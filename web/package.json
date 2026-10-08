@@ -1,0 +1,19 @@
+{
+  "name": "kiln-web",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "start": "NODE_ENV=production bun server.ts",
+    "dev": "bun --hot server.ts",
+    "check": "tsc --noEmit"
+  },
+  "dependencies": {
+    "dompurify": "^3.4.16",
+    "highlight.js": "^11.12.0",
+    "marked": "^18.1.0"
+  },
+  "devDependencies": {
+    "@types/bun": "^1.4.2",
+    "typescript": "^7.0.2"
+  }
+}

@@ -1,0 +1,10 @@
+[Unit]
+Description=kiln - Qwen3.8-27B inference server (OpenAI API on 127.0.0.1:8080)
+
+[Service]
+ExecStart=@ROOT@/kiln.sh serve
+Restart=on-failure
+RestartSec=3
+
+[Install]
+WantedBy=default.target

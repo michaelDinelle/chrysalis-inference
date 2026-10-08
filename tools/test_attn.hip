@@ -1,0 +1,120 @@
+// Checks attention prep (norm, RoPE, int8 KV) + WMMA flash attention + split combine against a CPU reference.
+#include "../engine/kernels.h"
+#include <cmath>
+#include <random>
+#include <vector>
+using std::vector;
+
+static float q8(float x, float d) { return d > 0 ? d * std::nearbyint(x / d) : 0.0f; }
+static void fwht(float *x) {   // normalized, self-inverse
+    for (int h = 1; h < HD; h <<= 1)
+        for (int i = 0; i < HD; i++) if (!(i & h)) { float a = x[i], b = x[i | h]; x[i] = a + b; x[i | h] = a - b; }
+    for (int i = 0; i < HD; i++) x[i] *= 0.0625f;
+}
+static float round_f16(float x) { return (float)(_Float16)x; }
+
+struct Ref {   // CPU model of the same math, keeping the dequantized cache
+    vector<float> K, V;   // [pos][NKV][HD]
+    void prep(const float *qg, const float *k, const float *v, const float *qw, const float *kw, int T, int pos0,
+              vector<float> &Q) {
+        auto rope_norm = [&](const float *x, const float *w, int pos, float *o) {
+            double ss = 0; for (int i = 0; i < HD; i++) ss += x[i] * x[i];
+            float inv = 1.0f / sqrtf(ss / HD + EPS), y[HD];
+            for (int i = 0; i < HD; i++) y[i] = x[i] * inv * w[i];
+            for (int i = 0; i < HD; i++) o[i] = y[i];
+            for (int i = 0; i < ROT / 2; i++) {
+                float s, c; sincosf(pos * powf(ROPE_BASE, -2.0f * i / ROT), &s, &c);
+                o[i] = y[i] * c - y[i + ROT / 2] * s; o[i + ROT / 2] = y[i + ROT / 2] * c + y[i] * s;
+            }
+        };
+        K.resize((size_t)(pos0 + T) * NKV * HD); V.resize(K.size()); Q.resize((size_t)T * NH * HD);
+        for (int t = 0; t < T; t++) {
+            for (int h = 0; h < NH; h++) {
+                float o[HD]; rope_norm(qg + ((size_t)t * NH + h) * 2 * HD, qw, pos0 + t, o);
+                for (int i = 0; i < HD; i++) Q[((size_t)t * NH + h) * HD + i] = round_f16(o[i] * 0.0625f);
+            }
+            for (int h = 0; h < NKV; h++) {
+                float o[HD]; rope_norm(k + ((size_t)t * NKV + h) * HD, kw, pos0 + t, o);
+                float vv[HD]; for (int i = 0; i < HD; i++) vv[i] = v[((size_t)t * NKV + h) * HD + i];
+                fwht(vv);
+                for (int b = 0; b < HD / 32; b++) {
+                    float mk = 0, mv = 0;
+                    for (int i = 0; i < 32; i++) { mk = fmaxf(mk, fabsf(o[b * 32 + i])); mv = fmaxf(mv, fabsf(vv[b * 32 + i])); }
+                    float dk = round_f16(mk / 127), dv = round_f16(mv / 15), dk0 = mk / 127, dv0 = mv / 15;   // K int8, V 5-bit
+                    for (int i = 0; i < 32; i++) {   // GPU rounds with the fp32 scale, stores the fp16 scale
+                        size_t at = ((size_t)(pos0 + t) * NKV + h) * HD + b * 32 + i;
+                        K[at] = dk * (dk0 > 0 ? std::nearbyint(o[b * 32 + i] / dk0) : 0);
+                        V[at] = dv * (dv0 > 0 ? std::nearbyint(vv[b * 32 + i] / dv0) : 0);
+                    }
+                }
+            }
+        }
+    }
+    void attend(const vector<float> &Q, const float *qg, int T, int pos0, vector<float> &out) {
+        out.assign((size_t)T * NH * HD, 0);
+        for (int t = 0; t < T; t++) for (int h = 0; h < NH; h++) {
+            const int g = h / 6, n = pos0 + t + 1;
+            vector<double> s(n); double mx = -1e30;
+            for (int j = 0; j < n; j++) {
+                double d = 0;
+                for (int i = 0; i < HD; i++) d += Q[((size_t)t * NH + h) * HD + i] * round_f16(K[((size_t)j * NKV + g) * HD + i]);
+                s[j] = d; mx = fmax(mx, d);
+            }
+            double L = 0; for (auto &x : s) { x = exp(x - mx); L += x; }
+            float o[HD];
+            for (int i = 0; i < HD; i++) {
+                double acc = 0; for (int j = 0; j < n; j++) acc += s[j] * round_f16(V[((size_t)j * NKV + g) * HD + i]);
+                o[i] = acc / L;
+            }
+            fwht(o);
+            for (int i = 0; i < HD; i++) {
+                float gate = qg[((size_t)t * NH + h) * 2 * HD + HD + i];
+                out[((size_t)t * NH + h) * HD + i] = o[i] / (1 + expf(-gate));
+            }
+        }
+    }
+};
+
+int main() {
+    hipStream_t st; CK(hipStreamCreate(&st));
+    std::mt19937 rng(7); std::normal_distribution<float> nd;
+    const int maxpos = 256, npages = maxpos / PAGE;
+    uint8_t *pool; CK(hipMalloc(&pool, KV_PAGE * npages));
+    vector<int> pages(npages); for (int i = 0; i < npages; i++) pages[i] = npages - 1 - i;   // non-identity paging
+    int *dpages; CK(hipMalloc(&dpages, npages * 4)); CK(hipMemcpy(dpages, pages.data(), npages * 4, hipMemcpyHostToDevice));
+    KVRef kv{pool, dpages};
+    vector<float> qw(HD), kw(HD); for (auto &x : qw) x = 1 + 0.1f * nd(rng); for (auto &x : kw) x = 1 + 0.1f * nd(rng);
+    float *dqw, *dkw; CK(hipMalloc(&dqw, HD * 4)); CK(hipMalloc(&dkw, HD * 4));
+    CK(hipMemcpy(dqw, qw.data(), HD * 4, hipMemcpyHostToDevice)); CK(hipMemcpy(dkw, kw.data(), HD * 4, hipMemcpyHostToDevice));
+    Ref ref; int fails = 0, pos = 0;
+    struct Case { int T, split; const char *name; } cases[] = {{100, 0, "prefill 100"}, {50, 0, "prefill +50"}, {1, 64, "decode split64"}, {4, 32, "verify4 split32"}, {8, 16, "verify8 split16"}, {1, 0, "decode nosplit"}};
+    for (auto c : cases) {
+        const int T = c.T;
+        vector<float> qg((size_t)T * NH * 2 * HD), k((size_t)T * NKV * HD), v(k.size());
+        for (auto &x : qg) x = nd(rng); for (auto &x : k) x = nd(rng); for (auto &x : v) x = nd(rng);
+        float *dqg, *dk, *dv, *po, *pml; half *Q16, *oh;
+        CK(hipMalloc(&dqg, qg.size() * 4)); CK(hipMalloc(&dk, k.size() * 4)); CK(hipMalloc(&dv, v.size() * 4));
+        CK(hipMalloc(&Q16, (size_t)T * NH * HD * 2)); CK(hipMalloc(&oh, (size_t)T * NH * HD * 2));
+        CK(hipMalloc(&po, (size_t)64 * T * NH * HD * 4)); CK(hipMalloc(&pml, (size_t)64 * T * NH * 2 * 4));
+        CK(hipMemcpy(dqg, qg.data(), qg.size() * 4, hipMemcpyHostToDevice));
+        CK(hipMemcpy(dk, k.data(), k.size() * 4, hipMemcpyHostToDevice)); CK(hipMemcpy(dv, v.data(), v.size() * 4, hipMemcpyHostToDevice));
+        attn_prep(dqg, dk, dv, dqw, dkw, T, pos, kv, 5, Q16, st);
+        AttnArgs a; a.Q16 = Q16; a.kv = kv; a.layer = 5; a.T = T; a.pos0 = pos; a.split_len = c.split; a.qg = dqg; a.part_o = po; a.part_ml = pml;
+        QAct none{nullptr, nullptr};
+        if (c.split > 0) { // force the combine path with fp16 output
+            a.split_len = c.split;
+        }
+        attention(a, oh, none, st);
+        CK(hipStreamSynchronize(st));
+        vector<_Float16> got((size_t)T * NH * HD); CK(hipMemcpy(got.data(), oh, got.size() * 2, hipMemcpyDeviceToHost));
+        vector<float> Q, want; ref.prep(qg.data(), k.data(), v.data(), qw.data(), kw.data(), T, pos, Q); ref.attend(Q, qg.data(), T, pos, want);
+        double e2 = 0, r2 = 0, emax = 0;
+        for (size_t i = 0; i < want.size(); i++) { double e = (double)got[i] - want[i]; e2 += e * e; r2 += want[i] * want[i]; emax = fmax(emax, fabs(e)); }
+        const double rel = sqrt(e2 / r2); const bool ok = rel < 5e-3;
+        printf("%-16s T=%-3d pos0=%-3d rel %.2e max %.2e %s\n", c.name, T, pos, rel, emax, ok ? "ok" : "FAIL");
+        fails += !ok; pos += T;
+        CK(hipFree(dqg)); CK(hipFree(dk)); CK(hipFree(dv)); CK(hipFree(Q16)); CK(hipFree(oh)); CK(hipFree(po)); CK(hipFree(pml));
+    }
+    printf(fails ? "%d FAILURES\n" : "all ok\n", fails);
+    return fails != 0;
+}

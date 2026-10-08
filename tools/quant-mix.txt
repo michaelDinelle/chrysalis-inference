@@ -1,0 +1,11 @@
+blk\.64\.=q8_0
+ssm_alpha=f32
+ssm_beta=f32
+ssm_out=q6_k
+attn_output=q6_k
+attn_k\.=q8_0
+attn_v\.=q8_0
+ffn_=iq4_xs
+attn_qkv=iq4_xs
+attn_gate=iq4_xs
+attn_q\.=iq4_xs
