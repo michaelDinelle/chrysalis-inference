@@ -10,14 +10,17 @@ About 3,400 lines: C++/HIP kernels and model code in `engine/` (2,400), the Pyth
 ## Use it
 
 ```sh
-./kiln.sh install        # systemd user unit + ~/.local/bin/kiln (does not enable autostart)
-kiln start               # loads the model (~3 s) and serves http://127.0.0.1:8080/v1
-kiln opencode            # make it OpenCode's default model (backs up ~/.config/opencode/opencode.json)
-kiln web                 # chat UI on http://127.0.0.1:8081 (`kiln web stop` to stop it)
+./kiln.sh install        # once: systemd user services + ~/.local/bin/kiln (does not enable autostart)
+kiln opencode            # once: make it OpenCode's default model (backs up ~/.config/opencode/opencode.json)
+
+kiln start               # loads the model (~3 s), starts the web chat, prints both URLs:
+                         #   API http://127.0.0.1:8080/v1, web chat http://127.0.0.1:8081
+kiln stop                # stops both and frees the GPU (also: restart, status)
 kiln logs                # one line per request: prompt/cached tokens, TTFT, tok/s, draft acceptance
 ```
 
-`kiln serve` runs in the foreground; `systemctl --user enable kiln` starts it at login. Models:
+`systemctl --user enable kiln kiln-web` starts both at login. `kiln serve` runs the server in the
+foreground instead of as a service (it takes `--port`, `--draft`, ...: `kiln serve -h`). Models:
 `qwen3.8-27b` (thinking, reasoning effort `xhigh` by default; OpenCode variants pick `medium`/`low`)
 and `qwen3.8-27b-fast` (no thinking; also used for session titles).
 
