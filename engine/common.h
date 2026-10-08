@@ -31,7 +31,6 @@ inline bool is_attn_layer(int l) { return l % 4 == 3; }
 // One scale per token per 32 dims for both. V uses 5 bits (symmetric, stored +16) and is transposed so a
 // lane reads 16 consecutive keys of one dimension, the operand layout of the P.V matrix multiply.
 constexpr int PAGE = 64;                                   // tokens per page
-constexpr uint32_t KV_FORMAT = 2;                          // bump when the cache layout or encoding changes
 constexpr size_t KS_OFF = (size_t)PAGE * HD;
 constexpr size_t VLO_OFF = KS_OFF + (size_t)PAGE * (HD / 32) * 2;
 constexpr size_t VHI_OFF = VLO_OFF + (size_t)HD * PAGE / 2;

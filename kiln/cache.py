@@ -6,10 +6,9 @@ A request is served from whatever cached state shares the longest prefix with it
     an edited or undone turn, a session that was evicted from the GPU),
   * otherwise a fresh sequence.
 Only the remaining suffix is prefilled. Snapshots hold the recurrent state in host RAM and share KV
-pages copy-on-write; least recently used ones are dropped when RAM or KV pages run short.
+pages copy-on-write; least recently used ones are dropped when RAM or KV pages run short. Nothing is
+written to disk: a restart starts cold.
 """
-import hashlib
-import os
 import time
 import numpy as np
 
@@ -33,25 +32,11 @@ class Entry:
 
 
 class Cache:
-    def __init__(self, engine, n_slots, max_snapshots=40, min_snapshot_gap=512, disk=None, max_disk=6):
+    def __init__(self, engine, n_slots, max_snapshots=40, min_snapshot_gap=512):
         self.e = engine
         self.slots = [Slot(engine.new_seq()) for _ in range(n_slots)]
         self.entries = []
         self.max_snapshots, self.min_gap = max_snapshots, min_snapshot_gap
-        self.disk, self.max_disk = disk, max_disk
-        if disk:
-            os.makedirs(disk, exist_ok=True)
-            for f in sorted(os.listdir(disk)):
-                if not f.endswith(".kv"):
-                    continue
-                base = os.path.join(disk, f[:-3])
-                snap = engine.load_snapshot(base + ".kv") if os.path.exists(base + ".npy") else -1
-                if snap >= 0:
-                    self.entries.append(Entry(snap, np.load(base + ".npy"), pinned=True))
-                else:                                   # written by an older engine build: stale
-                    for ext in (".kv", ".npy"):
-                        if os.path.exists(base + ext):
-                            os.remove(base + ext)
 
     def acquire(self, prompt):
         """Pick a slot holding the longest reusable prefix of `prompt` (np.int32). Returns (slot, cached)."""
@@ -94,22 +79,10 @@ class Cache:
 
     def checkpoint(self, slot, pinned=False):
         """Snapshot the slot's current state (a message boundary inside a prompt). Pinned snapshots are
-        prefixes shared by every session; they are also written to disk so a restart begins warm."""
+        prefixes shared by every session, evicted only when nothing else is left."""
         if not len(slot.tokens) or self.has(slot.tokens):
             return
-        snap = self.e.snapshot(slot.sid)
-        self.add(snap, slot.tokens.copy(), pinned)
-        if pinned and self.disk:
-            name = os.path.join(self.disk, hashlib.sha1(slot.tokens.tobytes()).hexdigest()[:16])
-            if self.e.save_snapshot(snap, name + ".kv"):
-                np.save(name + ".npy", slot.tokens)
-            files = sorted((f for f in os.listdir(self.disk) if f.endswith(".kv")), key=lambda f: os.path.getmtime(os.path.join(self.disk, f)))
-            for f in files[:-self.max_disk]:
-                for ext in (".kv", ".npy"):
-                    try:
-                        os.remove(os.path.join(self.disk, f[:-3] + ext))
-                    except OSError:
-                        pass
+        self.add(self.e.snapshot(slot.sid), slot.tokens.copy(), pinned)
 
     def trim(self, need_tokens=0):
         """Drop least recently used snapshots beyond the count limit, or until `need_tokens` of KV is free."""

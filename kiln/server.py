@@ -132,13 +132,13 @@ class Sticky:
 
 
 class Server:
-    def __init__(self, model_path, tokenizer_path, slots=3, n_draft=3, umax=2048, cache_dir=None, log=sys.stderr):
+    def __init__(self, model_path, tokenizer_path, slots=3, n_draft=3, umax=2048, log=sys.stderr):
         self.engine = Engine(model_path, max_seqs=slots, umax=umax)
         self.capacity = min(MAX_CONTEXT, self.engine.capacity)
         self.tok = Tokens(tokenizer_path)
         self.replay = LRU(8192)
         self.renderer = Renderer(self.tok, self.replay.get)
-        self.cache = Cache(self.engine, slots, disk=cache_dir)
+        self.cache = Cache(self.engine, slots)
         self.sticky = Sticky()
         self.sessions = LRU(64)          # latest request + reply per conversation, for compaction rewrites
         self.gpu = Turnstile()

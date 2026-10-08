@@ -26,8 +26,9 @@ and `qwen3.8-27b-fast` (no thinking; also used for session titles).
 
 ## Web UI
 
-`web/` is a small Bun app: `server.ts` serves the page, proxies kiln's API on the same origin and keeps
-conversations in SQLite (`data/web.db`); `app.ts` is plain TypeScript (marked, highlight.js, DOMPurify).
+`web/` is a small Bun app: `server.ts` serves the page and proxies kiln's API on the same origin; `app.ts` is
+plain TypeScript (marked, highlight.js, DOMPurify). Conversations live in the tab's sessionStorage: a reload
+keeps them, closing the tab ends them, and nothing is stored on the server.
 Replies stream with their reasoning (collapsible), each one shows time to first token, tok/s and how much of
 the prompt came from cache. The Think switch picks the reasoning effort (Max, Medium, Low) or the no-thinking
 model (Off). Esc stops a reply, the last turn can be regenerated or edited, and the sidebar starts or unloads
@@ -86,8 +87,8 @@ LDS-staged recurrent scan.
 **Caching (TTFT)** — `kiln/chat.py` renders the chat template straight to token ids, byte-identical
 to the official template, and replays assistant turns kiln generated as their exact ids, so each agent
 step only prefills the new tool output. Snapshots (recurrent state in RAM, KV pages shared
-copy-on-write) at the end of the tool block, the static system prompt, the system turn and every prompt;
-the shared prefixes persist on disk (`data/cache/`) so a restart starts warm. Tokenization is memoized
+copy-on-write) at the end of the tool block, the static system prompt, the system turn and every prompt.
+They live in RAM and VRAM only: nothing is written to disk, so a restart starts cold. Tokenization is memoized
 per message, so re-rendering a 200K-token conversation each turn costs ~2 ms. OpenCode specifics:
 the date in its environment block is frozen per conversation, plan-mode reminders are kept where
 they first appeared, and its compaction request (normally a full re-read of the older part of the
@@ -106,7 +107,7 @@ kiln/     engine.py chat.py cache.py server.py __main__.py
 web/      server.ts app.ts index.html style.css   Bun web UI
 tools/    tests (make test: test_quant, test_attn, test_chat, test_snapshot, test_server), compare_ref.py,
           benchmarks, agent_sim.py
-data/     (not code) rocm/ venv/ models/ cache/ llama.cpp/ (quantization tools + reference only)
+data/     (not code) rocm/ venv/ models/ llama.cpp/ (quantization tools + reference only)
 ```
 
 ## Rebuilding

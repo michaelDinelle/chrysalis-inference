@@ -23,8 +23,6 @@ int kiln_free_tokens() { return (int)E->free_pages.size() * PAGE; }
 int kiln_snapshot(int id) { return E->snapshot(id); }
 void kiln_restore(int id, int snap) { E->restore(id, snap); }
 void kiln_snap_free(int snap) { E->snap_free(snap); }
-int kiln_snap_save(int snap, const char *path) { return E->snap_save(snap, path) ? 0 : -1; }
-int kiln_snap_load(const char *path) { try { return E->snap_load(path); } catch (const std::exception &) { return -1; } }
 void kiln_sync() { CK(hipStreamSynchronize(E->st)); }
 // Capacity errors (out of KV pages) come back as -1 with the sequence left as it was.
 int kiln_prefill(int id, const int *tokens, int n) {

@@ -64,13 +64,6 @@ class Engine:
     def free_snapshot(self, snap):
         self.lib.kiln_snap_free(snap)
 
-    def save_snapshot(self, snap, path):
-        return self.lib.kiln_snap_save(snap, path.encode()) == 0
-
-    def load_snapshot(self, path):
-        """Returns a snapshot id, or -1 if the file is missing or does not fit."""
-        return self.lib.kiln_snap_load(path.encode())
-
     def free_tokens(self):
         return self.lib.kiln_free_tokens()
 

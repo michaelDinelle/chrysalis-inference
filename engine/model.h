@@ -90,8 +90,6 @@ struct Engine {
     int snapshot(int id);
     void restore(int id, int snap);
     void snap_free(int snap);
-    bool snap_save(int snap, const char *path);
-    int snap_load(const char *path);
     void prefill(int id, const int *tokens, int n);
     int generate(int id, const Sampling &sp, int *out, int max_out);
 

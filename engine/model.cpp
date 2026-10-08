@@ -296,54 +296,6 @@ void Engine::restore(int id, int snap) {
     CK(hipMemcpyAsync(s.h_last, h + ssm + conv, D * 4, hipMemcpyHostToDevice, st));
 }
 
-// Persist a snapshot (its KV pages + recurrent state) so a restart can start warm.
-bool Engine::snap_save(int snap, const char *path) {
-    Snap &sn = snaps.at(snap);
-    CK(hipStreamSynchronize(st));
-    CK(hipStreamSynchronize(cst));
-    FILE *f = fopen(path, "wb");
-    if (!f) return false;
-    const uint32_t magic = 0x6b6c6e31, version = KV_FORMAT, page_bytes = KV_PAGE, np = sn.pages.size();   // "kln1"
-    fwrite(&magic, 4, 1, f); fwrite(&version, 4, 1, f); fwrite(&page_bytes, 4, 1, f);
-    fwrite(&sn.n, 4, 1, f); fwrite(&np, 4, 1, f);
-    std::vector<uint8_t> buf(KV_PAGE);
-    for (int p : sn.pages) {
-        CK(hipMemcpy(buf.data(), kv_pool + (size_t)p * KV_PAGE, KV_PAGE, hipMemcpyDeviceToHost));
-        fwrite(buf.data(), 1, KV_PAGE, f);
-    }
-    fwrite(sn.host, 1, state_bytes(), f);
-    return fclose(f) == 0;
-}
-
-int Engine::snap_load(const char *path) {
-    FILE *f = fopen(path, "rb");
-    if (!f) return -1;
-    uint32_t hdr[3] = {}, np = 0;     // magic, KV format version, page size: anything else is stale
-    int n = 0;
-    if (fread(hdr, 4, 3, f) != 3 || hdr[0] != 0x6b6c6e31 || hdr[1] != KV_FORMAT || hdr[2] != KV_PAGE ||
-        fread(&n, 4, 1, f) != 1 || fread(&np, 4, 1, f) != 1 || np > free_pages.size()) { fclose(f); return -1; }
-    size_t si = 0;
-    while (si < snaps.size() && snaps[si].used) si++;
-    if (si == snaps.size()) snaps.emplace_back();
-    Snap &sn = snaps[si];
-    if (!sn.host) CK(hipHostMalloc(&sn.host, state_bytes()));
-    std::vector<uint8_t> buf(KV_PAGE);
-    sn.pages.clear();
-    bool ok = true;
-    for (uint32_t i = 0; i < np && ok; i++) {
-        ok = fread(buf.data(), 1, KV_PAGE, f) == KV_PAGE;
-        const int p = page_alloc();
-        sn.pages.push_back(p);
-        CK(hipMemcpy(kv_pool + (size_t)p * KV_PAGE, buf.data(), KV_PAGE, hipMemcpyHostToDevice));
-    }
-    ok = ok && fread(sn.host, 1, state_bytes(), f) == state_bytes();
-    fclose(f);
-    sn.used = true;
-    sn.n = n;
-    if (!ok) { snap_free((int)si); return -1; }
-    return (int)si;
-}
-
 void Engine::snap_free(int snap) {
     Snap &sn = snaps.at(snap);
     CK(hipStreamSynchronize(st));            // pending copies into sn.host must finish before reuse

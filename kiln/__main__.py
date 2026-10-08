@@ -16,7 +16,6 @@ def main():
     s.add_argument("--slots", type=int, default=3, help="sequences kept resident on the GPU")
     s.add_argument("--draft", type=int, default=3, help="MTP draft tokens per step (0 disables speculation)")
     s.add_argument("--chunk", type=int, default=2048, help="prefill chunk size (bigger is faster, costs VRAM)")
-    s.add_argument("--cache-dir", default=os.path.join(ROOT, "data/cache"), help="where shared prompt prefixes persist")
     o = sub.add_parser("opencode", help="add kiln as the default provider in ~/.config/opencode/opencode.json")
     o.add_argument("--config", default=os.path.expanduser("~/.config/opencode/opencode.json"))
     o.add_argument("--url", default="http://127.0.0.1:8080/v1")
@@ -26,7 +25,7 @@ def main():
         return opencode(a)
     if a.cmd == "serve":
         from .server import Server, serve
-        serve(Server(a.model, a.tokenizer, slots=a.slots, n_draft=a.draft, umax=a.chunk, cache_dir=a.cache_dir), a.host, a.port)
+        serve(Server(a.model, a.tokenizer, slots=a.slots, n_draft=a.draft, umax=a.chunk), a.host, a.port)
 
 
 

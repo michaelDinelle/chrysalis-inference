@@ -1,5 +1,6 @@
 // kiln web UI: chat with the local Qwen3.8-27B server. Replies stream in with their reasoning and are rendered
-// as markdown with highlighted code; conversations live on the Bun server (SQLite).
+// as markdown with highlighted code; conversations live in this tab's sessionStorage (a reload keeps them,
+// closing the tab ends them).
 import DOMPurify from "dompurify";
 import hljs from "highlight.js/lib/common";
 import { marked } from "marked";
@@ -8,7 +9,6 @@ type Effort = "xhigh" | "medium" | "low" | "off";
 interface Stats { ttft: number; tps: number; tokens: number; prompt: number; cached: number; thought?: number }
 interface Message { role: "user" | "assistant"; content: string; reasoning?: string; stats?: Stats; error?: string; stopped?: boolean }
 interface Conversation { id: string; title: string; named?: boolean; updated: number; effort: Effort; system: string; messages: Message[] }
-interface Summary { id: string; title: string; updated: number }
 interface Status { state: "online" | "loading" | "offline"; context?: number; kv_tokens?: number; cache?: { free_kv_tokens: number } }
 interface View { el: HTMLElement; think: HTMLDetailsElement; summary: HTMLElement; thought: HTMLElement; body: HTMLElement; foot: HTMLElement; shown?: string }
 interface Live { phase: "waiting" | "thinking" | "writing"; since: number; note: string }
@@ -68,8 +68,13 @@ function pref(key: string, fallback: string) {
 function setPref(key: string, value: string) {
   try { localStorage.setItem(key, value); } catch { /* private window: keep the default */ }
 }
+function loadChats(): Record<string, Conversation> {
+  try { return JSON.parse(sessionStorage.getItem("chats") ?? "{}"); } catch { return {}; }
+}
 
-let list: Summary[] = [];
+// Saved conversations by id, mirrored to sessionStorage. They are copied in and out, so unsaved changes to the
+// open one (turns cut by "edit" and never resent) are not kept.
+const chats: Record<string, Conversation> = loadChats();
 let conv = blank();
 let busy: AbortController | null = null;
 let status: Status = { state: "offline" };
@@ -183,7 +188,7 @@ function renderList() {
   const group = (t: number) => (t >= today ? "Today" : t >= today - 6 * 864e5 ? "Previous 7 days" : "Older");
   let current = "";
   nav.replaceChildren();
-  for (const s of list) {
+  for (const s of Object.values(chats).sort((a, b) => b.updated - a.updated)) {
     if (group(s.updated) !== current) nav.append(h("div", "group", (current = group(s.updated))));
     const a = h("a", s.id === conv.id ? "conv active" : "conv"), del = h("button", "conv-del", "×");
     a.href = `#${s.id}`;
@@ -235,16 +240,16 @@ async function refreshStatus() {
   renderStatus();
 }
 
-async function refreshList() {
-  try { list = await (await fetch("/api/conversations")).json(); } catch { /* keep the last list */ }
-  renderList();
+function storeChats() {
+  try { sessionStorage.setItem("chats", JSON.stringify(chats)); } catch { /* full or disabled: kept until a reload */ }
 }
 
-async function save(c: Conversation) {
+function save(c: Conversation) {
   if (!c.messages.length) return;
-  await fetch(`/api/conversations/${c.id}`, { method: "PUT", headers: { "Content-Type": "application/json" }, body: JSON.stringify(c) });
+  chats[c.id] = structuredClone(c);
+  storeChats();
   if (c === conv && location.hash !== `#${c.id}`) history.replaceState(null, "", `#${c.id}`);
-  await refreshList();
+  renderList();
 }
 
 // The request body. Assistant turns go back exactly as kiln sent them: kiln then replays its own tokens and
@@ -344,7 +349,7 @@ async function generate() {
   }
   c.updated = Date.now();
   if (c === conv) render();
-  await save(c);
+  save(c);
   if (!c.named && !m.error) await name(c);
 }
 
@@ -362,7 +367,7 @@ async function name(c: Conversation) {
     const title: string | undefined = (await res.json()).choices?.[0]?.message?.content?.split("\n")[0]?.replace(/^[\s#*"']+|[\s*"'.]+$/g, "");
     if (title) c.title = title.slice(0, 80);
   } catch { /* keep the first line of the question */ }
-  await save(c);
+  save(c);
   if (c === conv) $("title").textContent = document.title = c.title;
 }
 
@@ -378,10 +383,9 @@ function submit(text: string) {
   void generate();
 }
 
-async function openConversation(id: string) {
+function openConversation(id: string) {
   busy?.abort();
-  const res = await fetch(`/api/conversations/${id}`);
-  conv = res.ok ? await res.json() : blank();
+  conv = chats[id] ? structuredClone(chats[id]) : blank();
   document.body.classList.remove("nav-open");
   render();
   scroller.scrollTop = scroller.scrollHeight;
@@ -396,10 +400,11 @@ function newChat() {
   input.focus();
 }
 
-async function remove(id: string) {
-  await fetch(`/api/conversations/${id}`, { method: "DELETE" });
+function remove(id: string) {
+  delete chats[id];
+  storeChats();
   if (id === conv.id) newChat();
-  await refreshList();
+  else renderList();
 }
 
 async function copy(text: string, button: HTMLElement) {
@@ -449,7 +454,7 @@ document.addEventListener("keydown", (e) => { if (e.key === "Escape" && busy) bu
 scroller.addEventListener("scroll", () => { follow = scroller.scrollHeight - scroller.scrollTop - scroller.clientHeight < 80; });
 window.addEventListener("hashchange", () => {
   const id = location.hash.slice(1);
-  if (id && id !== conv.id) void openConversation(id);
+  if (id && id !== conv.id) openConversation(id);
 });
 $("new-chat").addEventListener("click", newChat);
 $("menu").addEventListener("click", () => document.body.classList.toggle("nav-open"));
@@ -462,14 +467,14 @@ systemDialog.addEventListener("close", () => {
   if (systemDialog.returnValue !== "save") return;
   conv.system = systemInput.value;
   $("system-btn").classList.toggle("on", !!conv.system.trim());
-  void save(conv);
+  save(conv);
 });
 document.addEventListener("visibilitychange", () => { if (!document.hidden) void refreshStatus(); });
 
 $("brand-mark").innerHTML = `<svg class="flame" viewBox="0 0 24 24">${ICONS.flame}</svg>`;
 $("new-chat").innerHTML = `${icon("plus")}New chat`;
 $("menu").innerHTML = icon("menu");
-await Promise.all([refreshList(), refreshStatus()]);
-if (location.hash.length > 1) await openConversation(location.hash.slice(1));
+await refreshStatus();
+if (location.hash.length > 1) openConversation(location.hash.slice(1));
 else render();
 setInterval(() => { if (!document.hidden) void refreshStatus(); }, 4000);
