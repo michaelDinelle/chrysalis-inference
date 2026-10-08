@@ -9,7 +9,7 @@ type Effort = "xhigh" | "medium" | "low" | "off";
 interface Stats { ttft: number; tps: number; tokens: number; prompt: number; cached: number; thought?: number }
 interface Message { role: "user" | "assistant"; content: string; reasoning?: string; stats?: Stats; error?: string; stopped?: boolean }
 interface Conversation { id: string; title: string; named?: boolean; updated: number; effort: Effort; system: string; messages: Message[] }
-interface Status { state: "online" | "loading" | "offline"; context?: number; kv_tokens?: number; cache?: { free_kv_tokens: number } }
+interface Status { state: "online" | "loading" | "offline"; build?: string; context?: number; kv_tokens?: number; cache?: { free_kv_tokens: number } }
 interface View { el: HTMLElement; think: HTMLDetailsElement; summary: HTMLElement; thought: HTMLElement; body: HTMLElement; foot: HTMLElement; shown?: string }
 interface Live { phase: "waiting" | "thinking" | "writing"; since: number; note: string }
 
@@ -78,6 +78,7 @@ const chats: Record<string, Conversation> = loadChats();
 let conv = blank();
 let busy: AbortController | null = null;
 let status: Status = { state: "offline" };
+let build = "";                                     // the server's code version when this page loaded
 let follow = true;                                  // keep the newest text in view unless the user scrolled up
 const views = new Map<Message, View>();
 
@@ -237,6 +238,9 @@ function renderStatus() {
 
 async function refreshStatus() {
   try { status = await (await fetch("/api/status")).json(); } catch { status = { state: "offline" }; }
+  build ||= status.build ?? "";
+  // The server has newer code: reload into it once nothing would be lost (chats are kept in sessionStorage).
+  if (status.build && status.build !== build && !busy && !input.value && !systemDialog.open) return location.reload();
   renderStatus();
 }
 

@@ -4,6 +4,9 @@
 import app from "./index.html";
 
 const KILN = process.env.KILN_URL ?? "http://127.0.0.1:8080";
+// Changes with the page's code. Open tabs compare it on every status poll and reload to pick up an update
+// (their chats are in sessionStorage, so a reload keeps them).
+const BUILD = Bun.hash((await Promise.all(["index.html", "app.ts", "style.css"].map((f) => Bun.file(`${import.meta.dir}/${f}`).text()))).join("\0")).toString(36);
 
 const unit = (...args: string[]) => Bun.spawnSync(["systemctl", "--user", ...args, "kiln"]).stdout.toString().trim();
 
@@ -36,9 +39,9 @@ const server = Bun.serve({
     // online: serving; loading: the systemd unit runs but the model is still loading; offline: stopped
     "/api/status": async () => {
       try {
-        return Response.json({ state: "online", ...(await (await fetch(`${KILN}/kiln/stats`)).json()) });
+        return Response.json({ state: "online", build: BUILD, ...(await (await fetch(`${KILN}/kiln/stats`)).json()) });
       } catch {
-        return Response.json({ state: unit("is-active") === "active" ? "loading" : "offline" });
+        return Response.json({ state: unit("is-active") === "active" ? "loading" : "offline", build: BUILD });
       }
     },
     "/api/kiln/start": { POST: () => (unit("start", "--no-block"), new Response(null, { status: 202 })) },
