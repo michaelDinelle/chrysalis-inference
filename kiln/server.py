@@ -27,6 +27,10 @@ from .engine import KVFull, Sampling, load_async
 
 MODEL = "qwen3.8-27b"
 MAX_CONTEXT = 262144
+# Reply length (reasoning included) when the request sets none. The model card asks for room on agentic tasks:
+# 262,144 tokens of reasoning and 131,072 of final response where the two are limited separately. A reply never
+# outgrows the context either; much past this it is a model stuck in a loop.
+MAX_OUTPUT = 131072
 DEFAULTS = {True: dict(temperature=1.0, top_p=0.95, top_k=20, min_p=0.0, presence_penalty=0.0),   # Qwen3.8 card
             False: dict(temperature=0.7, top_p=0.8, top_k=20, min_p=0.0, presence_penalty=1.5)}
 SIDE_PROMPTS = ("You are a title generator", "Summarize what was done in this conversation")
@@ -180,7 +184,7 @@ class Server:
         sp = Sampling(temperature=float(body.get("temperature", d["temperature"])), top_p=float(body.get("top_p", d["top_p"])),
                       min_p=float(body.get("min_p", d["min_p"])), presence_penalty=float(body.get("presence_penalty", d["presence_penalty"])),
                       top_k=int(body.get("top_k", d["top_k"])), n_draft=self.n_draft)
-        max_tokens = int(body.get("max_completion_tokens") or body.get("max_tokens") or 32768)
+        max_tokens = int(body.get("max_completion_tokens") or body.get("max_tokens") or MAX_OUTPUT)
         if side:
             max_tokens = min(max_tokens, 256)
         if len(prompt) + 1 >= self.capacity:

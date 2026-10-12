@@ -20,8 +20,8 @@ const MODEL = "qwen3.8-27b";
 // What kiln uses for a field left blank, with thinking on and off (DEFAULTS in kiln/server.py: Qwen's recommended
 // values). Without a seed kiln draws a random one and reports it with the reply.
 const SAMPLING_DEFAULTS: Record<"think" | "fast", Sampling> = {
-  think: { temperature: 1, top_p: 0.95, top_k: 20, min_p: 0, presence_penalty: 0, max_tokens: 32768 },
-  fast: { temperature: 0.7, top_p: 0.8, top_k: 20, min_p: 0, presence_penalty: 1.5, max_tokens: 32768 },
+  think: { temperature: 1, top_p: 0.95, top_k: 20, min_p: 0, presence_penalty: 0, max_tokens: 131072 },
+  fast: { temperature: 0.7, top_p: 0.8, top_k: 20, min_p: 0, presence_penalty: 1.5, max_tokens: 131072 },
 };
 const EFFORTS: [Effort, string][] = [["xhigh", "Max"], ["medium", "Medium"], ["low", "Low"], ["off", "Off"]];
 const SUGGESTIONS: [string, string][] = [
