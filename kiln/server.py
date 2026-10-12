@@ -464,12 +464,20 @@ def usage_of(info):
             "prompt_tokens_details": {"cached_tokens": info["cached_tokens"]}}
 
 
+class HTTPServer(ThreadingHTTPServer):
+    daemon_threads = True
+
+    def handle_error(self, request, client_address):
+        # A client that hangs up (curl -f on a 503 while the model loads, a closed tab) is not worth a traceback.
+        if not isinstance(sys.exc_info()[1], ConnectionError):
+            super().handle_error(request, client_address)
+
+
 def serve(make_server, host="127.0.0.1", port=8080):
     """Listens right away, so clients connect while the model loads: until make_server() returns, /health answers
     503 and requests wait. The engine's warm-up then runs holding the GPU lock; requests queue behind it."""
     state, ready = {}, threading.Event()
-    httpd = ThreadingHTTPServer((host, port), make_handler(state, ready))
-    httpd.daemon_threads = True
+    httpd = HTTPServer((host, port), make_handler(state, ready))
     threading.Thread(target=httpd.serve_forever, daemon=True).start()
     srv = make_server()
     srv.gpu.acquire(main=True)
