@@ -14,11 +14,15 @@ About 3,400 lines: C++/HIP kernels and model code in `engine/` (2,400), the Pyth
 
 kiln start               # loads the model (~1.5 s), starts the web chat, prints both URLs:
                          #   API http://127.0.0.1:8080/v1, web chat http://127.0.0.1:8081
+kiln start --lan         # the same, also on the local network: prints its URLs and a QR code for phones
 kiln stop                # stops both and frees the GPU (also: restart, status)
 kiln logs                # one line per request: prompt/cached tokens, TTFT, tok/s, draft acceptance
 ```
 
-`systemctl --user enable kiln kiln-web` starts both at login. `kiln serve` runs the server in the
+`--lan` is plain HTTP for a trusted home network, without logins; the firewall has to let other devices in
+(TCP 8080-8081), and a plain `kiln start` or `kiln restart` goes back to this machine only. Either way both servers
+answer only requests addressed to an IP address or to this machine's name, which keeps web pages from other sites
+out (DNS rebinding). `systemctl --user enable kiln kiln-web` starts both at login. `kiln serve` runs the server in the
 foreground instead of as a service (it takes `--port`, `--draft`, ...: `kiln serve -h`). Models:
 `qwen3.8-27b` (thinking, reasoning effort `xhigh` by default; OpenCode variants pick `medium`/`low`)
 and `qwen3.8-27b-fast` (no thinking; also used for session titles). OpenCode reaches it as an

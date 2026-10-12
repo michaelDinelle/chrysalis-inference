@@ -96,8 +96,13 @@ let build = "";                                     // the server's code version
 let follow = true;                                  // keep the newest text in view unless the user scrolled up
 const views = new Map<Message, View>();
 
+// Plain-HTTP pages (the web chat on the LAN) get no crypto.randomUUID; getRandomValues works on every page.
+function randomId() {
+  return Array.from(crypto.getRandomValues(new Uint8Array(16)), (b) => b.toString(16).padStart(2, "0")).join("");
+}
+
 function blank(): Conversation {
-  return { id: crypto.randomUUID(), title: "New chat", updated: Date.now(), effort: pref("effort", "xhigh") as Effort, messages: [] };
+  return { id: randomId(), title: "New chat", updated: Date.now(), effort: pref("effort", "xhigh") as Effort, messages: [] };
 }
 
 // ---- rendering ---------------------------------------------------------------------------------------------
@@ -428,8 +433,18 @@ function remove(id: string) {
   else renderList();
 }
 
-async function copy(text: string, button: HTMLElement) {
-  await navigator.clipboard.writeText(text);
+// The Clipboard API only exists on HTTPS and localhost pages, not on the web chat on the LAN (plain HTTP). The copy
+// command works on every page: copy from a hidden textarea.
+function copy(text: string, button: HTMLElement) {
+  const area = h("textarea");
+  area.value = text;
+  area.readOnly = true;                                  // no on-screen keyboard on phones
+  area.style.cssText = "position: fixed; top: 0; opacity: 0; font-size: 16px";   // 16px: iOS does not zoom
+  document.body.append(area);
+  area.select();
+  area.setSelectionRange(0, text.length);                // iOS ignores select()
+  document.execCommand("copy");
+  area.remove();
   const label = button.textContent;
   button.classList.add("done");
   if (button.classList.contains("copy")) button.textContent = "Copied";

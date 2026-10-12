@@ -13,8 +13,9 @@ usage() {
 usage: kiln <command>
 
   start     load the model, start the web chat, print their URLs
+            --lan: also on the local network, with a QR code for phones
   stop      stop both and free the GPU
-  restart   stop, then start (after rebuilding or editing the code)
+  restart   stop, then start (after rebuilding or editing the code; takes --lan too)
   status    is it running, and where
   logs      follow the request log (prompt and cached tokens, TTFT, tok/s)
 
@@ -23,9 +24,24 @@ one-time setup:
 EOF
 }
 
+# Where both services listen: 127.0.0.1, or 0.0.0.0 after `kiln start --lan`. It lives in the systemd user manager's
+# environment (KILN_HOST), so the web chat's Start button starts the model the same way.
+host() { systemctl --user show-environment | sed -n 's/^KILN_HOST=//p'; }
+lan_ip() { ip -4 route show default | awk '{ for (i = 1; i < NF; i++) if ($i == "src") { print $(i + 1); exit } }'; }
+
 urls() {
-    echo "  API       $API/v1"
-    if [ -n "$WEB" ] && systemctl --user is-active -q kiln-web; then echo "  web chat  http://127.0.0.1:8081"; fi
+    local at=127.0.0.1
+    if [ "$(host)" = 0.0.0.0 ]; then at=$(lan_ip); fi
+    echo "  API       http://$at:8080/v1"
+    if [ -n "$WEB" ] && systemctl --user is-active -q kiln-web; then
+        echo "  web chat  http://$at:8081"
+        if [ "$at" != 127.0.0.1 ]; then
+            if command -v qrencode >/dev/null; then qrencode -t ANSIUTF8 -m 2 "http://$at:8081"; fi
+            if systemctl is-active -q ufw && ! grep -qs "8080:8081" /etc/ufw/user.rules; then
+                echo "  ufw blocks other devices until it allows TCP 8080-8081 (~/kiln-ufw.sh does that)"
+            fi
+        fi
+    fi
 }
 
 # /health answers once the model has loaded (~1.5 s): poll it 10 times a second, then print the URLs
@@ -48,9 +64,18 @@ ready() {
 }
 
 case "${1:-help}" in
-  start)    [ -f "$UNITS/kiln.service" ] || { echo "kiln is not installed: run '$ROOT/kiln.sh install' first"; exit 1; }
-            systemctl --user start kiln $WEB; ready ;;
-  restart)  systemctl --user restart kiln $WEB; ready ;;
+  start|restart)
+            [ -f "$UNITS/kiln.service" ] || { echo "kiln is not installed: run '$ROOT/kiln.sh install' first"; exit 1; }
+            case "${2:-}" in --lan) to=0.0.0.0 ;; "") to=127.0.0.1 ;; *) usage; exit 1 ;; esac
+            was=$(host)
+            systemctl --user set-environment KILN_HOST=$to
+            if [ "$1" = restart ]; then
+                systemctl --user restart kiln $WEB
+            else
+                if [ "${was:-127.0.0.1}" != $to ]; then systemctl --user try-restart kiln $WEB; fi   # move running ones
+                systemctl --user start kiln $WEB
+            fi
+            ready ;;
   stop)     systemctl --user stop kiln $WEB; echo "kiln stopped" ;;
   status)   if curl -sf "$API/health" >/dev/null; then echo "kiln is running"; urls
             elif systemctl --user is-active -q kiln; then echo "kiln is loading the model ('kiln logs' to follow)"
@@ -68,7 +93,7 @@ case "${1:-help}" in
             systemctl --user daemon-reload
             echo "installed: 'kiln start' loads the model and prints its URLs" ;;
   # not in the usage: the foreground server the service runs (takes --port, --draft, ...) and the raw stats
-  serve)    cd "$ROOT" && exec "$PY" -m kiln serve "${@:2}" ;;
+  serve)    cd "$ROOT" && exec "$PY" -m kiln serve --host "${KILN_HOST:-127.0.0.1}" "${@:2}" ;;
   stats)    exec curl -s "$API/kiln/stats" ;;
   help|-h|--help) usage ;;
   *)        usage; exit 1 ;;

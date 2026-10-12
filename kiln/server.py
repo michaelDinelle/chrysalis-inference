@@ -9,9 +9,12 @@ What keeps time-to-first-token low:
     and its compaction request is answered from the live conversation instead of a full re-read.
 """
 import hashlib
+import ipaddress
 import json
 import random
 import re
+import socket
+import socketserver
 import sys
 import threading
 import time
@@ -325,6 +328,23 @@ class Server:
 
 # ---- HTTP ------------------------------------------------------------------------------------------
 
+# DNS rebinding guard: a web page from another site that points its own name at this machine still sends that name
+# as Host. Requests addressed to an IP address or to this machine's names are fine.
+NAMES = {"", "localhost", socket.gethostname().lower(), socket.gethostname().lower() + ".local"}
+
+
+def host_ok(host):
+    name = (host or "").strip().lower()
+    if name.startswith("["):                             # IPv6 literal
+        return True
+    name = name.rsplit(":", 1)[0]
+    try:
+        ipaddress.ip_address(name)
+        return True
+    except ValueError:
+        return name in NAMES
+
+
 def make_handler(state, ready):
     """state["srv"] is the Server once `ready` is set; until then /health and /kiln/stats answer 503 and the other
     requests wait."""
@@ -344,6 +364,8 @@ def make_handler(state, ready):
             self.wfile.write(data)
 
         def do_GET(self):
+            if not host_ok(self.headers.get("Host")):
+                return self.send_json(403, {"error": {"message": "unknown host", "type": "invalid_request_error"}})
             if not ready.is_set() and self.path.rstrip("/") in ("/health", "/v1/health", "/kiln/stats"):
                 return self.send_json(503, {"status": "loading"})
             ready.wait()
@@ -361,6 +383,8 @@ def make_handler(state, ready):
                 self.send_json(404, {"error": {"message": "not found"}})
 
         def do_POST(self):
+            if not host_ok(self.headers.get("Host")):
+                return self.send_json(403, {"error": {"message": "unknown host", "type": "invalid_request_error"}})
             if self.path.rstrip("/") not in ("/v1/chat/completions", "/chat/completions"):
                 return self.send_json(404, {"error": {"message": "not found"}})
             ready.wait()
@@ -466,6 +490,12 @@ def usage_of(info):
 
 class HTTPServer(ThreadingHTTPServer):
     daemon_threads = True
+
+    def server_bind(self):
+        # The stock version also looks up the bind address's fully qualified name, which it never uses: a reverse
+        # DNS query that runs into a timeout (4.5 s) for 0.0.0.0.
+        socketserver.TCPServer.server_bind(self)
+        self.server_name, self.server_port = self.server_address[:2]
 
     def handle_error(self, request, client_address):
         # A client that hangs up (curl -f on a 503 while the model loads, a closed tab) is not worth a traceback.
