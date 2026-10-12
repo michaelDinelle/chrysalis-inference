@@ -1,23 +1,10 @@
-// Quantized weights: GGUF blocks -> structure-of-arrays relayout, decode GEMVs built on int8
+// Quantized weights: their structure-of-arrays layout (filled by relayout.hip), decode GEMVs built on int8
 // dot products, dequantization to fp16 for the prefill GEMMs, and activation quantization.
 #include "kernels.h"
 #include <algorithm>
 #include <vector>
 
-// ---- relayout: raw GGUF blocks (already on the device) -> aligned arrays ---------------------
-
-// Each SoA array is one fixed byte range of every GGUF block; copy a range with one thread per 4 bytes.
-__global__ void k_copy_range(const uint8_t *raw, int block_bytes, int off, int len, uint8_t *out, int64_t nblocks) {
-    const int64_t i = blockIdx.x * (int64_t)blockDim.x + threadIdx.x, words = len / 4;
-    if (len == 2) {
-        if (i < nblocks) ((uint16_t *)out)[i] = *(const uint16_t *)(raw + i * block_bytes + off);
-        return;
-    }
-    if (i >= nblocks * words) return;
-    const uint8_t *src = raw + (i / words) * block_bytes + off + (i % words) * 4;   // at least 2-byte aligned
-    const uint16_t *s16 = (const uint16_t *)src;
-    ((uint32_t *)out)[i] = s16[0] | ((uint32_t)s16[1] << 16);
-}
+// ---- weight arrays (relayout from GGUF blocks: relayout.hip) -------------------------------------
 
 QTensor make_qtensor(Arena &a, int type, int rows, int cols) {
     QTensor t; t.type = type; t.rows = rows; t.cols = cols;
@@ -31,22 +18,6 @@ QTensor make_qtensor(Arena &a, int type, int rows, int cols) {
         default: FAIL("unsupported tensor type %d", type);
     }
     return t;
-}
-
-void relayout(const QTensor &t, const uint8_t *raw_dev, hipStream_t st) {
-    const int64_t n = (int64_t)t.rows * t.cols;
-    struct Range { int off, len; uint8_t *out; };
-    int block_bytes;
-    std::vector<Range> ranges;
-    if (t.type == Q8_0) { block_bytes = 34; ranges = {{0, 2, (uint8_t *)t.d}, {2, 32, t.q}}; }
-    else if (t.type == Q6_K) { block_bytes = 210; ranges = {{0, 128, t.q}, {128, 64, t.qh}, {192, 16, t.sc}, {208, 2, (uint8_t *)t.d}}; }
-    else if (t.type == IQ4_XS) { block_bytes = 136; ranges = {{0, 2, (uint8_t *)t.d}, {2, 2, (uint8_t *)t.sh}, {4, 4, t.sc}, {8, 128, t.q}}; }
-    else FAIL("relayout: type %d", t.type);
-    const int64_t nblocks = n / (t.type == Q8_0 ? 32 : 256);
-    for (const Range &r : ranges) {
-        const int64_t threads = r.len == 2 ? nblocks : nblocks * (r.len / 4);
-        k_copy_range<<<(threads + 255) / 256, 256, 0, st>>>(raw_dev, block_bytes, r.off, r.len, r.out, nblocks);
-    }
 }
 
 // ---- unpacking helpers --------------------------------------------------------------------

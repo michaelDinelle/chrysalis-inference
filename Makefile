@@ -1,7 +1,7 @@
 ROCM  ?= $(CURDIR)/data/rocm
 HIPCC := $(ROCM)/bin/hipcc
 FLAGS := -O3 -std=c++20 -fPIC --offload-arch=gfx1100 -Wno-unused-result
-SRC   := engine/quant.hip engine/ops.hip engine/gdn.hip engine/attn.hip engine/model.cpp engine/api.cpp
+SRC   := engine/relayout.hip engine/quant.hip engine/ops.hip engine/gdn.hip engine/attn.hip engine/model.cpp engine/load.cpp engine/api.cpp
 KERN  := $(filter %.hip,$(SRC))
 LIBS  := -L$(ROCM)/lib -lhipblaslt -Wl,-rpath,$(ROCM)/lib
 

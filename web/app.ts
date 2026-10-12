@@ -234,7 +234,7 @@ function renderStatus() {
   const button = (label: string, action: string) => {
     const b = h("button", "link-btn", label);
     b.type = "button";
-    b.onclick = async () => { await fetch(`/api/kiln/${action}`, { method: "POST" }); await sleep(300); await refreshStatus(); };
+    b.onclick = async () => { await fetch(`/api/kiln/${action}`, { method: "POST" }); await refreshStatus(); };
     return b;
   };
   if (status.state === "online") {
@@ -307,7 +307,7 @@ async function ensureOnline(signal: AbortSignal) {
   for (const deadline = Date.now() + 180_000; status.state !== "online"; await refreshStatus()) {
     if (signal.aborted) throw new DOMException("stopped", "AbortError");
     if (Date.now() > deadline) throw new Error("kiln did not start: see `kiln logs`");
-    await sleep(500);
+    await sleep(100);
   }
 }
 
@@ -510,4 +510,10 @@ $("menu").innerHTML = icon("menu");
 await refreshStatus();
 if (location.hash.length > 1) openConversation(location.hash.slice(1));
 else render();
-setInterval(() => { if (!document.hidden) void refreshStatus(); }, 4000);
+// Every 4 s, or 4 times a second while the model loads (a load takes ~1.5 s).
+(async () => {
+  for (;;) {
+    await sleep(status.state === "loading" ? 250 : 4000);
+    if (!document.hidden) await refreshStatus();
+  }
+})();

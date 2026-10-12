@@ -5,7 +5,9 @@
 // quant.hip
 enum { GEMV_STORE = 0, GEMV_ADD = 1, GEMV_GLU = 2 };
 QTensor make_qtensor(Arena &a, int type, int rows, int cols);
-void relayout(const QTensor &t, const uint8_t *raw_dev, hipStream_t st);
+// relayout.hip: blocks b0 .. b0 + nb (nb < 0: all) of a tensor from raw GGUF data starting at block b0
+void relayout(const QTensor &t, const uint8_t *raw_dev, hipStream_t st, int64_t b0 = 0, int64_t nb = -1);
+void f32_to_f16(const float *in, half *out, int64_t n, hipStream_t st);
 struct GemvSeg { QTensor W; float *y = nullptr; int ldy = 0; };
 struct GemvArgs {
     GemvSeg seg[3]; int nseg = 1;

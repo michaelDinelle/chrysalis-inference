@@ -29,15 +29,19 @@ urls() {
     if [ -n "$WEB" ] && systemctl --user is-active -q kiln-web; then echo "  web chat  http://127.0.0.1:8081"; fi
 }
 
-# the server only listens once the model has loaded: wait for that, then print the URLs
+# /health answers once the model has loaded (~1.5 s): poll it 10 times a second, then print the URLs
 ready() {
     if ! curl -sf "$API/health" >/dev/null; then
         printf "loading the model"
+        local i=0
         until curl -sf "$API/health" >/dev/null; do
-            if ! systemctl --user is-active -q kiln; then
-                echo " failed:"; journalctl --user -u kiln -n 15 -o cat --no-pager; exit 1
+            if (( ++i % 10 == 0 )); then
+                if ! systemctl --user is-active -q kiln; then
+                    echo " failed:"; journalctl --user -u kiln -n 15 -o cat --no-pager; exit 1
+                fi
+                printf .
             fi
-            printf .; sleep 1
+            sleep 0.1
         done
         echo " done"
     fi

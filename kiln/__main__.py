@@ -24,8 +24,13 @@ def main():
     if a.cmd == "opencode":
         return opencode(a)
     if a.cmd == "serve":
+        # Start what takes longest first: the GPU wakes and the weights load while the rest of Python starts up.
+        from .engine import load_async, wake_gpus
+        wake_gpus()
+        engine = load_async(a.model, max_seqs=a.slots, umax=a.chunk, warmup=False)
         from .server import Server, serve
-        serve(Server(a.model, a.tokenizer, slots=a.slots, n_draft=a.draft, umax=a.chunk), a.host, a.port)
+        serve(lambda: Server(a.model, a.tokenizer, slots=a.slots, n_draft=a.draft, umax=a.chunk, engine=engine, warmup=False),
+              a.host, a.port)
 
 
 

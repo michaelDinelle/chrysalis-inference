@@ -23,7 +23,7 @@ import numpy as np
 
 from .cache import Cache
 from .chat import OutputParser, Renderer, Tokens, message_key, text_of
-from .engine import Engine, KVFull, Sampling
+from .engine import KVFull, Sampling, load_async
 
 MODEL = "qwen3.8-27b"
 MAX_CONTEXT = 262144
@@ -133,18 +133,24 @@ class Sticky:
 
 
 class Server:
-    def __init__(self, model_path, tokenizer_path, slots=3, n_draft=3, umax=2048, log=sys.stderr):
-        self.engine = Engine(model_path, max_seqs=slots, umax=umax)
-        self.capacity = min(MAX_CONTEXT, self.engine.capacity)
+    def __init__(self, model_path, tokenizer_path, slots=3, n_draft=3, umax=2048, log=sys.stderr, engine=None, warmup=True):
+        """engine: a future of the Engine (engine.load_async) if its load already started; by default it loads here,
+        alongside the tokenizer. warmup=False leaves Engine.warmup() to the caller (serve() runs it under the GPU lock)."""
+        if engine is None:
+            engine = load_async(model_path, max_seqs=slots, umax=umax, warmup=False)
         self.tok = Tokens(tokenizer_path)
         self.replay = LRU(8192)
         self.renderer = Renderer(self.tok, self.replay.get)
-        self.cache = Cache(self.engine, slots)
         self.sticky = Sticky()
         self.sessions = LRU(64)          # latest request + reply per conversation, for compaction rewrites
         self.gpu = Turnstile()
         self.n_draft, self.log = n_draft, log
         self.recent = LRU(64)
+        self.engine = engine.result()
+        self.capacity = min(MAX_CONTEXT, self.engine.capacity)
+        self.cache = Cache(self.engine, slots)
+        if warmup:
+            self.engine.warmup()
 
     # ---- request translation ----------------------------------------------------------------
 
@@ -315,7 +321,9 @@ class Server:
 
 # ---- HTTP ------------------------------------------------------------------------------------------
 
-def make_handler(srv: Server):
+def make_handler(state, ready):
+    """state["srv"] is the Server once `ready` is set; until then /health and /kiln/stats answer 503 and the other
+    requests wait."""
     class Handler(BaseHTTPRequestHandler):
         protocol_version = "HTTP/1.1"
         server_version = "kiln"
@@ -332,6 +340,10 @@ def make_handler(srv: Server):
             self.wfile.write(data)
 
         def do_GET(self):
+            if not ready.is_set() and self.path.rstrip("/") in ("/health", "/v1/health", "/kiln/stats"):
+                return self.send_json(503, {"status": "loading"})
+            ready.wait()
+            srv = state["srv"]
             if self.path.rstrip("/") in ("/v1/models", "/models"):
                 now = int(time.time())
                 self.send_json(200, {"object": "list", "data": [
@@ -347,6 +359,8 @@ def make_handler(srv: Server):
         def do_POST(self):
             if self.path.rstrip("/") not in ("/v1/chat/completions", "/chat/completions"):
                 return self.send_json(404, {"error": {"message": "not found"}})
+            ready.wait()
+            srv = state["srv"]
             try:
                 body = json.loads(self.rfile.read(int(self.headers.get("Content-Length") or 0)) or b"{}")
             except json.JSONDecodeError:
@@ -446,8 +460,18 @@ def usage_of(info):
             "prompt_tokens_details": {"cached_tokens": info["cached_tokens"]}}
 
 
-def serve(srv: Server, host="127.0.0.1", port=8080):
-    httpd = ThreadingHTTPServer((host, port), make_handler(srv))
+def serve(make_server, host="127.0.0.1", port=8080):
+    """Listens right away, so clients connect while the model loads: until make_server() returns, /health answers
+    503 and requests wait. The engine's warm-up then runs holding the GPU lock; requests queue behind it."""
+    state, ready = {}, threading.Event()
+    httpd = ThreadingHTTPServer((host, port), make_handler(state, ready))
     httpd.daemon_threads = True
+    threading.Thread(target=httpd.serve_forever, daemon=True).start()
+    srv = make_server()
+    srv.gpu.acquire(main=True)
+    state["srv"] = srv
+    ready.set()
     print(f"kiln: serving {MODEL} on http://{host}:{port}/v1 (context {srv.capacity} tokens)", file=srv.log, flush=True)
-    httpd.serve_forever()
+    srv.engine.warmup()
+    srv.gpu.release()
+    threading.Event().wait()

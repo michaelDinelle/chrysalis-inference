@@ -13,7 +13,7 @@ About 3,400 lines: C++/HIP kernels and model code in `engine/` (2,400), the Pyth
 ./kiln.sh install        # once: systemd user services + ~/.local/bin/kiln (does not enable autostart)
 kiln opencode            # once: make it OpenCode's default model (backs up ~/.config/opencode/opencode.json)
 
-kiln start               # loads the model (~3 s), starts the web chat, prints both URLs:
+kiln start               # loads the model (~1.5 s), starts the web chat, prints both URLs:
                          #   API http://127.0.0.1:8080/v1, web chat http://127.0.0.1:8081
 kiln stop                # stops both and frees the GPU (also: restart, status)
 kiln logs                # one line per request: prompt/cached tokens, TTFT, tok/s, draft acceptance
@@ -54,6 +54,9 @@ Development: `cd web && bun run dev` (hot reload), `bun run check`.
 | Agent turn TTFT (small tool output) | **0.11–0.18 s**; large outputs add ~1,300 tok/s | full re-prefill whenever history diverges |
 | OpenCode compaction | **0.2 s**: served from the cached conversation | full re-read: minutes at 200K |
 | New session TTFT (warm prefix) | **0.24 s** | several seconds |
+| Load: start to serving, model file in the page cache | **1.5 s**, first reply at 1.8 s | |
+| Load from disk (file not cached) | **3.7–3.9 s**, first reply at 4.3–4.5 s | |
+| Unload: stop to process gone / VRAM free | **0.04 s / 0.19 s** | |
 
 Quality:
 - Kernels: mean KL divergence vs llama.cpp on identical weights 0.002 (98–100% top-1 agreement),
@@ -67,6 +70,18 @@ Quality:
 `ssm_out` / `attn_output` / output head, Q8_0 for K/V projections and the MTP head; 15.9 GB. At load
 the GGUF blocks are split into aligned arrays (same bits) so kernels use 16-byte loads. Token
 embeddings stay in pinned host RAM and are read by the GPU over PCIe (saves 0.7 GB of VRAM).
+
+**Loading** (`engine/load.cpp`) — from a stopped server to serving in ~1.5 s, overlapping everything that
+can overlap: the GPU wakes from runtime suspend (~0.6 s, started when the process starts) while Python
+starts, the tokenizer loads and a thread pulls any uncached part of the file into the page cache (the disk
+streams ~4.9 GB/s). Writer threads then copy the tensors in file order straight into a VRAM staging ring
+through the large BAR (non-temporal stores, ~21 GB/s, one pass over host RAM) and the GPU relayouts each
+32 MB piece into place as it lands. VRAM is allocated meanwhile in ~1 GB pieces (an allocation holds a HIP
+lock while the kernel clears it); the KV pool takes what is left, the staging ring included once the
+weights are in. The server listens from the start (`/health` answers 503 until the model is in) and then
+warms up under its GPU lock (~0.3 s): pinned host memory for the embeddings (relayouted on the CPU) and
+the snapshot slots, and the first kernel launches, which load the code objects. Both stall other HIP calls,
+so they stay out of the weight upload.
 
 **Decode** — int8 dot-product GEMVs (activations quantized per 32 values) at ~800–920 GB/s; up to three
 matrices per launch (q|k|v, qkv|z); SwiGLU fused with quantization of the down projection's input; one
@@ -108,7 +123,8 @@ Special-token text inside files stays text.
 
 ```
 engine/   common.h kernels.h gguf.h      constants, kernel entry points, GGUF reader
-          quant.hip                      weight relayout, GEMVs, dequantization
+          load.cpp relayout.hip          loading: GGUF -> VRAM pipeline, KV pool, warm-up
+          quant.hip                      weight arrays, GEMVs, dequantization
           attn.hip gdn.hip ops.hip       attention, gated delta net, norms / top-k
           model.cpp model.h api.cpp      weights, sequences, snapshots, forward, MTP, C API
 kiln/     engine.py chat.py cache.py server.py __main__.py

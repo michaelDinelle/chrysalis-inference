@@ -10,6 +10,7 @@
 #include <vector>
 
 constexpr int EOS_IM_END = 248046, EOS_TEXT = 248044;   // <|im_end|>, <|endoftext|>
+inline size_t state_bytes() { return (size_t)48 * GV * GD * GD * 4 + (size_t)48 * QKV * 3 * 4 + D * 4; }   // one sequence
 inline bool is_eos(int t) { return t == EOS_IM_END || t == EOS_TEXT; }
 
 struct Layer {
@@ -41,9 +42,11 @@ struct Seq {
 };
 
 struct Engine {
-    // weights
-    Arena warena;
-    QTensor embd, out;               // embd lives in pinned host memory, read by the GPU over PCIe
+    // weights (allocated in slabs, see load.cpp)
+    size_t weight_bytes = 0;
+    QTensor embd, out;               // embd lives in pinned host memory, read by the GPU over PCIe (filled by warmup())
+    std::string model_path;
+    size_t embd_offset = 0;          // of the token embeddings in the model file
     float *out_norm = nullptr;
     Layer L[NL], M;                  // M = the MTP block
     QTensor eh_proj;
@@ -54,7 +57,7 @@ struct Engine {
     hipStream_t st, cst;                // compute stream, snapshot copy stream
     hipEvent_t staged, copied;
     uint8_t *stage_state = nullptr;     // device staging copy of one sequence's recurrent state
-    hipblasLtHandle_t lt;
+    hipblasLtHandle_t lt = nullptr;      // created by warmup()
     void *lt_ws = nullptr;
     size_t lt_ws_size = 32 << 20;
     struct LtPlan { hipblasLtMatmulDesc_t desc; hipblasLtMatrixLayout_t a, b, c; hipblasLtMatmulAlgo_t algo; };
@@ -81,7 +84,10 @@ struct Engine {
     std::vector<Snap> snaps;
     float *ssm_pool = nullptr, *conv_pool = nullptr;
 
-    void load(const std::string &path, int max_seqs, size_t reserve_bytes);
+    void load(const std::string &path, int max_seqs, size_t reserve_bytes);   // load.cpp
+    void warmup();
+    void alloc_buffers(int max_seqs);
+    void add_kv_memory(uint8_t *p, size_t bytes);
     int seq_new();
     void seq_reset(Seq &s);
     void seq_free(int id);

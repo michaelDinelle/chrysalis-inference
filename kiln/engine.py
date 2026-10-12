@@ -14,8 +14,36 @@ class Sampling(C.Structure):
                 ("presence_penalty", C.c_float), ("top_k", C.c_int), ("n_draft", C.c_int)]
 
 
+def wake_gpus():
+    """Opening a GPU's render node resumes it from runtime suspend, ~0.65 s on the 7900 XTX that hipInit would
+    otherwise wait for: start that before the imports and the library load. The node is closed right away (the GPU
+    stays up for its autosuspend delay, 5 s)."""
+    import glob
+    import threading
+
+    def wake(node):
+        try:
+            os.close(os.open(node, os.O_RDWR))
+        except OSError:
+            pass
+    for node in glob.glob("/dev/dri/renderD*"):
+        threading.Thread(target=wake, args=(node,), daemon=True).start()
+
+
+def load_async(*args, **kw):
+    """Engine(*args, **kw) in a thread (the C++ load runs without the GIL): returns a future."""
+    from concurrent.futures import ThreadPoolExecutor
+    pool = ThreadPoolExecutor(1)
+    future = pool.submit(Engine, *args, **kw)
+    pool.shutdown(wait=False)
+    return future
+
+
 class Engine:
-    def __init__(self, model, max_seqs=4, umax=2048, reserve_mb=256, lib=os.path.join(ROOT, "build", "libkiln.so")):
+    """warmup=False leaves the last step of loading (token embeddings, snapshot buffers, first kernel launches) to a
+    later warmup() call, which must come before any other use: the server runs it after it starts listening."""
+
+    def __init__(self, model, max_seqs=4, umax=2048, reserve_mb=256, lib=os.path.join(ROOT, "build", "libkiln.so"), warmup=True):
         self.lib = L = C.CDLL(lib)
         L.kiln_init.restype = C.c_int
         L.kiln_init.argtypes = [C.c_char_p, C.c_int, C.c_int, C.c_longlong]
@@ -25,6 +53,11 @@ class Engine:
         L.kiln_seq_begin.argtypes = [C.c_int, C.c_uint64]
         L.kiln_last_logits.argtypes = [C.POINTER(C.c_float)]
         self.capacity = L.kiln_init(model.encode(), max_seqs, umax, reserve_mb)
+        if warmup:
+            self.warmup()
+
+    def warmup(self):
+        self.lib.kiln_warmup()
 
     def new_seq(self):
         sid = self.lib.kiln_seq_new()

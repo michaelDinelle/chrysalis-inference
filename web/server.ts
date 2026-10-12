@@ -36,16 +36,20 @@ const server = Bun.serve({
       },
     },
 
-    // online: serving; loading: the systemd unit runs but the model is still loading; offline: stopped
+    // online: serving; loading: the systemd unit runs but the model is still loading (kiln answers 503 until it has
+    // loaded, or does not listen yet); offline: stopped
     "/api/status": async () => {
       try {
-        return Response.json({ state: "online", build: BUILD, ...(await (await fetch(`${KILN}/kiln/stats`)).json()) });
+        const r = await fetch(`${KILN}/kiln/stats`);
+        if (!r.ok) throw new Error("loading");
+        return Response.json({ state: "online", build: BUILD, ...(await r.json()) });
       } catch {
         return Response.json({ state: unit("is-active") === "active" ? "loading" : "offline", build: BUILD });
       }
     },
     "/api/kiln/start": { POST: () => (unit("start", "--no-block"), new Response(null, { status: 202 })) },
-    "/api/kiln/stop": { POST: () => (unit("stop", "--no-block"), new Response(null, { status: 202 })) },
+    // stopping takes ~40 ms: wait for it, so the page can show the new state right away
+    "/api/kiln/stop": { POST: () => (unit("stop"), new Response(null, { status: 204 })) },
   },
 });
 

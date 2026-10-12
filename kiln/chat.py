@@ -53,8 +53,7 @@ class Content(str):
 class Tokens:
     def __init__(self, path):
         self.full = Tokenizer.from_file(path)
-        cfg = json.load(open(path, encoding="utf-8"))
-        self.added = [t["content"] for t in cfg["added_tokens"]]
+        self.added = [t.content for _, t in sorted(self.full.get_added_tokens_decoder().items())]
         self.id = {s: self.full.token_to_id(s) for s in STRUCT}
         self.eos = {self.id["<|im_end|>"], self.id["<|endoftext|>"]}
 

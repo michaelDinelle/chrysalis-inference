@@ -14,6 +14,8 @@ int kiln_init(const char *path, int max_seqs, int umax, long long reserve_mb) {
     E->load(path, max_seqs, (size_t)reserve_mb << 20);
     return E->n_pages * PAGE;
 }
+// Loads code objects and pins snapshot buffers; call once after kiln_init, before the first request.
+void kiln_warmup() { E->warmup(); }
 int kiln_seq_new() { return E->seq_new(); }
 void kiln_seq_free(int id) { E->seq_free(id); }
 int kiln_seq_len(int id) { return E->seqs.at(id).n; }
