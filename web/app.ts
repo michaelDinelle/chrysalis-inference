@@ -232,7 +232,12 @@ function renderList() {
   }
 }
 
+let shownStatus = "";
 function renderStatus() {
+  // Polled every 4 s: redraw only what changed, so an idle page does not repaint.
+  const key = JSON.stringify([status.state, status.context, status.kv_tokens, status.cache?.free_kv_tokens]);
+  if (key === shownStatus) return;
+  shownStatus = key;
   const el = $("status"), line = h("div", "status-line");
   line.append(h("span", `dot ${status.state}`));
   el.replaceChildren(line);
