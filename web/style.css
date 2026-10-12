@@ -2,7 +2,8 @@
   color-scheme: dark;
   --bg: #121010;
   --panel: #171413;
-  --raised: #1f1b19;
+  --raised: #171413;          /* was #1f1b19: a large area of it (the message box) made an LG monitor driven by a Mac
+                                 flicker and keep a ghost image; this color tested clean in the same place */
   --hover: #29231f;
   --line: #2d2724;
   --text: #ede6df;
