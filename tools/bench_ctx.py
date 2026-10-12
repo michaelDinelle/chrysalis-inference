@@ -7,7 +7,7 @@ eng = Engine("data/models/kiln-mix.gguf")
 s = eng.new_seq()
 random.seed(0)
 filled = 0
-greedy = lambda k: Sampling(temperature=0.0, top_p=1.0, min_p=0.0, presence_penalty=0.0, top_k=1, n_draft=k, seed=0)
+greedy = lambda k: Sampling(temperature=0.0, top_p=1.0, min_p=0.0, presence_penalty=0.0, top_k=1, n_draft=k)
 for depth in depths:
     t0 = time.time(); n = depth - filled
     while filled < depth:

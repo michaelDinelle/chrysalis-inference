@@ -7,7 +7,7 @@ eng = Engine("data/models/kiln-mix.gguf")
 random.seed(3)
 p1 = [random.randrange(1000, 50000) for _ in range(300)]
 p2 = [random.randrange(1000, 50000) for _ in range(130)]
-greedy = Sampling(temperature=0.0, top_p=1.0, min_p=0.0, presence_penalty=0.0, top_k=1, n_draft=3, seed=0)
+greedy = Sampling(temperature=0.0, top_p=1.0, min_p=0.0, presence_penalty=0.0, top_k=1, n_draft=3)
 a = eng.new_seq(); eng.prefill(a, p1); snap = eng.snapshot(a)
 eng.prefill(a, p2); la = eng.last_logits()
 out_a = []

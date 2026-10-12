@@ -15,9 +15,9 @@ drafts = [int(a) for a in sys.argv[2:]] or [0, 2, 3, 4]
 eng = Engine("data/models/kiln-mix.gguf")
 for k in drafts:
     for temp in (1.0, 0.0):
-        s = eng.new_seq(); eng.lib.kiln_seq_seed(s, 1234)
+        s = eng.new_seq(); eng.begin(s, 1234)
         eng.prefill(s, ids)
-        sp = Sampling(temperature=temp, top_p=0.95, min_p=0.0, presence_penalty=0.0, top_k=20, n_draft=k, seed=0)
+        sp = Sampling(temperature=temp, top_p=0.95, min_p=0.0, presence_penalty=0.0, top_k=20, n_draft=k)
         out, steps = [], 0
         t0 = time.time()
         while len(out) < n_tok:

@@ -6,10 +6,10 @@ import hljs from "highlight.js/lib/common";
 import { marked } from "marked";
 
 type Effort = "xhigh" | "medium" | "low" | "off";
-interface Stats { ttft: number; tps: number; tokens: number; prompt: number; cached: number; thought?: number }
+interface Stats { ttft: number; tps: number; tokens: number; prompt: number; cached: number; thought?: number; seed?: number }
 interface Message { role: "user" | "assistant"; content: string; reasoning?: string; stats?: Stats; error?: string; stopped?: boolean }
 interface Conversation { id: string; title: string; named?: boolean; updated: number; effort: Effort; messages: Message[] }
-type SamplingKey = "temperature" | "top_p" | "top_k" | "min_p" | "presence_penalty" | "max_tokens";
+type SamplingKey = "temperature" | "top_p" | "top_k" | "min_p" | "presence_penalty" | "max_tokens" | "seed";
 type Sampling = Partial<Record<SamplingKey, number>>;
 interface Settings { system: string; sampling: Sampling }
 interface Status { state: "online" | "loading" | "offline"; build?: string; context?: number; kv_tokens?: number; cache?: { free_kv_tokens: number } }
@@ -17,8 +17,9 @@ interface View { el: HTMLElement; think: HTMLDetailsElement; summary: HTMLElemen
 interface Live { phase: "waiting" | "thinking" | "writing"; since: number; note: string }
 
 const MODEL = "qwen3.8-27b";
-// What kiln uses for a field left blank, with thinking on and off (DEFAULTS in kiln/server.py: Qwen's recommended values).
-const SAMPLING_DEFAULTS: Record<"think" | "fast", Required<Sampling>> = {
+// What kiln uses for a field left blank, with thinking on and off (DEFAULTS in kiln/server.py: Qwen's recommended
+// values). Without a seed kiln draws a random one and reports it with the reply.
+const SAMPLING_DEFAULTS: Record<"think" | "fast", Sampling> = {
   think: { temperature: 1, top_p: 0.95, top_k: 20, min_p: 0, presence_penalty: 0, max_tokens: 32768 },
   fast: { temperature: 0.7, top_p: 0.8, top_k: 20, min_p: 0, presence_penalty: 1.5, max_tokens: 32768 },
 };
@@ -162,6 +163,7 @@ function paint(v: View, m: Message, live?: Live) {
   const s = m.stats;
   const facts = s ? [`${fmtS(s.ttft)} to first token`, `${Math.round(s.tps)} tok/s`, `${fmtK(s.tokens)} tokens`, `prompt ${fmtK(s.cached)}/${fmtK(s.prompt)} cached`]
     : m.stopped ? ["stopped"] : [];
+  if (s?.seed !== undefined) facts.push(`seed ${s.seed}`);
   const last = conv.messages.at(-1) === m;
   v.foot.innerHTML = `<span class="stats">${facts.join(" · ")}</span>` + actions(last ? ["copy", "retry"] : ["copy"]);
 }
@@ -317,7 +319,7 @@ async function generate() {
   render();
   const v = views.get(m)!, live: Live = { phase: "waiting", since: performance.now(), note: "Reading the prompt" };
   const timer = setInterval(() => { paint(v, m, live); if (follow) scroller.scrollTop = scroller.scrollHeight; }, 60);
-  let t0 = performance.now(), tFirst = 0, tAnswer = 0, tLast = 0, usage: any;
+  let t0 = performance.now(), tFirst = 0, tAnswer = 0, tLast = 0, usage: any, seed: number | undefined;
   try {
     if (status.state !== "online") {
       live.note = status.state === "loading" ? "Loading the model" : "Starting kiln";
@@ -350,12 +352,13 @@ async function generate() {
         tLast = now;
       }
       if (ev.usage) usage = ev.usage;
+      if (ev.seed !== undefined) seed = ev.seed;
     }
     if (usage && tFirst) {
       m.stats = {
         ttft: (tFirst - t0) / 1000, tps: usage.completion_tokens / Math.max((tLast - tFirst) / 1000, 1e-3),
         tokens: usage.completion_tokens, prompt: usage.prompt_tokens, cached: usage.prompt_tokens_details?.cached_tokens ?? 0,
-        thought: m.reasoning && tAnswer ? (tAnswer - tFirst) / 1000 : undefined,
+        thought: m.reasoning && tAnswer ? (tAnswer - tFirst) / 1000 : undefined, seed,
       };
     }
   } catch (e) {
@@ -482,7 +485,7 @@ $("settings-btn").addEventListener("click", () => {
   systemInput.value = settings.system;
   for (const f of samplingInputs) {
     f.value = String(settings.sampling[f.name as SamplingKey] ?? "");
-    f.placeholder = String(defaults[f.name as SamplingKey]);
+    f.placeholder = String(defaults[f.name as SamplingKey] ?? "random");
   }
   settingsDialog.returnValue = "";                  // Esc keeps the previous value, which may be "save"
   settingsDialog.showModal();

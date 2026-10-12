@@ -29,13 +29,14 @@ and `qwen3.8-27b-fast` (no thinking; also used for session titles).
 `web/` is a small Bun app: `server.ts` serves the page and proxies kiln's API on the same origin; `app.ts` is
 plain TypeScript (marked, highlight.js, DOMPurify). Conversations live in the tab's sessionStorage: a reload
 keeps them, closing the tab ends them, and nothing is stored on the server.
-Replies stream with their reasoning (collapsible), each one shows time to first token, tok/s and how much of
-the prompt came from cache. The Think switch picks the reasoning effort (Max, Medium, Low) or the no-thinking
-model (Off). Settings holds the system prompt and the sampling values (temperature, top-p, top-k, min-p,
-presence penalty, max reply tokens); they apply to every conversation in the tab and are kept with them. A
-blank field uses Qwen's recommended value for the thinking mode. Esc stops a reply, the last turn can be
-regenerated or edited, and the sidebar starts or unloads the model (sending a message starts it too).
-Assistant turns go back to kiln exactly as received, so every turn of a conversation is a cache hit.
+Replies stream with their reasoning (collapsible), each one shows time to first token, tok/s, how much of the
+prompt came from cache and its seed. The Think switch picks the reasoning effort (Max, Medium, Low) or the
+no-thinking model (Off). Settings holds the system prompt, the sampling values (temperature, top-p, top-k,
+min-p, presence penalty, max reply tokens) and the seed; they apply to every conversation in the tab and are
+kept with them. A blank field uses Qwen's recommended value for the thinking mode, a blank seed a new one for
+every reply: set a reply's seed to draw it again. Esc stops a reply, the last turn can be regenerated or
+edited, and the sidebar starts or unloads the model (sending a message starts it too). Assistant turns go back
+to kiln exactly as received, so every turn of a conversation is a cache hit.
 Development: `cd web && bun run dev` (hot reload), `bun run check`.
 
 ## Measured on this machine
@@ -72,7 +73,11 @@ matrices per launch (q|k|v, qkv|z); SwiGLU fused with quantization of the down p
 fused kernel per recurrent layer (gates, conv, L2 norms, delta-rule scan with the 128×128 state in
 registers, gated norm). MTP drafts on the GPU without host round trips, then one verify pass;
 rejection sampling against greedy drafts keeps sampling exact; the recurrent state is committed by
-replaying the accepted tokens.
+replaying the accepted tokens. Each reply seeds its sampler from the request's `seed` (or a random one) and the
+response carries it back (`seed`, in the finish_reason chunk when streaming): the same prompt, settings and
+seed give the same tokens, from a cold cache, a snapshot or the live conversation. A prompt read in different
+chunks (an older conversation re-read after a restart) has slightly different logits and may drift after a
+while. The presence penalty counts the current reply's tokens only.
 
 **Attention** — paged KV cache (64-token pages), K int8, V 5-bit Hadamard-rotated (as accurate as int8
 here, 18% smaller: what makes 262K fit). Decode attention is LDS-free WMMA: K rows, Q and transposed V

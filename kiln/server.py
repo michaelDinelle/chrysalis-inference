@@ -10,6 +10,7 @@ What keeps time-to-first-token low:
 """
 import hashlib
 import json
+import random
 import re
 import sys
 import threading
@@ -153,6 +154,7 @@ class Server:
         messages = merge_system(body.get("messages") or [])
         if not any(m.get("role") == "user" for m in messages):
             raise RequestError("the request needs at least one user message")
+        seed = seed_of(body)
         tools = body.get("tools") if body.get("tool_choice") != "none" else None
         kw = body.get("chat_template_kwargs") or {}
         sys0 = text_of(messages[0].get("content")) if messages and messages[0].get("role") == "system" else ""
@@ -171,7 +173,7 @@ class Server:
         d = DEFAULTS[bool(thinking)]
         sp = Sampling(temperature=float(body.get("temperature", d["temperature"])), top_p=float(body.get("top_p", d["top_p"])),
                       min_p=float(body.get("min_p", d["min_p"])), presence_penalty=float(body.get("presence_penalty", d["presence_penalty"])),
-                      top_k=int(body.get("top_k", d["top_k"])), n_draft=self.n_draft, seed=int(body.get("seed", 0) or 0))
+                      top_k=int(body.get("top_k", d["top_k"])), n_draft=self.n_draft)
         max_tokens = int(body.get("max_completion_tokens") or body.get("max_tokens") or 32768)
         if side:
             max_tokens = min(max_tokens, 256)
@@ -183,7 +185,7 @@ class Server:
         record = None if side or compacting else {"messages": messages, "tools": tools, "style": style}
         self.gpu.acquire(main=not side)
         try:
-            yield from self.run(np.array(prompt, np.int32), marks, sp, max_tokens, bool(thinking), schemas, record)
+            yield from self.run(np.array(prompt, np.int32), marks, sp, seed, max_tokens, bool(thinking), schemas, record)
         finally:
             self.gpu.release()
 
@@ -231,7 +233,7 @@ class Server:
                 s.tokens = s.tokens[:0]
         return self.engine.free_tokens() >= need
 
-    def run(self, prompt, marks, sp, max_tokens, thinking, schemas, record):
+    def run(self, prompt, marks, sp, seed, max_tokens, thinking, schemas, record):
         t0 = time.time()
         slot, cached = self.cache.acquire(prompt)
         points = [(marks["tools"], True), (marks["static"], True), (marks["system"], False), (marks["prompt"], False)]
@@ -244,6 +246,7 @@ class Server:
             if at < len(prompt):
                 self.cache.checkpoint(slot, pinned)
         t_prefill = time.time()
+        self.engine.begin(slot.sid, seed)
         parser = OutputParser(self.tok, thinking, schemas)
         out, finish, steps, completed = [], "stop", 0, False
         try:
@@ -298,7 +301,7 @@ class Server:
         n_gen = len(out)
         info = {"prompt_tokens": len(prompt), "cached_tokens": cached, "completion_tokens": min(n_gen, max_tokens),
                 "finish_reason": finish, "ttft": (t_first if steps else t1) - t0, "prefill_s": t_prefill - t0,
-                "decode_tps": n_gen / max(t1 - t_prefill, 1e-6), "tokens_per_step": n_gen / max(steps, 1)}
+                "decode_tps": n_gen / max(t1 - t_prefill, 1e-6), "tokens_per_step": n_gen / max(steps, 1), "seed": seed}
         self.recent.put(time.time(), info)
         print(f"kiln: prompt {len(prompt)} (cached {cached}) ttft {info['ttft']:.2f}s | gen {n_gen} "
               f"{info['decode_tps']:.1f} tok/s {info['tokens_per_step']:.2f}/step | {finish} | slot {slot.sid}",
@@ -384,7 +387,7 @@ def make_handler(srv: Server):
             while True:
                 kind, val = ev
                 if kind == "done":
-                    self.chunk({**base, "choices": [{"index": 0, "delta": {}, "finish_reason": val["finish_reason"]}]})
+                    self.chunk({**base, "seed": val["seed"], "choices": [{"index": 0, "delta": {}, "finish_reason": val["finish_reason"]}]})
                     if usage:
                         self.chunk({**base, "choices": [], "usage": usage_of(val)})
                     self.chunk(b"[DONE]")
@@ -417,11 +420,24 @@ def make_handler(srv: Server):
                 msg["reasoning_content"] = "".join(reasoning).strip()
             if calls:
                 msg["tool_calls"] = calls
-            self.send_json(200, {"id": rid, "object": "chat.completion", "created": created, "model": model,
+            self.send_json(200, {"id": rid, "object": "chat.completion", "created": created, "model": model, "seed": info["seed"],
                                  "choices": [{"index": 0, "message": msg, "finish_reason": info["finish_reason"]}],
                                  "usage": usage_of(info)})
 
     return Handler
+
+
+def seed_of(body):
+    """The request's seed, or a random one. Either way the response carries it (top-level `seed`; when streaming,
+    in the finish_reason chunk), so any reply can be drawn again (README: Decode)."""
+    seed = body.get("seed")
+    if seed is None:
+        return random.getrandbits(32)                # fits a JavaScript number exactly
+    if isinstance(seed, float) and seed.is_integer():
+        seed = int(seed)
+    if not isinstance(seed, int) or isinstance(seed, bool):
+        raise RequestError("seed must be an integer")
+    return seed % 2**64                              # negative seeds wrap, as in a C uint64
 
 
 def usage_of(info):

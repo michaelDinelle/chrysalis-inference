@@ -24,7 +24,6 @@ struct Layer {
 struct Sampling {                                // mirrors KilnSampling in api.cpp
     float temperature = 1.0f, top_p = 0.95f, min_p = 0.0f, presence_penalty = 0.0f;
     int top_k = 20, n_draft = 3;
-    uint64_t seed = 0;
 };
 
 struct Seq {
@@ -37,8 +36,8 @@ struct Seq {
     float *h_last = nullptr;         // final hidden of token n-1 (MTP pairs it with token n)
     std::vector<float> top_v;        // host top-k logits for the next position (valid when pending < 0)
     std::vector<int> top_i;
-    std::vector<int> seen;           // tokens generated so far (presence penalty)
-    std::mt19937_64 rng;
+    std::vector<int> seen;           // tokens of the current reply (presence penalty)
+    std::mt19937_64 rng;             // reseeded for every reply, see kiln_seq_begin
 };
 
 struct Engine {

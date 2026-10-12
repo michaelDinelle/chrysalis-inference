@@ -11,7 +11,7 @@ class KVFull(RuntimeError):
 
 class Sampling(C.Structure):
     _fields_ = [("temperature", C.c_float), ("top_p", C.c_float), ("min_p", C.c_float),
-                ("presence_penalty", C.c_float), ("top_k", C.c_int), ("n_draft", C.c_int), ("seed", C.c_uint64)]
+                ("presence_penalty", C.c_float), ("top_k", C.c_int), ("n_draft", C.c_int)]
 
 
 class Engine:
@@ -22,7 +22,7 @@ class Engine:
         L.kiln_prefill.argtypes = [C.c_int, C.POINTER(C.c_int), C.c_int]
         L.kiln_prefill.restype = C.c_int
         L.kiln_generate.argtypes = [C.c_int, C.POINTER(Sampling), C.POINTER(C.c_int), C.c_int]
-        L.kiln_seq_seed.argtypes = [C.c_int, C.c_uint64]
+        L.kiln_seq_begin.argtypes = [C.c_int, C.c_uint64]
         L.kiln_last_logits.argtypes = [C.POINTER(C.c_float)]
         self.capacity = L.kiln_init(model.encode(), max_seqs, umax, reserve_mb)
 
@@ -45,6 +45,10 @@ class Engine:
         arr = (C.c_int * len(tokens))(*tokens)
         if self.lib.kiln_prefill(sid, arr, len(tokens)) < 0:
             raise KVFull()
+
+    def begin(self, sid, seed):
+        """Start a reply after the prompt is prefilled: seeds the sampler and resets the presence penalty."""
+        self.lib.kiln_seq_begin(sid, seed)
 
     def generate(self, sid, sampling, max_out=16):
         out = (C.c_int * max_out)()

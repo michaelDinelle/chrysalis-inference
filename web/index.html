@@ -44,7 +44,7 @@
         <p>Changing it makes kiln re-read each conversation once, the next time it answers there.</p>
         <textarea id="system-input" rows="6" placeholder="You are a concise senior engineer…"></textarea>
         <h3>Sampling</h3>
-        <p>Blank fields use Qwen's recommended values, shown for this chat's thinking setting.</p>
+        <p>Blank fields use Qwen's recommended values, shown for this chat's thinking setting. The same seed, prompt and settings give the same reply.</p>
         <div id="sampling" class="fields">
           <label>Temperature<input name="temperature" type="number" min="0" max="2" step="0.01" /></label>
           <label>Top P<input name="top_p" type="number" min="0" max="1" step="0.01" /></label>
@@ -52,6 +52,7 @@
           <label>Min P<input name="min_p" type="number" min="0" max="1" step="0.01" /></label>
           <label>Presence penalty<input name="presence_penalty" type="number" min="-2" max="2" step="0.01" /></label>
           <label title="Thinking counts toward it">Max reply tokens<input name="max_tokens" type="number" min="1" max="262144" step="1" /></label>
+          <label title="Blank draws a new seed for every reply. Each reply shows its seed: set it here to draw that reply again.">Seed<input name="seed" type="number" min="0" max="4294967295" step="1" /></label>
         </div>
         <div class="dialog-actions">
           <button id="settings-reset" type="button" class="ghost-btn reset">Reset to defaults</button>

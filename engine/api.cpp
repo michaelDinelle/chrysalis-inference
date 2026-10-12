@@ -5,7 +5,7 @@
 static Engine *E = nullptr;
 
 extern "C" {
-struct KilnSampling { float temperature, top_p, min_p, presence_penalty; int top_k, n_draft; uint64_t seed; };
+struct KilnSampling { float temperature, top_p, min_p, presence_penalty; int top_k, n_draft; };
 
 // Loads the model; returns KV capacity in tokens.
 int kiln_init(const char *path, int max_seqs, int umax, long long reserve_mb) {
@@ -18,7 +18,13 @@ int kiln_seq_new() { return E->seq_new(); }
 void kiln_seq_free(int id) { E->seq_free(id); }
 int kiln_seq_len(int id) { return E->seqs.at(id).n; }
 void kiln_seq_truncate(int id, int n) { E->seq_truncate(id, n); }
-void kiln_seq_seed(int id, uint64_t seed) { E->seqs.at(id).rng.seed(seed); }
+// Starts a reply: the same seed after the same prompt draws the same tokens, and the presence penalty counts
+// this reply's tokens only (not those of earlier replies the sequence still holds).
+void kiln_seq_begin(int id, uint64_t seed) {
+    Seq &s = E->seqs.at(id);
+    s.rng.seed(seed);
+    s.seen.clear();
+}
 int kiln_free_tokens() { return (int)E->free_pages.size() * PAGE; }
 int kiln_snapshot(int id) { return E->snapshot(id); }
 void kiln_restore(int id, int snap) { E->restore(id, snap); }

@@ -27,7 +27,7 @@ pf = time.time() - t0
 print(f"context {len(prompt)} tokens, prefill {pf:.1f}s ({len(prompt) / pf:.0f} tok/s)", flush=True)
 for k in (3, 0):
     eng.free_seq(s); s = eng.new_seq(); eng.prefill(s, prompt)
-    sp = Sampling(temperature=1.0, top_p=0.95, min_p=0.0, presence_penalty=0.0, top_k=20, n_draft=k, seed=0)
+    sp = Sampling(temperature=1.0, top_p=0.95, min_p=0.0, presence_penalty=0.0, top_k=20, n_draft=k)
     out, steps, t0 = [], 0, time.time()
     while len(out) < n_gen:
         out += eng.generate(s, sp, 16); steps += 1
