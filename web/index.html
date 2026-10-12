@@ -20,7 +20,7 @@
         <header class="topbar">
           <button id="menu" class="act" type="button" aria-label="Conversations"></button>
           <h1 id="title">New chat</h1>
-          <button id="system-btn" class="ghost-btn" type="button">System prompt</button>
+          <button id="settings-btn" class="ghost-btn" type="button">Settings</button>
         </header>
         <div id="scroller"><div id="thread" class="thread"></div></div>
         <form id="composer">
@@ -36,13 +36,26 @@
         </form>
       </main>
     </div>
-    <dialog id="system-dialog">
+    <dialog id="settings-dialog">
       <form method="dialog">
-        <h2>System prompt</h2>
-        <p>Instructions for this conversation. Changing them makes kiln re-read the conversation once.</p>
-        <textarea id="system-input" rows="8" placeholder="You are a concise senior engineer…"></textarea>
+        <h2>Settings</h2>
+        <p>For every conversation in this tab, until it is closed.</p>
+        <h3><label for="system-input">System prompt</label></h3>
+        <p>Changing it makes kiln re-read each conversation once, the next time it answers there.</p>
+        <textarea id="system-input" rows="6" placeholder="You are a concise senior engineer…"></textarea>
+        <h3>Sampling</h3>
+        <p>Blank fields use Qwen's recommended values, shown for this chat's thinking setting.</p>
+        <div id="sampling" class="fields">
+          <label>Temperature<input name="temperature" type="number" min="0" max="2" step="0.01" /></label>
+          <label>Top P<input name="top_p" type="number" min="0" max="1" step="0.01" /></label>
+          <label title="kiln samples from at most the 64 likeliest tokens">Top K<input name="top_k" type="number" min="1" max="64" step="1" /></label>
+          <label>Min P<input name="min_p" type="number" min="0" max="1" step="0.01" /></label>
+          <label>Presence penalty<input name="presence_penalty" type="number" min="-2" max="2" step="0.01" /></label>
+          <label title="Thinking counts toward it">Max reply tokens<input name="max_tokens" type="number" min="1" max="262144" step="1" /></label>
+        </div>
         <div class="dialog-actions">
-          <button value="cancel" class="ghost-btn">Cancel</button>
+          <button id="settings-reset" type="button" class="ghost-btn reset">Reset to defaults</button>
+          <button value="cancel" class="ghost-btn" formnovalidate>Cancel</button>
           <button value="save" class="primary-btn">Save</button>
         </div>
       </form>

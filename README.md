@@ -31,9 +31,12 @@ plain TypeScript (marked, highlight.js, DOMPurify). Conversations live in the ta
 keeps them, closing the tab ends them, and nothing is stored on the server.
 Replies stream with their reasoning (collapsible), each one shows time to first token, tok/s and how much of
 the prompt came from cache. The Think switch picks the reasoning effort (Max, Medium, Low) or the no-thinking
-model (Off). Esc stops a reply, the last turn can be regenerated or edited, and the sidebar starts or unloads
-the model (sending a message starts it too). Assistant turns go back to kiln exactly as received, so every
-turn of a conversation is a cache hit. Development: `cd web && bun run dev` (hot reload), `bun run check`.
+model (Off). Settings holds the system prompt and the sampling values (temperature, top-p, top-k, min-p,
+presence penalty, max reply tokens); they apply to every conversation in the tab and are kept with them. A
+blank field uses Qwen's recommended value for the thinking mode. Esc stops a reply, the last turn can be
+regenerated or edited, and the sidebar starts or unloads the model (sending a message starts it too).
+Assistant turns go back to kiln exactly as received, so every turn of a conversation is a cache hit.
+Development: `cd web && bun run dev` (hot reload), `bun run check`.
 
 ## Measured on this machine
 

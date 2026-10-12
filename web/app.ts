@@ -1,6 +1,6 @@
 // kiln web UI: chat with the local Qwen3.8-27B server. Replies stream in with their reasoning and are rendered
 // as markdown with highlighted code; conversations live in this tab's sessionStorage (a reload keeps them,
-// closing the tab ends them).
+// closing the tab ends them). The settings (system prompt, sampling), kept the same way, apply to every conversation.
 import DOMPurify from "dompurify";
 import hljs from "highlight.js/lib/common";
 import { marked } from "marked";
@@ -8,12 +8,20 @@ import { marked } from "marked";
 type Effort = "xhigh" | "medium" | "low" | "off";
 interface Stats { ttft: number; tps: number; tokens: number; prompt: number; cached: number; thought?: number }
 interface Message { role: "user" | "assistant"; content: string; reasoning?: string; stats?: Stats; error?: string; stopped?: boolean }
-interface Conversation { id: string; title: string; named?: boolean; updated: number; effort: Effort; system: string; messages: Message[] }
+interface Conversation { id: string; title: string; named?: boolean; updated: number; effort: Effort; messages: Message[] }
+type SamplingKey = "temperature" | "top_p" | "top_k" | "min_p" | "presence_penalty" | "max_tokens";
+type Sampling = Partial<Record<SamplingKey, number>>;
+interface Settings { system: string; sampling: Sampling }
 interface Status { state: "online" | "loading" | "offline"; build?: string; context?: number; kv_tokens?: number; cache?: { free_kv_tokens: number } }
 interface View { el: HTMLElement; think: HTMLDetailsElement; summary: HTMLElement; thought: HTMLElement; body: HTMLElement; foot: HTMLElement; shown?: string }
 interface Live { phase: "waiting" | "thinking" | "writing"; since: number; note: string }
 
 const MODEL = "qwen3.8-27b";
+// What kiln uses for a field left blank, with thinking on and off (DEFAULTS in kiln/server.py: Qwen's recommended values).
+const SAMPLING_DEFAULTS: Record<"think" | "fast", Required<Sampling>> = {
+  think: { temperature: 1, top_p: 0.95, top_k: 20, min_p: 0, presence_penalty: 0, max_tokens: 32768 },
+  fast: { temperature: 0.7, top_p: 0.8, top_k: 20, min_p: 0, presence_penalty: 1.5, max_tokens: 32768 },
+};
 const EFFORTS: [Effort, string][] = [["xhigh", "Max"], ["medium", "Medium"], ["low", "Low"], ["off", "Off"]];
 const SUGGESTIONS: [string, string][] = [
   ["Rate limiter", "Write a token-bucket rate limiter in Python that works with asyncio, with pytest tests."],
@@ -36,7 +44,8 @@ const icon = (name: keyof typeof ICONS) => `<svg class="i" viewBox="0 0 24 24" a
 
 const $ = <T extends HTMLElement = HTMLElement>(id: string) => document.getElementById(id) as T;
 const thread = $("thread"), scroller = $("scroller"), input = $<HTMLTextAreaElement>("input"), sendBtn = $<HTMLButtonElement>("send");
-const systemDialog = $<HTMLDialogElement>("system-dialog"), systemInput = $<HTMLTextAreaElement>("system-input");
+const settingsDialog = $<HTMLDialogElement>("settings-dialog"), systemInput = $<HTMLTextAreaElement>("system-input");
+const samplingInputs = [...$("sampling").querySelectorAll("input")];
 
 function h<K extends keyof HTMLElementTagNameMap>(tag: K, cls = "", text = ""): HTMLElementTagNameMap[K] {
   const e = document.createElement(tag);
@@ -68,13 +77,17 @@ function pref(key: string, fallback: string) {
 function setPref(key: string, value: string) {
   try { localStorage.setItem(key, value); } catch { /* private window: keep the default */ }
 }
-function loadChats(): Record<string, Conversation> {
-  try { return JSON.parse(sessionStorage.getItem("chats") ?? "{}"); } catch { return {}; }
+function load<T>(key: string, fallback: T): T {
+  try { return JSON.parse(sessionStorage.getItem(key) ?? "null") ?? fallback; } catch { return fallback; }
+}
+function store(key: string, value: unknown) {
+  try { sessionStorage.setItem(key, JSON.stringify(value)); } catch { /* full or disabled: kept until a reload */ }
 }
 
 // Saved conversations by id, mirrored to sessionStorage. They are copied in and out, so unsaved changes to the
 // open one (turns cut by "edit" and never resent) are not kept.
-const chats: Record<string, Conversation> = loadChats();
+const chats: Record<string, Conversation> = load("chats", {});
+let settings: Settings = load("settings", { system: "", sampling: {} });
 let conv = blank();
 let busy: AbortController | null = null;
 let status: Status = { state: "offline" };
@@ -83,7 +96,7 @@ let follow = true;                                  // keep the newest text in v
 const views = new Map<Message, View>();
 
 function blank(): Conversation {
-  return { id: crypto.randomUUID(), title: "New chat", updated: Date.now(), effort: pref("effort", "xhigh") as Effort, system: "", messages: [] };
+  return { id: crypto.randomUUID(), title: "New chat", updated: Date.now(), effort: pref("effort", "xhigh") as Effort, messages: [] };
 }
 
 // ---- rendering ---------------------------------------------------------------------------------------------
@@ -93,7 +106,7 @@ function render() {
   thread.replaceChildren(...(conv.messages.length ? conv.messages.map(messageView) : [emptyState()]));
   $("title").textContent = conv.title;
   document.title = conv.messages.length ? `${conv.title} · kiln` : "kiln";
-  $("system-btn").classList.toggle("on", !!conv.system.trim());
+  renderSettingsButton();
   renderComposer();
   renderList();
 }
@@ -184,6 +197,11 @@ function renderComposer() {
   $("meter").textContent = s ? `${fmtK(s.prompt + s.tokens)} / ${fmtK(status.context ?? 262144)} tokens` : "";
 }
 
+// Highlighted while anything differs from the defaults.
+function renderSettingsButton() {
+  $("settings-btn").classList.toggle("on", !!settings.system.trim() || Object.keys(settings.sampling).length > 0);
+}
+
 function renderList() {
   const nav = $("conversations"), today = new Date().setHours(0, 0, 0, 0);
   const group = (t: number) => (t >= today ? "Today" : t >= today - 6 * 864e5 ? "Previous 7 days" : "Older");
@@ -240,18 +258,14 @@ async function refreshStatus() {
   try { status = await (await fetch("/api/status")).json(); } catch { status = { state: "offline" }; }
   build ||= status.build ?? "";
   // The server has newer code: reload into it once nothing would be lost (chats are kept in sessionStorage).
-  if (status.build && status.build !== build && !busy && !input.value && !systemDialog.open) return location.reload();
+  if (status.build && status.build !== build && !busy && !input.value && !settingsDialog.open) return location.reload();
   renderStatus();
-}
-
-function storeChats() {
-  try { sessionStorage.setItem("chats", JSON.stringify(chats)); } catch { /* full or disabled: kept until a reload */ }
 }
 
 function save(c: Conversation) {
   if (!c.messages.length) return;
   chats[c.id] = structuredClone(c);
-  storeChats();
+  store("chats", chats);
   if (c === conv && location.hash !== `#${c.id}`) history.replaceState(null, "", `#${c.id}`);
   renderList();
 }
@@ -262,10 +276,10 @@ function request(c: Conversation) {
   const messages: { role: string; content: string; reasoning_content?: string }[] = c.messages.slice(0, -1)
     .filter((m) => m.role === "user" || m.content || m.reasoning)
     .map((m) => (m.reasoning ? { role: m.role, content: m.content, reasoning_content: m.reasoning } : { role: m.role, content: m.content }));
-  if (c.system.trim()) messages.unshift({ role: "system", content: c.system.trim() });
+  if (settings.system.trim()) messages.unshift({ role: "system", content: settings.system.trim() });
   return {
     model: c.effort === "off" ? `${MODEL}-fast` : MODEL, reasoning_effort: c.effort === "off" ? undefined : c.effort,
-    messages, stream: true, stream_options: { include_usage: true },
+    ...settings.sampling, messages, stream: true, stream_options: { include_usage: true },
   };
 }
 
@@ -406,7 +420,7 @@ function newChat() {
 
 function remove(id: string) {
   delete chats[id];
-  storeChats();
+  store("chats", chats);
   if (id === conv.id) newChat();
   else renderList();
 }
@@ -463,15 +477,27 @@ window.addEventListener("hashchange", () => {
 $("new-chat").addEventListener("click", newChat);
 $("menu").addEventListener("click", () => document.body.classList.toggle("nav-open"));
 $("scrim").addEventListener("click", () => document.body.classList.remove("nav-open"));
-$("system-btn").addEventListener("click", () => {
-  systemInput.value = conv.system;
-  systemDialog.showModal();
+$("settings-btn").addEventListener("click", () => {
+  const defaults = SAMPLING_DEFAULTS[conv.effort === "off" ? "fast" : "think"];
+  systemInput.value = settings.system;
+  for (const f of samplingInputs) {
+    f.value = String(settings.sampling[f.name as SamplingKey] ?? "");
+    f.placeholder = String(defaults[f.name as SamplingKey]);
+  }
+  settingsDialog.returnValue = "";                  // Esc keeps the previous value, which may be "save"
+  settingsDialog.showModal();
 });
-systemDialog.addEventListener("close", () => {
-  if (systemDialog.returnValue !== "save") return;
-  conv.system = systemInput.value;
-  $("system-btn").classList.toggle("on", !!conv.system.trim());
-  save(conv);
+$("settings-reset").addEventListener("click", () => {
+  systemInput.value = "";
+  for (const f of samplingInputs) f.value = "";
+});
+settingsDialog.addEventListener("close", () => {
+  if (settingsDialog.returnValue !== "save") return;
+  const sampling: Sampling = {};
+  for (const f of samplingInputs) if (f.value !== "") sampling[f.name as SamplingKey] = f.valueAsNumber;
+  settings = { system: systemInput.value, sampling };
+  store("settings", settings);
+  renderSettingsButton();
 });
 document.addEventListener("visibilitychange", () => { if (!document.hidden) void refreshStatus(); });
 
