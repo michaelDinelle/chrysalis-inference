@@ -20,7 +20,6 @@ usage: kiln <command>
 
 one-time setup:
   install   install the systemd services and put 'kiln' on your PATH
-  opencode  make kiln OpenCode's default model (edits ~/.config/opencode/opencode.json)
 EOF
 }
 
@@ -67,8 +66,7 @@ case "${1:-help}" in
             fi
             ln -sf "$ROOT/kiln.sh" ~/.local/bin/kiln
             systemctl --user daemon-reload
-            echo "installed: 'kiln start' loads the model and prints its URLs, 'kiln opencode' points OpenCode at it" ;;
-  opencode) cd "$ROOT" && exec "$PY" -m kiln opencode "${@:2}" ;;
+            echo "installed: 'kiln start' loads the model and prints its URLs" ;;
   # not in the usage: the foreground server the service runs (takes --port, --draft, ...) and the raw stats
   serve)    cd "$ROOT" && exec "$PY" -m kiln serve "${@:2}" ;;
   stats)    exec curl -s "$API/kiln/stats" ;;
