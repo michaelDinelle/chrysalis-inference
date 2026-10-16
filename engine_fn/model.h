@@ -34,6 +34,7 @@ struct Layer {
     QTensor sh_gate, sh_up, sh_down;             // shared expert
     QTensor hot_gate, hot_up, hot_down;          // experts in VRAM: [n_hot*FE][D], [n_hot*D][FE]
     int *slot_of = nullptr;                      // device [NE]: hot slot >= 0, cold slot -1 - s
+    std::vector<int> slot_h;                     // the same, host copy (prefill sorts its picks on the host)
     int n_hot = 0, n_cold = 0;
 };
 
@@ -112,9 +113,13 @@ struct Engine {
         float *rlog, *sgT, *wtsT, *ent_w; int *idsT, *ent_tok, *pos; MoeWork *work;
         half *Xs, *Hs, *Ys;
         int *h_ids; float *h_wts; int *h_tok; float *h_entw; int *h_pos; MoeWork *h_work;   // pinned host
+        float *h_x; uint16_t *h_cout;            // pinned host: MoE inputs for the CPU, its per-pick outputs (fp16)
+        float *h_topv; int *h_topi, *h_draft;    // pinned host: a step's top-k and drafts
         uint8_t *raw[2]; QTensor sg_[2], su_[2], sd_[2];
     } b{};
     static constexpr int STAGE_G = 32;           // cold experts staged per group
+    std::vector<int> j_slot, j_first, j_tok;     // the CPU's share of a prefill chunk's cold experts (MoeJob arrays)
+    std::vector<float> j_w;
     uint8_t *d_cold = nullptr;                   // device view of cold_mem (registered)
     hipEvent_t raw_free[2], raw_ready[2];
     uint8_t *kv_pool = nullptr;
@@ -143,6 +148,8 @@ struct Engine {
     // internals
     void forward(Seq &s, const int *tokens, int T, bool verify);       // tokens (host) at positions s.n..s.n+T-1
     void ple_rows(const Seq &s, const int *tokens, int T);              // n-gram rows for these tokens -> b.ple_rows
+    void ple_ids(int h0, int h1, const int *tokens, int T, size_t *rows) const;   // their table rows (hash)
+    void ple_prefetch(const size_t *rows, size_t n) const;              // start reading their pages (async)
     void mtp_forward(Seq &s, int T, int pos0, const float *h_prev, const int *d_tokens);
     void mtp_catch_up(Seq &s, int T, int pos0);
     void lm_head(const QAct &in, int T, int rows);

@@ -175,6 +175,11 @@ void Engine::load(const std::string &path, int max_seqs, size_t reserve_bytes) {
         M.slot_of = warena.get<int>(NE);
         CK(hipMemcpyAsync(M.slot_of, id.data(), NE * 4, hipMemcpyHostToDevice, st));
         CK(hipStreamSynchronize(st));
+        M.slot_h = id;
+        for (int l = 0; l < NL; l++) {
+            const int *s = (const int *)get("blk." + std::to_string(l) + ".ffn_exp_slot")->data;
+            L[l].slot_h.assign(s, s + NE);
+        }
     }
     for (int i = 0; i < 2; i++) { CK(hipHostFree(pin[i])); CK(hipFree(dev[i])); CK(hipEventDestroy(ev[i])); }
     const double t_vram = now();
@@ -400,6 +405,8 @@ void Engine::alloc_buffers(int max_seqs) {
     b.Xs = barena.get<half>(N * D); b.Hs = barena.get<half>(N * FE); b.Ys = barena.get<half>(N * D);
     CK(hipHostMalloc(&b.h_ids, N * 4)); CK(hipHostMalloc(&b.h_wts, N * 4)); CK(hipHostMalloc(&b.h_tok, N * 4));
     CK(hipHostMalloc(&b.h_entw, N * 4)); CK(hipHostMalloc(&b.h_pos, N * 4)); CK(hipHostMalloc(&b.h_work, 1024 * sizeof(MoeWork)));
+    CK(hipHostMalloc(&b.h_x, (size_t)U * D * 4)); CK(hipHostMalloc(&b.h_cout, N * D * 2));
+    CK(hipHostMalloc(&b.h_topv, (size_t)8 * TOPK * 4)); CK(hipHostMalloc(&b.h_topi, (size_t)8 * TOPK * 4)); CK(hipHostMalloc(&b.h_draft, 64));
     for (int k = 0; k < 2; k++) {
         b.raw[k] = barena.get<uint8_t>(raw_bytes);
         b.sg_[k] = make_qtensor(barena, IQ4_XS, STAGE_G * FE, D);
@@ -439,7 +446,8 @@ void Engine::shutdown(bool keep_host) {
     if (warena.base) (void)hipFree(warena.base);
     if (barena.base) (void)hipFree(barena.base);
     warena = Arena{}; barena = Arena{};
-    for (void *p : {(void *)b.ple_rows, (void *)b.h_ids, (void *)b.h_wts, (void *)b.h_tok, (void *)b.h_entw, (void *)b.h_pos, (void *)b.h_work, (void *)sh})
+    for (void *p : {(void *)b.ple_rows, (void *)b.h_ids, (void *)b.h_wts, (void *)b.h_tok, (void *)b.h_entw, (void *)b.h_pos, (void *)b.h_work,
+                    (void *)b.h_x, (void *)b.h_cout, (void *)b.h_topv, (void *)b.h_topi, (void *)b.h_draft, (void *)sh})
         if (p) (void)hipHostFree(p);
     if (embd.q) { void *h = nullptr; (void)hipHostGetDevicePointer(&h, embd.q, 0); }
     if (embd_host) (void)hipHostFree(embd_host);

@@ -281,25 +281,7 @@ void Engine::gdn_block(const Layer &w, int gl, Seq &s, int T, bool verify, float
 // Routed experts + shared expert for T tokens of b.mx / b.hq. Decode path, also used (8 tokens at a time) by
 // prefill until the grouped GEMM path exists: hot picks on the GPU, cold picks on the CPU (cpu_cold).
 void Engine::moe_block(const Layer &w, int layer, int T, bool cpu_cold, float *out) {
-    if (T > 32) { moe_prefill(w, layer, T, out); return; }
-    if (T > 8) {                                  // short prefill: int8 activations for the decode kernels, 8 at a time
-        quant_act(b.mx, (int64_t)T * D, b.hq, st);
-        for (int t0 = 0; t0 < T; t0 += 8) {
-            const int n = std::min(8, T - t0);
-            const float *mx = b.mx + (size_t)t0 * D;
-            const QAct hq = qoff(b.hq, (size_t)t0 * D);
-            router_dec(w.router, w.sg_w, mx, n, b.logits_e, b.sg, st);
-            route_dec(b.logits_e, n, w.slot_of, b.ids, b.wts, b.hot, cpu_cold ? d_sh : nullptr, mx, layer, gen + 1, st);
-            if (cpu_cold) gen++;
-            GemvArgs sg; sg.seg[0] = {w.sh_gate, nullptr, 0}; sg.up = w.sh_up; sg.gq = b.hs_q; sg.x = hq; sg.T = n; sg.mode = GEMV_GLU;
-            gemv(sg, st);
-            gemv(w.sh_down, b.hs_q, n, b.shared, D, GEMV_STORE, st);
-            moe_experts_dec(w.hot_gate, w.hot_up, w.hot_down, b.hot, n, hq, b.hq_e, b.wts, b.y, st);
-            if (cpu_cold) moe_wait(&d_sh->done, gen, st);
-            moe_sum(b.y, b.hot, b.shared, b.sg, cpu_cold ? d_sh->y : nullptr, n, out + (size_t)t0 * D, st);
-        }
-        return;
-    }
+    if (T > 8) { moe_prefill(w, layer, T, out); return; }
     router_dec(w.router, w.sg_w, b.mx, T, b.logits_e, b.sg, st);
     route_dec(b.logits_e, T, w.slot_of, b.ids, b.wts, b.hot, cpu_cold ? d_sh : nullptr, b.mx, layer, gen + 1, st);
     if (cpu_cold) gen++;
@@ -311,9 +293,23 @@ void Engine::moe_block(const Layer &w, int layer, int T, bool cpu_cold, float *o
     moe_sum(b.y, b.hot, b.shared, b.sg, cpu_cold ? d_sh->y : nullptr, T, out, st);
 }
 
-// Routed experts for a prefill chunk: picks sorted by expert (on the host, one sync per layer), hot experts from VRAM,
-// cold experts streamed from system RAM into a two-slot VRAM staging ring by DMA (copy stream) and relaid out while
-// the previous group computes, everything as grouped WMMA GEMMs; then the per-token sum in router order.
+// Cost model of a prefill chunk's cold experts (per layer), measured on this machine: the CPU computes an expert in
+// place (bandwidth-bound for experts with few tokens, ~165 GMAC/s of ggml's IQ4 dot products for busy ones), the GPU
+// first copies it to VRAM (~26 GB/s over PCIe) and then computes it for nothing. Fixed constants rather than live
+// timings, so the split (and with it the output) depends only on the routing.
+namespace {
+constexpr double CPU_BW = 56e9, CPU_MAC = 165e9, GPU_BW = 26e9, GPU_PER_EXPERT = 4e-6;
+constexpr double EXPERT_MAC = 3.0 * FE * D;
+double cpu_time(double bytes, double macs) {
+    const double a = bytes / CPU_BW, m = macs / CPU_MAC;
+    return std::max(a, m) + 0.25 * std::min(a, m);
+}
+}
+
+// Routed experts for a prefill chunk: picks sorted by expert on the host (one sync per layer). Hot experts run as
+// grouped WMMA GEMMs from VRAM. Of the cold experts with picks, the CPU workers take the ones with the fewest tokens
+// and compute them where they are, while the GPU copies the rest into a two-slot VRAM staging ring (copy stream),
+// relayouts them and runs the same GEMMs; then the per-token sum in router order.
 void Engine::moe_prefill(const Layer &w, int layer, int T, float *out) {
     const int N = T * TOPK_E;
     gemm(w.router, NE, D, b.hh, D, T, b.rlog, NE, false, false);
@@ -324,94 +320,121 @@ void Engine::moe_prefill(const Layer &w, int layer, int T, float *out) {
     linear(w.sh_up, T, NO_Q, b.hh, D, u, FS, GEMV_STORE, true);
     swiglu_h(g, u, (int64_t)T * FS, st);
     linear(w.sh_down, T, NO_Q, g, FS, b.blk, D, GEMV_STORE);
-    // picks -> host, sort by tier and slot
+    // picks -> host (and the inputs, for the CPU's share)
     CK(hipMemcpyAsync(b.h_ids, b.idsT, (size_t)N * 4, hipMemcpyDeviceToHost, st));
     CK(hipMemcpyAsync(b.h_wts, b.wtsT, (size_t)N * 4, hipMemcpyDeviceToHost, st));
-    std::vector<int> slot_of(NE);
-    CK(hipMemcpyAsync(slot_of.data(), w.slot_of, NE * 4, hipMemcpyDeviceToHost, st));
+    if (w.n_cold) CK(hipMemcpyAsync(b.h_x, b.mx, (size_t)T * D * 4, hipMemcpyDeviceToHost, st));
     CK(hipStreamSynchronize(st));
-    // order: hot slots ascending, then cold slots ascending (so a staged range is one contiguous run)
-    std::vector<int> cnt(NE, 0), key(NE);
-    for (int e = 0; e < NE; e++) key[e] = slot_of[e] >= 0 ? slot_of[e] : NE + (-1 - slot_of[e]);
-    std::vector<int> order(NE);
-    for (int e = 0; e < NE; e++) order[e] = e;
-    std::sort(order.begin(), order.end(), [&](int a, int c) { return key[a] < key[c]; });
+    const std::vector<int> &slot_of = w.slot_h;
+    std::vector<int> cnt(NE, 0);
     for (int j = 0; j < N; j++) cnt[b.h_ids[j]]++;
-    std::vector<int> off(NE), cur(NE);
-    for (int i = 0, o = 0; i < NE; i++) { off[order[i]] = o; o += cnt[order[i]]; }
+    // cold experts with picks, fewest tokens first: the CPU takes a prefix, the GPU the rest
+    std::vector<int> ce, hot;
+    for (int e = 0; e < NE; e++) if (cnt[e]) (slot_of[e] >= 0 ? hot : ce).push_back(e);
+    std::stable_sort(ce.begin(), ce.end(), [&](int a, int c) { return cnt[a] < cnt[c]; });
+    const ColdLayer *cl = w.n_cold ? &cold[layer] : nullptr;
+    const double eb = cl ? 2.0 * FE * cl->row_gu + (double)D * cl->row_dn : 0;
+    int kc = 0;
+    {
+        double best = 1e30, macs = 0;
+        const int K = (int)ce.size();
+        for (int k = 0; k <= K; k++) {
+            const double t = std::max(cpu_time(k * eb, macs), (K - k) * (eb / GPU_BW + GPU_PER_EXPERT));
+            if (t < best) { best = t; kc = k; }
+            if (k < K) macs += cnt[ce[k]] * EXPERT_MAC;
+        }
+    }
+    std::vector<int> gpu_cold(ce.begin() + kc, ce.end()), cpu_cold(ce.begin(), ce.begin() + kc);
+    auto by_slot = [&](int a, int c) { return slot_of[a] > slot_of[c]; };   // cold slots are -1 - s: descending = ascending s
+    std::sort(hot.begin(), hot.end(), [&](int a, int c) { return slot_of[a] < slot_of[c]; });
+    std::sort(gpu_cold.begin(), gpu_cold.end(), by_slot);
+    std::stable_sort(cpu_cold.begin(), cpu_cold.end(), [&](int a, int c) { return cnt[a] > cnt[c]; });   // largest first
+    // pick order: hot experts, the GPU's cold experts, the CPU's (whose outputs then fill one contiguous range of Ys)
+    std::vector<int> off(NE, 0), cur(NE);
+    int o = 0;
+    for (const auto *v : {&hot, &gpu_cold, &cpu_cold}) for (int e : *v) { off[e] = o; o += cnt[e]; }
+    int pc0 = 0;
+    for (int e : hot) pc0 += cnt[e];
+    for (int e : gpu_cold) pc0 += cnt[e];
     cur = off;
     for (int j = 0; j < N; j++) {                 // token order within an expert: stable
         const int e = b.h_ids[j], p = cur[e]++;
         b.h_tok[p] = j / TOPK_E; b.h_entw[p] = b.h_wts[j]; b.h_pos[j] = p;
     }
-    int nw = 0, nhot = 0;
-    std::vector<std::pair<int, int>> cold_runs;   // (cold slot, expert) with picks, ascending
-    for (int i = 0; i < NE; i++) {
-        const int e = order[i];
-        if (!cnt[e]) continue;
-        if (slot_of[e] >= 0) { b.h_work[nw++] = {slot_of[e], off[e], cnt[e], 0}; nhot++; }
-        else cold_runs.push_back({-1 - slot_of[e], e});
+    if (!cpu_cold.empty()) {                      // the CPU starts right away
+        j_slot.clear(); j_first.assign(1, 0);
+        j_tok.assign(b.h_tok + pc0, b.h_tok + N); j_w.assign(b.h_entw + pc0, b.h_entw + N);
+        for (int e : cpu_cold) { j_slot.push_back(-1 - slot_of[e]); j_first.push_back(off[e] - pc0 + cnt[e]); }
+        MoeJob job;
+        job.layer = layer; job.T = T; job.n_exp = (int)cpu_cold.size(); job.x = b.h_x;
+        job.slot = j_slot.data(); job.first = j_first.data(); job.tok = j_tok.data(); job.w = j_w.data(); job.out = b.h_cout;
+        cpu.submit(job);
     }
-    // cold groups: ranges of STAGE_G slots
-    std::vector<std::pair<int, int>> groups;      // (first work item, count) per group; slots relative to the range start
-    std::vector<int> group_s0;
-    for (size_t i = 0; i < cold_runs.size();) {
-        const int s0 = cold_runs[i].first / STAGE_G * STAGE_G;
-        const int first = nw;
-        while (i < cold_runs.size() && cold_runs[i].first < s0 + STAGE_G) {
-            const int e = cold_runs[i].second;
-            b.h_work[nw++] = {cold_runs[i].first - s0, off[e], cnt[e], 0};
-            i++;
-        }
-        groups.push_back({first, nw - first});
-        group_s0.push_back(s0);
+    // GPU work items: hot experts, then the GPU's cold experts in staging groups (slots relative to the group)
+    int nw = 0;
+    for (int e : hot) b.h_work[nw++] = {slot_of[e], off[e], cnt[e], 0};
+    const int nhot = nw;
+    std::vector<std::pair<int, int>> groups;      // (first work item, experts) per group
+    for (size_t i = 0; i < gpu_cold.size(); i += STAGE_G) {
+        const int n = (int)std::min<size_t>(STAGE_G, gpu_cold.size() - i);
+        groups.push_back({nw, n});
+        for (int c = 0; c < n; c++) { const int e = gpu_cold[i + c]; b.h_work[nw++] = {c, off[e], cnt[e], 0}; }
     }
-    CK(hipMemcpyAsync(b.ent_tok, b.h_tok, (size_t)N * 4, hipMemcpyHostToDevice, st));
-    CK(hipMemcpyAsync(b.ent_w, b.h_entw, (size_t)N * 4, hipMemcpyHostToDevice, st));
+    CK(hipMemcpyAsync(b.ent_tok, b.h_tok, (size_t)pc0 * 4, hipMemcpyHostToDevice, st));
+    CK(hipMemcpyAsync(b.ent_w, b.h_entw, (size_t)pc0 * 4, hipMemcpyHostToDevice, st));
     CK(hipMemcpyAsync(b.pos, b.h_pos, (size_t)N * 4, hipMemcpyHostToDevice, st));
     CK(hipMemcpyAsync(b.work, b.h_work, (size_t)nw * sizeof(MoeWork), hipMemcpyHostToDevice, st));
-    gather_rows(b.hh, b.ent_tok, N, b.Xs, st);
-    // hot experts
+    gather_rows(b.hh, b.ent_tok, pc0, b.Xs, st);
     QTensor none{};
     moe_gemm_gateup(w.hot_gate, w.hot_up, none, none, b.work, nhot, b.Xs, b.Hs, st);
     moe_gemm_down(w.hot_down, none, b.work, nhot, b.Hs, b.ent_w, b.Ys, st);
-    // cold experts, group by group through the staging ring (the MTP layer has none)
-    if (groups.empty()) { moe_combine(b.Ys, b.pos, b.blk, b.sgT, T, out, st); return; }
-    const ColdLayer &c = cold[layer];
-    const size_t gsz = (size_t)FE * c.row_gu, dsz = (size_t)D * c.row_dn;   // bytes per expert: gate (= up), down
-    auto dma = [&](int gi) {
-        const int k = gi % 2, s0 = group_s0[gi], ns = std::min(STAGE_G, w.n_cold - s0);
-        CK(hipStreamWaitEvent(cst, raw_free[k], 0));
-        uint8_t *r = b.raw[k];
-        CK(hipMemcpyAsync(r, c.gate + (size_t)s0 * gsz, ns * gsz, hipMemcpyHostToDevice, cst));          // registered RAM
-        CK(hipMemcpyAsync(r + STAGE_G * gsz, c.up + (size_t)s0 * gsz, ns * gsz, hipMemcpyHostToDevice, cst));
-        CK(hipMemcpyAsync(r + 2 * STAGE_G * gsz, c.down + (size_t)s0 * dsz, ns * dsz, hipMemcpyHostToDevice, cst));
-        CK(hipEventRecord(raw_ready[k], cst));
-    };
-    if (!groups.empty()) dma(0);
-    for (size_t gi = 0; gi < groups.size(); gi++) {
-        if (gi + 1 < groups.size()) dma((int)gi + 1);
-        const int k = gi % 2, s0 = group_s0[gi], ns = std::min(STAGE_G, w.n_cold - s0);
-        CK(hipStreamWaitEvent(st, raw_ready[k], 0));
-        QTensor G = b.sg_[k], U = b.su_[k], Dn = b.sd_[k];
-        G.rows = U.rows = ns * FE; Dn.rows = ns * D;
-        relayout(G, b.raw[k], st, 0, (int64_t)ns * FE * D / 256);
-        relayout(U, b.raw[k] + STAGE_G * gsz, st, 0, (int64_t)ns * FE * D / 256);
-        relayout(Dn, b.raw[k] + 2 * STAGE_G * gsz, st, 0, (int64_t)ns * D * FE / 32);
-        CK(hipEventRecord(raw_free[k], st));
-        moe_gemm_gateup(G, U, none, none, b.work + groups[gi].first, groups[gi].second, b.Xs, b.Hs, st);
-        moe_gemm_down(Dn, none, b.work + groups[gi].first, groups[gi].second, b.Hs, b.ent_w, b.Ys, st);
+    if (!groups.empty()) {
+        const size_t gsz = (size_t)FE * cl->row_gu, dsz = (size_t)D * cl->row_dn;   // bytes per expert: gate (= up), down
+        auto dma = [&](int gi) {                  // the group's experts, packed; runs of consecutive slots in one copy
+            const int k = gi % 2, i0 = (int)(gi * STAGE_G), n = groups[gi].second;
+            CK(hipStreamWaitEvent(cst, raw_free[k], 0));
+            uint8_t *r = b.raw[k];
+            for (int c = 0; c < n;) {
+                const int s0 = -1 - slot_of[gpu_cold[i0 + c]];
+                int run = 1;
+                while (c + run < n && -1 - slot_of[gpu_cold[i0 + c + run]] == s0 + run) run++;
+                CK(hipMemcpyAsync(r + c * gsz, cl->gate + s0 * gsz, run * gsz, hipMemcpyHostToDevice, cst));
+                CK(hipMemcpyAsync(r + (STAGE_G + c) * gsz, cl->up + s0 * gsz, run * gsz, hipMemcpyHostToDevice, cst));
+                CK(hipMemcpyAsync(r + 2 * STAGE_G * gsz + c * dsz, cl->down + s0 * dsz, run * dsz, hipMemcpyHostToDevice, cst));
+                c += run;
+            }
+            CK(hipEventRecord(raw_ready[k], cst));
+        };
+        dma(0);
+        for (size_t gi = 0; gi < groups.size(); gi++) {
+            if (gi + 1 < groups.size()) dma((int)gi + 1);
+            const int k = gi % 2, ns = groups[gi].second;
+            CK(hipStreamWaitEvent(st, raw_ready[k], 0));
+            QTensor G = b.sg_[k], U = b.su_[k], Dn = b.sd_[k];
+            G.rows = U.rows = ns * FE; Dn.rows = ns * D;
+            relayout(G, b.raw[k], st, 0, (int64_t)ns * FE * D / 256);
+            relayout(U, b.raw[k] + STAGE_G * gsz, st, 0, (int64_t)ns * FE * D / 256);
+            relayout(Dn, b.raw[k] + 2 * STAGE_G * gsz, st, 0, (int64_t)ns * D * FE / 32);
+            CK(hipEventRecord(raw_free[k], st));
+            moe_gemm_gateup(G, U, none, none, b.work + groups[gi].first, ns, b.Xs, b.Hs, st);
+            moe_gemm_down(Dn, none, b.work + groups[gi].first, ns, b.Hs, b.ent_w, b.Ys, st);
+        }
+    }
+    if (!cpu_cold.empty()) {                      // the CPU's outputs into their rows of Ys
+        cpu.wait();
+        CK(hipMemcpyAsync(b.Ys + (size_t)pc0 * D, b.h_cout, (size_t)(N - pc0) * D * 2, hipMemcpyHostToDevice, st));
     }
     moe_combine(b.Ys, b.pos, b.blk, b.sgT, T, out, st);
 }
 
 // n-gram rows of tokens[0..T) at positions s.n.. : the hash of llama.cpp's llm_graph_input_qwen4exp_ple
-void Engine::ple_rows(const Seq &s, const int *tokens, int T) {
+// Table rows of the n-gram heads for tokens at the positions after history (h0, h1) (-1 = none): 8 bigram heads, then
+// 8 trigram heads; an EOS (or no token) cuts the context at and before it.
+void Engine::ple_ids(int h0, int h1, const int *tokens, int T, size_t *rows) const {
     constexpr int64_t EOS = EOS_TEXT;
-    std::vector<size_t> rows((size_t)T * PLE_HEADS);
     for (int t = 0; t < T; t++) {
-        const int64_t p1 = t >= 1 ? tokens[t - 1] : s.hist[1];
-        const int64_t p2 = t >= 2 ? tokens[t - 2] : t == 1 ? s.hist[1] : s.hist[0];
+        const int64_t p1 = t >= 1 ? tokens[t - 1] : h1;
+        const int64_t p2 = t >= 2 ? tokens[t - 2] : t == 1 ? h1 : h0;
         bool cut = p1 < 0 || p1 == EOS;
         const int64_t c1 = cut ? EOS : p1;
         cut = cut || p2 < 0 || p2 == EOS;
@@ -421,9 +444,23 @@ void Engine::ple_rows(const Seq &s, const int *tokens, int T) {
         for (int g = 0; g < 8; g++) rows[(size_t)t * PLE_HEADS + g] = m2 % ple_voc[g] + ple_off[g];
         for (int g = 8; g < 16; g++) rows[(size_t)t * PLE_HEADS + g] = m3 % ple_voc[g] + ple_off[g];
     }
+}
+
+// Ask the kernel for every page these rows touch at once: cold rows (most of them when RAM is full) are then read from
+// the disk in parallel instead of one ~0.1-0.3 ms fault after another.
+void Engine::ple_prefetch(const size_t *rows, size_t n) const {
     constexpr size_t RB = PLE_DIM / 32 * 34;
-    if (T > 64)                                   // ask the kernel to read every needed page at once
-        for (size_t r : rows) madvise((void *)((uintptr_t)(ngram + r * RB) & ~uintptr_t(4095)), 4096, MADV_WILLNEED);
+    for (size_t i = 0; i < n; i++) {
+        const uintptr_t a = (uintptr_t)(ngram + rows[i] * RB), p0 = a & ~uintptr_t(4095), p1 = (a + RB - 1) & ~uintptr_t(4095);
+        madvise((void *)p0, p1 - p0 + 4096, MADV_WILLNEED);
+    }
+}
+
+void Engine::ple_rows(const Seq &s, const int *tokens, int T) {
+    constexpr size_t RB = PLE_DIM / 32 * 34;
+    std::vector<size_t> rows((size_t)T * PLE_HEADS);
+    ple_ids(s.hist[0], s.hist[1], tokens, T, rows.data());
+    ple_prefetch(rows.data(), rows.size());
     for (size_t i = 0; i < rows.size(); i++) memcpy(b.ple_rows + i * RB, ngram + rows[i] * RB, RB);
 }
 
@@ -607,6 +644,11 @@ int Engine::generate(int id, const Sampling &sp, int *out, int max_out) {
         out[nout++] = s.pending;
         if (is_eos(s.pending)) return nout;
     }
+    {   // its n-gram rows load while the MTP head drafts (normally already started at the end of the last step)
+        size_t rows[PLE_HEADS];
+        ple_ids(s.hist[0], s.hist[1], &s.pending, 1, rows);
+        ple_prefetch(rows, PLE_HEADS);
+    }
     cpu.arm();
     const int k = std::max(0, std::min(sp.n_draft, std::min(3, max_out - nout - 1)));
     const int q = s.n;
@@ -626,21 +668,23 @@ int Engine::generate(int id, const Sampling &sp, int *out, int max_out) {
     }
     // 2. verify pending + drafts with the full model (the n-gram rows need the drafts on the host)
     const int T = k + 1;
-    std::vector<int> drafts(T);
-    CK(hipMemcpyAsync(drafts.data(), b.draft, T * 4, hipMemcpyDeviceToHost, st));
-    CK(hipStreamSynchronize(st));
+    if (k > 0) {                                  // the drafts' n-gram rows need them on the host
+        CK(hipMemcpyAsync(b.h_draft, b.draft, T * 4, hipMemcpyDeviceToHost, st));
+        CK(hipStreamSynchronize(st));
+    } else b.h_draft[0] = s.pending;
+    std::vector<int> drafts(b.h_draft, b.h_draft + T);
     forward(s, drafts.data(), T, k > 0);
     head(*this, hc_head, b.res, T, VOCAB);
     topk(b.logits, T, VOCAB, VOCAB, b.tsv, b.tsi, b.topv, b.topi, st);
-    std::vector<float> tv(T * TOPK);
-    std::vector<int> ti(T * TOPK);
-    CK(hipMemcpyAsync(tv.data(), b.topv, T * TOPK * 4, hipMemcpyDeviceToHost, st));
-    CK(hipMemcpyAsync(ti.data(), b.topi, T * TOPK * 4, hipMemcpyDeviceToHost, st));
+    CK(hipMemcpyAsync(b.h_topv, b.topv, T * TOPK * 4, hipMemcpyDeviceToHost, st));
+    CK(hipMemcpyAsync(b.h_topi, b.topi, T * TOPK * 4, hipMemcpyDeviceToHost, st));
     // 3. MTP catch-up on the verified pairs (rejected rows get overwritten later)
     CK(hipMemcpyAsync(b.tokens, b.draft, T * 4, hipMemcpyDeviceToDevice, st));
     mtp_catch_up(s, T, q);
     CK(hipStreamSynchronize(st));
     cpu.disarm();
+    const float *tv = b.h_topv;
+    const int *ti = b.h_topi;
 
     // 4. accept drafts (rejection sampling against greedy drafts is lossless) and draw the next token
     int a = 0, next = -1;
@@ -678,5 +722,10 @@ int Engine::generate(int id, const Sampling &sp, int *out, int max_out) {
     else { s.hist[0] = s.hist[1]; s.hist[1] = drafts[0]; }
     s.n = q + a + 1;
     s.pending = next;
+    {   // the next step reads this token's n-gram rows first: start fetching them now
+        size_t rows[PLE_HEADS];
+        ple_ids(s.hist[0], s.hist[1], &next, 1, rows);
+        ple_prefetch(rows, PLE_HEADS);
+    }
     return nout;
 }
