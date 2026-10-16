@@ -2,14 +2,17 @@
 import argparse
 import os
 
+from .models import DEFAULT, MODELS
+
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
 
 def main():
-    ap = argparse.ArgumentParser(prog="kiln", description="Qwen3.8-27B inference server for one RX 7900 XTX")
+    ap = argparse.ArgumentParser(prog="kiln", description="Qwen3.8 inference server for one RX 7900 XTX (27B and Flash-Next)")
     sub = ap.add_subparsers(dest="cmd", required=True)
     s = sub.add_parser("serve", help="run the OpenAI-compatible server")
-    s.add_argument("--model", default=os.path.join(ROOT, "data/models/kiln-mix.gguf"))
+    s.add_argument("--use", default=DEFAULT, choices=list(MODELS), help="model to load first (requests can switch)")
+    s.add_argument("--model", default=None, help="model file (default: the --use model's)")
     s.add_argument("--tokenizer", default=os.path.join(ROOT, "data/models/tokenizer.json"))
     s.add_argument("--host", default="127.0.0.1")
     s.add_argument("--port", type=int, default=8080)
@@ -21,10 +24,13 @@ def main():
         # Start what takes longest first: the GPU wakes and the weights load while the rest of Python starts up.
         from .engine import load_async, wake_gpus
         wake_gpus()
-        engine = load_async(a.model, max_seqs=a.slots, umax=a.chunk, warmup=False)
+        spec = MODELS[a.use]
+        path = a.model or os.path.join(ROOT, spec["path"])
+        engine = load_async(path, max_seqs=a.slots, umax=a.chunk, warmup=False, lib=os.path.join(ROOT, spec["lib"]))
         from .server import Server, serve
-        serve(lambda: Server(a.model, a.tokenizer, slots=a.slots, n_draft=a.draft, umax=a.chunk, engine=engine, warmup=False),
-              a.host, a.port)
+        draft = a.draft if a.draft != 3 or a.use == DEFAULT else spec["draft"]
+        serve(lambda: Server(path, a.tokenizer, slots=a.slots, n_draft=draft, umax=a.chunk, engine=engine, warmup=False,
+                             model=a.use), a.host, a.port)
 
 
 if __name__ == "__main__":

@@ -26,9 +26,15 @@ import numpy as np
 
 from .cache import Cache
 from .chat import OutputParser, Renderer, Tokens, message_key, text_of
-from .engine import KVFull, Sampling, load_async
+from .engine import Engine, KVFull, Sampling, load_async
+from .models import MODELS
 
 MODEL = "qwen3.8-27b"
+# Flash-Next keeps its cold experts (~55 GB) in system RAM while the 27B runs, so switching back only reloads what lives
+# in VRAM (~4.5 s instead of ~15 s), but only on machines with RAM to spare: on 64 GB the 27B gives it all back.
+with open("/proc/meminfo") as _f:
+    KEEP_HOST = int(_f.readline().split()[1]) >= 96 << 20         # MemTotal (kB) >= 96 GB
+_ROOT = __import__("os").path.dirname(__import__("os").path.dirname(__import__("os").path.abspath(__file__)))
 MAX_CONTEXT = 262144
 # Reply length (reasoning included) when the request sets none. The model card asks for room on agentic tasks:
 # 262,144 tokens of reasoning and 131,072 of final response where the two are limited separately. A reply never
@@ -140,11 +146,15 @@ class Sticky:
 
 
 class Server:
-    def __init__(self, model_path, tokenizer_path, slots=3, n_draft=3, umax=2048, log=sys.stderr, engine=None, warmup=True):
+    def __init__(self, model_path, tokenizer_path, slots=3, n_draft=3, umax=2048, log=sys.stderr, engine=None, warmup=True,
+                 model=MODEL):
         """engine: a future of the Engine (engine.load_async) if its load already started; by default it loads here,
-        alongside the tokenizer. warmup=False leaves Engine.warmup() to the caller (serve() runs it under the GPU lock)."""
+        alongside the tokenizer. warmup=False leaves Engine.warmup() to the caller (serve() runs it under the GPU lock).
+        model: the name of the model that model_path holds (see MODELS); requests can switch to the others."""
         if engine is None:
-            engine = load_async(model_path, max_seqs=slots, umax=umax, warmup=False)
+            engine = load_async(model_path, max_seqs=slots, umax=umax, warmup=False,
+                                lib=__import__("os").path.join(_ROOT, MODELS.get(model, MODELS[MODEL])["lib"]))
+        self.active, self.slots, self.umax = model, slots, umax
         self.tok = Tokens(tokenizer_path)
         self.replay = LRU(8192)
         self.renderer = Renderer(self.tok, self.replay.get)
@@ -158,6 +168,31 @@ class Server:
         self.cache = Cache(self.engine, slots)
         if warmup:
             self.engine.warmup()
+
+    # ---- model switching ---------------------------------------------------------------------
+
+    def resolve(self, name):
+        """The MODELS key a request names ("-fast" variants included); unknown names mean the active model."""
+        base = str(name or "").removesuffix("-fast")
+        return base if base in MODELS else self.active
+
+    def use(self, name):
+        """Switch the GPU to another model (the caller holds the GPU). Cached conversations of the old model are
+        dropped: they are that model's KV and states."""
+        if name == self.active:
+            return
+        import os
+        t0 = time.time()
+        spec = MODELS[name]
+        self.engine.shutdown(keep_host=KEEP_HOST)
+        self.engine = Engine(os.path.join(_ROOT, spec["path"]), max_seqs=self.slots, umax=self.umax,
+                             lib=os.path.join(_ROOT, spec["lib"]), warmup=True)
+        self.capacity = min(MAX_CONTEXT, self.engine.capacity)
+        self.cache = Cache(self.engine, self.slots)
+        self.n_draft = spec["draft"]
+        print(f"kiln: switched {self.active} -> {name} in {time.time() - t0:.1f} s (context {self.capacity} tokens)",
+              file=self.log, flush=True)
+        self.active = name
 
     # ---- request translation ----------------------------------------------------------------
 
@@ -198,6 +233,13 @@ class Server:
         record = None if side or compacting else {"messages": messages, "tools": tools, "style": style}
         self.gpu.acquire(main=not side)
         try:
+            want = self.active if side else self.resolve(body.get("model"))   # titles never cause a switch
+            if want != self.active:
+                self.use(want)
+                sp.n_draft = self.n_draft
+                if len(prompt) + 1 >= self.capacity:
+                    raise ContextError(f"the request ({len(prompt)} tokens) exceeds the available context size "
+                                       f"({self.capacity} tokens), try increasing it")
             yield from self.run(np.array(prompt, np.int32), marks, sp, seed, max_tokens, bool(thinking), schemas, record)
         finally:
             self.gpu.release()
@@ -322,7 +364,7 @@ class Server:
         yield "done", info
 
     def stats(self):
-        return {"model": MODEL, "context": self.capacity, "kv_tokens": self.engine.capacity, "cache": self.cache.stats(),
+        return {"model": self.active, "models": list(MODELS), "context": self.capacity, "kv_tokens": self.engine.capacity, "cache": self.cache.stats(),
                 "recent": list(self.recent.values())[-16:]}
 
 
@@ -373,8 +415,8 @@ def make_handler(state, ready):
             if self.path.rstrip("/") in ("/v1/models", "/models"):
                 now = int(time.time())
                 self.send_json(200, {"object": "list", "data": [
-                    {"id": m, "object": "model", "created": now, "owned_by": "kiln", "context_length": srv.capacity}
-                    for m in (MODEL, MODEL + "-fast")]})
+                    {"id": m, "object": "model", "created": now, "owned_by": "kiln", "context_length": MAX_CONTEXT}
+                    for name in MODELS for m in (name, name + "-fast")]})
             elif self.path.rstrip("/") in ("/health", "/v1/health"):
                 self.send_json(200, {"status": "ok"})
             elif self.path.rstrip("/") == "/kiln/stats":
@@ -393,7 +435,7 @@ def make_handler(state, ready):
                 body = json.loads(self.rfile.read(int(self.headers.get("Content-Length") or 0)) or b"{}")
             except json.JSONDecodeError:
                 return self.send_json(400, {"error": {"message": "invalid JSON", "type": "invalid_request_error"}})
-            rid, created, model = "chatcmpl-" + uuid.uuid4().hex[:24], int(time.time()), body.get("model") or MODEL
+            rid, created, model = "chatcmpl-" + uuid.uuid4().hex[:24], int(time.time()), body.get("model") or srv.active
             gen = srv.chat(body)
             try:
                 first = next(gen)                         # surfaces request errors before any bytes are sent
@@ -513,7 +555,7 @@ def serve(make_server, host="127.0.0.1", port=8080):
     srv.gpu.acquire(main=True)
     state["srv"] = srv
     ready.set()
-    print(f"kiln: serving {MODEL} on http://{host}:{port}/v1 (context {srv.capacity} tokens)", file=srv.log, flush=True)
+    print(f"kiln: serving {srv.active} on http://{host}:{port}/v1 (context {srv.capacity} tokens)", file=srv.log, flush=True)
     srv.engine.warmup()
     srv.gpu.release()
     threading.Event().wait()

@@ -1,5 +1,5 @@
 [Unit]
-Description=kiln - Qwen3.8-27B inference server (OpenAI API, port 8080)
+Description=kiln - Qwen3.8-27B / Qwen3.8-Flash-Next inference server (OpenAI API, port 8080)
 
 [Service]
 ExecStart=@ROOT@/kiln.sh serve

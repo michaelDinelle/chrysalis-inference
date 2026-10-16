@@ -1,4 +1,4 @@
-// kiln web UI: chat with the local Qwen3.8-27B server. Replies stream in with their reasoning and are rendered
+// kiln web UI: chat with kiln's local models (Qwen3.8-27B, Qwen3.8-Flash-Next). Replies stream in with their reasoning and are rendered
 // as markdown with highlighted code; conversations live in this tab's sessionStorage (a reload keeps them,
 // closing the tab ends them). The settings (system prompt, sampling), kept the same way, apply to every conversation.
 import DOMPurify from "dompurify";
@@ -6,17 +6,20 @@ import hljs from "highlight.js/lib/common";
 import { marked } from "marked";
 
 type Effort = "xhigh" | "medium" | "low" | "off";
-interface Stats { ttft: number; tps: number; tokens: number; prompt: number; cached: number; thought?: number; seed?: number }
+interface Stats { ttft: number; tps: number; tokens: number; prompt: number; cached: number; thought?: number; seed?: number; model?: string }
 interface Message { role: "user" | "assistant"; content: string; reasoning?: string; stats?: Stats; error?: string; stopped?: boolean }
-interface Conversation { id: string; title: string; named?: boolean; updated: number; effort: Effort; messages: Message[] }
+interface Conversation { id: string; title: string; named?: boolean; updated: number; effort: Effort; model?: string; messages: Message[] }
 type SamplingKey = "temperature" | "top_p" | "top_k" | "min_p" | "presence_penalty" | "max_tokens" | "seed";
 type Sampling = Partial<Record<SamplingKey, number>>;
 interface Settings { system: string; sampling: Sampling }
-interface Status { state: "online" | "loading" | "offline"; build?: string; context?: number; kv_tokens?: number; cache?: { free_kv_tokens: number } }
+interface Status { state: "online" | "loading" | "offline"; build?: string; model?: string; context?: number; kv_tokens?: number; cache?: { free_kv_tokens: number } }
 interface View { el: HTMLElement; think: HTMLDetailsElement; summary: HTMLElement; thought: HTMLElement; body: HTMLElement; foot: HTMLElement; shown?: string }
 interface Live { phase: "waiting" | "thinking" | "writing"; since: number; note: string }
 
-const MODEL = "qwen3.8-27b";
+// kiln keeps one model on the GPU; a request that names the other one switches it over (a few seconds).
+const MODELS: [string, string][] = [["qwen3.8-27b", "27B"], ["qwen3.8-flash-next", "Flash-Next"]];
+const modelOf = (c: Conversation) => c.model ?? MODELS[0][0];
+const modelName = (id?: string) => MODELS.find(([m]) => m === id)?.[1] ?? id ?? "";
 // What kiln uses for a field left blank, with thinking on and off (DEFAULTS in kiln/server.py: Qwen's recommended
 // values). Without a seed kiln draws a random one and reports it with the reply.
 const SAMPLING_DEFAULTS: Record<"think" | "fast", Sampling> = {
@@ -102,7 +105,7 @@ function randomId() {
 }
 
 function blank(): Conversation {
-  return { id: randomId(), title: "New chat", updated: Date.now(), effort: pref("effort", "xhigh") as Effort, messages: [] };
+  return { id: randomId(), title: "New chat", updated: Date.now(), effort: pref("effort", "xhigh") as Effort, model: pref("model", MODELS[0][0]), messages: [] };
 }
 
 // ---- rendering ---------------------------------------------------------------------------------------------
@@ -166,7 +169,7 @@ function paint(v: View, m: Message, live?: Live) {
   if (live) return;
   if (m.error) v.body.append(h("div", "error", m.error));
   const s = m.stats;
-  const facts = s ? [`${fmtS(s.ttft)} to first token`, `${Math.round(s.tps)} tok/s`, `${fmtK(s.tokens)} tokens`, `prompt ${fmtK(s.cached)}/${fmtK(s.prompt)} cached`]
+  const facts = s ? [...(s.model ? [modelName(s.model)] : []), `${fmtS(s.ttft)} to first token`, `${Math.round(s.tps)} tok/s`, `${fmtK(s.tokens)} tokens`, `prompt ${fmtK(s.cached)}/${fmtK(s.prompt)} cached`]
     : m.stopped ? ["stopped"] : [];
   if (s?.seed !== undefined) facts.push(`seed ${s.seed}`);
   const last = conv.messages.at(-1) === m;
@@ -192,6 +195,14 @@ function renderComposer() {
   sendBtn.innerHTML = icon(busy ? "stop" : "send");
   sendBtn.setAttribute("aria-label", busy ? "Stop" : "Send");
   sendBtn.classList.toggle("stop", !!busy);
+  $("model").replaceChildren(h("span", "label", "Model"), ...MODELS.map(([value, label]) => {
+    const b = h("button", "", label);
+    b.type = "button";
+    b.setAttribute("role", "radio");
+    b.setAttribute("aria-checked", String(modelOf(conv) === value));
+    b.onclick = () => { conv.model = value; setPref("model", value); renderComposer(); };
+    return b;
+  }));
   $("effort").replaceChildren(h("span", "label", "Think"), ...EFFORTS.map(([value, label]) => {
     const b = h("button", "", label);
     b.type = "button";
@@ -290,7 +301,7 @@ function request(c: Conversation) {
     .map((m) => (m.reasoning ? { role: m.role, content: m.content, reasoning_content: m.reasoning } : { role: m.role, content: m.content }));
   if (settings.system.trim()) messages.unshift({ role: "system", content: settings.system.trim() });
   return {
-    model: c.effort === "off" ? `${MODEL}-fast` : MODEL, reasoning_effort: c.effort === "off" ? undefined : c.effort,
+    model: c.effort === "off" ? `${modelOf(c)}-fast` : modelOf(c), reasoning_effort: c.effort === "off" ? undefined : c.effort,
     ...settings.sampling, messages, stream: true, stream_options: { include_usage: true },
   };
 }
@@ -337,6 +348,7 @@ async function generate() {
       live.note = "Reading the prompt";
       live.since = t0 = performance.now();
     }
+    if (status.model && status.model !== modelOf(c)) live.note = `Switching to ${modelName(modelOf(c))}`;
     const res = await fetch("/api/chat", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(request(c)), signal: ctrl.signal });
     if (!res.ok || !res.body) throw new Error((await res.json().catch(() => null))?.error?.message ?? `HTTP ${res.status}`);
     for await (const ev of events(res.body)) {
@@ -368,7 +380,7 @@ async function generate() {
       m.stats = {
         ttft: (tFirst - t0) / 1000, tps: usage.completion_tokens / Math.max((tLast - tFirst) / 1000, 1e-3),
         tokens: usage.completion_tokens, prompt: usage.prompt_tokens, cached: usage.prompt_tokens_details?.cached_tokens ?? 0,
-        thought: m.reasoning && tAnswer ? (tAnswer - tFirst) / 1000 : undefined, seed,
+        thought: m.reasoning && tAnswer ? (tAnswer - tFirst) / 1000 : undefined, seed, model: modelOf(c),
       };
     }
   } catch (e) {
@@ -390,7 +402,7 @@ async function name(c: Conversation) {
   try {
     const res = await fetch("/api/chat", {
       method: "POST", headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ model: `${MODEL}-fast`, max_tokens: 24, messages: [
+      body: JSON.stringify({ model: `${modelOf(c)}-fast`, max_tokens: 24, messages: [
         { role: "system", content: "You are a title generator. Reply with a title of at most six words for the conversation that starts with the user's message below. Reply with the title only." },
         { role: "user", content: c.messages[0].content.slice(0, 2000) },
       ] }),
@@ -530,7 +542,7 @@ $("menu").innerHTML = icon("menu");
 await refreshStatus();
 if (location.hash.length > 1) openConversation(location.hash.slice(1));
 else render();
-// Every 4 s, or 4 times a second while the model loads (a load takes ~1.5 s).
+// Every 4 s, or 4 times a second while the model loads (a load takes a few seconds).
 (async () => {
   for (;;) {
     await sleep(status.state === "loading" ? 250 : 4000);

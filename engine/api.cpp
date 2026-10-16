@@ -14,6 +14,14 @@ int kiln_init(const char *path, int max_seqs, int umax, long long reserve_mb) {
     E->load(path, max_seqs, (size_t)reserve_mb << 20);
     return E->n_pages * PAGE;
 }
+// Frees the GPU for another engine in this process (model switch): a device reset releases every allocation this
+// engine made (weights, KV pool, pinned buffers); the next kiln_init loads from scratch. keep_host is ignored here.
+void kiln_shutdown(int) {
+    if (!E) return;
+    (void)hipDeviceSynchronize();
+    (void)hipDeviceReset();
+    E = nullptr;                                // its memory went with the reset; the host-side object is left behind
+}
 // Loads code objects and pins snapshot buffers; call once after kiln_init, before the first request.
 void kiln_warmup() { E->warmup(); }
 int kiln_seq_new() { return E->seq_new(); }

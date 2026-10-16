@@ -1,0 +1,105 @@
+// Shared definitions for the Flash-Next engine: model constants, quant formats, small device helpers.
+#pragma once
+#include <hip/hip_runtime.h>
+#include <hip/hip_fp16.h>
+#include <cstdint>
+#include <cstdio>
+#include <cstdlib>
+
+#define CK(x) do { hipError_t e_ = (x); if (e_ != hipSuccess) { \
+    fprintf(stderr, "kiln: HIP error '%s' at %s:%d\n", hipGetErrorString(e_), __FILE__, __LINE__); abort(); } } while (0)
+#define FAIL(...) do { fprintf(stderr, "kiln: " __VA_ARGS__); fprintf(stderr, "\n"); abort(); } while (0)
+
+// ---- Qwen3.8-Flash-Next (qwen4_exp) -----------------------------------------------------------
+constexpr int D = 2560;            // hidden size (one hyper-connection stream)
+constexpr int HC = 4;              // hyper-connection streams: the residual is HC x D wide
+constexpr int HCD = HC * D;        // 10240
+constexpr int HCR = 320;           // hyper-connection bottleneck rank
+constexpr int VOCAB = 248320;
+constexpr int NL = 48;             // decoder layers; every 4th (l % 4 == 3) is QSA attention, the rest Gated DeltaNet
+constexpr int NH = 24, NKV = 2, HD = 256, ROT = 64;  // attention: q heads, kv heads, head dim, rotary dims
+constexpr int QPK = NH / NKV;                        // query heads per kv head (12)
+constexpr int GK = 16, GV = 48, GD = 128;            // gated delta net: q/k heads, v heads, head dim
+constexpr int QKV = 2 * GK * GD + GV * GD;           // 10240 conv channels (q | k | v)
+constexpr int NGDN = 36;                             // Gated DeltaNet layers
+constexpr int NATT = NL / 4;                         // 12 QSA layers
+constexpr int NKVL = NATT + 1;                       // KV-cache layers: 12 + the MTP layer
+constexpr int NE = 512, TOPK_E = 10, FE = 640;       // routed experts, experts per token, expert FFN width
+constexpr int FS = 640;                              // shared expert FFN width
+constexpr int IDX_H = 4, IDX_D = 128;                // QSA indexer: query heads, head dim (one shared key head)
+constexpr int KPOOL = 4;                             // QSA pools keys over blocks of 4 cells
+constexpr int SEL_BLOCKS = 512;                      // QSA attends the top 512 blocks (2048 cells) plus the tail
+constexpr int PLE_LAYER = 1;                         // n-gram embedding layer
+constexpr int PLE_HEADS = 16, PLE_DIM = 160;         // 8 bigram + 8 trigram rows of 160 per token -> 2560
+constexpr int PLE_K = 4, PLE_DIL = 3;                // its depthwise conv: kernel 4, dilation 3 (taps t-9, t-6, t-3, t)
+constexpr int PLE_HIST = (PLE_K - 1) * PLE_DIL;      // 9 positions of conv history
+constexpr float EPS = 1e-6f;
+constexpr float ROPE_BASE = 1e7f;
+constexpr int EOS_IM_END = 248046, EOS_TEXT = 248044;   // <|im_end|>, <|endoftext|>
+inline bool is_attn_layer(int l) { return l % 4 == 3; }
+
+// ---- paged KV cache -------------------------------------------------------------------------------
+// page -> layer (12 QSA layers + MTP) -> kv head -> block of PAGE tokens, kiln's format:
+//   K int8 [PAGE][HD] | K scales fp16 [PAGE][HD/32] |
+//   V 5-bit, transposed: low nibbles [HD][PAGE/2] | high bits [HD][PAGE/8] | V scales fp16 [HD/32][PAGE]
+// then, per layer, the QSA indexer cache: raw keys fp16 [PAGE][IDX_D] and pooled keys fp16 [PAGE/KPOOL][IDX_D]
+// (normed and rotated to the block's first cell).
+constexpr int PAGE = 64;
+constexpr size_t KS_OFF = (size_t)PAGE * HD;
+constexpr size_t VLO_OFF = KS_OFF + (size_t)PAGE * (HD / 32) * 2;
+constexpr size_t VHI_OFF = VLO_OFF + (size_t)HD * PAGE / 2;
+constexpr size_t VS_OFF = VHI_OFF + (size_t)HD * PAGE / 8;
+constexpr size_t KV_HEAD = VS_OFF + (size_t)(HD / 32) * PAGE * 2;
+constexpr size_t IDX_RAW = (size_t)PAGE * IDX_D * 2;
+constexpr size_t IDX_POOL = (size_t)(PAGE / KPOOL) * IDX_D * 2;
+constexpr size_t KV_LAYER = KV_HEAD * NKV + IDX_RAW + IDX_POOL;
+constexpr size_t KV_PAGE = KV_LAYER * NKVL;
+struct KVRef { uint8_t *pool; const int *pages; };
+
+// ---- quantized weight formats --------------------------------------------------------------
+// GGUF stores blocks as packed structs; at load time tensors in VRAM are split into separate arrays (same
+// bits, "structure of arrays") so every array is aligned for wide loads. Cold experts stay in GGUF block
+// order in host memory (the CPU's ggml kernels and the GPU's zero-copy prefill read them as they are).
+enum QType : int { F32 = 0, F16 = 1, Q5_0 = 6, Q8_0 = 8, Q6_K = 14, IQ4_NL = 20, IQ4_XS = 23 };
+
+struct QTensor {
+    int type = -1;
+    int rows = 0, cols = 0;        // rows = output features, cols = input features (K)
+    uint8_t *q = nullptr;          // packed quants   Q8_0: int8[rows*cols]  Q6_K, IQ4_XS, IQ4_NL, Q5_0: nibbles[rows*cols/2]
+    uint8_t *qh = nullptr;         // Q6_K high bits [rows*cols/4]   Q5_0 fifth bits [rows*cols/8] (one u32 per block)
+    uint8_t *sc = nullptr;         // Q6_K int8 scales [rows*cols/16]   IQ4_XS scales_l [rows*cols/64]
+    uint16_t *sh = nullptr;        // IQ4_XS scales_h [rows*cols/256]
+    half *d = nullptr;             // Q8_0, Q5_0, IQ4_NL: [rows*cols/32]   Q6_K, IQ4_XS: [rows*cols/256]
+    void *f = nullptr;             // F32/F16 data
+};
+
+// Activations for the int8 dot-product GEMVs: per 32 values one fp32 scale.
+struct QAct { int8_t *q; float *d; };
+
+// Bump allocator over one device allocation.
+struct Arena {
+    uint8_t *base = nullptr;
+    size_t used = 0, cap = 0;
+    void init(size_t bytes) { CK(hipMalloc(&base, bytes)); cap = bytes; used = 0; }
+    template <typename T = uint8_t> T *get(size_t n) {
+        size_t bytes = (n * sizeof(T) + 255) & ~size_t(255);
+        if (used + bytes > cap) FAIL("arena out of memory (%zu + %zu > %zu)", used, bytes, cap);
+        T *p = (T *)(base + used); used += bytes; return p;
+    }
+};
+
+__device__ __forceinline__ float warp_sum(float v) {
+    for (int o = 16; o > 0; o >>= 1) v += __shfl_xor(v, o, 32);
+    return v;
+}
+__device__ __forceinline__ float warp_max(float v) {
+    for (int o = 16; o > 0; o >>= 1) v = fmaxf(v, __shfl_xor(v, o, 32));
+    return v;
+}
+__device__ __forceinline__ float silu(float x) { return x / (1.0f + __expf(-x)); }
+__device__ __forceinline__ float sigmoid(float x) { return 1.0f / (1.0f + __expf(-x)); }
+// RDNA3 v_dot4_i32_iu8 with both operands signed
+__device__ __forceinline__ int dot4(int a, int b, int c) { return __builtin_amdgcn_sudot4(true, a, true, b, c, false); }
+// WMMA operands (wave32, 16x16x16): A/B fragments hold 16 halves per lane, the accumulator 8 floats.
+typedef _Float16 h16 __attribute__((ext_vector_type(16)));
+typedef float f8 __attribute__((ext_vector_type(8)));

@@ -59,6 +59,13 @@ class Engine:
     def warmup(self):
         self.lib.kiln_warmup()
 
+    def shutdown(self, keep_host=True):
+        """Release the GPU so another engine can load (model switch). The Flash-Next engine keeps its cold experts in
+        system RAM when keep_host is set, so loading it again only reloads what lives in VRAM."""
+        if hasattr(self.lib, "kiln_shutdown"):
+            self.lib.kiln_shutdown.argtypes = [C.c_int]
+            self.lib.kiln_shutdown(1 if keep_host else 0)
+
     def new_seq(self):
         sid = self.lib.kiln_seq_new()
         if sid < 0:

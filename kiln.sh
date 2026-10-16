@@ -1,5 +1,6 @@
 #!/usr/bin/env bash
-# kiln: local Qwen3.8-27B server for this machine. `kiln start` runs it as systemd user services
+# kiln: local Qwen3.8-27B and Qwen3.8-Flash-Next server for this machine (one model on the GPU at a time; a request
+# that names the other model switches to it). `kiln start` runs it as systemd user services
 # (the model server and, if bun is installed, the web chat) and prints their URLs.
 set -e
 ROOT="$(dirname "$(readlink -f "$0")")"
@@ -13,6 +14,7 @@ usage() {
 usage: kiln <command>
 
   start     load the model, start the web chat, print their URLs
+            (requests pick the model: qwen3.8-27b or qwen3.8-flash-next; kiln switches between them)
             --lan: also on the local network, with a QR code for phones
   stop      stop both and free the GPU
   restart   stop, then start (after rebuilding or editing the code; takes --lan too)
@@ -60,8 +62,11 @@ ready() {
         done
         echo " done"
     fi
-    echo "kiln is running"; urls
+    echo "kiln is running ($(loaded))"; urls
 }
+
+# which model is on the GPU right now
+loaded() { curl -sf "$API/kiln/stats" | "$PY" -Ic 'import json, sys; print(json.load(sys.stdin)["model"], "loaded")' 2>/dev/null || echo loading; }
 
 case "${1:-help}" in
   start|restart)
@@ -77,7 +82,7 @@ case "${1:-help}" in
             fi
             ready ;;
   stop)     systemctl --user stop kiln $WEB; echo "kiln stopped" ;;
-  status)   if curl -sf "$API/health" >/dev/null; then echo "kiln is running"; urls
+  status)   if curl -sf "$API/health" >/dev/null; then echo "kiln is running ($(loaded))"; urls
             elif systemctl --user is-active -q kiln; then echo "kiln is loading the model ('kiln logs' to follow)"
             else echo "kiln is stopped ('kiln start' starts it)"; fi ;;
   logs)     exec journalctl --user -u kiln -f -o cat ;;
