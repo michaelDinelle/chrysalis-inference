@@ -116,6 +116,18 @@ seed give the same tokens, from a cold cache, a snapshot or the live conversatio
 chunks (an older conversation re-read after a restart) has slightly different logits and may drift after a
 while. The presence penalty counts the current reply's tokens only.
 
+The sampler (`engine/sampler.h`, shared by both engines) applies the presence penalty and DRY (`dry_multiplier`,
+`dry_base`, `dry_allowed_length`; sequence breakers are tokens holding a newline, `:`, `"` or `*`; it looks back
+32K tokens), then top-k, temperature, top-p and min-p in the order `samplers` names (llama.cpp's field; stages
+before the temperature judge the untempered odds). The default order draws exactly as before (`tools/test_sampler.cpp`).
+`logprobs` / `top_logprobs` (up to 64, all of them) return each piece of text's log probability and alternatives, from the 64
+candidates it was drawn among (the reasoning's under `logprobs.reasoning_content`; alternatives carry their token
+`id`). `continue_final_message` (as in vLLM) writes on from the end of a final assistant message: kiln uses the
+reply's own tokens when it generated it, restates the reply as it now stands (a `kiln_prefix` delta), and serves the
+prompt from its cache. With `kiln_original` (the reply as generated) the final message may be a cut of it, and
+`kiln_append_token` adds a token after the cut: that rewrites a reply from a token's alternative. `kiln_aside`
+answers without thinking while rendering the conversation as it is cached, and keeps that cache as it was (the web
+UI's drafts).
 **Attention** — paged KV cache (64-token pages), K int8, V 5-bit Hadamard-rotated (as accurate as int8
 here, 18% smaller: what makes 262K fit). Decode and verify attention: a workgroup of 8 waves per key split
 and KV head walks 128-key stages; each wave scores 16 of the keys for all query rows (K rows straight from

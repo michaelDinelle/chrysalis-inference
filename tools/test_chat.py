@@ -79,15 +79,15 @@ events = []
 for i in gen + tok.full.encode("", add_special_tokens=False).ids:
     events += p.feed([i])
 events += p.finish()
-kinds = [k for k, _ in events]
-call = [v for k, v in events if k == "tool_call"]
+kinds = [k for k, *_ in events]
+call = [v for k, v, *_ in events if k == "tool_call"]
 ok = kinds.count("tool_call") == 1 and call[0] == ("bash", {"command": "ls -la"}) and p.text()[0] == "Let me check."
 fails += not ok
 print(f"parser: reasoning + tool call                 {'ok' if ok else 'FAIL'}  {call} {p.text()}")
 p = OutputParser(tok, thinking=True, schemas={"read": tools[0]["function"]["parameters"]})
 body = tok.full.encode('Plan.\n</think>\n\nOk.\n\n<tool_call>\n<function=read>\n<parameter=filePath>\nx.py\n</parameter>\n<parameter=limit>\n50\n</parameter>\n</function>\n</tool_call>', add_special_tokens=False).ids
 ev = p.feed(body) + p.finish()
-call = [v for k, v in ev if k == "tool_call"]
+call = [v for k, v, *_ in ev if k == "tool_call"]
 ok = call == [("read", {"filePath": "x.py", "limit": 50})] and p.text() == ("Plan.", "Ok.")
 fails += not ok
 print(f"parser: typed params, content before call     {'ok' if ok else 'FAIL'}  {call} {p.text()}")

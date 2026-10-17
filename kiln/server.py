@@ -10,6 +10,7 @@ What keeps time-to-first-token low:
   * OpenCode prompts are kept byte-stable (date frozen per conversation, appended reminders kept),
     and its compaction request is answered from the live conversation instead of a full re-read.
 """
+import functools
 import hashlib
 import ipaddress
 import json
@@ -28,8 +29,8 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 import numpy as np
 
 from .cache import Cache
-from .chat import OutputParser, Renderer, Tokens, message_key, text_of
-from .engine import Engine, KVFull, Sampling, load_async, load_progress
+from .chat import Content, OutputParser, Renderer, Tokens, message_key, text_of
+from .engine import STAGES, Engine, KVFull, Sampling, load_async, load_progress
 from .models import MODELS
 
 MODEL = "qwen3.8-27b"
@@ -227,6 +228,13 @@ class Server:
         messages = merge_system(body.get("messages") or [])
         if not any(m.get("role") == "user" for m in messages):
             raise RequestError("the request needs at least one user message")
+        # continue_final_message (as in vLLM): the final assistant message is left open and the model writes on
+        final = messages[-1] if body.get("continue_final_message") else None
+        if final is not None and final.get("role") != "assistant":
+            raise RequestError("continue_final_message needs a final assistant message")
+        # kiln_aside: a request beside the conversation (the web UI's draft of the user's next message): answered
+        # without thinking, rendered so the conversation's cache still matches, and leaving that cache as it was
+        aside = bool(body.get("kiln_aside"))
         seed = seed_of(body)
         tools = body.get("tools") if body.get("tool_choice") != "none" else None
         kw = body.get("chat_template_kwargs") or {}
@@ -242,15 +250,39 @@ class Server:
             messages, tools, style = rewrite
             thinking = style[0]
         messages = self.sticky.apply(messages)
-        prompt, marks = self.renderer.render(messages, tools, *style)
+        cont = None
+        if final is None:
+            prompt, marks = self.renderer.render(messages, tools, *style, think_reply=False if aside else None)
+        else:
+            prompt, marks = self.renderer.render(messages[:-1], tools, *style, think_reply=False if aside else None)
+            reply_thinking = bool(thinking) and not aside
+            prefix = self.reply_prefix(final, body.get("kiln_original"), reply_thinking)
+            if body.get("kiln_append_token") is not None:        # a token picked among the reply's alternatives
+                t = int(body["kiln_append_token"])
+                if t in self.tok.eos or not 0 <= t < self.tok.full.get_vocab_size():
+                    raise RequestError("kiln_append_token must be a token that continues the reply")
+                prefix.append(t)
+            parser = OutputParser(self.tok, reply_thinking)
+            parser.feed(prefix)
+            prompt, cont = prompt + prefix, (prefix, parser)
+            reasoning, content = parser.raw()
+            yield "prefix", {"reasoning_content": reasoning, "content": content}   # the reply so far, as it now stands
+        if aside:
+            thinking = False
         d = DEFAULTS[bool(thinking)]
+        order = body.get("samplers") or STAGES               # llama.cpp's name; penalties (presence, DRY) always come first
+        order = [x for x in order if x in STAGES]
         sp = Sampling(temperature=float(body.get("temperature", d["temperature"])), top_p=float(body.get("top_p", d["top_p"])),
                       min_p=float(body.get("min_p", d["min_p"])), presence_penalty=float(body.get("presence_penalty", d["presence_penalty"])),
                       top_k=int(body.get("top_k", d["top_k"])), n_draft=self.n_draft,
+                      dry_multiplier=float(body.get("dry_multiplier") or 0), dry_base=float(body.get("dry_base") or 1.75),
+                      dry_allowed_length=int(body.get("dry_allowed_length") or 2),
+                      order=order + [x for x in STAGES if x not in order],
                       # A model can call only the tools it is offered. Without any, Flash-Next still writes tool calls for
                       # agent-like asks ("design an SVG": list_files, read_file; the Q8_0 original as well, p ~0.94), and
                       # the reply ends there: so without tools <tool_call> is never drawn and it answers in text.
                       ban=-1 if tools else self.tok.id["<tool_call>"])
+        top_lp = int(body.get("top_logprobs") or 0) if body.get("logprobs") else -1   # -1: no log probs
         max_tokens = int(body.get("max_completion_tokens") or body.get("max_tokens") or MAX_OUTPUT)
         if side:
             max_tokens = min(max_tokens, 256)
@@ -259,7 +291,7 @@ class Server:
                                f"({self.capacity} tokens), try increasing it")
         max_tokens = min(max_tokens, self.capacity - len(prompt) - 1)
         schemas = {t["function"]["name"]: t["function"].get("parameters") or {} for t in tools or [] if "function" in t}
-        record = None if side or compacting else {"messages": messages, "tools": tools, "style": style}
+        record = None if side or compacting or cont or aside else {"messages": messages, "tools": tools, "style": style}
         self.gpu.acquire(main=not side)
         try:
             want = self.active if side else self.resolve(body.get("model"))   # titles never cause a switch
@@ -269,9 +301,60 @@ class Server:
                 if len(prompt) + 1 >= self.capacity:
                     raise ContextError(f"the request ({len(prompt)} tokens) exceeds the available context size "
                                        f"({self.capacity} tokens), try increasing it")
-            yield from self.run(np.array(prompt, np.int32), marks, sp, seed, max_tokens, bool(thinking), schemas, record, side)
+            yield from self.run(np.array(prompt, np.int32), marks, sp, seed, max_tokens, bool(thinking), schemas, record, side,
+                                cont=cont, top_lp=min(top_lp, 64), aside=aside)
         finally:
             self.gpu.release(main=not side)
+
+    def reply_prefix(self, msg, original, thinking):
+        """Token ids of a partial reply to continue: as kiln generated them when it can (its replay; when `msg` is
+        `original` shortened, cut where msg ends), else msg's text tokenized."""
+        S = self.tok.id
+        r, c = msg.get("reasoning_content") or "", text_of(msg.get("content"))
+        src = original or msg
+        hit = self.replay.get(message_key(src)) or self.replay.get(message_key(src, False))
+        if hit is not None:
+            ids, p, lr, lc = list(hit[1]), OutputParser(self.tok, thinking), 0, 0
+            for n in range(len(ids) + 1):
+                if (lr, lc) == (len(r), len(c)) and p.raw() == (r, c):
+                    return ids[:n]
+                if n == len(ids) or lr > len(r) or lc > len(c):
+                    break
+                for ev in p.feed([ids[n]]):
+                    if ev[0] == "reasoning":
+                        lr += len(ev[1])
+                    elif ev[0] == "content":
+                        lc += len(ev[1])
+        pieces = ([Content(r), "\n", S["</think>"], "\n\n", Content(c)] if c else [Content(r)]) if thinking else [Content(c)]
+        return list(self.tok.encode(pieces)[0])
+
+    def logprobs(self, ids, rv, ri, n_top, ban):
+        """Each token's log prob and its n_top likeliest alternatives, from the 64 candidates it was drawn among (the
+        model's own distribution, before sampling)."""
+        out = []
+        for tok, v, i in zip(ids, rv, ri):
+            m = float(v.max())
+            lse = m + float(np.log(np.exp(v - m).sum()))
+            j = np.flatnonzero(i == tok)
+            top = [k for k in np.argsort(-v) if i[k] != ban][:n_top]
+            out.append((float(v[j[0]]) - lse if len(j) else -99.0,
+                        [{"token": self.piece(int(i[k])), "logprob": round(float(v[k]) - lse, 4), "id": int(i[k])} for k in top]))
+        return out
+
+    @functools.lru_cache(maxsize=65536)
+    def piece(self, tid):
+        return self.tok.decode([tid])
+
+    def dry_breakers(self):
+        """Tokens holding a newline, ':', '"' or '*' end DRY's runs (its usual sequence breakers). Made once per
+        engine (a model switch makes a new one)."""
+        if getattr(self.engine, "_dry_set", False):
+            return
+        if not hasattr(self, "_breakers"):
+            texts = self.tok.full.decode_batch([[i] for i in range(self.tok.full.get_vocab_size())], skip_special_tokens=False)
+            self._breakers = [i for i, t in enumerate(texts) if any(ch in t for ch in "\n:\"*")]
+        self.engine.set_dry_breakers(self._breakers)
+        self.engine._dry_set = True
 
     def compaction(self, messages):
         """OpenCode compacts by sending the older part of the conversation serialized into one user message,
@@ -317,10 +400,15 @@ class Server:
                 s.tokens = s.tokens[:0]
         return self.engine.free_tokens() >= need
 
-    def run(self, prompt, marks, sp, seed, max_tokens, thinking, schemas, record, side=False):
+    def run(self, prompt, marks, sp, seed, max_tokens, thinking, schemas, record, side=False, cont=None, top_lp=-1, aside=False):
+        """cont: (prefix ids, primed parser) when the prompt ends inside a reply being continued (its ids are then
+        part of the reply too). top_lp >= 0: text events carry log probs with that many alternatives. aside: keep
+        the conversation it extends resumable (a snapshot of where it ended), and no replay of the reply."""
         t0 = time.time()
         trace = [] if TRACE else None
         slot, cached = self.cache.acquire(prompt)
+        if aside and cached and cached == len(slot.tokens):   # appending to a live conversation: keep it as it was
+            self.cache.checkpoint(slot)
         if trace is not None:
             trace.append(("acquire", time.time() - t0))
         # Cache points: the prompt is prefilled in pieces that end at them, whichever state it starts from, so a seed
@@ -345,13 +433,19 @@ class Server:
                 if trace is not None:
                     trace.append(("checkpoint", time.time() - t))
         t_prefill = time.time()
+        if sp.dry_multiplier > 0:
+            self.dry_breakers()
+            self.engine.set_context(slot.sid, prompt[-32768:].tolist())
         self.engine.begin(slot.sid, seed)
-        parser = OutputParser(self.tok, thinking, schemas)
+        prefix, parser = cont or ([], OutputParser(self.tok, thinking, schemas))
         out, finish, steps, completed = [], "stop", 0, False
         try:
             while True:
                 try:
-                    ids = self.engine.generate(slot.sid, sp, 16)
+                    if top_lp >= 0:
+                        ids, rv, ri = self.engine.generate(slot.sid, sp, 16, rows=True)
+                    else:
+                        ids = self.engine.generate(slot.sid, sp, 16)
                 except KVFull:
                     if self.free_kv(64, keep=slot):
                         continue
@@ -365,7 +459,8 @@ class Server:
                 stop = next((i for i, t in enumerate(ids) if t in self.tok.eos), None)
                 n, room = len(ids) if stop is None else stop, max_tokens - len(out)   # reply tokens in this step; allowed
                 out += ids
-                for ev in parser.feed(ids[:min(n, room)]):
+                emit = ids[:min(n, room)]
+                for ev in parser.feed(emit, self.logprobs(emit, rv, ri, top_lp, sp.ban) if top_lp >= 0 else None):
                     yield ev
                 if n > room or n == room and stop is None:   # cut at max_tokens (a step can carry several tokens)
                     finish = "length"
@@ -384,8 +479,8 @@ class Server:
             calls = parser.calls
             reply = {"role": "assistant", "content": content, "reasoning_content": reasoning,
                      "tool_calls": [{"type": "function", "function": {"name": n, "arguments": json.dumps(a, ensure_ascii=False)}} for n, a in calls]}
-            if content or calls:                         # an empty reply's key would match every other one
-                gen = (out[:-1] if out and out[-1] in self.tok.eos else out)[:max_tokens]   # what the client was sent
+            if (content or calls) and not aside:         # an empty reply's key would match every other one
+                gen = prefix + (out[:-1] if out and out[-1] in self.tok.eos else out)[:max_tokens]   # what the client was sent
                 self.replay.put(message_key(reply, False), (thinking, gen))   # for clients that drop the reasoning
                 self.replay.put(message_key(reply), (thinking, gen))
             if record:                                   # the conversation's latest state, for compaction
@@ -537,7 +632,11 @@ def make_handler(state, ready):
             self.chunk({**base, "choices": [{"index": 0, "delta": {"role": "assistant", "content": ""}, "finish_reason": None}]})
             n_calls, ev = 0, first
             while True:
-                kind, val = ev
+                kind, val = ev[0], ev[1]
+                if kind == "prefix":                      # a continued message as it now stands (kiln extension)
+                    self.chunk({**base, "choices": [{"index": 0, "delta": {"kiln_prefix": val}, "finish_reason": None}]})
+                    ev = next(gen)
+                    continue
                 if kind == "done":
                     self.chunk({**base, "seed": val["seed"], "choices": [{"index": 0, "delta": {}, "finish_reason": val["finish_reason"]}]})
                     if usage:
@@ -553,18 +652,25 @@ def make_handler(state, ready):
                     n_calls += 1
                 else:
                     delta = {"reasoning_content" if kind == "reasoning" else "content": val}
-                self.chunk({**base, "choices": [{"index": 0, "delta": delta, "finish_reason": None}]})
+                choice = {"index": 0, "delta": delta, "finish_reason": None}
+                if len(ev) > 2 and ev[2] is not None:     # OpenAI's logprobs; the reasoning's under its own key
+                    choice["logprobs"] = {"content" if kind == "content" else "reasoning_content": [ev[2]]}
+                self.chunk({**base, "choices": [choice]})
                 ev = next(gen)
 
         def complete(self, gen, first, rid, created, model):
-            reasoning, content, calls, ev = [], [], [], first
+            reasoning, content, calls, lps, ev = [], [], [], [], first
             while ev[0] != "done":
-                kind, val = ev
-                if kind == "tool_call":
+                kind, val = ev[0], ev[1]
+                if kind == "prefix":
+                    pass
+                elif kind == "tool_call":
                     calls.append({"id": "call_" + uuid.uuid4().hex[:24], "type": "function",
                                   "function": {"name": val[0], "arguments": json.dumps(val[1], ensure_ascii=False)}})
                 else:
                     (reasoning if kind == "reasoning" else content).append(val)
+                    if kind == "content" and len(ev) > 2 and ev[2] is not None:
+                        lps.append(ev[2])
                 ev = next(gen)
             info = ev[1]
             msg = {"role": "assistant", "content": "".join(content).strip() or (None if calls else "")}
@@ -573,7 +679,8 @@ def make_handler(state, ready):
             if calls:
                 msg["tool_calls"] = calls
             self.send_json(200, {"id": rid, "object": "chat.completion", "created": created, "model": model, "seed": info["seed"],
-                                 "choices": [{"index": 0, "message": msg, "finish_reason": info["finish_reason"]}],
+                                 "choices": [{"index": 0, "message": msg, "finish_reason": info["finish_reason"],
+                                              **({"logprobs": {"content": lps}} if lps else {})}],
                                  "usage": usage_of(info)})
 
     return Handler

@@ -145,10 +145,11 @@ class Renderer:
     def __init__(self, tok: Tokens, replay):
         self.t, self.replay = tok, replay       # replay: message_key -> (thinking, generated ids without stop token)
 
-    def render(self, messages, tools=None, enable_thinking=True, effort="xhigh", preserve_thinking=True):
+    def render(self, messages, tools=None, enable_thinking=True, effort="xhigh", preserve_thinking=True, think_reply=None):
         """Returns (token ids, marks): token offsets of cache points -- "tools" (end of the tool block, shared by
         every session; None without tools), "system" (end of the system turn), "messages" (start of each
-        later turn) and "prompt" (start of the generation prompt)."""
+        later turn) and "prompt" (start of the generation prompt). think_reply=False: the conversation as with
+        enable_thinking, but a reply without thinking."""
         T, S = self.t, self.t.id
         ri = EFFORT.get(effort, EFFORT["xhigh"]) if enable_thinking else ""
         pieces, marks = [], []
@@ -224,7 +225,7 @@ class Renderer:
                 raise ValueError(f"unexpected role {role!r}")
         marks.append(("prompt", len(pieces)))
         pieces += [S["<|im_start|>"], "assistant\n", S["<think>"]]
-        pieces += ["\n\n", S["</think>"], "\n\n"] if not enable_thinking else ["\n"]
+        pieces += ["\n"] if (enable_thinking if think_reply is None else think_reply) else ["\n\n", S["</think>"], "\n\n"]
         ids, offsets = T.encode(pieces, [i for _, i in marks])
         out = {"tools": None, "static": None, "messages": []}
         for (name, _), off in zip(marks, offsets):
@@ -268,6 +269,7 @@ class OutputParser:
         self.t, self.s = tok, tok.id
         self.state = "reasoning" if thinking else "content"
         self.pending = []            # undecoded ids (incomplete UTF-8)
+        self.pending_lp = []         # their log probs: (logprob, alternatives), when asked for
         self.call = None             # ids inside <tool_call> ... </tool_call>
         self.calls = []
         self.schemas = schemas or {}
@@ -281,23 +283,24 @@ class OutputParser:
         text = self.t.decode(self.pending)
         if text.endswith("�"):
             return
-        self.pending = []
-        if self.state == "reasoning":
-            self.reasoning.append(text)
-            out.append(("reasoning", text))
-        elif self.state == "content":
-            if not self.content_started:
-                text = text.lstrip("\n")
-                if not text:
-                    return
-                self.content_started = True
-            self.content.append(text)
-            out.append(("content", text))
+        lp, self.pending, self.pending_lp = self.pending_lp, [], []
+        if self.state == "content" and not self.content_started:
+            text = text.lstrip("\n")
+            if not text:
+                return
+            self.content_started = True
+        if self.state not in ("reasoning", "content"):
+            return
+        (self.reasoning if self.state == "reasoning" else self.content).append(text)
+        # A piece is usually one token; a character split over tokens is one piece, with their joint probability
+        # and the first one's alternatives.
+        out.append((self.state, text, {"token": text, "logprob": sum(x[0] for x in lp), "top_logprobs": lp[0][1]} if lp else None))
 
-    def feed(self, ids):
-        """Returns a list of events: ("reasoning", text), ("content", text), ("tool_call", (name, args))."""
+    def feed(self, ids, lps=None):
+        """Returns a list of events: ("reasoning", text, logprob), ("content", text, logprob), ("tool_call", (name, args)).
+        lps: each id's (logprob, alternatives), or None; a text event's logprob is then an OpenAI logprobs entry."""
         out = []
-        for i in ids:
+        for n, i in enumerate(ids):
             if self.call is not None:
                 if i == self.s["</tool_call>"]:
                     parsed = parse_call(self.t.decode(self.call), self.schemas)
@@ -318,8 +321,14 @@ class OutputParser:
                 continue
             else:
                 self.pending.append(i)
+                if lps is not None:
+                    self.pending_lp.append(lps[n])
                 self._flush(out)
         return out
+
+    def raw(self):
+        """The reasoning and content so far, unstripped (what a client has from the stream)."""
+        return "".join(self.reasoning), "".join(self.content)
 
     def finish(self):
         out = []
@@ -330,7 +339,7 @@ class OutputParser:
             self.pending = []
             if text:
                 (self.reasoning if self.state == "reasoning" else self.content).append(text)
-                out.append((self.state if self.state != "tool" else "content", text))
+                out.append((self.state if self.state != "tool" else "content", text, None))
         return out
 
     def text(self):
