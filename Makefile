@@ -17,6 +17,7 @@ build/%: tools/%.hip $(KERN) $(wildcard engine/*.h)
 test: build/libkiln.so build/test_quant build/test_attn
 	./build/test_quant data/models/kiln-mix.gguf && ./build/test_attn
 	data/venv/bin/python tools/test_chat.py
+	data/venv/bin/python tools/test_cache.py
 	data/venv/bin/python tools/test_snapshot.py
 	data/venv/bin/python tools/test_server.py
 

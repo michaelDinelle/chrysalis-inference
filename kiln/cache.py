@@ -65,12 +65,15 @@ class Cache:
             self.e.truncate(slot.sid, 0)
             slot.tokens = np.zeros(0, np.int32)
         slot.used = time.time()
+        # Only now, with the restored state in the slot: trimming first could drop the very snapshot being restored (the
+        # least recently used one, e.g. an old thread's end on Regenerate), and the reply would read freed KV pages.
+        self.trim()
         return slot, reuse
 
     def evict(self, slot):
-        """Keep a session that is losing its slot resumable: snapshot its end state first."""
+        """Keep a session that is losing its slot resumable: snapshot its end state first (trimmed by the caller)."""
         if len(slot.tokens) >= self.min_gap and not self.has(slot.tokens):
-            self.add(self.e.snapshot(slot.sid), slot.tokens.copy())
+            self.entries.append(Entry(self.e.snapshot(slot.sid), slot.tokens.copy()))
 
     def has(self, tokens):
         return any(len(en.tokens) == len(tokens) and common_prefix(en.tokens, tokens) == len(tokens) for en in self.entries)

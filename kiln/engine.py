@@ -134,10 +134,12 @@ class Engine:
 
     def restore(self, sid, snap):
         """Make sequence `sid` identical to the snapshot (shares its KV pages copy-on-write)."""
-        self.lib.kiln_restore(sid, snap)
+        if self.lib.kiln_restore(sid, snap) < 0:
+            raise RuntimeError(f"snapshot {snap} is not in use")
 
     def free_snapshot(self, snap):
-        self.lib.kiln_snap_free(snap)
+        if self.lib.kiln_snap_free(snap) < 0:
+            raise RuntimeError(f"snapshot {snap} is not in use")
 
     def free_tokens(self):
         return self.lib.kiln_free_tokens()

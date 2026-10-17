@@ -112,6 +112,7 @@ int Engine::snapshot(int id) {
 void Engine::restore(int id, int snap) {
     Seq &s = seqs.at(id);
     Snap &sn = snaps.at(snap);
+    if (!sn.used) throw std::runtime_error("restore of a freed snapshot");   // its pages may belong to others by now
     CK(hipStreamWaitEvent(st, copied, 0));      // the snapshot's host copy may still be in flight
     for (int p : s.pages) page_release(p);
     s.pages = sn.pages;
@@ -129,6 +130,7 @@ void Engine::restore(int id, int snap) {
 
 void Engine::snap_free(int snap) {
     Snap &sn = snaps.at(snap);
+    if (!sn.used) throw std::runtime_error("double free of a snapshot");
     CK(hipStreamSynchronize(st));            // pending copies into sn.host must finish before reuse
     CK(hipStreamSynchronize(cst));
     for (int p : sn.pages) page_release(p);

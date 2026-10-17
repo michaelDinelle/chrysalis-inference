@@ -249,7 +249,7 @@ engine/   common.h kernels.h gguf.h      constants, kernel entry points, GGUF re
           model.cpp model.h api.cpp      weights, sequences, snapshots, forward, MTP, C API
 kiln/     engine.py chat.py cache.py server.py __main__.py
 web/      server.ts app.ts index.html style.css   Bun web UI
-tools/    tests (make test: test_quant, test_attn, test_chat, test_snapshot, test_server; the last two take
+tools/    tests (make test: test_quant, test_attn, test_chat, test_cache, test_snapshot, test_server; the last two take
           --use qwen3.8-flash-next), compare_ref.py, benchmarks (bench_opencode.py: OpenCode's real requests), agent_sim.py
 engine_fn/                               the Flash-Next engine (same C API): cpu_moe.cpp cpu_vnni.cpp for the
                                          experts in RAM, moe.hip routing, ple.hip n-gram block, ...
