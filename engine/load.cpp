@@ -92,7 +92,18 @@ void Engine::add_kv_memory(uint8_t *p, size_t bytes) {
     page_ref.assign(free_pages.empty() ? 0 : free_pages.front() + 1, 0);
 }
 
+// Load progress for kiln_load_progress (another thread polls it while kiln_init runs): weight bytes handed to the
+// GPU, then warmup (phase 2) and done (3).
+static std::atomic<size_t> load_done{0}, load_total{0};
+static std::atomic<int> load_phase{0};
+float load_progress() {
+    if (load_phase >= 3) return 1.0f;
+    if (load_phase == 2) return 0.97f;
+    return load_total ? 0.95f * (float)load_done / (float)load_total : 0.0f;
+}
+
 void Engine::load(const std::string &path, int max_seqs, size_t reserve_bytes) {
+    load_done = 0; load_total = 0; load_phase = 0;
     const double t0 = now();
     GGUF g;
     if (!g.open(path.c_str())) FAIL("cannot open %s", path.c_str());
@@ -194,6 +205,7 @@ void Engine::load(const std::string &path, int max_seqs, size_t reserve_bytes) {
         }
     }
     const int n = (int)pieces.size();
+    load_total = total_bytes;
 
     // ---- prefetch: pull the file into the page cache in load order (a no-op when it is cached) ----------------
     std::atomic<size_t> prefetched{0};      // file offset up to which the data is in the page cache
@@ -326,6 +338,7 @@ void Engine::load(const std::string &path, int max_seqs, size_t reserve_bytes) {
         }
         CK(hipEventRecord(done[i], st));
         publish(submitted, i + 1);
+        load_done += pc.len;
         // Drop this piece's page mappings now (the page cache keeps the data): tearing down 4M pages in the final
         // munmap would take ~0.4 s.
         const uintptr_t a = (uintptr_t)(j.t->data + pc.src) & ~uintptr_t(4095);
@@ -363,6 +376,8 @@ void Engine::load(const std::string &path, int max_seqs, size_t reserve_bytes) {
 // The first kernel launches load the remaining code objects (~70 ms).
 void Engine::warmup() {
     if (embd.q) return;
+    load_phase = 2;
+    struct Done { ~Done() { load_phase = 3; } } done_;
     const double t0 = now();
     const size_t ne = (size_t)embd.rows * embd.cols, nb = ne / 256;
     CK(hipHostMalloc(&embd.q, ne / 2)); CK(hipHostMalloc(&embd.sc, ne / 64));

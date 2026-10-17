@@ -2,16 +2,22 @@
 
 Weights, by how kiln uses them:
   * always-active matrices on the GPU: the big projections (GDN qkv / z, attention q, shared expert gate / up) Q6_K,
-    everything else Q8_0 (output projections, K / V, hyper-connections, PLE, LM head, embeddings);
+    the LM head Q6_K, everything else Q8_0 (output projections, K / V, hyper-connections, PLE, embeddings);
     the QSA indexer projections Q8_0 (from BF16), GDN alpha | beta as one F16 matrix, the router F16;
-  * routed experts in two tiers by how often the router picks them (Unsloth's imatrix counts, 845,728 tokens):
-    the hottest N_HOT of the 24,576 (layer, expert) pairs in Q5_0 (gate, up, down) for VRAM, the rest IQ4_XS gate / up
-    and IQ4_NL down (640-wide rows rule out 256-blocks) for system RAM, where the CPU computes them;
-  * the MTP head's experts IQ4_XS / IQ4_NL (VRAM; drafts only, so precision only moves acceptance);
+  * routed experts by how often the router picks them, ranked over all 24,576 (layer, expert) pairs: the N_HOT most
+    used IQ4_XS gate / up + IQ4_NL down for VRAM; the rest for system RAM (CPU and GPU both read them there) in two
+    groups, Q3_K gate / up, and for the least used Q2_FRAC of all pairs Q2_K, both with IQ4_NL down (640-wide rows rule
+    out 256-blocks). K-quants run at the CPU's full memory bandwidth (the IQ3 formats are compute-bound there). Use is
+    Unsloth's imatrix counts (845,728 tokens of calibration text), blended with routing counts measured by kiln on
+    the work it does (tools_fn/route_stats.py: code), whose expert use barely correlates with the calibration text's.
+    The sizes: hot experts + the rest of VRAM's contents fill a 24 GiB card with a 262K-token KV cache and 8K-token
+    prefill passes; the RAM groups take ~42 GB;
+  * the MTP head's experts Q3_K / IQ4_NL (VRAM; drafts only, so precision only moves acceptance);
   * the n-gram table (51.2B parameters) stays in the source file (Q8_0), memory-mapped by the engine.
 Quantization uses the imatrix importances (per expert for the experts). Usage:
-  python tools_fn/fn_quantize.py SRC_DIR OUT.gguf [N_HOT]
+  python tools_fn/fn_quantize.py SRC_DIR OUT.gguf [--hot N] [--q2 FRAC] [--route COUNTS.npy --route-weight W]
 """
+import argparse
 import ctypes as C
 import json
 import os
@@ -25,14 +31,15 @@ import numpy as np
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "data", "llama.cpp", "gguf-py"))
 from gguf import GGUFReader  # noqa: E402
 
-F32, F16, Q5_0, Q8_0, Q6_K, IQ4_NL, IQ4_XS, I32 = 0, 1, 6, 8, 14, 20, 23, 26
-BLOCK = {Q5_0: (32, 22), Q8_0: (32, 34), Q6_K: (256, 210), IQ4_NL: (32, 18), IQ4_XS: (256, 136), F16: (1, 2), F32: (1, 4), I32: (1, 4)}
+F32, F16, Q5_0, Q8_0, Q2_K, Q3_K, Q6_K, IQ4_NL, IQ4_XS, I32 = 0, 1, 6, 8, 10, 11, 14, 20, 23, 26
+BLOCK = {Q5_0: (32, 22), Q8_0: (32, 34), Q2_K: (256, 84), Q3_K: (256, 110), Q6_K: (256, 210), IQ4_NL: (32, 18), IQ4_XS: (256, 136),
+         F16: (1, 2), F32: (1, 4), I32: (1, 4)}
 NL, NE, D, FE = 48, 512, 2560, 640
 
 ggml = C.CDLL(os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "data", "llama.cpp", "build", "bin", "libggml-base.so"))
 ggml.ggml_quantize_chunk.restype = C.c_size_t
 ggml.ggml_quantize_chunk.argtypes = [C.c_int, C.c_void_p, C.c_void_p, C.c_int64, C.c_int64, C.c_int64, C.c_void_p]
-for t in (Q5_0, Q6_K, IQ4_NL, IQ4_XS, Q8_0):
+for t in (Q5_0, Q2_K, Q3_K, Q6_K, IQ4_NL, IQ4_XS, Q8_0):
     ggml.ggml_quantize_init(t)
 
 
@@ -190,22 +197,43 @@ class Writer:
 
 
 def main():
-    src, out = sys.argv[1], sys.argv[2]
-    n_hot = int(sys.argv[3]) if len(sys.argv) > 3 else 4080
+    ap = argparse.ArgumentParser()
+    ap.add_argument("src"); ap.add_argument("out")
+    ap.add_argument("--hot", type=int, default=5600, help="experts in VRAM")
+    ap.add_argument("--q2", type=float, default=0.2, help="share of all experts in Q2_K (the least used)")
+    ap.add_argument("--route", default=None, help="routing counts [48][512] from tools_fn/route_stats.py")
+    ap.add_argument("--route-weight", type=float, default=0.5, help="their weight against the imatrix counts")
+    a = ap.parse_args()
+    src, out, n_hot, q2_frac = a.src, a.out, a.hot, a.q2
     S = Source(src)
     I = Imatrix(os.path.join(src, "imatrix_unsloth.gguf"))
-    pool = ThreadPoolExecutor(16)
+    pool = ThreadPoolExecutor(int(os.environ.get("THREADS", os.cpu_count())))
 
-    # hot experts: the n_hot most used (layer, expert) pairs
-    counts = np.stack([I.t[f"blk.{l}.ffn_gate_exps.weight.counts"].reshape(-1) for l in range(NL)]).astype(np.float64)
-    order = np.argsort(-counts.reshape(-1), kind="stable")[:n_hot]
-    hot = [sorted(int(i % NE) for i in order if i // NE == l) for l in range(NL)]
-    share = counts.reshape(-1)[order].sum() / counts.sum()
-    print(f"{n_hot} hot experts serve {100 * share:.1f}% of expert work (calibration counts); per layer {min(map(len, hot))}..{max(map(len, hot))}")
+    # tiers by use over all (layer, expert) pairs: the n_hot most used to VRAM, the least used q2_frac of all to Q2_K;
+    # use = shares of the calibration counts, blended with measured routing counts
+    calib = np.stack([I.t[f"blk.{l}.ffn_gate_exps.weight.counts"].reshape(-1) for l in range(NL)]).astype(np.float64).reshape(-1)
+    use = calib / calib.sum()
+    routed = None
+    if a.route:
+        routed = np.load(a.route).astype(np.float64).reshape(-1)
+        use = (1 - a.route_weight) * use + a.route_weight * routed / routed.sum()
+    order = np.argsort(-use, kind="stable")
+    n_q2 = int(q2_frac * order.size)
+    tier = np.ones(order.size, np.int32)                          # 0 hot, 1 Q3_K, 2 Q2_K
+    tier[order[:n_hot]] = 0
+    tier[order[order.size - n_q2:]] = 2
+    hot_ids, q2_ids = order[:n_hot], order[order.size - n_q2:]
+    tier = tier.reshape(NL, NE)
+    hot = [[e for e in range(NE) if tier[l, e] == 0] for l in range(NL)]
+    for name, cnt in (("calibration", calib), ("routing", routed)):
+        if cnt is not None:
+            print(f"{name} text: {n_hot} hot experts serve {100 * cnt[hot_ids].sum() / cnt.sum():.1f}% of expert work, "
+                  f"{n_q2} Q2_K experts {100 * cnt[q2_ids].sum() / cnt.sum():.2f}%")
+    print(f"hot experts per layer {min(map(len, hot))}..{max(map(len, hot))}")
 
     W = Writer(out)
     W.add_kv("general.architecture", "kilnfn")
-    W.add_kv("general.name", "Qwen3.8-Flash-Next (kiln: Q6_K/Q8_0 dense, Q5_0 hot / IQ4_XS cold experts)")
+    W.add_kv("general.name", "Qwen3.8-Flash-Next (kiln: Q6_K/Q8_0 dense, IQ4_XS VRAM / Q3_K + Q2_K RAM experts)")
     for k in ("ple.layer_multipliers", "ple.head_offsets", "ple.head_vocab_sizes"):
         W.add_kv("kilnfn." + k, [int(x) for x in S.meta["qwen4exp." + k]])
     ng = S.get("per_layer_token_embd.weight")
@@ -214,6 +242,8 @@ def main():
     W.add_kv("kilnfn.ngram_offset", int(ng.data_offset))
     W.add_kv("kilnfn.ngram_rows", int(ng.shape[1]))
     W.add_kv("kilnfn.n_hot", n_hot)
+    if a.route:
+        W.add_kv("kilnfn.route_weight", float(a.route_weight))
 
     def keep(name, out_name=None, dims=None):                    # copy a tensor as it is
         t = S.get(name)
@@ -238,27 +268,26 @@ def main():
                 yield j.result()
         W.add_tensor(out_name or name, ne, tt, produce)
 
-    def experts(l, prefix, names_types, ids, imat_base):
-        """One tier of a layer's experts: [len(ids)] experts of each of gate / up / down, each tensor contiguous."""
-        for src_name, tt, imat in names_types:
-            t = S.get(f"{prefix}{src_name}")
-            ne = [int(x) for x in t.shape]                       # [K, N, 512]
-            raw = np.asarray(t.data).reshape(NE, -1)              # one row of bytes per expert
+    def experts(l, prefix, mat, tt, ids, out_name):
+        """Experts `ids` of one of a layer's expert matrices (gate / up / down) as one tensor [len(ids)] experts."""
+        t = S.get(f"{prefix}ffn_{mat}_exps.weight")
+        ne = [int(x) for x in t.shape]                           # [K, N, 512]
+        raw = np.asarray(t.data).reshape(NE, -1)                  # one row of bytes per expert
 
-            def produce(raw=raw, ne=ne, tt=tt, imat=imat, ids=ids, rt=t.tensor_type.name):
-                def one(e):
-                    x = dequant(rt, raw[e], ne[0])
-                    im = I.vec(f"blk.{l}.{imat}.weight", e) if imat and l < NL else None
-                    return quantize(tt, x, im)
-                jobs = [pool.submit(one, e) for e in ids]
-                for j in jobs:
-                    yield j.result()
-            if ids:
-                W.add_tensor(f"blk.{l}.{src_name.replace('_exps.weight', '')}_{imat_base}.weight", [ne[0], ne[1], len(ids)], tt, produce)
+        def produce(raw=raw, ne=ne, rt=t.tensor_type.name):
+            def one(e):
+                x = dequant(rt, raw[e], ne[0])
+                im = I.vec(f"blk.{l}.ffn_{mat}_exps.weight", e) if l < NL else None
+                return quantize(tt, x, im)
+            jobs = [pool.submit(one, e) for e in ids]
+            for j in jobs:
+                yield j.result()
+        if ids:
+            W.add_tensor(f"blk.{l}.{out_name}.weight", [ne[0], ne[1], len(ids)], tt, produce)
 
     # ---- global tensors
     keep("token_embd.weight")
-    keep("output.weight")
+    requant("output.weight", Q6_K, "output.weight" if I.vec("output.weight") is not None else None)
     keep("output_hc_norm.weight"); keep("output_hc_down.weight"); keep("output_hc_up.weight")
 
     for l in range(NL + 1):                                     # 48 = the MTP layer
@@ -298,23 +327,27 @@ def main():
         requant(p + "ffn_up_shexp.weight", Q6_K, p + "ffn_up_shexp.weight")
         keep(p + "ffn_down_shexp.weight")
         if l < NL:
+            # slots: hot experts 0.. (VRAM tier); RAM experts -1 - s, s counting through the Q3_K group, then the Q2_K group
+            # (gate / up one tensor per group, down one tensor for both)
             h = hot[l]
-            c = [e for e in range(NE) if e not in set(h)]
+            c0 = [e for e in range(NE) if tier[l, e] == 1]
+            c1 = [e for e in range(NE) if tier[l, e] == 2]
             slot = np.zeros(NE, np.int32)
             for i, e in enumerate(h):
                 slot[e] = i
-            for i, e in enumerate(c):
+            for i, e in enumerate(c0 + c1):
                 slot[e] = -(i + 1)
             W.add_tensor(p + "ffn_exp_slot", [NE], I32, lambda slot=slot: iter([slot.tobytes()]))
-            experts(l, p, [("ffn_gate_exps.weight", Q5_0, "ffn_gate_exps"), ("ffn_up_exps.weight", Q5_0, "ffn_up_exps"),
-                           ("ffn_down_exps.weight", Q5_0, "ffn_down_exps")], h, "hot")
-            experts(l, p, [("ffn_gate_exps.weight", IQ4_XS, "ffn_gate_exps"), ("ffn_up_exps.weight", IQ4_XS, "ffn_up_exps"),
-                           ("ffn_down_exps.weight", IQ4_NL, "ffn_down_exps")], c, "cold")
+            experts(l, p, "gate", IQ4_XS, h, "ffn_gate_hot"); experts(l, p, "up", IQ4_XS, h, "ffn_up_hot")
+            experts(l, p, "down", IQ4_NL, h, "ffn_down_hot")
+            experts(l, p, "gate", Q3_K, c0, "ffn_gate_cold0"); experts(l, p, "up", Q3_K, c0, "ffn_up_cold0")
+            experts(l, p, "gate", Q2_K, c1, "ffn_gate_cold1"); experts(l, p, "up", Q2_K, c1, "ffn_up_cold1")
+            experts(l, p, "down", IQ4_NL, c0 + c1, "ffn_down_cold")
         else:
-            experts(l, p, [("ffn_gate_exps.weight", IQ4_XS, None), ("ffn_up_exps.weight", IQ4_XS, None),
-                           ("ffn_down_exps.weight", IQ4_NL, None)], list(range(NE)), "mtp")
+            experts(l, p, "gate", Q3_K, list(range(NE)), "ffn_gate_mtp"); experts(l, p, "up", Q3_K, list(range(NE)), "ffn_up_mtp")
+            experts(l, p, "down", IQ4_NL, list(range(NE)), "ffn_down_mtp")
     W.write()
-    json.dump({"hot": hot}, open(out + ".hot.json", "w"))
+    json.dump({"tier": tier.tolist()}, open(out + ".tiers.json", "w"))
 
 
 if __name__ == "__main__":

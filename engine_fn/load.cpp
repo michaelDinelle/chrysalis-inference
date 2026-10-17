@@ -2,8 +2,11 @@
 // structure-of-arrays), cold experts to system RAM in GGUF block order for the CPU workers, token embeddings to pinned
 // host memory, the n-gram table memory-mapped from the source file; then buffers, sequences and the KV pool.
 #include "model.h"
+#include <stdexcept>
 #include "gguf.h"
 #include <algorithm>
+#include <array>
+#include <set>
 #include <chrono>
 #include <cstring>
 #include <fcntl.h>
@@ -14,18 +17,114 @@
 
 namespace {
 double now() { return std::chrono::duration<double>(std::chrono::steady_clock::now().time_since_epoch()).count(); }
-int per_block(int type) { return (type == Q8_0 || type == Q5_0 || type == IQ4_NL) ? 32 : 256; }
-int block_bytes(int type) {
-    switch (type) { case Q8_0: return 34; case Q5_0: return 22; case IQ4_NL: return 18; case Q6_K: return 210; case IQ4_XS: return 136; }
-    return 0;
+// Load progress for kiln_load_progress (another thread polls it while kiln_init runs): bytes read from the model
+// file, then calibration (phase 1), warmup (2), done (3).
+std::atomic<size_t> load_read{0}, load_total{0};
+std::atomic<int> load_phase{0};
+// src (inside the file's mapping) -> dst, with pread on the file, in 64 MB pieces (counted for the progress)
+void read_file(const GGUF &g, uint8_t *dst, const uint8_t *src, size_t n) {
+    off_t off = (off_t)(src - g.base);
+    while (n) {
+        const ssize_t r = pread(g.fd, dst, std::min<size_t>(n, (size_t)64 << 20), off);
+        if (r <= 0) FAIL("reading the model file failed");
+        dst += r; off += r; n -= (size_t)r;
+        load_read += (size_t)r;
+    }
 }
+}  // namespace
+
+float load_progress() {
+    if (load_phase >= 3) return 1.0f;
+    if (load_phase >= 1) return load_phase == 1 ? 0.93f : 0.97f;
+    return load_total ? 0.9f * std::min(1.0f, (float)load_read / (float)load_total) : 0.0f;
+}
+
+namespace {
+int physical_cores() {                              // distinct SMT sibling sets
+    std::set<std::string> cores;
+    const unsigned n = std::max(1u, std::thread::hardware_concurrency());
+    for (unsigned c = 0; c < n; c++) {
+        FILE *f = fopen(("/sys/devices/system/cpu/cpu" + std::to_string(c) + "/topology/thread_siblings_list").c_str(), "r");
+        if (!f) continue;
+        char buf[64] = {};
+        if (fgets(buf, sizeof buf, f)) cores.insert(buf);
+        fclose(f);
+    }
+    return cores.empty() ? (int)std::max(1u, n / 2) : (int)cores.size();
+}
+}
+
+// The rates the cold expert split works with, measured here once per load (so nothing is tuned to one machine):
+// the workers' read bandwidth over the cold experts, a worker's VNNI expert rate times the workers, and DMA of
+// expert-sized pieces. The decode GPU share of cold picks follows from the bandwidths.
+void Engine::calibrate() {
+    // CPU read bandwidth: every worker sums its own 64 MB of the cold experts
+    const size_t slice = (size_t)64 << 20, nw = std::min<size_t>(n_workers, cold_bytes / slice);
+    double best = 1e30;
+    for (int rep = 0; rep < 3 && nw; rep++) {
+        std::vector<std::thread> th;
+        std::vector<uint64_t> sink(nw * 8);
+        const double t0 = now();
+        for (size_t w = 0; w < nw; w++) th.emplace_back([&, w] {
+            const uint64_t *p = (const uint64_t *)(cold_mem + w * slice);
+            uint64_t a = 0, b2 = 0, c = 0, d = 0;
+            for (size_t i = 0; i < slice / 8; i += 4) { a ^= p[i]; b2 ^= p[i + 1]; c ^= p[i + 2]; d ^= p[i + 3]; }
+            sink[w * 8] = a ^ b2 ^ c ^ d;
+        });
+        for (auto &t : th) t.join();
+        best = std::min(best, now() - t0);
+    }
+    if (nw) cal_cpu_bw = nw * slice / best;
+    // a worker's expert rate on 16 tokens (the VNNI kernel prefill uses), times the workers
+    const ColdLayer *c0 = nullptr;
+    for (const ColdLayer &c : cold) if (c.n) { c0 = &c; break; }
+    if (c0 && vnni_supported() && vnni_formats(*c0)) {
+        const int n = 16;
+        std::vector<int8_t> xq((size_t)n * D, 1); std::vector<float> xs((size_t)n * (D / 32), 0.01f), w(n, 0.1f);
+        std::vector<int32_t> xsum((size_t)n * (D / 16), 16);
+        std::vector<const int8_t *> pq(n); std::vector<const float *> ps(n); std::vector<const int32_t *> pc(n);
+        for (int i = 0; i < n; i++) { pq[i] = xq.data() + (size_t)i * D; ps[i] = xs.data() + (size_t)i * (D / 32); pc[i] = xsum.data() + (size_t)i * (D / 16); }
+        // all workers at once (all-core clocks, shared memory), two experts each, distinct outputs
+        const int per = 2;
+        std::vector<std::vector<uint16_t>> outs(n_workers, std::vector<uint16_t>((size_t)n * D));
+        double tb = 1e30;
+        for (int rep = 0; rep < 2; rep++) {
+            std::vector<std::thread> th;
+            const double t0 = now();
+            for (int wk = 0; wk < n_workers; wk++) th.emplace_back([&, wk] {
+                VnniScratch scr;
+                std::vector<uint16_t *> o(n);
+                for (int i = 0; i < n; i++) o[i] = outs[wk].data() + (size_t)i * D;
+                for (int k = 0; k < per; k++) expert_vnni(*c0, (wk * per + k) % c0->n, n, pq.data(), ps.data(), pc.data(), w.data(), o.data(), scr);
+            });
+            for (auto &t : th) t.join();
+            tb = std::min(tb, now() - t0);
+        }
+        cal_cpu_mac = (double)n_workers * per * n * (3.0 * FE * D) / tb;
+    } else cal_cpu_mac = cal_cpu_bw;                 // ggml's dot products: about a MAC per weight byte read
+    // DMA of expert-sized pieces into the staging ring
+    const size_t piece = std::min<size_t>(stage_gu ? stage_gu / STAGE_G : (size_t)1 << 20, cold_bytes / 64);
+    hipEvent_t e0, e1;
+    CK(hipEventCreate(&e0)); CK(hipEventCreate(&e1));
+    float best_ms = 1e30f;
+    for (int rep = 0; rep < 3; rep++) {
+        CK(hipEventRecord(e0, cst));
+        for (int i = 0; i < 48; i++) CK(hipMemcpyAsync(b.raw[i % NSLOT], cold_mem + (size_t)i * 7 * piece % (cold_bytes - piece), piece, hipMemcpyHostToDevice, cst));
+        CK(hipEventRecord(e1, cst)); CK(hipEventSynchronize(e1));
+        float ms; CK(hipEventElapsedTime(&ms, e0, e1));
+        best_ms = std::min(best_ms, ms);
+    }
+    CK(hipEventDestroy(e0)); CK(hipEventDestroy(e1));
+    cal_dma_bw = 48.0 * piece / (best_ms * 1e-3);
+    gfrac = (float)(cal_dma_bw / (cal_dma_bw + cal_cpu_bw));
 }
 
 void Engine::load(const std::string &path, int max_seqs, size_t reserve_bytes) {
     const double t0 = now();
+    load_read = 0; load_total = 0; load_phase = 0;
     static GGUF g;                                  // the mapping stays alive: the n-gram path and cold copies use it
     if (!g.base && !g.open(path.c_str())) FAIL("cannot open %s", path.c_str());
-    for (Layer *w = L; w <= &M; w++) *w = Layer{};  // a reload (after shutdown(keep_host)) starts from clean pointers
+    for (Layer *w = L; w <= &M; w++) *w = Layer{};  // a reload (after shutdown) starts from clean pointers
     hc_head = HcMix{}; mtp_head = HcMix{};
     if (g.strs["general.architecture"] != "kilnfn") FAIL("%s is not a kiln Flash-Next file (tools_fn/fn_quantize.py)", path.c_str());
     auto get = [&](const std::string &name) {
@@ -38,17 +137,23 @@ void Engine::load(const std::string &path, int max_seqs, size_t reserve_bytes) {
     CK(hipSetDevice(0));
     CK(hipStreamCreateWithFlags(&st, hipStreamNonBlocking));
     CK(hipStreamCreateWithFlags(&cst, hipStreamNonBlocking));
+    CK(hipStreamCreateWithFlags(&pst, hipStreamNonBlocking));
+    CK(hipEventCreateWithFlags(&routed, hipEventDisableTiming));
+    CK(hipEventCreateWithFlags(&moe_gpu_done, hipEventDisableTiming));
     CK(hipEventCreateWithFlags(&staged, hipEventDisableTiming));
     CK(hipEventCreateWithFlags(&copied, hipEventDisableTiming));
+    CK(hipEventCreateWithFlags(&topk_ready, hipEventDisableTiming));
     CK(hipEventRecord(copied, cst));
 
     // ---- plan the VRAM weights: every dense tensor and the hot / MTP expert tiers --------------------------------
-    struct Up { const GGUFTensor *t; QTensor *q = nullptr; float **f = nullptr; half **h = nullptr; int **i = nullptr; };
+    // layer: the decoder layer a tensor belongs to (-1: global, NL: the MTP block); hot expert tiers are not prefetched
+    struct Up { const GGUFTensor *t; QTensor *q = nullptr; float **f = nullptr; half **h = nullptr; int **i = nullptr; int layer = -1; bool pf = true; };
     std::vector<Up> ups;
-    auto quant = [&](const std::string &name, QTensor &q) { ups.push_back({get(name), &q}); };
-    auto vec = [&](const std::string &name, float *&f) { ups.push_back({get(name), nullptr, &f}); };
-    auto f16 = [&](const std::string &name, half *&h) { ups.push_back({get(name), nullptr, nullptr, &h}); };
-    auto i32 = [&](const std::string &name, int *&i) { ups.push_back({get(name), nullptr, nullptr, nullptr, &i}); };
+    int cur = -1;
+    auto quant = [&](const std::string &name, QTensor &q) { ups.push_back({get(name), &q, nullptr, nullptr, nullptr, cur}); };
+    auto vec = [&](const std::string &name, float *&f) { ups.push_back({get(name), nullptr, &f, nullptr, nullptr, cur}); };
+    auto f16 = [&](const std::string &name, half *&h) { ups.push_back({get(name), nullptr, nullptr, &h, nullptr, cur}); };
+    auto i32 = [&](const std::string &name, int *&i) { ups.push_back({get(name), nullptr, nullptr, nullptr, &i, cur, false}); };
     auto hcmix = [&](const std::string &p, HcMix &m, bool inject) {
         vec(p + "norm.weight", m.norm); quant(p + "down.weight", m.down); quant(p + "up.weight", m.up);
         if (inject) quant(p + "inject.weight", m.inject);
@@ -59,6 +164,7 @@ void Engine::load(const std::string &path, int max_seqs, size_t reserve_bytes) {
     for (int l = 0, gl = 0; l <= NL; l++) {
         Layer &w = l < NL ? L[l] : M;
         const std::string p = "blk." + std::to_string(l) + ".";
+        cur = l;
         hcmix(p + "hc_attn_", w.hca, true);
         hcmix(p + "hc_ffn_", w.hcf, true);
         if (l == NL || is_attn_layer(l)) {
@@ -86,11 +192,12 @@ void Engine::load(const std::string &path, int max_seqs, size_t reserve_bytes) {
         if (g.get(p + "ffn_gate_" + tier + ".weight")) {
             quant(p + "ffn_gate_" + tier + ".weight", w.hot_gate); quant(p + "ffn_up_" + tier + ".weight", w.hot_up);
             quant(p + "ffn_down_" + tier + ".weight", w.hot_down);
+            for (int k = 1; k <= 3; k++) ups[ups.size() - k].pf = false;
             w.n_hot = (int)get(p + "ffn_gate_" + tier + ".weight")->ne[2];
         }
         if (l < NL) {
             i32(p + "ffn_exp_slot", w.slot_of);
-            const GGUFTensor *c = g.get(p + "ffn_gate_cold.weight");
+            const GGUFTensor *c = g.get(p + "ffn_down_cold.weight");
             w.n_cold = c ? (int)c->ne[2] : 0;
         }
         if (l == NL) {
@@ -108,8 +215,60 @@ void Engine::load(const std::string &path, int max_seqs, size_t reserve_bytes) {
             Arena dry; dry.cap = SIZE_MAX; make_qtensor(dry, u.t->type, rows, cols); wbytes += dry.used;
         } else wbytes += (u.t->nbytes + 255) & ~size_t(255);
     }
-    wbytes += (size_t)NE * 4 + 2 * (size_t)NGDN * GV * 4 + (1 << 20);
+    wbytes += (size_t)NE * 4 + 2 * (size_t)NGDN * GV * 4 + (1 << 20) + ups.size() * 8 * sizeof(PrefetchRange);
     warena.init(wbytes);
+
+    // ---- cold experts -> system RAM (hugepages), copied by 8 threads while the VRAM upload below runs: both are reads
+    // of the same file, so together they take about as long as the disk needs for all of it. Per layer: gate / up of
+    // each format group (ffn_{gate,up}_cold0, _cold1; slots of group 0 first), down of all of them (ffn_down_cold) ----
+    enum { G0, U0, G1, U1, DN };
+    std::vector<std::array<const GGUFTensor *, 5>> ct(NL);
+    std::vector<std::array<size_t, 5>> coff(NL);
+    std::vector<std::tuple<const uint8_t *, size_t, size_t>> copies;   // src, bytes, offset
+    cold.assign(NL, ColdLayer{});
+    cold_bytes = 0;
+    for (int l = 0; l < NL; l++) {
+        ct[l] = {};
+        if (!L[l].n_cold) continue;
+        const std::string p = "blk." + std::to_string(l) + ".";
+        for (int grp = 0; grp < 2; grp++) {
+            const std::string sfx = "_cold" + std::to_string(grp) + ".weight";
+            ct[l][2 * grp] = g.get(p + "ffn_gate" + sfx);
+            ct[l][2 * grp + 1] = g.get(p + "ffn_up" + sfx);
+        }
+        ct[l][DN] = get(p + "ffn_down_cold.weight");
+        if (!ct[l][G0] || !ct[l][U0]) FAIL("layer %d: missing the cold gate / up experts", l);
+        for (int k = 0; k < 5; k++) {
+            if (!ct[l][k]) continue;
+            coff[l][k] = cold_bytes;
+            copies.emplace_back(ct[l][k]->data, ct[l][k]->nbytes, cold_bytes);
+            cold_bytes += (ct[l][k]->nbytes + 4095) & ~size_t(4095);
+        }
+    }
+    {
+        size_t vram_bytes = 0;
+        for (const Up &u : ups) vram_bytes += u.t->nbytes;
+        const GGUFTensor *te = g.get("token_embd.weight");
+        load_total = cold_bytes + vram_bytes + (te ? te->nbytes : 0);
+    }
+    std::atomic<size_t> next{0};
+    std::vector<std::thread> cold_th;
+    if (cold_bytes) {
+        cold_mem = (uint8_t *)mmap(nullptr, cold_bytes, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+        if (cold_mem == MAP_FAILED) FAIL("cannot allocate %.1f GB of system RAM for the experts", cold_bytes / 1e9);
+        madvise(cold_mem, cold_bytes, MADV_HUGEPAGE);
+        for (int w = 0; w < 8; w++) cold_th.emplace_back([&] {
+            for (size_t i; (i = next.fetch_add(1)) < copies.size();) {
+                auto [src, n, off] = copies[i];
+                read_file(g, cold_mem + off, src, n);
+                g.drop(src, n);                     // and the file pages: they would push the n-gram table out
+            }
+        });
+    }
+    struct Joiner {                                 // an early exit joins the copy threads
+        std::vector<std::thread> &th;
+        ~Joiner() { for (auto &t : th) if (t.joinable()) t.join(); }
+    } joiner{cold_th};
 
     // ---- upload through pinned staging + a device scratch, relayout on the GPU --------------------------------------
     constexpr size_t STAGE = 64 << 20;
@@ -123,11 +282,14 @@ void Engine::load(const std::string &path, int max_seqs, size_t reserve_bytes) {
     }
     int slot = 0;
     size_t total = 0;
+    // file -> host memory with pread (buffered, sequential: ~5 GB/s from this disk with a few readers; faulting the mapping
+    // in through memcpy got ~4 GB/s)
+    auto fetch = [&](uint8_t *dst, const uint8_t *src, size_t len) { read_file(g, dst, src, len); };
     auto put = [&](const uint8_t *src, size_t n, auto &&consume) {   // copy src[0..n) in pieces; consume(dev, off, len)
         for (size_t off = 0; off < n; off += STAGE) {
             const size_t len = std::min(STAGE, n - off);
             CK(hipEventSynchronize(ev[slot]));
-            memcpy(pin[slot], src + off, len);
+            fetch(pin[slot], src + off, len);
             CK(hipMemcpyAsync(dev[slot], pin[slot], len, hipMemcpyHostToDevice, st));
             consume(dev[slot], off, len);
             CK(hipEventRecord(ev[slot], st));
@@ -139,28 +301,48 @@ void Engine::load(const std::string &path, int max_seqs, size_t reserve_bytes) {
         if (u.q) {
             int rows, cols; shape(u.t, rows, cols);
             *u.q = make_qtensor(warena, u.t->type, rows, cols);
-            const int bb = block_bytes(u.t->type);
+            const int bb = qbytes_of(u.t->type);
             if (!bb) FAIL("unsupported type %d for %s", u.t->type, "tensor");
             const size_t piece = STAGE / bb * bb;
             for (size_t off = 0; off < u.t->nbytes; off += piece) {
                 const size_t len = std::min(piece, u.t->nbytes - off);
                 CK(hipEventSynchronize(ev[slot]));
-                memcpy(pin[slot], u.t->data + off, len);
+                fetch(pin[slot], u.t->data + off, len);
                 CK(hipMemcpyAsync(dev[slot], pin[slot], len, hipMemcpyHostToDevice, st));
                 relayout(*u.q, dev[slot], st, off / bb, len / bb);
                 CK(hipEventRecord(ev[slot], st));
                 slot ^= 1;
             }
+            g.drop(u.t->data, u.t->nbytes);          // copied: the page cache need not keep it
             total += u.t->nbytes;
         } else {
             uint8_t *d = warena.get(u.t->nbytes);
             put(u.t->data, u.t->nbytes, [&](uint8_t *src, size_t off, size_t len) {
                 CK(hipMemcpyAsync(d + off, src, len, hipMemcpyDeviceToDevice, st));
             });
+            g.drop(u.t->data, u.t->nbytes);
             if (u.f) *u.f = (float *)d;
             if (u.h) *u.h = (half *)d;
             if (u.i) *u.i = (int *)d;
         }
+    }
+    // decode prefetch lists: each decoder layer's dense weights (everything but its hot experts), in load order
+    {
+        std::vector<std::vector<PrefetchRange>> pr(NL);
+        std::vector<std::pair<const void *, size_t>> arrs;
+        for (const Up &u : ups) {
+            if (u.layer < 0 || u.layer >= NL || !u.pf) continue;
+            arrs.clear();
+            if (u.q) qtensor_arrays(*u.q, arrs);
+            else arrs.push_back({u.f ? (const void *)*u.f : u.h ? (const void *)*u.h : (const void *)*u.i, u.t->nbytes});
+            for (auto [p, n] : arrs) if (n >= 16) pr[u.layer].push_back({(const int4 *)p, n / 16});
+        }
+        std::vector<PrefetchRange> all;
+        pf_off.assign(NL, 0); pf_n.assign(NL, 0);
+        for (int l = 0; l < NL; l++) { pf_off[l] = (int)all.size(); pf_n[l] = (int)pr[l].size(); all.insert(all.end(), pr[l].begin(), pr[l].end()); }
+        pf_ranges = warena.get<PrefetchRange>(all.size());
+        pf_sink = warena.get<unsigned>(1);
+        CK(hipMemcpyAsync(pf_ranges, all.data(), all.size() * sizeof(PrefetchRange), hipMemcpyHostToDevice, st));
     }
     // GDN A / dt_bias contiguous for the all-layer commit
     gdn_A = warena.get<float>((size_t)NGDN * GV);
@@ -184,54 +366,33 @@ void Engine::load(const std::string &path, int max_seqs, size_t reserve_bytes) {
     for (int i = 0; i < 2; i++) { CK(hipHostFree(pin[i])); CK(hipFree(dev[i])); CK(hipEventDestroy(ev[i])); }
     const double t_vram = now();
 
-    // ---- cold experts -> system RAM (hugepages), copied by several threads ----------------------------------------
-    if (!cold_mem) {                                // kept across shutdown(keep_host): a model switch skips this
-    cold.assign(NL, ColdLayer{});
-    std::vector<std::tuple<const uint8_t *, size_t, size_t>> copies;   // src, bytes, offset
-    cold_bytes = 0;
-    for (int l = 0; l < NL; l++) {
-        if (!L[l].n_cold) continue;
-        const std::string p = "blk." + std::to_string(l) + ".";
-        for (const char *k : {"ffn_gate_cold.weight", "ffn_up_cold.weight", "ffn_down_cold.weight"}) {
-            const GGUFTensor *t = get(p + k);
-            copies.emplace_back(t->data, t->nbytes, cold_bytes);
-            cold_bytes += (t->nbytes + 4095) & ~size_t(4095);
-        }
-    }
-    if (cold_bytes) {
-        cold_mem = (uint8_t *)mmap(nullptr, cold_bytes, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
-        if (cold_mem == MAP_FAILED) FAIL("cannot allocate %.1f GB of system RAM for the cold experts", cold_bytes / 1e9);
-        madvise(cold_mem, cold_bytes, MADV_HUGEPAGE);
-        std::atomic<size_t> next{0};
-        std::vector<std::thread> th;
-        for (int w = 0; w < 8; w++) th.emplace_back([&] {
-            for (size_t i; (i = next.fetch_add(1)) < copies.size();) {
-                auto [src, n, off] = copies[i];
-                memcpy(cold_mem + off, src, n);
-                g.drop(src, n);                     // and the file pages: they would push the n-gram table out
-            }
-        });
-        for (auto &t : th) t.join();
-        int ci = 0;
-        for (int l = 0; l < NL; l++) {
-            if (!L[l].n_cold) continue;
-            ColdLayer &c = cold[l];
-            c.gate = cold_mem + std::get<2>(copies[ci]); c.up = cold_mem + std::get<2>(copies[ci + 1]); c.down = cold_mem + std::get<2>(copies[ci + 2]);
-            const std::string p = "blk." + std::to_string(l) + ".";
-            c.type_gu = get(p + "ffn_gate_cold.weight")->type; c.type_dn = get(p + "ffn_down_cold.weight")->type;
-            c.row_gu = (size_t)D / per_block(c.type_gu) * block_bytes(c.type_gu);
-            c.row_dn = (size_t)FE / per_block(c.type_dn) * block_bytes(c.type_dn);
-            ci += 3;
-        }
-    }
-    }
-    if (cold_bytes) {                               // the GPU streams cold experts during prefill
-        (void)hipHostUnregister(cold_mem);          // a device reset by the other engine may have dropped it
-        (void)hipGetLastError();
+    // ---- the cold copy started above: wait for it -------------------------------------------------------------------
+    for (auto &t : cold_th) t.join();
+    cold_th.clear();
+    cold_dev.assign(NL, ColdDec{});
+    if (cold_bytes) {                               // the GPU reads cold experts at decode and streams them at prefill
         CK(hipHostRegister(cold_mem, cold_bytes, hipHostRegisterMapped));
         void *dp;
         CK(hipHostGetDevicePointer(&dp, cold_mem, 0));
         d_cold = (uint8_t *)dp;
+    }
+    for (int l = 0; l < NL; l++) {
+        if (!L[l].n_cold) continue;
+        ColdLayer &c = cold[l];
+        ColdDec &cd = cold_dev[l];
+        for (int grp = 0; grp < 2; grp++) {
+            const GGUFTensor *tg = ct[l][2 * grp];
+            if (!tg) continue;
+            c.gate[grp] = cold_mem + coff[l][2 * grp]; c.up[grp] = cold_mem + coff[l][2 * grp + 1];
+            c.type_gu[grp] = tg->type; c.row_gu[grp] = qrow_bytes(tg->type, D);
+            cd.gate[grp] = d_cold + coff[l][2 * grp]; cd.up[grp] = d_cold + coff[l][2 * grp + 1]; cd.type[grp] = tg->type;
+        }
+        c.down = cold_mem + coff[l][DN]; c.type_dn = ct[l][DN]->type; c.row_dn = qrow_bytes(c.type_dn, FE);
+        cd.down = d_cold + coff[l][DN];
+        c.n = L[l].n_cold;
+        c.n0 = cd.n0 = (int)ct[l][G0]->ne[2];
+        const int n1 = ct[l][G1] ? (int)ct[l][G1]->ne[2] : 0;
+        if (c.n0 + n1 != c.n || c.type_dn != IQ4_NL) FAIL("layer %d: cold experts %d + %d of %d, down type %d", l, c.n0, n1, c.n, c.type_dn);
     }
     const double t_cold = now();
 
@@ -241,7 +402,8 @@ void Engine::load(const std::string &path, int max_seqs, size_t reserve_bytes) {
         if (t->type != Q8_0) FAIL("token embeddings must be Q8_0");
         void *host;
         CK(hipHostMalloc(&host, t->nbytes, hipHostMallocMapped));
-        memcpy(host, t->data, t->nbytes);
+        read_file(g, (uint8_t *)host, t->data, t->nbytes);
+        g.drop(t->data, t->nbytes);
         embd_host = host;
         void *devp;
         CK(hipHostGetDevicePointer(&devp, host, 0));
@@ -275,7 +437,8 @@ void Engine::load(const std::string &path, int max_seqs, size_t reserve_bytes) {
         void *dp;
         CK(hipHostGetDevicePointer(&dp, p, 0));
         d_sh = (MoeShared *)dp;
-        cpu.start(sh, cold, 8);
+        n_workers = physical_cores();
+        cpu.start(sh, cold, n_workers);
     }
     // ---- hipBLASLt, buffers, sequences, KV pool -----------------------------------------------------------------
     hipblasLtCreate(&lt);
@@ -288,130 +451,137 @@ void Engine::load(const std::string &path, int max_seqs, size_t reserve_bytes) {
     n_pages = (int)std::min(max_pages, want / KV_PAGE);
     if (n_pages < 64) FAIL("not enough VRAM left for the KV cache");
     CK(hipMalloc(&kv_pool, (size_t)n_pages * KV_PAGE));
+    load_phase = 1;
+    if (cold_bytes) calibrate();
     free_pages.clear();
     for (int p = n_pages - 1; p >= 0; p--) free_pages.push_back(p);
     page_ref.assign(n_pages, 0);
-    fprintf(stderr, "kiln-fn: weights %.2f GB VRAM (%.1f s), cold experts %.2f GB RAM (%.1f s), buffers %.2f GB, KV pool %d pages = %d tokens (%.2f GB), load %.1f s\n",
-            warena.used / 1e9, t_vram - t0, cold_bytes / 1e9, t_cold - t_vram, barena.used / 1e9, n_pages, n_pages * PAGE,
+    fprintf(stderr, "kiln-fn: CPU %d workers %.0f GB/s %.0f GMAC/s, DMA %.0f GB/s: decode GPU share of cold picks %.2f\n",
+            n_workers, cal_cpu_bw / 1e9, cal_cpu_mac / 1e9, cal_dma_bw / 1e9, gfrac);
+    fprintf(stderr, "kiln-fn: weights %.2f GB VRAM (%.1f s), cold experts %.2f GB RAM (%.1f s), buffers %.2f GB (passes of %d tokens), "
+            "KV pool %d pages = %d tokens (%.2f GB), load %.1f s\n",
+            warena.used / 1e9, t_vram - t0, cold_bytes / 1e9, t_cold - t_vram, barena.used / 1e9, smax, n_pages, n_pages * PAGE,
             (double)n_pages * KV_PAGE / 1e9, now() - t0);
     (void)total;
 }
 
 void Engine::alloc_buffers(int max_seqs) {
-    const int U = umax, T8 = 8;
-    const size_t big = (size_t)U * HCD;
-    size_t bytes = 0;
-    auto plan = [&](size_t n) { bytes += (n + 255) & ~size_t(255); };
-    // generous upper bound, computed from the same list as below
-    plan((size_t)U * 4);                                   // tokens
-    for (size_t n : {(size_t)U * D, big, big, (size_t)U * HCR, big, (size_t)U * HC, (size_t)U * HC, (size_t)U * D, (size_t)U * 2 * NH * HD,
-                     (size_t)U * GV * GD, (size_t)U * NKV * HD * 2, (size_t)U * NKV * HD, (size_t)U * IDX_H * IDX_D, (size_t)U * IDX_D, (size_t)U * D})
-        plan(n * 4);
-    for (size_t n : {big, (size_t)U * HCR, (size_t)U * D, (size_t)U * NH * HD, (size_t)U * IDX_H * IDX_D, (size_t)U * NH * HD, (size_t)12288 * 2560,
-                     (size_t)U * HC * 2 * D})
-        plan(n * 2);
-    plan(big + big / 32 * 4); plan((size_t)U * HCR + U * HCR / 32 * 4); plan((size_t)U * D + U * D / 32 * 4); plan((size_t)U * NH * HD + U * NH * HD / 32 * 4);
-    plan((size_t)MAX_SPLITS * 8 * NH * HD * 4); plan((size_t)MAX_SPLITS * 8 * NH * 2 * 4);
-    plan((size_t)SEL_G * (max_ctx / KPOOL + 1) * 4); plan((size_t)U * (SEL_BLOCKS + 1) * 4);
-    plan((size_t)U * GK * GD * 4 * 2); plan((size_t)U * GV * GD * 4);
-    plan((size_t)NGDN * 8 * QKV * 4); plan((size_t)NGDN * 8 * GK * GD * 4); plan((size_t)NGDN * 8 * GV * GD * 4); plan((size_t)NGDN * 8 * 2 * GV * 4);
-    plan((size_t)T8 * NE * 4); plan(T8 * 4); plan((size_t)T8 * TOPK_E * 4 * 3); plan((size_t)T8 * TOPK_E * D * 4); plan((size_t)T8 * D * 4 * 2);
-    plan((size_t)T8 * TOPK_E * FE * 2); plan((size_t)T8 * FS * 2);
-    plan((size_t)U * PLE_HEADS * 170); plan((size_t)U * D * 4); plan(big * 4); plan((size_t)U * D * 4); plan(big * 4); plan((size_t)U * D * 2); plan((size_t)U * D * 2);
-    plan((size_t)T8 * VOCAB * 4); plan((size_t)T8 * 64 * TOPK * 4 * 2); plan((size_t)T8 * TOPK * 8);
-    plan(big * 4); plan((size_t)U * D * 4); plan((size_t)U * HC * 2 * D * 4); plan((size_t)U * HC * 2 * D * 2); plan((size_t)U * HC * 2 * D * 2); plan(64);
-    plan((size_t)U * D * 4 * 2); plan((size_t)U * D * 2);
-    const size_t N = (size_t)U * TOPK_E;                   // MoE prefill
-    plan((size_t)U * NE * 4); plan((size_t)U * 4); plan(N * 4 * 5); plan(1024 * sizeof(MoeWork));
-    plan(N * D * 2); plan(N * FE * 2); plan(N * D * 2);
-    const size_t raw_bytes = (size_t)STAGE_G * (2 * (size_t)FE * (D / 256 * 136) + (size_t)D * (FE / 32 * 18));
-    plan(2 * raw_bytes); plan(2 * raw_bytes + (64 << 10));
-    barena.init(bytes + (64 << 20));
-    auto qact = [&](size_t n) { QAct a; a.q = barena.get<int8_t>(n); a.d = barena.get<float>(n / 32 + 1); return a; };
-    b.tokens = barena.get<int>(U);
-    b.x = barena.get<float>((size_t)U * D);
-    b.res = barena.get<float>(big);
-    b.xn = barena.get<float>(big);
-    b.lo = barena.get<float>((size_t)U * HCR);
-    b.gate = barena.get<float>(big);
-    b.inj_a = barena.get<float>((size_t)U * HC);
-    b.inj_f = barena.get<float>((size_t)U * HC);
-    b.mx = barena.get<float>((size_t)U * D);
-    b.proj = barena.get<float>((size_t)U * std::max(2 * NH * HD, QKV));
-    b.zb = barena.get<float>((size_t)U * GV * GD);
-    b.kb = barena.get<float>((size_t)U * std::max(NKV * HD, 2 * GV));
-    b.vb = barena.get<float>((size_t)U * NKV * HD);
-    b.qidx = barena.get<float>((size_t)U * IDX_H * IDX_D);
-    b.kidx = barena.get<float>((size_t)U * IDX_D);
-    b.blk = barena.get<float>((size_t)U * D);
-    b.xn_h = barena.get<half>(big);
-    b.lo_h = barena.get<half>((size_t)U * HCR);
-    b.hh = barena.get<half>((size_t)U * D);
-    b.Q16 = barena.get<half>((size_t)U * NH * HD);
-    b.qidx16 = barena.get<half>((size_t)U * IDX_H * IDX_D);
-    b.att_h = barena.get<half>((size_t)U * NH * HD);
-    b.deq = barena.get<half>((size_t)12288 * 2560);
-    b.gemm16 = barena.get<half>((size_t)U * HC * 2 * D);
-    b.xn_q = qact(big);
-    b.lo_q = qact((size_t)U * HCR);
-    b.hq = qact((size_t)U * D);
-    b.mq = qact((size_t)U * NH * HD);
-    b.part_o = barena.get<float>((size_t)MAX_SPLITS * 8 * NH * HD);
-    b.part_ml = barena.get<float>((size_t)MAX_SPLITS * 8 * NH * 2);
-    b.score = barena.get<float>((size_t)SEL_G * (max_ctx / KPOOL + 1));
-    b.sel = barena.get<int>((size_t)U * (SEL_BLOCKS + 1));
-    b.qn = barena.get<float>((size_t)U * GK * GD);
-    b.kn = barena.get<float>((size_t)U * GK * GD);
-    b.vc = barena.get<float>((size_t)U * GV * GD);
-    b.v_raw = barena.get<float>((size_t)NGDN * 8 * QKV);
-    b.v_kn = barena.get<float>((size_t)NGDN * 8 * GK * GD);
-    b.v_vc = barena.get<float>((size_t)NGDN * 8 * GV * GD);
-    b.v_ab = barena.get<float>((size_t)NGDN * 8 * 2 * GV);
-    b.logits_e = barena.get<float>((size_t)T8 * NE);
-    b.sg = barena.get<float>(T8);
-    b.wts = barena.get<float>((size_t)T8 * TOPK_E);
-    b.ids = barena.get<int>((size_t)T8 * TOPK_E);
-    b.hot = barena.get<int>((size_t)T8 * TOPK_E);
-    b.y = barena.get<float>((size_t)T8 * TOPK_E * D);
-    b.shared = barena.get<float>((size_t)T8 * D);
-    b.moe = barena.get<float>((size_t)U * D);
-    b.hq_e = qact((size_t)T8 * TOPK_E * FE);
-    b.hs_q = qact((size_t)T8 * FS);
-    CK(hipHostMalloc(&b.ple_rows, (size_t)U * PLE_HEADS * 170));
-    b.d_ple_rows = barena.get<uint8_t>((size_t)U * PLE_HEADS * 170);
-    b.emb = barena.get<float>((size_t)U * D);
-    b.key = barena.get<float>(big);
-    b.value = barena.get<float>((size_t)U * D);
-    b.xconv = barena.get<float>(big);
-    b.emb_h = barena.get<half>((size_t)U * D);
-    b.emb_q = qact((size_t)U * D);
-    b.logits = barena.get<float>((size_t)T8 * VOCAB);
+    // U: sub-chunk (attention, gated delta net, mixers, dense GEMMs); S: pass (residual streams, the MoE's inputs, routing
+    // and outputs, its pick batches); T8: decode / verify passes
+    const int U = umax, S = smax, T8 = 8;
+    const size_t big = (size_t)U * HCD, N = (size_t)S * TOPK_E, P = S, MC = std::min(U, MTP_CHUNK);
+    // cold expert staging, sized for the widest of the file's cold gate/up formats
+    stage_gu = stage_soa = 0;
+    for (const ColdLayer &c : cold)
+        for (int g = 0; g < 2; g++) {
+            if (!c.gate[g]) continue;
+            Arena dry; dry.cap = SIZE_MAX;
+            make_qtensor(dry, c.type_gu[g], STAGE_G * FE, D);
+            stage_soa = std::max(stage_soa, dry.used);
+            stage_gu = std::max(stage_gu, (size_t)STAGE_G * FE * c.row_gu[g]);
+        }
+    const size_t raw_bytes = 2 * stage_gu + (size_t)STAGE_G * D * (FE / 32 * 18);
     const int nb = (VOCAB + 4095) / 4096;
-    b.tsv = barena.get<float>((size_t)T8 * nb * TOPK);
-    b.tsi = barena.get<int>((size_t)T8 * nb * TOPK);
-    b.topv = barena.get<float>((size_t)T8 * TOPK);
-    b.topi = barena.get<int>((size_t)T8 * TOPK);
-    b.mtp_res = barena.get<float>(big);
-    b.mtp_e = barena.get<float>((size_t)U * D);
-    b.mtp_in = barena.get<float>((size_t)U * HC * 2 * D);
-    b.mtp_in_h = barena.get<half>((size_t)U * HC * 2 * D);
-    b.mtp_in_q = qact((size_t)8 * 2 * D);
-    b.draft = barena.get<int>(16);
-    b.rlog = barena.get<float>((size_t)U * NE);
-    b.sgT = barena.get<float>(U);
-    b.wtsT = barena.get<float>(N); b.ent_w = barena.get<float>(N);
-    b.idsT = barena.get<int>(N); b.ent_tok = barena.get<int>(N); b.pos = barena.get<int>(N);
-    b.work = barena.get<MoeWork>(1024);
-    b.Xs = barena.get<half>(N * D); b.Hs = barena.get<half>(N * FE); b.Ys = barena.get<half>(N * D);
+    // every device buffer, carved once from a dry arena to size it and then for real
+    auto carve = [&](Arena &a) {
+        auto qact = [&](size_t n) { QAct q; q.q = a.get<int8_t>(n); q.d = a.get<float>(n / 32 + 1); return q; };
+        b.tokens = a.get<int>(S);
+        b.x = a.get<float>((size_t)U * D);
+        b.res = a.get<float>((size_t)S * HCD);
+        b.xn = a.get<float>(big);
+        b.lo = a.get<float>((size_t)U * HCR);
+        b.inv = a.get<float>((size_t)8 * HC);
+        b.rr_counter = a.get<unsigned>(64);
+        b.idx_raw = a.get<half>((size_t)NKVL * U * IDX_D);
+        b.gate = a.get<float>(big);
+        b.inj_a = a.get<float>((size_t)U * HC);
+        b.inj_f = a.get<float>((size_t)S * HC);
+        b.mx = a.get<float>((size_t)U * D);
+        b.proj = a.get<float>((size_t)U * std::max(2 * NH * HD, QKV));
+        b.zb = a.get<float>((size_t)U * GV * GD);
+        b.kb = a.get<float>((size_t)U * std::max(NKV * HD, 2 * GV));
+        b.vb = a.get<float>((size_t)U * NKV * HD);
+        b.qidx = a.get<float>((size_t)U * IDX_H * IDX_D);
+        b.kidx = a.get<float>((size_t)U * IDX_D);
+        b.blk = a.get<float>((size_t)U * D);
+        b.xn_h = a.get<half>(big);
+        b.lo_h = a.get<half>((size_t)U * HCR);
+        b.hh = a.get<half>((size_t)U * D);
+        b.Q16 = a.get<half>((size_t)U * NH * HD);
+        b.qidx16 = a.get<half>((size_t)U * IDX_H * IDX_D);
+        b.att_h = a.get<half>((size_t)U * NH * HD);
+        b.deq = a.get<half>(DEQ_ELEMS);
+        b.gemm16 = a.get<half>((size_t)U * 12288);    // the widest GEMM output: q | gate projection
+        b.xn_q = qact(big);
+        b.lo_q = qact((size_t)U * HCR);
+        b.hq = qact((size_t)U * D);
+        b.mq = qact((size_t)U * NH * HD);
+        b.part_o = a.get<float>((size_t)PART_ROWS * NH * HD);
+        b.part_ml = a.get<float>((size_t)PART_ROWS * NH * 2);
+        b.score = a.get<float>((size_t)SEL_G * (max_ctx / KPOOL + 1));
+        b.sel_hist = a.get<uint32_t>((size_t)SEL_G * 1024);
+        b.sel = a.get<int>((size_t)U * (SEL_BLOCKS + 1));
+        b.qn = a.get<float>((size_t)U * GK * GD);
+        b.kn = a.get<float>((size_t)U * GK * GD);
+        b.vc = a.get<float>((size_t)U * GV * GD);
+        b.v_raw = a.get<float>((size_t)NGDN * 8 * QKV);
+        b.v_kn = a.get<float>((size_t)NGDN * 8 * GK * GD);
+        b.v_vc = a.get<float>((size_t)NGDN * 8 * GV * GD);
+        b.v_ab = a.get<float>((size_t)NGDN * 8 * 2 * GV);
+        b.logits_e = a.get<float>((size_t)T8 * NE);
+        b.sg = a.get<float>(T8);
+        b.wts = a.get<float>((size_t)T8 * TOPK_E);
+        b.ids = a.get<int>((size_t)T8 * TOPK_E);
+        b.hot = a.get<int>((size_t)T8 * TOPK_E);
+        b.y = a.get<float>((size_t)T8 * (TOPK_E + 1) * D);         // + each token's shared expert
+        b.moe = a.get<float>((size_t)S * D);
+        b.hq_e = qact((size_t)T8 * (TOPK_E + 1) * FE);
+        b.d_ple_rows = a.get<uint8_t>((size_t)U * PLE_HEADS * 170);
+        b.emb = a.get<float>((size_t)U * D);
+        b.value = a.get<float>((size_t)U * D);
+        b.emb_h = a.get<half>((size_t)U * D);
+        b.emb_q = qact((size_t)U * D);
+        b.logits = a.get<float>((size_t)T8 * VOCAB);
+        b.tsv = a.get<float>((size_t)T8 * nb * TOPK);
+        b.tsi = a.get<int>((size_t)T8 * nb * TOPK);
+        b.topv = a.get<float>((size_t)T8 * TOPK);
+        b.topi = a.get<int>((size_t)T8 * TOPK);
+        b.mtp_res = a.get<float>(MC * HCD);
+        b.mtp_e = a.get<float>(MC * D);
+        b.mtp_in = a.get<float>((size_t)8 * HC * 2 * D);        // decode only (T * HC <= 8 rows)
+        b.mtp_in_h = a.get<half>(MC * HC * 2 * D);
+        b.mtp_in_q = qact((size_t)8 * 2 * D);
+        b.draft = a.get<int>(16);
+        // MoE over a pass: router logits per sub-chunk; picks, their weights / positions, batches' tokens per pass
+        b.rlog = a.get<float>((size_t)U * NE);
+        b.sgT = a.get<float>(S);
+        b.wtsT = a.get<float>(N); b.ent_w = a.get<float>(N);
+        b.idsT = a.get<int>(N); b.ent_tok = a.get<int>(N); b.pos = a.get<int>(N); b.btok = a.get<int>(N);
+        b.work = a.get<MoeWork>(N / 64 + 2 * NE);         // 64-token tiles of the experts of a pass
+        b.hmoe = a.get<half>((size_t)S * D);
+        // a batch's gathered inputs / outputs; the PLE block's key and conv output (U x HCD fp32, layer 1 only) share them
+        const size_t xy = std::max(P * D * 2, (size_t)U * HCD * 4);
+        b.Xs = (half *)a.get<uint8_t>(xy); b.Hs = a.get<half>(P * FE); b.Ys = (half *)a.get<uint8_t>(xy);
+        b.key = (float *)b.Xs; b.xconv = (float *)b.Ys;
+        for (int k = 0; k < NSLOT; k++) {
+            b.raw[k] = a.get<uint8_t>(raw_bytes);
+            b.sgu[k] = a.get<uint8_t>(2 * stage_soa);
+            b.sd_[k] = make_qtensor(a, IQ4_NL, STAGE_G * D, FE);
+        }
+    };
+    Arena dry; dry.cap = SIZE_MAX;
+    carve(dry);
+    barena.init(dry.used + (1 << 20));
+    carve(barena);
+    CK(hipMemsetAsync(b.rr_counter, 0, 4, st));
+    // pinned host buffers
+    CK(hipHostMalloc(&b.ple_rows, (size_t)S * PLE_HEADS * 170));
     CK(hipHostMalloc(&b.h_ids, N * 4)); CK(hipHostMalloc(&b.h_wts, N * 4)); CK(hipHostMalloc(&b.h_tok, N * 4));
-    CK(hipHostMalloc(&b.h_entw, N * 4)); CK(hipHostMalloc(&b.h_pos, N * 4)); CK(hipHostMalloc(&b.h_work, 1024 * sizeof(MoeWork)));
-    CK(hipHostMalloc(&b.h_x, (size_t)U * D * 4)); CK(hipHostMalloc(&b.h_cout, N * D * 2));
+    CK(hipHostMalloc(&b.h_entw, N * 4)); CK(hipHostMalloc(&b.h_pos, N * 4)); CK(hipHostMalloc(&b.h_btok, N * 4));
+    CK(hipHostMalloc(&b.h_work, (N / 64 + 2 * NE) * sizeof(MoeWork)));
+    CK(hipHostMalloc(&b.h_x16, (size_t)S * D * 2)); CK(hipHostMalloc(&b.h_cout, P * D * 2));
     CK(hipHostMalloc(&b.h_topv, (size_t)8 * TOPK * 4)); CK(hipHostMalloc(&b.h_topi, (size_t)8 * TOPK * 4)); CK(hipHostMalloc(&b.h_draft, 64));
-    for (int k = 0; k < 2; k++) {
-        b.raw[k] = barena.get<uint8_t>(raw_bytes);
-        b.sg_[k] = make_qtensor(barena, IQ4_XS, STAGE_G * FE, D);
-        b.su_[k] = make_qtensor(barena, IQ4_XS, STAGE_G * FE, D);
-        b.sd_[k] = make_qtensor(barena, IQ4_NL, STAGE_G * D, FE);
+    for (int k = 0; k < NSLOT; k++) {
         CK(hipEventCreateWithFlags(&raw_free[k], hipEventDisableTiming));
         CK(hipEventCreateWithFlags(&raw_ready[k], hipEventDisableTiming));
         CK(hipEventRecord(raw_free[k], st));
@@ -424,30 +594,48 @@ void Engine::alloc_buffers(int max_seqs) {
         CK(hipMalloc(&s.conv, conv_bytes()));
         CK(hipMalloc(&s.ple, ple_bytes()));
         CK(hipMalloc(&s.h_last, (size_t)HCD * 4));
+        CK(hipMalloc(&s.idx_tail, tail_bytes()));
     }
     CK(hipMalloc(&stage_state, state_bytes()));
 }
 
 void Engine::warmup() {
-    // first launches load the code objects; keep them out of the first request
-    QAct none{nullptr, nullptr};
-    (void)none;
+    load_phase = 2;
+    struct Done { ~Done() { load_phase = 3; } } done_;
+    // first launches load the code objects (40-180 ms per source file): a short prefill (the T > 8 path: host routing,
+    // CPU job, staging) and a decode step with a draft, on a scratch sequence, keep that out of the first request
+    int id = seq_new();
+    const bool borrowed = id < 0;                   // the server's cache holds every slot (all still empty): borrow slot 0
+    if (borrowed) id = 0;
+    std::vector<int> toks(24, 198);
+    prefill(id, toks.data(), (int)toks.size());
+    Sampling sp;
+    sp.temperature = 0.0f; sp.n_draft = 1;
+    int out[4];
+    generate(id, sp, out, 4);
     CK(hipStreamSynchronize(st));
+    if (borrowed) seq_reset(seqs[0]); else seq_free(id);
+    snaps.resize(std::max<size_t>(snaps.size(), 2));   // the first snapshots of the first request, ready
+    for (Snap &sn : snaps) if (!sn.host) sn.host = snap_buffer();
 }
 
-void Engine::shutdown(bool keep_host) {
+void Engine::shutdown() {
     cpu.stop();
     CK(hipDeviceSynchronize());
     if (kv_pool) (void)hipFree(kv_pool);
-    for (Seq &s : seqs) { (void)hipFree(s.d_pages); (void)hipFree(s.ssm); (void)hipFree(s.conv); (void)hipFree(s.ple); (void)hipFree(s.h_last); }
+    for (Seq &s : seqs) { (void)hipFree(s.d_pages); (void)hipFree(s.ssm); (void)hipFree(s.conv); (void)hipFree(s.ple); (void)hipFree(s.h_last); (void)hipFree(s.idx_tail); }
     seqs.clear();
-    for (Snap &sn : snaps) if (sn.host) (void)hipHostFree(sn.host);
+    for (Snap &sn : snaps)
+        if (sn.host) {
+            (void)hipHostUnregister(sn.host);
+            munmap(sn.host, (state_bytes() + (2 << 20) - 1) & ~size_t((2 << 20) - 1));
+        }
     snaps.clear();
     if (warena.base) (void)hipFree(warena.base);
     if (barena.base) (void)hipFree(barena.base);
     warena = Arena{}; barena = Arena{};
-    for (void *p : {(void *)b.ple_rows, (void *)b.h_ids, (void *)b.h_wts, (void *)b.h_tok, (void *)b.h_entw, (void *)b.h_pos, (void *)b.h_work,
-                    (void *)b.h_x, (void *)b.h_cout, (void *)b.h_topv, (void *)b.h_topi, (void *)b.h_draft, (void *)sh})
+    for (void *p : {(void *)b.ple_rows, (void *)b.h_ids, (void *)b.h_wts, (void *)b.h_tok, (void *)b.h_entw, (void *)b.h_pos, (void *)b.h_btok,
+                    (void *)b.h_work, (void *)b.h_x16, (void *)b.h_cout, (void *)b.h_topv, (void *)b.h_topi, (void *)b.h_draft, (void *)sh})
         if (p) (void)hipHostFree(p);
     if (embd.q) { void *h = nullptr; (void)hipHostGetDevicePointer(&h, embd.q, 0); }
     if (embd_host) (void)hipHostFree(embd_host);
@@ -460,10 +648,9 @@ void Engine::shutdown(bool keep_host) {
     free_pages.clear(); page_ref.clear();
     if (cold_mem) (void)hipHostUnregister(cold_mem);
     (void)hipGetLastError();
-    (void)hipStreamDestroy(st); (void)hipStreamDestroy(cst);
-    if (!keep_host) {
-        if (cold_mem) munmap(cold_mem, cold_bytes);
-        if (ngram_map) munmap(ngram_map, ngram_map_bytes);
-        cold_mem = nullptr; ngram_map = nullptr; cold_bytes = 0;
-    }
+    (void)hipStreamDestroy(st); (void)hipStreamDestroy(cst); (void)hipStreamDestroy(pst);
+    if (cold_mem) munmap(cold_mem, cold_bytes);
+    if (ngram_map) munmap(ngram_map, ngram_map_bytes);
+    cold_mem = nullptr; ngram_map = nullptr; cold_bytes = 0; d_cold = nullptr;
+    cold.clear(); cold_dev.clear();
 }

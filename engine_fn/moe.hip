@@ -31,13 +31,15 @@ void router_dec(const half *W, const float *wsg, const float *x, int T, float *l
 
 // Softmax over the 512 logits, top 10, weights renormalized to sum 1. One 512-thread workgroup does all T tokens
 // (T <= 8 at decode) so it can publish the cold picks to the CPU with one fence: slot_of maps an expert to its
-// hot slot (>= 0) or cold slot (-1 - slot); hot_slot gets the hot slot per pick (-1 if cold).
+// hot slot (>= 0) or cold slot (-1 - slot). hot_slot per pick: the hot slot, -1 for a cold pick the CPU computes, or
+// -2 - cold slot for one the GPU reads from system RAM itself: a share gfrac of the cold picks, spread evenly.
 __global__ __launch_bounds__(512) void k_route(const float *logits, int T, const int *slot_of, int *ids, float *wts,
-                                               int *hot_slot, MoeShared *sh, const float *x, int layer, uint32_t gen) {
+                                               int *hot_slot, MoeShared *sh, float gfrac, const float *x, int layer, uint32_t gen) {
     __shared__ float v[NE], redv[16];
     __shared__ int redi[16], pick[TOPK_E];
     __shared__ float pw[TOPK_E];
     const int e = threadIdx.x, wave = e / 32, lane = e % 32;
+    int nc = 0;                                         // cold picks so far (thread 0)
     for (int t = 0; t < T; t++) {
         v[e] = logits[(size_t)t * NE + e];
         __syncthreads();
@@ -63,9 +65,11 @@ __global__ __launch_bounds__(512) void k_route(const float *logits, int T, const
             for (int k = 0; k < TOPK_E; k++) {
                 const int j = t * TOPK_E + k, ex = pick[k], sl = slot_of[ex];
                 const float w = pw[k] / s;
+                const bool gpu = sl < 0 && floorf((nc + 1) * gfrac) > floorf(nc * gfrac);
+                nc += sl < 0;
                 ids[j] = ex; wts[j] = w;
-                hot_slot[j] = sl >= 0 ? sl : -1;
-                if (sh) { sh->slot[j] = sl < 0 ? -1 - sl : -1; sh->w[j] = w; }
+                hot_slot[j] = sl >= 0 ? sl : gpu ? -2 - (-1 - sl) : -1;
+                if (sh) { sh->slot[j] = sl < 0 && !gpu ? -1 - sl : -1; sh->w[j] = w; }
             }
         }
         __syncthreads();
@@ -80,9 +84,129 @@ __global__ __launch_bounds__(512) void k_route(const float *logits, int T, const
         __hip_atomic_store(&sh->go, gen, __ATOMIC_RELEASE, __HIP_MEMORY_SCOPE_SYSTEM);
     }
 }
-void route_dec(const float *logits, int T, const int *slot_of, int *ids, float *wts, int *hot_slot, MoeShared *sh,
+void route_dec(const float *logits, int T, const int *slot_of, int *ids, float *wts, int *hot_slot, MoeShared *sh, float gfrac,
                const float *x, int layer, uint32_t gen, hipStream_t st) {
-    k_route<<<1, 512, 0, st>>>(logits, T, slot_of, ids, wts, hot_slot, sh, x, layer, gen);
+    k_route<<<1, 512, 0, st>>>(logits, T, slot_of, ids, wts, hot_slot, sh, gfrac, x, layer, gen);
+}
+
+// Router and routing in one launch (decode, T <= 8). 64 workgroups of 8 waves compute the 512 logits (a wave per
+// expert, 16-byte weight loads) and block 0 the shared expert gate; the last workgroup to finish (atomic counter)
+// selects the top 10 per token (each wave the top 10 of its 64 logits, then wave 0 the top 10 of those 80; ties go to
+// the lower expert id, as in k_route), computes the weights, splits the cold picks between GPU and CPU and publishes
+// the CPU's share. Same outputs as router_dec + route_dec.
+__global__ __launch_bounds__(256) void k_router_route(const half *W, const float *wsg, const float *x, int T, float *logits,
+        float *sg, const int *slot_of, int *ids, float *wts, int *hot_slot, MoeShared *sh, float gfrac, int layer,
+        uint32_t gen, unsigned *counter) {
+    __shared__ bool last;
+    __shared__ float cv[8][TOPK_E];
+    __shared__ int ci[8][TOPK_E];
+    const int tid = threadIdx.x, wave = tid / 32, lane = tid % 32;
+    {
+        const int e = blockIdx.x * 8 + wave;
+        const int4 *w = (const int4 *)(W + (size_t)e * D);
+        constexpr int NI = D / 8 / 32;                  // 10 loads of 16 bytes per lane, all issued before any math
+        int4 q[NI];
+#pragma unroll
+        for (int k = 0; k < NI; k++) q[k] = w[lane + 32 * k];
+        float acc[8] = {};
+#pragma unroll
+        for (int k = 0; k < NI; k++) {
+            const int i = lane + 32 * k;
+            const half2 *h = (const half2 *)&q[k];
+            const float2 f0 = __half22float2(h[0]), f1 = __half22float2(h[1]), f2 = __half22float2(h[2]), f3 = __half22float2(h[3]);
+            for (int t = 0; t < T; t++) {
+                const float4 a = ((const float4 *)(x + (size_t)t * D))[2 * i], b = ((const float4 *)(x + (size_t)t * D))[2 * i + 1];
+                acc[t] += f0.x * a.x + f0.y * a.y + f1.x * a.z + f1.y * a.w + f2.x * b.x + f2.y * b.y + f3.x * b.z + f3.y * b.w;
+            }
+        }
+        for (int t = 0; t < T; t++) { const float v = warp_sum(acc[t]); if (lane == 0) logits[(size_t)t * NE + e] = v; }
+        if (blockIdx.x == 0 && wave < T) {
+            float v = 0;
+            for (int i = lane; i < D; i += 32) v += wsg[i] * x[(size_t)wave * D + i];
+            v = warp_sum(v);
+            if (lane == 0) sg[wave] = sigmoid(v);
+        }
+    }
+    __threadfence();
+    __syncthreads();
+    if (tid == 0) last = atomicAdd(counter, 1u) == gridDim.x - 1;
+    __syncthreads();
+    if (!last) return;
+    int nc = 0;                                         // cold picks so far (wave 0, uniform)
+    for (int t = 0; t < T; t++) {
+        const int i0 = wave * 64 + lane, i1 = i0 + 32;   // L1 may hold an older layer's logits: load them from L2
+        float v0 = __hip_atomic_load(&logits[(size_t)t * NE + i0], __ATOMIC_RELAXED, __HIP_MEMORY_SCOPE_AGENT);
+        float v1 = __hip_atomic_load(&logits[(size_t)t * NE + i1], __ATOMIC_RELAXED, __HIP_MEMORY_SCOPE_AGENT);
+        for (int k = 0; k < TOPK_E; k++) {
+            float b; int bi;
+            if (v0 >= v1) { b = v0; bi = i0; } else { b = v1; bi = i1; }
+            for (int o = 16; o > 0; o >>= 1) {
+                const float ov = __shfl_xor(b, o, 32); const int oi = __shfl_xor(bi, o, 32);
+                if (ov > b || (ov == b && oi < bi)) { b = ov; bi = oi; }
+            }
+            if (lane == 0) { cv[wave][k] = b; ci[wave][k] = bi; }
+            if (bi == i0) v0 = -INFINITY;
+            if (bi == i1) v1 = -INFINITY;
+        }
+        __syncthreads();
+        if (wave == 0) {
+            float c[3]; int ce[3];
+#pragma unroll
+            for (int q = 0; q < 3; q++) {
+                const int idx = lane + 32 * q;
+                c[q] = idx < 80 ? cv[idx / 10][idx % 10] : -INFINITY;
+                ce[q] = idx < 80 ? ci[idx / 10][idx % 10] : 0x7fffffff;
+            }
+            float pv[TOPK_E]; int pe[TOPK_E];
+            for (int k = 0; k < TOPK_E; k++) {
+                float b = c[0]; int bi = ce[0];
+#pragma unroll
+                for (int q = 1; q < 3; q++) if (c[q] > b || (c[q] == b && ce[q] < bi)) { b = c[q]; bi = ce[q]; }
+                for (int o = 16; o > 0; o >>= 1) {
+                    const float ov = __shfl_xor(b, o, 32); const int oi = __shfl_xor(bi, o, 32);
+                    if (ov > b || (ov == b && oi < bi)) { b = ov; bi = oi; }
+                }
+                pv[k] = b; pe[k] = bi;
+#pragma unroll
+                for (int q = 0; q < 3; q++) if (ce[q] == bi) c[q] = -INFINITY;
+            }
+            // lane k < 10 takes pick k: weight (softmax restricted to the picks), tier, and the GPU's share of the cold
+            // picks in pick order (cold picks before it: ballot), all in parallel
+            float v = -INFINITY; int ex = 0;
+#pragma unroll
+            for (int k = 0; k < TOPK_E; k++) if (lane == k) { v = pv[k]; ex = pe[k]; }
+            const float p = lane < TOPK_E ? __expf(v - pv[0]) : 0.0f;
+            const float wk = p / warp_sum(p);
+            const int sl = lane < TOPK_E ? slot_of[ex] : 0;
+            const bool cold = lane < TOPK_E && sl < 0;
+            const uint32_t bal = (uint32_t)__ballot(cold);
+            const int before = nc + __popc(bal & ((1u << lane) - 1u));
+            const bool gpu = cold && floorf((before + 1) * gfrac) > floorf(before * gfrac);
+            nc += __popc(bal);
+            if (lane < TOPK_E) {
+                const int j = t * TOPK_E + lane;
+                ids[j] = ex; wts[j] = wk;
+                hot_slot[j] = sl >= 0 ? sl : gpu ? -2 - (-1 - sl) : -1;
+                if (sh) { sh->slot[j] = cold && !gpu ? -1 - sl : -1; sh->w[j] = wk; }
+            }
+        }
+        __syncthreads();
+    }
+    if (tid == 0) *counter = 0;                        // for the next launch
+    if (!sh) return;
+    for (int i = tid; i < T * D; i += 256) sh->x[i] = x[i];
+    __threadfence_system();
+    __syncthreads();
+    if (tid == 0) {
+        sh->layer = layer; sh->T = T;
+        __threadfence_system();
+        __hip_atomic_store(&sh->go, gen, __ATOMIC_RELEASE, __HIP_MEMORY_SCOPE_SYSTEM);
+    }
+}
+void router_route_dec(const half *W, const float *wsg, const float *x, int T, float *logits, float *sg, const int *slot_of,
+                      int *ids, float *wts, int *hot_slot, MoeShared *sh, float gfrac, int layer, uint32_t gen, unsigned *counter,
+                      hipStream_t st) {
+    k_router_route<<<NE / 8, 256, 0, st>>>(W, wsg, x, T, logits, sg, slot_of, ids, wts, hot_slot, sh, gfrac, layer, gen, counter);
 }
 
 // spin until the CPU has answered generation gen
@@ -91,20 +215,47 @@ __global__ void k_moe_wait(const uint32_t *done, uint32_t gen) {
 }
 void moe_wait(const uint32_t *done, uint32_t gen, hipStream_t st) { k_moe_wait<<<1, 1, 0, st>>>(done, gen); }
 
-// out[t] = sg[t] * shared[t] + sum of the hot picks' y + cold[t] (the CPU's answer, read from host memory)
+// out[t] = sg[t] * shared[t] + the y of every pick the GPU computed (hot, or cold read from RAM) + cold[t] (the CPU's
+// answer, read from host memory)
 __global__ __launch_bounds__(256) void k_moe_sum(const float *y, const int *hot_slot, const float *shared, const float *sg,
                                                  const float *cold, float *out) {
     const int i = blockIdx.x * 256 + threadIdx.x, t = blockIdx.y;
     float s = sg[t] * shared[(size_t)t * D + i];
     for (int k = 0; k < TOPK_E; k++) {
         const int j = t * TOPK_E + k;
-        if (hot_slot[j] >= 0) s += y[(size_t)j * D + i];
+        if (hot_slot[j] != -1) s += y[(size_t)j * D + i];
     }
     if (cold) s += cold[(size_t)t * D + i];
     out[(size_t)t * D + i] = s;
 }
 void moe_sum(const float *y, const int *hot_slot, const float *shared, const float *sg, const float *cold, int T, float *out, hipStream_t st) {
     k_moe_sum<<<dim3(D / 256, T), 256, 0, st>>>(y, hot_slot, shared, sg, cold, out);
+}
+
+// The end of a decode MoE block in one launch: wait for the CPU's answer (one thread per workgroup spins on the host
+// flag), out = sg * shared + the y of every pick the GPU computed + the CPU's sum, then the hyper-connection update
+// res[t][s] += 2 sigmoid(inject[t][s] / HC) * out in place (what moe_wait + moe_sum + hc_combine did).
+__global__ __launch_bounds__(256) void k_moe_finish(const uint32_t *done, uint32_t gen, const float *y, const int *hot_slot,
+                                                    const float *shared, const float *sg, const float *cold, const float *inject, float *res) {
+    const int i = blockIdx.x * 256 + threadIdx.x, t = blockIdx.y;
+    if (done) {
+        if (threadIdx.x == 0)
+            while (__hip_atomic_load(done, __ATOMIC_ACQUIRE, __HIP_MEMORY_SCOPE_SYSTEM) != gen) __builtin_amdgcn_s_sleep(1);
+        __syncthreads();
+        __atomic_thread_fence(__ATOMIC_ACQUIRE);
+    }
+    float s = (sg ? sg[t] : 1.0f) * shared[(size_t)t * D + i];
+    for (int k = 0; k < TOPK_E; k++) {
+        const int j = t * TOPK_E + k;
+        if (hot_slot[j] != -1) s += y[(size_t)j * D + i];
+    }
+    if (cold) s += cold[(size_t)t * D + i];
+#pragma unroll
+    for (int st = 0; st < HC; st++) res[((size_t)t * HC + st) * D + i] += 2.0f * sigmoid(inject[t * HC + st] * (1.0f / HC)) * s;
+}
+void moe_finish(const uint32_t *done, uint32_t gen, const float *y, const int *hot_slot, const float *shared, const float *sg,
+                const float *cold, const float *inject, float *res, int T, hipStream_t st) {
+    k_moe_finish<<<dim3(D / 256, T), 256, 0, st>>>(done, gen, y, hot_slot, shared, sg, cold, inject, res);
 }
 
 // ---- prefill (T > 32 tokens): routing for many tokens, gather by expert, final sum -------------------------
@@ -157,6 +308,31 @@ __global__ void k_gather_rows(const half *src, const int *idx, half *dst) {
 }
 void gather_rows(const half *src, const int *idx, int n, half *dst, hipStream_t st) {
     if (n) k_gather_rows<<<dim3(D / 256, n), 256, 0, st>>>(src, idx, dst);
+}
+
+// moe[t] = sg[t] * shared[t]: the gated shared expert, to which moe_accum adds the routed experts batch by batch
+__global__ __launch_bounds__(256) void k_moe_shared(const float *shared, const float *sg, float *moe) {
+    const int i = blockIdx.x * 256 + threadIdx.x, t = blockIdx.y;
+    moe[(size_t)t * D + i] = sg[t] * shared[(size_t)t * D + i];
+}
+void moe_shared(const float *shared, const float *sg, int T, float *moe, hipStream_t st) {
+    k_moe_shared<<<dim3(D / 256, T), 256, 0, st>>>(shared, sg, moe);
+}
+
+// One batch of picks (global pick indices p0..p1, their weighted outputs in Y rows 0..p1-p0): for each token it touches,
+// moe[t] += its picks in the batch, in router order (pos[t*10+k] = global index of token t's k-th pick): deterministic
+__global__ __launch_bounds__(256) void k_moe_accum(const half *Y, const int *pos, int p0, int p1, const int *toks, float *moe) {
+    const int i = blockIdx.x * 256 + threadIdx.x, t = toks[blockIdx.y];
+    float s = 0;
+#pragma unroll
+    for (int k = 0; k < TOPK_E; k++) {
+        const int q = pos[t * TOPK_E + k];
+        if (q >= p0 && q < p1) s += __half2float(Y[(size_t)(q - p0) * D + i]);
+    }
+    moe[(size_t)t * D + i] += s;
+}
+void moe_accum(const half *Y, const int *pos, int p0, int p1, const int *toks, int ntok, float *moe, hipStream_t st) {
+    if (ntok) k_moe_accum<<<dim3(D / 256, ntok), 256, 0, st>>>(Y, pos, p0, p1, toks, moe);
 }
 
 // out[t] = sg[t] * shared[t] + sum_k Y[pos[t*10+k]]  (picks in router order: deterministic)

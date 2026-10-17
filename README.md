@@ -3,7 +3,9 @@
 An inference engine written for exactly one model on exactly one GPU: **Qwen3.8-27B** on a
 **Radeon RX 7900 XTX** (gfx1100, 24 GB). It serves an OpenAI-compatible API built for coding
 agents such as OpenCode: full 262K context, prompt caching that makes every agent turn an
-append, and MTP speculative decoding.
+append, and MTP speculative decoding. A second engine runs **Qwen3.8-Flash-Next** (a 48-layer,
+512-expert MoE) split between the GPU and system RAM; requests pick the model and kiln switches
+(see [Qwen3.8-Flash-Next](#qwen38-flash-next)).
 
 About 3,400 lines: C++/HIP kernels and model code in `engine/` (2,400), the Python server in `kiln/` (1,000).
 
@@ -23,10 +25,12 @@ kiln logs                # one line per request: prompt/cached tokens, TTFT, tok
 (TCP 8080-8081), and a plain `kiln start` or `kiln restart` goes back to this machine only. Either way both servers
 answer only requests addressed to an IP address or to this machine's name, which keeps web pages from other sites
 out (DNS rebinding). `systemctl --user enable kiln kiln-web` starts both at login. `kiln serve` runs the server in the
-foreground instead of as a service (it takes `--port`, `--draft`, ...: `kiln serve -h`). Models:
+foreground instead of as a service (it takes `--port`, `--draft`, `--use`, ...: `kiln serve -h`). Models:
 `qwen3.8-27b` (thinking, reasoning effort `xhigh` by default; OpenCode variants pick `medium`/`low`)
-and `qwen3.8-27b-fast` (no thinking; also used for session titles). OpenCode reaches it as an
-OpenAI-compatible provider at `http://127.0.0.1:8080/v1`, set up in `~/.config/opencode/opencode.json`.
+and `qwen3.8-27b-fast` (no thinking; also used for session titles), and the same pair for
+`qwen3.8-flash-next`. One model is on the GPU at a time: a request naming the other one switches
+(titles never do); `kiln status` says which is loaded. OpenCode reaches it as an OpenAI-compatible
+provider at `http://127.0.0.1:8080/v1`, set up in `~/.config/opencode/opencode.json`.
 
 ## Web UI
 
@@ -123,6 +127,65 @@ conversation) is answered by appending the summary request to the cached convers
 that conversation's own settings. Extra system messages from plugins are merged into the first one.
 Special-token text inside files stays text.
 
+## Qwen3.8-Flash-Next
+
+48 layers (36 gated delta net, 12 sparse "QSA" attention), hidden size 2560 widened to 4 hyper-connection
+streams, 512 experts per layer (10 routed + a shared one), a 54 GB n-gram embedding table read at layer 1,
+and an MTP block with its own 512 experts. kiln runs one layout, sized so the model fits next to a desktop
+on 64 GB of RAM with no swapping:
+
+- **GPU (20.2 GB):** dense weights Q6_K / Q8_0, the LM head Q6_K, the MTP block (its experts Q3_K), and the
+  5,600 experts used most (IQ4_XS gate/up, IQ4_NL down). 3.3 GB of KV covers the 262K context.
+- **System RAM (42.6 GB):** the other 18,976 experts: Q3_K gate/up, the least used fifth of all experts Q2_K,
+  IQ4_NL down. K-quants run at the CPU's full memory bandwidth (the IQ3 formats are compute-bound there).
+  Flash-Next takes ~40 GiB of RAM in all.
+- **Disk:** the n-gram table stays in the source file, memory-mapped; a token's 16 rows are requested
+  together so the cold ones are read in parallel, and the next token's while the current step finishes.
+
+Which experts sit in VRAM comes from routing statistics: Unsloth's imatrix counts blended half and half with
+counts kiln measured on code (`tools_fn/route_stats.py`). Expert use on code barely correlates with the
+calibration text's (r = 0.08): this set serves 64% of the expert work on code, against 23% for a
+calibration-only choice.
+
+**Decode.** Per layer the GPU routes (one fused router + top-10 kernel), runs the shared and hot experts
+in one launch, and hands the cold picks over through pinned coherent memory: the CPU workers (one per
+physical core) compute most of them with ggml's AVX-512 kernels, and the GPU reads the rest from RAM itself
+over PCIe. One kernel waits for the CPU, sums and updates the residual streams. While the CPU works, a
+second stream reads the next layer's weights into the 96 MB Infinity Cache, where the GPU reads them 2.7x
+faster. CPU and PCIe share the RAM's ~60 GB/s, which bounds the cold experts' part of a token.
+
+**Prefill.** A prompt goes through in passes of 8,192 tokens. Within a pass, each layer runs its mixers,
+attention and recurrent state over sub-chunks of 1,024 tokens, then its routed experts once for the whole
+pass, so every expert in RAM is read once per pass rather than once per chunk. Hot experts run as grouped
+WMMA GEMMs in 64-token tiles. Of the cold experts, the CPU computes the ones with few tokens in place (an
+AVX-512 VNNI kernel with tokens as lanes) and the GPU DMAs the rest into a staging ring. The split follows a
+cost model with rates measured at load and a feedback term that keeps the CPU and GPU finishing together.
+
+**Memory.** The model is sized to fit, so there is nothing to guard: kiln loads it and runs. Switching to
+the 27B frees all of it (no experts are kept in RAM), and switching back reloads in ~18 s. Pages of the
+model file are dropped from the page cache once copied.
+
+**Measured** (7800X3D, 64 GB DDR5, RX 7900 XTX):
+
+| | |
+|---|---|
+| decode, no drafts / 1 MTP draft | 47-51 / 58-66 tok/s (in a coding conversation: 47 / 58) |
+| prefill 16K tokens | 7.6 s |
+| append to a 16K conversation: 64 / 256 / 1,024 / 4,096 tokens | 0.24 / 0.48 / 0.94 / 2.16 s to the first token |
+| OpenCode's first request (10.7K tokens) | 5.9 s to the first token |
+| at 260K context: decode, no drafts / 1 draft | 46.7 / 54.0 tok/s (27B: 22.8 / 43.0 with 3 drafts) |
+| at 260K context: 1,024-token append | 0.99 s to the first token (27B: 2.79 s) |
+| filling 260K tokens from empty | 130 s, 2,000 tok/s (27B: 448 s) |
+| load / switch from the 27B | 17 s / 18.8 s |
+
+Speed hardly changes with depth (`tools/bench_depth.py`, same code base as context for both models): only 12 of
+the 48 layers attend, each to a fixed 2,048 selected cells plus the indexer's scan, where the 27B's full-attention
+layers read the whole cache for every token.
+
+**Quality.** Mean KL divergence against the Q8_0 original on llama.cpp (`tools_fn/compare_fn.py`): 0.013,
+top-1 agreement 96-99%. A long text that is mostly code pasted into a user turn scores ~0.06: the model's
+predictions inside user turns are chaotic (two kiln runs that differ only in rounding disagree by 0.025 there).
+
 ## Layout
 
 ```
@@ -135,6 +198,10 @@ kiln/     engine.py chat.py cache.py server.py __main__.py
 web/      server.ts app.ts index.html style.css   Bun web UI
 tools/    tests (make test: test_quant, test_attn, test_chat, test_snapshot, test_server), compare_ref.py,
           benchmarks, agent_sim.py
+engine_fn/                               the Flash-Next engine (same C API): cpu_moe.cpp cpu_vnni.cpp for the
+                                         experts in RAM, moe.hip routing, ple.hip n-gram block, ...
+tools_fn/ fn_quantize.py (builds kiln-fn.gguf), route_stats.py (routing counts for it), test_*_fn.cpp (make test_fn),
+          compare_fn.py, bench_fn.py
 data/     (not code) rocm/ venv/ models/ llama.cpp/ (quantization tools + reference only)
 ```
 
@@ -144,6 +211,11 @@ data/     (not code) rocm/ venv/ models/ llama.cpp/ (quantization tools + refere
 made from bartowski's Q8_0 with llama.cpp's quantizer:
 `llama-quantize --allow-requantize --imatrix Qwen3.8-27B-imatrix.gguf --tensor-type-file tools/quant-mix.txt
 --output-tensor-type q6_k --token-embedding-type iq4_xs Qwen3.8-27B-Q8_0.gguf kiln-mix.gguf IQ4_XS`.
+
+`make fn` builds `build/libkiln_fn.so`. Its model file comes from Unsloth's Q8_0 split (plus the MTP file and
+imatrix) via `python tools_fn/fn_quantize.py SRC_DIR data/models/flash-next/kiln-fn.gguf --hot 5600 --q2 0.2
+--route data/models/flash-next/route_code.npy --route-weight 0.5` (~20 min); `tools_fn/route_stats.py` measured
+the routing counts on local code.
 
 ## Notes
 

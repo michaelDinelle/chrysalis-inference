@@ -42,17 +42,18 @@ inline bool is_attn_layer(int l) { return l % 4 == 3; }
 // page -> layer (12 QSA layers + MTP) -> kv head -> block of PAGE tokens, kiln's format:
 //   K int8 [PAGE][HD] | K scales fp16 [PAGE][HD/32] |
 //   V 5-bit, transposed: low nibbles [HD][PAGE/2] | high bits [HD][PAGE/8] | V scales fp16 [HD/32][PAGE]
-// then, per layer, the QSA indexer cache: raw keys fp16 [PAGE][IDX_D] and pooled keys fp16 [PAGE/KPOOL][IDX_D]
-// (normed and rotated to the block's first cell).
+// then, per layer, the QSA indexer cache: pooled keys fp16 [PAGE/KPOOL][IDX_D] (normed and rotated to the block's
+// first cell). Raw indexer keys are only needed until their block of KPOOL cells is complete: they live in the
+// sequence (idx_tail, the incomplete block) and in a per-pass buffer, not in the pages (22% less KV per token).
 constexpr int PAGE = 64;
 constexpr size_t KS_OFF = (size_t)PAGE * HD;
 constexpr size_t VLO_OFF = KS_OFF + (size_t)PAGE * (HD / 32) * 2;
 constexpr size_t VHI_OFF = VLO_OFF + (size_t)HD * PAGE / 2;
 constexpr size_t VS_OFF = VHI_OFF + (size_t)HD * PAGE / 8;
 constexpr size_t KV_HEAD = VS_OFF + (size_t)(HD / 32) * PAGE * 2;
-constexpr size_t IDX_RAW = (size_t)PAGE * IDX_D * 2;
 constexpr size_t IDX_POOL = (size_t)(PAGE / KPOOL) * IDX_D * 2;
-constexpr size_t KV_LAYER = KV_HEAD * NKV + IDX_RAW + IDX_POOL;
+constexpr size_t KV_LAYER = KV_HEAD * NKV + IDX_POOL;
+constexpr size_t IDX_TAIL = (size_t)KPOOL * IDX_D;     // halfs per layer: raw keys of a sequence's incomplete block
 constexpr size_t KV_PAGE = KV_LAYER * NKVL;
 struct KVRef { uint8_t *pool; const int *pages; };
 
@@ -60,18 +61,32 @@ struct KVRef { uint8_t *pool; const int *pages; };
 // GGUF stores blocks as packed structs; at load time tensors in VRAM are split into separate arrays (same
 // bits, "structure of arrays") so every array is aligned for wide loads. Cold experts stay in GGUF block
 // order in host memory (the CPU's ggml kernels and the GPU's zero-copy prefill read them as they are).
-enum QType : int { F32 = 0, F16 = 1, Q5_0 = 6, Q8_0 = 8, Q6_K = 14, IQ4_NL = 20, IQ4_XS = 23 };
+enum QType : int { F32 = 0, F16 = 1, Q5_0 = 6, Q8_0 = 8, Q2_K = 10, Q3_K = 11, Q6_K = 14, IQ4_NL = 20, IQ4_XS = 23 };
 
+// Q2_K / Q3_K super-blocks (256 weights) in 16 groups of 16; group g = 8n + 2j + k holds weights 128n + 32j + 16k + l
+// (l < 16), whose 2 low bits are bits 2j..2j+1 of byte 32n + 16k + l of the 64 quant bytes (and, Q3_K, its third bit is
+// bit 4n + j of byte 16k + l of the 32 hmask bytes).
 struct QTensor {
     int type = -1;
     int rows = 0, cols = 0;        // rows = output features, cols = input features (K)
     uint8_t *q = nullptr;          // packed quants   Q8_0: int8[rows*cols]  Q6_K, IQ4_XS, IQ4_NL, Q5_0: nibbles[rows*cols/2]
+                                   //                 Q2_K, Q3_K: 2-bit [rows*cols/4]
     uint8_t *qh = nullptr;         // Q6_K high bits [rows*cols/4]   Q5_0 fifth bits [rows*cols/8] (one u32 per block)
+                                   // Q3_K hmask [rows*cols/8]
     uint8_t *sc = nullptr;         // Q6_K int8 scales [rows*cols/16]   IQ4_XS scales_l [rows*cols/64]
+                                   // Q3_K int8 scales (unpacked, -32 applied) [rows*cols/16]   Q2_K scale | min << 4 [rows*cols/16]
     uint16_t *sh = nullptr;        // IQ4_XS scales_h [rows*cols/256]
-    half *d = nullptr;             // Q8_0, Q5_0, IQ4_NL: [rows*cols/32]   Q6_K, IQ4_XS: [rows*cols/256]
+    half *d = nullptr;             // Q8_0, Q5_0, IQ4_NL: [rows*cols/32]   Q6_K, IQ4_XS, Q2_K, Q3_K: [rows*cols/256]
+    half *dm = nullptr;            // Q2_K min scales [rows*cols/256]
     void *f = nullptr;             // F32/F16 data
 };
+// GGUF block size in weights and bytes
+__host__ __device__ constexpr int qk_of(int type) { return (type == Q8_0 || type == Q5_0 || type == IQ4_NL) ? 32 : type == F32 || type == F16 ? 1 : 256; }
+__host__ __device__ constexpr int qbytes_of(int type) {
+    return type == Q8_0 ? 34 : type == Q5_0 ? 22 : type == IQ4_NL ? 18 : type == Q2_K ? 84 : type == Q3_K ? 110 : type == Q6_K ? 210
+         : type == IQ4_XS ? 136 : type == F32 ? 4 : type == F16 ? 2 : 0;
+}
+inline size_t qrow_bytes(int type, int cols) { return (size_t)cols / qk_of(type) * qbytes_of(type); }
 
 // Activations for the int8 dot-product GEMVs: per 32 values one fp32 scale.
 struct QAct { int8_t *q; float *d; };

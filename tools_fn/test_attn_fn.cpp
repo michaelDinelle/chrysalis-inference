@@ -28,15 +28,24 @@ int main() {
     CK(hipMalloc(&dkr, kr.size() * 4)); CK(hipMalloc(&dqr, qr.size() * 4)); CK(hipMalloc(&dones, HD * 4));
     CK(hipMalloc(&dQ16, (size_t)C * NH * HD * 2)); CK(hipMalloc(&dq16, (size_t)C * IDX_H * IDX_D * 2));
     CK(hipMemcpy(dones, ones.data(), HD * 4, hipMemcpyHostToDevice));
-    for (int p0 = 0; p0 < N; p0 += C) {
-        const int T = std::min(C, N - p0);
+    // the sequence's tail (raw indexer keys of its incomplete block) and the per-pass raw key buffer
+    half *tail, *praw;
+    CK(hipMalloc(&tail, IDX_TAIL * 2)); CK(hipMalloc(&praw, (size_t)C * IDX_D * 2));
+    // every raw indexer key fed in, to build the reference pooled keys
+    std::vector<float> all_kr((size_t)N * IDX_D);
+    // passes of uneven sizes (so blocks straddle passes and the tail carries cells over), the cache filled to N
+    std::vector<int> sizes;
+    for (int p0 = 0, i = 0; p0 < N; i++) { const int T = std::min({C, N - p0, (int)(37 + 61 * (i % 4) + (i % 3))}); sizes.push_back(T); p0 += T; }
+    for (int p0 = 0, si = 0; p0 < N; p0 += sizes[si++]) {
+        const int T = sizes[si];
         for (auto &x : qg) x = nd(rng); for (auto &x : k) x = nd(rng); for (auto &x : v) x = nd(rng);
         for (auto &x : kr) x = nd(rng); for (auto &x : qr) x = nd(rng);
         CK(hipMemcpy(dqg, qg.data(), qg.size() * 4, hipMemcpyHostToDevice)); CK(hipMemcpy(dk, k.data(), k.size() * 4, hipMemcpyHostToDevice));
         CK(hipMemcpy(dv, v.data(), v.size() * 4, hipMemcpyHostToDevice)); CK(hipMemcpy(dkr, kr.data(), kr.size() * 4, hipMemcpyHostToDevice));
         CK(hipMemcpy(dqr, qr.data(), qr.size() * 4, hipMemcpyHostToDevice));
+        std::copy(kr.begin(), kr.begin() + (size_t)T * IDX_D, all_kr.begin() + (size_t)p0 * IDX_D);
         attn_prep(dqg, dk, dv, dones, dones, T, p0, kv, layer, dQ16, st);
-        idx_prep(dkr, dqr, dones, dones, T, p0, kv, layer, dq16, st);
+        idx_prep(dkr, dqr, dones, dones, T, p0, kv, layer, tail, praw, true, dq16, st);
     }
     CK(hipStreamSynchronize(st));
     int fails = 0;
@@ -49,7 +58,7 @@ int main() {
         CK(hipMemcpy(dv, v.data(), (size_t)NKV * HD * 4, hipMemcpyHostToDevice));
         attn_prep(dqg, dk, dv, dones, dones, 1, P, kv, layer, dQ16, st);   // overwrite cell P as the query token
         float *po, *pml; half *o1, *o2;
-        CK(hipMalloc(&po, (size_t)MAX_SPLITS * 8 * NH * HD * 4)); CK(hipMalloc(&pml, (size_t)MAX_SPLITS * 8 * NH * 2 * 4));
+        CK(hipMalloc(&po, (size_t)PART_ROWS * NH * HD * 4)); CK(hipMalloc(&pml, (size_t)PART_ROWS * NH * 2 * 4));
         CK(hipMalloc(&o1, NH * HD * 2)); CK(hipMalloc(&o2, NH * HD * 2));
         AttnArgs a; a.Q16 = dQ16; a.kv = kv; a.layer = layer; a.T = 1; a.pos0 = P; a.qg = dqg; a.part_o = po; a.part_ml = pml;
         attention(a, o1, QAct{nullptr, nullptr}, st);
@@ -73,24 +82,72 @@ int main() {
         const int G = 4, P0 = N - G;                     // queries at the last G positions
         for (auto &x : qr) x = nd(rng);
         CK(hipMemcpy(dqr, qr.data(), (size_t)G * IDX_H * IDX_D * 4, hipMemcpyHostToDevice));
-        // indexer queries via idx_prep (also rewrites these cells' raw keys; pooled keys of complete blocks stay)
-        CK(hipMemcpy(dkr, kr.data(), (size_t)G * IDX_D * 4, hipMemcpyHostToDevice));
-        idx_prep(dkr, dqr, dones, dones, G, P0, kv, layer, dq16, st);
+        // indexer queries for the last G cells: a speculative pass over them (no tail update), raw keys as before, so
+        // the pooled key of a block it completes comes out as it was
+        CK(hipMemcpy(dkr, all_kr.data() + (size_t)P0 * IDX_D, (size_t)G * IDX_D * 4, hipMemcpyHostToDevice));
+        idx_prep(dkr, dqr, dones, dones, G, P0, kv, layer, tail, praw, false, dq16, st);
         const int nblk = N / KPOOL;
         float *score; int *dsel;
         CK(hipMalloc(&score, (size_t)G * nblk * 4)); CK(hipMalloc(&dsel, (size_t)G * (SEL_BLOCKS + 1) * 4));
-        idx_select(dq16, P0, G, nblk, kv, layer, score, dsel, st);
+        uint32_t *dhist; CK(hipMalloc(&dhist, (size_t)G * 1024 * 4));
+        idx_select(dq16, P0, G, nblk, kv, layer, score, dhist, dsel, st);
+        {   // the new kernels pick exactly what the reference kernels pick, for every query and several context lengths
+            int *rsel; CK(hipMalloc(&rsel, (size_t)G * (SEL_BLOCKS + 1) * 4));
+            int bad = 0;
+            for (int pos_end : {300, 2047, 2049, 4000, N}) {
+                const int p0 = pos_end - G, nb = pos_end / KPOOL;
+                idx_select(dq16, p0, G, nb, kv, layer, score, dhist, dsel, st);
+                std::vector<int> a1((size_t)G * (SEL_BLOCKS + 1)), a2(a1.size());
+                CK(hipMemcpy(a1.data(), dsel, a1.size() * 4, hipMemcpyDeviceToHost));
+                idx_select_ref(dq16, p0, G, nb, kv, layer, score, rsel, st);
+                CK(hipMemcpy(a2.data(), rsel, a2.size() * 4, hipMemcpyDeviceToHost));
+                for (size_t k = 0; k < a1.size(); k++) bad += a1[k] != a2[k];
+            }
+            {   // all scores tied (zero query): both must take the first 512 visible blocks in order
+                half *zq; CK(hipMalloc(&zq, (size_t)G * IDX_H * IDX_D * 2)); CK(hipMemset(zq, 0, (size_t)G * IDX_H * IDX_D * 2));
+                idx_select(zq, P0, G, nblk, kv, layer, score, dhist, dsel, st);
+                std::vector<int> a1((size_t)G * (SEL_BLOCKS + 1)), a2(a1.size());
+                CK(hipMemcpy(a1.data(), dsel, a1.size() * 4, hipMemcpyDeviceToHost));
+                idx_select_ref(zq, P0, G, nblk, kv, layer, score, rsel, st);
+                CK(hipMemcpy(a2.data(), rsel, a2.size() * 4, hipMemcpyDeviceToHost));
+                for (size_t k = 0; k < a1.size(); k++) bad += a1[k] != a2[k];
+                bad += a1[0] != 0 || a1[SEL_BLOCKS - 1] != SEL_BLOCKS - 1;
+            }
+            printf("new selection vs the reference kernels (5 context lengths x %d queries, plus all ties): %d entries differ %s\n", G, bad, bad ? "FAIL" : "ok");
+            fails += bad != 0;
+            idx_select(dq16, P0, G, nblk, kv, layer, score, dhist, dsel, st);
+        }
         std::vector<int> sel((size_t)G * (SEL_BLOCKS + 1));
         CK(hipMemcpy(sel.data(), dsel, sel.size() * 4, hipMemcpyDeviceToHost));
         std::vector<half> q16((size_t)G * IDX_H * IDX_D);
         CK(hipMemcpy(q16.data(), dq16, q16.size() * 2, hipMemcpyDeviceToHost));
-        // pooled keys back from the pages
+        // pooled keys back from the pages, checked against pooled keys built on the host from every raw key (fp16, mean,
+        // RMS norm, rotation to the block's first cell)
         std::vector<half> pk((size_t)nblk * IDX_D);
+        int pool_bad = 0;
         for (int b = 0; b < nblk; b++) {
             const int cell = b * KPOOL;
-            const size_t off = (size_t)pg[cell / PAGE] * KV_PAGE + (size_t)layer * KV_LAYER + NKV * KV_HEAD + IDX_RAW + (size_t)((cell % PAGE) / KPOOL) * IDX_D * 2;
+            const size_t off = (size_t)pg[cell / PAGE] * KV_PAGE + (size_t)layer * KV_LAYER + NKV * KV_HEAD + (size_t)((cell % PAGE) / KPOOL) * IDX_D * 2;
             CK(hipMemcpy(&pk[(size_t)b * IDX_D], pool + off, IDX_D * 2, hipMemcpyDeviceToHost));
+            float x[IDX_D];
+            double ss = 0;
+            for (int i = 0; i < IDX_D; i++) {
+                float v = 0;
+                for (int c = 0; c < KPOOL; c++) v += __half2float(__float2half(all_kr[(size_t)(cell + c) * IDX_D + i]));
+                x[i] = v / KPOOL; ss += x[i] * x[i];
+            }
+            const float inv = 1.0f / sqrtf((float)(ss / IDX_D) + EPS);
+            for (int i = 0; i < IDX_D; i++) x[i] *= inv;
+            for (int i = 0; i < ROT / 2; i++) {
+                const float th = cell * powf(ROPE_BASE, -2.0f * i / ROT), c0 = cosf(th), s0 = sinf(th);
+                const float a = x[i], bb = x[i + ROT / 2];
+                x[i] = a * c0 - bb * s0; x[i + ROT / 2] = bb * c0 + a * s0;
+            }
+            for (int i = 0; i < IDX_D; i++) pool_bad += fabsf(__half2float(pk[(size_t)b * IDX_D + i]) - x[i]) > 2e-3f * (1 + fabsf(x[i]));
         }
+        printf("pooled keys of %d blocks (passes of uneven sizes, tail carried over) vs the host: %d values off %s\n", nblk, pool_bad,
+               pool_bad ? "FAIL" : "ok");
+        fails += pool_bad != 0;
         for (int g = 0; g < G; g++) {
             const int pos = P0 + g, nvis = (pos + 1) / KPOOL;
             std::vector<std::pair<float, int>> sc(nvis);

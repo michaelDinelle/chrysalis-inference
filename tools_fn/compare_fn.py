@@ -1,9 +1,9 @@
 """Compare kiln's Flash-Next next-token distributions with llama.cpp's on the Q8_0 source (KL divergence, top-1).
 
-The two run different weights (kiln: Q6_K/Q8_0 dense, Q5_0 hot / IQ4_XS+IQ4_NL cold experts; llama.cpp: Q8_0), so the
-numbers are kiln's quantization error plus any implementation error: decode, prefill and mixed paths must agree
-with each other, and the KL should match the predicted ~0.01-0.02.
-  python tools_fn/compare_fn.py [--fresh] [--ref-only]
+The two run different weights (kiln-fn.gguf: Q6_K/Q8_0 dense, IQ4_XS experts in VRAM, Q3_K / Q2_K in RAM; llama.cpp:
+Q8_0), so the numbers are kiln's quantization error plus any implementation error: decode, prefill and mixed paths must
+agree with each other, and the KL should match the prediction (~0.017).
+  python tools_fn/compare_fn.py [--fresh] [--ref-only] [--text FILE --tag NAME] [--model FILE]
 """
 import os
 import subprocess
@@ -15,6 +15,7 @@ ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, ROOT)
 from tokenizers import Tokenizer  # noqa: E402
 from kiln.engine import Engine  # noqa: E402
+from kiln.models import MODELS  # noqa: E402
 
 MODEL = os.path.join(ROOT, "data/models/flash-next/kiln-fn.gguf")
 REF = os.path.join(ROOT, "data/models/flash-next/src/Q8_0/Qwen3.8-Flash-Next-Q8_0-00001-of-00006.gguf")
@@ -38,10 +39,17 @@ def merge(intervals):
 The function runs in O(n log n) time because of the sort; the sweep itself is linear. Edge cases such as
 empty input, a single interval, or intervals that only touch at an endpoint are handled naturally.'''
 
+def arg(name, default=None):
+    return sys.argv[sys.argv.index(name) + 1] if name in sys.argv else default
+
+
+MODEL = arg("--model", MODEL)
+if arg("--text"):                            # another evaluation text, with its own reference directory
+    TEXT = open(arg("--text")).read()
 tok = Tokenizer.from_file(os.path.join(ROOT, "data/models/tokenizer.json"))
 ids = tok.encode(TEXT, add_special_tokens=False).ids
 n = len(ids)
-out_dir = os.path.join(ROOT, "build_fn/cmp")
+out_dir = os.path.join(ROOT, "build_fn/cmp" + ("_" + arg("--tag") if arg("--tag") else ""))
 os.makedirs(out_dir, exist_ok=True)
 np.array(ids, dtype=np.int32).tofile(os.path.join(out_dir, "tokens.bin"))
 ref_path = os.path.join(out_dir, "ref.bin")
@@ -67,10 +75,16 @@ def stats(name, pairs):
         top1 += int(ref[i].argmax() == ours.argmax())
     print(f"{name:28s} positions {len(pairs):4d}  mean KL {np.mean(kls):.5f}  max KL {np.max(kls):.4f}  "
           f"top-1 agree {100 * top1 / len(pairs):.1f}%", flush=True)
+    np.save(os.path.join(out_dir, "kl_" + name.split()[0] + ".npy"), np.array([[i, k] for (i, _), k in zip(pairs, kls)]))
+    if len(pairs) > 1024:                    # by position: long-context paths (sparse selection past 2048 cells) show here
+        pos = np.array([i for i, _ in pairs]); kk = np.array(kls)
+        print("   by position: " + "  ".join(f"{a}-{b}: {kk[(pos >= a) & (pos < b)].mean():.4f}"
+                                            for a, b in ((0, 512), (512, 1024), (1024, 2048), (2048, 2560), (2560, 3072), (3072, 1 << 20))
+                                            if ((pos >= a) & (pos < b)).any()), flush=True)
     return np.mean(kls)
 
 
-eng = Engine(MODEL, max_seqs=2, umax=512, lib=os.path.join(ROOT, "build/libkiln_fn.so"))
+eng = Engine(MODEL, max_seqs=2, umax=MODELS["qwen3.8-flash-next"]["chunk"], lib=os.path.join(ROOT, "build/libkiln_fn.so"))
 s = eng.new_seq()
 pairs = []
 for i, t in enumerate(ids):                 # decode path: one token at a time

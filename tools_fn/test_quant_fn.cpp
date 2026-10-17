@@ -27,6 +27,8 @@ int main() {
         {GGML_TYPE_Q5_0, Q5_0, 256, 2560}, {GGML_TYPE_Q5_0, Q5_0, 256, 640}, {GGML_TYPE_IQ4_NL, IQ4_NL, 256, 2560},
         {GGML_TYPE_IQ4_NL, IQ4_NL, 256, 640}, {GGML_TYPE_Q8_0, Q8_0, 256, 2560}, {GGML_TYPE_Q8_0, Q8_0, 512, 320},
         {GGML_TYPE_Q6_K, Q6_K, 256, 2560}, {GGML_TYPE_IQ4_XS, IQ4_XS, 256, 2560},
+        {GGML_TYPE_Q3_K, Q3_K, 256, 2560}, {GGML_TYPE_Q2_K, Q2_K, 256, 2560},
+        {GGML_TYPE_Q3_K, Q3_K, 1024, 4096}, {GGML_TYPE_Q2_K, Q2_K, 1024, 4096},   // split-K GEMV
     };
     for (const Case &c : cases) {
         printf("%s %dx%d\n", ggml_type_name(c.gt), c.rows, c.cols);

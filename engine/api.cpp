@@ -4,6 +4,8 @@
 
 static Engine *E = nullptr;
 
+float load_progress();                          // load.cpp (C++ linkage, so declared outside extern "C")
+
 extern "C" {
 struct KilnSampling { float temperature, top_p, min_p, presence_penalty; int top_k, n_draft; };
 
@@ -24,6 +26,8 @@ void kiln_shutdown(int) {
 }
 // Loads code objects and pins snapshot buffers; call once after kiln_init, before the first request.
 void kiln_warmup() { E->warmup(); }
+// 0..1 while kiln_init / kiln_warmup run (polled from another thread for a progress bar)
+float kiln_load_progress() { return load_progress(); }
 int kiln_seq_new() { return E->seq_new(); }
 void kiln_seq_free(int id) { E->seq_free(id); }
 int kiln_seq_len(int id) { return E->seqs.at(id).n; }

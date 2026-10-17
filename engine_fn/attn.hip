@@ -351,8 +351,8 @@ void attention(AttnArgs a, half *oh, QAct oq, hipStream_t st) {
     const int nkeys = a.pos0 + a.T;
     a.out_h = oh;
     if (a.T <= 8) {                       // decode / verify: enough splits to fill the GPU, at most MAX_SPLITS
-        const int target = std::min(MAX_SPLITS, std::max(1, 1536 / (ntiles * NKV)));
-        a.split_len = std::max(64, ((nkeys + target - 1) / target + 15) / 16 * 16);
+        const int target = std::min({MAX_SPLITS, PART_ROWS / a.T, std::max(1, 1536 / (ntiles * NKV))});
+        a.split_len = std::max(16, ((nkeys + target - 1) / target + 15) / 16 * 16);   // short contexts: many short splits
         a.nsplit = (nkeys + a.split_len - 1) / a.split_len;
         a.partial = 1;
         k_attn_dec<<<dim3(ntiles, NKV, a.nsplit), 32, 0, st>>>(a);
@@ -360,8 +360,8 @@ void attention(AttnArgs a, half *oh, QAct oq, hipStream_t st) {
         if (oq.q) FAIL("attention: prefill writes fp16 output");
         const int aw = ntiles >= 384 ? 16 : ntiles >= 96 ? 8 : 4;
         const int wgs = (ntiles + aw - 1) / aw * NKV;
-        a.nsplit = std::max(1, std::min({(192 + wgs - 1) / wgs, nkeys / 1024, MAX_SPLITS * 8 / a.T}));
-        if (a.nsplit * a.T > MAX_SPLITS * 8) FAIL("attention: chunk of %d tokens exceeds the partial buffers", a.T);
+        a.nsplit = std::max(1, std::min({(192 + wgs - 1) / wgs, nkeys / 1024, PART_ROWS / a.T}));
+        if (a.nsplit * a.T > PART_ROWS) FAIL("attention: chunk of %d tokens exceeds the partial buffers", a.T);
         a.split_len = ((nkeys + a.nsplit - 1) / a.nsplit + KST - 1) / KST * KST;
         a.nsplit = (nkeys + a.split_len - 1) / a.split_len;
         a.partial = 1;
@@ -379,12 +379,9 @@ void attention(AttnArgs a, half *oh, QAct oq, hipStream_t st) {
 // indexer heads (normed, rotated) score block b as sum_h relu(q_h . k_b) / sqrt(IDX_D); the query attends the
 // cells of its top SEL_BLOCKS complete visible blocks plus the incomplete tail block it sits in.
 
-__device__ __forceinline__ uint8_t *idx_raw(const KVRef &kv, int layer, int cell) {
-    return kv.pool + (size_t)kv.pages[cell / PAGE] * KV_PAGE + (size_t)layer * KV_LAYER + NKV * KV_HEAD + (size_t)(cell % PAGE) * IDX_D * 2;
-}
 __device__ __forceinline__ half *idx_pool(const KVRef &kv, int layer, int block) {
     const int cell = block * KPOOL;
-    return (half *)(kv.pool + (size_t)kv.pages[cell / PAGE] * KV_PAGE + (size_t)layer * KV_LAYER + NKV * KV_HEAD + IDX_RAW) +
+    return (half *)(kv.pool + (size_t)kv.pages[cell / PAGE] * KV_PAGE + (size_t)layer * KV_LAYER + NKV * KV_HEAD) +
            (size_t)((cell % PAGE) / KPOOL) * IDX_D;
 }
 
@@ -409,13 +406,14 @@ __device__ __forceinline__ float norm_rope128(float x, const float *w, int pos, 
     return x;
 }
 
-// grid (1 + IDX_H, T), 128 threads: job 0 stores the raw key of token t, jobs 1.. norm + rotate its query heads
-__global__ __launch_bounds__(128) void k_idx_prep(const float *kraw, const float *qraw, const float *qnw, int pos0, KVRef kv,
-                                                  int layer, half *q16) {
+// grid (1 + IDX_H, T), 128 threads: job 0 stores the raw key of token t (fp16, in the pass buffer), jobs 1.. norm +
+// rotate its query heads
+__global__ __launch_bounds__(128) void k_idx_prep(const float *kraw, const float *qraw, const float *qnw, int pos0, half *praw,
+                                                  half *q16) {
     __shared__ float red[4], buf[ROT];
     const int job = blockIdx.x, t = blockIdx.y, i = threadIdx.x, pos = pos0 + t;
     if (job == 0) {
-        ((half *)idx_raw(kv, layer, pos))[i] = __float2half(kraw[(size_t)t * IDX_D + i]);
+        praw[(size_t)t * IDX_D + i] = __float2half(kraw[(size_t)t * IDX_D + i]);
         return;
     }
     const int h = job - 1;
@@ -423,22 +421,40 @@ __global__ __launch_bounds__(128) void k_idx_prep(const float *kraw, const float
     q16[((size_t)t * IDX_H + h) * IDX_D + i] = __float2half(x);
 }
 
-// one block per pooled key completed by tokens pos0 .. pos0+T-1 (blocks b0 ..), 128 threads
-__global__ __launch_bounds__(128) void k_idx_pool(int b0, KVRef kv, int layer, const float *knw) {
+// one block per pooled key completed by tokens pos0 .. pos0+T-1 (blocks b0 ..), 128 threads; raw keys of cells before
+// pos0 come from the sequence's tail (slot = cell % KPOOL), the rest from this pass's buffer
+__global__ __launch_bounds__(128) void k_idx_pool(int b0, int pos0, const half *tail, const half *praw, KVRef kv, int layer, const float *knw) {
     __shared__ float red[4], buf[ROT];
     const int b = b0 + blockIdx.x, i = threadIdx.x;
     float x = 0;
-    for (int c = 0; c < KPOOL; c++) x += __half2float(((const half *)idx_raw(kv, layer, b * KPOOL + c))[i]);
+    for (int c = 0; c < KPOOL; c++) {
+        const int cell = b * KPOOL + c;
+        x += __half2float(cell < pos0 ? tail[(cell % KPOOL) * IDX_D + i] : praw[(size_t)(cell - pos0) * IDX_D + i]);
+    }
     x = norm_rope128(x * (1.0f / KPOOL), knw, b * KPOOL, red, buf);
     idx_pool(kv, layer, b)[i] = __float2half(x);
 }
 
+// the tail after the cells before n_end are final: raw keys of n_end's incomplete block that this pass wrote. Grid:
+// layers (tail / praw strides per layer), 128 threads.
+__global__ __launch_bounds__(128) void k_idx_tail(half *tail, const half *praw, size_t praw_layer, int pos0, int n_end) {
+    half *tl = tail + (size_t)blockIdx.x * IDX_TAIL;
+    const half *pr = praw + (size_t)blockIdx.x * praw_layer;
+    for (int cell = max(pos0, n_end / KPOOL * KPOOL); cell < n_end; cell++)
+        tl[(cell % KPOOL) * IDX_D + threadIdx.x] = pr[(size_t)(cell - pos0) * IDX_D + threadIdx.x];
+}
+
 void idx_prep(const float *kraw, const float *qraw, const float *qnw, const float *knw, int T, int pos0, KVRef kv, int layer,
-              half *q16, hipStream_t st) {
-    k_idx_prep<<<dim3(1 + IDX_H, T), 128, 0, st>>>(kraw, qraw, qnw, pos0, kv, layer, q16);
+              half *tail, half *praw, bool keep_tail, half *q16, hipStream_t st) {
+    k_idx_prep<<<dim3(1 + IDX_H, T), 128, 0, st>>>(kraw, qraw, qnw, pos0, praw, q16);
     // blocks completed in this pass: b with b*KPOOL + KPOOL-1 in [pos0, pos0 + T - 1]
     const int first = pos0 / KPOOL, last = (pos0 + T) / KPOOL - 1;
-    if (last >= first) k_idx_pool<<<last - first + 1, 128, 0, st>>>(first, kv, layer, knw);
+    if (last >= first) k_idx_pool<<<last - first + 1, 128, 0, st>>>(first, pos0, tail, praw, kv, layer, knw);
+    if (keep_tail) k_idx_tail<<<1, 128, 0, st>>>(tail, praw, 0, pos0, pos0 + T);
+}
+
+void idx_tail_commit(half *tails, const half *praw, size_t praw_layer, int layers, int pos0, int n_end, hipStream_t st) {
+    k_idx_tail<<<layers, 128, 0, st>>>(tails, praw, praw_layer, pos0, n_end);
 }
 
 // scores [G][nblk] for G query tokens at positions pos0 + t (block b visible to t when (b+1)*KPOOL <= pos+1)
@@ -547,7 +563,270 @@ __global__ __launch_bounds__(1024) void k_idx_select(const float *score, int pos
     }
 }
 
-void idx_select(const half *q16, int pos0, int G, int nblk, KVRef kv, int layer, float *score, int *sel, hipStream_t st) {
+// ---- faster selection (decode at long context: 65K blocks per QSA layer at 262K) ------------------------------------
+// Scores: 16 lanes per block (16-byte loads, coalesced), 16 blocks per workgroup step; each workgroup also counts the
+// top 10 bits of its scores (non-negative floats order like their bits) and adds its non-empty bins to the token's
+// histogram, so the selection starts from a 1024-bin histogram instead of 4 radix passes over every score.
+constexpr int SEL_BINS = 1024;
+__global__ __launch_bounds__(256) void k_idx_score2(const half *q16, int pos0, int nblk, KVRef kv, int layer, float *score,
+                                                    uint32_t *hist) {
+    __shared__ uint32_t lh[SEL_BINS];
+    const int t = blockIdx.y, tid = threadIdx.x, g = tid / 16, l = tid % 16, pos = pos0 + t;
+    const int nvis = min(nblk, (pos + 1) / KPOOL);
+    for (int i = tid; i < SEL_BINS; i += 256) lh[i] = 0;
+    float q[IDX_H][8];
+#pragma unroll
+    for (int h = 0; h < IDX_H; h++) {
+        const int4 v = *(const int4 *)(q16 + ((size_t)t * IDX_H + h) * IDX_D + l * 8);
+        const half2 *hv = (const half2 *)&v;
+#pragma unroll
+        for (int k = 0; k < 4; k++) { const float2 f = __half22float2(hv[k]); q[h][2 * k] = f.x; q[h][2 * k + 1] = f.y; }
+    }
+    __syncthreads();
+    const int b0 = blockIdx.x * 256;
+#pragma unroll 4
+    for (int it = 0; it < 16; it++) {
+        const int b = b0 + it * 16 + g;
+        if (b >= nblk) break;
+        float acc[IDX_H] = {};
+        if (b < nvis) {
+            const int4 v = *(const int4 *)(idx_pool(kv, layer, b) + l * 8);
+            const half2 *hv = (const half2 *)&v;
+#pragma unroll
+            for (int k = 0; k < 4; k++) {
+                const float2 f = __half22float2(hv[k]);
+#pragma unroll
+                for (int h = 0; h < IDX_H; h++) acc[h] += q[h][2 * k] * f.x + q[h][2 * k + 1] * f.y;
+            }
+        }
+#pragma unroll
+        for (int h = 0; h < IDX_H; h++)
+#pragma unroll
+            for (int o = 8; o > 0; o >>= 1) acc[h] += __shfl_xor(acc[h], o, 16);
+        if (l == 0) {
+            float sc = -INFINITY;
+            if (b < nvis) {
+                sc = 0;
+#pragma unroll
+                for (int h = 0; h < IDX_H; h++) sc += fmaxf(acc[h], 0.0f);
+                sc *= 0.08838834764831845f;           // 1/sqrt(128)
+                atomicAdd(&lh[__float_as_uint(sc) >> 22], 1u);
+            }
+            score[(size_t)t * nblk + b] = sc;
+        }
+    }
+    __syncthreads();
+    for (int i = tid; i < SEL_BINS; i += 256) if (lh[i]) atomicAdd(&hist[(size_t)t * SEL_BINS + i], lh[i]);
+}
+
+// Top SEL_BLOCKS from the histogram: the threshold bin from suffix sums, its exact threshold value by radix passes over
+// the scores in that bin only (bits 21..0), then one compaction pass in block order (each thread a contiguous range,
+// one scan): blocks above the threshold, plus the first `need` equal to it (ties to the lower block ids). Same output
+// as k_idx_select.
+// inclusive prefix sum over a wave (32 lanes)
+__device__ __forceinline__ int wave_incl(int v, int lane) {
+#pragma unroll
+    for (int o = 1; o < 32; o <<= 1) { const int u = __shfl_up(v, o, 32); if (lane >= o) v += u; }
+    return v;
+}
+// exclusive prefix sum over the 1024 threads of a workgroup (2 barriers); total comes back in *tot
+__device__ __forceinline__ int block_excl(int v, int *wsum, int *tot) {
+    const int lane = threadIdx.x % 32, wave = threadIdx.x / 32;
+    const int inc = wave_incl(v, lane);
+    if (lane == 31) wsum[wave] = inc;
+    __syncthreads();
+    if (wave == 0) {
+        const int w = wave_incl(wsum[lane], lane);
+        wsum[lane] = w;                               // inclusive per wave
+    }
+    __syncthreads();
+    *tot = wsum[31];
+    return inc - v + (wave ? wsum[wave - 1] : 0);
+}
+// Wave 0 finds, in a histogram of n bins (counts per digit), the digit d holding the need-th largest element counting
+// from the top digit down: returns d and the count of elements above it (all lanes of wave 0 get the result).
+__device__ __forceinline__ void digit_of(const uint32_t *h, int n, uint32_t need, int lane, int &d_out, uint32_t &above) {
+    const int per = n / 32;                           // bins per lane, lane 0 owns the top ones
+    uint32_t loc = 0;
+    for (int k = 0; k < per; k++) loc += h[n - 1 - (lane * per + k)];
+    const int inc = wave_incl((int)loc, lane), exc = inc - (int)loc;
+    const bool mine = (uint32_t)exc < need && (uint32_t)inc >= need;
+    const unsigned long long m = __ballot(mine);
+    const int owner = m ? __ffsll((long long)m) - 1 : 31;
+    int d = 0; uint32_t ab = 0;
+    if (lane == owner) {
+        uint32_t acc = (uint32_t)exc;
+        int k = 0;
+        for (; k < per - 1; k++) { const uint32_t c = h[n - 1 - (lane * per + k)]; if (acc + c >= need) break; acc += c; }
+        d = n - 1 - (lane * per + k); ab = acc;
+    }
+    d_out = __shfl(d, owner, 32); above = (uint32_t)__shfl((int)ab, owner, 32);
+}
+
+__global__ __launch_bounds__(1024) void k_idx_select2(const float *score, const uint32_t *hist, int pos0, int nblk, int *sel) {
+    __shared__ uint32_t hb[SEL_BINS], h256[256], hw[32][256];   // per-wave sub-histograms: ties do not serialize
+    __shared__ uint32_t s_prefix, s_need, s_mask;
+    __shared__ int wsum[32];
+    const int t = blockIdx.x, tid = threadIdx.x, lane = tid % 32, wave = tid / 32, pos = pos0 + t;
+    const int nvis = min(nblk, (pos + 1) / KPOOL);
+    const float *s = score + (size_t)t * nblk;
+    int *out = sel + (size_t)t * (SEL_BLOCKS + 1);
+    const int want = min(nvis, SEL_BLOCKS);
+    const bool all = want >= nvis;
+    if (!all) {
+        hb[tid] = hist[(size_t)t * SEL_BINS + tid];
+        __syncthreads();
+        if (wave == 0) {                              // the threshold bin from the top 10 bits
+            int d; uint32_t above;
+            digit_of(hb, SEL_BINS, (uint32_t)want, lane, d, above);
+            if (lane == 0) { s_prefix = (uint32_t)d << 22; s_mask = 0xFFC00000u; s_need = want - above; }
+        }
+        __syncthreads();
+        // the remaining 22 bits, 8 + 8 + 6, over the scores matching the prefix so far
+        for (int shift = 14; shift >= -6; shift -= 8) {
+            const int sh_ = shift < 0 ? 0 : shift, bits = shift < 0 ? 6 : 8;
+            for (int i = tid; i < 32 * 256; i += 1024) hw[i / 256][i % 256] = 0;
+            __syncthreads();
+            const uint32_t prefix = s_prefix, mask = s_mask;
+            for (int b0 = tid; b0 < nvis; b0 += 8 * 1024) {     // 8 loads in flight per thread
+                uint32_t u[8];
+#pragma unroll
+                for (int k = 0; k < 8; k++) { const int b = b0 + k * 1024; u[k] = b < nvis ? __float_as_uint(s[b]) : ~prefix; }
+#pragma unroll
+                for (int k = 0; k < 8; k++)
+                    if ((u[k] & mask) == prefix) atomicAdd(&hw[wave][(u[k] >> sh_) & ((1u << bits) - 1)], 1u);
+            }
+            __syncthreads();
+            if (tid < 256) { uint32_t c = 0; for (int v = 0; v < 32; v++) c += hw[v][tid]; h256[tid] = c; }
+            __syncthreads();
+            if (wave == 0) {
+                int d; uint32_t above;
+                digit_of(h256, 1 << bits, s_need, lane, d, above);
+                if (lane == 0) { s_need -= above; s_prefix = prefix | ((uint32_t)d << sh_); s_mask = mask | (((1u << bits) - 1) << sh_); }
+            }
+            __syncthreads();
+        }
+    }
+    const uint32_t thr = all ? 0 : s_prefix, need = all ? 0 : s_need;
+    // compaction in block order: wave w owns blocks [lo, hi), its lanes read them together (coalesced); order inside a
+    // wave from ballots, across waves from one scan
+    const int per = ((nvis + 31) / 32 + 31) / 32 * 32, lo = min(nvis, wave * per), hi = min(nvis, lo + per);
+    int n_take = 0, n_eq = 0;                         // per wave (lane 0 holds the sums)
+    for (int b0 = lo; b0 < hi; b0 += 32 * 4) {
+        uint32_t u[4];
+#pragma unroll
+        for (int k = 0; k < 4; k++) { const int b = b0 + k * 32 + lane; u[k] = b < hi ? __float_as_uint(s[b]) : 0u; }
+#pragma unroll
+        for (int k = 0; k < 4; k++) {
+            const int b = b0 + k * 32 + lane;
+            n_take += __popcll(__ballot(b < hi && (all || u[k] > thr)));
+            n_eq += __popcll(__ballot(b < hi && !all && u[k] == thr));
+        }
+    }
+    __shared__ int w_take[32], w_eq[32];
+    if (lane == 0) { w_take[wave] = n_take; w_eq[wave] = n_eq; }
+    __syncthreads();
+    int eq_before = 0, out_before = 0;
+    for (int v = 0; v < wave; v++) eq_before += w_eq[v];
+    int tot = 0;
+    for (int v = 0; v < 32; v++) {
+        const int e = max(0, min(w_eq[v], (int)need - (tot == 0 && v == 0 ? 0 : 0)));
+        (void)e;
+    }
+    // equals taken by the waves before mine, then my own output offset
+    {
+        int eqb = 0, ob = 0;
+        for (int v = 0; v < 32; v++) {
+            const int taken_eq = max(0, min(w_eq[v], (int)need - eqb));
+            if (v < wave) ob += w_take[v] + taken_eq;
+            tot += w_take[v] + taken_eq;
+            eqb += w_eq[v];
+        }
+        out_before = ob;
+    }
+    int w = out_before, eq_seen = eq_before;          // running output position and equal rank (block order)
+    for (int b0 = lo; b0 < hi; b0 += 32 * 4) {
+        uint32_t u[4];
+#pragma unroll
+        for (int k = 0; k < 4; k++) { const int b = b0 + k * 32 + lane; u[k] = b < hi ? __float_as_uint(s[b]) : 0u; }
+#pragma unroll
+        for (int k = 0; k < 4; k++) {
+            const int b = b0 + k * 32 + lane;
+            const bool in = b < hi;
+            const bool eq = in && !all && u[k] == thr;
+            const unsigned long long me = __ballot(eq), below = (1ull << lane) - 1;
+            const bool take_eq = eq && eq_seen + __popcll(me & below) < (int)need;
+            const bool take = in && (all || u[k] > thr || take_eq);
+            const unsigned long long mt = __ballot(take);
+            if (take) out[w + __popcll(mt & below)] = b;
+            w += __popcll(mt);
+            eq_seen += __popcll(me);
+        }
+    }
+    if (tid == 0) {
+        int n = tot;
+        if ((pos + 1) % KPOOL != 0) out[n++] = (pos + 1) / KPOOL;   // the tail block (masked past pos)
+        for (; n < SEL_BLOCKS + 1; n++) out[n] = -1;
+    }
+}
+
+// Scores for G > 1 query tokens (prefill) as WMMA tiles: a wave computes 16 tokens x 16 blocks, the 16 pooled keys
+// loaded once as B fragments and used for all 4 indexer heads (A = the tokens' query heads), so the keys are read once
+// per 16 tokens instead of once per token. Workgroup: 4 waves = 64 blocks.
+__global__ __launch_bounds__(128) void k_idx_score_mm(const half *q16, int G, int pos0, int nblk, KVRef kv, int layer, float *score) {
+    const int wave = threadIdx.x / 32, lane = threadIdx.x % 32, r16 = lane % 16, hi = lane / 16;
+    const int t0 = blockIdx.y * 16, b = (blockIdx.x * 4 + wave) * 16 + r16;
+    // B fragments: block b's key, 8 slices of 16 dims (blocks past nblk read block 0, masked below)
+    const half *kp = idx_pool(kv, layer, b < nblk ? b : 0);
+    h16 kb[8];
+#pragma unroll
+    for (int k = 0; k < 8; k++) kb[k] = *(const h16 *)(kp + k * 16);
+    const int ta = min(t0 + r16, G - 1);               // A row: token t0 + r16 (rows past G repeat the last token)
+    f8 sum = {};
+#pragma unroll
+    for (int h = 0; h < IDX_H; h++) {
+        f8 acc = {};
+        const half *qp = q16 + ((size_t)ta * IDX_H + h) * IDX_D;
+#pragma unroll
+        for (int k = 0; k < 8; k++) acc = __builtin_amdgcn_wmma_f32_16x16x16_f16_w32(*(const h16 *)(qp + k * 16), kb[k], acc);
+#pragma unroll
+        for (int i = 0; i < 8; i++) sum[i] += fmaxf(acc[i], 0.0f);
+    }
+    // lane holds tokens t0 + 2i + hi, block b
+    if (b >= nblk) return;
+#pragma unroll
+    for (int i = 0; i < 8; i++) {
+        const int t = t0 + 2 * i + hi;
+        if (t >= G) continue;
+        const bool vis = (b + 1) * KPOOL <= pos0 + t + 1;
+        score[(size_t)t * nblk + b] = vis ? sum[i] * 0.08838834764831845f : -INFINITY;
+    }
+}
+
+// the per-token histograms of the top 10 score bits, from a score matrix (one workgroup per token and 4096 blocks)
+__global__ __launch_bounds__(256) void k_idx_hist(const float *score, int pos0, int nblk, uint32_t *hist) {
+    __shared__ uint32_t lh[SEL_BINS];
+    const int t = blockIdx.y, tid = threadIdx.x;
+    const int nvis = min(nblk, (pos0 + t + 1) / KPOOL);
+    for (int i = tid; i < SEL_BINS; i += 256) lh[i] = 0;
+    __syncthreads();
+    const int b1 = min(nvis, (int)(blockIdx.x + 1) * 4096);
+    for (int b = blockIdx.x * 4096 + tid; b < b1; b += 256) atomicAdd(&lh[__float_as_uint(score[(size_t)t * nblk + b]) >> 22], 1u);
+    __syncthreads();
+    for (int i = tid; i < SEL_BINS; i += 256) if (lh[i]) atomicAdd(&hist[(size_t)t * SEL_BINS + i], lh[i]);
+}
+
+void idx_select(const half *q16, int pos0, int G, int nblk, KVRef kv, int layer, float *score, uint32_t *hist, int *sel, hipStream_t st) {
+    CK(hipMemsetAsync(hist, 0, (size_t)G * SEL_BINS * 4, st));
+    if (G == 1) k_idx_score2<<<dim3((nblk + 255) / 256, 1), 256, 0, st>>>(q16, pos0, nblk, kv, layer, score, hist);
+    else {                                            // several tokens: WMMA tiles, then their histograms
+        k_idx_score_mm<<<dim3((nblk + 63) / 64, (G + 15) / 16), 128, 0, st>>>(q16, G, pos0, nblk, kv, layer, score);
+        k_idx_hist<<<dim3((nblk + 4095) / 4096, G), 256, 0, st>>>(score, pos0, nblk, hist);
+    }
+    k_idx_select2<<<G, 1024, 0, st>>>(score, hist, pos0, nblk, sel);
+}
+// the earlier two kernels, kept as the reference the unit test compares against
+void idx_select_ref(const half *q16, int pos0, int G, int nblk, KVRef kv, int layer, float *score, int *sel, hipStream_t st) {
     k_idx_score<<<dim3((nblk + 255) / 256, G), 256, 0, st>>>(q16, pos0, nblk, kv, layer, score);
     k_idx_select<<<G, 1024, 0, st>>>(score, pos0, nblk, sel);
 }
@@ -671,10 +950,10 @@ __global__ __launch_bounds__(32) void k_attn_sel(AttnArgs a, const int *sel, int
 // sparse attention for T tokens at pos0.. with their block lists `sel`; output like attention()
 void attention_sel(AttnArgs a, const int *sel, half *oh, QAct oq, hipStream_t st) {
     const int groups = (SEL_BLOCKS + 1 + 3) / 4;
-    const int nsplit = std::max(1, std::min(16, 1536 / std::max(1, a.T * NKV)));
+    const int nsplit = std::max(1, std::min({groups, 1536 / std::max(1, a.T * NKV), PART_ROWS / a.T}));   // decode: ~one group per wave
     const int gps = (groups + nsplit - 1) / nsplit;
     a.nsplit = (groups + gps - 1) / gps;
-    if (a.nsplit * a.T > MAX_SPLITS * 8) FAIL("attention_sel: %d tokens x %d splits exceed the partial buffers", a.T, a.nsplit);
+    if (a.nsplit * a.T > PART_ROWS) FAIL("attention_sel: %d tokens x %d splits exceed the partial buffers", a.T, a.nsplit);
     k_attn_sel<<<dim3(a.T, NKV, a.nsplit), 32, 0, st>>>(a, sel, gps);
     k_attn_combine<<<a.T * NH, 256, 0, st>>>(a.part_o, a.part_ml, a.nsplit, a.T * NH, a.qg, oh, oq);
 }

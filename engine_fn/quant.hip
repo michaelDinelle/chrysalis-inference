@@ -6,6 +6,52 @@
 
 // ---- weight arrays (relayout from GGUF blocks: relayout.hip) -------------------------------------
 
+// t (rows set) = rows r0.. of W: each array offset by r0 rows' worth of its elements
+void qtensor_rows(QTensor &t, const QTensor &W, int r0) {
+    const size_t n = (size_t)r0 * W.cols;
+    switch (W.type) {
+        case F32: t.f = (float *)W.f + n; break;
+        case F16: t.f = (half *)W.f + n; break;
+        case Q8_0: t.q = W.q + n; t.d = W.d + n / 32; break;
+        case Q6_K: t.q = W.q + n / 2; t.qh = W.qh + n / 4; t.sc = W.sc + n / 16; t.d = W.d + n / 256; break;
+        case IQ4_XS: t.q = W.q + n / 2; t.sc = W.sc + n / 64; t.sh = W.sh + n / 256; t.d = W.d + n / 256; break;
+        case IQ4_NL: t.q = W.q + n / 2; t.d = W.d + n / 32; break;
+        case Q5_0: t.q = W.q + n / 2; t.qh = W.qh + n / 8; t.d = W.d + n / 32; break;
+        case Q3_K: t.q = W.q + n / 4; t.qh = W.qh + n / 8; t.sc = W.sc + n / 16; t.d = W.d + n / 256; break;
+        case Q2_K: t.q = W.q + n / 4; t.sc = W.sc + n / 16; t.d = W.d + n / 256; t.dm = W.dm + n / 256; break;
+        default: FAIL("qtensor_rows: type %d", W.type);
+    }
+}
+
+// The arrays a tensor occupies (pointer, bytes), as make_qtensor carves them
+void qtensor_arrays(const QTensor &t, std::vector<std::pair<const void *, size_t>> &out) {
+    const size_t n = (size_t)t.rows * t.cols;
+    auto add = [&](const void *p, size_t bytes) { if (p && bytes) out.push_back({p, bytes}); };
+    switch (t.type) {
+        case F32: add(t.f, n * 4); break;
+        case F16: add(t.f, n * 2); break;
+        case Q8_0: add(t.q, n); add(t.d, n / 32 * 2); break;
+        case Q6_K: add(t.q, n / 2); add(t.qh, n / 4); add(t.sc, n / 16); add(t.d, n / 256 * 2); break;
+        case IQ4_XS: add(t.q, n / 2); add(t.sc, n / 64); add(t.sh, n / 256 * 2); add(t.d, n / 256 * 2); break;
+        case IQ4_NL: add(t.q, n / 2); add(t.d, n / 32 * 2); break;
+        case Q5_0: add(t.q, n / 2); add(t.qh, n / 8); add(t.d, n / 32 * 2); break;
+        case Q3_K: add(t.q, n / 4); add(t.qh, n / 8); add(t.sc, n / 16); add(t.d, n / 256 * 2); break;
+        case Q2_K: add(t.q, n / 4); add(t.sc, n / 16); add(t.d, n / 256 * 2); add(t.dm, n / 256 * 2); break;
+    }
+}
+
+// Read ranges of VRAM so they land in the Infinity Cache (decode: the next layer's weights, while the CPU computes the
+// current layer's cold experts). blockIdx.y = range; the xor keeps the loads.
+__global__ __launch_bounds__(256) void k_prefetch(const PrefetchRange *r, unsigned *sink) {
+    const PrefetchRange R = r[blockIdx.y];
+    unsigned acc = 0;
+    for (size_t i = blockIdx.x * 256 + threadIdx.x; i < R.n16; i += (size_t)gridDim.x * 256) acc ^= R.p[i].x;
+    if (acc == 0x9e3779b9u) *sink = acc;
+}
+void prefetch(const PrefetchRange *r, int n, unsigned *sink, hipStream_t st) {
+    if (n) k_prefetch<<<dim3(32, n), 256, 0, st>>>(r, sink);
+}
+
 QTensor make_qtensor(Arena &a, int type, int rows, int cols) {
     QTensor t; t.type = type; t.rows = rows; t.cols = cols;
     const size_t n = (size_t)rows * cols;
@@ -17,6 +63,8 @@ QTensor make_qtensor(Arena &a, int type, int rows, int cols) {
         case IQ4_XS: t.q = a.get(n / 2); t.sc = a.get(n / 64); t.sh = a.get<uint16_t>(n / 256); t.d = a.get<half>(n / 256); break;
         case IQ4_NL: t.q = a.get(n / 2); t.d = a.get<half>(n / 32); break;
         case Q5_0: t.q = a.get(n / 2); t.qh = a.get(n / 8); t.d = a.get<half>(n / 32); break;
+        case Q3_K: t.q = a.get(n / 4); t.qh = a.get(n / 8); t.sc = a.get(n / 16); t.d = a.get<half>(n / 256); break;
+        case Q2_K: t.q = a.get(n / 4); t.sc = a.get(n / 16); t.d = a.get<half>(n / 256); t.dm = a.get<half>(n / 256); break;
         default: FAIL("unsupported tensor type %d", type);
     }
     return t;
@@ -60,6 +108,15 @@ __device__ __forceinline__ void iq4_block(int4 w, int4 &lo, int4 &hi) {
 __device__ __forceinline__ int dot16(int4 w, int4 x, int acc) {
     return dot4(w.w, x.w, dot4(w.z, x.z, dot4(w.y, x.y, dot4(w.x, x.x, acc))));
 }
+__device__ __forceinline__ int sum16(int4 x) { return dot16(make_int4(0x01010101, 0x01010101, 0x01010101, 0x01010101), x, 0); }
+// Q2_K: the 2-bit values at shift 2j of 4 quant bytes, as 4 bytes in [0, 3]
+__device__ __forceinline__ int q2_vals(uint32_t w, int j) { return (int)((w >> (2 * j)) & 0x03030303u); }
+// Q3_K: the same plus the third bit (bit `bit` of the 4 hmask bytes), minus 4: int8 values in [-4, 3]. The byte-wise
+// subtraction goes through the sign bit so no byte borrows from its neighbour.
+__device__ __forceinline__ int q3_vals(uint32_t w, uint32_t hm, int j, int bit) {
+    const uint32_t u = ((w >> (2 * j)) & 0x03030303u) | (((hm >> bit) & 0x01010101u) << 2);
+    return (int)(((u | 0x80808080u) - 0x04040404u) ^ 0x80808080u);
+}
 
 // ---- decode GEMV: y[t][row] (+)= W[row] . x[t] for T <= 8 tokens ----------------------------------
 // A wave computes R rows at once (R consecutive rows of one matrix, or the gate and up rows of the
@@ -69,10 +126,13 @@ __device__ __forceinline__ int dot16(int4 w, int4 x, int acc) {
 // the down projection (1024-thread workgroups = 32 rows = one int8 block per token).
 
 template <int QT, int T, int R>
-__device__ __forceinline__ void rows_dot(const QTensor *const W[R], const int row[R], int lane, QAct x, float acc[R][T]) {
+__device__ __forceinline__ void rows_dot(const QTensor *const W[R], const int row[R], int lane, QAct x, float acc[R][T],
+                                         int part = 0, int nparts = 1) {
     const int K = W[0]->cols;
+    const int n32 = K / 32, b32 = part * n32 / nparts, e32 = (part + 1) * n32 / nparts;   // split-K ranges (Q6_K: 64s)
+    const int n64 = K / 64, b64 = part * n64 / nparts, e64 = (part + 1) * n64 / nparts;
     if constexpr (QT == Q8_0) {
-        for (int ch = lane; ch < K / 32; ch += 32) {
+        for (int ch = b32 + lane; ch < e32; ch += 32) {
             int4 w0[R], w1[R]; float dw[R];
 #pragma unroll
             for (int r = 0; r < R; r++) {
@@ -90,7 +150,7 @@ __device__ __forceinline__ void rows_dot(const QTensor *const W[R], const int ro
             }
         }
     } else if constexpr (QT == IQ4_XS) {
-        for (int ch = lane; ch < K / 32; ch += 32) {
+        for (int ch = b32 + lane; ch < e32; ch += 32) {
             const int sb = ch >> 3, ib = ch & 7;
             int4 lo[R], hi[R]; float dl[R];
 #pragma unroll
@@ -111,7 +171,7 @@ __device__ __forceinline__ void rows_dot(const QTensor *const W[R], const int ro
             }
         }
     } else if constexpr (QT == IQ4_NL || QT == Q5_0) {
-        for (int ch = lane; ch < K / 32; ch += 32) {
+        for (int ch = b32 + lane; ch < e32; ch += 32) {
             int4 lo[R], hi[R]; float dw[R];
 #pragma unroll
             for (int r = 0; r < R; r++) {
@@ -129,8 +189,49 @@ __device__ __forceinline__ void rows_dot(const QTensor *const W[R], const int ro
                 for (int r = 0; r < R; r++) acc[r][t] += dw[r] * xd * dot16(hi[r], b, dot16(lo[r], a, 0));
             }
         }
+    } else if constexpr (QT == Q3_K || QT == Q2_K) {
+        // chunk ch = weights 32ch..: super-block sb, half n, shift j; its 16-groups g (quant bytes 32n..+15) and g + 1
+        for (int ch = b32 + lane; ch < e32; ch += 32) {
+            const int sb = ch >> 3, n = (ch >> 2) & 1, j = ch & 3, g = 8 * n + 2 * j;
+            int4 lo[R], hi[R]; float s0[R], s1[R], m0[R], m1[R];
+#pragma unroll
+            for (int r = 0; r < R; r++) {
+                const size_t gsb = (size_t)row[r] * (K / 256) + sb;
+                const uint8_t *qp = W[r]->q + gsb * 64 + 32 * n;
+                const int4 A = *(const int4 *)qp, B = *(const int4 *)(qp + 16);
+                const float d = __half2float(W[r]->d[gsb]);
+                if constexpr (QT == Q3_K) {
+                    const int4 HA = *(const int4 *)(W[r]->qh + gsb * 32), HB = *(const int4 *)(W[r]->qh + gsb * 32 + 16);
+                    const int bit = 4 * n + j;
+                    lo[r] = make_int4(q3_vals(A.x, HA.x, j, bit), q3_vals(A.y, HA.y, j, bit), q3_vals(A.z, HA.z, j, bit), q3_vals(A.w, HA.w, j, bit));
+                    hi[r] = make_int4(q3_vals(B.x, HB.x, j, bit), q3_vals(B.y, HB.y, j, bit), q3_vals(B.z, HB.z, j, bit), q3_vals(B.w, HB.w, j, bit));
+                    const int8_t *sc = (const int8_t *)W[r]->sc + gsb * 16 + g;
+                    s0[r] = d * sc[0]; s1[r] = d * sc[1]; m0[r] = m1[r] = 0;
+                } else {
+                    lo[r] = make_int4(q2_vals(A.x, j), q2_vals(A.y, j), q2_vals(A.z, j), q2_vals(A.w, j));
+                    hi[r] = make_int4(q2_vals(B.x, j), q2_vals(B.y, j), q2_vals(B.z, j), q2_vals(B.w, j));
+                    const uint8_t *sc = W[r]->sc + gsb * 16 + g;
+                    const float dm = __half2float(W[r]->dm[gsb]);
+                    s0[r] = d * (sc[0] & 15); s1[r] = d * (sc[1] & 15); m0[r] = dm * (sc[0] >> 4); m1[r] = dm * (sc[1] >> 4);
+                }
+            }
+#pragma unroll
+            for (int t = 0; t < T; t++) {
+                const int8_t *xp = x.q + (size_t)t * K + ch * 32;
+                const int4 a = *(const int4 *)xp, b = *(const int4 *)(xp + 16);
+                const float xd = x.d[t * (K / 32) + ch];
+                int sa = 0, sbb = 0;
+                if constexpr (QT == Q2_K) { sa = sum16(a); sbb = sum16(b); }
+#pragma unroll
+                for (int r = 0; r < R; r++) {
+                    float v = s0[r] * dot16(lo[r], a, 0) + s1[r] * dot16(hi[r], b, 0);
+                    if constexpr (QT == Q2_K) v -= m0[r] * sa + m1[r] * sbb;
+                    acc[r][t] += xd * v;
+                }
+            }
+        }
     } else if constexpr (QT == Q6_K) {
-        for (int ch = lane; ch < K / 64; ch += 32) {
+        for (int ch = b64 + lane; ch < e64; ch += 32) {
             const int sb = ch >> 2, h = (ch >> 1) & 1, c = ch & 1;
             int4 q[R][4]; float sc[R][4];
 #pragma unroll
@@ -164,12 +265,15 @@ __device__ __forceinline__ void rows_dot(const QTensor *const W[R], const int ro
 }
 
 template <int T, int R>
-__device__ __forceinline__ void rows_dot_any(const QTensor *const W[R], const int row[R], int lane, QAct x, float acc[R][T]) {
-    if (W[0]->type == IQ4_XS) rows_dot<IQ4_XS, T, R>(W, row, lane, x, acc);
-    else if (W[0]->type == Q6_K) rows_dot<Q6_K, T, R>(W, row, lane, x, acc);
-    else if (W[0]->type == IQ4_NL) rows_dot<IQ4_NL, T, R>(W, row, lane, x, acc);
-    else if (W[0]->type == Q5_0) rows_dot<Q5_0, T, R>(W, row, lane, x, acc);
-    else rows_dot<Q8_0, T, R>(W, row, lane, x, acc);
+__device__ __forceinline__ void rows_dot_any(const QTensor *const W[R], const int row[R], int lane, QAct x, float acc[R][T],
+                                             int part = 0, int nparts = 1) {
+    if (W[0]->type == IQ4_XS) rows_dot<IQ4_XS, T, R>(W, row, lane, x, acc, part, nparts);
+    else if (W[0]->type == Q6_K) rows_dot<Q6_K, T, R>(W, row, lane, x, acc, part, nparts);
+    else if (W[0]->type == IQ4_NL) rows_dot<IQ4_NL, T, R>(W, row, lane, x, acc, part, nparts);
+    else if (W[0]->type == Q5_0) rows_dot<Q5_0, T, R>(W, row, lane, x, acc, part, nparts);
+    else if (W[0]->type == Q3_K) rows_dot<Q3_K, T, R>(W, row, lane, x, acc, part, nparts);
+    else if (W[0]->type == Q2_K) rows_dot<Q2_K, T, R>(W, row, lane, x, acc, part, nparts);
+    else rows_dot<Q8_0, T, R>(W, row, lane, x, acc, part, nparts);
 }
 
 template <int T, int R>
@@ -189,10 +293,49 @@ __global__ __launch_bounds__(256) void k_gemv(GemvArgs a) {
         for (int t = 0; t < T; t++) {
             const float v = warp_sum(acc[r][t]);
             if (lane == 0) {
-                float *o = a.seg[s].y + (size_t)t * a.seg[s].ldy + row + r;
-                *o = a.mode == GEMV_ADD ? *o + v : v;
+                if (a.mode == GEMV_HC) {
+#pragma unroll
+                    for (int h = 0; h < HC; h++)
+                        a.res[((size_t)t * HC + h) * D + row + r] += 2.0f * sigmoid(a.inj[t * HC + h] * (1.0f / HC)) * v;
+                } else {
+                    float *o = a.seg[s].y + (size_t)t * a.seg[s].ldy + row + r;
+                    *o = a.mode == GEMV_ADD ? *o + v : v;
+                }
             }
         }
+}
+
+// Long rows (K >= 4096) with few of them: 4 waves share a row (each a quarter of K), so twice as many loads are in flight
+// per row; partial sums meet in LDS. ~775 GB/s instead of ~520 on 2560 x 6144 streamed from VRAM.
+constexpr int GEMV_SK = 4;
+template <int QT, int T>
+__global__ __launch_bounds__(256) void k_gemv_sk(GemvArgs a) {
+    __shared__ float part[8][T];
+    const int wave = threadIdx.x / 32, lane = threadIdx.x % 32;
+    int row = blockIdx.x * (8 / GEMV_SK) + wave / GEMV_SK, s = 0;
+    while (s < a.nseg - 1 && row >= a.seg[s].W.rows) row -= a.seg[s++].W.rows;
+    const bool valid = row < a.seg[s].W.rows;
+    float acc[1][T] = {};
+    if (valid) {
+        const QTensor *W[1] = {&a.seg[s].W};
+        const int rows[1] = {row};
+        rows_dot<QT, T, 1>(W, rows, lane, a.x, acc, wave % GEMV_SK, GEMV_SK);   // one type: fewer registers, more waves
+    }
+#pragma unroll
+    for (int t = 0; t < T; t++) { const float v = warp_sum(acc[0][t]); if (lane == 0) part[wave][t] = v; }
+    __syncthreads();
+    if (!valid || wave % GEMV_SK || lane >= T) return;
+    const int t = lane;
+    float v = 0;
+#pragma unroll
+    for (int k = 0; k < GEMV_SK; k++) v += part[wave + k][t];
+    if (a.mode == GEMV_HC) {
+#pragma unroll
+        for (int h = 0; h < HC; h++) a.res[((size_t)t * HC + h) * D + row] += 2.0f * sigmoid(a.inj[t * HC + h] * (1.0f / HC)) * v;
+    } else {
+        float *o = a.seg[s].y + (size_t)t * a.seg[s].ldy + row;
+        *o = a.mode == GEMV_ADD ? *o + v : v;
+    }
 }
 
 template <int T>
@@ -220,6 +363,19 @@ __global__ __launch_bounds__(1024) void k_gemv_glu(GemvArgs a) {
 template <int T>
 static void gemv_launch(const GemvArgs &a, int rows, hipStream_t st) {
     if (a.mode == GEMV_GLU) k_gemv_glu<T><<<rows / 32, 1024, 0, st>>>(a);
+    else if (a.seg[0].W.cols >= 4096 && rows >= 1024 && rows <= 8192 && a.nseg == 1) {
+        const dim3 g((rows + 1) / 2);
+        switch (a.seg[0].W.type) {
+            case Q8_0: k_gemv_sk<Q8_0, T><<<g, 256, 0, st>>>(a); break;
+            case Q6_K: k_gemv_sk<Q6_K, T><<<g, 256, 0, st>>>(a); break;
+            case IQ4_XS: k_gemv_sk<IQ4_XS, T><<<g, 256, 0, st>>>(a); break;
+            case IQ4_NL: k_gemv_sk<IQ4_NL, T><<<g, 256, 0, st>>>(a); break;
+            case Q3_K: k_gemv_sk<Q3_K, T><<<g, 256, 0, st>>>(a); break;
+            case Q2_K: k_gemv_sk<Q2_K, T><<<g, 256, 0, st>>>(a); break;
+            case Q5_0: k_gemv_sk<Q5_0, T><<<g, 256, 0, st>>>(a); break;
+            default: FAIL("gemv: type %d", a.seg[0].W.type);
+        }
+    }
     else if (T >= 5) k_gemv<T, 2><<<(rows + 15) / 16, 256, 0, st>>>(a);   // amortize activation loads
     else k_gemv<T, 1><<<(rows + 7) / 8, 256, 0, st>>>(a);
 }
@@ -243,6 +399,11 @@ void gemv(const GemvArgs &a, hipStream_t st) {
 void gemv(const QTensor &W, QAct x, int T, float *y, int ldy, int mode, hipStream_t st) {
     GemvArgs a;
     a.seg[0] = {W, y, ldy}; a.x = x; a.T = T; a.mode = mode;
+    gemv(a, st);
+}
+void gemv_hc(const QTensor &W, QAct x, int T, float *res, const float *inj, hipStream_t st) {
+    GemvArgs a;
+    a.seg[0] = {W, nullptr, 0}; a.x = x; a.T = T; a.mode = GEMV_HC; a.inj = inj; a.res = res;
     gemv(a, st);
 }
 
@@ -284,21 +445,47 @@ __device__ __forceinline__ u4v to_h8(int2 q, float d) {
     return r;
 }
 
+// 8 values q * d - m (Q2_K: unsigned 2-bit values, a scale and a min per 16 weights)
+__device__ __forceinline__ u4v to_h8m(int2 q, float d, float m) {
+    typedef _Float16 h2 __attribute__((ext_vector_type(2)));
+    const h2 dd = {(_Float16)d, (_Float16)d}, off = {(_Float16)-1152.0f, (_Float16)-1152.0f}, mm = {(_Float16)-m, (_Float16)-m};
+    u4v r;
+#pragma unroll
+    for (int i = 0; i < 2; i++) {
+        const uint32_t u = (i ? q.y : q.x) ^ 0x80808080u;
+        r[2 * i] = __builtin_bit_cast(uint32_t, (__builtin_bit_cast(h2, __builtin_amdgcn_perm(0x64646464u, u, 0x04010400u)) + off) * dd + mm);
+        r[2 * i + 1] = __builtin_bit_cast(uint32_t, (__builtin_bit_cast(h2, __builtin_amdgcn_perm(0x64646464u, u, 0x04030402u)) + off) * dd + mm);
+    }
+    return r;
+}
+
 // Scale data of one 256-weight super-block of a row, and the scale of its fragment f (weights 16f..16f+15).
-struct SbScales { float d; int4 raw; };
+struct SbScales { float d, dm; int4 raw; };
 template <int QT>
 __device__ __forceinline__ SbScales sb_scales(const QTensor &W, int row, int sb) {
     const size_t gsb = (size_t)row * (W.cols / 256) + sb;
-    if constexpr (QT == IQ4_XS) return {__half2float(W.d[gsb]), make_int4(((const int *)W.sc)[gsb], W.sh[gsb], 0, 0)};
-    else if constexpr (QT == Q6_K) return {__half2float(W.d[gsb]), ((const int4 *)W.sc)[gsb]};
-    else return {1.0f, ((const int4 *)W.d)[gsb]};                  // Q8_0, Q5_0, IQ4_NL: 8 fp16 block scales
+    if constexpr (QT == IQ4_XS) return {__half2float(W.d[gsb]), 0.0f, make_int4(((const int *)W.sc)[gsb], W.sh[gsb], 0, 0)};
+    else if constexpr (QT == Q6_K || QT == Q3_K) return {__half2float(W.d[gsb]), 0.0f, ((const int4 *)W.sc)[gsb]};
+    else if constexpr (QT == Q2_K) return {__half2float(W.d[gsb]), __half2float(W.dm[gsb]), ((const int4 *)W.sc)[gsb]};
+    else return {1.0f, 0.0f, ((const int4 *)W.d)[gsb]};           // Q8_0, Q5_0, IQ4_NL: 8 fp16 block scales
 }
 template <int QT>
 __device__ __forceinline__ float frag_scale(const SbScales &s, int f) {
     const uint32_t w[4] = {(uint32_t)s.raw.x, (uint32_t)s.raw.y, (uint32_t)s.raw.z, (uint32_t)s.raw.w};
     if constexpr (QT == IQ4_XS) return s.d * ((int)(((w[0] >> 4 * (f >> 1)) & 0xf) | (((w[1] >> 2 * (f >> 1)) & 3) << 4)) - 32);
-    else if constexpr (QT == Q6_K) return s.d * (int8_t)(w[f >> 2] >> 8 * (f & 3));
+    else if constexpr (QT == Q6_K || QT == Q3_K) return s.d * (int8_t)(w[f >> 2] >> 8 * (f & 3));
+    else if constexpr (QT == Q2_K) return s.d * ((w[f >> 2] >> 8 * (f & 3)) & 0xf);
     else return __half2float(__ushort_as_half((uint16_t)(w[f >> 2] >> 16 * ((f >> 1) & 1))));
+}
+__device__ __forceinline__ float frag_min_q2k(const SbScales &s, int f) {
+    const uint32_t w[4] = {(uint32_t)s.raw.x, (uint32_t)s.raw.y, (uint32_t)s.raw.z, (uint32_t)s.raw.w};
+    return s.dm * ((w[f >> 2] >> (8 * (f & 3) + 4)) & 0xf);
+}
+// fragment f's 8 values of this lane half as halves
+template <int QT>
+__device__ __forceinline__ u4v frag_h8(int2 q, const SbScales &s, int f) {
+    if constexpr (QT == Q2_K) return to_h8m(q, frag_scale<QT>(s, f), frag_min_q2k(s, f));
+    else return to_h8(q, frag_scale<QT>(s, f));
 }
 
 // This lane half's 8 int8 values of the 4 fragments in step c (weights 64c..64c+63) of super-block sb, and
@@ -326,6 +513,22 @@ __device__ __forceinline__ void frags(const QTensor &W, int row, int sb, int c, 
         q[3] = make_int2(q6_unpack(B.x >> 4, H.x >> 6), q6_unpack(B.y >> 4, H.y >> 6));
 #pragma unroll
         for (int g = 0; g < 4; g++) f[g] = 8 * h + cc + 2 * g;
+    } else if constexpr (QT == Q3_K || QT == Q2_K) {
+        // step c = (half n, k): quant bytes 32n + 16k + 0..15 hold groups 8n + 2j + k at shifts 2j (j = 0..3)
+        const int n = c >> 1, k = c & 1;
+        const size_t gsb = (size_t)row * (K / 256) + sb;
+        const int2 w = *(const int2 *)(W.q + gsb * 64 + 32 * n + 16 * k + 8 * hf);
+        if constexpr (QT == Q3_K) {
+            const int2 hm = *(const int2 *)(W.qh + gsb * 32 + 16 * k + 8 * hf);
+#pragma unroll
+            for (int j = 0; j < 4; j++) {
+                q[j] = make_int2(q3_vals(w.x, hm.x, j, 4 * n + j), q3_vals(w.y, hm.y, j, 4 * n + j));
+                f[j] = 8 * n + 2 * j + k;
+            }
+        } else {
+#pragma unroll
+            for (int j = 0; j < 4; j++) { q[j] = make_int2(q2_vals(w.x, j), q2_vals(w.y, j)); f[j] = 8 * n + 2 * j + k; }
+        }
     } else if constexpr (QT == IQ4_NL || QT == Q5_0) {
         // blocks 2c, 2c+1 (64 weights); in a block the low nibbles are weights 0..15, the high ones 16..31
 #pragma unroll
@@ -367,8 +570,8 @@ __global__ __launch_bounds__(128) void k_gemm_q(QTensor W, const half *x, int ld
             frags<QT>(W, row0 + 16 + r, sb, c, hf, q1, f);
 #pragma unroll
             for (int g = 0; g < 4; g++) {
-                const h16 a0 = join_halves(to_h8(q0[g], frag_scale<QT>(s0, f[g])));
-                const h16 a1 = join_halves(to_h8(q1[g], frag_scale<QT>(s1, f[g])));
+                const h16 a0 = join_halves(frag_h8<QT>(q0[g], s0, f[g]));
+                const h16 a1 = join_halves(frag_h8<QT>(q1[g], s1, f[g]));
 #pragma unroll
                 for (int j = 0; j < NT; j++) {
                     const h16 b = join_halves(*(const u4v *)(xl + (size_t)16 * j * ldx + sb * 256 + 16 * f[g]));
@@ -414,6 +617,8 @@ void gemm_q(const QTensor &W, const half *x, int ldx, int T, void *y, int ldy, i
     else if (W.type == Q8_0) gemm_q_launch<Q8_0>(W, x, ldx, T, y, ldy, mode, y_f16, st);
     else if (W.type == Q5_0) gemm_q_launch<Q5_0>(W, x, ldx, T, y, ldy, mode, y_f16, st);
     else if (W.type == IQ4_NL) gemm_q_launch<IQ4_NL>(W, x, ldx, T, y, ldy, mode, y_f16, st);
+    else if (W.type == Q3_K) gemm_q_launch<Q3_K>(W, x, ldx, T, y, ldy, mode, y_f16, st);
+    else if (W.type == Q2_K) gemm_q_launch<Q2_K>(W, x, ldx, T, y, ldy, mode, y_f16, st);
     else FAIL("gemm_q: type %d", W.type);
 }
 
@@ -471,6 +676,34 @@ __global__ void k_dequant(QTensor W, half *out, int64_t nchunks) {
         half *o = out + ch * 32;
         store16(o, lo, dw);
         store16(o + 16, hi, dw);
+    } else if (W.type == Q3_K || W.type == Q2_K) {
+        const int row = ch / (K / 32), c = ch % (K / 32), sb = c >> 3, n = (c >> 2) & 1, j = c & 3, g = 8 * n + 2 * j;
+        const size_t gsb = (size_t)row * (K / 256) + sb;
+        const uint8_t *qp = W.q + gsb * 64 + 32 * n;
+        const int4 A = *(const int4 *)qp, B = *(const int4 *)(qp + 16);
+        const float d = __half2float(W.d[gsb]);
+        half *o = out + (size_t)row * K + c * 32;
+        if (W.type == Q3_K) {
+            const int4 HA = *(const int4 *)(W.qh + gsb * 32), HB = *(const int4 *)(W.qh + gsb * 32 + 16);
+            const int bit = 4 * n + j;
+            const int8_t *sc = (const int8_t *)W.sc + gsb * 16 + g;
+            store16(o, make_int4(q3_vals(A.x, HA.x, j, bit), q3_vals(A.y, HA.y, j, bit), q3_vals(A.z, HA.z, j, bit), q3_vals(A.w, HA.w, j, bit)), d * sc[0]);
+            store16(o + 16, make_int4(q3_vals(B.x, HB.x, j, bit), q3_vals(B.y, HB.y, j, bit), q3_vals(B.z, HB.z, j, bit), q3_vals(B.w, HB.w, j, bit)), d * sc[1]);
+        } else {
+            const uint8_t *sc = W.sc + gsb * 16 + g;
+            const float dm = __half2float(W.dm[gsb]);
+            const int4 lo = make_int4(q2_vals(A.x, j), q2_vals(A.y, j), q2_vals(A.z, j), q2_vals(A.w, j));
+            const int4 hi = make_int4(q2_vals(B.x, j), q2_vals(B.y, j), q2_vals(B.z, j), q2_vals(B.w, j));
+            for (int h = 0; h < 2; h++) {
+                const int8_t *b = (const int8_t *)(h ? &hi : &lo);
+                const float s = d * (sc[h] & 15), m = dm * (sc[h] >> 4);
+                half2 v[8];
+#pragma unroll
+                for (int i = 0; i < 8; i++) v[i] = __floats2half2_rn(s * b[2 * i] - m, s * b[2 * i + 1] - m);
+                ((int4 *)(o + 16 * h))[0] = *(const int4 *)&v[0];
+                ((int4 *)(o + 16 * h))[1] = *(const int4 *)&v[4];
+            }
+        }
     } else if (W.type == F16) {
         const int4 *f = (const int4 *)((const half *)W.f + ch * 32);
         int4 *o = (int4 *)(out + ch * 32);
@@ -479,6 +712,9 @@ __global__ void k_dequant(QTensor W, half *out, int64_t nchunks) {
 }
 
 void dequant(const QTensor &W, half *out, hipStream_t st) {
+    if (W.type != Q8_0 && W.type != IQ4_XS && W.type != Q6_K && W.type != IQ4_NL && W.type != Q5_0 && W.type != Q3_K && W.type != Q2_K &&
+        W.type != F16)
+        FAIL("dequant: type %d", W.type);
     const int64_t n = (int64_t)W.rows * W.cols;
     const int64_t nchunks = W.type == Q6_K ? n / 64 : n / 32;
     k_dequant<<<(nchunks + 255) / 256, 256, 0, st>>>(W, out, nchunks);
@@ -535,15 +771,19 @@ void quant_act(const float *x, int64_t n, QAct out, hipStream_t st) {
 // A tier tensor holds its experts' rows back to back: gate / up [n_experts * FE][D], down [n_experts * D][FE].
 // hot_slot[j] is pick j's slot in the tier (token j / TOPK_E), or -1 when another device computes it.
 
-// silu(gate) * up for every pick: one 1024-thread workgroup = 32 rows = one int8 block of the output
-__global__ __launch_bounds__(1024) void k_moe_glu(QTensor gate, QTensor up, const int *hot_slot, QAct x, QAct hq) {
+// silu(gate) * up for every pick and, as pick T * TOPK_E + t, token t's shared expert (same width): one 1024-thread
+// workgroup = 32 rows = one int8 block of the output
+__global__ __launch_bounds__(1024) void k_moe_glu(QTensor gate, QTensor up, QTensor sgate, QTensor sup, const int *hot_slot, int T,
+                                                  QAct x, QAct hq) {
     __shared__ float act[32];
-    const int j = blockIdx.y, slot = hot_slot[j];
+    const int j = blockIdx.y;
+    const bool shared = j >= T * TOPK_E;
+    const int slot = shared ? 0 : hot_slot[j];
     if (slot < 0) return;
     const int wave = threadIdx.x / 32, lane = threadIdx.x % 32, r = blockIdx.x * 32 + wave;
-    const QTensor *W[2] = {&gate, &up};
+    const QTensor *W[2] = {shared ? &sgate : &gate, shared ? &sup : &up};
     const int rows[2] = {slot * FE + r, slot * FE + r};
-    const int t = j / TOPK_E;
+    const int t = shared ? j - T * TOPK_E : j / TOPK_E;
     const QAct xt{x.q + (size_t)t * D, x.d + (size_t)t * (D / 32)};
     float acc[2][1] = {};
     rows_dot_any<1, 2>(W, rows, lane, xt, acc);
@@ -557,24 +797,161 @@ __global__ __launch_bounds__(1024) void k_moe_glu(QTensor gate, QTensor up, cons
     }
 }
 
-// y[j] = w[j] * down[slot] h[j]: 8 rows per 256-thread workgroup
-__global__ __launch_bounds__(256) void k_moe_down(QTensor down, const int *hot_slot, QAct hq, const float *wts, float *y) {
-    const int j = blockIdx.y, slot = hot_slot[j];
+// y[j] = w[j] * down[slot] h[j], the shared expert's rows weighted by its gate sg[t]: 8 rows per 256-thread workgroup
+__global__ __launch_bounds__(256) void k_moe_down(QTensor down, QTensor sdown, const int *hot_slot, int T, QAct hq, const float *wts,
+                                                  const float *sg, float *y) {
+    const int j = blockIdx.y;
+    const bool shared = j >= T * TOPK_E;
+    const int slot = shared ? 0 : hot_slot[j];
     if (slot < 0) return;
     const int wave = threadIdx.x / 32, lane = threadIdx.x % 32, r = blockIdx.x * 8 + wave;
-    const QTensor *W[1] = {&down};
+    const QTensor *W[1] = {shared ? &sdown : &down};
     const int rows[1] = {slot * D + r};
     const QAct h{hq.q + (size_t)j * FE, hq.d + (size_t)j * (FE / 32)};
     float acc[1][1] = {};
     rows_dot_any<1, 1>(W, rows, lane, h, acc);
     const float v = warp_sum(acc[0][0]);
-    if (lane == 0) y[(size_t)j * D + r] = wts[j] * v;
+    if (lane == 0) y[(size_t)j * D + r] = (shared ? sg[j - T * TOPK_E] : wts[j]) * v;
 }
 
-void moe_experts_dec(const QTensor &gate, const QTensor &up, const QTensor &down, const int *hot_slot, int T, QAct x,
-                     QAct hq, const float *wts, float *y, hipStream_t st) {
-    k_moe_glu<<<dim3(FE / 32, T * TOPK_E), 1024, 0, st>>>(gate, up, hot_slot, x, hq);
-    k_moe_down<<<dim3(D / 8, T * TOPK_E), 256, 0, st>>>(down, hot_slot, hq, wts, y);
+void moe_experts_dec(const QTensor &gate, const QTensor &up, const QTensor &down, const QTensor &sgate, const QTensor &sup,
+                     const QTensor &sdown, const int *hot_slot, int T, QAct x, QAct hq, const float *wts, const float *sg, float *y,
+                     hipStream_t st) {
+    const int picks = T * TOPK_E + (sgate.type >= 0 ? T : 0);
+    k_moe_glu<<<dim3(FE / 32, picks), 1024, 0, st>>>(gate, up, sgate, sup, hot_slot, T, x, hq);
+    k_moe_down<<<dim3(D / 8, picks), 256, 0, st>>>(down, sdown, hot_slot, T, hq, wts, sg, y);
+}
+
+// ---- decode: the GPU's share of the cold experts, read straight from system RAM ------------------------------------
+// Picks with hot_slot <= -2 (cold slot -2 - hot_slot) are the GPU's: their GGUF blocks come over PCIe from registered
+// host memory. A workgroup copies a tile of whole rows into LDS with 16-byte loads (rows are 16-byte aligned, so every
+// byte crosses the bus once, in full lines) and its waves decode from there. Gate / up come in per-group formats
+// (IQ4_XS, Q3_K, Q2_K), down is IQ4_NL.
+constexpr int CG_ROWS = 8;                        // gate | up rows per tile (8 x up to 1360 B per matrix)
+constexpr int CD_ROWS = 32;                       // down rows per workgroup (32 x 360 B)
+
+// One GGUF-block row of D weights (in LDS) dotted with this lane's activation chunks ch = lane + 32i; xs16: the chunks'
+// sums per 16 values (Q2_K's mins)
+template <int QT>
+__device__ __forceinline__ float aos_dot(const uint8_t *row, int lane, const int8_t *xq, const float *xd, const int (*xs16)[2]) {
+    float acc = 0;
+    for (int i = 0, ch = lane; ch < D / 32; ch += 32, i++) {
+        const int4 a = *(const int4 *)(xq + ch * 32), b = *(const int4 *)(xq + ch * 32 + 16);
+        if constexpr (QT == IQ4_XS) {
+            const int sb = ch >> 3, ib = ch & 7;
+            const uint8_t *blk = row + sb * 136;
+            const float dl = __half2float(*(const __half *)blk) *
+                             ((((blk[4 + (ib >> 1)] >> 4 * (ib & 1)) & 0xf) | (((*(const uint16_t *)(blk + 2) >> 2 * ib) & 3) << 4)) - 32);
+            const uint2 q0 = *(const uint2 *)(blk + 8 + 16 * ib), q1 = *(const uint2 *)(blk + 16 + 16 * ib);
+            int4 lo, hi;
+            iq4_block(make_int4(q0.x, q0.y, q1.x, q1.y), lo, hi);
+            acc += dl * xd[ch] * dot16(hi, b, dot16(lo, a, 0));
+        } else if constexpr (QT == Q3_K) {
+            const int sb = ch >> 3, n = (ch >> 2) & 1, j = ch & 3, g = 8 * n + 2 * j, bit = 4 * n + j;
+            const uint8_t *blk = row + sb * 110;                       // blocks are 2-byte aligned: 16-bit loads
+            const uint16_t *h16 = (const uint16_t *)blk, *q16 = (const uint16_t *)(blk + 32 + 32 * n), *s16 = (const uint16_t *)(blk + 96);
+            uint32_t qw[8], hw[8];
+#pragma unroll
+            for (int k = 0; k < 8; k++) { qw[k] = q16[2 * k] | (uint32_t)q16[2 * k + 1] << 16; hw[k] = h16[2 * k] | (uint32_t)h16[2 * k + 1] << 16; }
+            const int4 lo = make_int4(q3_vals(qw[0], hw[0], j, bit), q3_vals(qw[1], hw[1], j, bit), q3_vals(qw[2], hw[2], j, bit), q3_vals(qw[3], hw[3], j, bit));
+            const int4 hi = make_int4(q3_vals(qw[4], hw[4], j, bit), q3_vals(qw[5], hw[5], j, bit), q3_vals(qw[6], hw[6], j, bit), q3_vals(qw[7], hw[7], j, bit));
+            const uint32_t l2 = s16[(g & 7) >> 1], h2 = s16[4 + ((g & 3) >> 1)];   // scale bytes of groups g, g + 1
+            const int sl = 4 * (g >> 3), sh = 2 * (g >> 2);
+            const int sc0 = (int)(((l2 >> sl) & 0xf) | (((h2 >> sh) & 3) << 4)) - 32;
+            const int sc1 = (int)(((l2 >> (8 + sl)) & 0xf) | (((h2 >> (8 + sh)) & 3) << 4)) - 32;
+            const float d = __half2float(__ushort_as_half(*(const uint16_t *)(blk + 108)));
+            acc += d * xd[ch] * (float)(sc0 * dot16(lo, a, 0) + sc1 * dot16(hi, b, 0));
+        } else {                                                        // Q2_K
+            const int sb = ch >> 3, n = (ch >> 2) & 1, j = ch & 3, g = 8 * n + 2 * j;
+            const uint8_t *blk = row + sb * 84;                         // 4-byte aligned
+            const uint32_t *q32 = (const uint32_t *)(blk + 16 + 32 * n);
+            const int4 lo = make_int4(q2_vals(q32[0], j), q2_vals(q32[1], j), q2_vals(q32[2], j), q2_vals(q32[3], j));
+            const int4 hi = make_int4(q2_vals(q32[4], j), q2_vals(q32[5], j), q2_vals(q32[6], j), q2_vals(q32[7], j));
+            const uint32_t sc = *(const uint16_t *)(blk + g), dd = *(const uint32_t *)(blk + 80);
+            const float d = __half2float(__ushort_as_half((uint16_t)dd)), dm = __half2float(__ushort_as_half((uint16_t)(dd >> 16)));
+            acc += xd[ch] * (d * (float)((int)(sc & 0xf) * dot16(lo, a, 0) + (int)((sc >> 8) & 0xf) * dot16(hi, b, 0))
+                             - dm * (float)((int)((sc >> 4) & 0xf) * xs16[i][0] + (int)(sc >> 12) * xs16[i][1]));
+        }
+    }
+    return acc;
+}
+
+template <int QT>
+__device__ __forceinline__ void cold_glu(const uint8_t *gate, const uint8_t *up, int slot, int j, QAct x, QAct hq, int4 *tile0,
+                                         int4 *tile1, float *act) {
+    constexpr int RB = D / 256 * qbytes_of(QT);  // bytes per row
+    const int wave = threadIdx.x / 32, lane = threadIdx.x % 32, t = j / TOPK_E;
+    const int8_t *xq = x.q + (size_t)t * D;
+    const float *xd = x.d + (size_t)t * (D / 32);
+    int xs16[3][2] = {};
+    if constexpr (QT == Q2_K)
+        for (int i = 0, ch = lane; ch < D / 32; ch += 32, i++) {
+            xs16[i][0] = sum16(*(const int4 *)(xq + ch * 32)); xs16[i][1] = sum16(*(const int4 *)(xq + ch * 32 + 16));
+        }
+    for (int k = 0; k < 32 / CG_ROWS; k++) {
+        const size_t r0 = (size_t)slot * FE + blockIdx.x * 32 + k * CG_ROWS;
+        const int4 *g = (const int4 *)(gate + r0 * RB), *u = (const int4 *)(up + r0 * RB);
+        for (int i = threadIdx.x; i < CG_ROWS * RB / 16; i += 256) { tile0[i] = g[i]; tile1[i] = u[i]; }
+        __syncthreads();
+        const float ag = aos_dot<QT>((const uint8_t *)tile0 + wave * RB, lane, xq, xd, xs16);
+        const float au = aos_dot<QT>((const uint8_t *)tile1 + wave * RB, lane, xq, xd, xs16);
+        const float v = silu(warp_sum(ag)) * warp_sum(au);
+        if (lane == 0) act[k * CG_ROWS + wave] = v;
+        __syncthreads();
+    }
+    if (wave == 0) {
+        const float a = act[lane], d = warp_max(fabsf(a)) / 127.0f;
+        hq.q[(size_t)j * FE + blockIdx.x * 32 + lane] = (int8_t)__float2int_rn(d > 0 ? a / d : 0.0f);
+        if (lane == 0) hq.d[((size_t)j * FE + blockIdx.x * 32) / 32] = d;
+    }
+}
+
+__global__ __launch_bounds__(256) void k_cold_glu(ColdDec c, const int *hot_slot, QAct x, QAct hq) {
+    __shared__ int4 tile[2][CG_ROWS * (D / 256 * 136) / 16];   // the widest row format: IQ4_XS
+    __shared__ float act[32];
+    const int j = blockIdx.y, hs = hot_slot[j];
+    if (hs > -2) return;
+    const int slot = -2 - hs, grp = slot >= c.n0, s = grp ? slot - c.n0 : slot;
+    switch (c.type[grp]) {
+        case Q3_K: cold_glu<Q3_K>(c.gate[grp], c.up[grp], s, j, x, hq, tile[0], tile[1], act); break;
+        case Q2_K: cold_glu<Q2_K>(c.gate[grp], c.up[grp], s, j, x, hq, tile[0], tile[1], act); break;
+        default: cold_glu<IQ4_XS>(c.gate[grp], c.up[grp], s, j, x, hq, tile[0], tile[1], act); break;
+    }
+}
+
+__global__ __launch_bounds__(256) void k_cold_down(const uint8_t *down, const int *hot_slot, QAct hq, const float *wts, float *y) {
+    constexpr int RB = FE / 32 * 18;              // bytes per IQ4_NL row
+    __shared__ int4 tile[CD_ROWS * RB / 16];
+    const int j = blockIdx.y, hs = hot_slot[j];
+    if (hs > -2) return;
+    const int slot = -2 - hs, wave = threadIdx.x / 32, lane = threadIdx.x % 32, r0 = blockIdx.x * CD_ROWS;
+    const int4 *src = (const int4 *)(down + ((size_t)slot * D + r0) * RB);
+    for (int i = threadIdx.x; i < CD_ROWS * RB / 16; i += 256) tile[i] = src[i];
+    __syncthreads();
+    const int8_t *h = hq.q + (size_t)j * FE;
+    const float *hd = hq.d + (size_t)j * (FE / 32);
+    for (int rr = 0; rr < CD_ROWS / 8; rr++) {    // 8 waves x 4 rows; lanes 0..19 take one 18-byte block each
+        const int r = wave * (CD_ROWS / 8) + rr;
+        float acc = 0;
+        if (lane < FE / 32) {
+            const uint8_t *blk = (const uint8_t *)tile + r * RB + lane * 18;
+            const uint16_t *q16 = (const uint16_t *)(blk + 2);
+            int4 lo, hi;
+            iq4_block(make_int4(q16[0] | (uint32_t)q16[1] << 16, q16[2] | (uint32_t)q16[3] << 16,
+                                q16[4] | (uint32_t)q16[5] << 16, q16[6] | (uint32_t)q16[7] << 16), lo, hi);
+            const int4 a = *(const int4 *)(h + lane * 32), b = *(const int4 *)(h + lane * 32 + 16);
+            acc = __half2float(*(const __half *)blk) * hd[lane] * dot16(hi, b, dot16(lo, a, 0));
+        }
+        const float v = warp_sum(acc);
+        if (lane == 0) y[(size_t)j * D + r0 + r] = wts[j] * v;
+    }
+}
+
+void moe_cold_dec(const ColdDec &c, const int *hot_slot, int T, QAct x, QAct hq, const float *wts, float *y, hipStream_t st) {
+    for (int g = 0; g < 2; g++)
+        if (c.gate[g] && c.type[g] != IQ4_XS && c.type[g] != Q3_K && c.type[g] != Q2_K) FAIL("moe_cold_dec: gate/up type %d", c.type[g]);
+    k_cold_glu<<<dim3(FE / 32, T * TOPK_E), 256, 0, st>>>(c, hot_slot, x, hq);
+    k_cold_down<<<dim3(D / CD_ROWS, T * TOPK_E), 256, 0, st>>>(c.down, hot_slot, hq, wts, y);
 }
 
 // ---- routed experts at prefill: grouped GEMMs over the tokens sorted by expert ---------------------------
@@ -626,10 +1003,10 @@ __global__ __launch_bounds__(128) void k_moe_gateup(QTensor g0, QTensor u0, QTen
                 frags<QT>(U, row0 + r, sb, c, hf, qu0, f); frags<QT>(U, row0 + 16 + r, sb, c, hf, qu1, f);
 #pragma unroll
                 for (int gi = 0; gi < 4; gi++) {
-                    const h16 a0 = join_halves(to_h8(qg0[gi], frag_scale<QT>(sg0, f[gi])));
-                    const h16 a1 = join_halves(to_h8(qg1[gi], frag_scale<QT>(sg1, f[gi])));
-                    const h16 b0 = join_halves(to_h8(qu0[gi], frag_scale<QT>(su0, f[gi])));
-                    const h16 b1 = join_halves(to_h8(qu1[gi], frag_scale<QT>(su1, f[gi])));
+                    const h16 a0 = join_halves(frag_h8<QT>(qg0[gi], sg0, f[gi]));
+                    const h16 a1 = join_halves(frag_h8<QT>(qg1[gi], sg1, f[gi]));
+                    const h16 b0 = join_halves(frag_h8<QT>(qu0[gi], su0, f[gi]));
+                    const h16 b1 = join_halves(frag_h8<QT>(qu1[gi], su1, f[gi]));
 #pragma unroll
                     for (int j = 0; j < NT; j++) {
                         const int t = min(tt + 16 * j + r, wk.n - 1);
@@ -723,6 +1100,8 @@ void moe_gemm_gateup(const QTensor &g0, const QTensor &u0, const QTensor &g1, co
     if (t == Q5_0) k_moe_gateup<Q5_0><<<grid, 128, 0, st>>>(g0, u0, g1, u1, work, X, H);
     else if (t == IQ4_XS) k_moe_gateup<IQ4_XS><<<grid, 128, 0, st>>>(g0, u0, g1, u1, work, X, H);
     else if (t == IQ4_NL) k_moe_gateup<IQ4_NL><<<grid, 128, 0, st>>>(g0, u0, g1, u1, work, X, H);
+    else if (t == Q3_K) k_moe_gateup<Q3_K><<<grid, 128, 0, st>>>(g0, u0, g1, u1, work, X, H);
+    else if (t == Q2_K) k_moe_gateup<Q2_K><<<grid, 128, 0, st>>>(g0, u0, g1, u1, work, X, H);
     else FAIL("moe_gemm_gateup: type %d", t);
 }
 void moe_gemm_down(const QTensor &d0, const QTensor &d1, const MoeWork *work, int nwork, const half *H, const float *wts, half *Y, hipStream_t st) {

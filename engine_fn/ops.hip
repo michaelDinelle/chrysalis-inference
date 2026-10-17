@@ -267,11 +267,154 @@ void hc_combine(float *res, const float *inject, int ld_inject, const float *out
     k_hc_combine<<<dim3(D / 256, T), 256, 0, st>>>(res, inject, out, out2, ld_inject);
 }
 
-// MTP eh_proj input rows: out[t][s] = [e[t] ; xn[t][s]]   ([T][HC][2D] fp32)
-__global__ __launch_bounds__(256) void k_mtp_pack(const float *e, const float *xn, float *out) {
+// MTP eh_proj input rows: out[t][s] = [e[t] ; xn[t][s]]   ([T][HC][2D], fp32 or fp16)
+__global__ __launch_bounds__(256) void k_mtp_pack(const float *e, const float *xn, float *out, half *out_h) {
     const int i = blockIdx.x * 256 + threadIdx.x, s = blockIdx.y, t = blockIdx.z;
-    out[((size_t)t * HC + s) * 2 * D + i] = i < D ? e[(size_t)t * D + i] : xn[((size_t)t * HC + s) * D + i - D];
+    const float v = i < D ? e[(size_t)t * D + i] : xn[((size_t)t * HC + s) * D + i - D];
+    const size_t o = ((size_t)t * HC + s) * 2 * D + i;
+    if (out) out[o] = v;
+    else out_h[o] = __float2half(v);
 }
-void mtp_pack(const float *e, const float *xn, int T, float *out, hipStream_t st) {
-    k_mtp_pack<<<dim3(2 * D / 256, HC, T), 256, 0, st>>>(e, xn, out);
+void mtp_pack(const float *e, const float *xn, int T, float *out, half *out_h, hipStream_t st) {
+    k_mtp_pack<<<dim3(2 * D / 256, HC, T), 256, 0, st>>>(e, xn, out, out_h);
+}
+
+// ---- fused HC mixer at decode (T <= 4 tokens): two kernels instead of norm / down / lo / up / inject / mix -----------
+__device__ __forceinline__ int dot16i(int4 w, int4 x, int acc) {
+    return dot4(w.w, x.w, dot4(w.z, x.z, dot4(w.y, x.y, dot4(w.x, x.x, acc))));
+}
+
+// mix_down: every workgroup recomputes the grouped norms (inv = rsqrt(mean res^2 + eps) per token and stream; res is
+// 40 KB per token, an L2 read) and quantizes xn = res * inv * gamma into LDS (int8 per 32), then each wave takes one
+// row: the 320 rows of W_down -> lo, then the 4 rows of W_inject -> inject. Block 0 also stores inv for mix_up.
+constexpr int MIX_WG = 1024;                             // big workgroups: each normalizes / quantizes the residual once for 32 rows
+template <int T>
+__global__ __launch_bounds__(MIX_WG) void k_mix_down(const float *res, const float *gamma, QTensor down, QTensor inj,
+                                                  float *lo, float *inject, int ld_inject, float *inv_out) {
+    __shared__ int4 xq4[T][HCD / 16];
+    __shared__ float xd[T][HCD / 32];
+    constexpr int NW = MIX_WG / 32;                      // waves: one row each
+    __shared__ float part[NW][T * HC];
+    __shared__ float inv[T * HC];
+    const int tid = threadIdx.x, wave = tid / 32, lane = tid % 32;
+    // 1. sums of squares per (token, stream)
+    float ss[T * HC] = {};
+#pragma unroll
+    for (int t = 0; t < T; t++)
+#pragma unroll
+        for (int st = 0; st < HC; st++) {
+            const float4 *r = (const float4 *)(res + ((size_t)t * HC + st) * D);
+            for (int i = tid; i < D / 4; i += MIX_WG) { const float4 v = r[i]; ss[t * HC + st] += v.x * v.x + v.y * v.y + v.z * v.z + v.w * v.w; }
+        }
+#pragma unroll
+    for (int k = 0; k < T * HC; k++) { const float v = warp_sum(ss[k]); if (lane == 0) part[wave][k] = v; }
+    __syncthreads();
+    if (tid < T * HC) {
+        float v = 0;
+        for (int w = 0; w < NW; w++) v += part[w][tid];
+        inv[tid] = rsqrtf(v / D + EPS);
+        if (blockIdx.x == 0) inv_out[tid] = inv[tid];
+    }
+    __syncthreads();
+    // 2. xn -> int8 blocks in LDS (a wave per block of 32)
+    int8_t *xq = (int8_t *)xq4;
+#pragma unroll
+    for (int t = 0; t < T; t++)
+        for (int blk = wave; blk < HCD / 32; blk += NW) {
+            const int c = blk * 32 + lane, st = c / D;
+            const float v = res[(size_t)t * HCD + c] * inv[t * HC + st] * gamma[c];
+            const float d = warp_max(fabsf(v)) / 127.0f;
+            xq[(size_t)t * HCD + c] = (int8_t)__float2int_rn(d > 0 ? v / d : 0.0f);
+            if (lane == 0) xd[t][blk] = d;
+        }
+    __syncthreads();
+    // 3. rows
+    const int row = blockIdx.x * NW + wave;
+    const QTensor *W = row < HCR ? &down : &inj;
+    const int r = row < HCR ? row : row - HCR;
+    if (row >= HCR && (!inject || r >= HC)) return;
+    float acc[T] = {};
+    for (int ch = lane; ch < HCD / 32; ch += 32) {
+        const int8_t *wr = (const int8_t *)W->q + (size_t)r * HCD + ch * 32;
+        const int4 w0 = *(const int4 *)wr, w1 = *(const int4 *)(wr + 16);
+        const float dw = __half2float(W->d[(size_t)r * (HCD / 32) + ch]);
+#pragma unroll
+        for (int t = 0; t < T; t++)
+            acc[t] += dw * xd[t][ch] * dot16i(w1, xq4[t][ch * 2 + 1], dot16i(w0, xq4[t][ch * 2], 0));
+    }
+#pragma unroll
+    for (int t = 0; t < T; t++) {
+        const float v = warp_sum(acc[t]);
+        if (lane == 0) {
+            if (row < HCR) lo[(size_t)t * HCR + r] = v;
+            else inject[(size_t)t * ld_inject + r] = v;
+        }
+    }
+}
+
+// mix_up: a workgroup takes 64 positions i x 4 streams = 256 rows of W_up (row s * D + i, K = 320), one per thread, on
+// silu(lo / HC) quantized in LDS; then mixed[i] = mean_s xn[s][i] * sigmoid(gate[s][i]) -> fp32, fp16 and int8 blocks.
+template <int T>
+__global__ __launch_bounds__(256) void k_mix_up(const float *lo, QTensor up, const float *res, const float *gamma, const float *inv,
+                                                float *mx, half *hh, QAct hq) {
+    __shared__ int4 lq4[T][HCR / 16];
+    __shared__ float ld_[T][HCR / 32];
+    __shared__ float g[T][HC][64];
+    const int tid = threadIdx.x, wave = tid / 32, lane = tid % 32, i0 = blockIdx.x * 64;
+    int8_t *lq = (int8_t *)lq4;
+    for (int k = wave; k < T * HCR / 32; k += 8) {                // silu(lo / HC) -> int8 blocks
+        const int t = k / (HCR / 32), blk = k % (HCR / 32);
+        const float v = silu(lo[(size_t)t * HCR + blk * 32 + lane] * (1.0f / HC));
+        const float d = warp_max(fabsf(v)) / 127.0f;
+        lq[(size_t)t * HCR + blk * 32 + lane] = (int8_t)__float2int_rn(d > 0 ? v / d : 0.0f);
+        if (lane == 0) ld_[t][blk] = d;
+    }
+    __syncthreads();
+    const int st = tid / 64, p = tid % 64, row = st * D + i0 + p;
+    const int8_t *wr = (const int8_t *)up.q + (size_t)row * HCR;
+    float acc[T] = {};
+#pragma unroll
+    for (int ch = 0; ch < HCR / 32; ch++) {
+        const int4 w0 = *(const int4 *)(wr + ch * 32), w1 = *(const int4 *)(wr + ch * 32 + 16);
+        const float dw = __half2float(up.d[(size_t)row * (HCR / 32) + ch]);
+#pragma unroll
+        for (int t = 0; t < T; t++) acc[t] += dw * ld_[t][ch] * dot16i(w1, lq4[t][ch * 2 + 1], dot16i(w0, lq4[t][ch * 2], 0));
+    }
+#pragma unroll
+    for (int t = 0; t < T; t++) g[t][st][p] = acc[t];
+    __syncthreads();
+    if (tid >= 64) return;
+    const int i = i0 + tid;
+#pragma unroll
+    for (int t = 0; t < T; t++) {
+        float m = 0;
+#pragma unroll
+        for (int s2 = 0; s2 < HC; s2++) {
+            const int c = s2 * D + i;
+            m += res[(size_t)t * HCD + c] * inv[t * HC + s2] * gamma[c] * sigmoid(g[t][s2][tid]);
+        }
+        m *= 1.0f / HC;
+        const size_t o = (size_t)t * D + i;
+        mx[o] = m;
+        if (hh) hh[o] = __float2half(m);
+        if (hq.q) {
+            const float d = warp_max(fabsf(m)) / 127.0f;
+            hq.q[o] = (int8_t)__float2int_rn(d > 0 ? m / d : 0.0f);
+            if (lane == 0) hq.d[o / 32] = d;
+        }
+    }
+}
+
+void hc_mix_fused(const float *res, const float *gamma, const QTensor &down, const QTensor &up, const QTensor *inj, int T,
+                  float *lo, float *inject, int ld_inject, float *inv, float *mx, half *hh, QAct hq, hipStream_t st) {
+    const QTensor none{};
+    const int rows = HCR + (inj ? HC : 0);
+    switch (T) {
+#define MIX_CASE(N) case N: \
+        k_mix_down<N><<<(rows + MIX_WG / 32 - 1) / (MIX_WG / 32), MIX_WG, 0, st>>>(res, gamma, down, inj ? *inj : none, lo, inj ? inject : nullptr, ld_inject, inv); \
+        k_mix_up<N><<<D / 64, 256, 0, st>>>(lo, up, res, gamma, inv, mx, hh, hq); break;
+        MIX_CASE(1) MIX_CASE(2) MIX_CASE(3) MIX_CASE(4)
+#undef MIX_CASE
+        default: FAIL("hc_mix_fused: T=%d", T);
+    }
 }

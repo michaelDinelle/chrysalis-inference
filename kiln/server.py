@@ -26,14 +26,10 @@ import numpy as np
 
 from .cache import Cache
 from .chat import OutputParser, Renderer, Tokens, message_key, text_of
-from .engine import Engine, KVFull, Sampling, load_async
+from .engine import Engine, KVFull, Sampling, load_async, load_progress
 from .models import MODELS
 
 MODEL = "qwen3.8-27b"
-# Flash-Next keeps its cold experts (~55 GB) in system RAM while the 27B runs, so switching back only reloads what lives
-# in VRAM (~4.5 s instead of ~15 s), but only on machines with RAM to spare: on 64 GB the 27B gives it all back.
-with open("/proc/meminfo") as _f:
-    KEEP_HOST = int(_f.readline().split()[1]) >= 96 << 20         # MemTotal (kB) >= 96 GB
 _ROOT = __import__("os").path.dirname(__import__("os").path.dirname(__import__("os").path.abspath(__file__)))
 MAX_CONTEXT = 262144
 # Reply length (reasoning included) when the request sets none. The model card asks for room on agentic tasks:
@@ -146,15 +142,17 @@ class Sticky:
 
 
 class Server:
-    def __init__(self, model_path, tokenizer_path, slots=3, n_draft=3, umax=2048, log=sys.stderr, engine=None, warmup=True,
+    def __init__(self, model_path, tokenizer_path, slots=3, n_draft=3, umax=None, log=sys.stderr, engine=None, warmup=True,
                  model=MODEL):
         """engine: a future of the Engine (engine.load_async) if its load already started; by default it loads here,
         alongside the tokenizer. warmup=False leaves Engine.warmup() to the caller (serve() runs it under the GPU lock).
         model: the name of the model that model_path holds (see MODELS); requests can switch to the others."""
         if engine is None:
-            engine = load_async(model_path, max_seqs=slots, umax=umax, warmup=False,
+            engine = load_async(model_path, max_seqs=slots, umax=umax or MODELS.get(model, MODELS[MODEL])["chunk"], warmup=False,
                                 lib=__import__("os").path.join(_ROOT, MODELS.get(model, MODELS[MODEL])["lib"]))
         self.active, self.slots, self.umax = model, slots, umax
+        self.loading = None              # the model a switch is loading; stats() then leaves the engine alone
+        self.state_lock = threading.Lock()
         self.tok = Tokens(tokenizer_path)
         self.replay = LRU(8192)
         self.renderer = Renderer(self.tok, self.replay.get)
@@ -165,7 +163,7 @@ class Server:
         self.recent = LRU(64)
         self.engine = engine.result()
         self.capacity = min(MAX_CONTEXT, self.engine.capacity)
-        self.cache = Cache(self.engine, slots)
+        self.cache = Cache(self.engine, slots, max_snapshots=MODELS.get(model, MODELS[MODEL])["snapshots"])
         if warmup:
             self.engine.warmup()
 
@@ -184,15 +182,21 @@ class Server:
         import os
         t0 = time.time()
         spec = MODELS[name]
-        self.engine.shutdown(keep_host=KEEP_HOST)
-        self.engine = Engine(os.path.join(_ROOT, spec["path"]), max_seqs=self.slots, umax=self.umax,
-                             lib=os.path.join(_ROOT, spec["lib"]), warmup=True)
-        self.capacity = min(MAX_CONTEXT, self.engine.capacity)
-        self.cache = Cache(self.engine, self.slots)
-        self.n_draft = spec["draft"]
-        print(f"kiln: switched {self.active} -> {name} in {time.time() - t0:.1f} s (context {self.capacity} tokens)",
-              file=self.log, flush=True)
-        self.active = name
+        with self.state_lock:                         # waits for a stats() call that is reading the engine
+            self.loading = name
+        try:
+            self.engine.shutdown()
+            self.engine = Engine(os.path.join(_ROOT, spec["path"]), max_seqs=self.slots, umax=self.umax or spec["chunk"],
+                                 lib=os.path.join(_ROOT, spec["lib"]), warmup=True)
+            self.capacity = min(MAX_CONTEXT, self.engine.capacity)
+            self.cache = Cache(self.engine, self.slots, max_snapshots=spec["snapshots"])
+            self.n_draft = spec["draft"]
+            print(f"kiln: switched {self.active} -> {name} in {time.time() - t0:.1f} s (context {self.capacity} tokens)",
+                  file=self.log, flush=True)
+            self.active = name
+        finally:
+            with self.state_lock:
+                self.loading = None
 
     # ---- request translation ----------------------------------------------------------------
 
@@ -364,8 +368,21 @@ class Server:
         yield "done", info
 
     def stats(self):
-        return {"model": self.active, "models": list(MODELS), "context": self.capacity, "kv_tokens": self.engine.capacity, "cache": self.cache.stats(),
-                "recent": list(self.recent.values())[-16:]}
+        with self.state_lock:
+            if self.loading:                          # the old engine is gone, the new one not ready
+                return {"model": self.active, "loading": self.loading, "progress": load_progress(), "models": list(MODELS)}
+            return {"model": self.active, "models": list(MODELS), "context": self.capacity, "kv_tokens": self.engine.capacity,
+                    "cache": self.cache.stats(), "recent": list(self.recent.values())[-16:]}
+
+    def load(self, name):
+        """Switch to a model now (the web chat's model picker), after the request on the GPU, if any."""
+        if name not in MODELS:
+            raise RequestError(f"unknown model {name!r}; kiln has {', '.join(MODELS)}")
+        self.gpu.acquire(main=True)
+        try:
+            self.use(name)
+        finally:
+            self.gpu.release()
 
 
 # ---- HTTP ------------------------------------------------------------------------------------------
@@ -409,7 +426,7 @@ def make_handler(state, ready):
             if not host_ok(self.headers.get("Host")):
                 return self.send_json(403, {"error": {"message": "unknown host", "type": "invalid_request_error"}})
             if not ready.is_set() and self.path.rstrip("/") in ("/health", "/v1/health", "/kiln/stats"):
-                return self.send_json(503, {"status": "loading"})
+                return self.send_json(503, {"status": "loading", "model": state.get("loading"), "progress": load_progress()})
             ready.wait()
             srv = state["srv"]
             if self.path.rstrip("/") in ("/v1/models", "/models"):
@@ -427,6 +444,15 @@ def make_handler(state, ready):
         def do_POST(self):
             if not host_ok(self.headers.get("Host")):
                 return self.send_json(403, {"error": {"message": "unknown host", "type": "invalid_request_error"}})
+            if self.path.rstrip("/") == "/kiln/load":
+                ready.wait()
+                srv = state["srv"]
+                try:
+                    body = json.loads(self.rfile.read(int(self.headers.get("Content-Length") or 0)) or b"{}")
+                    srv.load(str(body.get("model", "")))
+                except (json.JSONDecodeError, RequestError) as e:
+                    return self.send_json(400, {"error": {"message": str(e), "type": "invalid_request_error"}})
+                return self.send_json(200, {"model": srv.active, "context": srv.capacity})
             if self.path.rstrip("/") not in ("/v1/chat/completions", "/chat/completions"):
                 return self.send_json(404, {"error": {"message": "not found"}})
             ready.wait()
@@ -545,10 +571,11 @@ class HTTPServer(ThreadingHTTPServer):
             super().handle_error(request, client_address)
 
 
-def serve(make_server, host="127.0.0.1", port=8080):
+def serve(make_server, host="127.0.0.1", port=8080, model=None):
     """Listens right away, so clients connect while the model loads: until make_server() returns, /health answers
-    503 and requests wait. The engine's warm-up then runs holding the GPU lock; requests queue behind it."""
-    state, ready = {}, threading.Event()
+    503 (with the load's progress) and requests wait. The engine's warm-up then runs holding the GPU lock; requests
+    queue behind it."""
+    state, ready = {"loading": model}, threading.Event()
     httpd = HTTPServer((host, port), make_handler(state, ready))
     threading.Thread(target=httpd.serve_forever, daemon=True).start()
     srv = make_server()

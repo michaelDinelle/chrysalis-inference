@@ -30,6 +30,18 @@ def wake_gpus():
         threading.Thread(target=wake, args=(node,), daemon=True).start()
 
 
+_loading = None                  # the library whose kiln_init / kiln_warmup is running
+
+
+def load_progress():
+    """0..1 while an engine loads (bytes of weights read, then warmup), None when nothing is loading."""
+    lib = _loading
+    if lib is None or not hasattr(lib, "kiln_load_progress"):
+        return None
+    lib.kiln_load_progress.restype = C.c_float
+    return round(float(lib.kiln_load_progress()), 3)
+
+
 def load_async(*args, **kw):
     """Engine(*args, **kw) in a thread (the C++ load runs without the GIL): returns a future."""
     from concurrent.futures import ThreadPoolExecutor
@@ -52,19 +64,28 @@ class Engine:
         L.kiln_generate.argtypes = [C.c_int, C.POINTER(Sampling), C.POINTER(C.c_int), C.c_int]
         L.kiln_seq_begin.argtypes = [C.c_int, C.c_uint64]
         L.kiln_last_logits.argtypes = [C.POINTER(C.c_float)]
-        self.capacity = L.kiln_init(model.encode(), max_seqs, umax, reserve_mb)
-        if warmup:
-            self.warmup()
+        global _loading
+        _loading = L
+        try:
+            self.capacity = L.kiln_init(model.encode(), max_seqs, umax, reserve_mb)
+            if warmup:
+                self.warmup()
+        finally:
+            _loading = None
 
     def warmup(self):
-        self.lib.kiln_warmup()
+        global _loading
+        _loading = self.lib
+        try:
+            self.lib.kiln_warmup()
+        finally:
+            _loading = None
 
-    def shutdown(self, keep_host=True):
-        """Release the GPU so another engine can load (model switch). The Flash-Next engine keeps its cold experts in
-        system RAM when keep_host is set, so loading it again only reloads what lives in VRAM."""
+    def shutdown(self):
+        """Release the GPU and the engine's host memory so another engine can load (model switch)."""
         if hasattr(self.lib, "kiln_shutdown"):
             self.lib.kiln_shutdown.argtypes = [C.c_int]
-            self.lib.kiln_shutdown(1 if keep_host else 0)
+            self.lib.kiln_shutdown(0)
 
     def new_seq(self):
         sid = self.lib.kiln_seq_new()

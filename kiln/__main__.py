@@ -18,7 +18,7 @@ def main():
     s.add_argument("--port", type=int, default=8080)
     s.add_argument("--slots", type=int, default=3, help="sequences kept resident on the GPU")
     s.add_argument("--draft", type=int, default=3, help="MTP draft tokens per step (0 disables speculation)")
-    s.add_argument("--chunk", type=int, default=2048, help="prefill chunk size (bigger is faster, costs VRAM)")
+    s.add_argument("--chunk", type=int, default=None, help="prefill chunk size (bigger is faster, costs VRAM; default: the model's)")
     a = ap.parse_args()
     if a.cmd == "serve":
         # Start what takes longest first: the GPU wakes and the weights load while the rest of Python starts up.
@@ -26,11 +26,11 @@ def main():
         wake_gpus()
         spec = MODELS[a.use]
         path = a.model or os.path.join(ROOT, spec["path"])
-        engine = load_async(path, max_seqs=a.slots, umax=a.chunk, warmup=False, lib=os.path.join(ROOT, spec["lib"]))
+        engine = load_async(path, max_seqs=a.slots, umax=a.chunk or spec["chunk"], warmup=False, lib=os.path.join(ROOT, spec["lib"]))
         from .server import Server, serve
         draft = a.draft if a.draft != 3 or a.use == DEFAULT else spec["draft"]
         serve(lambda: Server(path, a.tokenizer, slots=a.slots, n_draft=draft, umax=a.chunk, engine=engine, warmup=False,
-                             model=a.use), a.host, a.port)
+                             model=a.use), a.host, a.port, model=a.use)
 
 
 if __name__ == "__main__":

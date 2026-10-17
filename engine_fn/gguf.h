@@ -37,6 +37,8 @@ struct GGUF {
             case 30: return n * 2;               // BF16
             case 14: return n / 256 * 210;       // Q6_K
             case 23: return n / 256 * 136;       // IQ4_XS
+            case 10: return n / 256 * 84;        // Q2_K
+            case 11: return n / 256 * 110;       // Q3_K
             default: return 0;
         }
     }
@@ -89,6 +91,7 @@ struct GGUF {
         for (auto &[name, t] : tensors) {
             t.data = base + data_start + offsets[name];
             t.nbytes = type_bytes(t.type, t.ne[0] * t.ne[1] * t.ne[2] * t.ne[3]);
+            if (!t.nbytes) { fprintf(stderr, "kiln: tensor %s has a type this reader does not know (%d)\n", name.c_str(), t.type); return false; }
         }
         return true;
     }

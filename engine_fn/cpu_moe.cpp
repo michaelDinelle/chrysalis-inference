@@ -9,6 +9,7 @@
 
 namespace {
 constexpr int D_ = 2560, FE_ = 640;
+constexpr int VNNI_MIN_TOKENS = 3;              // below this ggml's per-row dot products are as fast (bandwidth-bound)
 inline uint32_t load_acq(const uint32_t *p) { return __atomic_load_n(p, __ATOMIC_ACQUIRE); }
 inline void store_rel(uint32_t *p, uint32_t v) { __atomic_store_n(p, v, __ATOMIC_RELEASE); }
 }
@@ -18,32 +19,42 @@ void CpuMoe::start(MoeShared *shared, const std::vector<ColdLayer> &layers, int 
     sh = shared;
     L = layers;
     n = threads;
-    int tgu = -1, tdn = -1;
-    for (const ColdLayer &c : L) if (c.gate) { tgu = c.type_gu; tdn = c.type_dn; break; }
-    if (tgu < 0) return;                                        // no cold experts at all
-    const ggml_type dt_gu = ggml_get_type_traits_cpu((ggml_type)tgu)->vec_dot_type;
-    const ggml_type dt_dn = ggml_get_type_traits_cpu((ggml_type)tdn)->vec_dot_type;
-    xq_row = ggml_row_size(dt_gu, D_);
+    // every layer's groups share their formats (one model file); group 1 may be absent
+    const ColdLayer *c0 = nullptr;
+    for (const ColdLayer &c : L) if (c.n) { c0 = &c; break; }
+    if (!c0) return;                                            // no cold experts at all
+    for (const ColdLayer &c : L)
+        if (c.n && (c.type_gu[0] != c0->type_gu[0] || (c.gate[1] && c0->gate[1] && c.type_gu[1] != c0->type_gu[1]) || c.type_dn != c0->type_dn))
+            fprintf(stderr, "kiln: cold expert formats differ between layers\n"), abort();
+    int t1 = c0->type_gu[0];
+    for (const ColdLayer &c : L) if (c.gate[1]) { t1 = c.type_gu[1]; break; }
+    dot_gu[0] = ggml_get_type_traits_cpu((ggml_type)c0->type_gu[0])->vec_dot_type;
+    dot_gu[1] = ggml_get_type_traits_cpu((ggml_type)t1)->vec_dot_type;
+    dot_same = dot_gu[0] == dot_gu[1];
+    const ggml_type dt_dn = ggml_get_type_traits_cpu((ggml_type)c0->type_dn)->vec_dot_type;
+    for (int g = 0; g < 2; g++) { xq_row[g] = ggml_row_size((ggml_type)dot_gu[g], D_); xq[g].resize(xq_row[g] * MOE_MAX_T); }
     hq_row = ggml_row_size(dt_dn, FE_);
     gu.resize((size_t)MOE_MAX_T * MOE_MAX_E * 2 * FE_);
-    xq.resize(xq_row * MOE_MAX_T);
     hq.resize(hq_row * MOE_MAX_T * MOE_MAX_E);
     seen = load_acq(&sh->go);
-    scr.assign(n, Scratch{});
+    scr = std::vector<Scratch>(n);
+    vnni = vnni_supported();
+    for (const ColdLayer &c : L) if (c.n && !vnni_formats(c)) vnni = false;
+    vnni_ok = vnni;
     for (int i = 0; i < n; i++) th.emplace_back(&CpuMoe::worker, this, i);
 }
 
 void CpuMoe::stop() {
     if (th.empty()) return;
     quit = true;
-    armed = 1;
-    armed.notify_all();
+    wake.fetch_add(1, std::memory_order_release);
+    wake.notify_all();
     for (auto &t : th) t.join();
     th.clear();
     quit = false;
 }
 
-void CpuMoe::arm() { armed.store(1, std::memory_order_release); armed.notify_all(); }
+void CpuMoe::arm() { armed.store(1, std::memory_order_release); wake.fetch_add(1, std::memory_order_release); wake.notify_all(); }
 void CpuMoe::disarm() { armed.store(0, std::memory_order_release); }
 
 void CpuMoe::barrier() {                           // spin barrier for the n workers
@@ -58,9 +69,12 @@ void CpuMoe::barrier() {                           // spin barrier for the n wor
 
 void CpuMoe::submit(const MoeJob &j) {
     job = j;
-    if (pxq.size() < xq_row * j.T) pxq.resize(xq_row * j.T);
+    for (int g = 0; g < (dot_same ? 1 : 2); g++) if (pxq[g].size() < xq_row[g] * j.T) pxq[g].resize(xq_row[g] * j.T);
+    if (vnni && vxq.size() < (size_t)j.T * D_) { vxq.resize((size_t)j.T * D_); vxs.resize((size_t)j.T * (D_ / 32)); vxsum.resize((size_t)j.T * (D_ / 16)); }
     jtok.store(0, std::memory_order_relaxed); jexp.store(0, std::memory_order_relaxed); jfin.store(0, std::memory_order_relaxed);
     jgen.fetch_add(1, std::memory_order_release);
+    wake.fetch_add(1, std::memory_order_release);
+    wake.notify_all();
 }
 
 void CpuMoe::wait() {
@@ -73,20 +87,38 @@ void CpuMoe::wait() {
 void CpuMoe::prefill_work(int id) {
     const MoeJob &J = job;
     const ColdLayer &c = L[J.layer];
-    const auto *tr_gu = ggml_get_type_traits_cpu((ggml_type)c.type_gu);
     const auto *tr_dn = ggml_get_type_traits_cpu((ggml_type)c.type_dn);
-    const auto from_gu = ggml_get_type_traits_cpu(tr_gu->vec_dot_type)->from_float;
     const auto from_dn = ggml_get_type_traits_cpu(tr_dn->vec_dot_type)->from_float;
-    for (int t; (t = jtok.fetch_add(1, std::memory_order_relaxed)) < J.T;) from_gu(J.x + (size_t)t * D_, pxq.data() + xq_row * t, D_);
+    for (int t; (t = jtok.fetch_add(1, std::memory_order_relaxed)) < J.T;) {
+        float x[D_];
+        ggml_cpu_fp16_to_fp32((const ggml_fp16_t *)J.x + (size_t)t * D_, x, D_);
+        for (int g = 0; g < (dot_same ? 1 : 2); g++)
+            ggml_get_type_traits_cpu((ggml_type)dot_gu[g])->from_float(x, pxq[g].data() + xq_row[g] * t, D_);
+        if (vnni) vnni_quant_x(x, vxq.data() + (size_t)t * D_, vxs.data() + (size_t)t * (D_ / 32), vxsum.data() + (size_t)t * (D_ / 16));
+    }
     barrier();
     Scratch &s = scr[id];
     for (int e; (e = jexp.fetch_add(1, std::memory_order_relaxed)) < J.n_exp;) {
         const int p0 = J.first[e], np = J.first[e + 1] - p0, slot = J.slot[e];
+        if (vnni && np >= VNNI_MIN_TOKENS) {     // several tokens: each weight row decoded once, 16 tokens per instruction
+            std::vector<const int8_t *> xq(np); std::vector<const float *> xs(np); std::vector<const int32_t *> xsum(np);
+            std::vector<uint16_t *> out(np);
+            for (int i = 0; i < np; i++) {
+                const int t = J.tok[p0 + i];
+                xq[i] = vxq.data() + (size_t)t * D_; xs[i] = vxs.data() + (size_t)t * (D_ / 32);
+                xsum[i] = vxsum.data() + (size_t)t * (D_ / 16);
+                out[i] = J.out + (size_t)(p0 + i) * D_;
+            }
+            expert_vnni(c, slot, np, xq.data(), xs.data(), xsum.data(), J.w + p0, out.data(), s.v);
+            continue;
+        }
         if (s.gu.size() < (size_t)np * 2 * FE_) { s.gu.resize((size_t)np * 2 * FE_); s.y.resize((size_t)np * D_); s.hq.resize(hq_row * np); }
+        const int g = c.grp(slot), gx = dot_same ? 0 : g;
+        const auto *tr_gu = ggml_get_type_traits_cpu((ggml_type)c.type_gu[g]);
         for (int r = 0; r < 2 * FE_; r++) {
-            const uint8_t *row = (r < FE_ ? c.gate : c.up) + ((size_t)slot * FE_ + r % FE_) * c.row_gu;
+            const uint8_t *row = c.gu_row(r >= FE_, slot, r % FE_);
             for (int i = 0; i < np; i++)
-                tr_gu->vec_dot(D_, &s.gu[(size_t)i * 2 * FE_ + r], 0, row, 0, pxq.data() + xq_row * J.tok[p0 + i], 0, 1);
+                tr_gu->vec_dot(D_, &s.gu[(size_t)i * 2 * FE_ + r], 0, row, 0, pxq[gx].data() + xq_row[gx] * J.tok[p0 + i], 0, 1);
         }
         for (int i = 0; i < np; i++) {
             float h[FE_];
@@ -95,7 +127,7 @@ void CpuMoe::prefill_work(int id) {
             from_dn(h, s.hq.data() + hq_row * i, FE_);
         }
         for (int r = 0; r < D_; r++) {
-            const uint8_t *row = c.down + ((size_t)slot * D_ + r) * c.row_dn;
+            const uint8_t *row = c.dn_row(slot, r);
             for (int i = 0; i < np; i++) tr_dn->vec_dot(FE_, &s.y[(size_t)i * D_ + r], 0, row, 0, s.hq.data() + hq_row * i, 0, 1);
         }
         for (int i = 0; i < np; i++) {
@@ -115,12 +147,13 @@ void CpuMoe::worker(int id) {
         uint32_t g;
         bool host_job = false;
         for (;;) {
+            const uint32_t wk = wake.load(std::memory_order_acquire);   // read first: a later bump ends the wait below
             if (quit.load(std::memory_order_acquire)) return;
             const uint32_t j = jgen.load(std::memory_order_acquire);
             if (j != jlast) { jlast = j; host_job = true; break; }
             g = load_acq(&sh->go);
             if (g != last) break;
-            if (!armed.load(std::memory_order_acquire)) { armed.wait(0, std::memory_order_acquire); continue; }
+            if (!armed.load(std::memory_order_acquire)) { wake.wait(wk, std::memory_order_acquire); continue; }
             _mm_pause();
         }
         if (host_job) { prefill_work(id); continue; }
@@ -130,18 +163,21 @@ void CpuMoe::worker(int id) {
         // picks handled here
         int pick[MOE_MAX_T * MOE_MAX_E], np = 0;
         for (int j = 0; j < T * MOE_MAX_E; j++) if (sh->slot[j] >= 0) pick[np++] = j;
-        const auto *tr_gu = ggml_get_type_traits_cpu((ggml_type)c.type_gu);
+        const ggml_type_traits_cpu *tr_gu[2] = {ggml_get_type_traits_cpu((ggml_type)c.type_gu[0]),
+                                                ggml_get_type_traits_cpu((ggml_type)(c.gate[1] ? c.type_gu[1] : c.type_gu[0]))};
         const auto *tr_dn = ggml_get_type_traits_cpu((ggml_type)c.type_dn);
         if (np > 0) {
-            // inputs to the gate/up dot type (one token per worker)
-            if (id < T) ggml_get_type_traits_cpu(tr_gu->vec_dot_type)->from_float(sh->x + (size_t)id * D_, xq.data() + xq_row * id, D_);
+            // inputs to the gate/up dot types (one token per worker)
+            if (id < T)
+                for (int g = 0; g < (dot_same ? 1 : 2); g++)
+                    ggml_get_type_traits_cpu((ggml_type)dot_gu[g])->from_float(sh->x + (size_t)id * D_, xq[g].data() + xq_row[g] * id, D_);
             barrier();
             // gate | up rows of all picks, split evenly
             const int R1 = np * 2 * FE_;
             for (int r = id * R1 / n; r < (id + 1) * R1 / n; r++) {
-                const int p = r / (2 * FE_), k = r % (2 * FE_), j = pick[p], slot = sh->slot[j];
-                const uint8_t *row = (k < FE_ ? c.gate : c.up) + ((size_t)slot * FE_ + (k % FE_)) * c.row_gu;
-                tr_gu->vec_dot(D_, &gu[(size_t)p * 2 * FE_ + k], 0, row, 0, xq.data() + xq_row * (j / MOE_MAX_E), 0, 1);
+                const int p = r / (2 * FE_), k = r % (2 * FE_), j = pick[p], slot = sh->slot[j], g = c.grp(slot), gx = dot_same ? 0 : g;
+                tr_gu[g]->vec_dot(D_, &gu[(size_t)p * 2 * FE_ + k], 0, c.gu_row(k >= FE_, slot, k % FE_), 0,
+                                  xq[gx].data() + xq_row[gx] * (j / MOE_MAX_E), 0, 1);
             }
             barrier();
             // silu(gate) * up, quantized for the down rows
@@ -159,7 +195,7 @@ void CpuMoe::worker(int id) {
             for (int p = 0; p < np; p++) {
                 const int j = pick[p], slot = sh->slot[j];
                 float v;
-                tr_dn->vec_dot(FE_, &v, 0, c.down + ((size_t)slot * D_ + r) * c.row_dn, 0, hq.data() + hq_row * p, 0, 1);
+                tr_dn->vec_dot(FE_, &v, 0, c.dn_row(slot, r), 0, hq.data() + hq_row * p, 0, 1);
                 acc[j / MOE_MAX_E] += sh->w[j] * v;
             }
             for (int t = 0; t < T; t++) sh->y[(size_t)t * D_ + r] = acc[t];
