@@ -10,7 +10,7 @@ static Engine *E = nullptr;
 float load_progress();                          // load.cpp (C++ linkage, so declared outside extern "C")
 
 extern "C" {
-struct KilnSampling { float temperature, top_p, min_p, presence_penalty; int top_k, n_draft; };
+struct KilnSampling { float temperature, top_p, min_p, presence_penalty; int top_k, n_draft, ban; };
 
 // Loads the model; returns KV capacity in tokens. chunk: tokens per prefill pass (each RAM expert is read once per pass).
 int kiln_init(const char *path, int max_seqs, int chunk, long long reserve_mb) {
@@ -47,7 +47,7 @@ int kiln_prefill(int id, const int *tokens, int n) {
 int kiln_generate(int id, const KilnSampling *p, int *out, int max_out) {
     Sampling sp;
     sp.temperature = p->temperature; sp.top_p = p->top_p; sp.min_p = p->min_p;
-    sp.presence_penalty = p->presence_penalty; sp.top_k = p->top_k; sp.n_draft = p->n_draft;
+    sp.presence_penalty = p->presence_penalty; sp.top_k = p->top_k; sp.n_draft = p->n_draft; sp.ban = p->ban;
     try { return E->generate(id, sp, out, max_out); } catch (const std::exception &) { return -1; }
 }
 // Tuning knobs for experiments (benchmarks set them between runs); returns the previous value, NAN if unknown.

@@ -47,7 +47,7 @@
         <h2>Settings</h2>
         <p>For every conversation in this tab, until it is closed.</p>
         <h3><label for="system-input">System prompt</label></h3>
-        <p>Changing it makes kiln re-read each conversation once, the next time it answers there.</p>
+        <p>Every chat begins with “There are no tools or files in this chat. Answer directly.” (without it the model takes some asks for a coding-agent task); yours follows it. Changing it makes kiln re-read each conversation once, the next time it answers there.</p>
         <textarea id="system-input" rows="6" placeholder="You are a concise senior engineer…"></textarea>
         <h3>Sampling</h3>
         <p>Blank fields use Qwen's recommended values, shown for this chat's thinking setting. The same seed, prompt and settings give the same reply.</p>

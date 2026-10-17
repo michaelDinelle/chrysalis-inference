@@ -246,7 +246,11 @@ class Server:
         d = DEFAULTS[bool(thinking)]
         sp = Sampling(temperature=float(body.get("temperature", d["temperature"])), top_p=float(body.get("top_p", d["top_p"])),
                       min_p=float(body.get("min_p", d["min_p"])), presence_penalty=float(body.get("presence_penalty", d["presence_penalty"])),
-                      top_k=int(body.get("top_k", d["top_k"])), n_draft=self.n_draft)
+                      top_k=int(body.get("top_k", d["top_k"])), n_draft=self.n_draft,
+                      # A model can call only the tools it is offered. Without any, Flash-Next still writes tool calls for
+                      # agent-like asks ("design an SVG": list_files, read_file; the Q8_0 original as well, p ~0.94), and
+                      # the reply ends there: so without tools <tool_call> is never drawn and it answers in text.
+                      ban=-1 if tools else self.tok.id["<tool_call>"])
         max_tokens = int(body.get("max_completion_tokens") or body.get("max_tokens") or MAX_OUTPUT)
         if side:
             max_tokens = min(max_tokens, 256)

@@ -847,15 +847,17 @@ struct Dist { int n = 0; int id[TOPK]; float p[TOPK]; };
 
 Dist make_dist(const float *v, const int *ids, const Sampling &sp, const std::vector<int> &seen) {
     std::pair<float, int> c[TOPK];
+    int nc = 0;
     for (int i = 0; i < TOPK; i++) {
+        if (ids[i] == sp.ban) continue;                 // not a candidate at all (so not a fallback either)
         float x = v[i];
         if (sp.presence_penalty != 0 && std::find(seen.begin(), seen.end(), ids[i]) != seen.end()) x -= sp.presence_penalty;
-        c[i] = {x, ids[i]};
+        c[nc++] = {x, ids[i]};
     }
-    std::sort(c, c + TOPK, [](auto &a, auto &b) { return a.first > b.first; });
+    std::sort(c, c + nc, [](auto &a, auto &b) { return a.first > b.first; });
     Dist d;
     if (sp.temperature <= 0) { d.n = 1; d.id[0] = c[0].second; d.p[0] = 1; return d; }
-    const int k = std::max(1, std::min(sp.top_k > 0 ? sp.top_k : TOPK, TOPK));
+    const int k = std::max(1, std::min(sp.top_k > 0 ? sp.top_k : nc, nc));
     double sum = 0;
     for (int i = 0; i < k; i++) { d.p[i] = expf((c[i].first - c[0].first) / sp.temperature); d.id[i] = c[i].second; sum += d.p[i]; }
     d.n = k;

@@ -10,8 +10,13 @@ class KVFull(RuntimeError):
 
 
 class Sampling(C.Structure):
+    """ban: a token id never drawn (-1: none)."""
     _fields_ = [("temperature", C.c_float), ("top_p", C.c_float), ("min_p", C.c_float),
-                ("presence_penalty", C.c_float), ("top_k", C.c_int), ("n_draft", C.c_int)]
+                ("presence_penalty", C.c_float), ("top_k", C.c_int), ("n_draft", C.c_int), ("ban", C.c_int)]
+
+    def __init__(self, **kw):
+        kw.setdefault("ban", -1)
+        super().__init__(**kw)
 
 
 def wake_gpus():

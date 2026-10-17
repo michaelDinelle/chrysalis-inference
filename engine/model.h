@@ -25,6 +25,7 @@ struct Layer {
 struct Sampling {                                // mirrors KilnSampling in api.cpp
     float temperature = 1.0f, top_p = 0.95f, min_p = 0.0f, presence_penalty = 0.0f;
     int top_k = 20, n_draft = 3;
+    int ban = -1;                                // a token never drawn (-1: none): <tool_call> when a request offers no tools
 };
 
 struct Seq {

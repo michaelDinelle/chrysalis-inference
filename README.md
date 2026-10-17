@@ -40,6 +40,9 @@ keeps them, closing the tab ends them, and nothing is stored on the server's dis
 while it is written (in RAM, until 15 minutes after it ends): opening another chat, reloading, closing the tab, a
 laptop asleep or a dropped connection leave it running, and the page follows it again from the last event it saw;
 only Stop (the button, or Esc when no dialog is open) or deleting the chat ends it early.
+Every chat's system prompt starts with "There are no tools or files in this chat. Answer directly." (Settings shows it;
+yours follows): without it, Flash-Next with thinking off takes asks like "design a cute SVG" for a coding-agent task
+("let me first explore the project structure", then calls to tools that do not exist), as the Q8_0 original does too.
 Replies stream with their reasoning (collapsible), each one shows time to first token, tok/s, how much of the
 prompt came from cache and its seed. The Think switch picks the reasoning effort (Max, Medium, Low) or the
 no-thinking model (Off). Settings holds the system prompt, the sampling values (temperature, top-p, top-k,
@@ -151,7 +154,8 @@ block. OpenCode specifics: the date in its environment block is frozen per conve
 reminders are kept where they first appeared, and its compaction request (normally a full re-read of the
 older part of the conversation) is answered by appending the summary request to the cached conversation,
 rendered with that conversation's own settings. Extra system messages from plugins are merged into the
-first one. Special-token text inside files stays text. `KILN_TRACE=1` adds each request's time split
+first one. Special-token text inside files stays text. A request that offers no tools never draws `<tool_call>`: a model can call
+only the tools it was given. `KILN_TRACE=1` adds each request's time split
 (cache lookup, prefill pieces, snapshots, first step) to its log line; `tools/bench_opencode.py` replays
 OpenCode 2.0.25's real requests (`tools/opencode2.json`) against a running server.
 

@@ -23,6 +23,7 @@ interface Run {
   at: number;                                       // events of the job seen so far
   stopping: boolean; gone?: boolean;                // Stop pressed; the chat was deleted
   usage?: any; seed?: number; timing?: { start: number; first?: number; answer?: number; last?: number };
+  calls: string[];                                  // tools the model asked for (this chat offers none)
   frame: number; saved: number;
 }
 
@@ -619,13 +620,18 @@ function save(c: Conversation) {
   renderList();
 }
 
+// Every chat's system prompt starts with the truth about this chat. Without it Flash-Next takes some asks for a
+// coding-agent task when it does not think ("design a cute SVG ..." -> "let me first explore the project structure"
+// and calls to list_files / read_file: 16 replies out of 16, and the Q8_0 original as well); with it, 16 of 16 draw.
+const CHAT_NOTE = "There are no tools or files in this chat. Answer directly.";
+
 // The request body. Assistant turns go back exactly as kiln sent them: kiln then replays its own tokens and
 // every turn is a cache hit (only the new message is read).
 function request(c: Conversation) {
   const messages: { role: string; content: string; reasoning_content?: string }[] = c.messages.slice(0, -1)
     .filter((m) => m.role === "user" || m.content || m.reasoning)
     .map((m) => (m.reasoning ? { role: m.role, content: m.content, reasoning_content: m.reasoning } : { role: m.role, content: m.content }));
-  if (settings.system.trim()) messages.unshift({ role: "system", content: settings.system.trim() });
+  messages.unshift({ role: "system", content: [CHAT_NOTE, settings.system.trim()].filter(Boolean).join("\n\n") });
   return {
     model: c.effort === "off" ? `${current()}-fast` : current(), reasoning_effort: c.effort === "off" ? undefined : c.effort,
     ...settings.sampling, messages, stream: true, stream_options: { include_usage: true },
@@ -664,7 +670,7 @@ const CUT_OFF = "The reply was cut off: the web server restarted while it was be
 async function generate(c: Conversation = conv) {
   const m: Message = { role: "assistant", content: "", reasoning: "" };
   c.messages.push(m);
-  const run: Run = { conv: c, m, live: { phase: "waiting", since: performance.now(), note: "Reading the prompt" }, at: 0, stopping: false, frame: 0, saved: 0 };
+  const run: Run = { conv: c, m, live: { phase: "waiting", since: performance.now(), note: "Reading the prompt" }, at: 0, stopping: false, frame: 0, saved: 0, calls: [] };
   runs.set(c.id, run);
   if (c === conv) {
     follow = true;
@@ -695,7 +701,7 @@ async function generate(c: Conversation = conv) {
 // A reply that was being written when the page (re)loaded: followed again from its first event. The saved text stays
 // until the server answers; if it no longer knows the reply, that text stays and says why it ends there.
 async function resume(c: Conversation, m: Message) {
-  const run: Run = { conv: c, m, live: { phase: "waiting", since: performance.now(), note: "Reading the prompt" }, at: 0, stopping: false, frame: 0, saved: 0 };
+  const run: Run = { conv: c, m, live: { phase: "waiting", since: performance.now(), note: "Reading the prompt" }, at: 0, stopping: false, frame: 0, saved: 0, calls: [] };
   runs.set(c.id, run);
   try {
     const res = await fetch(`/api/chat/${m.job}?from=0`);
@@ -742,6 +748,7 @@ function take(run: Run, ev: any) {
   if (ev.timing) run.timing = ev.timing;
   if (ev.usage) run.usage = ev.usage;
   if (ev.seed !== undefined) run.seed = ev.seed;
+  for (const c of d.tool_calls ?? []) if (c.function?.name) run.calls.push(c.function.name);
   if (d.reasoning_content) {
     if (live.phase !== "thinking") {
       live.phase = "thinking";
@@ -782,6 +789,8 @@ function finish(run: Run) {
       thought: m.reasoning && t.answer ? (t.answer - t.first) / 1000 : undefined, seed: run.seed, model: current(),
     };
   }
+  if (run.calls.length && !m.error)                // shown, not dropped: the reply would otherwise just stop
+    m.error = `The model asked to run ${[...new Set(run.calls)].join(", ")}, but this chat has no tools, so the reply ends here.`;
   delete m.job;
   cancelAnimationFrame(run.frame);
   if (runs.get(c.id) === run) runs.delete(c.id);
