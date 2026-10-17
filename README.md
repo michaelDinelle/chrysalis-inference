@@ -72,6 +72,10 @@ explanations elsewhere are tooltips, so nothing in the panel changes size while 
 A value that differs from the recommended one is marked; ↺ or a double click on its slider brings it back. The
 sidebar starts or unloads the model (sending a message starts it too). Assistant turns go back
 to kiln exactly as received, so every turn of a conversation is a cache hit.
+While a reply streams the page follows it, until you scroll up (wheel, touch, keys or the scrollbar); back at the
+end, or with the ↓ over the message box, it follows again, and it never scrolls up on its own. A figure being drawn
+is shown from its top, as large as what can be seen at once (the column's width or the visible height), and the page
+holds still while it draws. The thinking box follows its newest line the same way.
 Replies render block by block: while one streams, finished paragraphs, code blocks and tables keep their nodes
 and only the growing tail is rebuilt (on the next frame), and the tail shows settled text only: whole words, whole
 code lines and table rows, links once their address is in, no stray `**`. A code block holding an SVG document

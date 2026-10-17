@@ -104,6 +104,7 @@ const ICONS = {
   cont: '<path d="M5 6l6 6-6 6M13 6l6 6-6 6"/>',
   tokens: '<path d="M4 19V11M9 19V5M14 19v-6M19 19V9"/>',
   wand: '<path d="M12 3l1.6 4.4L18 9l-4.4 1.6L12 15l-1.6-4.4L6 9l4.4-1.6z"/><path d="M18.5 14.5l.7 1.8 1.8.7-1.8.7-.7 1.8-.7-1.8-1.8-.7 1.8-.7z"/>',
+  down: '<path d="M12 5v14M5 12l7 7 7-7"/>',
   grip: '<circle cx="9" cy="6" r="1.3" fill="currentColor" stroke="none"/><circle cx="15" cy="6" r="1.3" fill="currentColor" stroke="none"/><circle cx="9" cy="12" r="1.3" fill="currentColor" stroke="none"/><circle cx="15" cy="12" r="1.3" fill="currentColor" stroke="none"/><circle cx="9" cy="18" r="1.3" fill="currentColor" stroke="none"/><circle cx="15" cy="18" r="1.3" fill="currentColor" stroke="none"/>',
   dice: '<rect x="4" y="4" width="16" height="16" rx="3.5"/><circle cx="9" cy="9" r="1.1" fill="currentColor"/><circle cx="15" cy="15" r="1.1" fill="currentColor"/><circle cx="15" cy="9" r="1.1" fill="currentColor"/><circle cx="9" cy="15" r="1.1" fill="currentColor"/>',
 };
@@ -199,8 +200,8 @@ function renderBlocks(v: View, src: string, live: boolean) {
 // with a short fade, once its tag is complete. The markup is sanitized (no scripts, handlers, foreignObject, external
 // references) and lives in a shadow root, so its styles and ids stay inside it. The code is a click away.
 const SVG_START = /^\s*(?:<\?xml[^>]*\?>\s*)?(?:<!--[\s\S]*?-->\s*|<!DOCTYPE[^>]*>\s*)*<svg[\s>]/i;
-const SVG_SHADOW = ":host { display: block; color: #1f1b19; } svg { display: block; max-width: 100%; height: auto; } " +
-  "svg[data-fit=fluid] { width: 640px; } :host(.zoom) svg { max-width: none; }";
+const SVG_SHADOW = ":host { display: block; color: #1f1b19; } svg { display: block; width: var(--fig-w, 640px); max-width: 100%; height: auto; } " +
+  ":host(.zoom) svg { max-width: none; }";
 const svgSource = new WeakMap<Element, string>();
 const reducedMotion = matchMedia("(prefers-reduced-motion: reduce)");
 
@@ -290,7 +291,6 @@ function drawSvg(root: ShadowRoot, markup: string | null, fade: boolean): boolea
   const num = (n: string) => /^\s*[\d.]+\s*(px)?\s*$/.test(svg.getAttribute(n) ?? "") ? parseFloat(svg.getAttribute(n)!) : 0;
   const w = num("width"), hh = num("height");
   if (w && hh && !svg.hasAttribute("viewBox")) svg.setAttribute("viewBox", `0 0 ${w} ${hh}`);   // so it can scale down
-  if (!w) svg.setAttribute("data-fit", "fluid");
   const cur = root.querySelector("svg"), added: Element[] = [];
   if (cur && sameEl(cur, svg)) syncSvg(cur, svg, added);
   else {
@@ -320,12 +320,25 @@ function svgFigure(old: Node | undefined, text: string, drawing: boolean): HTMLE
     const ok = drawSvg(fig.querySelector(".svg-paper")!.shadowRoot!, svgPrefix(text), drawing);
     fig.classList.toggle("failed", !drawing && !ok);
   }
+  fitFigure(fig);
   const svg = fig.querySelector(".svg-paper")!.shadowRoot!.querySelector("svg"), box = svg?.viewBox.baseVal;
   fig.querySelector(".svg-state")!.textContent = drawing ? "Drawing" : fig.classList.contains("failed") ? "Couldn't draw this SVG"
     : box && box.width ? `SVG · ${Math.round(box.width)} × ${Math.round(box.height)}` : "SVG";
   if (fig.classList.contains("show-code") || fig.classList.contains("failed")) svgCode(fig);
   return fig;
 }
+
+// A drawing as large as what can be seen at once: the column's width, or the scroll area's height less the caption,
+// whichever runs out first, its shape kept. Set when its <svg> tag arrives, so it never changes size while it draws.
+function fitFigure(fig: Element) {
+  const paper = fig.querySelector<HTMLElement>(".svg-paper")!, vb = paper.shadowRoot!.querySelector("svg")?.viewBox.baseVal;
+  if (!vb || !vb.width || !vb.height) return;
+  const room = thread.clientWidth - 48 - 30;             // the column (the thread's padding), less the paper's padding and border
+  const tall = Math.max(scroller.clientHeight - 74, 320); // the scroll area, less 8 + 6 px of gap, the paper's padding and the caption
+  const w = `${Math.floor(Math.min(room, tall * (vb.width / vb.height)))}px`;
+  if (paper.style.getPropertyValue("--fig-w") !== w) paper.style.setProperty("--fig-w", w);
+}
+addEventListener("resize", () => thread.querySelectorAll(".svg-fig").forEach(fitFigure));
 
 function svgCode(fig: Element) {
   const code = fig.querySelector(".svg-code code")!, text = svgSource.get(fig) ?? "";
@@ -386,7 +399,7 @@ const runs = new Map<string, Run>();               // conversation id -> its rep
 const running = (c: Conversation = conv) => runs.get(c.id);
 let status: Status = { state: "offline" };
 let build = "";                                     // the server's code version when this page loaded
-let follow = true;                                  // keep the newest text in view unless the user scrolled up
+let follow = true;                                  // keep the newest text in view (see keepUp)
 const views = new Map<Message, View>();
 const tokens = new Map<string, { reasoning: Tok[]; content: Tok[] }>();   // replies' token odds by message id (this page only)
 const tokenView = new Set<string>();                // replies shown as their tokens
@@ -501,6 +514,10 @@ function assistantView(i: number): View {
   el.dataset.i = String(i);
   think.append(summary, thought);
   el.append(think, body, foot);
+  // while it streams the thinking box keeps its newest line in view, until it is scrolled up by hand (back at its end,
+  // it follows again)
+  thought.addEventListener("wheel", (e) => { if (e.deltaY < 0) thought.dataset.held = "1"; }, { passive: true });
+  thought.addEventListener("scroll", () => { if (thought.scrollHeight - thought.scrollTop - thought.clientHeight < 4) delete thought.dataset.held; });
   return { el, think, summary, thought, body, foot };
 }
 
@@ -525,7 +542,7 @@ function paint(v: View, m: Message, live?: Live) {
     if (!live) v.tok = undefined;                  // drawn afresh (and with the error, if any) once it is done
     paintTokens(v, m);
     if (live) {
-      if (live.phase === "thinking") v.thought.scrollTop = v.thought.scrollHeight;
+      if (live.phase === "thinking" && !v.thought.dataset.held) v.thought.scrollTop = v.thought.scrollHeight;
       return;
     }
   } else {
@@ -534,7 +551,7 @@ function paint(v: View, m: Message, live?: Live) {
   }
   if (!asTokens && m.reasoning && v.thought.textContent !== m.reasoning) {
     v.thought.textContent = m.reasoning;
-    if (live) v.thought.scrollTop = v.thought.scrollHeight;
+    if (live && !v.thought.dataset.held) v.thought.scrollTop = v.thought.scrollHeight;
   }
   if (asTokens) { /* drawn above */ } else if (live?.phase === "waiting") {
     // while a model loads the sidebar's bar says so; here only the dot
@@ -1056,8 +1073,30 @@ function schedule(run: Run) {
     const v = views.get(run.m);
     if (!v) return;                                // its chat is not on screen
     paint(v, run.m, run.live);
-    if (follow) scroller.scrollTop = scroller.scrollHeight;
+    keepUp();
   });
+}
+
+// Following a reply: the newest text stays in view until the user scrolls up (wheel, touch, keys or the scrollbar; a
+// scroll the page makes itself never counts), and again once they are back at the end. Following only scrolls down,
+// so it never takes the page from under someone reading. A figure drawing at the end is shown from its top and the
+// page holds still while it draws (its size is set when it starts).
+function followTarget() {
+  const end = scroller.scrollHeight - scroller.clientHeight;
+  const fig = thread.querySelector<HTMLElement>(".msg:last-child .svg-fig.drawing");
+  if (!fig) return end;
+  return Math.min(end, fig.getBoundingClientRect().top - scroller.getBoundingClientRect().top + scroller.scrollTop - 8);
+}
+function keepUp() {
+  if (follow) {
+    const t = followTarget();
+    if (scroller.scrollTop < t - 1) scroller.scrollTop = t;
+  }
+  $("to-latest").hidden = follow || scroller.scrollHeight - scroller.scrollTop - scroller.clientHeight < 120;
+}
+function stopFollowing() {
+  follow = false;
+  keepUp();
 }
 setInterval(() => { for (const r of runs.values()) schedule(r); }, 250);   // the elapsed-time labels
 
@@ -1174,6 +1213,8 @@ function openConversation(id: string) {
   document.body.classList.remove("nav-open");
   render();
   scroller.scrollTop = scroller.scrollHeight;
+  follow = true;
+  keepUp();
 }
 
 function newChat() {
@@ -1279,7 +1320,31 @@ document.addEventListener("keydown", (e) => {
   const r = running();
   if (r) stopRun(r);
 });
-scroller.addEventListener("scroll", () => { follow = scroller.scrollHeight - scroller.scrollTop - scroller.clientHeight < 80; });
+// Back at the end by scrolling down to it: following again. Only a downward scroll counts: the first pixels of an
+// upward one (a trackpad's small steps, a wheel's smooth scroll) are still at the end, and taking those as a return
+// snapped the page back under the user's hand.
+let lastTop = 0;
+scroller.addEventListener("scroll", () => {
+  const down = scroller.scrollTop > lastTop + 0.5;
+  lastTop = scroller.scrollTop;
+  if (!follow && down && scroller.scrollTop >= followTarget() - 2) follow = true;
+  keepUp();
+});
+scroller.addEventListener("wheel", (e) => { if (e.deltaY < 0) stopFollowing(); }, { passive: true });
+let touchY = 0;
+scroller.addEventListener("touchstart", (e) => { touchY = e.touches[0].clientY; }, { passive: true });
+scroller.addEventListener("touchmove", (e) => {
+  if (e.touches[0].clientY > touchY + 2) stopFollowing();                  // the finger moves down: the page up
+  touchY = e.touches[0].clientY;
+}, { passive: true });
+scroller.addEventListener("pointerdown", (e) => { if (e.target === scroller && e.offsetX >= scroller.clientWidth) stopFollowing(); });   // its scrollbar
+document.addEventListener("keydown", (e) => {
+  if (["PageUp", "ArrowUp", "Home"].includes(e.key) && !(e.target as Element).closest?.("input, textarea, select, [contenteditable]")) stopFollowing();
+});
+$("to-latest").addEventListener("click", () => {
+  follow = true;
+  scroller.scrollTo({ top: followTarget(), behavior: reducedMotion.matches ? "auto" : "smooth" });
+});
 window.addEventListener("hashchange", () => {
   const id = location.hash.slice(1);
   if (id && id !== conv.id) openConversation(id);
@@ -1785,6 +1850,7 @@ $("menu").innerHTML = icon("menu");
 $("settings-btn").innerHTML = `${icon("sliders")}<span>Settings</span>`;
 $("draft").addEventListener("click", () => void draft());
 $("settings-close").innerHTML = icon("close");
+$("to-latest").innerHTML = icon("down");
 $("settings-reset").insertAdjacentHTML("afterbegin", icon("retry"));
 for (const id of ["system-reset", "order-reset"]) $(id).innerHTML = icon("retry");
 buildSettings();
