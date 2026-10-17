@@ -13,6 +13,7 @@
         <div class="brand"><span id="brand-mark"></span>kiln</div>
         <button id="new-chat" class="new-chat" type="button"></button>
         <nav id="conversations" aria-label="Conversations"></nav>
+        <div id="model-menu" class="model-menu" role="menu" aria-label="Model" hidden></div>
         <div id="status" class="status"></div>
       </aside>
       <div id="scrim"></div>
@@ -28,7 +29,6 @@
             <textarea id="input" rows="1" placeholder="Message kiln" autofocus></textarea>
             <div class="composer-row">
               <div class="choices">
-                <div id="model" class="segmented" role="radiogroup" aria-label="Model"></div>
                 <div id="effort" class="segmented" role="radiogroup" aria-label="Thinking"></div>
               </div>
               <span id="meter" class="meter"></span>

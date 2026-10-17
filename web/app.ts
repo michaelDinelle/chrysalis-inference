@@ -8,17 +8,20 @@ import { marked } from "marked";
 type Effort = "xhigh" | "medium" | "low" | "off";
 interface Stats { ttft: number; tps: number; tokens: number; prompt: number; cached: number; thought?: number; seed?: number; model?: string }
 interface Message { role: "user" | "assistant"; content: string; reasoning?: string; stats?: Stats; error?: string; stopped?: boolean }
-interface Conversation { id: string; title: string; named?: boolean; updated: number; effort: Effort; model?: string; messages: Message[] }
+interface Conversation { id: string; title: string; named?: boolean; updated: number; effort: Effort; messages: Message[] }
 type SamplingKey = "temperature" | "top_p" | "top_k" | "min_p" | "presence_penalty" | "max_tokens" | "seed";
 type Sampling = Partial<Record<SamplingKey, number>>;
 interface Settings { system: string; sampling: Sampling }
-interface Status { state: "online" | "loading" | "offline"; build?: string; model?: string; context?: number; kv_tokens?: number; cache?: { free_kv_tokens: number } }
+interface Status { state: "online" | "loading" | "offline"; build?: string; model?: string; loading?: string; progress?: number; context?: number; kv_tokens?: number; cache?: { free_kv_tokens: number } }
 interface View { el: HTMLElement; think: HTMLDetailsElement; summary: HTMLElement; thought: HTMLElement; body: HTMLElement; foot: HTMLElement; shown?: string }
-interface Live { phase: "waiting" | "thinking" | "writing"; since: number; note: string }
+interface Live { phase: "waiting" | "thinking" | "writing"; since: number; note: string; loading?: boolean }
 
-// kiln keeps one model on the GPU; a request that names the other one switches it over (a few seconds).
-const MODELS: [string, string][] = [["qwen3.8-27b", "27B"], ["qwen3.8-flash-next", "Flash-Next"]];
-const modelOf = (c: Conversation) => c.model ?? MODELS[0][0];
+// kiln keeps one model on the GPU. The picker by Load / Unload chooses it (switching takes 5-20 s); every chat then
+// talks to the model that is loaded.
+const MODELS: [string, string, string][] = [
+  ["qwen3.8-27b", "Qwen3.8-27B", "Quickest replies · 4 s to load"],
+  ["qwen3.8-flash-next", "Qwen3.8-Flash-Next", "Fast at any length · 20 s to load"],
+];
 const modelName = (id?: string) => MODELS.find(([m]) => m === id)?.[1] ?? id ?? "";
 // What kiln uses for a field left blank, with thinking on and off (DEFAULTS in kiln/server.py: Qwen's recommended
 // values). Without a seed kiln draws a random one and reports it with the reply.
@@ -42,6 +45,8 @@ const ICONS = {
   copy: '<rect x="9" y="9" width="11" height="11" rx="2"/><path d="M5 15V5a2 2 0 0 1 2-2h10"/>',
   retry: '<path d="M3 12a9 9 0 1 0 3-6.7L3 8"/><path d="M3 3v5h5"/>',
   edit: '<path d="M12 20h9"/><path d="M16.5 3.5a2.1 2.1 0 0 1 3 3L7 19l-4 1 1-4Z"/>',
+  check: '<path d="M5 12.5l4.5 4.5L19 7.5"/>',
+  chevron: '<path d="M7 10l5 5 5-5"/>',
 };
 const TITLES = { copy: "Copy", retry: "Regenerate", edit: "Edit and resend" };
 const icon = (name: keyof typeof ICONS) => `<svg class="i" viewBox="0 0 24 24" aria-hidden="true">${ICONS[name]}</svg>`;
@@ -105,7 +110,7 @@ function randomId() {
 }
 
 function blank(): Conversation {
-  return { id: randomId(), title: "New chat", updated: Date.now(), effort: pref("effort", "xhigh") as Effort, model: pref("model", MODELS[0][0]), messages: [] };
+  return { id: randomId(), title: "New chat", updated: Date.now(), effort: pref("effort", "xhigh") as Effort, messages: [] };
 }
 
 // ---- rendering ---------------------------------------------------------------------------------------------
@@ -160,7 +165,8 @@ function paint(v: View, m: Message, live?: Live) {
     }
   }
   if (live?.phase === "waiting") {
-    v.body.innerHTML = `<p class="waiting">${live.note} · ${fmtS(elapsed)}</p>`;
+    // while a model loads the sidebar's bar says so; here only the dot
+    v.body.innerHTML = `<p class="waiting">${live.loading ? "" : `${live.note} · ${fmtS(elapsed)}`}</p>`;
     v.shown = undefined;
   } else if (v.shown !== m.content) {
     v.body.innerHTML = markdown(m.content);
@@ -179,7 +185,7 @@ function paint(v: View, m: Message, live?: Live) {
 function emptyState() {
   const e = h("div", "empty"), grid = h("div", "suggestions");
   e.innerHTML = `<svg class="flame" viewBox="0 0 24 24">${ICONS.flame}</svg><h2>What are we building?</h2>` +
-    "<p>Qwen3.8-27B on your Radeon · 262K context · nothing leaves this machine</p>";
+    `<p>${modelName(current())} on your Radeon · 262K context · nothing leaves this machine</p>`;
   for (const [title, prompt] of SUGGESTIONS) {
     const b = h("button", "suggestion");
     b.type = "button";
@@ -195,14 +201,6 @@ function renderComposer() {
   sendBtn.innerHTML = icon(busy ? "stop" : "send");
   sendBtn.setAttribute("aria-label", busy ? "Stop" : "Send");
   sendBtn.classList.toggle("stop", !!busy);
-  $("model").replaceChildren(h("span", "label", "Model"), ...MODELS.map(([value, label]) => {
-    const b = h("button", "", label);
-    b.type = "button";
-    b.setAttribute("role", "radio");
-    b.setAttribute("aria-checked", String(modelOf(conv) === value));
-    b.onclick = () => { conv.model = value; setPref("model", value); renderComposer(); };
-    return b;
-  }));
   $("effort").replaceChildren(h("span", "label", "Think"), ...EFFORTS.map(([value, label]) => {
     const b = h("button", "", label);
     b.type = "button";
@@ -243,43 +241,133 @@ function renderList() {
   }
 }
 
+// The model picker: what kiln has loaded (or is loading); while kiln is stopped, what Load will start.
+let picked = pref("model", MODELS[0][0]);
+const current = () => status.loading ?? (status.state === "online" ? status.model : undefined) ?? picked;
+
+async function start() {
+  await fetch("/api/kiln/start", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ model: picked }) });
+}
+
+async function pickModel(model: string) {
+  picked = model;
+  setPref("model", model);
+  if (status.state !== "online" || status.model === model) return renderStatus();
+  status = { ...status, loading: model, progress: undefined };   // shown at once; the page polls while kiln switches
+  renderStatus();
+  if (!conv.messages.length) render();
+  try {
+    const r = await fetch("/api/kiln/load", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ model }) });
+    if (!r.ok) console.warn("model switch failed:", await r.text());
+  } finally {
+    await refreshStatus();
+  }
+}
+
+// The model menu opens above the status line: the models with a line each, a check on the one in use.
+let menuOpen = false;
+function setMenu(open: boolean) {
+  menuOpen = open;
+  const menu = $("model-menu"), btn = document.querySelector<HTMLElement>(".model-btn");
+  btn?.setAttribute("aria-expanded", String(open));
+  btn?.classList.toggle("open", open);
+  if (!open) return void (menu.hidden = true);
+  menu.replaceChildren(...MODELS.map(([id, label, about]) => {
+    const item = h("button", id === current() ? "model-item current" : "model-item");
+    item.type = "button";
+    item.setAttribute("role", "menuitemradio");
+    item.setAttribute("aria-checked", String(id === current()));
+    const text = h("span", "model-text");
+    text.append(h("span", "model-label", label), h("span", "model-about", about));
+    const mark = h("span", "model-check");
+    if (id === current()) mark.innerHTML = icon("check");
+    item.append(text, mark);
+    item.onclick = () => { setMenu(false); if (id !== current()) void pickModel(id); };
+    return item;
+  }));
+  const sidebar = $("sidebar").getBoundingClientRect(), statusTop = $("status").getBoundingClientRect().top;
+  menu.style.bottom = `${sidebar.bottom - statusTop + 6}px`;
+  menu.hidden = false;
+  (menu.querySelector(".current") as HTMLElement | null)?.focus();
+}
+document.addEventListener("click", (e) => {
+  if (menuOpen && !(e.target as HTMLElement).closest("#model-menu, .model-btn")) setMenu(false);
+});
+
 let shownStatus = "";
 function renderStatus() {
+  const el = $("status");
+  const loading = status.state === "loading" || !!status.loading;
+  const pct = status.progress == null ? null : Math.round(status.progress * 100);
+  // While a model loads only the bar moves: update it in place so its width animates between polls.
+  if (loading && el.dataset.view === `loading:${current()}`) {
+    const fill = el.querySelector<HTMLElement>(".bar.load > i"), num = el.querySelector(".pct");
+    if (pct != null && fill && num) {
+      el.querySelector(".bar.load")!.classList.remove("indeterminate");
+      fill.style.width = `${pct}%`;
+      num.textContent = `${pct}%`;
+    }
+    return;
+  }
   // Polled every 4 s: redraw only what changed, so an idle page does not repaint.
-  const key = JSON.stringify([status.state, status.context, status.kv_tokens, status.cache?.free_kv_tokens]);
+  const key = JSON.stringify([status.state, status.model, status.loading, picked, status.context, status.kv_tokens, status.cache?.free_kv_tokens]);
   if (key === shownStatus) return;
   shownStatus = key;
-  const el = $("status"), line = h("div", "status-line");
-  line.append(h("span", `dot ${status.state}`));
+  const line = h("div", "status-line");
+  line.append(h("span", `dot ${loading ? "loading" : status.state}`));
   el.replaceChildren(line);
-  const button = (label: string, action: string) => {
+  el.dataset.view = loading ? `loading:${current()}` : status.state;
+  if (loading) {
+    if (menuOpen) setMenu(false);
+    line.append(h("span", "loading-name", `Loading ${modelName(current())}`), h("span", "pct", pct == null ? "" : `${pct}%`));
+    const bar = h("div", pct == null ? "bar load indeterminate" : "bar load"), fill = h("i");
+    fill.style.width = `${pct ?? 0}%`;
+    bar.append(fill);
+    el.append(bar);
+    return;
+  }
+  const button = (label: string, action: () => Promise<void>) => {
     const b = h("button", "link-btn", label);
     b.type = "button";
-    b.onclick = async () => { await fetch(`/api/kiln/${action}`, { method: "POST" }); await refreshStatus(); };
+    b.onclick = async () => { await action(); await refreshStatus(); };
     return b;
   };
+  const pick = h("button", "model-btn");
+  pick.type = "button";
+  pick.title = "Choose the model";
+  pick.setAttribute("aria-haspopup", "menu");
+  pick.setAttribute("aria-expanded", String(menuOpen));
+  pick.append(h("span", "", modelName(current())));
+  pick.insertAdjacentHTML("beforeend", icon("chevron"));
+  pick.onclick = () => setMenu(!menuOpen);
+  line.append(pick);
   if (status.state === "online") {
     const used = status.kv_tokens && status.cache ? 1 - status.cache.free_kv_tokens / status.kv_tokens : 0;
     const bar = h("div", "bar"), fill = h("i");
     fill.style.width = `${Math.round(used * 100)}%`;
     bar.append(fill);
     bar.title = `${fmtK(status.cache?.free_kv_tokens ?? 0)} of ${fmtK(status.kv_tokens ?? 0)} KV tokens free (cached conversations are dropped as needed)`;
-    line.append(h("span", "", `Qwen3.8-27B · ${fmtK(status.context ?? 0)}`), button("Unload", "stop"));
+    line.append(button("Unload", async () => { await fetch("/api/kiln/stop", { method: "POST" }); }));
     const kv = h("div", "status-line kv");
-    kv.append(h("span", "", `Prompt cache ${Math.round(used * 100)}%`), bar);
+    kv.append(h("span", "", `${fmtK(status.context ?? 0)} context · cache ${Math.round(used * 100)}%`), bar);
     el.append(kv);
-  } else if (status.state === "loading") {
-    line.append(h("span", "", "Loading the model…"));
   } else {
-    line.append(h("span", "", "kiln is stopped"), button("Start", "start"));
+    line.append(button("Load", start));
   }
+  if (menuOpen) setMenu(true);                    // the line moved: keep the menu above it
 }
 
 // ---- talking to kiln ---------------------------------------------------------------------------------------
 
 async function refreshStatus() {
+  const was = current();
   try { status = await (await fetch("/api/status")).json(); } catch { status = { state: "offline" }; }
   build ||= status.build ?? "";
+  if (status.state === "online" && status.model && !status.loading && status.model !== picked) {
+    picked = status.model;                         // the picker follows kiln (another client may have switched it)
+    setPref("model", picked);
+  }
+  if (current() !== was && !conv.messages.length) render();
   // The server has newer code: reload into it once nothing would be lost (chats are kept in sessionStorage).
   if (status.build && status.build !== build && !busy && !input.value && !settingsDialog.open) return location.reload();
   renderStatus();
@@ -301,7 +389,7 @@ function request(c: Conversation) {
     .map((m) => (m.reasoning ? { role: m.role, content: m.content, reasoning_content: m.reasoning } : { role: m.role, content: m.content }));
   if (settings.system.trim()) messages.unshift({ role: "system", content: settings.system.trim() });
   return {
-    model: c.effort === "off" ? `${modelOf(c)}-fast` : modelOf(c), reasoning_effort: c.effort === "off" ? undefined : c.effort,
+    model: c.effort === "off" ? `${current()}-fast` : current(), reasoning_effort: c.effort === "off" ? undefined : c.effort,
     ...settings.sampling, messages, stream: true, stream_options: { include_usage: true },
   };
 }
@@ -324,8 +412,8 @@ async function* events(body: ReadableStream<Uint8Array>): AsyncGenerator<any> {
 }
 
 async function ensureOnline(signal: AbortSignal) {
-  if (status.state === "offline") await fetch("/api/kiln/start", { method: "POST" });
-  for (const deadline = Date.now() + 180_000; status.state !== "online"; await refreshStatus()) {
+  if (status.state === "offline") await start();
+  for (const deadline = Date.now() + 180_000; status.state !== "online" || status.loading; await refreshStatus()) {
     if (signal.aborted) throw new DOMException("stopped", "AbortError");
     if (Date.now() > deadline) throw new Error("kiln did not start: see `kiln logs`");
     await sleep(100);
@@ -342,13 +430,13 @@ async function generate() {
   const timer = setInterval(() => { paint(v, m, live); if (follow) scroller.scrollTop = scroller.scrollHeight; }, 60);
   let t0 = performance.now(), tFirst = 0, tAnswer = 0, tLast = 0, usage: any, seed: number | undefined;
   try {
-    if (status.state !== "online") {
-      live.note = status.state === "loading" ? "Loading the model" : "Starting kiln";
+    if (status.state !== "online" || status.loading) {
+      live.loading = true;
       await ensureOnline(ctrl.signal);
       live.note = "Reading the prompt";
+      live.loading = false;
       live.since = t0 = performance.now();
     }
-    if (status.model && status.model !== modelOf(c)) live.note = `Switching to ${modelName(modelOf(c))}`;
     const res = await fetch("/api/chat", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(request(c)), signal: ctrl.signal });
     if (!res.ok || !res.body) throw new Error((await res.json().catch(() => null))?.error?.message ?? `HTTP ${res.status}`);
     for await (const ev of events(res.body)) {
@@ -380,7 +468,7 @@ async function generate() {
       m.stats = {
         ttft: (tFirst - t0) / 1000, tps: usage.completion_tokens / Math.max((tLast - tFirst) / 1000, 1e-3),
         tokens: usage.completion_tokens, prompt: usage.prompt_tokens, cached: usage.prompt_tokens_details?.cached_tokens ?? 0,
-        thought: m.reasoning && tAnswer ? (tAnswer - tFirst) / 1000 : undefined, seed, model: modelOf(c),
+        thought: m.reasoning && tAnswer ? (tAnswer - tFirst) / 1000 : undefined, seed, model: current(),
       };
     }
   } catch (e) {
@@ -402,7 +490,7 @@ async function name(c: Conversation) {
   try {
     const res = await fetch("/api/chat", {
       method: "POST", headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ model: `${modelOf(c)}-fast`, max_tokens: 24, messages: [
+      body: JSON.stringify({ model: `${current()}-fast`, max_tokens: 24, messages: [
         { role: "system", content: "You are a title generator. Reply with a title of at most six words for the conversation that starts with the user's message below. Reply with the title only." },
         { role: "user", content: c.messages[0].content.slice(0, 2000) },
       ] }),
@@ -503,7 +591,11 @@ input.addEventListener("keydown", (e) => {
     submit(input.value);
   }
 });
-document.addEventListener("keydown", (e) => { if (e.key === "Escape" && busy) busy.abort(); });
+document.addEventListener("keydown", (e) => {
+  if (e.key !== "Escape") return;
+  if (menuOpen) return setMenu(false);
+  if (busy) busy.abort();
+});
 scroller.addEventListener("scroll", () => { follow = scroller.scrollHeight - scroller.scrollTop - scroller.clientHeight < 80; });
 window.addEventListener("hashchange", () => {
   const id = location.hash.slice(1);
@@ -542,10 +634,10 @@ $("menu").innerHTML = icon("menu");
 await refreshStatus();
 if (location.hash.length > 1) openConversation(location.hash.slice(1));
 else render();
-// Every 4 s, or 4 times a second while the model loads (a load takes a few seconds).
+// Every 4 s, or 4 times a second while a model loads (5-20 s).
 (async () => {
   for (;;) {
-    await sleep(status.state === "loading" ? 250 : 4000);
+    await sleep(status.state === "loading" || status.loading ? 250 : 4000);
     if (!document.hidden) await refreshStatus();
   }
 })();

@@ -27,7 +27,8 @@ EOF
 }
 
 # Where both services listen: 127.0.0.1, or 0.0.0.0 after `kiln start --lan`. It lives in the systemd user manager's
-# environment (KILN_HOST), so the web chat's Start button starts the model the same way.
+# environment (KILN_HOST), so the web chat's Start button starts the model the same way. KILN_MODEL there (set by the
+# web chat's model picker) is the model kiln loads at start.
 host() { systemctl --user show-environment | sed -n 's/^KILN_HOST=//p'; }
 lan_ip() { ip -4 route show default | awk '{ for (i = 1; i < NF; i++) if ($i == "src") { print $(i + 1); exit } }'; }
 
@@ -98,7 +99,7 @@ case "${1:-help}" in
             systemctl --user daemon-reload
             echo "installed: 'kiln start' loads the model and prints its URLs" ;;
   # not in the usage: the foreground server the service runs (takes --port, --draft, ...) and the raw stats
-  serve)    cd "$ROOT" && exec "$PY" -m kiln serve --host "${KILN_HOST:-127.0.0.1}" "${@:2}" ;;
+  serve)    cd "$ROOT" && exec "$PY" -m kiln serve --host "${KILN_HOST:-127.0.0.1}" ${KILN_MODEL:+--use "$KILN_MODEL"} "${@:2}" ;;
   stats)    exec curl -s "$API/kiln/stats" ;;
   help|-h|--help) usage ;;
   *)        usage; exit 1 ;;

@@ -21,6 +21,14 @@ const guarded = (handler: (req: Request, srv: Server<undefined>) => Response | P
   (req: Request, srv: Server<undefined>) => (hostOk(req) ? handler(req, srv) : new Response("unknown host", { status: 403 }));
 
 const unit = (...args: string[]) => Bun.spawnSync(["systemctl", "--user", ...args, "kiln"]).stdout.toString().trim();
+// The model picker's choice, kept in the systemd user environment: kiln.sh serve loads it when kiln (re)starts.
+const MODELS = ["qwen3.8-27b", "qwen3.8-flash-next"];
+async function pickModel(req: Request): Promise<string | undefined> {
+  const model = (await req.json().catch(() => ({})))?.model;
+  if (!MODELS.includes(model)) return undefined;
+  Bun.spawnSync(["systemctl", "--user", "set-environment", `KILN_MODEL=${model}`]);
+  return model;
+}
 
 const server = Bun.serve({
   hostname: process.env.KILN_HOST ?? "127.0.0.1",          // 0.0.0.0 after `kiln start --lan`
@@ -53,13 +61,31 @@ const server = Bun.serve({
     "/api/status": guarded(async () => {
       try {
         const r = await fetch(`${KILN}/kiln/stats`);
+        if (r.status === 503) {                         // listening, still loading its first model
+          const b = await r.json().catch(() => ({}));
+          return Response.json({ state: "loading", build: BUILD, loading: b.model ?? undefined, progress: b.progress ?? undefined });
+        }
         if (!r.ok) throw new Error("loading");
         return Response.json({ state: "online", build: BUILD, ...(await r.json()) });
       } catch {
         return Response.json({ state: unit("is-active") === "active" ? "loading" : "offline", build: BUILD });
       }
     }),
-    "/api/kiln/start": { POST: guarded(() => (unit("start", "--no-block"), new Response(null, { status: 202 }))) },
+    "/api/kiln/start": { POST: guarded(async (req) => (await pickModel(req), unit("start", "--no-block"), new Response(null, { status: 202 }))) },
+    // switch the running kiln to another model; answers once it has loaded (up to ~20 s), the page polls meanwhile
+    "/api/kiln/load": {
+      POST: guarded(async (req, srv) => {
+        srv.timeout(req, 0);
+        const model = await pickModel(req);
+        if (!model) return Response.json({ error: { message: "unknown model" } }, { status: 400 });
+        try {
+          const r = await fetch(`${KILN}/kiln/load`, { method: "POST", body: JSON.stringify({ model }), headers: { "Content-Type": "application/json" } });
+          return new Response(r.body, { status: r.status, headers: { "Content-Type": "application/json" } });
+        } catch {
+          return Response.json({ error: { message: "kiln is not running" } }, { status: 502 });
+        }
+      }),
+    },
     // stopping takes ~40 ms: wait for it, so the page can show the new state right away
     "/api/kiln/stop": { POST: guarded(() => (unit("stop"), new Response(null, { status: 204 }))) },
   },
