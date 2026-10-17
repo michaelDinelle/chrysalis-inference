@@ -14,7 +14,7 @@
     <div id="app">
       <aside id="sidebar">
         <div class="brand"><span id="brand-mark"></span>kiln</div>
-        <button id="new-chat" class="new-chat" type="button"></button>
+        <button id="new-chat" class="btn" type="button"></button>
         <nav id="conversations" aria-label="Conversations"></nav>
         <div id="model-menu" class="model-menu" role="menu" aria-label="Model" hidden></div>
         <div id="status" class="status"></div>
@@ -24,7 +24,7 @@
         <header class="topbar">
           <button id="menu" class="act" type="button" aria-label="Conversations"></button>
           <h1 id="title">New chat</h1>
-          <button id="settings-btn" class="top-btn" type="button" aria-controls="settings" aria-expanded="false" title="Settings (Ctrl+,)"></button>
+          <button id="settings-btn" class="btn" type="button" aria-controls="settings" aria-expanded="false" title="Settings (Ctrl+,)"></button>
         </header>
         <div id="scroller"><div id="thread" class="thread"></div></div>
         <form id="composer">
@@ -54,11 +54,11 @@
           </header>
           <div class="set-body">
             <section class="set-sec">
-              <div class="set-sec-head"><label class="set-title" for="system-input">System prompt</label><button id="system-reset" class="set-link" type="button" hidden>Restore default</button></div>
+              <div class="set-sec-head"><label class="set-title" for="system-input">System prompt</label><button id="system-reset" class="act knob-reset" type="button" title="Back to the default system prompt" aria-label="Restore the default system prompt"></button></div>
               <textarea id="system-input" rows="2" placeholder="No system prompt" title="Sent as written; empty sends none. The default keeps the model from acting as a coding agent when it doesn't think. A change makes each chat read its history again once."></textarea>
             </section>
             <section class="set-sec">
-              <div class="set-sec-head"><span class="set-title">Sampling</span><span class="set-aside"><button id="order-reset" class="set-link" type="button" hidden>Default order</button><span id="mode-note" title="Set by Think in the message box"></span></span></div>
+              <div class="set-sec-head"><span class="set-title">Sampling</span><span class="set-aside"><button id="order-reset" class="act knob-reset" type="button" title="Back to the default order" aria-label="Restore the default order"></button><span id="mode-note" title="Set by Think in the message box"></span></span></div>
               <figure id="odds-first" class="odds" title="Qwen3.8-Flash-Next naming a cat (thinking off): 2,000 real draws of the first word"><div class="odd-head">Qwen names a cat</div></figure>
               <div id="samplers" class="knobs"></div>
             </section>
@@ -72,7 +72,7 @@
               <div id="reply-knobs" class="knobs"></div>
             </section>
           </div>
-          <footer class="set-foot"><button id="settings-reset" class="ghost-btn reset-all" type="button"
+          <footer class="set-foot"><button id="settings-reset" class="btn" type="button"
             title="The default system prompt and Qwen's recommended values, with thinking and without (Undo brings yours back)">Reset all settings</button></footer>
         </div>
       </aside>

@@ -467,9 +467,9 @@ function editorView(m: Message, i: number): HTMLElement {
     save(conv);
   };
   acts.append(h("span", "editor-hint", again ? "Ctrl+Enter regenerates · Esc cancels" : "Ctrl+Enter saves · Esc cancels"));
-  button("Cancel", "ghost-btn", () => done(false));
-  button("Save", again ? "ghost-btn" : "primary-btn", () => done(true));
-  if (again) button("Save & regenerate", "primary-btn", () => done(true, true));
+  button("Cancel", "btn", () => done(false));
+  button("Save", again ? "btn" : "btn primary", () => done(true));
+  if (again) button("Save & regenerate", "btn primary", () => done(true, true));
   el.addEventListener("keydown", (e) => {
     if (e.key === "Escape") { e.preventDefault(); done(false); }
     else if (e.key === "Enter" && (e.ctrlKey || e.metaKey)) { e.preventDefault(); done(true, again); }
@@ -554,7 +554,8 @@ function paint(v: View, m: Message, live?: Live) {
   if (s?.seed !== undefined) facts.push(`<button type="button" class="seed" data-act="seed" data-seed="${s.seed}" title="Use this seed for the next replies">seed ${s.seed}</button>`);
   const last = conv.messages.at(-1) === m, busy = !!running(), cut = m.finish === "length" || m.stopped;
   // Continue is spelled out when the reply was cut short (its length limit, or Stop)
-  const cont = `<button type="button" class="act${cut ? " wide" : ""}" data-act="cont" title="Continue">${icon("cont")}${cut ? "Continue" : ""}</button>`;
+  const cont = cut ? `<button type="button" class="btn" data-act="cont" title="Continue">${icon("cont")}Continue</button>`
+    : `<button type="button" class="act" data-act="cont" title="Continue">${icon("cont")}</button>`;
   v.foot.innerHTML = `<span class="stats">${facts.join(" · ")}</span>` + (last ? slots([["cont", !busy, cont], ["retry", !busy]]) : "")
     + slots([["tokens", !!m.id && tokens.has(m.id)], ["copy", true], ["edit", !busy], ["trash", !busy]]);
   v.foot.querySelector("[data-act=tokens]")?.classList.toggle("on", asTokens);
@@ -676,7 +677,6 @@ function renderSettingsButton() {
   const custom = settings.system !== DEFAULT_SYSTEM || Object.keys(settings.think).length + Object.keys(settings.fast).length > 0
     || !!settings.max_tokens || settings.seed !== undefined;
   $("settings-btn").classList.toggle("on", custom);
-  $<HTMLButtonElement>("settings-reset").disabled = !custom;   // nothing to reset: there, but off
 }
 
 function renderList() {
@@ -1329,7 +1329,7 @@ function changed(mode: Mode) {
 
 let toastTimer = 0;
 function toast(text: string, undo?: () => void) {
-  const t = $("toast"), b = h("button", "", "Undo");
+  const t = $("toast"), b = h("button", "btn", "Undo");
   b.type = "button";
   b.onclick = () => { t.hidden = true; undo?.(); };
   t.replaceChildren(h("span", "", text), ...(undo ? [b] : []));
@@ -1456,7 +1456,8 @@ function chart(fig: HTMLElement, shown: number[], tagOf: (r: Odds) => string) {
         o.base.style.width = `${r.raw * 100}%`;
         o.bar.style.width = `${r.cut ? 0 : r.p * 100}%`;
         o.tick.style.left = `${r.raw * 100}%`;
-        o.tag.style.left = `calc(${(r.cut ? r.raw : r.p) * 100}% + 6px)`;
+        o.tag.style.setProperty("--w", `${(r.cut ? r.raw : r.p) * 100}%`);
+        o.tag.classList.toggle("inside", !r.cut && r.p > 0.62);   // a long bar carries its tag at its end
         o.tag.textContent = isRest ? (cuts && !r.cut ? `${cuts} cut` : "") : tagOf(r);
         o.p.textContent = r.cut ? CUT_BY[r.cut] : pct(r.p);
       });
@@ -1646,7 +1647,7 @@ function buildSettings() {
     val: (p) => 2 ** Math.round(Math.log2(LO) + p * Math.log2(HI() / LO)),
   });
   // Seed: random for every reply, or fixed. A reply's footer shows its seed; clicking it fixes that one here.
-  const seed = h("div", "knob seed-knob"), modes = h("div", "tabs small"), num = h("input", "knob-num"), dice = h("button", "act");
+  const seed = h("div", "knob seed-knob"), modes = h("div", "segmented"), num = h("input", "knob-num"), dice = h("button", "act");
   seed.title = "Seed: the same seed, chat and settings draw the same reply. Click a reply's seed to fix it here.";
   const label = h("label", "", "Seed");
   label.htmlFor = num.id = "knob-seed";
@@ -1701,6 +1702,7 @@ function buildSettings() {
     toast("The system prompt is back to the default", () => { settings.system = before; saveSettings(); growSystem(); });
   };
   $("settings-reset").onclick = () => {
+    if (!$("settings-btn").classList.contains("on")) return toast("Everything is already at the recommended values");
     const before = structuredClone(settings);
     settings = { system: DEFAULT_SYSTEM, think: {}, fast: {} };
     saveSettings();
@@ -1754,10 +1756,10 @@ function placeStages() {
 function syncSettings() {
   if (!document.body.classList.contains("settings-open")) return;
   if (document.activeElement !== systemInput && systemInput.value !== settings.system) systemInput.value = settings.system;
-  $("system-reset").hidden = settings.system === DEFAULT_SYSTEM;
+  $("system-reset").classList.toggle("on", settings.system !== DEFAULT_SYSTEM);
 
   $("mode-note").textContent = shownMode() === "think" ? "with thinking" : "thinking off";
-  $("order-reset").hidden = !settings[shownMode()].order;
+  $("order-reset").classList.toggle("on", !!settings[shownMode()].order);
   placeStages();
   for (const sync of knobs) sync();
   drawCharts();
@@ -1784,6 +1786,7 @@ $("settings-btn").innerHTML = `${icon("sliders")}<span>Settings</span>`;
 $("draft").addEventListener("click", () => void draft());
 $("settings-close").innerHTML = icon("close");
 $("settings-reset").insertAdjacentHTML("afterbegin", icon("retry"));
+for (const id of ["system-reset", "order-reset"]) $(id).innerHTML = icon("retry");
 buildSettings();
 await refreshStatus();
 for (const c of Object.values(chats)) {

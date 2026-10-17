@@ -70,8 +70,7 @@ button { font: inherit; color: inherit; cursor: pointer; }
 #sidebar { position: relative; display: flex; flex-direction: column; gap: 6px; min-height: 0; padding: 14px 10px 10px; background: var(--panel); border-right: 1px solid var(--line); }
 .brand { display: flex; align-items: center; gap: 8px; padding: 2px 8px 10px; font-size: 18px; font-weight: 650; letter-spacing: 0.01em; }
 .brand svg { display: block; width: 22px; height: 22px; }
-.new-chat { display: flex; align-items: center; gap: 8px; padding: 9px 12px; border: 1px solid var(--line); border-radius: 10px; background: var(--raised); font-size: 14px; }
-.new-chat:hover { border-color: color-mix(in srgb, var(--accent) 60%, var(--line)); }
+#new-chat { justify-content: flex-start; }
 #conversations { flex: 1; min-height: 0; overflow-y: auto; margin: 4px -4px 0; padding: 0 4px; }
 .group { margin: 14px 10px 4px; font-size: 11px; font-weight: 600; letter-spacing: 0.07em; text-transform: uppercase; color: var(--faint); }
 .conv { display: flex; align-items: center; gap: 6px; padding: 6px 6px 6px 10px; border-radius: 8px; color: var(--muted); font-size: 14px; text-decoration: none; }
@@ -119,9 +118,15 @@ main { display: flex; flex-direction: column; min-height: 0; }
 .topbar { display: flex; align-items: center; gap: 10px; min-height: 52px; padding: 8px 18px; border-bottom: 1px solid var(--line); }
 .topbar h1 { flex: 1; margin: 0; overflow: hidden; font-size: 15px; font-weight: 600; white-space: nowrap; text-overflow: ellipsis; }
 #menu { display: none; }
-.ghost-btn { padding: 5px 11px; border: 1px solid var(--line); border-radius: 8px; background: none; color: var(--muted); font-size: 13px; }
-.ghost-btn:hover { border-color: var(--faint); color: var(--text); }
-.ghost-btn.on { border-color: color-mix(in srgb, var(--accent) 55%, var(--line)); color: var(--accent-hi); }
+/* buttons: one look for every labeled button (Settings, New chat, Reset all settings, Cancel, Undo); the main action
+   of a form adds .primary. Icon buttons are .act, choices .segmented. */
+.btn { position: relative; display: inline-flex; align-items: center; justify-content: center; gap: 7px; height: 32px; padding: 0 12px; border: 1px solid var(--line);
+  border-radius: 9px; background: var(--raised); color: var(--text); font-size: 13px; white-space: nowrap; }
+.btn:has(> .i) { padding-left: 10px; }
+.btn .i { width: 16px; height: 16px; color: var(--muted); }
+.btn:hover { border-color: var(--faint); }
+.btn.primary { border-color: var(--accent); background: var(--accent); color: #fff; font-weight: 600; }
+.btn.primary:hover { border-color: var(--accent-hi); background: var(--accent-hi); }
 #scroller { flex: 1; overflow-y: auto; }
 /* The chat column keeps the place it has with Settings closed (centered) as far as the room beside Settings allows, so
    opening it moves nothing when there is room and only slides the column when there is not (never re-wraps it). */
@@ -130,7 +135,7 @@ main { display: flex; flex-direction: column; min-height: 0; }
 .msg { margin-bottom: 22px; }
 .msg.user { display: flex; flex-direction: column; align-items: flex-end; }
 .bubble { max-width: min(85%, 640px); padding: 10px 15px; border: 1px solid var(--line); border-radius: 18px 18px 6px 18px; background: var(--raised); white-space: pre-wrap; overflow-wrap: anywhere; }
-.msg-foot { display: flex; align-items: center; gap: 2px; min-height: 30px; margin-top: 4px; color: var(--faint); font-size: 12px; }
+.msg-foot { display: flex; align-items: center; gap: 2px; min-height: 32px; margin-top: 4px; color: var(--faint); font-size: 12px; }
 .msg.user .msg-foot { opacity: 0; transition: opacity 0.15s; }
 .msg.user:hover .msg-foot, .msg.user:focus-within .msg-foot { opacity: 1; }
 .stats { flex: 1 1 auto; min-width: 0; margin-right: 6px; font: 11.5px var(--mono); }   /* pushes the actions to their fixed places */
@@ -251,12 +256,8 @@ dialog::backdrop { background: rgb(0 0 0 / 0.45); }
 
 /* ---- settings: a panel beside the chat ---- */
 body.settings-open #app { grid-template-columns: 272px minmax(0, 1fr) 380px; }
-.top-btn { position: relative; display: inline-flex; align-items: center; gap: 7px; height: 32px; padding: 0 12px 0 10px; border: 1px solid var(--line); border-radius: 9px;
-  background: var(--raised); color: var(--text); font-size: 13px; }
-.top-btn .i { width: 16px; height: 16px; color: var(--muted); }
-.top-btn:hover { border-color: var(--faint); }
-.top-btn[aria-expanded="true"] { border-color: var(--faint); background: var(--hover); }
-.top-btn.on::after { content: ""; position: absolute; top: -3px; right: -3px; width: 8px; height: 8px; border-radius: 50%; background: var(--accent); box-shadow: 0 0 0 2px var(--bg); }
+#settings-btn[aria-expanded="true"] { border-color: var(--faint); background: var(--hover); }
+#settings-btn.on::after { content: ""; position: absolute; top: -3px; right: -3px; width: 8px; height: 8px; border-radius: 50%; background: var(--accent); box-shadow: 0 0 0 2px var(--bg); }
 .settings { position: relative; min-width: 0; overflow: hidden; background: var(--panel); outline: none; }
 body.settings-open .settings { border-left: 1px solid var(--line); }
 .settings-inner { position: absolute; inset: 0 0 0 auto; display: flex; flex-direction: column; width: 380px; }
@@ -268,26 +269,13 @@ body.settings-open .settings { border-left: 1px solid var(--line); }
 .set-sec + .set-sec { border-top: 1px solid var(--line); }
 .set-sec-head { display: flex; align-items: center; justify-content: space-between; gap: 10px; min-height: 24px; margin-bottom: 10px; }
 .set-title { font-size: 11.5px; font-weight: 600; letter-spacing: 0.06em; text-transform: uppercase; color: var(--muted); }
-.set-link { padding: 2px 0; border: 0; background: none; color: var(--accent); font-size: 12.5px; }
-.set-link:hover { color: var(--accent-hi); }
 .set-aside { display: inline-flex; align-items: center; gap: 10px; color: var(--faint); font-size: 12px; }
 #system-input { display: block; width: 100%; min-height: 60px; padding: 9px 11px; border: 1px solid var(--line); border-radius: 10px; background: var(--bg); color: var(--text);
   font: 13.5px/1.55 var(--sans); resize: none; outline: none; }
 #system-input:focus { border-color: color-mix(in srgb, var(--accent) 50%, var(--line)); }
 #system-input::placeholder { color: var(--faint); }
 .set-foot { padding: 11px 20px; border-top: 1px solid var(--line); }
-.reset-all { display: inline-flex; align-items: center; gap: 7px; padding: 5px 11px 5px 9px; color: var(--text); }
-.reset-all .i { width: 14px; height: 14px; color: var(--muted); }
-.reset-all:hover:not(:disabled) { border-color: color-mix(in srgb, var(--danger) 55%, var(--line)); color: var(--danger); }
-.reset-all:hover:not(:disabled) .i { color: var(--danger); }
-.reset-all:disabled { opacity: 0.4; cursor: default; }
 
-.tabs { display: inline-flex; gap: 2px; padding: 2px; border: 1px solid var(--line); border-radius: 999px; background: var(--bg); font-size: 12px; }
-.tabs button { padding: 2px 10px; border: 0; border-radius: 999px; background: none; color: var(--muted); white-space: nowrap; }
-.tabs button:hover { color: var(--text); }
-.tabs button[aria-selected="true"], .tabs button[aria-checked="true"] { background: var(--accent-soft); color: var(--accent-hi); }
-.tabs button.custom::after { content: ""; display: inline-block; width: 5px; height: 5px; margin-left: 5px; border-radius: 50%; background: var(--accent); vertical-align: 2px; }
-.tabs.small { font-size: 11.5px; }
 
 /* the odds: a row per name, a bar for its odds now with a tick where the model had them, the sampler's cuts on them */
 .odds { margin: 0 0 12px; padding: 10px 12px 8px; border: 1px solid var(--line); border-radius: 12px; background: var(--bg); }
@@ -310,7 +298,8 @@ body.settings-open .settings { border-left: 1px solid var(--line); }
 .odd.cut .odd-base { display: block; }
 .odd-tick { position: absolute; top: 3px; width: 1.5px; height: 12px; margin-left: -1px; background: color-mix(in srgb, var(--text) 55%, transparent); transition: left 0.14s ease-out; }
 .odd.cut .odd-tick { display: none; }
-.odd-tag { position: absolute; top: 1px; color: var(--muted); font: normal 10.5px var(--mono); white-space: nowrap; transition: left 0.14s ease-out; }
+.odd-tag { position: absolute; top: 1px; left: calc(var(--w, 0%) + 6px); color: var(--muted); font: normal 10.5px var(--mono); white-space: nowrap; transition: left 0.14s ease-out; }
+.odd-tag.inside { right: calc(100% - var(--w, 0%) + 6px); left: auto; color: var(--bg); }
 .odd-p { color: var(--muted); font: 11.5px var(--mono); text-align: right; font-variant-numeric: tabular-nums; }
 .odd.cut .odd-word { color: var(--faint); text-decoration: line-through; text-decoration-color: color-mix(in srgb, var(--faint) 60%, transparent); }
 .odd.cut .odd-p { color: var(--faint); font-size: 10.5px; }
@@ -349,6 +338,7 @@ body.settings-open .settings { border-left: 1px solid var(--line); }
 .knob-reset { width: 22px; height: 22px; visibility: hidden; }
 .knob.custom .knob-reset { visibility: visible; }
 .knob-reset .i { width: 13px; height: 13px; }
+.knob-reset.on { visibility: visible; }   /* the system prompt's and the order's, in their headers */
 .knob-track { position: relative; height: 16px; }
 .knob-track input { position: relative; width: 100%; height: 16px; margin: 0; background: none; cursor: pointer; appearance: none; -webkit-appearance: none; }
 .knob-track input::-webkit-slider-runnable-track { height: 4px; border-radius: 4px; background: linear-gradient(to right, var(--fill-c) var(--fill), var(--hover) var(--fill)); }
@@ -370,21 +360,16 @@ body.settings-open .settings { border-left: 1px solid var(--line); }
 .msg-foot .seed:hover { color: var(--accent-hi); }
 
 main { position: relative; }
-.toast { position: absolute; top: 64px; left: 50%; z-index: 40; display: flex; align-items: center; gap: 14px; padding: 9px 10px 9px 16px; border: 1px solid var(--line); border-radius: 12px;
+.toast { position: absolute; top: 64px; left: 50%; z-index: 40; display: flex; align-items: center; gap: 14px; padding: 6px 6px 6px 16px; border: 1px solid var(--line); border-radius: 12px;
   background: var(--raised); box-shadow: var(--shadow); font-size: 13px; transform: translateX(-50%); transition: opacity 0.15s, translate 0.15s; }
 @starting-style { .toast { opacity: 0; translate: 0 -6px; } }
 .toast[hidden] { display: none; }
-.toast button { padding: 3px 9px; border: 0; border-radius: 7px; background: none; color: var(--accent); font-size: 13px; font-weight: 600; }
-.toast button:hover { background: var(--accent-soft); }
 
 /* ---- message actions, editing, tokens ---- */
 .msg.assistant .msg-foot .act { opacity: 0; transition: opacity 0.15s; }
 .msg.assistant:hover .msg-foot .act, .msg.assistant:focus-within .msg-foot .act, .msg.assistant:last-child .msg-foot .act { opacity: 1; }
 @media (hover: none) { .msg .msg-foot .act, .msg.user .msg-foot { opacity: 1; } }
-.act.wide { display: inline-flex; gap: 4px; width: auto; padding: 0 9px 0 6px; color: var(--accent-hi); font-size: 12.5px; }
 .act.on { background: var(--accent-soft); color: var(--accent-hi); }
-.primary-btn { padding: 5px 12px; border: 0; border-radius: 8px; background: var(--accent); color: #fff; font-size: 13px; font-weight: 600; }
-.primary-btn:hover { background: var(--accent-hi); }
 .msg.editing { display: block; }
 .editor { display: grid; gap: 6px; padding: 10px; border: 1px solid color-mix(in srgb, var(--accent) 45%, var(--line)); border-radius: 14px; background: var(--raised); }
 .editor textarea { width: 100%; padding: 8px 10px; border: 1px solid var(--line); border-radius: 9px; background: var(--bg); color: var(--text); font: 14.5px/1.55 var(--sans); resize: none; outline: none; }
@@ -440,8 +425,8 @@ main { position: relative; }
   .thread { padding: 20px 16px 12px; }
   #composer { padding: 0 10px 10px; }
   body.settings-open #app { grid-template-columns: minmax(0, 1fr); }
-  .top-btn { padding: 0 8px; }
-  .top-btn span { display: none; }
+  #settings-btn { padding: 0 8px; }
+  #settings-btn span { display: none; }
   .hint, .meter { display: none; }
   .segmented .label { display: none; }
 }
