@@ -322,15 +322,15 @@ void Engine::moe_block(const Layer &w, int layer, int T, bool cpu_cold, float *r
     }
     const float gf = cpu_cold && w.n_cold ? gfrac : 0.0f;
     router_route_dec(w.router, w.sg_w, b.mx, T, b.logits_e, b.sg, w.slot_of, b.ids, b.wts, b.hot, cpu_cold ? d_sh : nullptr, gf,
-                     layer, gen + 1, b.rr_counter, st);
+                     layer, gen + 1, b.rr_counter, st, route_dec);
     if (cpu_cold) gen++;
     if (cpu_cold && layer + 1 < NL && pf_on) {    // the next layer's weights into the Infinity Cache meanwhile (2-3x faster reads)
         CK(hipEventRecord(routed, st));
         CK(hipStreamWaitEvent(pst, routed, 0));
         prefetch(pf_ranges + pf_off[layer + 1], pf_n[layer + 1], pf_sink, pst);
     }
-    moe_experts_dec(w.hot_gate, w.hot_up, w.hot_down, w.sh_gate, w.sh_up, w.sh_down, b.hot, T, b.hq, b.hq_e, b.wts, b.sg, b.y, st);
-    if (gf > 0) moe_cold_dec(cold_dev[layer], b.hot, T, b.hq, b.hq_e, b.wts, b.y, st);   // the GPU's share, straight from RAM
+    moe_dec(w.hot_gate, w.hot_up, w.hot_down, w.sh_gate, w.sh_up, w.sh_down, gf > 0 ? &cold_dev[layer] : nullptr, b.hot, T, b.hq,
+            b.hq_e, b.wts, b.sg, b.y, st);                // hot picks, shared expert and the GPU's share of the cold picks
     moe_finish(cpu_cold ? &d_sh->done : nullptr, gen, b.y, b.hot, b.y + (size_t)T * TOPK_E * D, nullptr, cpu_cold ? d_sh->y : nullptr,
                inject, res, T, st);
 }
@@ -427,7 +427,7 @@ void Engine::moe_back(const Layer &w, int layer, int T) {
     }
     // Picks go through the gather / output buffers (P rows) in ranges: a range is gathered once and its outputs added to
     // b.moe once. A range holds groups that run together: all its hot experts, or staging groups of the GPU's cold
-    // experts (at most STAGE_G, one format: one DMA + relayout each). Work items are tiles of at most 64 of an expert's
+    // experts (at most STAGE_G, one format: one DMA + relayout each). Work items are tiles of at most MOE_ITEM of an expert's
     // tokens (rows relative to the range), so a busy expert spreads over many workgroups.
     struct Range { int p0, p1, t0, t1; };
     struct Group { int range, i0, i1, w0, w1; };
@@ -455,7 +455,7 @@ void Engine::moe_back(const Layer &w, int layer, int T) {
             if (new_range) { r = Range{p0, p0, 0, 0}; g = Group{(int)ranges.size(), i, i, nw, nw}; }
             else if (new_group) close_group(i);
             const int sl = hot_slots ? slot_of[e] : i - g.i0;
-            for (int t0 = 0; t0 < n; t0 += 64) b.h_work[nw++] = {sl, p0 - r.p0 + t0, std::min(64, n - t0), 0};
+            for (int t0 = 0; t0 < n; t0 += MOE_ITEM) b.h_work[nw++] = {sl, p0 - r.p0 + t0, std::min(MOE_ITEM, n - t0), 0};
             g.i1 = i + 1; g.w1 = nw; r.p1 = p0 + n;
         }
         if (r.p0 >= 0) { close_group((int)ex.size()); close_range(r); }
@@ -819,6 +819,17 @@ int draw_without(Dist d, int tok, std::mt19937_64 &rng) {
 int Engine::generate(int id, const Sampling &sp, int *out, int max_out) {
     Seq &s = seqs.at(id);
     int nout = 0;
+    if (route_dec_file && !route_dec) {
+        CK(hipMalloc(&route_dec, (size_t)NL * NE * 4));
+        CK(hipMemsetAsync(route_dec, 0, (size_t)NL * NE * 4, st));
+    }
+    if (route_dec && ++route_dec_steps % 256 == 0) {
+        std::vector<unsigned> c((size_t)NL * NE);
+        CK(hipMemcpyAsync(c.data(), route_dec, c.size() * 4, hipMemcpyDeviceToHost, st));
+        CK(hipStreamSynchronize(st));
+        std::vector<int64_t> c64(c.begin(), c.end());
+        if (FILE *f = fopen(route_dec_file, "wb")) { fwrite(c64.data(), 8, c64.size(), f); fclose(f); }
+    }
     if (s.pending < 0) {
         if (s.top_v.empty()) FAIL("generate: nothing to continue from");
         s.pending = draw(make_dist(s.top_v.data(), s.top_i.data(), sp, s.seen), s.rng);

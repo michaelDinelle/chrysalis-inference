@@ -41,15 +41,25 @@ void qtensor_arrays(const QTensor &t, std::vector<std::pair<const void *, size_t
 }
 
 // Read ranges of VRAM so they land in the Infinity Cache (decode: the next layer's weights, while the CPU computes the
-// current layer's cold experts). blockIdx.y = range; the xor keeps the loads.
-__global__ __launch_bounds__(256) void k_prefetch(const PrefetchRange *r, unsigned *sink) {
-    const PrefetchRange R = r[blockIdx.y];
+// current layer's cold experts). A few workgroups walk all the ranges with 8 loads in flight per thread: enough to stream
+// VRAM, without taking the CUs the concurrent MoE kernels need. The xor keeps the loads.
+constexpr int PF_WGS = 8;                         // measured best (fewer starve the stream, more crowd the MoE kernels)
+__global__ __launch_bounds__(256) void k_prefetch(const PrefetchRange *r, int n, unsigned *sink) {
     unsigned acc = 0;
-    for (size_t i = blockIdx.x * 256 + threadIdx.x; i < R.n16; i += (size_t)gridDim.x * 256) acc ^= R.p[i].x;
+    for (int k = 0; k < n; k++) {
+        const PrefetchRange R = r[k];
+        for (size_t i = (size_t)blockIdx.x * 2048 + threadIdx.x; i < R.n16; i += (size_t)gridDim.x * 2048) {
+            int4 v[8];
+#pragma unroll
+            for (int u = 0; u < 8; u++) v[u] = i + u * 256 < R.n16 ? R.p[i + u * 256] : int4{0, 0, 0, 0};
+#pragma unroll
+            for (int u = 0; u < 8; u++) acc ^= v[u].x;
+        }
+    }
     if (acc == 0x9e3779b9u) *sink = acc;
 }
 void prefetch(const PrefetchRange *r, int n, unsigned *sink, hipStream_t st) {
-    if (n) k_prefetch<<<dim3(32, n), 256, 0, st>>>(r, sink);
+    if (n) k_prefetch<<<PF_WGS, 256, 0, st>>>(r, n, sink);
 }
 
 QTensor make_qtensor(Arena &a, int type, int rows, int cols) {
@@ -771,56 +781,6 @@ void quant_act(const float *x, int64_t n, QAct out, hipStream_t st) {
 // A tier tensor holds its experts' rows back to back: gate / up [n_experts * FE][D], down [n_experts * D][FE].
 // hot_slot[j] is pick j's slot in the tier (token j / TOPK_E), or -1 when another device computes it.
 
-// silu(gate) * up for every pick and, as pick T * TOPK_E + t, token t's shared expert (same width): one 1024-thread
-// workgroup = 32 rows = one int8 block of the output
-__global__ __launch_bounds__(1024) void k_moe_glu(QTensor gate, QTensor up, QTensor sgate, QTensor sup, const int *hot_slot, int T,
-                                                  QAct x, QAct hq) {
-    __shared__ float act[32];
-    const int j = blockIdx.y;
-    const bool shared = j >= T * TOPK_E;
-    const int slot = shared ? 0 : hot_slot[j];
-    if (slot < 0) return;
-    const int wave = threadIdx.x / 32, lane = threadIdx.x % 32, r = blockIdx.x * 32 + wave;
-    const QTensor *W[2] = {shared ? &sgate : &gate, shared ? &sup : &up};
-    const int rows[2] = {slot * FE + r, slot * FE + r};
-    const int t = shared ? j - T * TOPK_E : j / TOPK_E;
-    const QAct xt{x.q + (size_t)t * D, x.d + (size_t)t * (D / 32)};
-    float acc[2][1] = {};
-    rows_dot_any<1, 2>(W, rows, lane, xt, acc);
-    const float v = silu(warp_sum(acc[0][0])) * warp_sum(acc[1][0]);
-    if (lane == 0) act[wave] = v;
-    __syncthreads();
-    if (wave == 0) {
-        const float a = act[lane], d = warp_max(fabsf(a)) / 127.0f;
-        hq.q[(size_t)j * FE + blockIdx.x * 32 + lane] = (int8_t)__float2int_rn(d > 0 ? a / d : 0.0f);
-        if (lane == 0) hq.d[((size_t)j * FE + blockIdx.x * 32) / 32] = d;
-    }
-}
-
-// y[j] = w[j] * down[slot] h[j], the shared expert's rows weighted by its gate sg[t]: 8 rows per 256-thread workgroup
-__global__ __launch_bounds__(256) void k_moe_down(QTensor down, QTensor sdown, const int *hot_slot, int T, QAct hq, const float *wts,
-                                                  const float *sg, float *y) {
-    const int j = blockIdx.y;
-    const bool shared = j >= T * TOPK_E;
-    const int slot = shared ? 0 : hot_slot[j];
-    if (slot < 0) return;
-    const int wave = threadIdx.x / 32, lane = threadIdx.x % 32, r = blockIdx.x * 8 + wave;
-    const QTensor *W[1] = {shared ? &sdown : &down};
-    const int rows[1] = {slot * D + r};
-    const QAct h{hq.q + (size_t)j * FE, hq.d + (size_t)j * (FE / 32)};
-    float acc[1][1] = {};
-    rows_dot_any<1, 1>(W, rows, lane, h, acc);
-    const float v = warp_sum(acc[0][0]);
-    if (lane == 0) y[(size_t)j * D + r] = (shared ? sg[j - T * TOPK_E] : wts[j]) * v;
-}
-
-void moe_experts_dec(const QTensor &gate, const QTensor &up, const QTensor &down, const QTensor &sgate, const QTensor &sup,
-                     const QTensor &sdown, const int *hot_slot, int T, QAct x, QAct hq, const float *wts, const float *sg, float *y,
-                     hipStream_t st) {
-    const int picks = T * TOPK_E + (sgate.type >= 0 ? T : 0);
-    k_moe_glu<<<dim3(FE / 32, picks), 1024, 0, st>>>(gate, up, sgate, sup, hot_slot, T, x, hq);
-    k_moe_down<<<dim3(D / 8, picks), 256, 0, st>>>(down, sdown, hot_slot, T, hq, wts, sg, y);
-}
 
 // ---- decode: the GPU's share of the cold experts, read straight from system RAM ------------------------------------
 // Picks with hot_slot <= -2 (cold slot -2 - hot_slot) are the GPU's: their GGUF blocks come over PCIe from registered
@@ -906,31 +866,17 @@ __device__ __forceinline__ void cold_glu(const uint8_t *gate, const uint8_t *up,
     }
 }
 
-__global__ __launch_bounds__(256) void k_cold_glu(ColdDec c, const int *hot_slot, QAct x, QAct hq) {
-    __shared__ int4 tile[2][CG_ROWS * (D / 256 * 136) / 16];   // the widest row format: IQ4_XS
-    __shared__ float act[32];
-    const int j = blockIdx.y, hs = hot_slot[j];
-    if (hs > -2) return;
-    const int slot = -2 - hs, grp = slot >= c.n0, s = grp ? slot - c.n0 : slot;
-    switch (c.type[grp]) {
-        case Q3_K: cold_glu<Q3_K>(c.gate[grp], c.up[grp], s, j, x, hq, tile[0], tile[1], act); break;
-        case Q2_K: cold_glu<Q2_K>(c.gate[grp], c.up[grp], s, j, x, hq, tile[0], tile[1], act); break;
-        default: cold_glu<IQ4_XS>(c.gate[grp], c.up[grp], s, j, x, hq, tile[0], tile[1], act); break;
-    }
-}
-
-__global__ __launch_bounds__(256) void k_cold_down(const uint8_t *down, const int *hot_slot, QAct hq, const float *wts, float *y) {
+// 32 down rows of a cold pick (IQ4_NL GGUF blocks in RAM): the tile is copied into LDS with 16-byte loads, then 8 waves x 4
+// rows, lanes 0..19 one 18-byte block each
+__device__ __forceinline__ void cold_down(const uint8_t *down, int slot, int j, int r0, QAct hq, const float *wts, float *y, int4 *tile) {
     constexpr int RB = FE / 32 * 18;              // bytes per IQ4_NL row
-    __shared__ int4 tile[CD_ROWS * RB / 16];
-    const int j = blockIdx.y, hs = hot_slot[j];
-    if (hs > -2) return;
-    const int slot = -2 - hs, wave = threadIdx.x / 32, lane = threadIdx.x % 32, r0 = blockIdx.x * CD_ROWS;
+    const int wave = threadIdx.x / 32, lane = threadIdx.x % 32;
     const int4 *src = (const int4 *)(down + ((size_t)slot * D + r0) * RB);
     for (int i = threadIdx.x; i < CD_ROWS * RB / 16; i += 256) tile[i] = src[i];
     __syncthreads();
     const int8_t *h = hq.q + (size_t)j * FE;
     const float *hd = hq.d + (size_t)j * (FE / 32);
-    for (int rr = 0; rr < CD_ROWS / 8; rr++) {    // 8 waves x 4 rows; lanes 0..19 take one 18-byte block each
+    for (int rr = 0; rr < CD_ROWS / 8; rr++) {
         const int r = wave * (CD_ROWS / 8) + rr;
         float acc = 0;
         if (lane < FE / 32) {
@@ -947,11 +893,95 @@ __global__ __launch_bounds__(256) void k_cold_down(const uint8_t *down, const in
     }
 }
 
+// ---- decode: all of the GPU's routed picks in two launches (gate | up, then down) -----------------------------------
+// blockIdx.y = pick j. Hot picks (hot_slot >= 0) and, when sgate is set, each token's shared expert (pick T * TOPK_E + t,
+// weighted by sg[t]) read VRAM, 8 waves x 4 rows per workgroup; the GPU's share of the cold picks (hot_slot <= -2) reads
+// system RAM over PCIe as above; the CPU's picks (-1) exit. Both kinds run side by side in one launch, so the PCIe-bound
+// cold picks hide the hot ones. hq / y have T * (TOPK_E + 1) rows.
+__global__ __launch_bounds__(256) void k_glu_dec(QTensor gate, QTensor up, QTensor sgate, QTensor sup, ColdDec c, const int *hot_slot,
+                                                 int T, QAct x, QAct hq) {
+    __shared__ int4 tile[2][CG_ROWS * (D / 256 * 136) / 16];   // cold picks: the widest row format (IQ4_XS)
+    __shared__ float act[32];
+    const int j = blockIdx.y;
+    const bool shared = j >= T * TOPK_E;
+    const int hs = shared ? 0 : hot_slot[j];
+    if (hs == -1 || (hs >= 0 && !shared && gate.type < 0) || (hs <= -2 && !c.down)) return;
+    if (hs <= -2) {
+        const int slot = -2 - hs, grp = slot >= c.n0, s = grp ? slot - c.n0 : slot;
+        switch (c.type[grp]) {
+            case Q3_K: cold_glu<Q3_K>(c.gate[grp], c.up[grp], s, j, x, hq, tile[0], tile[1], act); break;
+            case Q2_K: cold_glu<Q2_K>(c.gate[grp], c.up[grp], s, j, x, hq, tile[0], tile[1], act); break;
+            default: cold_glu<IQ4_XS>(c.gate[grp], c.up[grp], s, j, x, hq, tile[0], tile[1], act); break;
+        }
+        return;
+    }
+    const int wave = threadIdx.x / 32, lane = threadIdx.x % 32, t = shared ? j - T * TOPK_E : j / TOPK_E;
+    const QTensor *G = shared ? &sgate : &gate, *U = shared ? &sup : &up;
+    const QTensor *W[8];
+    int rows[8];
+#pragma unroll
+    for (int i = 0; i < 4; i++) {
+        W[i] = G; W[4 + i] = U;
+        rows[i] = rows[4 + i] = hs * FE + blockIdx.x * 32 + wave * 4 + i;
+    }
+    const QAct xt{x.q + (size_t)t * D, x.d + (size_t)t * (D / 32)};
+    float acc[8][1] = {};
+    rows_dot_any<1, 8>(W, rows, lane, xt, acc);
+#pragma unroll
+    for (int i = 0; i < 4; i++) {
+        const float v = silu(warp_sum(acc[i][0])) * warp_sum(acc[4 + i][0]);
+        if (lane == 0) act[wave * 4 + i] = v;
+    }
+    __syncthreads();
+    if (wave == 0) {                              // one int8 block of the down projection's input
+        const float a = act[lane], d = warp_max(fabsf(a)) / 127.0f;
+        hq.q[(size_t)j * FE + blockIdx.x * 32 + lane] = (int8_t)__float2int_rn(d > 0 ? a / d : 0.0f);
+        if (lane == 0) hq.d[((size_t)j * FE + blockIdx.x * 32) / 32] = d;
+    }
+}
+
+__global__ __launch_bounds__(256) void k_down_dec(QTensor down, QTensor sdown, const uint8_t *cdown, const int *hot_slot, int T,
+                                                  QAct hq, const float *wts, const float *sg, float *y) {
+    __shared__ int4 tile[CD_ROWS * (FE / 32 * 18) / 16];
+    const int j = blockIdx.y, r0 = blockIdx.x * CD_ROWS;
+    const bool shared = j >= T * TOPK_E;
+    const int hs = shared ? 0 : hot_slot[j];
+    if (hs == -1 || (hs >= 0 && !shared && down.type < 0) || (hs <= -2 && !cdown)) return;
+    if (hs <= -2) { cold_down(cdown, -2 - hs, j, r0, hq, wts, y, tile); return; }
+    const int wave = threadIdx.x / 32, lane = threadIdx.x % 32;
+    const QTensor *W[4];
+    int rows[4];
+#pragma unroll
+    for (int i = 0; i < 4; i++) { W[i] = shared ? &sdown : &down; rows[i] = hs * D + r0 + wave * 4 + i; }
+    const QAct h{hq.q + (size_t)j * FE, hq.d + (size_t)j * (FE / 32)};
+    float acc[4][1] = {};
+    rows_dot_any<1, 4>(W, rows, lane, h, acc);
+    const float wj = shared ? sg[j - T * TOPK_E] : wts[j];
+#pragma unroll
+    for (int i = 0; i < 4; i++) {
+        const float v = warp_sum(acc[i][0]);
+        if (lane == 0) y[(size_t)j * D + r0 + wave * 4 + i] = wj * v;
+    }
+}
+
+void moe_dec(const QTensor &gate, const QTensor &up, const QTensor &down, const QTensor &sgate, const QTensor &sup, const QTensor &sdown,
+             const ColdDec *c, const int *hot_slot, int T, QAct x, QAct hq, const float *wts, const float *sg, float *y, hipStream_t st) {
+    if (c)
+        for (int g = 0; g < 2; g++)
+            if (c->gate[g] && c->type[g] != IQ4_XS && c->type[g] != Q3_K && c->type[g] != Q2_K) FAIL("moe_dec: cold gate/up type %d", c->type[g]);
+    const ColdDec none{};
+    const int picks = T * TOPK_E + (sgate.type >= 0 ? T : 0);
+    k_glu_dec<<<dim3(FE / 32, picks), 256, 0, st>>>(gate, up, sgate, sup, c ? *c : none, hot_slot, T, x, hq);
+    k_down_dec<<<dim3(D / CD_ROWS, picks), 256, 0, st>>>(down, sdown, c ? c->down : nullptr, hot_slot, T, hq, wts, sg, y);
+}
+void moe_experts_dec(const QTensor &gate, const QTensor &up, const QTensor &down, const QTensor &sgate, const QTensor &sup,
+                     const QTensor &sdown, const int *hot_slot, int T, QAct x, QAct hq, const float *wts, const float *sg, float *y,
+                     hipStream_t st) {
+    moe_dec(gate, up, down, sgate, sup, sdown, nullptr, hot_slot, T, x, hq, wts, sg, y, st);
+}
 void moe_cold_dec(const ColdDec &c, const int *hot_slot, int T, QAct x, QAct hq, const float *wts, float *y, hipStream_t st) {
-    for (int g = 0; g < 2; g++)
-        if (c.gate[g] && c.type[g] != IQ4_XS && c.type[g] != Q3_K && c.type[g] != Q2_K) FAIL("moe_cold_dec: gate/up type %d", c.type[g]);
-    k_cold_glu<<<dim3(FE / 32, T * TOPK_E), 256, 0, st>>>(c, hot_slot, x, hq);
-    k_cold_down<<<dim3(D / CD_ROWS, T * TOPK_E), 256, 0, st>>>(c.down, hot_slot, hq, wts, y);
+    const QTensor none{};
+    moe_dec(none, none, none, none, none, none, &c, hot_slot, T, x, hq, wts, nullptr, y, st);
 }
 
 // ---- routed experts at prefill: grouped GEMMs over the tokens sorted by expert ---------------------------
@@ -981,113 +1011,117 @@ __device__ __forceinline__ void frags64(const QTensor &W, int row, int ch, int h
     }
 }
 
-// gate/up: 4 waves on 32 rows of gate and up and 16*NT tokens; waves split K (superblocks), sums through LDS
+constexpr int MOE_TW = 1;                         // token tiles of 16 per wave: work items of up to 4 * 16 * MOE_TW tokens
+// gate/up: 4 waves on 32 rows of gate and up and the work item's tokens (at most MOE_ITEM), 16 * MOE_TW per wave. Per half super-block
+// (128 columns: steps c = 2h, 2h + 1 hold its fragments in every format) the 32 rows are dequantized once into LDS (fp16,
+// natural K order) by all threads, then every wave runs its tokens against them, so a weight is decoded once per work
+// item rather than once per token tile.
 template <int QT>
-__global__ __launch_bounds__(128) void k_moe_gateup(QTensor g0, QTensor u0, QTensor g1, QTensor u1, const MoeWork *work,
-                                                    const half *X, half *H) {
-    constexpr int NT = 2;                                   // LDS: 4 waves x 32 tokens x 64 outputs
-    __shared__ float red[4][16 * NT][65];
+__global__ __launch_bounds__(128) __attribute__((amdgpu_waves_per_eu(6))) void k_moe_gateup(QTensor g0, QTensor u0, QTensor g1,
+        QTensor u1, const MoeWork *work, const half *X, half *H) {
+    __shared__ _Float16 Ws[2][32][128 + 8];                 // gate | up rows of the current half super-block
     const MoeWork wk = work[blockIdx.y];
     const QTensor &G = wk.tier ? g1 : g0, &U = wk.tier ? u1 : u0;
-    const int wave = threadIdx.x / 32, l = threadIdx.x % 32, hf = l >> 4, r = l & 15;
-    const int row0 = wk.slot * FE + blockIdx.x * 32, nsb = D / 256, sb1 = (wave + 1) * nsb / 4;
-    for (int tt = 0; tt < wk.n; tt += 16 * NT) {
-        f8 ag[2][NT] = {}, au[2][NT] = {};
-        for (int sb = wave * nsb / 4; sb < sb1; sb++) {
-            const SbScales sg0 = sb_scales<QT>(G, row0 + r, sb), sg1 = sb_scales<QT>(G, row0 + 16 + r, sb);
-            const SbScales su0 = sb_scales<QT>(U, row0 + r, sb), su1 = sb_scales<QT>(U, row0 + 16 + r, sb);
+    const int tid = threadIdx.x, wave = tid / 32, l = tid % 32, hf = l >> 4, r = l & 15;
+    const int row0 = wk.slot * FE + blockIdx.x * 32;
+    for (int tt = 0; tt < wk.n; tt += 4 * 16 * MOE_TW) {   // one pass for the engine's items (at most MOE_ITEM tokens)
+    const int nt = min(4 * 16 * MOE_TW, wk.n - tt), m0 = wk.m0 + tt;
+    const int ntw = min(MOE_TW, (nt - 16 * MOE_TW * wave + 15) / 16);   // wave-uniform: this wave's token tiles
+    const _Float16 *xl[MOE_TW];                             // B: lane = token
 #pragma unroll
-            for (int c = 0; c < 4; c++) {
-                int2 qg0[4], qg1[4], qu0[4], qu1[4]; int f[4];
-                frags<QT>(G, row0 + r, sb, c, hf, qg0, f); frags<QT>(G, row0 + 16 + r, sb, c, hf, qg1, f);
-                frags<QT>(U, row0 + r, sb, c, hf, qu0, f); frags<QT>(U, row0 + 16 + r, sb, c, hf, qu1, f);
+    for (int j = 0; j < MOE_TW; j++) xl[j] = (const _Float16 *)X + (size_t)(m0 + min(16 * (MOE_TW * wave + j) + r, nt - 1)) * D;
+    f8 ag[MOE_TW][2] = {}, au[MOE_TW][2] = {};
+    for (int hs = 0; hs < 2 * (D / 256); hs++) {
+        const int sb = hs >> 1, h2 = hs & 1;
+#pragma unroll 1
+        for (int u = tid; u < 2 * 32 * 2 * 2; u += 128) {   // (matrix, row, step, half) units: 4 fragments x 8 values each
+            const int mat = u >> 7, row = (u >> 2) & 31, c = 2 * h2 + ((u >> 1) & 1), h = u & 1;
+            const QTensor &W = mat ? U : G;
+            const SbScales sc = sb_scales<QT>(W, row0 + row, sb);
+            int2 q[4]; int f[4];
+            frags<QT>(W, row0 + row, sb, c, h, q, f);
 #pragma unroll
-                for (int gi = 0; gi < 4; gi++) {
-                    const h16 a0 = join_halves(frag_h8<QT>(qg0[gi], sg0, f[gi]));
-                    const h16 a1 = join_halves(frag_h8<QT>(qg1[gi], sg1, f[gi]));
-                    const h16 b0 = join_halves(frag_h8<QT>(qu0[gi], su0, f[gi]));
-                    const h16 b1 = join_halves(frag_h8<QT>(qu1[gi], su1, f[gi]));
-#pragma unroll
-                    for (int j = 0; j < NT; j++) {
-                        const int t = min(tt + 16 * j + r, wk.n - 1);
-                        const _Float16 *xl = (const _Float16 *)X + (size_t)(wk.m0 + t) * D + 8 * hf;
-                        const h16 x = join_halves(*(const u4v *)(xl + sb * 256 + 16 * f[gi]));
-                        ag[0][j] = __builtin_amdgcn_wmma_f32_16x16x16_f16_w32(a0, x, ag[0][j]);
-                        ag[1][j] = __builtin_amdgcn_wmma_f32_16x16x16_f16_w32(a1, x, ag[1][j]);
-                        au[0][j] = __builtin_amdgcn_wmma_f32_16x16x16_f16_w32(b0, x, au[0][j]);
-                        au[1][j] = __builtin_amdgcn_wmma_f32_16x16x16_f16_w32(b1, x, au[1][j]);
-                    }
-                }
-            }
+            for (int g = 0; g < 4; g++) *(u4v *)&Ws[mat][row][16 * (f[g] - 8 * h2) + 8 * h] = frag_h8<QT>(q[g], sc, f[g]);
         }
         __syncthreads();
 #pragma unroll
-        for (int i = 0; i < 2; i++)
+        for (int k = 0; k < 8; k++) {
+            if (ntw <= 0) break;
+            const h16 a0 = *(const h16 *)&Ws[0][r][16 * k], a1 = *(const h16 *)&Ws[0][16 + r][16 * k];
+            const h16 b0 = *(const h16 *)&Ws[1][r][16 * k], b1 = *(const h16 *)&Ws[1][16 + r][16 * k];
 #pragma unroll
-            for (int j = 0; j < NT; j++)
-#pragma unroll
-                for (int e = 0; e < 8; e++) {
-                    red[wave][16 * j + r][16 * i + 2 * e + hf] = ag[i][j][e];
-                    red[wave][16 * j + r][32 + 16 * i + 2 * e + hf] = au[i][j][e];
-                }
-        __syncthreads();
-        for (int o = threadIdx.x; o < 32 * 16 * NT; o += 128) {
-            const int m = o & 31, t = o >> 5;
-            if (tt + t >= wk.n) continue;
-            const float gv = red[0][t][m] + red[1][t][m] + red[2][t][m] + red[3][t][m];
-            const float uv = red[0][t][32 + m] + red[1][t][32 + m] + red[2][t][32 + m] + red[3][t][32 + m];
-            H[(size_t)(wk.m0 + tt + t) * FE + blockIdx.x * 32 + m] = __float2half(silu(gv) * uv);
+            for (int j = 0; j < MOE_TW; j++) {
+                if (j >= ntw) break;
+                const h16 x = *(const h16 *)(xl[j] + sb * 256 + h2 * 128 + 16 * k);
+                ag[j][0] = __builtin_amdgcn_wmma_f32_16x16x16_f16_w32(a0, x, ag[j][0]);
+                ag[j][1] = __builtin_amdgcn_wmma_f32_16x16x16_f16_w32(a1, x, ag[j][1]);
+                au[j][0] = __builtin_amdgcn_wmma_f32_16x16x16_f16_w32(b0, x, au[j][0]);
+                au[j][1] = __builtin_amdgcn_wmma_f32_16x16x16_f16_w32(b1, x, au[j][1]);
+            }
         }
         __syncthreads();
     }
-}
-
-// down: 4 waves on 32 rows of Dn and 16*NT tokens; K = FE in 64-weight chunks split across the waves
-template <int QT>
-__global__ __launch_bounds__(128) void k_moe_down_g(QTensor d0, QTensor d1, const MoeWork *work, const half *H, const float *wts, half *Y) {
-    constexpr int NT = 4;
-    __shared__ float red[4][16 * NT][33];
-    const MoeWork wk = work[blockIdx.y];
-    const QTensor &W = wk.tier ? d1 : d0;
-    const int wave = threadIdx.x / 32, l = threadIdx.x % 32, hf = l >> 4, r = l & 15;
-    const int row0 = wk.slot * D + blockIdx.x * 32, nch = FE / 64, c1 = (wave + 1) * nch / 4;
-    for (int tt = 0; tt < wk.n; tt += 16 * NT) {
-        f8 acc[2][NT] = {};
-        for (int ch = wave * nch / 4; ch < c1; ch++) {
-            int2 q0[4], q1[4]; float s0[4], s1[4];
-            frags64<QT>(W, row0 + r, ch, hf, q0, s0);
-            frags64<QT>(W, row0 + 16 + r, ch, hf, q1, s1);
 #pragma unroll
-            for (int gi = 0; gi < 4; gi++) {
-                const h16 a0 = join_halves(to_h8(q0[gi], s0[gi])), a1 = join_halves(to_h8(q1[gi], s1[gi]));
-                // fragment gi of this 64-chunk: blocks 2ch, 2ch+1; low nibbles = weights 0..15 of the block
-                const int k16 = ch * 64 + (gi >> 1) * 32 + (gi & 1) * 16;
-#pragma unroll
-                for (int j = 0; j < NT; j++) {
-                    const int t = min(tt + 16 * j + r, wk.n - 1);
-                    const _Float16 *hl = (const _Float16 *)H + (size_t)(wk.m0 + t) * FE + 8 * hf;
-                    const h16 x = join_halves(*(const u4v *)(hl + k16));
-                    acc[0][j] = __builtin_amdgcn_wmma_f32_16x16x16_f16_w32(a0, x, acc[0][j]);
-                    acc[1][j] = __builtin_amdgcn_wmma_f32_16x16x16_f16_w32(a1, x, acc[1][j]);
-                }
-            }
-        }
-        __syncthreads();
+    for (int j = 0; j < MOE_TW; j++) {                      // ag[j][i][e]: row 16i + 2e + hf, token 16 (MOE_TW wave + j) + r
+        const int t = 16 * (MOE_TW * wave + j) + r;
+        if (j >= ntw || t >= nt) continue;
+        half *o = H + (size_t)(m0 + t) * FE + blockIdx.x * 32 + hf;
 #pragma unroll
         for (int i = 0; i < 2; i++)
 #pragma unroll
-            for (int j = 0; j < NT; j++)
+            for (int e = 0; e < 8; e++) o[16 * i + 2 * e] = __float2half(silu(ag[j][i][e]) * au[j][i][e]);
+    }
+    }
+}
+
+// down: 4 waves on 32 rows of Dn and the work item's tokens (at most MOE_ITEM), 16 * MOE_TW per wave; the 32 rows (K = FE) are
+// dequantized once into LDS, as above.
+template <int QT>
+__global__ __launch_bounds__(128) void k_moe_down_g(QTensor d0, QTensor d1, const MoeWork *work, const half *H, const float *wts, half *Y) {
+    __shared__ _Float16 Ws[32][FE + 8];
+    const MoeWork wk = work[blockIdx.y];
+    const QTensor &W = wk.tier ? d1 : d0;
+    const int tid = threadIdx.x, wave = tid / 32, l = tid % 32, hf = l >> 4, r = l & 15;
+    const int row0 = wk.slot * D + blockIdx.x * 32;
+    for (int u = tid; u < 32 * (FE / 64) * 2; u += 128) {   // (row, 64-chunk, half) units
+        const int row = u / (FE / 64 * 2), ch = (u >> 1) % (FE / 64), h = u & 1;
+        int2 q[4]; float sc[4];
+        frags64<QT>(W, row0 + row, ch, h, q, sc);
 #pragma unroll
-                for (int e = 0; e < 8; e++) red[wave][16 * j + r][16 * i + 2 * e + hf] = acc[i][j][e];
-        __syncthreads();
-        for (int o = threadIdx.x; o < 32 * 16 * NT; o += 128) {
-            const int m = o & 31, t = o >> 5;
-            if (tt + t >= wk.n) continue;
-            const float v = red[0][t][m] + red[1][t][m] + red[2][t][m] + red[3][t][m];
-            const size_t e = (size_t)(wk.m0 + tt + t);
-            Y[e * D + blockIdx.x * 32 + m] = __float2half(wts[e] * v);
+        for (int gi = 0; gi < 4; gi++) *(u4v *)&Ws[row][ch * 64 + (gi >> 1) * 32 + (gi & 1) * 16 + 8 * h] = to_h8(q[gi], sc[gi]);
+    }
+    __syncthreads();
+    for (int tt = 0; tt < wk.n; tt += 4 * 16 * MOE_TW) {
+    const int nt = min(4 * 16 * MOE_TW, wk.n - tt), m0 = wk.m0 + tt;
+    const int ntw = min(MOE_TW, (nt - 16 * MOE_TW * wave + 15) / 16);
+    if (ntw <= 0) continue;
+    const _Float16 *hl[MOE_TW];
+#pragma unroll
+    for (int j = 0; j < MOE_TW; j++) hl[j] = (const _Float16 *)H + (size_t)(m0 + min(16 * (MOE_TW * wave + j) + r, nt - 1)) * FE;
+    f8 acc[MOE_TW][2] = {};
+#pragma unroll 4
+    for (int k = 0; k < FE / 16; k++) {
+        const h16 a0 = *(const h16 *)&Ws[r][16 * k], a1 = *(const h16 *)&Ws[16 + r][16 * k];
+#pragma unroll
+        for (int j = 0; j < MOE_TW; j++) {
+            if (j >= ntw) break;
+            const h16 x = *(const h16 *)(hl[j] + 16 * k);
+            acc[j][0] = __builtin_amdgcn_wmma_f32_16x16x16_f16_w32(a0, x, acc[j][0]);
+            acc[j][1] = __builtin_amdgcn_wmma_f32_16x16x16_f16_w32(a1, x, acc[j][1]);
         }
-        __syncthreads();
+    }
+#pragma unroll
+    for (int j = 0; j < MOE_TW; j++) {
+        const int t = 16 * (MOE_TW * wave + j) + r;
+        if (j >= ntw || t >= nt) continue;
+        const size_t e = (size_t)(m0 + t);
+        const float w = wts[e];
+        half *o = Y + e * D + blockIdx.x * 32 + hf;
+#pragma unroll
+        for (int i = 0; i < 2; i++)
+#pragma unroll
+            for (int k = 0; k < 8; k++) o[16 * i + 2 * k] = __float2half(w * acc[j][i][k]);
+    }
     }
 }
 

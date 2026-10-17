@@ -46,10 +46,7 @@ __global__ __launch_bounds__(512) void k_route(const float *logits, int T, const
         // top 10 by logit (softmax is monotonic); ties go to the lower expert id
         for (int k = 0; k < TOPK_E; k++) {
             float best = v[e]; int bi = e;
-            for (int o = 16; o > 0; o >>= 1) {
-                const float ov = __shfl_xor(best, o, 32); const int oi = __shfl_xor(bi, o, 32);
-                if (ov > best || (ov == best && oi < bi)) { best = ov; bi = oi; }
-            }
+            wave_argmax(best, bi);
             if (lane == 0) { redv[wave] = best; redi[wave] = bi; }
             __syncthreads();
             if (e == 0) {
@@ -96,7 +93,7 @@ void route_dec(const float *logits, int T, const int *slot_of, int *ids, float *
 // the CPU's share. Same outputs as router_dec + route_dec.
 __global__ __launch_bounds__(256) void k_router_route(const half *W, const float *wsg, const float *x, int T, float *logits,
         float *sg, const int *slot_of, int *ids, float *wts, int *hot_slot, MoeShared *sh, float gfrac, int layer,
-        uint32_t gen, unsigned *counter) {
+        uint32_t gen, unsigned *counter, unsigned *counts) {
     __shared__ bool last;
     __shared__ float cv[8][TOPK_E];
     __shared__ int ci[8][TOPK_E];
@@ -120,9 +117,15 @@ __global__ __launch_bounds__(256) void k_router_route(const half *W, const float
             }
         }
         for (int t = 0; t < T; t++) { const float v = warp_sum(acc[t]); if (lane == 0) logits[(size_t)t * NE + e] = v; }
-        if (blockIdx.x == 0 && wave < T) {
+        if (blockIdx.x == 0 && wave < T) {             // shared expert gate: all loads in flight at once
+            constexpr int NV = D / 4 / 32;
+            const float4 *w4 = (const float4 *)wsg, *x4 = (const float4 *)(x + (size_t)wave * D);
+            float4 wv[NV], xv[NV];
+#pragma unroll
+            for (int k = 0; k < NV; k++) { wv[k] = w4[lane + 32 * k]; xv[k] = x4[lane + 32 * k]; }
             float v = 0;
-            for (int i = lane; i < D; i += 32) v += wsg[i] * x[(size_t)wave * D + i];
+#pragma unroll
+            for (int k = 0; k < NV; k++) v += wv[k].x * xv[k].x + wv[k].y * xv[k].y + wv[k].z * xv[k].z + wv[k].w * xv[k].w;
             v = warp_sum(v);
             if (lane == 0) sg[wave] = sigmoid(v);
         }
@@ -138,15 +141,12 @@ __global__ __launch_bounds__(256) void k_router_route(const half *W, const float
         float v0 = __hip_atomic_load(&logits[(size_t)t * NE + i0], __ATOMIC_RELAXED, __HIP_MEMORY_SCOPE_AGENT);
         float v1 = __hip_atomic_load(&logits[(size_t)t * NE + i1], __ATOMIC_RELAXED, __HIP_MEMORY_SCOPE_AGENT);
         for (int k = 0; k < TOPK_E; k++) {
-            float b; int bi;
-            if (v0 >= v1) { b = v0; bi = i0; } else { b = v1; bi = i1; }
-            for (int o = 16; o > 0; o >>= 1) {
-                const float ov = __shfl_xor(b, o, 32); const int oi = __shfl_xor(bi, o, 32);
-                if (ov > b || (ov == b && oi < bi)) { b = ov; bi = oi; }
-            }
+            const bool first = v0 >= v1;
+            float b = first ? v0 : v1; int bi = first ? i0 : i1;
+            wave_argmax(b, bi);
             if (lane == 0) { cv[wave][k] = b; ci[wave][k] = bi; }
-            if (bi == i0) v0 = -INFINITY;
-            if (bi == i1) v1 = -INFINITY;
+            v0 = bi == i0 ? -INFINITY : v0;
+            v1 = bi == i1 ? -INFINITY : v1;
         }
         __syncthreads();
         if (wave == 0) {
@@ -161,14 +161,14 @@ __global__ __launch_bounds__(256) void k_router_route(const half *W, const float
             for (int k = 0; k < TOPK_E; k++) {
                 float b = c[0]; int bi = ce[0];
 #pragma unroll
-                for (int q = 1; q < 3; q++) if (c[q] > b || (c[q] == b && ce[q] < bi)) { b = c[q]; bi = ce[q]; }
-                for (int o = 16; o > 0; o >>= 1) {
-                    const float ov = __shfl_xor(b, o, 32); const int oi = __shfl_xor(bi, o, 32);
-                    if (ov > b || (ov == b && oi < bi)) { b = ov; bi = oi; }
+                for (int q = 1; q < 3; q++) {
+                    const bool tk = (c[q] > b) | ((c[q] == b) & (ce[q] < bi));
+                    b = tk ? c[q] : b; bi = tk ? ce[q] : bi;
                 }
+                wave_argmax(b, bi);
                 pv[k] = b; pe[k] = bi;
 #pragma unroll
-                for (int q = 0; q < 3; q++) if (ce[q] == bi) c[q] = -INFINITY;
+                for (int q = 0; q < 3; q++) c[q] = ce[q] == bi ? -INFINITY : c[q];
             }
             // lane k < 10 takes pick k: weight (softmax restricted to the picks), tier, and the GPU's share of the cold
             // picks in pick order (cold picks before it: ballot), all in parallel
@@ -185,6 +185,7 @@ __global__ __launch_bounds__(256) void k_router_route(const half *W, const float
             nc += __popc(bal);
             if (lane < TOPK_E) {
                 const int j = t * TOPK_E + lane;
+                if (counts && layer < NL) atomicAdd(&counts[layer * NE + ex], 1u);
                 ids[j] = ex; wts[j] = wk;
                 hot_slot[j] = sl >= 0 ? sl : gpu ? -2 - (-1 - sl) : -1;
                 if (sh) { sh->slot[j] = cold && !gpu ? -1 - sl : -1; sh->w[j] = wk; }
@@ -205,8 +206,8 @@ __global__ __launch_bounds__(256) void k_router_route(const half *W, const float
 }
 void router_route_dec(const half *W, const float *wsg, const float *x, int T, float *logits, float *sg, const int *slot_of,
                       int *ids, float *wts, int *hot_slot, MoeShared *sh, float gfrac, int layer, uint32_t gen, unsigned *counter,
-                      hipStream_t st) {
-    k_router_route<<<NE / 8, 256, 0, st>>>(W, wsg, x, T, logits, sg, slot_of, ids, wts, hot_slot, sh, gfrac, layer, gen, counter);
+                      hipStream_t st, unsigned *counts) {
+    k_router_route<<<NE / 8, 256, 0, st>>>(W, wsg, x, T, logits, sg, slot_of, ids, wts, hot_slot, sh, gfrac, layer, gen, counter, counts);
 }
 
 // spin until the CPU has answered generation gen
@@ -270,10 +271,7 @@ __global__ __launch_bounds__(512) void k_route_many(const float *logits, int *id
     __syncthreads();
     for (int k = 0; k < TOPK_E; k++) {
         float best = v[e]; int bi = e;
-        for (int o = 16; o > 0; o >>= 1) {
-            const float ov = __shfl_xor(best, o, 32); const int oi = __shfl_xor(bi, o, 32);
-            if (ov > best || (ov == best && oi < bi)) { best = ov; bi = oi; }
-        }
+        wave_argmax(best, bi);
         if (lane == 0) { redv[wave] = best; redi[wave] = bi; }
         __syncthreads();
         if (e == 0) {

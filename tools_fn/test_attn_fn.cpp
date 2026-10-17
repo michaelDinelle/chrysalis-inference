@@ -49,9 +49,8 @@ int main() {
     }
     CK(hipStreamSynchronize(st));
     int fails = 0;
-    // (1) dense vs sparse-all at position P (context P+1 <= 2048 cells)
-    {
-        const int P = 1999;
+    // (1) dense vs sparse-all at position P (context P+1 <= 2048 cells); P = 1997: a tail block with a later cell to mask
+    for (const int P : {1999, 1997}) {
         for (auto &x : qg) x = nd(rng); for (auto &x : k) x = nd(rng); for (auto &x : v) x = nd(rng);
         CK(hipMemcpy(dqg, qg.data(), (size_t)NH * 2 * HD * 4, hipMemcpyHostToDevice));
         CK(hipMemcpy(dk, k.data(), (size_t)NKV * HD * 4, hipMemcpyHostToDevice));
@@ -74,8 +73,50 @@ int main() {
         double num = 0, den = 0;
         for (int i = 0; i < NH * HD; i++) { const double d = h2f(h1[i]) - h2f(h2[i]); num += d * d; den += h2f(h1[i]) * h2f(h1[i]); }
         const double rel = sqrt(num / den);
-        printf("dense vs sparse (all %d blocks): rel diff %.2e %s\n", B, rel, rel < 5e-3 ? "ok" : "FAIL");
+        printf("dense vs sparse (all %d blocks%s): rel diff %.2e %s\n", B, (P + 1) % KPOOL ? " + tail" : "", rel, rel < 5e-3 ? "ok" : "FAIL");
         fails += rel >= 5e-3;
+    }
+    // (1b) sparse, many tokens at once (the prefill path) vs one token at a time (the decode path, checked above): random
+    // ascending block subsets of different sizes, the token's own incomplete tail block (causal within it), -1 padding
+    {
+        const int T = 37, P0 = 5900;
+        for (auto &x : qg) x = nd(rng); for (auto &x : k) x = nd(rng); for (auto &x : v) x = nd(rng);
+        CK(hipMemcpy(dqg, qg.data(), qg.size() * 4, hipMemcpyHostToDevice));
+        CK(hipMemcpy(dk, k.data(), k.size() * 4, hipMemcpyHostToDevice)); CK(hipMemcpy(dv, v.data(), v.size() * 4, hipMemcpyHostToDevice));
+        attn_prep(dqg, dk, dv, dones, dones, T, P0, kv, layer, dQ16, st);
+        std::vector<int> sel((size_t)T * (SEL_BLOCKS + 1), -1);
+        for (int t = 0; t < T; t++) {
+            const int p = P0 + t, vis = (p + 1) / KPOOL;
+            std::vector<int> blocks(vis);
+            for (int b = 0; b < vis; b++) blocks[b] = b;
+            std::shuffle(blocks.begin(), blocks.end(), rng);
+            const int n = std::min({vis, SEL_BLOCKS, 100 + 13 * t});
+            std::sort(blocks.begin(), blocks.begin() + n);
+            for (int i = 0; i < n; i++) sel[(size_t)t * (SEL_BLOCKS + 1) + i] = blocks[i];
+            if ((p + 1) % KPOOL) sel[(size_t)t * (SEL_BLOCKS + 1) + n] = vis;   // the tail block holds cells up to p
+        }
+        float *po, *pml; half *oa, *o1;
+        CK(hipMalloc(&po, (size_t)PART_ROWS * NH * HD * 4)); CK(hipMalloc(&pml, (size_t)PART_ROWS * NH * 2 * 4));
+        CK(hipMalloc(&oa, (size_t)T * NH * HD * 2)); CK(hipMalloc(&o1, NH * HD * 2));
+        int *dsel; CK(hipMalloc(&dsel, sel.size() * 4)); CK(hipMemcpy(dsel, sel.data(), sel.size() * 4, hipMemcpyHostToDevice));
+        AttnArgs a; a.Q16 = dQ16; a.kv = kv; a.layer = layer; a.T = T; a.pos0 = P0; a.qg = dqg; a.part_o = po; a.part_ml = pml;
+        attention_sel(a, dsel, oa, QAct{nullptr, nullptr}, st);
+        std::vector<half> ha((size_t)T * NH * HD), h1(NH * HD);
+        CK(hipMemcpy(ha.data(), oa, ha.size() * 2, hipMemcpyDeviceToHost));
+        double num = 0, den = 0;
+        for (int t = 0; t < T; t++) {
+            AttnArgs a1 = a;
+            a1.Q16 = dQ16 + (size_t)t * NH * HD; a1.qg = dqg + (size_t)t * NH * 2 * HD; a1.T = 1; a1.pos0 = P0 + t;
+            attention_sel(a1, dsel + (size_t)t * (SEL_BLOCKS + 1), o1, QAct{nullptr, nullptr}, st);
+            CK(hipMemcpy(h1.data(), o1, NH * HD * 2, hipMemcpyDeviceToHost));
+            for (int i = 0; i < NH * HD; i++) {
+                const double d = h2f(ha[(size_t)t * NH * HD + i]) - h2f(h1[i]);
+                num += d * d; den += h2f(h1[i]) * h2f(h1[i]);
+            }
+        }
+        const double rel = sqrt(num / den);
+        printf("sparse, %d tokens at once vs one at a time (random block lists, tails): rel diff %.2e %s\n", T, rel, rel < 2e-3 ? "ok" : "FAIL");
+        fails += rel >= 2e-3;
     }
     // (2) selection at a long context: GPU vs CPU over the same pooled keys
     {

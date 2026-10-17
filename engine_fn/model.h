@@ -90,6 +90,11 @@ struct Engine {
     // KILN_FN_PROF: time prefill phases (syncing the stream at each boundary, so phases do not overlap) and print them
     bool prof = getenv("KILN_FN_PROF") != nullptr;
     std::vector<int64_t> route_counts;           // picks per (layer, expert) in prefill passes, when enabled (kiln_route_counts)
+    // KILN_FN_DECODE_COUNTS=file: picks per (layer, expert) at decode, counted on the GPU and written to the file (int64
+    // [NL][NE]) every 256 steps, for tuning which experts live in VRAM to what the model generates
+    unsigned *route_dec = nullptr;
+    const char *route_dec_file = getenv("KILN_FN_DECODE_COUNTS");
+    int route_dec_steps = 0;
     double prof_t[12] = {}, prof_last = 0;
     void pmark(int phase);
     uint32_t gen = 0;

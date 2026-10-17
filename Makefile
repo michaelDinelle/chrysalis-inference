@@ -38,6 +38,10 @@ build_fn/test_%_fn: tools_fn/test_%_fn.cpp $(FN_KERN) $(wildcard engine_fn/*.h)
 	@mkdir -p build_fn
 	$(HIPCC) $(FLAGS) -I$(GGML)/ggml/include -x hip -o $@ $< $(FN_KERN) $(FN_LIBS)
 
+build_fn/bench_%_fn: tools_fn/bench_%_fn.cpp $(FN_KERN) $(wildcard engine_fn/*.h)
+	@mkdir -p build_fn
+	$(HIPCC) $(FLAGS) -I$(GGML)/ggml/include -x hip -o $@ $< $(FN_KERN) $(FN_LIBS)
+
 # the engine's own GEMM path (Engine::linear) needs the whole engine
 build_fn/test_linear_fn: tools_fn/test_linear_fn.cpp $(FN_SRC) $(wildcard engine_fn/*.h)
 	@mkdir -p build_fn

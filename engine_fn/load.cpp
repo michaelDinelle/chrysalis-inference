@@ -641,6 +641,8 @@ void Engine::shutdown() {
     if (embd_host) (void)hipHostFree(embd_host);
     embd_host = nullptr; embd.q = nullptr; sh = d_sh = nullptr;
     if (stage_state) (void)hipFree(stage_state);
+    if (route_dec) (void)hipFree(route_dec);
+    route_dec = nullptr;
     if (lt_ws) (void)hipFree(lt_ws);
     if (lt) hipblasLtDestroy(lt);
     lt = nullptr; lt_ws = nullptr; stage_state = nullptr; kv_pool = nullptr;

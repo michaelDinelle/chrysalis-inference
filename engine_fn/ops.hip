@@ -155,10 +155,7 @@ __global__ __launch_bounds__(1024) void k_argmax(const float *logits, int n, int
     const float *r = logits + (size_t)blockIdx.x * ld;
     float best = -INFINITY; int bidx = 0;
     for (int i = threadIdx.x; i < n; i += blockDim.x) if (r[i] > best) { best = r[i]; bidx = i; }
-    for (int o = 16; o > 0; o >>= 1) {
-        const float ov = __shfl_xor(best, o, 32); const int oi = __shfl_xor(bidx, o, 32);
-        if (ov > best || (ov == best && oi < bidx)) { best = ov; bidx = oi; }
-    }
+    wave_argmax(best, bidx);
     if ((threadIdx.x & 31) == 0) { bv[threadIdx.x >> 5] = best; bi[threadIdx.x >> 5] = bidx; }
     __syncthreads();
     if (threadIdx.x == 0) {

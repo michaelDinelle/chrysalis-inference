@@ -28,10 +28,13 @@ __device__ __forceinline__ void v5_load16(const uint8_t *blk, int dim, int slot0
 // the attention output is rotated back.
 __device__ __forceinline__ float fwht256(float x, float *buf) {
     const int i = threadIdx.x;
-#pragma unroll
-    for (int h = 1; h < 32; h <<= 1) {                 // within a wave
-        const float o = __shfl_xor(x, h, 32);
-        x = (i & h) ? o - x : x + o;
+    {                                                  // within a wave
+        float o;
+        o = lane_xor<1>(x); x = (i & 1) ? o - x : x + o;
+        o = lane_xor<2>(x); x = (i & 2) ? o - x : x + o;
+        o = lane_xor<4>(x); x = (i & 4) ? o - x : x + o;
+        o = lane_xor<8>(x); x = (i & 8) ? o - x : x + o;
+        o = lane_xor<16>(x); x = (i & 16) ? o - x : x + o;
     }
     for (int h = 32; h < 256; h <<= 1) {               // across waves
         buf[i] = x;
@@ -177,7 +180,7 @@ __global__ __launch_bounds__(AW * 32) void k_attn(AttnArgs a) {
             if (key + 16 >= kend || key + 16 > qpos) s1[i] = -INFINITY;
             mx = fmaxf(mx, fmaxf(s0[i], s1[i]));
         }
-        mx = fmaxf(mx, __shfl_xor(mx, 16, 32));
+        mx = fmaxf(mx, lane_xor<16>(mx));
         if (mx > m) {                                             // rescale only when the max grows
             const float alpha = m == -INFINITY ? 0.0f : __expf(m - mx);
             l *= alpha;
@@ -192,11 +195,11 @@ __global__ __launch_bounds__(AW * 32) void k_attn(AttnArgs a) {
             p1[i] = m == -INFINITY ? 0.0f : __expf(s1[i] - m);
             rs += p0[i] + p1[i];
         }
-        l += rs + __shfl_xor(rs, 16, 32);
+        l += rs + lane_xor<16>(rs);
         h16 P0, P1;                                               // P^T[key][row r16] for keys 0-15 and 16-31
 #pragma unroll
         for (int i = 0; i < 8; i++) {
-            const float o0 = __shfl_xor(p0[i], 16, 32), o1 = __shfl_xor(p1[i], 16, 32);
+            const float o0 = lane_xor<16>(p0[i]), o1 = lane_xor<16>(p1[i]);
             P0[2 * i] = (_Float16)(hi ? o0 : p0[i]); P0[2 * i + 1] = (_Float16)(hi ? p0[i] : o0);
             P1[2 * i] = (_Float16)(hi ? o1 : p1[i]); P1[2 * i + 1] = (_Float16)(hi ? p1[i] : o1);
         }
@@ -271,19 +274,19 @@ __global__ __launch_bounds__(32) void k_attn_dec(AttnArgs a) {
             if (key >= kend || key > qpos) sc[i] = -INFINITY;
             mx = fmaxf(mx, sc[i]);
         }
-        mx = fmaxf(mx, __shfl_xor(mx, 16, 32));
+        mx = fmaxf(mx, lane_xor<16>(mx));
         const float mn = fmaxf(m, mx);
         const float alpha = mn == -INFINITY ? 1.0f : __expf(m - mn);
         float p[8], rs = 0;
 #pragma unroll
         for (int i = 0; i < 8; i++) { p[i] = mn == -INFINITY ? 0.0f : __expf(sc[i] - mn); rs += p[i]; }
-        rs += __shfl_xor(rs, 16, 32);
+        rs += lane_xor<16>(rs);
         l = l * alpha + rs;
         m = mn;
         float P[16];                                              // this row's probabilities for keys 0..15
 #pragma unroll
         for (int i = 0; i < 8; i++) {
-            const float o = __shfl_xor(p[i], 16, 32);
+            const float o = lane_xor<16>(p[i]);
             P[2 * i] = hi ? o : p[i];
             P[2 * i + 1] = hi ? p[i] : o;
         }
@@ -600,9 +603,9 @@ __global__ __launch_bounds__(256) void k_idx_score2(const half *q16, int pos0, i
             }
         }
 #pragma unroll
-        for (int h = 0; h < IDX_H; h++)
-#pragma unroll
-            for (int o = 8; o > 0; o >>= 1) acc[h] += __shfl_xor(acc[h], o, 16);
+        for (int h = 0; h < IDX_H; h++) {             // sums over 16 lanes
+            acc[h] += lane_xor<8>(acc[h]); acc[h] += lane_xor<4>(acc[h]); acc[h] += lane_xor<2>(acc[h]); acc[h] += lane_xor<1>(acc[h]);
+        }
         if (l == 0) {
             float sc = -INFINITY;
             if (b < nvis) {
@@ -832,128 +835,161 @@ void idx_select_ref(const half *q16, int pos0, int G, int nblk, KVRef kv, int la
 }
 
 // ---- sparse attention over selected blocks ------------------------------------------------------------
-// One wave per (token, kv head, split): rows are the token's 12 query heads (a 16-row tile, 4 rows unused), keys are
-// 16 at a time = 4 selected blocks of 4 cells. Same math and partial outputs as k_attn_dec.
-__device__ __forceinline__ void v5_load4(const uint8_t *blk, int dim, int slot0, int8_t out[4]) {   // slot0 % 4 == 0
-    const uint32_t lo = *(const uint16_t *)(blk + VLO_OFF + dim * (PAGE / 2) + slot0 / 2);
-    const uint32_t hi = (*(const uint8_t *)(blk + VHI_OFF + dim * (PAGE / 8) + slot0 / 8)) >> (slot0 % 8);
+// One 256-thread workgroup (8 waves) per (token, kv head, split of the token's block list); the selected blocks
+// (SEL_BLOCKS of KPOOL = 4 cells, then the tail block) in stages of 32 blocks = 128 keys. As the 27B engine's decode
+// kernel: wave w scores keys 16w..16w+15 of the stage (4 blocks) for the token's 12 query heads (one 16-row tile), the
+// waves agree on each row's running max through LDS and publish P^T (fp16), and wave w accumulates O^T for its own 32
+// dims (one V scale block) over the stage's keys, so a wave keeps 16 registers of output instead of 128. Keys come in
+// runs of 4 cells: V is 2 bytes of nibbles per run and dim, decoded two cells per instruction (fragment order VPERM4).
+constexpr int SST = 32;                       // selected blocks per stage (128 keys)
+__device__ constexpr int VPERM4[16] = {0, 2, 1, 3, 4, 6, 5, 7, 8, 10, 9, 11, 12, 14, 13, 15};
+union Frag { h16 h; uint32_t u[8]; };
+__device__ __forceinline__ h16 k8_frag(int4 kr, _Float16 s) {   // 16 int8 K values times their scale, as (_Float16)k * s
+    const uint32_t w[4] = {(uint32_t)kr.x ^ 0x80808080u, (uint32_t)kr.y ^ 0x80808080u, (uint32_t)kr.z ^ 0x80808080u,
+                           (uint32_t)kr.w ^ 0x80808080u};
+    Frag f;
 #pragma unroll
-    for (int i = 0; i < 4; i++) out[i] = (int8_t)((((lo >> (4 * i)) & 15) | (((hi >> i) & 1) << 4)) - 16);
+    for (int q = 0; q < 4; q++) {
+        f.u[2 * q] = __builtin_amdgcn_perm(0x64646464u, w[q], 0x04010400u);
+        f.u[2 * q + 1] = __builtin_amdgcn_perm(0x64646464u, w[q], 0x04030402u);
+    }
+    return (f.h - (_Float16)1152) * s;
 }
 
-__global__ __launch_bounds__(32) void k_attn_sel(AttnArgs a, const int *sel, int groups_per_split) {
-    const int t = blockIdx.x, g = blockIdx.y, split = blockIdx.z;
-    const int lane = threadIdx.x, r16 = lane % 16, hi = lane / 16;
-    const bool valid = r16 < QPK;
-    const int qpos = a.pos0 + t;
-    const half *qrow = a.Q16 + ((size_t)t * NH + g * QPK + (valid ? r16 : 0)) * HD;
+__global__ __launch_bounds__(256) __attribute__((amdgpu_waves_per_eu(10))) void k_attn_sel(AttnArgs a, const int *sel, int stages_per_split) {
+    __shared__ _Float16 Qs[16][HD + 8];
+    __shared__ float rmx[8][16];
+    __shared__ _Float16 Ps[8][16][16 + 8];    // P^T per key tile: [tile][row][16 fragment slots, keys VPERM4]
+    __shared__ int bid[SEL_BLOCKS + 1], bpg[SEL_BLOCKS + 1];   // this split's blocks: id (-1: none), page
+    const int t = blockIdx.x, g = blockIdx.y, split = blockIdx.z, tid = threadIdx.x;
+    const int w = tid / 32, lane = tid % 32, r16 = lane % 16, hi = lane / 16;
+    const int qpos = a.pos0 + t, rowvalid = r16 < QPK;
     const int *list = sel + (size_t)t * (SEL_BLOCKS + 1);
-    const int gbeg = split * groups_per_split, gend = min((SEL_BLOCKS + 1 + 3) / 4, gbeg + groups_per_split);
+    const int bbeg = split * stages_per_split * SST, nb = min(SEL_BLOCKS + 1, bbeg + stages_per_split * SST) - bbeg;
+    for (int i = tid; i < 16 * (HD / 8); i += 256) {
+        const int r = i / (HD / 8), c = i % (HD / 8);
+        int4 v = {0, 0, 0, 0};
+        if (r < QPK) v = *(const int4 *)(a.Q16 + ((size_t)t * NH + g * QPK + r) * HD + c * 8);
+        *(int4 *)&Qs[r][c * 8] = v;
+    }
+    for (int i = tid; i < nb; i += 256) {
+        const int id = list[bbeg + i];
+        bid[i] = id;
+        bpg[i] = id >= 0 ? a.kv.pages[id * KPOOL / PAGE] : a.kv.pages[0];
+    }
     float m = -INFINITY, l = 0;
-    f8 acc[16];
-#pragma unroll
-    for (int d = 0; d < 16; d++) acc[d] = f8{};
-    for (int grp = gbeg; grp < gend; grp++) {
-        // this lane's key (row r16 of the S^T tile): block list[4*grp + r16/4], cell r16 % 4
-        const int bi = 4 * grp + r16 / 4;
-        const int blk_id = bi < SEL_BLOCKS + 1 ? list[bi] : -1;
-        const int cell = blk_id >= 0 ? blk_id * KPOOL + r16 % 4 : 0;
-        const uint8_t *page = kv_head(a.kv, a.layer, g, cell);
-        const int slot = cell % PAGE;
-        const int8_t *kq = (const int8_t *)page + slot * HD;
-        const half *ks = (const half *)(page + KS_OFF) + slot * (HD / 32);
+    f8 acc[2] = {f8{}, f8{}};
+    __syncthreads();
+    const size_t head_off = (size_t)a.layer * KV_LAYER + (size_t)g * KV_HEAD;
+    auto block_base = [&](int i) { return a.kv.pool + (size_t)bpg[i] * KV_PAGE + head_off; };
+
+    for (int s0 = 0; s0 < nb; s0 += SST) {
+        // S^T for this wave's keys: blocks s0 + 4w .. s0 + 4w + 3, cell r16 % 4 of block r16 / 4
+        const int bi = s0 + 4 * w + r16 / 4;
+        const int id = bi < nb ? bid[bi] : -1;
         f8 sc = {};
+        {
+            const uint8_t *page = block_base(bi < nb ? bi : 0);
+            const int slot = (id >= 0 ? id * KPOOL % PAGE : 0) + r16 % 4;
+            const int8_t *kq = (const int8_t *)page + slot * HD;
+            const half *ks = (const half *)(page + KS_OFF) + slot * (HD / 32);
 #pragma unroll
-        for (int d = 0; d < 16; d++) {
-            const int4 kr = *(const int4 *)(kq + d * 16);
-            const _Float16 s = (_Float16)__half2float(ks[d / 2]);
-            const int8_t *kb = (const int8_t *)&kr;
-            h16 A;
-#pragma unroll
-            for (int i = 0; i < 16; i++) A[i] = (_Float16)kb[i] * s;
-            sc = __builtin_amdgcn_wmma_f32_16x16x16_f16_w32(A, *(const h16 *)(qrow + d * 16), sc);
+            for (int d = 0; d < 16; d++) {
+                const h16 A = k8_frag(*(const int4 *)(kq + d * 16), (_Float16)__half2float(ks[d / 2]));
+                sc = __builtin_amdgcn_wmma_f32_16x16x16_f16_w32(A, *(const h16 *)&Qs[r16][d * 16], sc);
+            }
         }
-        // sc[i] = S^T[key 2i+hi][row r16]: key k's block and cell
         float mx = -INFINITY;
 #pragma unroll
-        for (int i = 0; i < 8; i++) {
-            const int key = 2 * i + hi;
-            const int kb_i = 4 * grp + key / 4;
-            const int kb_id = kb_i < SEL_BLOCKS + 1 ? list[kb_i] : -1;
-            const int kcell = kb_id * KPOOL + key % 4;
-            if (kb_id < 0 || kcell > qpos || !valid) sc[i] = -INFINITY;
+        for (int i = 0; i < 8; i++) {                // sc[i] = S^T[key 2i+hi][row r16]
+            const int key = 2 * i + hi, kb = s0 + 4 * w + key / 4;
+            const int kid = kb < nb ? bid[kb] : -1;
+            if (kid < 0 || kid * KPOOL + key % 4 > qpos || !rowvalid) sc[i] = -INFINITY;
             mx = fmaxf(mx, sc[i]);
         }
-        mx = fmaxf(mx, __shfl_xor(mx, 16, 32));
-        const float mn = fmaxf(m, mx);
-        const float alpha = mn == -INFINITY ? 1.0f : __expf(m - mn);
-        float p[8], rs = 0;
+        mx = fmaxf(mx, lane_xor<16>(mx));
+        if (hi == 0) rmx[w][r16] = mx;
+        __syncthreads();
+        {
+            float M = m;
 #pragma unroll
-        for (int i = 0; i < 8; i++) { p[i] = mn == -INFINITY ? 0.0f : __expf(sc[i] - mn); rs += p[i]; }
-        rs += __shfl_xor(rs, 16, 32);
-        l = l * alpha + rs;
-        m = mn;
-        float P[16];
+            for (int ww = 0; ww < 8; ww++) M = fmaxf(M, rmx[ww][r16]);
+            const float alpha = M == -INFINITY ? 1.0f : __expf(m - M);
+            m = M;
+            float p[8], rs = 0;
 #pragma unroll
-        for (int i = 0; i < 8; i++) {
-            const float o = __shfl_xor(p[i], 16, 32);
-            P[2 * i] = hi ? o : p[i];
-            P[2 * i + 1] = hi ? p[i] : o;
+            for (int i = 0; i < 8; i++) { p[i] = M == -INFINITY ? 0.0f : __expf(sc[i] - M); rs += p[i]; }
+            l = l * alpha + rs + lane_xor<16>(rs);
+            acc[0] *= alpha; acc[1] *= alpha;
+            float P16[16];
+#pragma unroll
+            for (int i = 0; i < 8; i++) {
+                const float o = lane_xor<16>(p[i]);
+                P16[2 * i] = hi ? o : p[i];
+                P16[2 * i + 1] = hi ? p[i] : o;
+            }
+            h16 Ph;                                  // lane hi writes fragment slots 8hi .. 8hi+7
+#pragma unroll
+            for (int j = 0; j < 8; j++) Ph[j] = (_Float16)(hi ? P16[VPERM4[8 + j]] : P16[VPERM4[j]]);
+            *(uint4 *)&Ps[w][r16][8 * hi] = *(const uint4 *)&Ph;
         }
-#pragma unroll
-        for (int dt = 0; dt < 16; dt++) acc[dt] *= alpha;
-        // V: the 16 keys are 4 runs of 4 consecutive cells (one per block)
-        const uint8_t *vpage[4]; int vslot[4];
-#pragma unroll
-        for (int q4 = 0; q4 < 4; q4++) {
-            const int b2 = 4 * grp + q4;
-            const int id2 = b2 < SEL_BLOCKS + 1 ? list[b2] : -1;
-            const int c2 = id2 >= 0 ? id2 * KPOOL : 0;
-            vpage[q4] = kv_head(a.kv, a.layer, g, c2); vslot[q4] = c2 % PAGE;
-        }
-#pragma unroll
-        for (int blk = 0; blk < 8; blk++) {
-            h16 B;
+        __syncthreads();
+#pragma unroll 2
+        for (int kt = 0; kt < 8; kt++) {             // O^T for dims 32w + 16dt + r16 over the stage's key tiles
+            if (s0 + 4 * kt >= nb) break;
+            const uint8_t *pq[4]; int sl[4];
+            h16 vsp;                                 // the keys' V scales (block w) in fragment order
 #pragma unroll
             for (int q4 = 0; q4 < 4; q4++) {
-                const half *vs = (const half *)(vpage[q4] + VS_OFF) + blk * PAGE + vslot[q4];
-#pragma unroll
-                for (int i = 0; i < 4; i++) B[4 * q4 + i] = (_Float16)(P[4 * q4 + i] * __half2float(vs[i]));
+                const int b2 = s0 + 4 * kt + q4, id2 = b2 < nb ? bid[b2] : -1;
+                pq[q4] = block_base(b2 < nb ? b2 : 0); sl[q4] = id2 >= 0 ? id2 * KPOOL % PAGE : 0;
+                const half *vs = (const half *)(pq[q4] + VS_OFF) + w * PAGE + sl[q4];
+                vsp[4 * q4] = (_Float16)__half2float(vs[0]); vsp[4 * q4 + 1] = (_Float16)__half2float(vs[2]);
+                vsp[4 * q4 + 2] = (_Float16)__half2float(vs[1]); vsp[4 * q4 + 3] = (_Float16)__half2float(vs[3]);
             }
+            const h16 B = *(const h16 *)&Ps[kt][r16][0] * vsp;
 #pragma unroll
-            for (int dt = 2 * blk; dt < 2 * blk + 2; dt++) {
-                h16 A;
+            for (int dt = 0; dt < 2; dt++) {
+                const int dim = 32 * w + 16 * dt + r16;
+                Frag f;
 #pragma unroll
                 for (int q4 = 0; q4 < 4; q4++) {
-                    int8_t v4[4];
-                    v5_load4(vpage[q4], dt * 16 + r16, vslot[q4], v4);
-#pragma unroll
-                    for (int i = 0; i < 4; i++) A[4 * q4 + i] = (_Float16)v4[i];
+                    const uint32_t lo16 = *(const uint16_t *)(pq[q4] + VLO_OFF + dim * (PAGE / 2) + sl[q4] / 2);
+                    const uint32_t hb4 = (*(const uint8_t *)(pq[q4] + VHI_OFF + dim * (PAGE / 8) + sl[q4] / 8) >> (sl[q4] % 8)) & 15u;
+                    const uint32_t y = (lo16 & 0xffu) | ((lo16 & 0xff00u) << 8);       // nibbles at bits 0, 4, 16, 20
+                    f.u[2 * q4] = (y & 0x000f000fu) | ((hb4 & 1u) << 4) | ((hb4 & 4u) << 18) | 0x64006400u;          // cells 0, 2
+                    f.u[2 * q4 + 1] = ((y >> 4) & 0x000f000fu) | ((hb4 & 2u) << 3) | ((hb4 & 8u) << 17) | 0x64006400u;  // cells 1, 3
                 }
-                acc[dt] = __builtin_amdgcn_wmma_f32_16x16x16_f16_w32(A, B, acc[dt]);
+                acc[dt] = __builtin_amdgcn_wmma_f32_16x16x16_f16_w32(f.h - (_Float16)1040, B, acc[dt]);
             }
         }
     }
-    if (!valid) return;
+    // partials: O^T rows of this wave's dims; the row sums add up over the waves
+    if (hi == 0) rmx[w][r16] = l;
+    __syncthreads();
+    if (!rowvalid) return;
     const size_t row = (size_t)t * NH + g * QPK + r16;
-    float *po = a.part_o + ((size_t)split * a.T * NH + row) * HD;
+    float *po = a.part_o + ((size_t)split * a.T * NH + row) * HD + 32 * w;
 #pragma unroll
-    for (int dt = 0; dt < 16; dt++)
+    for (int dt = 0; dt < 2; dt++)
 #pragma unroll
         for (int i = 0; i < 8; i++) po[dt * 16 + 2 * i + hi] = acc[dt][i];
-    if (hi == 0) {
+    if (w == 0 && hi == 0) {
+        float L = 0;
+#pragma unroll
+        for (int ww = 0; ww < 8; ww++) L += rmx[ww][r16];
         a.part_ml[((size_t)split * a.T * NH + row) * 2] = m;
-        a.part_ml[((size_t)split * a.T * NH + row) * 2 + 1] = l;
+        a.part_ml[((size_t)split * a.T * NH + row) * 2 + 1] = L;
     }
 }
 
 // sparse attention for T tokens at pos0.. with their block lists `sel`; output like attention()
 void attention_sel(AttnArgs a, const int *sel, half *oh, QAct oq, hipStream_t st) {
-    const int groups = (SEL_BLOCKS + 1 + 3) / 4;
-    const int nsplit = std::max(1, std::min({groups, 1536 / std::max(1, a.T * NKV), PART_ROWS / a.T}));   // decode: ~one group per wave
-    const int gps = (groups + nsplit - 1) / nsplit;
-    a.nsplit = (groups + gps - 1) / gps;
+    const int stages = (SEL_BLOCKS + 1 + SST - 1) / SST;
+    const int nsplit = std::max(1, std::min({stages, 192 / std::max(1, a.T * NKV), PART_ROWS / a.T}));   // decode: a stage per workgroup
+    const int sps = (stages + nsplit - 1) / nsplit;
+    a.nsplit = (stages + sps - 1) / sps;
     if (a.nsplit * a.T > PART_ROWS) FAIL("attention_sel: %d tokens x %d splits exceed the partial buffers", a.T, a.nsplit);
-    k_attn_sel<<<dim3(a.T, NKV, a.nsplit), 32, 0, st>>>(a, sel, gps);
+    k_attn_sel<<<dim3(a.T, NKV, a.nsplit), 256, 0, st>>>(a, sel, sps);
     k_attn_combine<<<a.T * NH, 256, 0, st>>>(a.part_o, a.part_ml, a.nsplit, a.T * NH, a.qg, oh, oq);
 }

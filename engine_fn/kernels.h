@@ -81,10 +81,11 @@ void gdn_step(const GdnStepArgs &a, hipStream_t st);
 // moe.hip / quant.hip: routed experts at decode ----------------------------------------------------
 struct MoeShared;
 void router_dec(const half *W, const float *wsg, const float *x, int T, float *logits, float *sg, hipStream_t st);
-// router_dec + route_dec in one launch (counter: a zeroed device word the kernel resets itself)
+// router_dec + route_dec in one launch (counter: a zeroed device word the kernel resets itself); counts: if set, picks per
+// (layer, expert) are added to it ([NL][NE])
 void router_route_dec(const half *W, const float *wsg, const float *x, int T, float *logits, float *sg, const int *slot_of,
                       int *ids, float *wts, int *hot_slot, MoeShared *sh, float gfrac, int layer, uint32_t gen, unsigned *counter,
-                      hipStream_t st);
+                      hipStream_t st, unsigned *counts = nullptr);
 void route_dec(const float *logits, int T, const int *slot_of, int *ids, float *wts, int *hot_slot, MoeShared *sh, float gfrac,
                const float *x, int layer, uint32_t gen, hipStream_t st);
 // the GPU's routed picks (hot_slot >= 0) and, if sgate is set, each token's shared expert as pick T*TOPK_E + t (y rows
@@ -99,6 +100,9 @@ struct ColdDec {                       // a layer's RAM experts as the GPU sees 
     int n0 = 0;                        // cold slots below n0 are group 0's, the rest group 1's (slot - n0)
 };
 void moe_cold_dec(const ColdDec &c, const int *hot_slot, int T, QAct x, QAct hq, const float *wts, float *y, hipStream_t st);
+// both in two launches, the cold picks (c, may be nullptr) side by side with the hot ones and the shared expert
+void moe_dec(const QTensor &gate, const QTensor &up, const QTensor &down, const QTensor &sgate, const QTensor &sup, const QTensor &sdown,
+             const ColdDec *c, const int *hot_slot, int T, QAct x, QAct hq, const float *wts, const float *sg, float *y, hipStream_t st);
 void moe_wait(const uint32_t *done, uint32_t gen, hipStream_t st);
 // moe_wait + moe_sum + hc_combine (res += 2 sigmoid(inject / HC) * out) in one launch; done = nullptr: no CPU part;
 // sg = nullptr: the shared rows are already weighted
@@ -142,6 +146,7 @@ void ple_commit(float *state, const float *xconv, int n, hipStream_t st);
 
 // routed experts at prefill (quant.hip / moe.hip) ------------------------------------------------------
 struct MoeWork { int slot, m0, n, tier; };
+constexpr int MOE_ITEM = 64;                     // tokens per work item at most (an expert's tokens split into items)
 void moe_gemm_gateup(const QTensor &g0, const QTensor &u0, const QTensor &g1, const QTensor &u1, const MoeWork *work, int nwork,
                      const half *X, half *H, hipStream_t st);
 void moe_gemm_down(const QTensor &d0, const QTensor &d1, const MoeWork *work, int nwork, const half *H, const float *wts, half *Y, hipStream_t st);
