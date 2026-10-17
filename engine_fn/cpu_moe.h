@@ -64,6 +64,14 @@ bool vnni_formats(const ColdLayer &c);                                  // the k
 void vnni_quant_x(const float *x, int8_t *q, float *s, int32_t *sum);   // one token: int8 per 32, scales, sums per 16
 void expert_vnni(const ColdLayer &c, int slot, int n, const int8_t *const *xq, const float *const *xs, const int32_t *const *xsum,
                  const float *w, uint16_t *const *out, VnniScratch &S);
+// decode (one token per pick): a token's per-16 lane vectors from vnni_quant_x's scales and sums ([D/16] each), one
+// gate / up row's dot product with it (ggml type 11 Q3_K, 10 Q2_K, 23 IQ4_XS), a pick's h quantized for the down rows
+// (int8 per 32, scales, corrections), one IQ4_NL down row's dot product with it
+void vnni_act1(const float *xs, const int32_t *xsum, float *s16, float *f16);
+float vnni_dot_gu1(const uint8_t *row, int type, const int8_t *xq, const float *xs, const int32_t *xsum, const float *s16,
+                   const float *f16, VnniScratch &S);
+void vnni_quant_h(const float *h, int8_t *q, float *s, float *c);
+float vnni_dot_dn1(const uint8_t *row, const int8_t *hq, const float *hs, const float *hc);
 
 class CpuMoe {
 public:
@@ -100,6 +108,8 @@ private:
     // inputs quantized to each gate/up group's dot type (group 1 shares group 0's when the types agree)
     std::vector<uint8_t> xq[2];                  // [T]
     std::vector<uint8_t> hq;                     // [picks] silu(g) * u quantized to the down dot type
+    // the VNNI decode path's operands: per token x int8 per 32, scales, per-16 sums and lane vectors; per pick h int8
+    std::vector<int8_t> dxq, dhq; std::vector<float> dxs, ds16, df16, dhs, dhc; std::vector<int32_t> dxsum;
     size_t xq_row[2] = {}, hq_row = 0;
     int dot_gu[2] = {-1, -1};                    // vec_dot types of the gate/up groups
     bool dot_same = true;

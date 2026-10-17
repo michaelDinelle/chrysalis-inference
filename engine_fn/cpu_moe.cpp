@@ -41,6 +41,9 @@ void CpuMoe::start(MoeShared *shared, const std::vector<ColdLayer> &layers, int 
     vnni = vnni_supported();
     for (const ColdLayer &c : L) if (c.n && !vnni_formats(c)) vnni = false;
     vnni_ok = vnni;
+    dxq.resize((size_t)MOE_MAX_T * D_); dxs.resize(MOE_MAX_T * (D_ / 32)); dxsum.resize(MOE_MAX_T * (D_ / 16));
+    ds16.resize(MOE_MAX_T * (D_ / 16)); df16.resize(MOE_MAX_T * (D_ / 16));
+    dhq.resize((size_t)MOE_MAX_T * MOE_MAX_E * FE_); dhs.resize(MOE_MAX_T * MOE_MAX_E * (FE_ / 32)); dhc.resize(MOE_MAX_T * MOE_MAX_E * (FE_ / 32));
     for (int i = 0; i < n; i++) th.emplace_back(&CpuMoe::worker, this, i);
 }
 
@@ -166,18 +169,31 @@ void CpuMoe::worker(int id) {
         const ggml_type_traits_cpu *tr_gu[2] = {ggml_get_type_traits_cpu((ggml_type)c.type_gu[0]),
                                                 ggml_get_type_traits_cpu((ggml_type)(c.gate[1] ? c.type_gu[1] : c.type_gu[0]))};
         const auto *tr_dn = ggml_get_type_traits_cpu((ggml_type)c.type_dn);
+        const bool vx = vnni;                       // AVX-512 VNNI row dots, or ggml's
         if (np > 0) {
             // inputs to the gate/up dot types (one token per worker)
-            if (id < T)
-                for (int g = 0; g < (dot_same ? 1 : 2); g++)
-                    ggml_get_type_traits_cpu((ggml_type)dot_gu[g])->from_float(sh->x + (size_t)id * D_, xq[g].data() + xq_row[g] * id, D_);
+            if (id < T) {
+                if (vx) {
+                    int32_t *xsum = dxsum.data() + id * (D_ / 16);
+                    vnni_quant_x(sh->x + (size_t)id * D_, dxq.data() + (size_t)id * D_, dxs.data() + id * (D_ / 32), xsum);
+                    vnni_act1(dxs.data() + id * (D_ / 32), xsum, ds16.data() + id * (D_ / 16), df16.data() + id * (D_ / 16));
+                } else {
+                    for (int g = 0; g < (dot_same ? 1 : 2); g++)
+                        ggml_get_type_traits_cpu((ggml_type)dot_gu[g])->from_float(sh->x + (size_t)id * D_, xq[g].data() + xq_row[g] * id, D_);
+                }
+            }
             barrier();
             // gate | up rows of all picks, split evenly
             const int R1 = np * 2 * FE_;
             for (int r = id * R1 / n; r < (id + 1) * R1 / n; r++) {
                 const int p = r / (2 * FE_), k = r % (2 * FE_), j = pick[p], slot = sh->slot[j], g = c.grp(slot), gx = dot_same ? 0 : g;
-                tr_gu[g]->vec_dot(D_, &gu[(size_t)p * 2 * FE_ + k], 0, c.gu_row(k >= FE_, slot, k % FE_), 0,
-                                  xq[gx].data() + xq_row[gx] * (j / MOE_MAX_E), 0, 1);
+                const uint8_t *row = c.gu_row(k >= FE_, slot, k % FE_);
+                const int t = j / MOE_MAX_E;
+                if (vx)
+                    gu[(size_t)p * 2 * FE_ + k] = vnni_dot_gu1(row, c.type_gu[g], dxq.data() + (size_t)t * D_, dxs.data() + t * (D_ / 32),
+                                                               dxsum.data() + t * (D_ / 16), ds16.data() + t * (D_ / 16),
+                                                               df16.data() + t * (D_ / 16), scr[id].v);
+                else tr_gu[g]->vec_dot(D_, &gu[(size_t)p * 2 * FE_ + k], 0, row, 0, xq[gx].data() + xq_row[gx] * t, 0, 1);
             }
             barrier();
             // silu(gate) * up, quantized for the down rows
@@ -185,7 +201,8 @@ void CpuMoe::worker(int id) {
                 float h[FE_];
                 const float *g2 = &gu[(size_t)p * 2 * FE_];
                 for (int i = 0; i < FE_; i++) { const float a = g2[i]; h[i] = a / (1.0f + expf(-a)) * g2[FE_ + i]; }
-                ggml_get_type_traits_cpu(tr_dn->vec_dot_type)->from_float(h, hq.data() + hq_row * p, FE_);
+                if (vx) vnni_quant_h(h, dhq.data() + (size_t)p * FE_, dhs.data() + p * (FE_ / 32), dhc.data() + p * (FE_ / 32));
+                else ggml_get_type_traits_cpu(tr_dn->vec_dot_type)->from_float(h, hq.data() + hq_row * p, FE_);
             }
             barrier();
         }
@@ -195,7 +212,8 @@ void CpuMoe::worker(int id) {
             for (int p = 0; p < np; p++) {
                 const int j = pick[p], slot = sh->slot[j];
                 float v;
-                tr_dn->vec_dot(FE_, &v, 0, c.dn_row(slot, r), 0, hq.data() + hq_row * p, 0, 1);
+                if (vx) v = vnni_dot_dn1(c.dn_row(slot, r), dhq.data() + (size_t)p * FE_, dhs.data() + p * (FE_ / 32), dhc.data() + p * (FE_ / 32));
+                else tr_dn->vec_dot(FE_, &v, 0, c.dn_row(slot, r), 0, hq.data() + hq_row * p, 0, 1);
                 acc[j / MOE_MAX_E] += sh->w[j] * v;
             }
             for (int t = 0; t < T; t++) sh->y[(size_t)t * D_ + r] = acc[t];

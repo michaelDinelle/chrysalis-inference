@@ -290,6 +290,145 @@ VNNI void vnni_quant_x(const float *x, int8_t *q, float *s, int32_t *sum) {
     }
 }
 
+// ---- decode: one token per pick, many rows ---------------------------------------------------------------------
+// A row's GGUF blocks are decoded straight into 64-byte registers (weights in natural order, unsigned as above) and
+// multiplied with the token's int8 activations by vpdpbusd: each int32 lane holds 4 products of one 16-weight group, so
+// the groups' scales (weight scale times the activation scale of the 32-block) apply as a per-lane vector, and a row
+// needs one horizontal sum. The unsigned offsets come out through the token's per-16 sums (f16: sum times scale).
+namespace {
+VNNI inline __m512i two16(int lo, int hi) {           // shift counts: lo for the low 256 bits' words, hi for the high ones
+    return _mm512_inserti64x4(_mm512_castsi256_si512(_mm256_set1_epi16((short)lo)), _mm256_set1_epi16((short)hi), 1);
+}
+VNNI inline __m512i lane_groups(int k) {              // lane l of register k (weights 64k + 4l..) -> group 4k + l / 4
+    return _mm512_set_epi32(4 * k + 3, 4 * k + 3, 4 * k + 3, 4 * k + 3, 4 * k + 2, 4 * k + 2, 4 * k + 2, 4 * k + 2,
+                            4 * k + 1, 4 * k + 1, 4 * k + 1, 4 * k + 1, 4 * k, 4 * k, 4 * k, 4 * k);
+}
+
+// Q3_K (110-byte super-blocks): weights + 4 in 0..7 (low 2 bits of qs, third bit of hmask), a = d (scale - 32), offset 4a
+VNNI float dot1_q3k(const uint8_t *row, const int8_t *xq, const float *s16, const float *f16) {
+    const __m512i m3 = _mm512_set1_epi8(3), one = _mm512_set1_epi8(1);
+    const __m512i cq[2] = {two16(0, 2), two16(4, 6)}, ch[4] = {two16(0, 1), two16(2, 3), two16(4, 5), two16(6, 7)};
+    const __m512i gi[4] = {lane_groups(0), lane_groups(1), lane_groups(2), lane_groups(3)};
+    __m512 acc = _mm512_setzero_ps(), cor = _mm512_setzero_ps();
+    for (int sb = 0; sb < D_ / 256; sb++) {
+        const uint8_t *blk = row + sb * 110;
+        uint32_t a[3];
+        memcpy(a, blk + 96, 12);
+        const uint32_t s0 = (a[0] & 0x0f0f0f0f) | ((a[2] & 0x03030303) << 4), s1 = (a[1] & 0x0f0f0f0f) | (((a[2] >> 2) & 0x03030303) << 4);
+        const uint32_t s2 = ((a[0] >> 4) & 0x0f0f0f0f) | (((a[2] >> 4) & 0x03030303) << 4), s3 = ((a[1] >> 4) & 0x0f0f0f0f) | (((a[2] >> 6) & 0x03030303) << 4);
+        const __m512 av = _mm512_mul_ps(_mm512_set1_ps(_cvtsh_ss(*(const uint16_t *)(blk + 108))),
+            _mm512_cvtepi32_ps(_mm512_sub_epi32(_mm512_cvtepu8_epi32(_mm_set_epi32((int)s3, (int)s2, (int)s1, (int)s0)), _mm512_set1_epi32(32))));
+        const __m512 cs = _mm512_mul_ps(av, _mm512_loadu_ps(s16 + sb * 16));
+        cor = _mm512_fmadd_ps(av, _mm512_loadu_ps(f16 + sb * 16), cor);
+        const __m512i hm = _mm512_broadcast_i64x4(_mm256_loadu_si256((const __m256i *)blk));
+#pragma unroll
+        for (int n = 0; n < 2; n++) {
+            const __m512i q = _mm512_broadcast_i64x4(_mm256_loadu_si256((const __m256i *)(blk + 32 + 32 * n)));
+#pragma unroll
+            for (int kk = 0; kk < 2; kk++) {               // register k = 2n + kk: weights 64k .. 64k + 63
+                const int k = 2 * n + kk;
+                const __m512i lo = _mm512_and_si512(_mm512_srlv_epi16(q, cq[kk]), m3);
+                const __m512i hb = _mm512_and_si512(_mm512_srlv_epi16(hm, ch[k]), one);
+                const __m512i w = _mm512_or_si512(lo, _mm512_slli_epi16(hb, 2));
+                const __m512i sdot = _mm512_dpbusd_epi32(_mm512_setzero_si512(), w, _mm512_loadu_si512(xq + sb * 256 + 64 * k));
+                acc = _mm512_fmadd_ps(_mm512_cvtepi32_ps(sdot), _mm512_permutexvar_ps(gi[k], cs), acc);
+            }
+        }
+    }
+    return _mm512_reduce_add_ps(acc) - 4.0f * _mm512_reduce_add_ps(cor);
+}
+
+// Q2_K (84-byte super-blocks): weights 0..3, a = d * (scale & 15), offset dmin * (scale >> 4)
+VNNI float dot1_q2k(const uint8_t *row, const int8_t *xq, const float *s16, const float *f16) {
+    const __m512i m3 = _mm512_set1_epi8(3);
+    const __m512i cq[2] = {two16(0, 2), two16(4, 6)};
+    const __m512i gi[4] = {lane_groups(0), lane_groups(1), lane_groups(2), lane_groups(3)};
+    __m512 acc = _mm512_setzero_ps(), cor = _mm512_setzero_ps();
+    for (int sb = 0; sb < D_ / 256; sb++) {
+        const uint8_t *blk = row + sb * 84;
+        const __m512i sv = _mm512_cvtepu8_epi32(_mm_loadu_si128((const __m128i *)blk));
+        const __m512 av = _mm512_mul_ps(_mm512_set1_ps(_cvtsh_ss(*(const uint16_t *)(blk + 80))),
+                                        _mm512_cvtepi32_ps(_mm512_and_si512(sv, _mm512_set1_epi32(15))));
+        const __m512 bv = _mm512_mul_ps(_mm512_set1_ps(_cvtsh_ss(*(const uint16_t *)(blk + 82))), _mm512_cvtepi32_ps(_mm512_srli_epi32(sv, 4)));
+        const __m512 cs = _mm512_mul_ps(av, _mm512_loadu_ps(s16 + sb * 16));
+        cor = _mm512_fmadd_ps(bv, _mm512_loadu_ps(f16 + sb * 16), cor);
+#pragma unroll
+        for (int n = 0; n < 2; n++) {
+            const __m512i q = _mm512_broadcast_i64x4(_mm256_loadu_si256((const __m256i *)(blk + 16 + 32 * n)));
+#pragma unroll
+            for (int kk = 0; kk < 2; kk++) {
+                const int k = 2 * n + kk;
+                const __m512i w = _mm512_and_si512(_mm512_srlv_epi16(q, cq[kk]), m3);
+                const __m512i sdot = _mm512_dpbusd_epi32(_mm512_setzero_si512(), w, _mm512_loadu_si512(xq + sb * 256 + 64 * k));
+                acc = _mm512_fmadd_ps(_mm512_cvtepi32_ps(sdot), _mm512_permutexvar_ps(gi[k], cs), acc);
+            }
+        }
+    }
+    return _mm512_reduce_add_ps(acc) - _mm512_reduce_add_ps(cor);
+}
+
+// IQ4_XS (136-byte super-blocks), through the prefill decoder: bytes = codebook + 128, per-32 scales
+VNNI float dot1_iq4xs(const uint8_t *row, const int8_t *xq, const float *xs, const int32_t *xsum, VnniScratch &S) {
+    decode_iq4xs(row, D_, S.w, S.ws);
+    __m512 acc = _mm512_setzero_ps();
+    float cor = 0;
+    for (int b = 0; b < NB_GU; b += 2) {
+        const __m512i sdot = _mm512_dpbusd_epi32(_mm512_setzero_si512(), _mm512_loadu_si512(S.w + 32 * b), _mm512_loadu_si512(xq + 32 * b));
+        const float c0 = S.ws[b] * xs[b], c1 = S.ws[b + 1] * xs[b + 1];
+        acc = _mm512_fmadd_ps(_mm512_cvtepi32_ps(sdot), _mm512_mask_blend_ps(0xff00, _mm512_set1_ps(c0), _mm512_set1_ps(c1)), acc);
+        cor += 128.0f * (c0 * (float)(xsum[2 * b] + xsum[2 * b + 1]) + c1 * (float)(xsum[2 * b + 2] + xsum[2 * b + 3]));
+    }
+    return _mm512_reduce_add_ps(acc) - cor;
+}
+}  // namespace
+
+void vnni_act1(const float *xs, const int32_t *xsum, float *s16, float *f16) {
+    for (int g = 0; g < D_ / 16; g++) { s16[g] = xs[g / 2]; f16[g] = xs[g / 2] * (float)xsum[g]; }
+}
+float vnni_dot_gu1(const uint8_t *row, int type, const int8_t *xq, const float *xs, const int32_t *xsum, const float *s16,
+                   const float *f16, VnniScratch &S) {
+    if (type == 11) return dot1_q3k(row, xq, s16, f16);
+    if (type == 10) return dot1_q2k(row, xq, s16, f16);
+    S.reserve();
+    return dot1_iq4xs(row, xq, xs, xsum, S);
+}
+// h (640 floats, one pick) -> int8 per 32, scales, and the corrections 128 * sum * scale
+VNNI void vnni_quant_h(const float *h, int8_t *q, float *s, float *c) {
+    for (int b = 0; b < NB_DN; b++) {
+        const __m512 v0 = _mm512_loadu_ps(h + b * 32), v1 = _mm512_loadu_ps(h + b * 32 + 16);
+        const float m = std::max(_mm512_reduce_max_ps(_mm512_abs_ps(v0)), _mm512_reduce_max_ps(_mm512_abs_ps(v1)));
+        const float d = m / 127.0f, id = d > 0 ? 1.0f / d : 0.0f;
+        const __m512i q0 = _mm512_cvtps_epi32(_mm512_mul_ps(v0, _mm512_set1_ps(id)));
+        const __m512i q1 = _mm512_cvtps_epi32(_mm512_mul_ps(v1, _mm512_set1_ps(id)));
+        _mm_storeu_si128((__m128i *)(q + b * 32), _mm512_cvtsepi32_epi8(q0));
+        _mm_storeu_si128((__m128i *)(q + b * 32 + 16), _mm512_cvtsepi32_epi8(q1));
+        s[b] = d;
+        c[b] = 128.0f * d * (float)(_mm512_reduce_add_epi32(q0) + _mm512_reduce_add_epi32(q1));
+    }
+}
+// one IQ4_NL down row (640 weights, 18-byte blocks) with a pick's quantized h
+VNNI float vnni_dot_dn1(const uint8_t *row, const int8_t *hq, const float *hs, const float *hc) {
+    const __m256i tbl = _mm256_broadcastsi128_si256(_mm_load_si128((const __m128i *)KV128)), m4 = _mm256_set1_epi8(0x0f);
+    __m512 acc = _mm512_setzero_ps();
+    float cor = 0;
+#pragma unroll 2
+    for (int b = 0; b < NB_DN; b += 2) {
+        const uint8_t *b0 = row + 18 * b, *b1 = b0 + 18;
+        const __m256i q = _mm256_inserti128_si256(_mm256_castsi128_si256(_mm_loadu_si128((const __m128i *)(b0 + 2))),
+                                                  _mm_loadu_si128((const __m128i *)(b1 + 2)), 1);
+        const __m256i lo = _mm256_shuffle_epi8(tbl, _mm256_and_si256(q, m4));
+        const __m256i hi = _mm256_shuffle_epi8(tbl, _mm256_and_si256(_mm256_srli_epi16(q, 4), m4));
+        const __m512i w = _mm512_inserti64x4(_mm512_castsi256_si512(_mm256_permute2x128_si256(lo, hi, 0x20)),
+                                             _mm256_permute2x128_si256(lo, hi, 0x31), 1);
+        const __m512i sdot = _mm512_dpbusd_epi32(_mm512_setzero_si512(), w, _mm512_loadu_si512(hq + 32 * b));
+        const float w0 = _cvtsh_ss(*(const uint16_t *)b0), w1 = _cvtsh_ss(*(const uint16_t *)b1);
+        acc = _mm512_fmadd_ps(_mm512_cvtepi32_ps(sdot),
+                              _mm512_mask_blend_ps(0xff00, _mm512_set1_ps(w0 * hs[b]), _mm512_set1_ps(w1 * hs[b + 1])), acc);
+        cor += w0 * hc[b] + w1 * hc[b + 1];
+    }
+    return _mm512_reduce_add_ps(acc) - cor;
+}
+
 // The expert at cold slot `slot` for n tokens (xq / xs / xsum: their gate/up activations from vnni_quant_x), weights
 // w[i]: out[i][0..2560) = fp16(w[i] * down(silu(gate x_i) * up x_i)). Groups of 16 tokens, the last one 8 lanes wide
 // when it has 8 or fewer.
