@@ -24,7 +24,7 @@
         <header class="topbar">
           <button id="menu" class="act" type="button" aria-label="Conversations"></button>
           <h1 id="title">New chat</h1>
-          <button id="settings-btn" class="ghost-btn" type="button">Settings</button>
+          <button id="settings-btn" class="top-btn" type="button" aria-controls="settings" aria-expanded="false" title="Settings (Ctrl+,)"></button>
         </header>
         <div id="scroller"><div id="thread" class="thread"></div></div>
         <form id="composer">
@@ -35,38 +35,49 @@
                 <div id="effort" class="segmented" role="radiogroup" aria-label="Thinking"></div>
               </div>
               <span id="meter" class="meter"></span>
+              <button id="draft" class="draft" type="button" hidden></button>
               <button id="send" class="send" type="submit" aria-label="Send"></button>
             </div>
           </div>
           <p class="hint">Enter to send · Shift+Enter for a new line · Esc stops the reply</p>
         </form>
+        <div id="toast" class="toast" role="status" aria-live="polite" hidden></div>
       </main>
+      <!-- Settings: a panel beside the chat, not a dialog over it, so a change can be tried at once (Regenerate) and
+           compared; every change applies as it is made, and what it shows is exactly what kiln is sent -->
+      <aside id="settings" class="settings" aria-label="Settings" tabindex="-1" inert>
+        <div class="settings-inner">
+          <header class="set-head">
+            <h2>Settings</h2>
+            <span>every chat in this tab</span>
+            <button id="settings-close" class="act" type="button" aria-label="Close settings" title="Close (Esc)"></button>
+          </header>
+          <div class="set-body">
+            <section class="set-sec">
+              <div class="set-sec-head"><label class="set-title" for="system-input">System prompt</label><button id="system-reset" class="set-link" type="button" hidden>Restore default</button></div>
+              <textarea id="system-input" rows="2" placeholder="No system prompt" title="Sent as written; empty sends none. The default keeps the model from acting as a coding agent when it doesn't think. A change makes each chat read its history again once."></textarea>
+            </section>
+            <section class="set-sec">
+              <div class="set-sec-head"><span class="set-title">Sampling</span><span class="set-aside"><button id="order-reset" class="set-link" type="button" hidden>Default order</button><span id="mode-note" title="Set by Think in the message box"></span></span></div>
+              <figure id="odds-first" class="odds" title="Qwen3.8-Flash-Next naming a cat (thinking off): 2,000 real draws of the first word"><div class="odd-head">Qwen names a cat</div></figure>
+              <div id="samplers" class="knobs"></div>
+            </section>
+            <section class="set-sec">
+              <div class="set-sec-head"><span class="set-title">Repetition</span></div>
+              <figure id="odds-next" class="odds" title="Qwen3.8-Flash-Next listing cat names (thinking off): the next token's real odds"><div id="odds-line" class="odd-head odd-line"></div></figure>
+              <div id="repetition" class="knobs"></div>
+            </section>
+            <section class="set-sec">
+              <div class="set-sec-head"><span class="set-title">Reply</span></div>
+              <div id="reply-knobs" class="knobs"></div>
+            </section>
+          </div>
+          <footer class="set-foot"><button id="settings-reset" class="ghost-btn reset-all" type="button"
+            title="The default system prompt and Qwen's recommended values, with thinking and without (Undo brings yours back)">Reset all settings</button></footer>
+        </div>
+      </aside>
     </div>
-    <dialog id="settings-dialog">
-      <form method="dialog">
-        <h2>Settings</h2>
-        <p>For every conversation in this tab, until it is closed.</p>
-        <h3><label for="system-input">System prompt</label></h3>
-        <p>Every chat begins with “There are no tools or files in this chat. Answer directly.” (without it the model takes some asks for a coding-agent task); yours follows it. Changing it makes kiln re-read each conversation once, the next time it answers there.</p>
-        <textarea id="system-input" rows="6" placeholder="You are a concise senior engineer…"></textarea>
-        <h3>Sampling</h3>
-        <p>Blank fields use Qwen's recommended values, shown for this chat's thinking setting. The same seed, prompt and settings give the same reply.</p>
-        <div id="sampling" class="fields">
-          <label>Temperature<input name="temperature" type="number" min="0" max="2" step="0.01" /></label>
-          <label>Top P<input name="top_p" type="number" min="0" max="1" step="0.01" /></label>
-          <label title="kiln samples from at most the 64 likeliest tokens">Top K<input name="top_k" type="number" min="1" max="64" step="1" /></label>
-          <label>Min P<input name="min_p" type="number" min="0" max="1" step="0.01" /></label>
-          <label>Presence penalty<input name="presence_penalty" type="number" min="-2" max="2" step="0.01" /></label>
-          <label title="Thinking counts toward it">Max reply tokens<input name="max_tokens" type="number" min="1" max="262144" step="1" /></label>
-          <label title="Blank draws a new seed for every reply. Each reply shows its seed: set it here to draw that reply again.">Seed<input name="seed" type="number" min="0" max="4294967295" step="1" /></label>
-        </div>
-        <div class="dialog-actions">
-          <button id="settings-reset" type="button" class="ghost-btn reset">Reset to defaults</button>
-          <button value="cancel" class="ghost-btn" formnovalidate>Cancel</button>
-          <button value="save" class="primary-btn">Save</button>
-        </div>
-      </form>
-    </dialog>
+    <div id="tokpop" class="tokpop" role="dialog" aria-label="Alternatives" hidden></div>
     <dialog id="svg-zoom" class="svg-zoom" aria-label="SVG, full size"><div class="svg-zoom-paper"></div></dialog>
     <script type="module" src="./app.ts"></script>
   </body>

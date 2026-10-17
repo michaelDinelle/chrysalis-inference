@@ -39,17 +39,38 @@ plain TypeScript (marked, highlight.js, DOMPurify). Conversations live in the ta
 keeps them, closing the tab ends them, and nothing is stored on the server's disk. A reply belongs to the web server
 while it is written (in RAM, until 15 minutes after it ends): opening another chat, reloading, closing the tab, a
 laptop asleep or a dropped connection leave it running, and the page follows it again from the last event it saw;
-only Stop (the button, or Esc when no dialog is open) or deleting the chat ends it early.
-Every chat's system prompt starts with "There are no tools or files in this chat. Answer directly." (Settings shows it;
-yours follows): without it, Flash-Next with thinking off takes asks like "design a cute SVG" for a coding-agent task
-("let me first explore the project structure", then calls to tools that do not exist), as the Q8_0 original does too.
+only Stop (the button, or Esc when nothing else is open) or deleting the chat ends it early.
 Replies stream with their reasoning (collapsible), each one shows time to first token, tok/s, how much of the
-prompt came from cache and its seed. The Think switch picks the reasoning effort (Max, Medium, Low) or the
-no-thinking model (Off). Settings holds the system prompt, the sampling values (temperature, top-p, top-k,
-min-p, presence penalty, max reply tokens) and the seed; they apply to every conversation in the tab and are
-kept with them. A blank field uses Qwen's recommended value for the thinking mode, a blank seed a new one for
-every reply: set a reply's seed to draw it again. The last turn can be regenerated or
-edited, and the sidebar starts or unloads the model (sending a message starts it too). Assistant turns go back
+prompt came from cache, the sampling values that differed from the recommended ones and its seed. The Think switch
+picks the reasoning effort (Max, Medium, Low) or the no-thinking model (Off).
+Message actions keep fixed places (from the right: delete, edit, copy on every message, then a reply's token odds,
+regenerate and continue), so none moves between messages. Every message can be edited in place (a reply's thinking too; on the last question, Save & regenerate draws a new
+reply) or deleted (with Undo). The last reply can be regenerated or continued (Continue is spelled out when the
+reply was cut short). Token odds shows a reply as its tokens, tinted by how unsure the model was of each; a click
+on one lists what else it could have written there, and picking one rewrites the reply from that token on. The
+wand in the message box drafts the user's next message (or finishes the one being typed) to edit and send: kiln is
+asked, as the assistant and without thinking, to write it (Qwen will not write a user turn: at one it ends it).
+Settings (Ctrl+,) sits beside the chat: with room it opens without moving the conversation, otherwise it slides the
+column over (never re-wrapping it) or, in narrow windows, slides over it. Every change applies from the next reply
+and can be undone, for every conversation in the tab (kept with them). It shows exactly what kiln is sent:
+- The system prompt, by default "There are no tools or files in this chat. Answer directly." It is an ordinary
+  prompt: edit or delete it. Without it, Flash-Next with thinking off takes asks like "design a cute SVG" for a
+  coding-agent task ("let me first explore the project structure", then calls to tools that do not exist), as the
+  Q8_0 original does too.
+- Sampling: top-k, temperature, top-p and min-p, one row each in the order the sampler applies them (drag a row by
+  its grip to reorder), one set with thinking and one without, starting from Qwen's recommended values. Think in the
+  message box is the one switch: the panel shows (and edits) the set it selects.
+- Repetition: presence penalty and DRY (with its allowed run and growth).
+Each group sits under a chart of real odds run through kiln's whole sampler with the settings as they stand. Sampling:
+Qwen naming a cat (the first word, 2,000 draws), a row per name with a bar for its odds now and a tick where the model
+had them; min-p is a line across the bars, and a cut name is struck through with the stage that cut it. Repetition:
+Qwen listing cat names after it started repeating itself ("…Luna, Milo, Shadow, Luna, Milo,", its next token's 64
+candidates): the reply line marks the names presence counts as used and the run DRY sees, and the rows show "Shadow"
+(91% from the model) pushed down, tagged used and repeats. Pointing at a row explains it in the line under the chart;
+explanations elsewhere are tooltips, so nothing in the panel changes size while it is used.
+- The reply's max length and the seed: random for every reply, or fixed. Clicking a reply's seed fixes it.
+A value that differs from the recommended one is marked; ↺ or a double click on its slider brings it back. The
+sidebar starts or unloads the model (sending a message starts it too). Assistant turns go back
 to kiln exactly as received, so every turn of a conversation is a cache hit.
 Replies render block by block: while one streams, finished paragraphs, code blocks and tables keep their nodes
 and only the growing tail is rebuilt (on the next frame), and the tail shows settled text only: whole words, whole
@@ -128,6 +149,7 @@ prompt from its cache. With `kiln_original` (the reply as generated) the final m
 `kiln_append_token` adds a token after the cut: that rewrites a reply from a token's alternative. `kiln_aside`
 answers without thinking while rendering the conversation as it is cached, and keeps that cache as it was (the web
 UI's drafts).
+
 **Attention** — paged KV cache (64-token pages), K int8, V 5-bit Hadamard-rotated (as accurate as int8
 here, 18% smaller: what makes 262K fit). Decode and verify attention: a workgroup of 8 waves per key split
 and KV head walks 128-key stages; each wave scores 16 of the keys for all query rows (K rows straight from

@@ -1,19 +1,34 @@
 // kiln web UI: chat with kiln's local models (Qwen3.8-27B, Qwen3.8-Flash-Next). Replies stream in with their reasoning and are rendered
 // as markdown with highlighted code; conversations live in this tab's sessionStorage (a reload keeps them,
-// closing the tab ends them). The settings (system prompt, sampling), kept the same way, apply to every conversation.
+// closing the tab ends them). The settings (system prompt, sampling, reply length, seed), kept the same way, apply to
+// every conversation.
 import DOMPurify from "dompurify";
 import hljs from "highlight.js/lib/common";
 import { marked, type Links, type Token } from "marked";
 
 type Effort = "xhigh" | "medium" | "low" | "off";
 interface Stats { ttft: number; tps: number; tokens: number; prompt: number; cached: number; thought?: number; seed?: number; model?: string }
-interface Message { role: "user" | "assistant"; content: string; reasoning?: string; stats?: Stats; error?: string; stopped?: boolean; job?: string }
+interface Message {
+  id?: string; role: "user" | "assistant"; content: string; reasoning?: string; stats?: Stats; error?: string; stopped?: boolean; job?: string;
+  params?: string;                                  // the sampling values that differed from the recommended ones
+  effort?: Effort;                                  // the thinking setting it was written with (Continue keeps it)
+  finish?: string; edited?: boolean;
+}
 interface Conversation { id: string; title: string; named?: boolean; updated: number; effort: Effort; messages: Message[] }
-type SamplingKey = "temperature" | "top_p" | "top_k" | "min_p" | "presence_penalty" | "max_tokens" | "seed";
-type Sampling = Partial<Record<SamplingKey, number>>;
-interface Settings { system: string; sampling: Sampling }
+type Stage = "top_k" | "temperature" | "top_p" | "min_p";
+type SamplerKey = Stage | "presence_penalty" | "dry_multiplier" | "dry_allowed_length" | "dry_base";
+type Sampler = Partial<Record<SamplerKey, number>> & { order?: Stage[] };
+type Mode = "think" | "fast";                       // thinking on (Max, Medium, Low) or off: Qwen recommends other values
+// Only what differs from the recommended values is kept, so whatever is left alone follows them.
+interface Settings { system: string; think: Sampler; fast: Sampler; max_tokens?: number; seed?: number }
 interface Status { state: "online" | "loading" | "offline"; build?: string; model?: string; loading?: string; progress?: number; context?: number; kv_tokens?: number; cache?: { free_kv_tokens: number } }
-interface View { el: HTMLElement; think: HTMLDetailsElement; summary: HTMLElement; thought: HTMLElement; body: HTMLElement; foot: HTMLElement; shown?: string; blocks?: Blocks }
+interface View {
+  el: HTMLElement; think: HTMLDetailsElement; summary: HTMLElement; thought: HTMLElement; body: HTMLElement; foot: HTMLElement; shown?: string; blocks?: Blocks;
+  tok?: { reasoning: number; content: number };     // tokens drawn so far, shown as tokens
+}
+// A token of a reply, with the model's probability for it and its likeliest alternatives (log probs from kiln).
+interface Alt { t: string; p: number; id: number }
+interface Tok { t: string; p: number; alts: Alt[] }
 interface Live { phase: "waiting" | "thinking" | "writing"; since: number; note: string; loading?: boolean }
 // A reply being written. The web server owns it (a job, m.job its id): the page only follows it, so opening another
 // chat, reloading, sleeping or a dropped connection leaves it running, and the page picks it up again from the last
@@ -24,6 +39,7 @@ interface Run {
   stopping: boolean; gone?: boolean;                // Stop pressed; the chat was deleted
   usage?: any; seed?: number; timing?: { start: number; first?: number; answer?: number; last?: number };
   calls: string[];                                  // tools the model asked for (this chat offers none)
+  pick?: Tok;                                       // the alternative a rewrite starts from
   frame: number; saved: number;
 }
 
@@ -34,19 +50,43 @@ const MODELS: [string, string, string][] = [
   ["qwen3.8-flash-next", "Qwen3.8-Flash-Next", "Fast at any length · 20 s to load"],
 ];
 const modelName = (id?: string) => MODELS.find(([m]) => m === id)?.[1] ?? id ?? "";
-// What kiln uses for a field left blank, with thinking on and off (DEFAULTS in kiln/server.py: Qwen's recommended
-// values). Without a seed kiln draws a random one and reports it with the reply.
-const SAMPLING_DEFAULTS: Record<"think" | "fast", Sampling> = {
-  think: { temperature: 1, top_p: 0.95, top_k: 20, min_p: 0, presence_penalty: 0, max_tokens: 131072 },
-  fast: { temperature: 0.7, top_p: 0.8, top_k: 20, min_p: 0, presence_penalty: 1.5, max_tokens: 131072 },
+// What kiln uses for a value it is not sent, with thinking on and off (DEFAULTS and MAX_OUTPUT in kiln/server.py:
+// Qwen's recommended values). Without a seed kiln draws a random one and reports it with the reply.
+const RECOMMENDED: Record<Mode, Record<SamplerKey, number>> = {
+  think: { temperature: 1, top_p: 0.95, top_k: 20, min_p: 0, presence_penalty: 0, dry_multiplier: 0, dry_allowed_length: 2, dry_base: 1.75 },
+  fast: { temperature: 0.7, top_p: 0.8, top_k: 20, min_p: 0, presence_penalty: 1.5, dry_multiplier: 0, dry_allowed_length: 2, dry_base: 1.75 },
 };
+const MAX_REPLY = 131072;
+const STAGES: Stage[] = ["top_k", "temperature", "top_p", "min_p"];   // kiln's default order (engine/sampler.h)
+// `slider` narrows the slider to the useful part of the range; typing still reaches all of it.
+const SAMPLERS: Record<SamplerKey, { label: string; short: string; min: number; max: number; step: number; slider?: [number, number]; help: string }> = {
+  temperature: { label: "Temperature", short: "temp", min: 0, max: 2, step: 0.01, help: "Temperature: under 1 sharpens the odds, over 1 flattens them; 0 always takes the likeliest." },
+  top_p: { label: "Top P", short: "top-p", min: 0, max: 1, step: 0.01, help: "Top P: keeps the likeliest tokens until together they reach this share." },
+  top_k: { label: "Top K", short: "top-k", min: 1, max: 64, step: 1, help: "Top K: keeps at most this many tokens (kiln looks at the 64 likeliest)." },
+  min_p: { label: "Min P", short: "min-p", min: 0, max: 1, step: 0.01, slider: [0, 0.5], help: "Min P: drops tokens less likely than this share of the likeliest." },
+  presence_penalty: { label: "Presence", short: "presence", min: -2, max: 2, step: 0.05, slider: [0, 2], help: "Presence penalty: lowers every token the reply has already used." },
+  dry_multiplier: { label: "DRY", short: "dry", min: 0, max: 5, step: 0.05, slider: [0, 2], help: "DRY: lowers a token that would repeat a run of text already in the chat. Off at 0." },
+  dry_allowed_length: { label: "Allowed run", short: "dry-run", min: 1, max: 20, step: 1, slider: [1, 8], help: "DRY's allowed run: repeats up to this many tokens long go unpenalized." },
+  dry_base: { label: "Growth", short: "dry-base", min: 1, max: 4, step: 0.05, slider: [1, 3], help: "DRY's growth: how fast the penalty rises with each token a repeat goes on." },
+};
+// Real odds for the settings to act on: the first word of Qwen3.8-Flash-Next's answer to "Suggest a name for a cat.
+// One word." with thinking off, drawn 2,000 times with the sampler wide open (names drawn twice or more).
+const ODDS: [string, number][] = [["Luna", 703], ["Mochi", 470], ["Whiskers", 312], ["Milo", 182], ["Mittens", 78], ["Shadow", 39],
+  ["Miso", 31], ["Whisper", 29], ["Moon", 14], ["Pumpkin", 14], ["Pixel", 13], ["Whisker", 11], ["Willow", 9], ["Muffin", 8], ["Echo", 7],
+  ["Momo", 6], ["Jasper", 5], ["Nimbus", 5], ["Nebula", 4], ["Simba", 4], ["Noodle", 3], ["Misty", 3], ["Mocha", 3], ["Mimi", 2],
+  ["Munchkin", 2], ["Zephyr", 2], ["Moss", 2]];
+// A list that has started to repeat itself: the reply so far (token, id) and the next token's 64 candidates (token, log
+// prob, id), as Qwen3.8-Flash-Next (thinking off) gave them for "List cat names, separated by commas."
+const LOOP: { reply: [string, number][]; cands: [string, number, number][] } = {
+  reply: [["Here",8160],[" are",513],[" some",1010],[" cat",7993],[" names",4874],[":",25],[" Luna",48130],[",",11],[" Milo",81533],[",",11],[" Shadow",23536],[",",11],[" Luna",48130],[",",11],[" Milo",81533],[",",11]],
+  cands: [[" Shadow",-0.0896,23536],[" Bella",-3.5744,52670],[" Sim",-4.8584,4319],[" Wh",-4.8871,1190],[" Oliver",-5.0203,29260],[" Luna",-5.2131,48130],[" Cle",-5.7006,34809],[" Felix",-6.2065,54048],[" Charlie",-6.3093,24137],[" Max",-6.3492,7252],[" Leo",-6.3968,35530],[" N",-6.4557,443],[" Chloe",-6.4601,57365],[" Sm",-6.6385,4245],[" and",-6.8932,321],[" Snow",-7.1383,18331],[" Tiger",-7.1712,34560],[" shadow",-7.2331,12098],[" Willow",-7.2804,62177],[" Midnight",-7.311,61432],[" Ginger",-7.3367,65023],[" Bailey",-7.3892,40814],[" T",-7.5099,345],[" C",-7.6189,351],[" Fl",-7.664,2893],[" Belle",-7.6838,48808],[" Daisy",-7.8786,67789],[" Kitty",-7.9955,63947],[" Cookie",-8.0238,23588],[" Pepper",-8.026,50038],[" Jasper",-8.0536,68103],[" B",-8.1631,417],["Shadow",-8.196,22926],[" Stella",-8.2029,72059],[" Oscar",-8.2098,29695],[" Lily",-8.4152,45714],[" O",-8.4355,496],[" Simon",-8.4382,20660],[" Ch",-8.4431,882],[" S",-8.4961,326],[" Shadows",-8.5475,64206],[" Bear",-8.576,23237],[" M",-8.5788,380],[" Whisper",-8.5826,93630],[" Mitt",-8.6306,31539],[" Bell",-8.7311,17349],[" Mist",-8.7477,32969],[" Milo",-8.7748,81533],[" Barn",-8.7777,21722],[" Pumpkin",-8.7798,72693],[" Coco",-8.7924,80506],[" Princess",-8.8369,28330],[" Gus",-8.8442,78575],[" Lucy",-8.8952,42610],[" Olivia",-8.932,57283],[" Sophie",-8.9338,57306],[" Pop",-8.9441,9948],[" Jasmine",-8.9874,78548],[" Buddy",-9.0182,57515],[" Gar",-9.0378,11845],[" J",-9.0965,604],[" K",-9.1184,710],[" Cloud",-9.1404,14388],[" Call",-9.1473,6920]],
+};
+// The default system prompt, an ordinary one: shown in Settings, edited or deleted there. Without it Flash-Next takes
+// some asks for a coding-agent task when it does not think ("design a cute SVG ..." -> "let me first explore the
+// project structure" and calls to list_files / read_file: 16 replies out of 16, and the Q8_0 original as well); with
+// it, 16 of 16 draw.
+const DEFAULT_SYSTEM = "There are no tools or files in this chat. Answer directly.";
 const EFFORTS: [Effort, string][] = [["xhigh", "Max"], ["medium", "Medium"], ["low", "Low"], ["off", "Off"]];
-const SUGGESTIONS: [string, string][] = [
-  ["Rate limiter", "Write a token-bucket rate limiter in Python that works with asyncio, with pytest tests."],
-  ["SQLite schema", 'Design a SQLite schema for a todo app with projects, tags and due dates, and the query for a "due today" view.'],
-  ["Borrow checker", "Why doesn't this compile, and what is the idiomatic fix?\n\nfn longest(a: &str, b: &str) -> &str {\n    if a.len() > b.len() { a } else { b }\n}"],
-  ["Backup script", "Write a bash script that backs up ~/projects to a dated tarball and keeps only the 7 newest."],
-];
 const ICONS = {
   flame: '<path fill="currentColor" stroke="none" d="M12 1.5c.9 3.6-.9 5.9-2.6 7.9C7.8 11.2 6 13.1 6 15.9 6 19.3 8.7 22 12 22s6-2.6 6-6.2c0-2.7-1.4-4.7-2.6-6.1-.3 1.6-1.2 2.7-2.4 3.2 1-3.9-.2-8.1-1-11.4z"/>',
   plus: '<path d="M12 5v14M5 12h14"/>',
@@ -58,14 +98,21 @@ const ICONS = {
   edit: '<path d="M12 20h9"/><path d="M16.5 3.5a2.1 2.1 0 0 1 3 3L7 19l-4 1 1-4Z"/>',
   check: '<path d="M5 12.5l4.5 4.5L19 7.5"/>',
   chevron: '<path d="M7 10l5 5 5-5"/>',
+  sliders: '<path d="M4 7h9M17 7h3M4 17h3M11 17h9"/><circle cx="15" cy="7" r="2"/><circle cx="9" cy="17" r="2"/>',
+  close: '<path d="M6 6l12 12M18 6 6 18"/>',
+  trash: '<path d="M4 7h16M10 11v6M14 11v6M6 7l1 12a2 2 0 0 0 2 2h6a2 2 0 0 0 2-2l1-12M9 7V4h6v3"/>',
+  cont: '<path d="M5 6l6 6-6 6M13 6l6 6-6 6"/>',
+  tokens: '<path d="M4 19V11M9 19V5M14 19v-6M19 19V9"/>',
+  wand: '<path d="M12 3l1.6 4.4L18 9l-4.4 1.6L12 15l-1.6-4.4L6 9l4.4-1.6z"/><path d="M18.5 14.5l.7 1.8 1.8.7-1.8.7-.7 1.8-.7-1.8-1.8-.7 1.8-.7z"/>',
+  grip: '<circle cx="9" cy="6" r="1.3" fill="currentColor" stroke="none"/><circle cx="15" cy="6" r="1.3" fill="currentColor" stroke="none"/><circle cx="9" cy="12" r="1.3" fill="currentColor" stroke="none"/><circle cx="15" cy="12" r="1.3" fill="currentColor" stroke="none"/><circle cx="9" cy="18" r="1.3" fill="currentColor" stroke="none"/><circle cx="15" cy="18" r="1.3" fill="currentColor" stroke="none"/>',
+  dice: '<rect x="4" y="4" width="16" height="16" rx="3.5"/><circle cx="9" cy="9" r="1.1" fill="currentColor"/><circle cx="15" cy="15" r="1.1" fill="currentColor"/><circle cx="15" cy="9" r="1.1" fill="currentColor"/><circle cx="9" cy="15" r="1.1" fill="currentColor"/>',
 };
-const TITLES = { copy: "Copy", retry: "Regenerate", edit: "Edit and resend" };
+const TITLES = { copy: "Copy", edit: "Edit", trash: "Delete", tokens: "Token odds", retry: "Regenerate" };
 const icon = (name: keyof typeof ICONS) => `<svg class="i" viewBox="0 0 24 24" aria-hidden="true">${ICONS[name]}</svg>`;
 
 const $ = <T extends HTMLElement = HTMLElement>(id: string) => document.getElementById(id) as T;
 const thread = $("thread"), scroller = $("scroller"), input = $<HTMLTextAreaElement>("input"), sendBtn = $<HTMLButtonElement>("send");
-const settingsDialog = $<HTMLDialogElement>("settings-dialog"), systemInput = $<HTMLTextAreaElement>("system-input");
-const samplingInputs = [...$("sampling").querySelectorAll("input")];
+const panel = $("settings"), systemInput = $<HTMLTextAreaElement>("system-input");
 
 function h<K extends keyof HTMLElementTagNameMap>(tag: K, cls = "", text = ""): HTMLElementTagNameMap[K] {
   const e = document.createElement(tag);
@@ -333,7 +380,7 @@ function store(key: string, value: unknown) {
 // Saved conversations by id, mirrored to sessionStorage. They are copied in and out, so unsaved changes to the
 // open one (turns cut by "edit" and never resent) are not kept.
 const chats: Record<string, Conversation> = load("chats", {});
-let settings: Settings = load("settings", { system: "", sampling: {} });
+let settings = loadSettings();
 let conv = blank();
 const runs = new Map<string, Run>();               // conversation id -> its reply being written
 const running = (c: Conversation = conv) => runs.get(c.id);
@@ -341,6 +388,9 @@ let status: Status = { state: "offline" };
 let build = "";                                     // the server's code version when this page loaded
 let follow = true;                                  // keep the newest text in view unless the user scrolled up
 const views = new Map<Message, View>();
+const tokens = new Map<string, { reasoning: Tok[]; content: Tok[] }>();   // replies' token odds by message id (this page only)
+const tokenView = new Set<string>();                // replies shown as their tokens
+let editing: Message | null = null;                 // the message being edited in place
 
 // Plain-HTTP pages (the web chat on the LAN) get no crypto.randomUUID; getRandomValues works on every page.
 function randomId() {
@@ -364,6 +414,7 @@ function render() {
 }
 
 function messageView(m: Message, i: number): HTMLElement {
+  if (m === editing) return editorView(m, i);
   if (m.role === "assistant") {
     const v = assistantView(i);
     views.set(m, v);
@@ -372,9 +423,76 @@ function messageView(m: Message, i: number): HTMLElement {
   }
   const el = h("article", "msg user"), foot = h("footer", "msg-foot");
   el.dataset.i = String(i);
-  foot.innerHTML = actions(i === conv.messages.findLastIndex((x) => x.role === "user") ? ["copy", "edit"] : ["copy"]);
+  foot.innerHTML = slots([["copy", true], ["edit", !running()], ["trash", !running()]]);
   el.append(h("div", "bubble", m.content), foot);
   return el;
+}
+
+// A message edited in place: its text, and a reply's thinking. Save keeps the rest of the chat; on the last user
+// message, Save & regenerate also draws a new reply. Ctrl+Enter takes the main action, Esc cancels.
+function editorView(m: Message, i: number): HTMLElement {
+  const el = h("article", `msg ${m.role} editing`), box = h("div", "editor"), acts = h("div", "editor-acts");
+  el.dataset.i = String(i);
+  const area = (value: string, label: string) => {
+    const t = h("textarea");
+    t.value = value;
+    t.rows = 1;
+    t.setAttribute("aria-label", label);
+    t.addEventListener("input", () => fit(t));
+    return t;
+  };
+  const think = m.role === "assistant" && m.reasoning ? area(m.reasoning, "Thinking") : null;
+  const text = area(m.content, m.role === "user" ? "Message" : "Reply");
+  if (think) box.append(h("div", "ed-label", "Thinking"), think, h("div", "ed-label", "Reply"));
+  box.append(text, acts);
+  const again = m.role === "user" && i === conv.messages.findLastIndex((x) => x.role === "user");
+  const button = (label: string, cls: string, fn: () => void) => {
+    const b = h("button", cls, label);
+    b.type = "button";
+    b.onclick = fn;
+    acts.append(b);
+  };
+  const done = (keep: boolean, regenerate = false) => {
+    if (keep && (text.value !== m.content || (think && think.value !== m.reasoning))) {
+      m.content = text.value;
+      if (think) m.reasoning = think.value;
+      m.edited = true;
+      if (m.id) { tokens.delete(m.id); tokenView.delete(m.id); }
+    }
+    editing = null;
+    if (regenerate) {
+      conv.messages.splice(i + 1);
+      void generate();
+    } else render();
+    save(conv);
+  };
+  acts.append(h("span", "editor-hint", again ? "Ctrl+Enter regenerates · Esc cancels" : "Ctrl+Enter saves · Esc cancels"));
+  button("Cancel", "ghost-btn", () => done(false));
+  button("Save", again ? "ghost-btn" : "primary-btn", () => done(true));
+  if (again) button("Save & regenerate", "primary-btn", () => done(true, true));
+  el.addEventListener("keydown", (e) => {
+    if (e.key === "Escape") { e.preventDefault(); done(false); }
+    else if (e.key === "Enter" && (e.ctrlKey || e.metaKey)) { e.preventDefault(); done(true, again); }
+  });
+  el.append(box);
+  requestAnimationFrame(() => {
+    for (const t of [think, text]) if (t) fit(t);
+    text.focus();
+    text.setSelectionRange(text.value.length, text.value.length);
+  });
+  return el;
+}
+const fit = (t: HTMLTextAreaElement) => { t.style.height = "auto"; t.style.height = `${Math.min(t.scrollHeight + 2, innerHeight * 0.6)}px`; };
+
+function deleteMessage(i: number) {
+  const c = conv, [m] = c.messages.splice(i, 1);
+  persist(c);
+  render();
+  toast(m.role === "user" ? "Message deleted" : "Reply deleted", () => {
+    c.messages.splice(i, 0, m);
+    persist(c);
+    if (c === conv) render();
+  });
 }
 
 function assistantView(i: number): View {
@@ -386,8 +504,11 @@ function assistantView(i: number): View {
   return { el, think, summary, thought, body, foot };
 }
 
-const actions = (names: (keyof typeof TITLES)[]) =>
-  names.map((a) => `<button type="button" class="act" data-act="${a}" title="${TITLES[a]}">${icon(a)}</button>`).join("");
+// Message actions in fixed places: from the right, delete, edit and copy on every message, then a reply's token odds,
+// regenerate and continue. An action that is not available keeps its place empty, so none ever moves.
+type Act = keyof typeof TITLES | "cont";
+const slots = (list: [Act, boolean, string?][]) => list.map(([a, on, html]) => !on ? `<span class="act ghost" aria-hidden="true"></span>`
+  : html ?? `<button type="button" class="act" data-act="${a}" title="${TITLES[a as keyof typeof TITLES]}">${icon(a)}</button>`).join("");
 
 // Fill an assistant message's view; `live` while it streams (cheap to call repeatedly).
 function paint(v: View, m: Message, live?: Live) {
@@ -397,12 +518,25 @@ function paint(v: View, m: Message, live?: Live) {
   if (m.reasoning) {
     v.summary.textContent = live?.phase === "thinking" ? `Thinking · ${fmtS(elapsed)}`
       : m.stats?.thought ? `Thought for ${fmtS(m.stats.thought)}` : "Thoughts";
-    if (v.thought.textContent !== m.reasoning) {
-      v.thought.textContent = m.reasoning;
-      if (live) v.thought.scrollTop = v.thought.scrollHeight;
-    }
   }
-  if (live?.phase === "waiting") {
+  const asTokens = !!m.id && tokenView.has(m.id) && tokens.has(m.id);
+  v.el.classList.toggle("as-tokens", asTokens);
+  if (asTokens) {
+    if (!live) v.tok = undefined;                  // drawn afresh (and with the error, if any) once it is done
+    paintTokens(v, m);
+    if (live) {
+      if (live.phase === "thinking") v.thought.scrollTop = v.thought.scrollHeight;
+      return;
+    }
+  } else {
+    for (const box of [v.thought, v.body]) if (box.classList.contains("tokens")) { box.classList.remove("tokens"); box.replaceChildren(); }
+    v.tok = undefined;
+  }
+  if (!asTokens && m.reasoning && v.thought.textContent !== m.reasoning) {
+    v.thought.textContent = m.reasoning;
+    if (live) v.thought.scrollTop = v.thought.scrollHeight;
+  }
+  if (asTokens) { /* drawn above */ } else if (live?.phase === "waiting") {
     // while a model loads the sidebar's bar says so; here only the dot
     v.body.innerHTML = `<p class="waiting">${live.loading ? "" : `${live.note} · ${fmtS(elapsed)}`}</p>`;
     v.shown = v.blocks = undefined;
@@ -415,31 +549,112 @@ function paint(v: View, m: Message, live?: Live) {
   const s = m.stats;
   const facts = s ? [...(s.model ? [modelName(s.model)] : []), `${fmtS(s.ttft)} to first token`, `${Math.round(s.tps)} tok/s`, `${fmtK(s.tokens)} tokens`, `prompt ${fmtK(s.cached)}/${fmtK(s.prompt)} cached`]
     : m.stopped ? ["stopped"] : [];
-  if (s?.seed !== undefined) facts.push(`seed ${s.seed}`);
-  const last = conv.messages.at(-1) === m;
-  v.foot.innerHTML = `<span class="stats">${facts.join(" · ")}</span>` + actions(last ? ["copy", "retry"] : ["copy"]);
+  if (m.params) facts.push(m.params);
+  if (m.edited) facts.push("edited");
+  if (s?.seed !== undefined) facts.push(`<button type="button" class="seed" data-act="seed" data-seed="${s.seed}" title="Use this seed for the next replies">seed ${s.seed}</button>`);
+  const last = conv.messages.at(-1) === m, busy = !!running(), cut = m.finish === "length" || m.stopped;
+  // Continue is spelled out when the reply was cut short (its length limit, or Stop)
+  const cont = `<button type="button" class="act${cut ? " wide" : ""}" data-act="cont" title="Continue">${icon("cont")}${cut ? "Continue" : ""}</button>`;
+  v.foot.innerHTML = `<span class="stats">${facts.join(" · ")}</span>` + (last ? slots([["cont", !busy, cont], ["retry", !busy]]) : "")
+    + slots([["tokens", !!m.id && tokens.has(m.id)], ["copy", true], ["edit", !busy], ["trash", !busy]]);
+  v.foot.querySelector("[data-act=tokens]")?.classList.toggle("on", asTokens);
 }
 
+// A new chat: the flame, nothing else.
 function emptyState() {
-  const e = h("div", "empty"), grid = h("div", "suggestions");
-  e.innerHTML = `<svg class="flame" viewBox="0 0 24 24">${ICONS.flame}</svg><h2>What are we building?</h2>` +
-    `<p>${modelName(current())} on your Radeon · 262K context · nothing leaves this machine</p>`;
-  for (const [title, prompt] of SUGGESTIONS) {
-    const b = h("button", "suggestion");
-    b.type = "button";
-    b.append(h("strong", "", title), h("span", "", prompt));
-    b.onclick = () => submit(prompt);
-    grid.append(b);
-  }
-  e.append(grid);
+  const e = h("div", "empty");
+  e.innerHTML = `<svg class="flame" viewBox="0 0 24 24" aria-hidden="true">${ICONS.flame}</svg>`;
   return e;
 }
+
+// A reply as its tokens, tinted by how unsure the model was of each; a click on one shows what else it could have
+// written there. Drawn incrementally while the reply streams.
+function paintTokens(v: View, m: Message) {
+  const td = tokens.get(m.id!)!;
+  for (const [ch, box] of [["reasoning", v.thought], ["content", v.body]] as const) {
+    const list = td[ch];
+    if (!v.tok || v.tok[ch] > list.length || !box.classList.contains("tokens")) {
+      box.replaceChildren();
+      box.classList.add("tokens");
+      v.tok = { reasoning: 0, content: 0, ...(v.tok ?? {}), [ch]: 0 };
+    }
+    const frag = document.createDocumentFragment();
+    for (let i = v.tok[ch]; i < list.length; i++) {
+      const t = h("span", "tok", list[i].t);
+      t.dataset.k = ch === "reasoning" ? "r" : "c";
+      t.dataset.i = String(i);
+      if (list[i].p < 0.97) t.style.setProperty("--u", (1 - list[i].p).toFixed(2));
+      frag.append(t);
+    }
+    box.append(frag);
+    v.tok[ch] = list.length;
+  }
+  v.shown = v.blocks = undefined;                   // markdown is drawn afresh when the view goes back
+}
+
+const SPECIAL: Record<string, string> = { "<|im_end|>": "end of reply", "<|endoftext|>": "end of reply", "</think>": "end of thinking" };
+const showTok = (t: string) => SPECIAL[t] ?? (t.replace(/\n/g, "↵").replace(/^ | $/g, "·") || "∅");
+
+function closeTokPop() {
+  $("tokpop").hidden = true;
+  thread.querySelector(".tok.picked")?.classList.remove("picked");
+}
+// What else the model could have written at a token; picking one rewrites the reply from there.
+function openTokPop(span: HTMLElement) {
+  closeTokPop();
+  const m = conv.messages[Number(span.closest<HTMLElement>("article")?.dataset.i)];
+  const ch = span.dataset.k === "r" ? "reasoning" : "content", i = Number(span.dataset.i), t = m?.id && tokens.get(m.id)?.[ch][i];
+  if (!m || !t) return;
+  const pop = $("tokpop"), busy = !!running();
+  pop.replaceChildren(h("div", "tokpop-head", busy ? "Alternatives (after the reply is done, pick one to rewrite from there)" : "Rewrite from here with"));
+  const alts = t.alts.some((a) => a.t === t.t) ? t.alts : [{ t: t.t, p: t.p, id: -1 }, ...t.alts];
+  for (const a of alts) {
+    const b = h("button", "tokalt"), code = h("code", SPECIAL[a.t] ? "special" : "", showTok(a.t)), bar = h("i");
+    b.type = "button";
+    bar.style.width = `${Math.max(2, a.p * 100)}%`;
+    b.append(code, h("span", "tokalt-bar"), h("span", "tokalt-p", pct(a.p) || "<1%"));
+    b.querySelector(".tokalt-bar")!.append(bar);
+    if (a.t === t.t) { b.classList.add("chosen"); b.title = "What it wrote"; }
+    b.disabled = a.t === t.t || busy;
+    b.onclick = () => { closeTokPop(); pickToken(m, ch, i, a); };
+    pop.append(b);
+  }
+  pop.hidden = false;
+  span.classList.add("picked");
+  const r = span.getBoundingClientRect(), w = pop.offsetWidth, ph = pop.offsetHeight;
+  pop.style.left = `${Math.max(8, Math.min(innerWidth - w - 8, r.left))}px`;
+  pop.style.top = `${r.bottom + 6 + ph > innerHeight - 8 ? r.top - ph - 6 : r.bottom + 6}px`;
+}
+
+function pickToken(m: Message, ch: "reasoning" | "content", i: number, a: Alt) {
+  const td = tokens.get(m.id!)!, before = td[ch].slice(0, i).map((x) => x.t).join("");
+  if (SPECIAL[a.t] === "end of reply") {            // nothing to write: the reply just ends there
+    const was = { ...m }, wasTok = structuredClone(td);
+    td[ch] = td[ch].slice(0, i);
+    m[ch] = before;
+    if (ch === "reasoning") { td.content = []; m.content = ""; }
+    m.finish = "stop";
+    save(conv);
+    render();
+    toast("The reply ends there now", () => { Object.assign(m, was); tokens.set(m.id!, wasTok); save(conv); render(); });
+    return;
+  }
+  continueReply(m, { ch, i, alt: a, before });
+}
+
 
 function renderComposer() {
   const busy = !!running();
   sendBtn.innerHTML = icon(busy ? "stop" : "send");
   sendBtn.setAttribute("aria-label", busy ? "Stop" : "Send");
   sendBtn.classList.toggle("stop", busy);
+  const draftBtn = $<HTMLButtonElement>("draft");
+  draftBtn.innerHTML = icon(drafting ? "stop" : "wand");
+  draftBtn.title = drafting ? "Stop the draft" : input.value.trim() ? "Finish my message (draft)" : "Draft my next message";
+  draftBtn.setAttribute("aria-label", draftBtn.title);
+  draftBtn.classList.toggle("on", !!drafting);
+  draftBtn.hidden = busy || !conv.messages.length;
+  $("composer").classList.toggle("drafting", !!drafting);
   $("effort").replaceChildren(h("span", "label", "Think"), ...EFFORTS.map(([value, label]) => {
     const b = h("button", "", label);
     b.type = "button";
@@ -448,13 +663,20 @@ function renderComposer() {
     b.onclick = () => { conv.effort = value; setPref("effort", value); renderComposer(); };
     return b;
   }));
+  if (modeOf(conv) !== chatMode) {                  // Settings shows the values of the Think setting below
+    chatMode = modeOf(conv);
+    if (!panel.hidden) syncSettings();
+  }
   const s = conv.messages.findLast((m) => m.stats)?.stats;
   $("meter").textContent = s ? `${fmtK(s.prompt + s.tokens)} / ${fmtK(status.context ?? 262144)} tokens` : "";
 }
 
-// Highlighted while anything differs from the defaults.
+// Marked while anything differs from the recommended values.
 function renderSettingsButton() {
-  $("settings-btn").classList.toggle("on", !!settings.system.trim() || Object.keys(settings.sampling).length > 0);
+  const custom = settings.system !== DEFAULT_SYSTEM || Object.keys(settings.think).length + Object.keys(settings.fast).length > 0
+    || !!settings.max_tokens || settings.seed !== undefined;
+  $("settings-btn").classList.toggle("on", custom);
+  $<HTMLButtonElement>("settings-reset").disabled = !custom;   // nothing to reset: there, but off
 }
 
 function renderList() {
@@ -608,8 +830,17 @@ async function refreshStatus() {
   }
   if (current() !== was && !conv.messages.length) render();
   // The server has newer code: reload into it once nothing would be lost (chats are kept in sessionStorage).
-  if (status.build && status.build !== build && !runs.size && !input.value && !settingsDialog.open) return location.reload();
+  if (status.build && status.build !== build && !runs.size && !input.value && !panel.contains(document.activeElement)
+    && !editing && !drafting) return location.reload();
   renderStatus();
+}
+
+// Saved, or forgotten once it has no messages left (deleting its last one).
+function persist(c: Conversation) {
+  if (c.messages.length) return save(c);
+  delete chats[c.id];
+  store("chats", chats);
+  renderList();
 }
 
 function save(c: Conversation) {
@@ -620,21 +851,21 @@ function save(c: Conversation) {
   renderList();
 }
 
-// Every chat's system prompt starts with the truth about this chat. Without it Flash-Next takes some asks for a
-// coding-agent task when it does not think ("design a cute SVG ..." -> "let me first explore the project structure"
-// and calls to list_files / read_file: 16 replies out of 16, and the Q8_0 original as well); with it, 16 of 16 draw.
-const CHAT_NOTE = "There are no tools or files in this chat. Answer directly.";
-
-// The request body. Assistant turns go back exactly as kiln sent them: kiln then replays its own tokens and
-// every turn is a cache hit (only the new message is read).
-function request(c: Conversation) {
-  const messages: { role: string; content: string; reasoning_content?: string }[] = c.messages.slice(0, -1)
+// The request body for a reply after the messages `upto`. Assistant turns go back exactly as kiln sent them: kiln then
+// replays its own tokens and every turn is a cache hit (only the new message is read). The reply's tokens come with
+// their odds (log probs, five alternatives each) for the token view. effort: the thinking setting (the chat's by
+// default); sampling: whose values (by default the effort's mode).
+function request(c: Conversation, upto: Message[], o: { effort?: Effort; sampling?: Mode; final?: object; extra?: Record<string, unknown> } = {}) {
+  const effort = o.effort ?? c.effort, mode: Mode = effort === "off" ? "fast" : "think";
+  const messages: object[] = upto
     .filter((m) => m.role === "user" || m.content || m.reasoning)
     .map((m) => (m.reasoning ? { role: m.role, content: m.content, reasoning_content: m.reasoning } : { role: m.role, content: m.content }));
-  messages.unshift({ role: "system", content: [CHAT_NOTE, settings.system.trim()].filter(Boolean).join("\n\n") });
+  if (settings.system.trim()) messages.unshift({ role: "system", content: settings.system.trim() });
+  if (o.final) messages.push(o.final);
   return {
-    model: c.effort === "off" ? `${current()}-fast` : current(), reasoning_effort: c.effort === "off" ? undefined : c.effort,
-    ...settings.sampling, messages, stream: true, stream_options: { include_usage: true },
+    model: effort === "off" ? `${current()}-fast` : current(), reasoning_effort: effort === "off" ? undefined : effort,
+    ...samplerFields(o.sampling ?? mode), max_tokens: settings.max_tokens, seed: settings.seed, logprobs: true, top_logprobs: 5,
+    messages, stream: true, stream_options: { include_usage: true }, ...o.extra,
   };
 }
 
@@ -668,9 +899,32 @@ async function ensureOnline(run: Run) {
 const CUT_OFF = "The reply was cut off: the web server restarted while it was being written";
 
 async function generate(c: Conversation = conv) {
-  const m: Message = { role: "assistant", content: "", reasoning: "" };
+  const m: Message = { id: randomId(), role: "assistant", content: "", reasoning: "", params: changed(modeOf(c)) || undefined, effort: c.effort };
   c.messages.push(m);
-  const run: Run = { conv: c, m, live: { phase: "waiting", since: performance.now(), note: "Reading the prompt" }, at: 0, stopping: false, frame: 0, saved: 0, calls: [] };
+  await startRun(c, m, request(c, c.messages.slice(0, -1)));
+}
+
+// Writes on from the end of the last reply, or (pick) from one of its tokens replaced by an alternative. kiln is
+// given the reply as it generated it (kiln_original), finds the exact tokens to keep and serves them from its cache;
+// it restates the reply as it now stands before the new text.
+function continueReply(m: Message, pick?: { ch: "reasoning" | "content"; i: number; alt: Alt; before: string }) {
+  const c = conv, at = c.messages.indexOf(m);
+  if (at < 0 || running(c)) return;
+  const original = { role: "assistant", content: m.content, reasoning_content: m.reasoning ?? "" };
+  const final = !pick ? original : pick.ch === "content" ? { ...original, content: pick.before } : { role: "assistant", content: "", reasoning_content: pick.before };
+  const effort = m.effort ?? c.effort;
+  c.messages.splice(at + 1);
+  m.error = m.finish = undefined;
+  m.stopped = false;
+  m.params = changed(effort === "off" ? "fast" : "think") || undefined;
+  const extra = pick ? { continue_final_message: true, kiln_original: original, kiln_append_token: pick.alt.id } : { continue_final_message: true };
+  void startRun(c, m, request(c, c.messages.slice(0, at), { effort, final, extra }),
+    pick && { t: pick.alt.t, p: pick.alt.p, alts: tokens.get(m.id!)?.[pick.ch][pick.i]?.alts ?? [] });
+}
+
+async function startRun(c: Conversation, m: Message, body: object, pick?: Tok) {
+  const phase = m.content ? "writing" : m.reasoning ? "thinking" : "waiting";
+  const run: Run = { conv: c, m, live: { phase, since: performance.now(), note: "Reading the prompt" }, at: 0, stopping: false, frame: 0, saved: 0, calls: [], pick };
   runs.set(c.id, run);
   if (c === conv) {
     follow = true;
@@ -685,7 +939,7 @@ async function generate(c: Conversation = conv) {
       run.live.since = performance.now();
     }
     if (run.stopping) throw new DOMException("stopped", "AbortError");
-    const res = await fetch("/api/chat", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(request(c)) });
+    const res = await fetch("/api/chat", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body) });
     if (!res.ok || !res.body) throw new Error((await res.json().catch(() => null))?.error?.message ?? `HTTP ${res.status}`);
     m.job = res.headers.get("X-Kiln-Job") ?? undefined;
     save(c);                                       // a reload finds the reply and follows it again
@@ -698,8 +952,6 @@ async function generate(c: Conversation = conv) {
   finish(run);
 }
 
-// A reply that was being written when the page (re)loaded: followed again from its first event. The saved text stays
-// until the server answers; if it no longer knows the reply, that text stays and says why it ends there.
 async function resume(c: Conversation, m: Message) {
   const run: Run = { conv: c, m, live: { phase: "waiting", since: performance.now(), note: "Reading the prompt" }, at: 0, stopping: false, frame: 0, saved: 0, calls: [] };
   runs.set(c.id, run);
@@ -708,6 +960,7 @@ async function resume(c: Conversation, m: Message) {
     if (res.status === 404) throw new Error(CUT_OFF);
     if (!res.ok || !res.body) throw new Error(`HTTP ${res.status}`);
     m.content = m.reasoning = "";
+    if (m.id) tokens.delete(m.id);                 // the job's events bring them back
     await stream(run, res.body);
   } catch (e) {
     if (run.stopping) m.stopped = true;
@@ -742,8 +995,22 @@ async function stream(run: Run, body: ReadableStream<Uint8Array> | null) {
 
 // One event of a reply into its message, and onto the screen on the next frame.
 function take(run: Run, ev: any) {
-  const { m, live } = run, d = ev.choices?.[0]?.delta ?? {}, now = performance.now(), v = views.get(m);
+  const { m, live } = run, choice = ev.choices?.[0], d = choice?.delta ?? {}, now = performance.now(), v = views.get(m);
   if (ev.error) m.error = ev.error.message;
+  if (choice?.finish_reason) m.finish = choice.finish_reason;
+  if (d.kiln_prefix) {                             // a continued reply as it now stands
+    m.reasoning = d.kiln_prefix.reasoning_content ?? "";
+    m.content = d.kiln_prefix.content ?? "";
+    keepTokens(m, run.pick);
+    if (v) v.tok = undefined;
+  }
+  if (choice?.logprobs && m.id) {
+    const td = tokens.get(m.id) ?? { reasoning: [], content: [] };
+    tokens.set(m.id, td);
+    const tok = (e: any): Tok => ({ t: e.token, p: Math.exp(e.logprob), alts: (e.top_logprobs ?? []).map((a: any) => ({ t: a.token, p: Math.exp(a.logprob), id: a.id })) });
+    for (const e of choice.logprobs.reasoning_content ?? []) td.reasoning.push(tok(e));
+    for (const e of choice.logprobs.content ?? []) td.content.push(tok(e));
+  }
   if (ev.stopped) m.stopped = true;
   if (ev.timing) run.timing = ev.timing;
   if (ev.usage) run.usage = ev.usage;
@@ -767,6 +1034,20 @@ function take(run: Run, ev: any) {
     save(run.conv);
   }
   schedule(run);
+}
+
+// After kiln restates a continued reply: keep the tokens it still starts with; the rest (a picked alternative) stands
+// in as one token.
+function keepTokens(m: Message, pick?: Tok) {
+  const td = m.id && tokens.get(m.id);
+  if (!td) return;
+  for (const ch of ["reasoning", "content"] as const) {
+    const text = m[ch] ?? "", list = td[ch];
+    let n = 0, len = 0;
+    while (n < list.length && text.startsWith(list[n].t, len)) len += list[n++].t.length;
+    list.length = n;
+    if (len < text.length) list.push({ t: text.slice(len), p: pick?.p ?? 1, alts: pick?.alts ?? [] });
+  }
 }
 
 function schedule(run: Run) {
@@ -831,12 +1112,61 @@ async function name(c: Conversation) {
 
 function submit(text: string) {
   text = text.trim();
-  if (!text || running()) return;
+  if (!text || running() || drafting) return;
   input.value = "";
   grow();
   if (!conv.messages.length) conv.title = text.split("\n")[0].slice(0, 60);
   conv.messages.push({ role: "user", content: text });
   void generate();
+}
+
+// ---- a draft of the user's next message ----------------------------------------------------------------------
+// kiln writes the message the user would likely send next, into the composer to edit and send. It is asked as the
+// assistant (Qwen will not write a user turn: at one it just ends it), without thinking, from the conversation
+// kiln has cached, which it leaves as it was (kiln_aside). Text already in the composer is how the draft begins.
+const DRAFT_ASK = "Write the next message I would send in this conversation, as me: same voice, same goals, natural and brief. Reply with only that message.";
+let drafting: { job?: string; stop: boolean } | null = null;
+
+async function draft() {
+  if (drafting) {
+    drafting.stop = true;
+    if (drafting.job) void fetch(`/api/chat/${drafting.job}/stop`, { method: "POST" }).catch(() => {});
+    return;
+  }
+  const c = conv, begin = input.value;
+  if (running(c) || !c.messages.length || status.state !== "online") return;
+  const d: { job?: string; stop: boolean } = (drafting = { stop: false });
+  const body = request(c, c.messages, {
+    sampling: "fast", final: begin.trim() ? { role: "assistant", content: begin } : undefined,
+    extra: { kiln_aside: true, max_tokens: 400, logprobs: false, seed: undefined, ...(begin.trim() ? { continue_final_message: true } : {}) },
+  });
+  (body.messages as object[]).splice(begin.trim() ? -1 : body.messages.length, 0, { role: "user", content: DRAFT_ASK });
+  input.readOnly = true;
+  renderComposer();
+  try {
+    const res = await fetch("/api/chat", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body) });
+    if (!res.ok || !res.body) throw new Error((await res.json().catch(() => null))?.error?.message ?? `HTTP ${res.status}`);
+    d.job = res.headers.get("X-Kiln-Job") ?? undefined;
+    if (d.stop && d.job) void fetch(`/api/chat/${d.job}/stop`, { method: "POST" }).catch(() => {});
+    let text = begin;
+    for await (const ev of events(res.body)) {
+      if (ev === DONE) break;
+      if (ev.error) throw new Error(ev.error.message);
+      const delta = ev.choices?.[0]?.delta ?? {};
+      if (delta.kiln_prefix) text = delta.kiln_prefix.content ?? text;
+      if (delta.content) text += delta.content;
+      input.value = text;
+      grow();
+    }
+  } catch (e) {
+    if (!d.stop) toast(`The draft failed: ${e instanceof Error ? e.message : e}`);
+  } finally {
+    drafting = null;
+    input.readOnly = false;
+    renderComposer();
+    input.focus();
+    input.setSelectionRange(input.value.length, input.value.length);
+  }
 }
 
 function openConversation(id: string) {
@@ -893,42 +1223,59 @@ function grow() {
 
 thread.addEventListener("click", (e) => {
   const t = e.target as HTMLElement, code = t.closest<HTMLElement>(".copy"), act = t.closest<HTMLElement>("[data-act]");
+  const tok = t.closest<HTMLElement>(".tok");
+  if (tok) return void openTokPop(tok);
   if (code) return void copy(code.closest(".code")?.querySelector("code")?.textContent ?? "", code);
   const svg = t.closest<HTMLElement>("[data-svg]");
   if (svg) return void svgAction(svg);
   if (!act) return;
   const i = Number(act.closest<HTMLElement>("article")?.dataset.i), m = conv.messages[i];
   if (act.dataset.act === "copy") return void copy(m.content, act);
+  if (act.dataset.act === "seed") return void useSeed(Number(act.dataset.seed));
+  if (act.dataset.act === "tokens" && m.id) {
+    if (!tokenView.delete(m.id)) tokenView.add(m.id);
+    return render();
+  }
   if (running()) return;
   if (act.dataset.act === "retry") {
     conv.messages.splice(i);
     void generate();
-  } else if (act.dataset.act === "edit") {
-    conv.messages.splice(i);
+  } else if (act.dataset.act === "cont") continueReply(m);
+  else if (act.dataset.act === "trash") deleteMessage(i);
+  else if (act.dataset.act === "edit") {
+    editing = m;
     render();
-    input.value = m.content;
-    grow();
-    input.focus();
   }
 });
+document.addEventListener("pointerdown", (e) => {
+  if (!$("tokpop").hidden && !(e.target as Element).closest("#tokpop, .tok")) closeTokPop();
+});
+scroller.addEventListener("scroll", () => { if (!$("tokpop").hidden) closeTokPop(); }, { passive: true });
 $("composer").addEventListener("submit", (e) => {
   e.preventDefault();
   const r = running();
   if (r) stopRun(r);
   else submit(input.value);
 });
-input.addEventListener("input", grow);
+input.addEventListener("input", () => { grow(); if (!drafting) $("draft").title = input.value.trim() ? "Finish my message (draft)" : "Draft my next message"; });
 input.addEventListener("keydown", (e) => {
   if (e.key === "Enter" && !e.shiftKey && !e.isComposing) {
     e.preventDefault();
     submit(input.value);
   }
 });
-// Esc stops this chat's reply, unless it is closing something: a menu, a dialog (Settings, a picture at full size)
+// Esc stops this chat's reply, unless it is closing something: a menu, a picture at full size, Settings (when it is
+// in use or covers the chat)
 document.addEventListener("keydown", (e) => {
+  if (e.key === "," && (e.ctrlKey || e.metaKey) && !e.altKey) {
+    e.preventDefault();
+    return setPanel(panel.hidden !== false);
+  }
   if (e.key !== "Escape" || e.defaultPrevented) return;
+  if (!$("tokpop").hidden) return closeTokPop();
   if (menuOpen) return setMenu(false);
   if (document.querySelector("dialog[open]")) return;
+  if (!panel.hidden && (panel.contains(document.activeElement) || !docked.matches)) return setPanel(false);
   const r = running();
   if (r) stopRun(r);
 });
@@ -940,33 +1287,504 @@ window.addEventListener("hashchange", () => {
 $("new-chat").addEventListener("click", newChat);
 $("menu").addEventListener("click", () => document.body.classList.toggle("nav-open"));
 $("scrim").addEventListener("click", () => document.body.classList.remove("nav-open"));
-$("settings-btn").addEventListener("click", () => {
-  const defaults = SAMPLING_DEFAULTS[conv.effort === "off" ? "fast" : "think"];
-  systemInput.value = settings.system;
-  for (const f of samplingInputs) {
-    f.value = String(settings.sampling[f.name as SamplingKey] ?? "");
-    f.placeholder = String(defaults[f.name as SamplingKey] ?? "random");
-  }
-  settingsDialog.returnValue = "";                  // Esc keeps the previous value, which may be "save"
-  settingsDialog.showModal();
-});
-$("settings-reset").addEventListener("click", () => {
-  systemInput.value = "";
-  for (const f of samplingInputs) f.value = "";
-});
-settingsDialog.addEventListener("close", () => {
-  if (settingsDialog.returnValue !== "save") return;
-  const sampling: Sampling = {};
-  for (const f of samplingInputs) if (f.value !== "") sampling[f.name as SamplingKey] = f.valueAsNumber;
-  settings = { system: systemInput.value, sampling };
-  store("settings", settings);
+// ---- settings ----------------------------------------------------------------------------------------------
+// A panel beside the chat (it opens without moving the chat when there is room). Every change applies to the next
+// reply and can be undone; each value shows what kiln is sent, marked where it differs from the recommended one.
+
+const docked = matchMedia("(min-width: 1460px)");    // beside the chat; narrower, it slides over it
+const modeOf = (c: Conversation): Mode => (c.effort === "off" ? "fast" : "think");
+let chatMode: Mode | undefined;                     // the Think setting Settings last showed
+const shownMode = (): Mode => modeOf(conv);             // the values Settings shows: those of the chat's Think setting
+let systemEdited = false;
+
+function loadSettings(): Settings {
+  const s = load<Settings | null>("settings2", null);
+  if (s) return s;
+  // the earlier shape: one set of values for both modes, and a system prompt added after a built-in line
+  const old = load<{ system?: string; sampling?: Record<string, number> } | null>("settings", null);
+  const { max_tokens, seed, ...rest } = old?.sampling ?? {};
+  return { system: [DEFAULT_SYSTEM, old?.system?.trim()].filter(Boolean).join("\n\n"), think: { ...rest }, fast: { ...rest }, max_tokens, seed };
+}
+function saveSettings() {
+  store("settings2", settings);
   renderSettingsButton();
-});
+  syncSettings();
+}
+const value = (mode: Mode, key: SamplerKey) => settings[mode][key] ?? RECOMMENDED[mode][key];
+const orderOf = (mode: Mode) => settings[mode].order ?? STAGES;
+const fmtValue = (key: SamplerKey, v: number) => SAMPLERS[key].step >= 1 ? String(v) : v.toFixed(2);
+// The sampling fields of a request for a mode: only what differs from the recommended values.
+function samplerFields(mode: Mode) {
+  const { order, ...rest } = settings[mode];
+  return { ...rest, ...(order ? { samplers: order } : {}) };
+}
+// What a reply was drawn with, where it differs from the recommended values (its footer shows it).
+function changed(mode: Mode) {
+  const out = (Object.keys(SAMPLERS) as SamplerKey[]).filter((k) => settings[mode][k] !== undefined)
+    .map((k) => `${SAMPLERS[k].short} ${fmtValue(k, settings[mode][k]!)}`);
+  if (settings[mode].order) out.push(settings[mode].order!.map((s) => SAMPLERS[s].short).join("›"));
+  if (settings.max_tokens) out.push(`max ${fmtK(settings.max_tokens)}`);
+  return out.join(" · ");
+}
+
+let toastTimer = 0;
+function toast(text: string, undo?: () => void) {
+  const t = $("toast"), b = h("button", "", "Undo");
+  b.type = "button";
+  b.onclick = () => { t.hidden = true; undo?.(); };
+  t.replaceChildren(h("span", "", text), ...(undo ? [b] : []));
+  t.hidden = false;
+  clearTimeout(toastTimer);
+  toastTimer = window.setTimeout(() => { t.hidden = true; }, 6000);
+}
+
+function useSeed(seed: number) {
+  const before = settings.seed;
+  settings.seed = seed;
+  saveSettings();
+  toast(`Seed ${seed} is fixed for the next replies`, () => { settings.seed = before; saveSettings(); });
+}
+
+// ---- the odds charts --------------------------------------------------------------------------------------------
+// Two real moments of Qwen3.8-Flash-Next run through kiln's sampler (make_dist in engine/sampler.h) with the settings
+// as they stand: the first name of a reply (what the stages do) and the next name of a list that has started to repeat
+// itself (what presence and DRY do). Each sits above the values it shows.
+
+interface Cand { word: string; logit: number; id: number }
+interface Odds { word: string; raw: number; p: number; cut: Stage | ""; pres: number; dry: number }
+const FIRST: Cand[] = ODDS.map(([word, c], i) => ({ word, logit: Math.log(c), id: -1 - i }));
+const NEXT: Cand[] = LOOP.cands.map(([t, lp, id]) => ({ word: t.trim(), logit: lp, id }));
+const breaker = (t: string) => /[\n:"*]/.test(t);    // DRY's sequence breakers (the server's set)
+
+// DRY's runs (dry_runs in engine/sampler.h): for each token that followed an earlier occurrence of the context's last
+// token, how many tokens before it match the end of the context; and where the longest run sits, to show it.
+function dryRuns(ctx: [string, number][]) {
+  const runs = new Map<number, number>(), n = ctx.length;
+  let best: { run: number; at: number } | null = null;
+  if (n < 2 || breaker(ctx[n - 1][0])) return { runs, best };
+  for (let i = n - 2; i >= 0; i--) {
+    if (ctx[i][1] !== ctx[n - 1][1] || breaker(ctx[i + 1][0])) continue;
+    let run = 1;
+    while (run < 48 && i >= run && ctx[i - run][1] === ctx[n - 1 - run][1] && !breaker(ctx[i - run][0])) run++;
+    const next = ctx[i + 1][1];
+    runs.set(next, Math.max(runs.get(next) ?? 0, run));
+    if (!best || run > best.run) best = { run, at: i };
+  }
+  return { runs, best };
+}
+
+// The sampler on a set of candidates after a reply so far: penalties, then the stages in their order. Each
+// candidate's odds before (the model's) and after, what cut it, and its penalties; and min P's line.
+function sample(cands: Cand[], reply: [string, number][], mode: Mode) {
+  const v = (k: SamplerKey) => value(mode, k), T = v("temperature");
+  const seen = new Set(reply.map(([, id]) => id)), { runs } = dryRuns(reply);
+  const top = Math.max(...cands.map((c) => c.logit)), z = cands.reduce((a, c) => a + Math.exp(c.logit - top), 0);
+  const rows: Odds[] = cands.map((c) => {
+    const run = runs.get(c.id) ?? 0, allowed = v("dry_allowed_length");
+    const dry = v("dry_multiplier") > 0 && run >= allowed ? v("dry_multiplier") * v("dry_base") ** (run - allowed) : 0;
+    return { word: c.word, raw: Math.exp(c.logit - top) / z, p: 0, cut: "", pres: seen.has(c.id) ? v("presence_penalty") : 0, dry };
+  });
+  const x = cands.map((c, i) => c.logit - rows[i].dry - rows[i].pres);
+  const order = rows.map((_, i) => i).sort((a, b) => x[b] - x[a]);
+  let n = order.length, t = 1, minLine: { at: number; tempered: boolean } | undefined;
+  if (T <= 0) {
+    order.forEach((r, j) => { if (j) rows[r].cut = "temperature"; });
+    rows[order[0]].p = 1;
+    return { rows, minLine };
+  }
+  const probs = (temp: number) => {
+    const e = order.slice(0, n).map((r) => Math.exp((x[r] - x[order[0]]) / temp)), sum = e.reduce((a, y) => a + y, 0);
+    return e.map((y) => y / sum);
+  };
+  const cut = (to: number, stage: Stage) => { for (let j = to; j < n; j++) rows[order[j]].cut ||= stage; n = to; };
+  for (const s of orderOf(mode)) {
+    if (s === "top_k") { const k = v("top_k"); cut(Math.max(1, Math.min(k > 0 ? k : n, n)), s); }
+    else if (s === "temperature") t = T;
+    else if (s === "top_p") {
+      const P = probs(t);
+      let cum = 0, keep = n;
+      for (let j = 0; j < n; j++) { cum += P[j]; if (cum >= v("top_p")) { keep = j + 1; break; } }
+      cut(keep, s);
+    } else {
+      const P = probs(t), min = v("min_p");
+      let m = 1;
+      while (m < n && P[m] >= min * P[0]) m++;
+      cut(m, s);
+      if (min > 0) minLine = { at: min, tempered: t === T };
+    }
+  }
+  probs(T).forEach((p, j) => { rows[order[j]].p = p; });
+  return { rows, minLine };
+}
+
+const pct = (p: number) => (p >= 0.995 ? "100%" : p >= 0.01 ? `${Math.round(p * 100)}%` : p > 0 ? "<1%" : "");
+const CUT_BY: Record<Stage, string> = { top_k: "top-k", top_p: "top-p", min_p: "min-p", temperature: "temp 0" };
+
+// A chart: a row per named candidate (the rest share one): the name, a bar for its odds now with a tick where the
+// model had them, and its share, or what cut it (struck through). Min P is a line across the bars. Pointing at a row
+// tells it in the line below; nothing changes size.
+function chart(fig: HTMLElement, shown: number[], tagOf: (r: Odds) => string) {
+  const box = h("div", "odd-rows"), min = h("div", "odd-min"), caption = h("figcaption", "odd-caption");
+  const els = [...shown, -1].map(() => {
+    const el = h("div", "odd"), word = h("span", "odd-word"), track = h("span", "odd-track"), p = h("span", "odd-p");
+    const base = h("i", "odd-base"), bar = h("i", "odd-bar"), tick = h("b", "odd-tick"), tag = h("em", "odd-tag");
+    track.append(base, bar, tick, tag);
+    el.append(word, track, p);
+    box.append(el);
+    return { el, word, base, bar, tick, tag, p };
+  });
+  min.append(h("span", "", "min-p"));
+  box.append(min);
+  fig.append(box, caption);
+  let at = -1, last: (() => void) | null = null;
+  box.addEventListener("pointerover", (e) => {
+    const i = els.findIndex((x) => x.el.contains(e.target as Node));
+    if (i !== at) { at = i; last?.(); }
+  });
+  box.addEventListener("pointerleave", () => { at = -1; last?.(); });
+  return (rows: Odds[], minLine: { at: number; tempered: boolean } | undefined, explain: (r: Odds | null, rest?: Odds[]) => string) => {
+    last = () => {
+      const rest = rows.filter((_, i) => !shown.includes(i)), cuts = rest.filter((r) => r.cut).length;
+      const agg: Odds = { word: `${rest.length} more`, raw: rest.reduce((a, r) => a + r.raw, 0), p: rest.reduce((a, r) => a + r.p, 0),
+        cut: cuts === rest.length ? rest[0].cut : "", pres: 0, dry: 0 };
+      [...shown.map((i) => rows[i]), agg].forEach((r, k) => {
+        const o = els[k], isRest = k === shown.length;
+        o.el.classList.toggle("cut", !!r.cut);
+        o.el.classList.toggle("rest", isRest);
+        o.el.classList.toggle("at", k === at);
+        o.word.textContent = r.word;
+        o.base.style.width = `${r.raw * 100}%`;
+        o.bar.style.width = `${r.cut ? 0 : r.p * 100}%`;
+        o.tick.style.left = `${r.raw * 100}%`;
+        o.tag.style.left = `calc(${(r.cut ? r.raw : r.p) * 100}% + 6px)`;
+        o.tag.textContent = isRest ? (cuts && !r.cut ? `${cuts} cut` : "") : tagOf(r);
+        o.p.textContent = r.cut ? CUT_BY[r.cut] : pct(r.p);
+      });
+      const kept = rows.filter((r) => !r.cut), topNow = kept.reduce((a, r) => (r.p > a.p ? r : a), kept[0]);
+      min.classList.toggle("on", !!minLine);
+      min.classList.toggle("untempered", !!minLine && !minLine.tempered);
+      if (minLine) min.style.setProperty("--at", String(Math.min(1, minLine.at * topNow.p)));
+      caption.innerHTML = at < 0 ? explain(null) : at === shown.length ? explain(null, rest) : explain(rows[shown[at]]);
+    };
+    last();
+  };
+}
+
+let drawFirst: ReturnType<typeof chart> | null = null, drawNext: ReturnType<typeof chart> | null = null;
+const LOOP_FROM = LOOP.reply.findIndex(([t]) => t === ":") + 1;   // the reply line shows the list, not its lead-in
+function drawCharts() {
+  const mode = shownMode();
+  // the first name of a reply: what the stages keep
+  drawFirst ??= chart($("odds-first"), [0, 1, 2, 3, 4, 5], () => "");
+  const first = sample(FIRST, [], mode);
+  drawFirst(first.rows, first.minLine, (r, rest) => {
+    if (rest) {
+      const by = STAGES.map((s) => [s, rest.filter((x) => x.cut === s).length] as const).filter(([, c]) => c);
+      return `<b>${rest.length} more names</b> ${pct(rest.reduce((a, x) => a + x.p, 0)) || "0%"} together` +
+        (by.length ? `<span> · cut: ${by.map(([s, c]) => `${c} by ${CUT_BY[s]}`).join(", ")}</span>` : "");
+    }
+    if (r) return `<b>${r.word}</b> ${r.cut ? `cut by ${CUT_BY[r.cut]}` : pct(r.p)} <span>· ${pct(r.raw)} before</span>`;
+    const kept = first.rows.filter((x) => !x.cut);
+    return kept.length === 1 ? `Always <b>${kept[0].word}</b>` : `<b>${kept.length}</b> of ${first.rows.length} names can be drawn <span>· Luna ${pct(first.rows[0].p)}</span>`;
+  });
+  // the next name of a list that repeats itself: what presence and DRY push down
+  drawNext ??= chart($("odds-next"), [0, 1, 4, 5], (r) => [r.pres > 0 ? "used" : r.pres < 0 ? "used, boosted" : "", r.dry ? "repeats" : ""].filter(Boolean).join(" · "));
+  const next = sample(NEXT, LOOP.reply, mode), { best } = dryRuns(LOOP.reply), allowed = value(mode, "dry_allowed_length");
+  const dryOn = value(mode, "dry_multiplier") > 0 && !!best && best.run >= allowed, presOn = value(mode, "presence_penalty") !== 0;
+  const runText = best ? LOOP.reply.slice(best.at - best.run + 1, best.at + 2).map(([t]) => t).join("").trim() : "";
+  drawNext(next.rows, next.minLine, (r, rest) => {
+    if (rest) return `<b>${rest.length} more</b> ${pct(rest.reduce((a, x) => a + x.p, 0)) || "0%"} together`;
+    if (r) {
+      const why = [r.pres ? `already used (presence ${r.pres > 0 ? "−" : "+"}${Math.abs(r.pres).toFixed(2)})` : "",
+        r.dry ? `would repeat “${runText}” (DRY −${r.dry.toFixed(2)})` : ""].filter(Boolean);
+      return `<b>${r.word}</b> ${pct(r.raw)} → ${r.cut ? `cut by ${CUT_BY[r.cut]}` : pct(r.p)}${why.length ? `<span> · ${why.join(", ")}</span>` : ""}`;
+    }
+    const kept = next.rows.filter((x) => !x.cut), topNow = kept.reduce((a, x) => (x.p > a.p ? x : a), kept[0]);
+    return `<b>${kept.length}</b> of ${next.rows.length} can be drawn <span>· ${topNow.word} ${pct(topNow.p)}${topNow.word === "Shadow" ? ", the loop goes on" : ""}</span>`;
+  });
+  // the reply so far, the run DRY sees and the names presence counts as used marked in it
+  // Each highlighted stretch (the run, both times; what followed it) is one span, and spaces stay outside the marks,
+  // so highlights and underlines cover the words only.
+  const line = $("odds-line");
+  line.replaceChildren(h("span", "faint", "…"));
+  let group: HTMLElement | null = null, groupCls = "";
+  LOOP.reply.slice(LOOP_FROM).forEach(([t], j) => {
+    const i = j + LOOP_FROM, [, space, word] = /^(\s*)([\s\S]*)$/.exec(t)!;
+    const cls = dryOn && best && (i > best.at - best.run && i <= best.at || i >= LOOP.reply.length - best.run) ? "run" : dryOn && best && i === best.at + 1 ? "echo" : "";
+    if (cls !== groupCls) {
+      if (space) line.append(space);
+      group = cls ? h("span", cls) : null;
+      groupCls = cls;
+      if (group) line.append(group);
+    } else if (space) (group ?? line).append(space);
+    (group ?? line).append(h("span", presOn && /\w/.test(word) ? "used" : "", word));
+  });
+  line.append(h("i", "caret"));
+}
+
+// One value on one line: label, slider (its fill shows the value, a notch the recommended one), the number, ↺.
+interface KnobSpec {
+  id: string; label: string; help: string; min: number; max: number; step: number;
+  get(): number; rec(): number; custom(): boolean; set(v: number | undefined): void; fmt(v: number): string;
+  pos(v: number): number; val(pos: number): number;    // value <-> slider position, 0..1
+}
+const knobs: (() => void)[] = [];
+const roundTo = (v: number, step: number) => Math.round(v / step) * step;
+function knob(k: KnobSpec) {
+  const el = h("div", "knob"), label = h("label", "", k.label), reset = h("button", "act knob-reset");
+  const num = h("input", "knob-num"), track = h("div", "knob-track"), range = h("input"), rec = h("i", "knob-rec");
+  el.title = k.help;
+  num.id = `knob-${k.id}`;
+  label.htmlFor = num.id;
+  num.type = "text";
+  num.inputMode = "decimal";
+  num.spellcheck = false;
+  num.autocomplete = "off";
+  range.type = "range";
+  range.min = "0";
+  range.max = "1";
+  range.step = "any";
+  range.tabIndex = -1;                             // the number takes the keyboard (arrows step it)
+  range.setAttribute("aria-hidden", "true");
+  reset.type = "button";
+  reset.innerHTML = icon("retry");
+  track.append(rec, range);
+  el.append(label, track, num, reset);
+  const commit = (v: number) => {
+    if (!Number.isFinite(v)) return sync(true);
+    v = Math.min(k.max, Math.max(k.min, roundTo(v, k.step)));
+    k.set(Math.abs(v - k.rec()) < k.step / 2 ? undefined : +v.toFixed(6));
+    saveSettings();
+  };
+  const typed = () => Number(num.value.replace(/[,_\s]/g, "").replace(/^off$/i, "0"));
+  range.addEventListener("input", () => commit(k.val(range.valueAsNumber)));
+  range.addEventListener("dblclick", () => { k.set(undefined); saveSettings(); });
+  reset.addEventListener("click", () => { k.set(undefined); saveSettings(); });
+  num.addEventListener("change", () => commit(typed()));
+  num.addEventListener("keydown", (e) => {
+    if (e.key === "Enter") commit(typed());
+    else if (e.key === "Escape") { e.preventDefault(); sync(true); num.blur(); }
+    else if (e.key === "ArrowUp" || e.key === "ArrowDown") {
+      e.preventDefault();
+      const v = k.get(), up = e.key === "ArrowUp";
+      commit(k.id === "max_tokens" ? (up ? v * 2 : v / 2) : v + (up ? 1 : -1) * k.step * (e.shiftKey ? 10 : 1));
+      sync(true);
+    }
+  });
+  function sync(force = false) {
+    const v = k.get(), p = k.pos(v), custom = k.custom();
+    el.classList.toggle("custom", custom);
+    if (force || document.activeElement !== num) num.value = k.fmt(v);
+    range.value = String(p);
+    range.style.setProperty("--fill", `${p * 100}%`);
+    rec.style.setProperty("--at", String(k.pos(k.rec())));
+    rec.title = reset.title = `Recommended: ${k.fmt(k.rec())}`;
+  }
+  knobs.push(sync);
+  return el;
+}
+function samplerKnob(key: SamplerKey) {
+  const d = SAMPLERS[key], [lo, hi] = d.slider ?? [d.min, d.max];
+  return knob({
+    id: key, label: d.label, help: d.help, min: d.min, max: d.max, step: d.step,
+    fmt: (v) => (key === "dry_multiplier" && v === 0 ? "off" : fmtValue(key, v)),
+    get: () => value(shownMode(), key), rec: () => RECOMMENDED[shownMode()][key], custom: () => settings[shownMode()][key] !== undefined,
+    set: (v) => { if (v === undefined) delete settings[shownMode()][key]; else settings[shownMode()][key] = v; },
+    pos: (v) => Math.min(1, Math.max(0, (v - lo) / (hi - lo))), val: (p) => lo + p * (hi - lo),
+  });
+}
+
+function buildSettings() {
+  // the four stages, one row each, in the order the sampler applies them: drag a row by its grip (or arrows on it)
+  for (const st of STAGES) {
+    const row = samplerKnob(st), grip = h("button", "grip");
+    row.dataset.stage = st;
+    grip.type = "button";
+    grip.title = "Drag to reorder: the sampler applies these top to bottom";
+    grip.setAttribute("aria-label", `Move ${SAMPLERS[st].label}`);
+    grip.innerHTML = icon("grip");
+    grip.addEventListener("pointerdown", (e) => {
+      e.preventDefault();
+      grip.setPointerCapture(e.pointerId);
+      row.classList.add("dragging");
+      const move = (ev: PointerEvent) => {
+        const rows = [...$("samplers").children] as HTMLElement[], i = rows.indexOf(row), mid = (el: HTMLElement) => el.getBoundingClientRect().top + el.offsetHeight / 2;
+        if (i > 0 && ev.clientY < mid(rows[i - 1])) moveStage(st, i - 1);
+        else if (i < rows.length - 1 && ev.clientY > mid(rows[i + 1])) moveStage(st, i + 1);
+      };
+      const up = () => {
+        row.classList.remove("dragging");
+        grip.removeEventListener("pointermove", move);
+        grip.removeEventListener("pointerup", up);
+        grip.removeEventListener("pointercancel", up);
+      };
+      grip.addEventListener("pointermove", move);
+      grip.addEventListener("pointerup", up);
+      grip.addEventListener("pointercancel", up);
+    });
+    grip.addEventListener("keydown", (e) => {
+      if (e.key !== "ArrowUp" && e.key !== "ArrowDown") return;
+      e.preventDefault();
+      moveStage(st, orderOf(shownMode()).indexOf(st) + (e.key === "ArrowUp" ? -1 : 1));
+      grip.focus();
+    });
+    row.prepend(grip);
+    stageRows.set(st, row);
+  }
+  $("order-reset").onclick = () => { delete settings[shownMode()].order; saveSettings(); };
+  const dryMore = h("div", "knob-more");
+  dryMore.append(samplerKnob("dry_allowed_length"), samplerKnob("dry_base"));
+  knobs.push(() => { dryMore.classList.toggle("off", value(shownMode(), "dry_multiplier") <= 0); });
+  $("repetition").replaceChildren(samplerKnob("presence_penalty"), samplerKnob("dry_multiplier"), dryMore);
+
+  const LO = 256, HI = () => status.context ?? 262144;   // reply length: powers of two on the slider
+  const maxLen = knob({
+    id: "max_tokens", label: "Max length", help: "Max length: the reply stops here; thinking counts toward it.", min: 1, max: 262144, step: 1,
+    fmt: (v) => v.toLocaleString("en-US"), get: () => settings.max_tokens ?? MAX_REPLY, rec: () => MAX_REPLY,
+    custom: () => settings.max_tokens !== undefined, set: (v) => { settings.max_tokens = v; },
+    pos: (v) => Math.min(1, Math.max(0, Math.log(v / LO) / Math.log(HI() / LO))),
+    val: (p) => 2 ** Math.round(Math.log2(LO) + p * Math.log2(HI() / LO)),
+  });
+  // Seed: random for every reply, or fixed. A reply's footer shows its seed; clicking it fixes that one here.
+  const seed = h("div", "knob seed-knob"), modes = h("div", "tabs small"), num = h("input", "knob-num"), dice = h("button", "act");
+  seed.title = "Seed: the same seed, chat and settings draw the same reply. Click a reply's seed to fix it here.";
+  const label = h("label", "", "Seed");
+  label.htmlFor = num.id = "knob-seed";
+  num.type = "text";
+  num.inputMode = "numeric";
+  num.spellcheck = false;
+  num.autocomplete = "off";
+  dice.type = "button";
+  dice.innerHTML = icon("dice");
+  dice.title = "Another seed";
+  seed.append(label, modes, num, dice);
+  const random = () => crypto.getRandomValues(new Uint32Array(1))[0];
+  for (const [text, fixed] of [["Random", false], ["Fixed", true]] as const) {
+    const b = h("button", "", text);
+    b.type = "button";
+    b.setAttribute("role", "radio");
+    b.onclick = () => { settings.seed = fixed ? settings.seed ?? random() : undefined; saveSettings(); if (fixed) num.focus(); };
+    modes.append(b);
+  }
+  const setSeed = () => {
+    const v = Number(num.value.replace(/[,_\s]/g, ""));
+    if (num.value.trim() && Number.isInteger(v) && v >= 0 && v < 2 ** 32) settings.seed = v;
+    saveSettings();
+  };
+  num.addEventListener("change", setSeed);
+  num.addEventListener("keydown", (e) => {
+    if (e.key === "Enter") setSeed();
+    else if (e.key === "Escape") { e.preventDefault(); num.value = String(settings.seed ?? ""); num.blur(); }
+  });
+  dice.onclick = () => { settings.seed = random(); saveSettings(); };
+  knobs.push(() => {
+    const fixed = settings.seed !== undefined;
+    seed.classList.toggle("custom", fixed);
+    seed.classList.toggle("fixed", fixed);
+    modes.querySelectorAll("button").forEach((b, i) => b.setAttribute("aria-checked", String(i === Number(fixed))));
+    if (document.activeElement !== num) num.value = String(settings.seed ?? "");
+  });
+  $("reply-knobs").replaceChildren(maxLen, seed);
+
+
+  systemInput.addEventListener("input", () => {
+    settings.system = systemInput.value;
+    systemEdited = true;
+    growSystem();
+    saveSettings();
+  });
+  $("system-reset").onclick = () => {
+    const before = settings.system;
+    settings.system = DEFAULT_SYSTEM;
+    saveSettings();
+    growSystem();
+    toast("The system prompt is back to the default", () => { settings.system = before; saveSettings(); growSystem(); });
+  };
+  $("settings-reset").onclick = () => {
+    const before = structuredClone(settings);
+    settings = { system: DEFAULT_SYSTEM, think: {}, fast: {} };
+    saveSettings();
+    growSystem();
+    toast("Everything is back to the recommended values", () => { settings = before; saveSettings(); growSystem(); });
+  };
+  $("settings-btn").onclick = () => setPanel(!document.body.classList.contains("settings-open"));
+  $("settings-close").onclick = () => setPanel(false);
+  // Slid over the chat (narrow windows), a click outside closes it.
+  document.addEventListener("pointerdown", (e) => {
+    const t = e.target as Node;
+    if (document.body.classList.contains("settings-open") && !docked.matches && !panel.contains(t) && !$("settings-btn").contains(t)
+      && !$("toast").contains(t)) setPanel(false);
+  });
+  measureScrollbar();
+  addEventListener("resize", measureScrollbar);
+}
+
+// The chat stays put when Settings opens beside it: its column keeps the place it has with Settings closed, as far
+// as the room left allows (style.css), which needs the scrollbar's width.
+function measureScrollbar() {
+  document.documentElement.style.setProperty("--sb", `${scroller.offsetWidth - scroller.clientWidth}px`);
+}
+
+function growSystem() {
+  systemInput.style.height = "auto";
+  systemInput.style.height = `${Math.min(systemInput.scrollHeight + 2, innerHeight * 0.4)}px`;
+}
+
+const stageRows = new Map<Stage, HTMLElement>();
+function moveStage(stage: Stage, to: number) {
+  const order = orderOf(shownMode()).filter((x) => x !== stage);
+  order.splice(Math.max(0, Math.min(order.length, to)), 0, stage);
+  if (order.join() === STAGES.join()) delete settings[shownMode()].order;
+  else settings[shownMode()].order = order;
+  saveSettings();
+}
+// The stage rows in the current order; the ones that move glide to their new place.
+function placeStages() {
+  const box = $("samplers"), order = orderOf(shownMode()), rows = [...box.children] as HTMLElement[];
+  if (rows.map((x) => x.dataset.stage).join() === order.join()) return;
+  const before = new Map(rows.map((el) => [el, el.getBoundingClientRect().top]));
+  box.append(...order.map((st) => stageRows.get(st)!));
+  if (reducedMotion.matches) return;
+  for (const [el, top] of before) {
+    const dy = top - el.getBoundingClientRect().top;
+    if (dy && top) el.animate([{ transform: `translateY(${dy}px)` }, { transform: "none" }], { duration: 160, easing: "cubic-bezier(0.2, 0.7, 0.2, 1)" });
+  }
+}
+
+function syncSettings() {
+  if (!document.body.classList.contains("settings-open")) return;
+  if (document.activeElement !== systemInput && systemInput.value !== settings.system) systemInput.value = settings.system;
+  $("system-reset").hidden = settings.system === DEFAULT_SYSTEM;
+
+  $("mode-note").textContent = shownMode() === "think" ? "with thinking" : "thinking off";
+  $("order-reset").hidden = !settings[shownMode()].order;
+  placeStages();
+  for (const sync of knobs) sync();
+  drawCharts();
+}
+
+function setPanel(open: boolean, focus = true) {
+  document.body.classList.toggle("settings-open", open);
+  panel.inert = !open;
+  $("settings-btn").setAttribute("aria-expanded", String(open));
+  if (docked.matches) setPref("settings", open ? "open" : "");
+  if (open) {
+    syncSettings();
+    growSystem();
+    if (focus) panel.focus({ preventScroll: true });
+  } else if (panel.contains(document.activeElement)) $("settings-btn").focus();
+}
+
 document.addEventListener("visibilitychange", () => { if (!document.hidden) void refreshStatus(); });
 
 $("brand-mark").innerHTML = `<svg class="flame" viewBox="0 0 24 24">${ICONS.flame}</svg>`;
 $("new-chat").innerHTML = `${icon("plus")}New chat`;
 $("menu").innerHTML = icon("menu");
+$("settings-btn").innerHTML = `${icon("sliders")}<span>Settings</span>`;
+$("draft").addEventListener("click", () => void draft());
+$("settings-close").innerHTML = icon("close");
+$("settings-reset").insertAdjacentHTML("afterbegin", icon("retry"));
+buildSettings();
 await refreshStatus();
 for (const c of Object.values(chats)) {
   const m = c.messages.at(-1);
@@ -974,6 +1792,7 @@ for (const c of Object.values(chats)) {
 }
 if (location.hash.length > 1) openConversation(location.hash.slice(1));
 else render();
+setPanel(docked.matches && pref("settings", "") === "open", false);
 // Every 4 s, or 4 times a second while a model loads (5-20 s).
 (async () => {
   for (;;) {
