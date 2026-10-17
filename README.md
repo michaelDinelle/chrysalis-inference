@@ -54,11 +54,12 @@ Development: `cd web && bun run dev` (hot reload), `bun run check`.
 | Context | **262,144** tokens (KV pool holds 276K) | 262K needs 3-bit weights or 4-bit KV |
 | Decode, coding prompt, thinking, Qwen sampling | **100–114 tok/s** (MTP, 3 drafts) | 39.8 tok/s |
 | Decode, greedy | **112–116 tok/s** | |
-| Decode at 112K of real code (thinking, MTP) | **58 tok/s** (31 without drafts) | ~17 tok/s at 128K (reported) |
-| Decode at 250K (synthetic context) | **57 tok/s** (23 without drafts) | |
+| Decode at 131K of real code (thinking, MTP) | **80 tok/s** (37 without drafts) | ~17 tok/s at 128K (reported) |
+| Decode at 260K of real code | **64 tok/s** (31 without drafts) | |
 | Prefill, 2K-token chunks | **1,350 tok/s** | 1,015 tok/s |
 | Prefill, short appends (one forward pass) | **16 tokens in 43 ms, 64 in 73 ms, 256 in 222 ms** | |
-| Prefill at 128K | **~700 tok/s** (0→112K averages 877) | ~390 tok/s (reported) |
+| Prefill at 128K | **~730 tok/s**; filling 260K from empty: 381 s (683 tok/s) | ~390 tok/s (reported) |
+| 1,024-token append at 260K | **2.4 s** to the first token | |
 | Agent turn TTFT (small tool output) | **0.11–0.18 s**; large outputs add ~1,300 tok/s | full re-prefill whenever history diverges |
 | OpenCode compaction | **0.2 s**: served from the cached conversation | full re-read: minutes at 200K |
 | New session TTFT (warm prefix) | **0.24 s** | several seconds |
@@ -103,9 +104,15 @@ chunks (an older conversation re-read after a restart) has slightly different lo
 while. The presence penalty counts the current reply's tokens only.
 
 **Attention** — paged KV cache (64-token pages), K int8, V 5-bit Hadamard-rotated (as accurate as int8
-here, 18% smaller: what makes 262K fit). Decode attention is LDS-free WMMA: K rows, Q and transposed V
-rows go straight into WMMA fragments, V scales folded into the probabilities, splits sized to fill the
-GPU. Prefill attention: 16-wave workgroups sharing 32-key LDS stages, ~60 TFLOPS at 128K.
+here, 18% smaller: what makes 262K fit). Decode and verify attention: a workgroup of 8 waves per key split
+and KV head walks 128-key stages; each wave scores 16 of the keys for all query rows (K rows straight from
+memory into WMMA fragments), the waves agree on the softmax max through LDS, and each accumulates the
+output for its own 32 of the 256 dims, so a wave holds 16 accumulator registers instead of 128 and every KV
+byte is read once for all draft tokens. K and V decode to fp16 with packed arithmetic (bytes into the
+mantissa of 1024 by `v_perm`, two 5-bit values per and-or). 0.67 ms per layer at 262K (~700 GB/s; the read
+floor is 0.50 ms), 0.79 ms for a 4-token verify. Prefill attention: 16-wave workgroups share 32-key LDS
+stages, and each stage's raw K/V is loaded into registers during the previous stage's softmax and P·V, so
+DRAM latency hides behind WMMA work: ~80 TFLOPS at 260K.
 
 **Prefill** — chunks of up to 384 tokens (agent turns) run a fused GEMM that dequantizes weights in
 registers straight into WMMA fragments: the weights are read once at 4–6 bits instead of being expanded
@@ -142,22 +149,31 @@ on 64 GB of RAM with no swapping:
 - **Disk:** the n-gram table stays in the source file, memory-mapped; a token's 16 rows are requested
   together so the cold ones are read in parallel, and the next token's while the current step finishes.
 
-Which experts sit in VRAM comes from routing statistics: Unsloth's imatrix counts blended half and half with
-counts kiln measured on code (`tools_fn/route_stats.py`). Expert use on code barely correlates with the
-calibration text's (r = 0.08): this set serves 64% of the expert work on code, against 23% for a
-calibration-only choice.
+Which experts sit in VRAM comes from routing statistics, blended: what the model picks while decoding in
+OpenCode-style agent sessions (0.6; counted on the GPU with `KILN_FN_DECODE_COUNTS=file`, 69K tokens of
+`tools/agent_sim.py` sessions over a dozen coding tasks), what it picks while reading code (0.25,
+`tools_fn/route_stats.py`) and Unsloth's imatrix counts (0.15). Decode routing correlates little with
+either: tuned on code prefill alone, the VRAM tier caught 41-45% of decode picks; this one catches ~59% on
+held-out sessions (cross-validated by task), so a third fewer experts come from RAM per token, and 59% of
+code prefill's (64% before).
 
-**Decode.** Per layer the GPU routes (one fused router + top-10 kernel), runs the shared and hot experts
-in one launch, and hands the cold picks over through pinned coherent memory: the CPU workers (one per
-physical core) compute most of them with ggml's AVX-512 kernels, and the GPU reads the rest from RAM itself
-over PCIe. One kernel waits for the CPU, sums and updates the residual streams. While the CPU works, a
-second stream reads the next layer's weights into the 96 MB Infinity Cache, where the GPU reads them 2.7x
-faster. CPU and PCIe share the RAM's ~60 GB/s, which bounds the cold experts' part of a token.
+**Decode.** Per layer the GPU routes (one fused router + top-10 kernel) and hands the cold picks over
+through pinned coherent memory: the CPU workers (one per physical core) compute most of them with ggml's
+AVX-512 kernels. The shared expert, the hot experts and the GPU's own share of the cold experts (read from
+RAM over PCIe) run side by side in two launches (gate/up, then down), so the PCIe-bound picks hide the hot
+ones. One kernel waits for the CPU, sums and updates the residual streams. While the CPU works, 8
+workgroups on a second stream read the next layer's dense weights into the 96 MB Infinity Cache, where the
+GPU reads them ~2x faster (more workgroups would crowd out the expert kernels). Wave reductions and the
+router's top-10 use DPP / `v_permlanex16` lane exchanges and branch-free compares instead of LDS
+round trips. CPU and PCIe share the RAM's bandwidth, which bounds the cold experts' part of a token.
 
 **Prefill.** A prompt goes through in passes of 8,192 tokens. Within a pass, each layer runs its mixers,
 attention and recurrent state over sub-chunks of 1,024 tokens, then its routed experts once for the whole
 pass, so every expert in RAM is read once per pass rather than once per chunk. Hot experts run as grouped
-WMMA GEMMs in 64-token tiles. Of the cold experts, the CPU computes the ones with few tokens in place (an
+WMMA GEMMs over work items of up to 64 of an expert's tokens: a workgroup dequantizes its 32 weight rows into
+LDS once per half super-block and its 4 waves each run 16 tokens against them. The sparse attention gives
+each (token, KV head) a workgroup of 8 waves over 128-key stages of the token's selected blocks, split by
+output dims as in the 27B's decode kernel. Of the cold experts, the CPU computes the ones with few tokens in place (an
 AVX-512 VNNI kernel with tokens as lanes) and the GPU DMAs the rest into a staging ring. The split follows a
 cost model with rates measured at load and a feedback term that keeps the CPU and GPU finishing together.
 
@@ -169,20 +185,19 @@ model file are dropped from the page cache once copied.
 
 | | |
 |---|---|
-| decode, no drafts / 1 MTP draft | 47-51 / 58-66 tok/s (in a coding conversation: 47 / 58) |
-| prefill 16K tokens | 7.6 s |
-| append to a 16K conversation: 64 / 256 / 1,024 / 4,096 tokens | 0.24 / 0.48 / 0.94 / 2.16 s to the first token |
-| OpenCode's first request (10.7K tokens) | 5.9 s to the first token |
-| at 260K context: decode, no drafts / 1 draft | 46.7 / 54.0 tok/s (27B: 22.8 / 43.0 with 3 drafts) |
-| at 260K context: 1,024-token append | 0.99 s to the first token (27B: 2.79 s) |
-| filling 260K tokens from empty | 130 s, 2,000 tok/s (27B: 448 s) |
-| load / switch from the 27B | 17 s / 18.8 s |
+| decode, no drafts / 2 MTP drafts | 61-63 / 78-80 tok/s (in a coding conversation: 62 / 81) |
+| prefill 16K tokens | 6.8 s |
+| append to a 16K conversation: 64 / 256 / 1,024 / 4,096 tokens | 0.22 / 0.44 / 0.85 / 2.00 s to the first token |
+| at 260K context: decode, no drafts / 2 drafts | 54.4 / 66.7 tok/s (27B: 30.6 / 64.1 with 3 drafts) |
+| at 260K context: 1,024-token append | 0.95 s to the first token (27B: 2.40 s) |
+| filling 260K tokens from empty | 113 s, 2,290 tok/s (27B: 381 s) |
+| load / switch from the 27B | 18 s / 19 s |
 
 Speed hardly changes with depth (`tools/bench_depth.py`, same code base as context for both models): only 12 of
 the 48 layers attend, each to a fixed 2,048 selected cells plus the indexer's scan, where the 27B's full-attention
 layers read the whole cache for every token.
 
-**Quality.** Mean KL divergence against the Q8_0 original on llama.cpp (`tools_fn/compare_fn.py`): 0.013,
+**Quality.** Mean KL divergence against the Q8_0 original on llama.cpp (`tools_fn/compare_fn.py`): 0.011-0.016,
 top-1 agreement 96-99%. A long text that is mostly code pasted into a user turn scores ~0.06: the model's
 predictions inside user turns are chaotic (two kiln runs that differ only in rounding disagree by 0.025 there).
 
@@ -201,7 +216,7 @@ tools/    tests (make test: test_quant, test_attn, test_chat, test_snapshot, tes
 engine_fn/                               the Flash-Next engine (same C API): cpu_moe.cpp cpu_vnni.cpp for the
                                          experts in RAM, moe.hip routing, ple.hip n-gram block, ...
 tools_fn/ fn_quantize.py (builds kiln-fn.gguf), route_stats.py (routing counts for it), test_*_fn.cpp (make test_fn),
-          compare_fn.py, bench_fn.py
+          compare_fn.py, bench_fn.py, bench_dec_fn.cpp / bench_moeg_fn.cpp (decode / prefill MoE kernels alone)
 data/     (not code) rocm/ venv/ models/ llama.cpp/ (quantization tools + reference only)
 ```
 
@@ -214,8 +229,9 @@ made from bartowski's Q8_0 with llama.cpp's quantizer:
 
 `make fn` builds `build/libkiln_fn.so`. Its model file comes from Unsloth's Q8_0 split (plus the MTP file and
 imatrix) via `python tools_fn/fn_quantize.py SRC_DIR data/models/flash-next/kiln-fn.gguf --hot 5600 --q2 0.2
---route data/models/flash-next/route_code.npy --route-weight 0.5` (~20 min); `tools_fn/route_stats.py` measured
-the routing counts on local code.
+--route data/models/flash-next/route_code.npy:0.25 --route data/models/flash-next/route_decode.npy:0.6` (~22 min);
+`tools_fn/route_stats.py` measured the code-prefill counts on local code, `KILN_FN_DECODE_COUNTS` the decode counts
+in `tools/agent_sim.py` sessions (`--model=qwen3.8-flash-next`).
 
 ## Notes
 

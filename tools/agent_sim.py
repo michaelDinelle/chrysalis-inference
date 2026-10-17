@@ -1,6 +1,6 @@
 """A miniature OpenCode: drives the kiln server through a real agent loop (OpenCode's system prompt and tool
 schemas, read-only tools executed for real in this repo) and reports cache reuse and latency per turn.
-usage: agent_sim.py ["task"] [--url http://127.0.0.1:8080/v1]"""
+usage: agent_sim.py ["task"] [--url=http://127.0.0.1:8080/v1] [--model=qwen3.8-27b]"""
 import glob as globmod
 import json
 import os
@@ -11,11 +11,12 @@ import urllib.request
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 URL = next((a.split("=", 1)[1] for a in sys.argv if a.startswith("--url=")), "http://127.0.0.1:8080/v1")
+MODEL = next((a.split("=", 1)[1] for a in sys.argv if a.startswith("--model=")), "qwen3.8-27b")
 TASK = next((a for a in sys.argv[1:] if not a.startswith("--")),
             "How does kiln's decode attention kernel avoid LDS, and how many lines is engine/attn.hip? Be brief.")
 TOOLS = json.load(open(os.path.join(ROOT, "tools/opencode_tools.json")))
 SYSTEM = open(os.path.join(ROOT, "tools/opencode_default_prompt.txt")).read() + f"""
-You are powered by the model named qwen3.8-27b. The exact model ID is kiln/qwen3.8-27b
+You are powered by the model named {MODEL}. The exact model ID is kiln/{MODEL}
 Here is some useful information about the environment you are running in:
 <env>
   Working directory: {ROOT}
@@ -56,7 +57,7 @@ def run_tool(name, args):
 
 
 def chat(messages):
-    body = json.dumps({"model": "qwen3.8-27b", "messages": messages, "tools": TOOLS, "stream": True,
+    body = json.dumps({"model": MODEL, "messages": messages, "tools": TOOLS, "stream": True,
                        "stream_options": {"include_usage": True}}).encode()
     req = urllib.request.Request(URL + "/chat/completions", body, {"Content-Type": "application/json"})
     t0, t_first = time.time(), None

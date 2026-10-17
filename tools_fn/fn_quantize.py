@@ -9,13 +9,16 @@ Weights, by how kiln uses them:
     groups, Q3_K gate / up, and for the least used Q2_FRAC of all pairs Q2_K, both with IQ4_NL down (640-wide rows rule
     out 256-blocks). K-quants run at the CPU's full memory bandwidth (the IQ3 formats are compute-bound there). Use is
     Unsloth's imatrix counts (845,728 tokens of calibration text), blended with routing counts measured by kiln on
-    the work it does (tools_fn/route_stats.py: code), whose expert use barely correlates with the calibration text's.
+    the work it does: prefill of code (tools_fn/route_stats.py) and, since decode reads every pick's expert per token
+    while a long prefill reads them all once per pass, decode in agent sessions (KILN_FN_DECODE_COUNTS), whose expert
+    use correlates little with either.
     The sizes: hot experts + the rest of VRAM's contents fill a 24 GiB card with a 262K-token KV cache and 8K-token
     prefill passes; the RAM groups take ~42 GB;
   * the MTP head's experts Q3_K / IQ4_NL (VRAM; drafts only, so precision only moves acceptance);
   * the n-gram table (51.2B parameters) stays in the source file (Q8_0), memory-mapped by the engine.
 Quantization uses the imatrix importances (per expert for the experts). Usage:
-  python tools_fn/fn_quantize.py SRC_DIR OUT.gguf [--hot N] [--q2 FRAC] [--route COUNTS.npy --route-weight W]
+  python tools_fn/fn_quantize.py SRC_DIR OUT.gguf [--hot N] [--q2 FRAC] [--route COUNTS:W ...]
+  (COUNTS: [48][512] .npy; the calibration counts weigh 1 - the sum of the W)
 """
 import argparse
 import ctypes as C
@@ -201,8 +204,7 @@ def main():
     ap.add_argument("src"); ap.add_argument("out")
     ap.add_argument("--hot", type=int, default=5600, help="experts in VRAM")
     ap.add_argument("--q2", type=float, default=0.2, help="share of all experts in Q2_K (the least used)")
-    ap.add_argument("--route", default=None, help="routing counts [48][512] from tools_fn/route_stats.py")
-    ap.add_argument("--route-weight", type=float, default=0.5, help="their weight against the imatrix counts")
+    ap.add_argument("--route", action="append", default=[], help="routing counts [48][512] (.npy) and their weight, FILE:W")
     a = ap.parse_args()
     src, out, n_hot, q2_frac = a.src, a.out, a.hot, a.q2
     S = Source(src)
@@ -212,11 +214,14 @@ def main():
     # tiers by use over all (layer, expert) pairs: the n_hot most used to VRAM, the least used q2_frac of all to Q2_K;
     # use = shares of the calibration counts, blended with measured routing counts
     calib = np.stack([I.t[f"blk.{l}.ffn_gate_exps.weight.counts"].reshape(-1) for l in range(NL)]).astype(np.float64).reshape(-1)
-    use = calib / calib.sum()
-    routed = None
-    if a.route:
-        routed = np.load(a.route).astype(np.float64).reshape(-1)
-        use = (1 - a.route_weight) * use + a.route_weight * routed / routed.sum()
+    routes = []
+    for spec in a.route:
+        f, wt = spec.rsplit(":", 1)
+        routes.append((os.path.basename(f), np.load(f).astype(np.float64).reshape(-1), float(wt)))
+    w_calib = 1 - sum(wt for _, _, wt in routes)
+    if w_calib < 0: sys.exit("fn_quantize: route weights sum to more than 1")
+    use = w_calib * calib / calib.sum()
+    for _, cnt, wt in routes: use += wt * cnt / cnt.sum()
     order = np.argsort(-use, kind="stable")
     n_q2 = int(q2_frac * order.size)
     tier = np.ones(order.size, np.int32)                          # 0 hot, 1 Q3_K, 2 Q2_K
@@ -225,10 +230,9 @@ def main():
     hot_ids, q2_ids = order[:n_hot], order[order.size - n_q2:]
     tier = tier.reshape(NL, NE)
     hot = [[e for e in range(NE) if tier[l, e] == 0] for l in range(NL)]
-    for name, cnt in (("calibration", calib), ("routing", routed)):
-        if cnt is not None:
-            print(f"{name} text: {n_hot} hot experts serve {100 * cnt[hot_ids].sum() / cnt.sum():.1f}% of expert work, "
-                  f"{n_q2} Q2_K experts {100 * cnt[q2_ids].sum() / cnt.sum():.2f}%")
+    for name, cnt in [("calibration", calib)] + [(f, c) for f, c, _ in routes]:
+        print(f"{name}: {n_hot} hot experts serve {100 * cnt[hot_ids].sum() / cnt.sum():.1f}% of expert work, "
+              f"{n_q2} Q2_K experts {100 * cnt[q2_ids].sum() / cnt.sum():.2f}%")
     print(f"hot experts per layer {min(map(len, hot))}..{max(map(len, hot))}")
 
     W = Writer(out)
@@ -242,8 +246,8 @@ def main():
     W.add_kv("kilnfn.ngram_offset", int(ng.data_offset))
     W.add_kv("kilnfn.ngram_rows", int(ng.shape[1]))
     W.add_kv("kilnfn.n_hot", n_hot)
-    if a.route:
-        W.add_kv("kilnfn.route_weight", float(a.route_weight))
+    if routes:
+        W.add_kv("kilnfn.routes", ", ".join(f"{f}:{wt:g}" for f, _, wt in routes))
 
     def keep(name, out_name=None, dims=None):                    # copy a tensor as it is
         t = S.get(name)
