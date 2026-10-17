@@ -92,6 +92,7 @@ int Engine::snapshot(int id) {
     if (!sn.host) CK(hipHostMalloc(&sn.host, state_bytes()));
     sn.used = true;
     sn.n = s.n;
+    if (s.pending < 0) { sn.top_v = s.top_v; sn.top_i = s.top_i; } else { sn.top_v.clear(); sn.top_i.clear(); }
     sn.pages.assign(s.pages.begin(), s.pages.begin() + (s.n + PAGE - 1) / PAGE);
     for (int p : sn.pages) page_ref[p]++;
     // Copy the state into a device staging buffer (fast, keeps the compute stream moving), then to host
@@ -118,7 +119,7 @@ void Engine::restore(int id, int snap) {
     if (!s.pages.empty()) CK(hipMemcpyAsync(s.d_pages, s.pages.data(), s.pages.size() * 4, hipMemcpyHostToDevice, st));
     s.n = sn.n;
     s.pending = -1;
-    s.top_v.clear(); s.top_i.clear(); s.seen.clear();
+    s.top_v = sn.top_v; s.top_i = sn.top_i; s.seen.clear();
     const uint8_t *h = (const uint8_t *)sn.host;
     const size_t ssm = (size_t)48 * GV * GD * GD * 4, conv = (size_t)48 * QKV * 3 * 4;
     CK(hipMemcpyAsync(s.ssm, h, ssm, hipMemcpyHostToDevice, st));

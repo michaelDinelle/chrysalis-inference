@@ -31,11 +31,11 @@ STRUCT = ["<|im_start|>", "<|im_end|>", "<|endoftext|>", "<think>", "</think>", 
           "<tool_response>", "</tool_response>"]
 
 
-VOLATILE = re.compile(r"^(You are powered by the model|Here is some useful information about the environment|<env>)", re.M)
+VOLATILE = re.compile(r"^(Today's date:|You are powered by the model|Here is some useful information about the environment|<env>)", re.M)
 
 
 def split_static(text):
-    """Split a system prompt before its per-session part (OpenCode's model/environment block), at a line
+    """Split a system prompt before its per-session part (OpenCode's date and environment block), at a line
     start so the tokenization is unchanged. The head is identical across projects and days."""
     m = VOLATILE.search(text)
     return (text[:m.start()], text[m.start():]) if m and m.start() > 0 else (text, "")
@@ -132,10 +132,13 @@ def call_args(tc):
     return fn.get("name", ""), args if isinstance(args, dict) else {"arguments": args}
 
 
-def message_key(msg):
-    """Identity of an assistant turn as the client echoes it back (ignores reasoning and formatting)."""
+def message_key(msg, reasoning=True):
+    """Identity of an assistant turn as the client echoes it back (ignores formatting). With the reasoning, so turns
+    that said and called the same (an "OK", a repeated tool call) stay apart; without it for clients that drop it."""
     calls = [(n, json.dumps(a, sort_keys=True, ensure_ascii=False)) for n, a in map(call_args, msg.get("tool_calls") or [])]
-    return json.dumps([text_of(msg.get("content")).strip(), calls], ensure_ascii=False)
+    r = msg.get("reasoning_content")
+    r = r.strip() if reasoning and isinstance(r, str) else ""
+    return json.dumps([text_of(msg.get("content")).strip(), calls] + ([r] if r else []), ensure_ascii=False)
 
 
 class Renderer:
@@ -189,6 +192,8 @@ class Renderer:
             elif role == "assistant":
                 marks.append(("messages", len(pieces)))
                 hit = self.replay(message_key(m))
+                if hit is None:
+                    hit = self.replay(message_key(m, False))
                 if hit is not None:
                     thinking, ids = hit
                     pieces += [S["<|im_start|>"], "assistant\n", S["<think>"]]

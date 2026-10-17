@@ -27,8 +27,9 @@ class Slot:
 
 
 class Entry:
-    def __init__(self, snap, tokens, pinned=False):
-        self.snap, self.tokens, self.used, self.pinned = snap, tokens, time.time(), pinned
+    def __init__(self, snap, tokens, pinned=False, logits=False):
+        # logits: taken at the end of a prompt, it holds the next token's distribution, so it can serve that whole prompt
+        self.snap, self.tokens, self.used, self.pinned, self.logits = snap, tokens, time.time(), pinned, logits
 
 
 class Cache:
@@ -48,7 +49,7 @@ class Cache:
                 best, kind, reuse = s, "live", n
         for en in self.entries:
             n = len(en.tokens)
-            if n < len(prompt) and n > reuse and common_prefix(en.tokens, prompt) == n:
+            if (n < len(prompt) or n == len(prompt) and en.logits) and n > reuse and common_prefix(en.tokens, prompt) == n:
                 best, kind, reuse = en, "snap", n
         if kind == "live":
             best.used = time.time()
@@ -73,16 +74,25 @@ class Cache:
     def has(self, tokens):
         return any(len(en.tokens) == len(tokens) and common_prefix(en.tokens, tokens) == len(tokens) for en in self.entries)
 
-    def add(self, snap, tokens, pinned=False):
-        self.entries.append(Entry(snap, tokens, pinned))
+    def add(self, snap, tokens, pinned=False, logits=False):
+        self.entries.append(Entry(snap, tokens, pinned, logits))
         self.trim()
 
-    def checkpoint(self, slot, pinned=False):
-        """Snapshot the slot's current state (a message boundary inside a prompt). Pinned snapshots are
-        prefixes shared by every session, evicted only when nothing else is left."""
-        if not len(slot.tokens) or self.has(slot.tokens):
+    def checkpoint(self, slot, pinned=False, logits=False):
+        """Snapshot the slot's current state (a cache point inside a prompt, or its end: logits). Pinned snapshots
+        are prefixes shared by every session, evicted only when nothing else is left."""
+        if not len(slot.tokens):
             return
-        self.add(self.e.snapshot(slot.sid), slot.tokens.copy(), pinned)
+        for en in self.entries:
+            if len(en.tokens) == len(slot.tokens) and common_prefix(en.tokens, slot.tokens) == len(slot.tokens):
+                if logits and not en.logits:             # taken elsewhere (an evicted reply): no distribution in it
+                    pinned = pinned or en.pinned
+                    self.entries.remove(en)
+                    self.e.free_snapshot(en.snap)
+                    break
+                en.pinned, en.used = en.pinned or pinned, time.time()
+                return
+        self.add(self.e.snapshot(slot.sid), slot.tokens.copy(), pinned, logits)
 
     def trim(self, need_tokens=0):
         """Drop least recently used snapshots beyond the count limit, or until `need_tokens` of KV is free."""

@@ -3,14 +3,17 @@
 What keeps time-to-first-token low:
   * prompts render to token ids; assistant turns kiln generated are replayed as their exact ids, so each
     agent step extends the cached sequence (only new tool output / user text is prefilled);
-  * snapshots at the end of the tool block (shared by all sessions), the system turn and every prompt,
-    so new sessions, edited turns and evicted sessions resume from cache instead of from scratch;
+  * snapshots at the end of the tool block and the static system prompt (shared by all sessions), the system turn
+    and every prompt (with the next token's distribution, so a resent prompt needs no prefill), so new sessions,
+    edited turns and evicted sessions resume from cache instead of from scratch;
+  * side requests (session titles, summaries) wait until the agent requests pause;
   * OpenCode prompts are kept byte-stable (date frozen per conversation, appended reminders kept),
     and its compaction request is answered from the live conversation instead of a full re-read.
 """
 import hashlib
 import ipaddress
 import json
+import os
 import random
 import re
 import socket
@@ -40,6 +43,7 @@ DEFAULTS = {True: dict(temperature=1.0, top_p=0.95, top_k=20, min_p=0.0, presenc
             False: dict(temperature=0.7, top_p=0.8, top_k=20, min_p=0.0, presence_penalty=1.5)}
 SIDE_PROMPTS = ("You are a title generator", "Summarize what was done in this conversation")
 COMPACT_PROMPT = "You are a context summarization agent"
+TRACE = bool(os.environ.get("KILN_TRACE"))     # log where each request's time to first token went
 EFFORTS = {"xhigh": "xhigh", "high": "xhigh", "medium": "medium", "low": "low", "minimal": "low"}
 
 
@@ -87,22 +91,39 @@ DATE = re.compile(r"(Today's date: )([^\n]*)")
 
 
 class Turnstile:
-    """One request on the GPU at a time; side requests (titles, summaries) wait while agent requests queue."""
+    """One request on the GPU at a time. Side requests (titles, summaries) go last: they wait while agent requests
+    queue, and start only after SIDE_IDLE seconds without an agent request, counted from their own arrival too.
+    OpenCode sends a new session's title request 8 ms before the session's first request, and an agent's next step
+    ~25 ms after a tool returns, so a side request that took the GPU whenever it was free would hold up the turn
+    the user is waiting for."""
+    SIDE_IDLE = 0.3
 
     def __init__(self):
         self.cv = threading.Condition()
         self.busy, self.waiting = False, 0
+        self.main_seen = 0.0                             # an agent request last arrived or finished
 
     def acquire(self, main):
         with self.cv:
-            self.waiting += main
-            self.cv.wait_for(lambda: not self.busy and (main or self.waiting == 0))
-            self.waiting -= main
+            if main:
+                self.waiting += 1
+                self.main_seen = time.time()
+                self.cv.wait_for(lambda: not self.busy)
+                self.waiting -= 1
+            else:
+                arrived = time.time()
+                while True:
+                    idle = time.time() - max(self.main_seen, arrived)
+                    if not self.busy and not self.waiting and idle >= self.SIDE_IDLE:
+                        break
+                    self.cv.wait(None if self.busy or self.waiting else self.SIDE_IDLE - idle)
             self.busy = True
 
-    def release(self):
+    def release(self, main=True):
         with self.cv:
             self.busy = False
+            if main:
+                self.main_seen = time.time()
             self.cv.notify_all()
 
 
@@ -244,9 +265,9 @@ class Server:
                 if len(prompt) + 1 >= self.capacity:
                     raise ContextError(f"the request ({len(prompt)} tokens) exceeds the available context size "
                                        f"({self.capacity} tokens), try increasing it")
-            yield from self.run(np.array(prompt, np.int32), marks, sp, seed, max_tokens, bool(thinking), schemas, record)
+            yield from self.run(np.array(prompt, np.int32), marks, sp, seed, max_tokens, bool(thinking), schemas, record, side)
         finally:
-            self.gpu.release()
+            self.gpu.release(main=not side)
 
     def compaction(self, messages):
         """OpenCode compacts by sending the older part of the conversation serialized into one user message,
@@ -292,18 +313,33 @@ class Server:
                 s.tokens = s.tokens[:0]
         return self.engine.free_tokens() >= need
 
-    def run(self, prompt, marks, sp, seed, max_tokens, thinking, schemas, record):
+    def run(self, prompt, marks, sp, seed, max_tokens, thinking, schemas, record, side=False):
         t0 = time.time()
+        trace = [] if TRACE else None
         slot, cached = self.cache.acquire(prompt)
-        points = [(marks["tools"], True), (marks["static"], True), (marks["system"], False), (marks["prompt"], False)]
+        if trace is not None:
+            trace.append(("acquire", time.time() - t0))
+        # Cache points: the prompt is prefilled in pieces that end at them, whichever state it starts from, so a seed
+        # draws the same reply from a cold cache and from a snapshot. The last one is the prompt's end, kept with the
+        # next token's distribution: the same prompt again (a retry, a redraw) needs no prefill at all, and an agent
+        # step is one piece (its new messages and the reply's opening tokens together). A side request's system turn
+        # (the title / summary instructions) is shared by every session, so it is kept like the tool block; side
+        # prompts are never resent, so their end is not kept.
+        points = [(marks["tools"], True), (marks["static"], True), (marks["system"], side)]
         pos = cached
         for at, pinned in sorted(p for p in points if p[0] is not None and p[0] > cached) + [(len(prompt), False)]:
             if at <= pos:
                 continue
+            t = time.time()
             self.prefill(slot, prompt, pos, at)
+            if trace is not None:
+                trace.append((f"prefill {at - pos}", time.time() - t))
             pos = at
-            if at < len(prompt):
-                self.cache.checkpoint(slot, pinned)
+            if at < len(prompt) or not side:
+                t = time.time()
+                self.cache.checkpoint(slot, pinned, logits=at == len(prompt))
+                if trace is not None:
+                    trace.append(("checkpoint", time.time() - t))
         t_prefill = time.time()
         self.engine.begin(slot.sid, seed)
         parser = OutputParser(self.tok, thinking, schemas)
@@ -319,6 +355,8 @@ class Server:
                     break
                 if steps == 0:
                     t_first = time.time()
+                    if trace is not None:
+                        trace.append(("first step", t_first - t_prefill))
                 steps += 1
                 stop = next((i for i, t in enumerate(ids) if t in self.tok.eos), None)
                 out += ids
@@ -346,6 +384,7 @@ class Server:
                      "tool_calls": [{"type": "function", "function": {"name": n, "arguments": json.dumps(a, ensure_ascii=False)}} for n, a in calls]}
             if content or calls:                         # an empty reply's key would match every other one
                 gen = out[:-1] if out and out[-1] in self.tok.eos else out[:max_tokens]
+                self.replay.put(message_key(reply, False), (thinking, gen))   # for clients that drop the reasoning
                 self.replay.put(message_key(reply), (thinking, gen))
             if record:                                   # the conversation's latest state, for compaction
                 record["reply"] = reply
@@ -363,7 +402,8 @@ class Server:
                 "decode_tps": n_gen / max(t1 - t_prefill, 1e-6), "tokens_per_step": n_gen / max(steps, 1), "seed": seed}
         self.recent.put(time.time(), info)
         print(f"kiln: prompt {len(prompt)} (cached {cached}) ttft {info['ttft']:.2f}s | gen {n_gen} "
-              f"{info['decode_tps']:.1f} tok/s {info['tokens_per_step']:.2f}/step | {finish} | slot {slot.sid}",
+              f"{info['decode_tps']:.1f} tok/s {info['tokens_per_step']:.2f}/step | {finish} | slot {slot.sid}"
+              + (" | " + ", ".join(f"{k} {v * 1000:.0f} ms" for k, v in trace) if trace else ""),
               file=self.log, flush=True)
         yield "done", info
 

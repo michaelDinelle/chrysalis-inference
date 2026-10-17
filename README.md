@@ -62,7 +62,7 @@ Development: `cd web && bun run dev` (hot reload), `bun run check`.
 | 1,024-token append at 260K | **2.4 s** to the first token | |
 | Agent turn TTFT (small tool output) | **0.11–0.18 s**; large outputs add ~1,300 tok/s | full re-prefill whenever history diverges |
 | OpenCode compaction | **0.2 s**: served from the cached conversation | full re-read: minutes at 200K |
-| New session TTFT (warm prefix) | **0.24 s** | several seconds |
+| New OpenCode session TTFT (warm prefix) | **0.08 s** same project, **0.27 s** another project or day | several seconds |
 | Load: start to serving, model file in the page cache | **1.5 s**, first reply at 1.8 s | |
 | Load from disk (file not cached) | **3.7–3.9 s**, first reply at 4.3–4.5 s | |
 | Unload: stop to process gone / VRAM free | **0.04 s / 0.19 s** | |
@@ -124,16 +124,24 @@ LDS-staged recurrent scan (16 tokens per stage, so every workgroup of a layer is
 4-way split dot products for a short dependency chain per token).
 
 **Caching (TTFT)** — `kiln/chat.py` renders the chat template straight to token ids, byte-identical
-to the official template, and replays assistant turns kiln generated as their exact ids, so each agent
-step only prefills the new tool output. Snapshots (recurrent state in RAM, KV pages shared
-copy-on-write) at the end of the tool block, the static system prompt, the system turn and every prompt.
-They live in RAM and VRAM only: nothing is written to disk, so a restart starts cold. Tokenization is memoized
-per message, so re-rendering a 200K-token conversation each turn costs ~2 ms. OpenCode specifics:
-the date in its environment block is frozen per conversation, plan-mode reminders are kept where
-they first appeared, and its compaction request (normally a full re-read of the older part of the
-conversation) is answered by appending the summary request to the cached conversation, rendered with
-that conversation's own settings. Extra system messages from plugins are merged into the first one.
-Special-token text inside files stays text.
+to the official template, and replays assistant turns kiln generated as their exact ids (looked up by
+their text, tool calls and reasoning, so two turns that said the same "OK" stay apart), so each agent step
+only prefills the new tool output. Snapshots (recurrent state in RAM, KV pages shared copy-on-write) at
+the end of the tool block, of the static system prompt (cut before OpenCode's date and environment
+lines, so it is shared across projects and days), of the system turn, and of every prompt: that last one
+keeps the next token's distribution, so a resent prompt (a retry, a redraw) needs no prefill at all and an
+agent step is one forward pass. A prompt is always cut at these points, so a seed draws the same reply
+from any cached state. They live in RAM and VRAM only: nothing is written to disk, so a restart starts cold.
+Tokenization is memoized per message, so re-rendering a 200K-token conversation each turn costs ~2 ms.
+Side requests (OpenCode's session title, sent 8 ms before the session's first request, and its summaries)
+go last: they start after 0.3 s without an agent request, and their instructions are kept like the tool
+block. OpenCode specifics: the date in its environment block is frozen per conversation, plan-mode
+reminders are kept where they first appeared, and its compaction request (normally a full re-read of the
+older part of the conversation) is answered by appending the summary request to the cached conversation,
+rendered with that conversation's own settings. Extra system messages from plugins are merged into the
+first one. Special-token text inside files stays text. `KILN_TRACE=1` adds each request's time split
+(cache lookup, prefill pieces, snapshots, first step) to its log line; `tools/bench_opencode.py` replays
+OpenCode 2.0.25's real requests (`tools/opencode2.json`) against a running server.
 
 ## Qwen3.8-Flash-Next
 
@@ -215,8 +223,8 @@ engine/   common.h kernels.h gguf.h      constants, kernel entry points, GGUF re
           model.cpp model.h api.cpp      weights, sequences, snapshots, forward, MTP, C API
 kiln/     engine.py chat.py cache.py server.py __main__.py
 web/      server.ts app.ts index.html style.css   Bun web UI
-tools/    tests (make test: test_quant, test_attn, test_chat, test_snapshot, test_server), compare_ref.py,
-          benchmarks, agent_sim.py
+tools/    tests (make test: test_quant, test_attn, test_chat, test_snapshot, test_server; the last two take
+          --use qwen3.8-flash-next), compare_ref.py, benchmarks (bench_opencode.py: OpenCode's real requests), agent_sim.py
 engine_fn/                               the Flash-Next engine (same C API): cpu_moe.cpp cpu_vnni.cpp for the
                                          experts in RAM, moe.hip routing, ple.hip n-gram block, ...
 tools_fn/ fn_quantize.py (builds kiln-fn.gguf), route_stats.py (routing counts for it), test_*_fn.cpp (make test_fn),

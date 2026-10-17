@@ -1,11 +1,14 @@
 """In-process server checks: a client that disconnects mid-stream (OpenCode's Esc, a Stop button) leaves the
 prompt cache consistent with the engine, and the conversation can continue from the partial reply. A seed
-reproduces a reply, whichever cached state the prompt is served from."""
+reproduces a reply, whichever cached state the prompt is served from.
+  python tools/test_server.py [--use qwen3.8-flash-next]   (default: the 27B)"""
 import os, sys
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+from kiln.models import MODELS
 from kiln.server import Server
 
-srv = Server("data/models/kiln-mix.gguf", "data/models/tokenizer.json")
+MODEL = sys.argv[sys.argv.index("--use") + 1] if "--use" in sys.argv else "qwen3.8-27b"
+srv = Server(MODELS[MODEL]["path"], "data/models/tokenizer.json", model=MODEL)
 fails = 0
 
 
@@ -21,7 +24,7 @@ def consistent():
 
 
 question = {"role": "user", "content": "Count from 1 to 300, separated by spaces."}
-gen = srv.chat({"model": "qwen3.8-27b-fast", "messages": [question], "temperature": 0})
+gen = srv.chat({"model": MODEL + "-fast", "messages": [question], "temperature": 0})
 partial = ""
 for kind, val in gen:
     partial += val if kind == "content" else ""
@@ -33,7 +36,7 @@ check("aborted stream: cache matches engine", *consistent())
 partial = partial[:partial.rstrip().rfind(" ")]   # the client keeps what it received; end on a whole number
 messages = [question, {"role": "assistant", "content": partial}, {"role": "user", "content": "Stop. What was the last number you wrote?"}]
 answer, info = "", None
-for kind, val in srv.chat({"model": "qwen3.8-27b-fast", "messages": messages, "temperature": 0}):
+for kind, val in srv.chat({"model": MODEL + "-fast", "messages": messages, "temperature": 0}):
     if kind == "content":
         answer += val
     elif kind == "done":
@@ -48,7 +51,7 @@ check("after follow-up: cache matches engine", *consistent())
 
 def reply(body):
     text, info = "", None
-    for kind, val in srv.chat({"model": "qwen3.8-27b-fast", "max_tokens": 60, **body}):
+    for kind, val in srv.chat({"model": MODEL + "-fast", "max_tokens": 60, **body}):
         if kind == "content":
             text += val
         elif kind == "done":

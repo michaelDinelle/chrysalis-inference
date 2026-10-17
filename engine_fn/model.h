@@ -159,7 +159,10 @@ struct Engine {
     std::vector<int> free_pages;
     std::vector<Seq> seqs;
     std::vector<int> page_ref;
-    struct Snap { bool used = false; int n = 0; int hist[2] = {-1, -1}; std::vector<int> pages; void *host = nullptr; };
+    // top_v / top_i: the next token's top-k logits when the snapshot ends a prompt (empty otherwise), so a restore
+    // there samples at once
+    struct Snap { bool used = false; int n = 0; int hist[2] = {-1, -1}; std::vector<int> pages; void *host = nullptr;
+                  std::vector<float> top_v; std::vector<int> top_i; };
     std::vector<Snap> snaps;
     float *ssm_pool = nullptr;
 

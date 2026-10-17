@@ -109,6 +109,7 @@ int Engine::snapshot(int id) {
     sn.used = true;
     sn.n = s.n;
     sn.hist[0] = s.hist[0]; sn.hist[1] = s.hist[1];
+    if (s.pending < 0) { sn.top_v = s.top_v; sn.top_i = s.top_i; } else { sn.top_v.clear(); sn.top_i.clear(); }
     sn.pages.assign(s.pages.begin(), s.pages.begin() + (s.n + PAGE - 1) / PAGE);
     for (int p : sn.pages) page_ref[p]++;
     CK(hipStreamWaitEvent(st, copied, 0));
@@ -136,7 +137,7 @@ void Engine::restore(int id, int snap) {
     s.n = sn.n;
     s.hist[0] = sn.hist[0]; s.hist[1] = sn.hist[1];
     s.pending = -1;
-    s.top_v.clear(); s.top_i.clear(); s.seen.clear();
+    s.top_v = sn.top_v; s.top_i = sn.top_i; s.seen.clear();
     const uint8_t *h = (const uint8_t *)sn.host;
     size_t o = 0;
     CK(hipMemcpyAsync(s.ssm, h + o, ssm_bytes(), hipMemcpyHostToDevice, st)); o += ssm_bytes();
