@@ -91,9 +91,10 @@ void gdn_conv_commit(float *state, const float *raw, int n, int raw_layer_stride
 
 // The delta-rule scan. Grid (GV heads, 4 column blocks, layers); 128 threads = 32 columns x 4 row-quarters.
 // State stays in registers across tokens; k, q, v and the gates of CT tokens at a time are staged in LDS
-// (rows padded so the 4 row-quarters hit different banks). out == nullptr skips outputs (commit);
-// write_state=0 leaves S untouched (verify).
-constexpr int CT = 32, PADQ = 36;
+// (rows padded so the 4 row-quarters hit different banks; CT = 16 keeps every workgroup of a layer resident at once,
+// where 32 left a second wave of workgroups).
+// out == nullptr skips outputs (commit); write_state=0 leaves S untouched (verify).
+constexpr int CT = 16, PADQ = 36;
 __global__ __launch_bounds__(128) void k_gdn_scan(GdnScanArgs a) {
     __shared__ __attribute__((aligned(16))) float ks[CT][4 * PADQ], qs[CT][4 * PADQ];
     __shared__ float vs[CT][32], dec[CT], bet[CT];
@@ -124,18 +125,20 @@ __global__ __launch_bounds__(128) void k_gdn_scan(GdnScanArgs a) {
         for (int t = 0; t < n; t++) {
             const float decay = dec[t], beta = bet[t];
             const float *kp = &ks[t][part * PADQ];
-            float kv = 0;
+            float k4[4] = {};                            // 4 partial sums: a short dependency chain per token
 #pragma unroll
-            for (int i = 0; i < 32; i++) kv += s[i] * kp[i];
+            for (int i = 0; i < 32; i++) k4[i % 4] += s[i] * kp[i];
+            float kv = (k4[0] + k4[1]) + (k4[2] + k4[3]);
             kv += lane_xor<1>(kv); kv += lane_xor<2>(kv);
             const float delta = beta * (vs[t][tid / 4] - decay * kv);
 #pragma unroll
             for (int i = 0; i < 32; i++) s[i] = decay * s[i] + kp[i] * delta;
             if (a.out) {
                 const float *qp = &qs[t][part * PADQ];
-                float o = 0;
+                float o4[4] = {};
 #pragma unroll
-                for (int i = 0; i < 32; i++) o += s[i] * qp[i];
+                for (int i = 0; i < 32; i++) o4[i % 4] += s[i] * qp[i];
+                float o = (o4[0] + o4[1]) + (o4[2] + o4[3]);
                 o += lane_xor<1>(o); o += lane_xor<2>(o);
                 if (part == 0) a.out[((size_t)(t0 + t) * GV + h) * GD + j] = o * 0.08838834764831845f;   // 1/sqrt(128)
             }
