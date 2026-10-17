@@ -17,9 +17,10 @@ int main(int argc, char **argv) {
     AttnArgs a; a.Q16 = Q16; a.kv = {pool, dp}; a.layer = 0; a.T = T; a.pos0 = depth; a.qg = qg; a.part_o = po; a.part_ml = pml;
     QAct none{nullptr, nullptr};
     hipEvent_t e0, e1; CK(hipEventCreate(&e0)); CK(hipEventCreate(&e1));
-    attention(a, out, none, st);
-    CK(hipEventRecord(e0, st)); for (int i = 0; i < 5; i++) attention(a, out, none, st); CK(hipEventRecord(e1, st)); CK(hipEventSynchronize(e1));
-    float ms; CK(hipEventElapsedTime(&ms, e0, e1)); ms /= 5;
+    const int reps = T <= 8 ? 200 : 5;          // decode calls are short: enough of them for steady clocks
+    for (int i = 0; i < reps / 5 + 1; i++) attention(a, out, none, st);
+    CK(hipEventRecord(e0, st)); for (int i = 0; i < reps; i++) attention(a, out, none, st); CK(hipEventRecord(e1, st)); CK(hipEventSynchronize(e1));
+    float ms; CK(hipEventElapsedTime(&ms, e0, e1)); ms /= reps;
     const double flops = 4.0 * HD * NH * (double)T * (depth + T / 2.0);
-    printf("T=%d depth=%d: %.2f ms  %.1f TFLOPS\n", T, depth, ms, flops / (ms * 1e9));
+    printf("T=%d depth=%d: %.3f ms  %.1f TFLOPS\n", T, depth, ms, flops / (ms * 1e9));
 }

@@ -126,7 +126,7 @@ __global__ __launch_bounds__(128) void k_gdn_scan(GdnScanArgs a) {
             float kv = 0;
 #pragma unroll
             for (int i = 0; i < 32; i++) kv += s[i] * kp[i];
-            kv += __shfl_xor(kv, 1, 32); kv += __shfl_xor(kv, 2, 32);
+            kv += lane_xor<1>(kv); kv += lane_xor<2>(kv);
             const float delta = beta * (vs[t][tid / 4] - decay * kv);
 #pragma unroll
             for (int i = 0; i < 32; i++) s[i] = decay * s[i] + kp[i] * delta;
@@ -135,7 +135,7 @@ __global__ __launch_bounds__(128) void k_gdn_scan(GdnScanArgs a) {
                 float o = 0;
 #pragma unroll
                 for (int i = 0; i < 32; i++) o += s[i] * qp[i];
-                o += __shfl_xor(o, 1, 32); o += __shfl_xor(o, 2, 32);
+                o += lane_xor<1>(o); o += lane_xor<2>(o);
                 if (part == 0) a.out[((size_t)(t0 + t) * GV + h) * GD + j] = o * 0.08838834764831845f;   // 1/sqrt(128)
             }
         }
@@ -245,12 +245,12 @@ __global__ __launch_bounds__(512) void k_gdn_step(GdnStepArgs a) {
         float kv = 0;
 #pragma unroll
         for (int i = 0; i < 32; i++) kv += st[i] * kp[i];
-        kv += __shfl_xor(kv, 1, 32); kv += __shfl_xor(kv, 2, 32);
+        kv += lane_xor<1>(kv); kv += lane_xor<2>(kv);
         const float delta = beta * (vs[t][j] - decay * kv);
         float o = 0;
 #pragma unroll
         for (int i = 0; i < 32; i++) { st[i] = decay * st[i] + kp[i] * delta; o += st[i] * qp[i]; }
-        o += __shfl_xor(o, 1, 32); o += __shfl_xor(o, 2, 32);
+        o += lane_xor<1>(o); o += lane_xor<2>(o);
         if (part == 0) os[t][j] = o * 0.08838834764831845f;
     }
     if (!a.verify) {

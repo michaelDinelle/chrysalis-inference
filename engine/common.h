@@ -71,13 +71,35 @@ struct Arena {
     }
 };
 
+// The value of lane (lane ^ M), M = 1, 2, 4, 8 or 16, as one VALU instruction (DPP quad_perm / row_xmask, or
+// v_permlanex16 across the wave's halves) instead of __shfl_xor's ds_bpermute, an LDS round trip: reductions and top-k
+// selections are chains of these. All lanes of the wave must be active.
+template <int M> __device__ __forceinline__ int lane_xor(int v) {
+    static_assert(M == 1 || M == 2 || M == 4 || M == 8 || M == 16, "lane_xor: M");
+    if constexpr (M == 1) return __builtin_amdgcn_update_dpp(0, v, 0xb1, 0xf, 0xf, true);     // quad_perm [1, 0, 3, 2]
+    else if constexpr (M == 2) return __builtin_amdgcn_update_dpp(0, v, 0x4e, 0xf, 0xf, true);   // quad_perm [2, 3, 0, 1]
+    else if constexpr (M == 4) return __builtin_amdgcn_update_dpp(0, v, 0x164, 0xf, 0xf, true);  // row_xmask:4
+    else if constexpr (M == 8) return __builtin_amdgcn_update_dpp(0, v, 0x168, 0xf, 0xf, true);  // row_xmask:8
+    else return __builtin_amdgcn_permlanex16(v, v, 0x76543210, 0xfedcba98, true, false);      // lane i of the other half
+}
+template <int M> __device__ __forceinline__ float lane_xor(float v) { return __int_as_float(lane_xor<M>(__float_as_int(v))); }
+
 __device__ __forceinline__ float warp_sum(float v) {
-    for (int o = 16; o > 0; o >>= 1) v += __shfl_xor(v, o, 32);
+    v += lane_xor<16>(v); v += lane_xor<8>(v); v += lane_xor<4>(v); v += lane_xor<2>(v); v += lane_xor<1>(v);
     return v;
 }
 __device__ __forceinline__ float warp_max(float v) {
-    for (int o = 16; o > 0; o >>= 1) v = fmaxf(v, __shfl_xor(v, o, 32));
+    v = fmaxf(v, lane_xor<16>(v)); v = fmaxf(v, lane_xor<8>(v)); v = fmaxf(v, lane_xor<4>(v));
+    v = fmaxf(v, lane_xor<2>(v)); v = fmaxf(v, lane_xor<1>(v));
     return v;
+}
+// Wave-wide (max value, lowest index among equals): every lane ends with the winner. Branch-free (a branchy compare
+// makes each step a cascade of exec-mask updates).
+__device__ __forceinline__ void wave_argmax(float &b, int &bi) {
+#define KILN_ARGMAX_STEP(M) { const float ov = lane_xor<M>(b); const int oi = lane_xor<M>(bi); \
+                              const bool tk = (ov > b) | ((ov == b) & (oi < bi)); b = tk ? ov : b; bi = tk ? oi : bi; }
+    KILN_ARGMAX_STEP(16) KILN_ARGMAX_STEP(8) KILN_ARGMAX_STEP(4) KILN_ARGMAX_STEP(2) KILN_ARGMAX_STEP(1)
+#undef KILN_ARGMAX_STEP
 }
 __device__ __forceinline__ float silu(float x) { return x / (1.0f + __expf(-x)); }
 __device__ __forceinline__ float sigmoid(float x) { return 1.0f / (1.0f + __expf(-x)); }

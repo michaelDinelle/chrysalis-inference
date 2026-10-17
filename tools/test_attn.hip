@@ -78,7 +78,7 @@ struct Ref {   // CPU model of the same math, keeping the dequantized cache
 int main() {
     hipStream_t st; CK(hipStreamCreate(&st));
     std::mt19937 rng(7); std::normal_distribution<float> nd;
-    const int maxpos = 256, npages = maxpos / PAGE;
+    const int maxpos = 36864, npages = maxpos / PAGE;
     uint8_t *pool; CK(hipMalloc(&pool, KV_PAGE * npages));
     vector<int> pages(npages); for (int i = 0; i < npages; i++) pages[i] = npages - 1 - i;   // non-identity paging
     int *dpages; CK(hipMalloc(&dpages, npages * 4)); CK(hipMemcpy(dpages, pages.data(), npages * 4, hipMemcpyHostToDevice));
@@ -87,15 +87,20 @@ int main() {
     float *dqw, *dkw; CK(hipMalloc(&dqw, HD * 4)); CK(hipMalloc(&dkw, HD * 4));
     CK(hipMemcpy(dqw, qw.data(), HD * 4, hipMemcpyHostToDevice)); CK(hipMemcpy(dkw, kw.data(), HD * 4, hipMemcpyHostToDevice));
     Ref ref; int fails = 0, pos = 0;
-    struct Case { int T, split; const char *name; } cases[] = {{100, 0, "prefill 100"}, {50, 0, "prefill +50"}, {1, 64, "decode split64"}, {4, 32, "verify4 split32"}, {8, 16, "verify8 split16"}, {1, 0, "decode nosplit"}};
+    struct Case { int T, split; const char *name; bool check = true; };
+    vector<Case> cases = {{100, 0, "prefill 100"}, {50, 0, "prefill +50"}, {1, 64, "decode split64"}, {4, 32, "verify4 split32"}, {8, 16, "verify8 split16"}, {1, 0, "decode nosplit"}};
+    // then a deep context (prefilled in engine-sized chunks, not checked) for decode / verify with many multi-stage splits
+    for (int i = 0; i < 16; i++) cases.push_back({2048, 0, "prefill 2048", false});
+    for (int t : {1, 2, 3, 4, 8, 5, 1}) cases.push_back({t, 0, "deep decode/verify"});
+    float *po, *pml;
+    CK(hipMalloc(&po, (size_t)MAX_SPLITS * 8 * NH * HD * 4)); CK(hipMalloc(&pml, (size_t)MAX_SPLITS * 8 * NH * 2 * 4));
     for (auto c : cases) {
         const int T = c.T;
         vector<float> qg((size_t)T * NH * 2 * HD), k((size_t)T * NKV * HD), v(k.size());
         for (auto &x : qg) x = nd(rng); for (auto &x : k) x = nd(rng); for (auto &x : v) x = nd(rng);
-        float *dqg, *dk, *dv, *po, *pml; half *Q16, *oh;
+        float *dqg, *dk, *dv; half *Q16, *oh;
         CK(hipMalloc(&dqg, qg.size() * 4)); CK(hipMalloc(&dk, k.size() * 4)); CK(hipMalloc(&dv, v.size() * 4));
         CK(hipMalloc(&Q16, (size_t)T * NH * HD * 2)); CK(hipMalloc(&oh, (size_t)T * NH * HD * 2));
-        CK(hipMalloc(&po, (size_t)64 * T * NH * HD * 4)); CK(hipMalloc(&pml, (size_t)64 * T * NH * 2 * 4));
         CK(hipMemcpy(dqg, qg.data(), qg.size() * 4, hipMemcpyHostToDevice));
         CK(hipMemcpy(dk, k.data(), k.size() * 4, hipMemcpyHostToDevice)); CK(hipMemcpy(dv, v.data(), v.size() * 4, hipMemcpyHostToDevice));
         attn_prep(dqg, dk, dv, dqw, dkw, T, pos, kv, 5, Q16, st);
@@ -107,13 +112,15 @@ int main() {
         attention(a, oh, none, st);
         CK(hipStreamSynchronize(st));
         vector<_Float16> got((size_t)T * NH * HD); CK(hipMemcpy(got.data(), oh, got.size() * 2, hipMemcpyDeviceToHost));
-        vector<float> Q, want; ref.prep(qg.data(), k.data(), v.data(), qw.data(), kw.data(), T, pos, Q); ref.attend(Q, qg.data(), T, pos, want);
+        vector<float> Q, want; ref.prep(qg.data(), k.data(), v.data(), qw.data(), kw.data(), T, pos, Q);
+        if (!c.check) { pos += T; CK(hipFree(dqg)); CK(hipFree(dk)); CK(hipFree(dv)); CK(hipFree(Q16)); CK(hipFree(oh)); continue; }
+        ref.attend(Q, qg.data(), T, pos, want);
         double e2 = 0, r2 = 0, emax = 0;
         for (size_t i = 0; i < want.size(); i++) { double e = (double)got[i] - want[i]; e2 += e * e; r2 += want[i] * want[i]; emax = fmax(emax, fabs(e)); }
         const double rel = sqrt(e2 / r2); const bool ok = rel < 5e-3;
         printf("%-16s T=%-3d pos0=%-3d rel %.2e max %.2e %s\n", c.name, T, pos, rel, emax, ok ? "ok" : "FAIL");
         fails += !ok; pos += T;
-        CK(hipFree(dqg)); CK(hipFree(dk)); CK(hipFree(dv)); CK(hipFree(Q16)); CK(hipFree(oh)); CK(hipFree(po)); CK(hipFree(pml));
+        CK(hipFree(dqg)); CK(hipFree(dk)); CK(hipFree(dv)); CK(hipFree(Q16)); CK(hipFree(oh));
     }
     printf(fails ? "%d FAILURES\n" : "all ok\n", fails);
     return fails != 0;
