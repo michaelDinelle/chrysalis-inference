@@ -131,7 +131,9 @@ the end of the tool block, of the static system prompt (cut before OpenCode's da
 lines, so it is shared across projects and days), of the system turn, and of every prompt: that last one
 keeps the next token's distribution, so a resent prompt (a retry, a redraw) needs no prefill at all and an
 agent step is one forward pass. A prompt is always cut at these points, so a seed draws the same reply
-from any cached state. They live in RAM and VRAM only: nothing is written to disk, so a restart starts cold.
+from any cached state. Pinned buffers for all snapshot slots are made during warm-up (Flash-Next: one 1.9 GB
+region whose pages fault in while the warm-up runs; made one at a time, each cost a request 0.1-0.4 s in the
+minutes after a load). They live in RAM and VRAM only: nothing is written to disk, so a restart starts cold.
 Tokenization is memoized per message, so re-rendering a 200K-token conversation each turn costs ~2 ms.
 Side requests (OpenCode's session title, sent 8 ms before the session's first request, and its summaries)
 go last: they start after 0.3 s without an agent request, and their instructions are kept like the tool
@@ -187,7 +189,11 @@ sub-chunks run, so planning a layer's experts waits only for the last one. The s
 each (token, KV head) a workgroup of 8 waves over 128-key stages of the token's selected blocks, split by
 output dims as in the 27B's decode kernel. Of the cold experts, the CPU computes the ones with few tokens in place (an
 AVX-512 VNNI kernel with tokens as lanes) and the GPU DMAs the rest into a staging ring. The split follows a
-cost model with rates measured at load and a feedback term that keeps the CPU and GPU finishing together.
+cost model with rates measured at load and a feedback term that keeps the CPU and GPU finishing together. The
+feedback runs for the first ten passes after a load and then stays put: the CPU and GPU round differently, so a
+split that kept following timing made the same prompt prefill to different logits each time; the settled one
+is as fast (frozen at any point between 1.5x and 2x the CPU estimate, within 2% of the adapting split, and up to
+10% faster than its oscillation on long passes) and Flash-Next's results no longer depend on history.
 
 **Memory.** The model is sized to fit, so there is nothing to guard: kiln loads it and runs. Switching to
 the 27B frees all of it (no experts are kept in RAM), and switching back reloads in ~18 s. Pages of the
@@ -204,6 +210,7 @@ model file are dropped from the page cache once copied.
 | at 260K context: 1,024-token append | 0.91 s to the first token (27B: 2.38 s) |
 | filling 260K tokens from empty | 106 s, 2,450 tok/s (27B: 377 s) |
 | load / switch from the 27B | 18 s / 19 s |
+| OpenCode (`tools/bench_opencode.py`): first request after a load / new session / new day or project | 5.9 / 0.14 / 0.5 s to the first token |
 
 Speed hardly changes with depth (`tools/bench_depth.py`, same code base as context for both models): only 12 of
 the 48 layers attend, each to a fixed 2,048 selected cells plus the indexer's scan, where the 27B's full-attention

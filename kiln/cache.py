@@ -38,6 +38,7 @@ class Cache:
         self.slots = [Slot(engine.new_seq()) for _ in range(n_slots)]
         self.entries = []
         self.max_snapshots, self.min_gap = max_snapshots, min_snapshot_gap
+        engine.reserve_snapshots(max_snapshots + 1)    # trim() frees one after adding it
 
     def acquire(self, prompt):
         """Pick a slot holding the longest reusable prefix of `prompt` (np.int32). Returns (slot, cached)."""

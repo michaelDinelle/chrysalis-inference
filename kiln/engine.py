@@ -81,6 +81,11 @@ class Engine:
         finally:
             _loading = None
 
+    def reserve_snapshots(self, n):
+        """Pinned buffers for n snapshots, made by warmup() (or now, if it already ran), so no request waits for one."""
+        if hasattr(self.lib, "kiln_reserve_snapshots"):
+            self.lib.kiln_reserve_snapshots(n)
+
     def shutdown(self):
         """Release the GPU and the engine's host memory so another engine can load (model switch)."""
         if hasattr(self.lib, "kiln_shutdown"):

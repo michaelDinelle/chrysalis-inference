@@ -21,6 +21,8 @@ int kiln_init(const char *path, int max_seqs, int chunk, long long reserve_mb) {
     return E->n_pages * PAGE;
 }
 void kiln_warmup() { E->warmup(); }
+// Pinned buffers for n snapshots in all: made by warmup(), or now if it already ran.
+void kiln_reserve_snapshots(int n) { E->reserve_snapshots(n); }
 // 0..1 while kiln_init / kiln_warmup run (polled from another thread for a progress bar)
 float kiln_load_progress() { return load_progress(); }
 // frees everything the engine made (model switch); the argument is unused (the 27B engine's signature)
@@ -57,6 +59,8 @@ double kiln_tune(const char *key, double value) {
     if (k == "vnni") old = E->cpu.use_vnni((int)value);
     if (k == "prefetch") { old = E->pf_on; E->pf_on = value != 0; }
     if (k == "cpu_bias") { old = E->cpu_bias; if (value > 0) E->cpu_bias = value; }
+    if (k == "adapt") { old = E->adapt; E->adapt = value != 0; }
+    if (k == "adapt_left") { old = E->adapt_left; if (value >= 0) E->adapt_left = (int)value; }
     return old;
 }
 // Routing statistics (tools_fn/route_stats.py): out == nullptr starts counting the picks per (layer, expert) of prefill

@@ -604,6 +604,7 @@ void Engine::alloc_buffers(int max_seqs) {
 void Engine::warmup() {
     load_phase = 2;
     struct Done { ~Done() { load_phase = 3; } } done_;
+    snap_reserve_start();                              // snapshot buffers fault in meanwhile
     // first launches load the code objects (40-180 ms per source file): a short prefill (the T > 8 path: host routing,
     // CPU job, staging) and a decode step with a draft, on a scratch sequence, keep that out of the first request
     int id = seq_new();
@@ -617,8 +618,8 @@ void Engine::warmup() {
     generate(id, sp, out, 4);
     CK(hipStreamSynchronize(st));
     if (borrowed) seq_reset(seqs[0]); else seq_free(id);
-    snaps.resize(std::max<size_t>(snaps.size(), 2));   // the first snapshots of the first request, ready
-    for (Snap &sn : snaps) if (!sn.host) sn.host = snap_buffer();
+    snap_warm = true;
+    snap_reserve_finish();                             // every snapshot slot the server asked for (2 by default)
 }
 
 void Engine::shutdown() {
@@ -627,12 +628,17 @@ void Engine::shutdown() {
     if (kv_pool) (void)hipFree(kv_pool);
     for (Seq &s : seqs) { (void)hipFree(s.d_pages); (void)hipFree(s.ssm); (void)hipFree(s.conv); (void)hipFree(s.ple); (void)hipFree(s.h_last); (void)hipFree(s.idx_tail); }
     seqs.clear();
-    for (Snap &sn : snaps)
-        if (sn.host) {
-            (void)hipHostUnregister(sn.host);
-            munmap(sn.host, (state_bytes() + (2 << 20) - 1) & ~size_t((2 << 20) - 1));
-        }
-    snaps.clear();
+    snap_reserve_finish();
+    auto in_region = [&](const void *p) {
+        for (auto &r : snap_regions) if (p >= r.first && (const char *)p < (const char *)r.first + r.second) return true;
+        return false;
+    };
+    std::vector<void *> own;                                     // buffers made one by one past the reserved count
+    for (Snap &sn : snaps) if (sn.host && !in_region(sn.host)) own.push_back(sn.host);
+    for (void *p : snap_spare) if (!in_region(p)) own.push_back(p);
+    for (void *p : own) { (void)hipHostUnregister(p); munmap(p, (state_bytes() + (2 << 20) - 1) & ~size_t((2 << 20) - 1)); }
+    for (auto &r : snap_regions) { (void)hipHostUnregister(r.first); munmap(r.first, r.second); }
+    snaps.clear(); snap_spare.clear(); snap_regions.clear();
     if (warena.base) (void)hipFree(warena.base);
     if (barena.base) (void)hipFree(barena.base);
     warena = Arena{}; barena = Arena{};

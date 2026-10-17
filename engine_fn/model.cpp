@@ -91,12 +91,65 @@ void Engine::ensure_pages(Seq &s, int n_tokens, int from) {
 // page, ~0.3 s for a slot while the cold experts hold most of RAM; this takes a few ms)
 void *Engine::snap_buffer() {
     const size_t n = (state_bytes() + (2 << 20) - 1) & ~size_t((2 << 20) - 1);
+    const auto t0 = std::chrono::steady_clock::now();
     void *p = mmap(nullptr, n, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
     if (p == MAP_FAILED) FAIL("cannot allocate a snapshot buffer");
     madvise(p, n, MADV_HUGEPAGE);
     memset(p, 0, n);
+    const auto t1 = std::chrono::steady_clock::now();
     CK(hipHostRegister(p, n, hipHostRegisterDefault));
+    const auto t2 = std::chrono::steady_clock::now();
+    if (getenv("KILN_TRACE"))
+        fprintf(stderr, "kiln-fn: snapshot buffer %zu MB: fault-in %.0f ms, register %.0f ms\n", n >> 20,
+                std::chrono::duration<double, std::milli>(t1 - t0).count(), std::chrono::duration<double, std::milli>(t2 - t1).count());
     return p;
+}
+
+void *Engine::take_snap_buffer() {
+    if (snap_spare.empty()) return snap_buffer();
+    void *p = snap_spare.back();
+    snap_spare.pop_back();
+    return p;
+}
+
+// Buffers for n snapshots in all: the missing ones in one region, faulted in by a few threads and pinned in one call.
+// Small pages: with MADV_HUGEPAGE, faulting in 1.9 GB right after a load took ~1 s of compaction (pinning more pages costs
+// ~0.2 s instead).
+void Engine::reserve_snapshots(int n) {
+    snap_target = std::max(snap_target, n);
+    if (snap_warm) { snap_reserve_start(); snap_reserve_finish(); }
+}
+
+void Engine::snap_reserve_start() {
+    int have = (int)snap_spare.size();
+    for (const Snap &sn : snaps) have += sn.host != nullptr;
+    const int k = snap_target - have;
+    if (k <= 0 || snap_pending) return;
+    const size_t one = (state_bytes() + (2 << 20) - 1) & ~size_t((2 << 20) - 1), all = one * k;
+    void *p = mmap(nullptr, all, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+    if (p == MAP_FAILED) FAIL("cannot allocate %d snapshot buffers", k);
+    madvise(p, all, MADV_NOHUGEPAGE);
+    snap_pending = p; snap_pending_n = k;
+    const int nt = std::min(k, 4);
+    for (int t = 0; t < nt; t++)
+        snap_fill.emplace_back([=] { const size_t a = (size_t)k * t / nt * one, b = (size_t)k * (t + 1) / nt * one; memset((char *)p + a, 0, b - a); });
+}
+
+void Engine::snap_reserve_finish() {
+    const auto t0 = std::chrono::steady_clock::now();
+    for (std::thread &t : snap_fill) t.join();
+    snap_fill.clear();
+    if (!snap_pending) return;
+    const size_t one = (state_bytes() + (2 << 20) - 1) & ~size_t((2 << 20) - 1), all = one * snap_pending_n;
+    const auto t1 = std::chrono::steady_clock::now();
+    CK(hipHostRegister(snap_pending, all, hipHostRegisterDefault));
+    const auto t2 = std::chrono::steady_clock::now();
+    for (int i = 0; i < snap_pending_n; i++) snap_spare.push_back((char *)snap_pending + (size_t)i * one);
+    snap_regions.push_back({snap_pending, all});
+    if (getenv("KILN_TRACE"))
+        fprintf(stderr, "kiln-fn: %d snapshot buffers (%zu MB): fault-in wait %.0f ms, register %.0f ms\n", snap_pending_n,
+                all >> 20, std::chrono::duration<double, std::milli>(t1 - t0).count(), std::chrono::duration<double, std::milli>(t2 - t1).count());
+    snap_pending = nullptr; snap_pending_n = 0;
 }
 
 int Engine::snapshot(int id) {
@@ -105,7 +158,7 @@ int Engine::snapshot(int id) {
     while (si < snaps.size() && snaps[si].used) si++;
     if (si == snaps.size()) snaps.emplace_back();
     Snap &sn = snaps[si];
-    if (!sn.host) sn.host = snap_buffer();
+    if (!sn.host) sn.host = take_snap_buffer();
     sn.used = true;
     sn.n = s.n;
     sn.hist[0] = s.hist[0]; sn.hist[1] = s.hist[1];
@@ -560,8 +613,13 @@ void Engine::moe_back(const Layer &w, int layer, int T) {
         if (!gpu_cold.empty()) CK(hipEventRecord(moe_gpu_done, st));
         cpu.wait();
         // balance feedback: if the GPU's share is already done when the CPU's is, the CPU got too much (and the reverse);
-        // the split's CPU estimates scale by cpu_bias, which settles where both finish together
-        if (!gpu_cold.empty() && split < 0) cpu_bias = std::clamp(cpu_bias * (hipEventQuery(moe_gpu_done) == hipSuccess ? 1.03 : 1 / 1.03), 0.1, 10.0);
+        // the split's CPU estimates scale by cpu_bias, which settles where both finish together. It runs for the first
+        // passes after a load only: a split that keeps following timing would make results depend on history (the CPU
+        // and the GPU round differently), and a settled bias is as fast (1.5-2x the estimate: within 2% everywhere).
+        if (!gpu_cold.empty() && split < 0 && adapt && adapt_left > 0) {
+            cpu_bias = std::clamp(cpu_bias * (hipEventQuery(moe_gpu_done) == hipSuccess ? 1.03 : 1 / 1.03), 0.1, 10.0);
+            if (--adapt_left == 0) fprintf(stderr, "kiln-fn: prefill split settled (CPU cost x%.2f)\n", cpu_bias);
+        }
         pmark(6);
         CK(hipMemcpyAsync(b.Ys, b.h_cout, (size_t)(N - pc0) * D * 2, hipMemcpyHostToDevice, st));
         accum((int)ranges.size() - 1, b.Ys);

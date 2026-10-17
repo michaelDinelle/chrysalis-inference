@@ -8,6 +8,7 @@
 #include <map>
 #include <random>
 #include <string>
+#include <thread>
 #include <tuple>
 #include <vector>
 
@@ -84,9 +85,12 @@ struct Engine {
     float gfrac = 0.3f;                          // share of the decode cold picks the GPU reads over PCIe itself (calibrate())
     double cal_cpu_bw = 50e9, cal_cpu_mac = 150e9, cal_dma_bw = 25e9;   // measured at load: CPU read and VNNI rates, DMA
     double cpu_bias = 1.0;                       // learned correction of the CPU's estimated cost in the prefill split
+    int adapt_left = 480;                        // balance-feedback steps left (10 passes' worth): then cpu_bias stays,
+                                                 // so a prompt prefills to the same result however often it is read
     hipEvent_t moe_gpu_done;
     int n_workers = 0;                           // CPU workers: one per physical core
     int split = -1;                              // experiments: prefill cold experts by the cost model (-1), all on the GPU (0), all on the CPU (1)
+    bool adapt = true;                           // experiments: false freezes cpu_bias (no balance feedback)
     // KILN_FN_PROF: time prefill phases (syncing the stream at each boundary, so phases do not overlap) and print them
     bool prof = getenv("KILN_FN_PROF") != nullptr;
     std::vector<int64_t> route_counts;           // picks per (layer, expert) in prefill passes, when enabled (kiln_route_counts)
@@ -165,6 +169,16 @@ struct Engine {
                   std::vector<float> top_v; std::vector<int> top_i; };
     std::vector<Snap> snaps;
     float *ssm_pool = nullptr;
+    // Snapshot host buffers, made ahead of need in one pinned region (reserve_snapshots): made one at a time on demand,
+    // each took 0.1-0.4 s in the minutes after a load (direct reclaim and compaction), paid by a request.
+    std::vector<void *> snap_spare;
+    std::vector<std::pair<void *, size_t>> snap_regions;   // pinned regions the buffers were carved from
+    void *snap_pending = nullptr;                // a region being faulted in, of snap_pending_n buffers
+    int snap_target = 2, snap_pending_n = 0;
+    bool snap_warm = false;
+    std::vector<std::thread> snap_fill;          // faulting the region in (started early in warmup())
+    void snap_reserve_start();                   // map the missing buffers' region, fault it in on a few threads
+    void snap_reserve_finish();                  // wait for them, pin the region, hand the buffers out
 
     void load(const std::string &path, int max_seqs, size_t reserve_bytes);   // load.cpp
     void calibrate();                            // this machine's CPU / DMA rates for the cold expert split
@@ -176,6 +190,8 @@ struct Engine {
     void seq_truncate(int id, int n);
     int snapshot(int id);
     void *snap_buffer();
+    void *take_snap_buffer();                   // a spare one, else a new one
+    void reserve_snapshots(int n);              // buffers for n snapshots in all (made at warmup(), or now if it ran)
     void restore(int id, int snap);
     void snap_free(int snap);
     void prefill(int id, const int *tokens, int n);
