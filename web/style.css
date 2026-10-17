@@ -16,6 +16,7 @@
   --warn: #e8b04a;
   --danger: #f2706b;
   --code: #0d0b0a;
+  --paper: #f3f0eb;           /* SVG figures: a light page, dimmed so it does not glare in the dark */
   --shadow: 0 12px 40px rgb(0 0 0 / 0.38);
   --t-keyword: #ff9d62;
   --t-string: #a9d37e;
@@ -43,6 +44,7 @@
     --accent-hi: #b9500f;
     --accent-soft: rgb(216 98 31 / 0.11);
     --code: #f8f4ef;
+    --paper: #ffffff;
     --shadow: 0 12px 32px rgb(70 45 20 / 0.09);
     --t-keyword: #c2410c;
     --t-string: #4d7c0f;
@@ -167,8 +169,31 @@ main { display: flex; flex-direction: column; min-height: 0; }
 
 .code { margin: 0.9em 0; overflow: hidden; border: 1px solid var(--line); border-radius: 12px; background: var(--code); }
 .code-head { display: flex; align-items: center; justify-content: space-between; padding: 4px 6px 4px 14px; border-bottom: 1px solid var(--line); background: color-mix(in srgb, var(--panel) 55%, var(--code)); color: var(--faint); font: 12px var(--mono); }
-.copy { padding: 3px 9px; border: 0; border-radius: 6px; background: none; color: var(--muted); font: 12px var(--sans); }
-.copy:hover { background: var(--hover); color: var(--text); }
+.copy, .code-act { padding: 3px 9px; border: 0; border-radius: 6px; background: none; color: var(--muted); font: 12px var(--sans); }
+.copy:hover, .code-act:hover { background: var(--hover); color: var(--text); }
+.code-acts { display: flex; gap: 2px; }
+/* SVG figures: the picture on its own paper (generated drawings assume a light page), sized to the drawing, with a
+   quiet caption bar; the code replaces the picture on demand */
+.svg-fig { margin: 0.9em 0; }
+.svg-paper { width: fit-content; max-width: 100%; box-sizing: border-box; padding: 14px; border: 1px solid var(--line); border-radius: 12px; background: var(--paper); }
+.svg-bar { display: flex; align-items: center; gap: 12px; min-height: 26px; margin-top: 4px; color: var(--faint); font: 12px var(--sans); }
+.svg-state { font-variant-numeric: tabular-nums; }
+.svg-fig.drawing .svg-state::before { content: ""; display: inline-block; width: 6px; height: 6px; margin-right: 7px; border-radius: 50%; background: var(--accent); vertical-align: 1px; animation: pulse 1.2s ease-in-out infinite; }
+.svg-fig.drawing .svg-state::after { content: "…"; }
+.svg-acts { display: flex; gap: 2px; opacity: 0; transition: opacity 120ms; }
+.svg-acts button { padding: 3px 8px; border: 0; border-radius: 6px; background: none; color: var(--muted); font: 12px var(--sans); }
+.svg-acts button:hover { background: var(--hover); color: var(--text); }
+.svg-acts button.done { color: var(--ok); }
+.svg-fig:hover .svg-acts, .svg-fig:focus-within .svg-acts { opacity: 1; }
+@media (hover: none) { .svg-acts { opacity: 1; } }
+.svg-fig.drawing .svg-acts, .svg-fig.failed [data-svg=code], .svg-fig.failed [data-svg=zoom] { display: none; }
+.svg-code { display: none; margin: 0; }
+.svg-fig.show-code .svg-code, .svg-fig.failed .svg-code { display: block; }
+.svg-fig.show-code .svg-paper, .svg-fig.failed .svg-paper { display: none; }
+.svg-zoom { width: 100vw; height: 100vh; max-width: none; max-height: none; margin: 0; padding: 0; border: 0; background: none; cursor: zoom-out; }
+.svg-zoom[open] { display: grid; place-items: center; }
+.svg-zoom::backdrop { background: rgb(0 0 0 / 0.72); }
+.svg-zoom-paper { padding: 20px; border-radius: 14px; background: var(--paper); }
 .copy.done { color: var(--ok); }
 .code pre { margin: 0; padding: 12px 16px; overflow-x: auto; }
 .code code { font: 13px/1.6 var(--mono); }

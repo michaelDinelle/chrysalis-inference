@@ -45,6 +45,13 @@ kept with them. A blank field uses Qwen's recommended value for the thinking mod
 every reply: set a reply's seed to draw it again. Esc stops a reply, the last turn can be regenerated or
 edited, and the sidebar starts or unloads the model (sending a message starts it too). Assistant turns go back
 to kiln exactly as received, so every turn of a conversation is a cache hit.
+Replies render block by block: while one streams, finished paragraphs, code blocks and tables keep their nodes
+and only the growing tail is rebuilt (on the next frame), and the tail shows settled text only: whole words, whole
+code lines and table rows, links once their address is in, no stray `**`. A code block holding an SVG document
+(whatever its label) becomes a figure that draws itself while it streams: it takes its final size from the
+`<svg>` tag, then each element fades in once its tag is complete. It sits on a light page sized to the drawing,
+with Code, Copy, Download and Expand; the markup is sanitized (no scripts, handlers, `foreignObject` or outside
+references) into a shadow root, and the page's Content-Security-Policy lets nothing load from anywhere else.
 Development: `cd web && bun run dev` (hot reload), `bun run check`.
 
 ## Measured on this machine

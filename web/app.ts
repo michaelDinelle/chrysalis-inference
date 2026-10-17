@@ -3,7 +3,7 @@
 // closing the tab ends them). The settings (system prompt, sampling), kept the same way, apply to every conversation.
 import DOMPurify from "dompurify";
 import hljs from "highlight.js/lib/common";
-import { marked } from "marked";
+import { marked, type Links, type Token } from "marked";
 
 type Effort = "xhigh" | "medium" | "low" | "off";
 interface Stats { ttft: number; tps: number; tokens: number; prompt: number; cached: number; thought?: number; seed?: number; model?: string }
@@ -13,7 +13,7 @@ type SamplingKey = "temperature" | "top_p" | "top_k" | "min_p" | "presence_penal
 type Sampling = Partial<Record<SamplingKey, number>>;
 interface Settings { system: string; sampling: Sampling }
 interface Status { state: "online" | "loading" | "offline"; build?: string; model?: string; loading?: string; progress?: number; context?: number; kv_tokens?: number; cache?: { free_kv_tokens: number } }
-interface View { el: HTMLElement; think: HTMLDetailsElement; summary: HTMLElement; thought: HTMLElement; body: HTMLElement; foot: HTMLElement; shown?: string }
+interface View { el: HTMLElement; think: HTMLDetailsElement; summary: HTMLElement; thought: HTMLElement; body: HTMLElement; foot: HTMLElement; shown?: string; blocks?: Blocks }
 interface Live { phase: "waiting" | "thinking" | "writing"; since: number; note: string; loading?: boolean }
 
 // kiln keeps one model on the GPU. The picker by Load / Unload chooses it (switching takes 5-20 s); every chat then
@@ -64,6 +64,7 @@ function h<K extends keyof HTMLElementTagNameMap>(tag: K, cls = "", text = ""): 
 }
 
 const escapeHtml = (s: string) => s.replace(/[&<>"']/g, (c) => `&#${c.charCodeAt(0)};`);
+
 marked.use({
   gfm: true,
   renderer: {
@@ -76,6 +77,231 @@ marked.use({
   },
 });
 const markdown = (src: string) => DOMPurify.sanitize(marked.parse(src, { async: false }));
+
+// ---- replies, block by block --------------------------------------------------------------------------------------
+// A reply renders as its blocks (paragraphs, lists, code blocks, tables...). While it streams, only blocks that changed
+// are rebuilt: finished ones keep their nodes (no re-highlighting; selections and toggles survive), so the work per
+// update is the size of the growing tail, not of the reply. And the tail shows only settled text: whole words, whole
+// code lines and table rows, no half-typed markdown, so nothing flashes and then changes shape.
+interface Blocks { raws: string[]; nodes: Node[][] }
+
+const FENCE = /^ {0,3}(?:`{3,}|~{3,})/gm;
+function settle(src: string): string {
+  const nl = src.lastIndexOf("\n"), head = src.slice(0, nl + 1);
+  let line = src.slice(nl + 1);
+  if ((src.match(FENCE)?.length ?? 0) % 2) return head;                    // in a code block: its whole lines
+  if (/^\s*\|/.test(line)) return head;                                   // a table row once it is complete
+  if (/^\s*(?:[#>*+-]|\d+[.)])*\s*$/.test(line)) return head;             // a bare "#", "-", "1." ... line
+  if (!/\s$/.test(line)) line = line.replace(/[A-Za-z0-9À-ɏ'’_-]{1,24}$/, "");   // a word once it ends
+  const text = head + line, p = text.lastIndexOf("\n\n") + 1;
+  let para = text.slice(p)                                                // the paragraph being written:
+    .replace(/!\[[^\]\n]*\]?(?:\([^)\n]*)?$/, "")                         // no half image,
+    .replace(/\[([^\]\n]*)\]\([^)\n]*$/, "$1").replace(/\[([^\]\n]*)$/, "$1")   // a link is its text until it is whole,
+    .replace(/<\/?[A-Za-z][^>\n]*$/, "")                                  // no half HTML tag,
+    .replace(/(?:\*{1,3}|_{1,3}|~{1,2}|`+)$/, "");                        // markers with nothing after them wait;
+  if ((para.replace(/```[\s\S]*?```/g, "").match(/`/g)?.length ?? 0) % 2) para += "`";   // open code and bold close
+  if ((para.match(/\*\*/g)?.length ?? 0) % 2) para += "**";
+  if ((para.match(/~~/g)?.length ?? 0) % 2) para += "~~";
+  return text.slice(0, p) + para;
+}
+
+function htmlNodes(t: Token, links: Links): Node[] {
+  const tpl = document.createElement("template");
+  tpl.innerHTML = DOMPurify.sanitize(marked.parser(Object.assign([t], { links })));      // (options here would drop marked.use's renderer)
+  return [...tpl.content.childNodes];
+}
+
+function renderBlocks(v: View, src: string, live: boolean) {
+  if (!v.blocks) { v.body.replaceChildren(); v.blocks = { raws: [], nodes: [] }; }
+  const b = v.blocks, tokens = marked.lexer(live ? settle(src) : src), blocks = tokens.filter((t) => t.type !== "space");
+  let k = 0;
+  while (k < blocks.length && k < b.raws.length && b.raws[k] === blocks[k].raw) k++;
+  for (; k < blocks.length; k++) {
+    const t = blocks[k], old = b.nodes[k] ?? [];
+    const now = t.type === "code" && SVG_START.test(t.text) ? [svgFigure(old[0], t.text, live && k === blocks.length - 1)] : htmlNodes(t, tokens.links);
+    b.raws[k] = t.raw;
+    if (now.length === 1 && old.length === 1 && now[0] === old[0]) continue;   // a figure updated in place
+    const at = b.nodes.slice(k).flat()[0] ?? null;
+    for (const n of now) v.body.insertBefore(n, at);
+    for (const n of old) n.parentNode?.removeChild(n);
+    b.nodes[k] = now;
+  }
+  for (const n of b.nodes.slice(blocks.length).flat()) n.parentNode?.removeChild(n);
+  b.nodes.length = b.raws.length = blocks.length;
+  // a figure that was drawing at the tail finishes once something follows it (its block no longer changes)
+  b.nodes.forEach((n, k) => {
+    const f = n[0], t = blocks[k];
+    if (f instanceof HTMLElement && f.classList.contains("drawing") && !(live && k === blocks.length - 1) && t.type === "code") svgFigure(f, t.text, false);
+  });
+}
+
+// ---- SVG figures ----------------------------------------------------------------------------------------------------
+// A code block holding an SVG document (models label it svg, xml or html) shows the picture instead, as a figure that
+// draws itself while it streams: its size is set once the <svg> tag is in (the viewBox), then each element appears,
+// with a short fade, once its tag is complete. The markup is sanitized (no scripts, handlers, foreignObject, external
+// references) and lives in a shadow root, so its styles and ids stay inside it. The code is a click away.
+const SVG_START = /^\s*(?:<\?xml[^>]*\?>\s*)?(?:<!--[\s\S]*?-->\s*|<!DOCTYPE[^>]*>\s*)*<svg[\s>]/i;
+const SVG_SHADOW = ":host { display: block; color: #1f1b19; } svg { display: block; max-width: 100%; height: auto; } " +
+  "svg[data-fit=fluid] { width: 640px; } :host(.zoom) svg { max-width: none; }";
+const svgSource = new WeakMap<Element, string>();
+const reducedMotion = matchMedia("(prefers-reduced-motion: reduce)");
+
+// The document as a standalone file: from the root element on, with the namespaces models often leave out.
+function svgFile(text: string) {
+  let src = text.trim().replace(/^[\s\S]*?(?=<svg[\s>])/i, "");
+  const open = src.match(/^<svg[^>]*>/i)?.[0] ?? "<svg>";
+  let root = open;
+  if (!/\sxmlns\s*=/.test(root)) root = root.replace(/^<svg/i, '<svg xmlns="http://www.w3.org/2000/svg"');
+  if (/\bxlink:/.test(src) && !/\sxmlns:xlink\s*=/.test(root)) root = root.replace(/^<svg/i, '<svg xmlns:xlink="http://www.w3.org/1999/xlink"');
+  return root + src.slice(open.length);
+}
+
+// The part of an SVG that has arrived, as a document: up to the last complete tag (text waits for its closing tag),
+// with the elements still open closed. Also mends a finished one that forgot to close something.
+function svgPrefix(text: string): string | null {
+  const start = text.search(/<svg[\s>]/i);
+  if (start < 0) return null;
+  const s = text.slice(start), stack: string[] = [];
+  let i = 0, cut = 0;
+  while (i < s.length) {
+    const lt = s.indexOf("<", i);
+    if (lt < 0) break;
+    if (s.startsWith("<!--", lt) || s.startsWith("<![CDATA[", lt)) {
+      const e = s.indexOf(s[lt + 2] === "-" ? "-->" : "]]>", lt);
+      if (e < 0) break;
+      i = cut = e + 3;
+      continue;
+    }
+    let j = lt + 1, q = "";
+    for (; j < s.length; j++) {
+      const c = s[j];
+      if (q) { if (c === q) q = ""; } else if (c === '"' || c === "'") q = c; else if (c === ">") break;
+    }
+    if (j >= s.length) break;                                            // a tag still arriving
+    const m = s.slice(lt, j + 1).match(/^<(\/?)([A-Za-z][\w:.-]*)[^]*?(\/?)>$/);
+    if (m && m[1]) {
+      const at = stack.lastIndexOf(m[2]);
+      if (at >= 0) stack.length = at;
+    } else if (m && !m[3]) stack.push(m[2]);
+    i = cut = j + 1;
+    if (!stack.length) break;                                            // the root closed: the end
+  }
+  return cut ? s.slice(0, cut) + stack.reverse().map((t) => `</${t}>`).join("") : null;
+}
+
+// Only references inside the picture: a link or image may point at #id or a data: image, CSS at nothing outside.
+let svgSanitizing = false;
+const scrubCss = (css: string) => css.replace(/@import[^;]*;?/gi, "").replace(/url\(\s*(['"]?)(?!#|data:image\/)[^)]*\)/gi, "none");
+DOMPurify.addHook("uponSanitizeAttribute", (_node, data) => {
+  if (!svgSanitizing) return;
+  if (/^(xlink:)?href$/i.test(data.attrName) && !/^\s*(#|data:image\/)/i.test(data.attrValue)) data.keepAttr = false;
+  else if (/url\(|@import/i.test(data.attrValue)) data.attrValue = scrubCss(data.attrValue);
+});
+DOMPurify.addHook("uponSanitizeElement", (node, data) => {
+  if (svgSanitizing && data.tagName === "style") node.textContent = scrubCss(node.textContent ?? "");
+});
+
+const sameEl = (a: Node, b: Node) => a.nodeType === b.nodeType && (a.nodeType !== 1 || ((a as Element).tagName === (b as Element).tagName
+  && (a as Element).attributes.length === (b as Element).attributes.length
+  && [...(b as Element).attributes].every((x) => (a as Element).getAttribute(x.name) === x.value)));
+// Bring dst's subtree to src's, touching only what differs; new elements are collected (to fade them in).
+function syncSvg(dst: Element, src: Element, added: Element[]) {
+  const a = [...dst.childNodes], b = [...src.childNodes];
+  b.forEach((y, i) => {
+    const x = a[i];
+    if (x && sameEl(x, y)) {
+      if (y.nodeType === 1) syncSvg(x as Element, y as Element, added);
+      else if (x.nodeValue !== y.nodeValue) x.nodeValue = y.nodeValue;
+      return;
+    }
+    if (x) dst.replaceChild(y, x); else dst.appendChild(y);
+    if (y.nodeType === 1) added.push(y as Element);
+  });
+  for (const x of a.slice(b.length)) x.remove();
+}
+
+function drawSvg(root: ShadowRoot, markup: string | null, fade: boolean): boolean {
+  if (!markup) return !!root.querySelector("svg");
+  svgSanitizing = true;
+  let frag: DocumentFragment;
+  try {
+    frag = DOMPurify.sanitize(markup, { USE_PROFILES: { svg: true, svgFilters: true }, FORBID_TAGS: ["foreignObject"], RETURN_DOM_FRAGMENT: true });
+  } finally { svgSanitizing = false; }
+  const svg = frag.querySelector("svg");
+  if (!svg) return false;
+  const num = (n: string) => /^\s*[\d.]+\s*(px)?\s*$/.test(svg.getAttribute(n) ?? "") ? parseFloat(svg.getAttribute(n)!) : 0;
+  const w = num("width"), hh = num("height");
+  if (w && hh && !svg.hasAttribute("viewBox")) svg.setAttribute("viewBox", `0 0 ${w} ${hh}`);   // so it can scale down
+  if (!w) svg.setAttribute("data-fit", "fluid");
+  const cur = root.querySelector("svg"), added: Element[] = [];
+  if (cur && sameEl(cur, svg)) syncSvg(cur, svg, added);
+  else {
+    cur ? cur.replaceWith(svg) : root.append(svg);
+    added.push(...svg.children);
+  }
+  if (fade && !reducedMotion.matches)
+    for (const el of added) if (el instanceof SVGGraphicsElement) el.animate([{ opacity: 0 }, { opacity: 1 }], { duration: 260, easing: "ease-out" });
+  return true;
+}
+
+function svgFigure(old: Node | undefined, text: string, drawing: boolean): HTMLElement {
+  let fig = old instanceof HTMLElement && old.classList.contains("svg-fig") ? old : null;
+  if (!fig) {
+    fig = h("figure", "svg-fig");
+    fig.innerHTML = `<div class="svg-paper"></div><figcaption class="svg-bar"><span class="svg-state"></span><span class="svg-acts">` +
+      ["code:Code", "copy:Copy", "save:Download", "zoom:Expand"].map((a) => `<button type="button" data-svg="${a.split(":")[0]}">${a.split(":")[1]}</button>`).join("") +
+      `</span></figcaption><div class="code svg-code"><div class="code-head"><span>svg</span><button type="button" class="copy">Copy</button></div>` +
+      `<pre><code class="hljs"></code></pre></div>`;
+    fig.querySelector(".svg-paper")!.attachShadow({ mode: "open" }).innerHTML = `<style>${SVG_SHADOW}</style>`;
+  }
+  svgSource.set(fig, text);
+  fig.classList.toggle("drawing", drawing);
+  const t = performance.now();
+  if (!drawing || t - Number(fig.dataset.drawn ?? 0) > 90) {             // at most ~11 redraws a second while it streams
+    fig.dataset.drawn = String(t);
+    const ok = drawSvg(fig.querySelector(".svg-paper")!.shadowRoot!, svgPrefix(text), drawing);
+    fig.classList.toggle("failed", !drawing && !ok);
+  }
+  const svg = fig.querySelector(".svg-paper")!.shadowRoot!.querySelector("svg"), box = svg?.viewBox.baseVal;
+  fig.querySelector(".svg-state")!.textContent = drawing ? "Drawing" : fig.classList.contains("failed") ? "Couldn't draw this SVG"
+    : box && box.width ? `SVG · ${Math.round(box.width)} × ${Math.round(box.height)}` : "SVG";
+  if (fig.classList.contains("show-code") || fig.classList.contains("failed")) svgCode(fig);
+  return fig;
+}
+
+function svgCode(fig: Element) {
+  const code = fig.querySelector(".svg-code code")!, text = svgSource.get(fig) ?? "";
+  if (code.textContent !== text) code.innerHTML = hljs.highlight(text, { language: "xml", ignoreIllegals: true }).value;
+}
+
+function svgAction(btn: HTMLElement) {
+  const fig = btn.closest(".svg-fig")!, text = svgSource.get(fig) ?? "";
+  const act = btn.dataset.svg;
+  if (act === "code") {
+    btn.textContent = fig.classList.toggle("show-code") ? "Picture" : "Code";
+    svgCode(fig);
+  } else if (act === "copy") copy(text, btn);
+  else if (act === "save") {
+    const a = h("a");
+    a.href = URL.createObjectURL(new Blob([svgFile(text)], { type: "image/svg+xml" }));
+    a.download = "image.svg";
+    a.click();
+    setTimeout(() => URL.revokeObjectURL(a.href), 1000);
+  } else if (act === "zoom") {
+    const dlg = $<HTMLDialogElement>("svg-zoom"), host = h("div");
+    host.className = "zoom";
+    host.attachShadow({ mode: "open" }).innerHTML = `<style>${SVG_SHADOW}</style>`;
+    drawSvg(host.shadowRoot!, svgPrefix(text), false);
+    const svg = host.shadowRoot!.querySelector("svg"), vb = svg?.viewBox.baseVal;
+    if (svg && vb && vb.width && vb.height) {                           // as large as the window allows, its shape kept
+      const ar = vb.width / vb.height, w = Math.min(innerWidth * 0.94 - 40, (innerHeight * 0.92 - 40) * ar);
+      svg.style.width = `${w}px`;
+      svg.style.height = `${w / ar}px`;
+    }
+    dlg.querySelector(".svg-zoom-paper")!.replaceChildren(host);
+    dlg.showModal();
+  }
+}
 const fmtK = (n: number) => (n < 1000 ? String(n) : `${(n / 1000).toFixed(n < 10_000 ? 1 : 0)}K`);
 const fmtS = (s: number) => `${s < 10 ? s.toFixed(1) : Math.round(s)} s`;
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
@@ -167,9 +393,9 @@ function paint(v: View, m: Message, live?: Live) {
   if (live?.phase === "waiting") {
     // while a model loads the sidebar's bar says so; here only the dot
     v.body.innerHTML = `<p class="waiting">${live.loading ? "" : `${live.note} · ${fmtS(elapsed)}`}</p>`;
-    v.shown = undefined;
+    v.shown = v.blocks = undefined;
   } else if (v.shown !== m.content) {
-    v.body.innerHTML = markdown(m.content);
+    renderBlocks(v, m.content, !!live);
     v.shown = m.content;
   }
   if (live) return;
@@ -427,7 +653,10 @@ async function generate() {
   follow = true;
   render();
   const v = views.get(m)!, live: Live = { phase: "waiting", since: performance.now(), note: "Reading the prompt" };
-  const timer = setInterval(() => { paint(v, m, live); if (follow) scroller.scrollTop = scroller.scrollHeight; }, 60);
+  let frame = 0;
+  const show = () => { frame = 0; paint(v, m, live); if (follow) scroller.scrollTop = scroller.scrollHeight; };
+  const schedule = () => { frame ||= requestAnimationFrame(show); };
+  const timer = setInterval(schedule, 250);
   let t0 = performance.now(), tFirst = 0, tAnswer = 0, tLast = 0, usage: any, seed: number | undefined;
   try {
     if (status.state !== "online" || status.loading) {
@@ -460,6 +689,7 @@ async function generate() {
       if (d.reasoning_content || d.content) {
         tFirst ||= now;
         tLast = now;
+        schedule();
       }
       if (ev.usage) usage = ev.usage;
       if (ev.seed !== undefined) seed = ev.seed;
@@ -476,6 +706,7 @@ async function generate() {
     else m.error = e instanceof Error ? e.message : String(e);
   } finally {
     clearInterval(timer);
+    cancelAnimationFrame(frame);
     if (busy === ctrl) busy = null;              // a newer reply may have started after this one was stopped
   }
   c.updated = Date.now();
@@ -556,6 +787,8 @@ function copy(text: string, button: HTMLElement) {
   setTimeout(() => { button.classList.remove("done"); if (button.classList.contains("copy")) button.textContent = label; }, 1200);
 }
 
+$("svg-zoom").addEventListener("click", (e) => (e.currentTarget as HTMLDialogElement).close());   // a click anywhere closes it
+
 function grow() {
   input.style.height = "auto";
   input.style.height = `${Math.min(input.scrollHeight, 240)}px`;
@@ -564,6 +797,8 @@ function grow() {
 thread.addEventListener("click", (e) => {
   const t = e.target as HTMLElement, code = t.closest<HTMLElement>(".copy"), act = t.closest<HTMLElement>("[data-act]");
   if (code) return void copy(code.closest(".code")?.querySelector("code")?.textContent ?? "", code);
+  const svg = t.closest<HTMLElement>("[data-svg]");
+  if (svg) return void svgAction(svg);
   if (!act) return;
   const i = Number(act.closest<HTMLElement>("article")?.dataset.i), m = conv.messages[i];
   if (act.dataset.act === "copy") return void copy(m.content, act);

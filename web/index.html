@@ -3,6 +3,9 @@
   <head>
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <!-- nothing the page shows (model markdown, SVG figures) may load from or talk to anywhere else (under `bun run dev`
+         this also blocks the dev server's inline tab-hidden beacon: one console message, nothing else changes) -->
+    <meta http-equiv="Content-Security-Policy" content="default-src 'self'; img-src 'self' data: blob:; style-src 'self' 'unsafe-inline'; font-src 'self' data:; connect-src 'self'; object-src 'none'; base-uri 'none'; form-action 'self'" />
     <title>kiln</title>
     <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24'%3E%3Cpath fill='%23f07a3c' d='M12 1.5c.9 3.6-.9 5.9-2.6 7.9C7.8 11.2 6 13.1 6 15.9 6 19.3 8.7 22 12 22s6-2.6 6-6.2c0-2.7-1.4-4.7-2.6-6.1-.3 1.6-1.2 2.7-2.4 3.2 1-3.9-.2-8.1-1-11.4z'/%3E%3C/svg%3E" />
     <link rel="stylesheet" href="./style.css" />
@@ -64,6 +67,7 @@
         </div>
       </form>
     </dialog>
+    <dialog id="svg-zoom" class="svg-zoom" aria-label="SVG, full size"><div class="svg-zoom-paper"></div></dialog>
     <script type="module" src="./app.ts"></script>
   </body>
 </html>
