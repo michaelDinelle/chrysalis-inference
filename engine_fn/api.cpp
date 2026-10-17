@@ -60,6 +60,7 @@ double kiln_tune(const char *key, double value) {
     if (k == "prefetch") { old = E->pf_on; E->pf_on = value != 0; }
     if (k == "cpu_bias") { old = E->cpu_bias; if (value > 0) E->cpu_bias = value; }
     if (k == "adapt") { old = E->adapt; E->adapt = value != 0; }
+    if (k == "lookahead") { old = E->la_on; E->la_on = value != 0; }
     if (k == "adapt_left") { old = E->adapt_left; if (value >= 0) E->adapt_left = (int)value; }
     return old;
 }

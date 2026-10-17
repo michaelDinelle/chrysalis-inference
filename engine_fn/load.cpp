@@ -138,6 +138,13 @@ void Engine::load(const std::string &path, int max_seqs, size_t reserve_bytes) {
     CK(hipStreamCreateWithFlags(&st, hipStreamNonBlocking));
     CK(hipStreamCreateWithFlags(&cst, hipStreamNonBlocking));
     CK(hipStreamCreateWithFlags(&pst, hipStreamNonBlocking));
+    {   // the lookahead's kernels go ahead of the queued token-mixer work: the earlier its prediction, the more the CPU loads
+        int lo = 0, hi = 0;
+        CK(hipDeviceGetStreamPriorityRange(&lo, &hi));
+        CK(hipStreamCreateWithPriority(&lst, hipStreamNonBlocking, hi));
+    }
+    CK(hipEventCreateWithFlags(&la_ready, hipEventDisableTiming));
+    CK(hipEventCreateWithFlags(&la_done, hipEventDisableTiming));
     CK(hipEventCreateWithFlags(&routed, hipEventDisableTiming));
     CK(hipEventCreateWithFlags(&moe_gpu_done, hipEventDisableTiming));
     CK(hipEventCreateWithFlags(&staged, hipEventDisableTiming));
@@ -432,15 +439,17 @@ void Engine::load(const std::string &path, int max_seqs, size_t reserve_bytes) {
     }
     // ---- CPU workers for the cold experts ---------------------------------------------------------------------------
     {
-        void *p;
-        CK(hipHostMalloc(&p, sizeof(MoeShared), hipHostMallocCoherent | hipHostMallocMapped));
-        memset(p, 0, sizeof(MoeShared));
-        sh = (MoeShared *)p;
-        void *dp;
-        CK(hipHostGetDevicePointer(&dp, p, 0));
-        d_sh = (MoeShared *)dp;
+        auto shared = [](MoeShared *&h, MoeShared *&d) {
+            void *p, *dp;
+            CK(hipHostMalloc(&p, sizeof(MoeShared), hipHostMallocCoherent | hipHostMallocMapped));
+            memset(p, 0, sizeof(MoeShared));
+            CK(hipHostGetDevicePointer(&dp, p, 0));
+            h = (MoeShared *)p; d = (MoeShared *)dp;
+        };
+        shared(sh, d_sh);
+        shared(sh_pred, d_sh_pred);
         n_workers = physical_cores();
-        cpu.start(sh, cold, n_workers);
+        cpu.start(sh, sh_pred, cold, n_workers);
     }
     // ---- hipBLASLt, buffers, sequences, KV pool -----------------------------------------------------------------
     hipblasLtCreate(&lt);
@@ -494,6 +503,10 @@ void Engine::alloc_buffers(int max_seqs) {
         b.lo = a.get<float>((size_t)U * HCR);
         b.inv = a.get<float>((size_t)8 * HC);
         b.rr_counter = a.get<unsigned>(64);
+        la.res = a.get<float>((size_t)8 * HCD); la.lo = a.get<float>((size_t)8 * HCR); la.inv = a.get<float>((size_t)8 * HC);
+        la.mx = a.get<float>((size_t)8 * D); la.hh = a.get<half>((size_t)8 * D); la.hq = qact((size_t)8 * D);
+        la.logits = a.get<float>((size_t)8 * NE); la.sg = a.get<float>(8); la.wts = a.get<float>(8 * TOPK_E);
+        la.ids = a.get<int>(8 * TOPK_E); la.hot = a.get<int>(8 * TOPK_E); la.counter = a.get<unsigned>(64);
         b.idx_raw = a.get<half>((size_t)NKVL * U * IDX_D);
         b.gate = a.get<float>(big);
         b.inj_a = a.get<float>((size_t)U * HC);
@@ -576,6 +589,7 @@ void Engine::alloc_buffers(int max_seqs) {
     barena.init(dry.used + (1 << 20));
     carve(barena);
     CK(hipMemsetAsync(b.rr_counter, 0, 4, st));
+    CK(hipMemsetAsync(la.counter, 0, 4, st));
     // pinned host buffers
     CK(hipHostMalloc(&b.ple_rows, (size_t)S * PLE_HEADS * 170));
     CK(hipHostMalloc(&b.h_ids, N * 4)); CK(hipHostMalloc(&b.h_wts, N * 4)); CK(hipHostMalloc(&b.h_tok, N * 4));
@@ -643,11 +657,12 @@ void Engine::shutdown() {
     if (barena.base) (void)hipFree(barena.base);
     warena = Arena{}; barena = Arena{};
     for (void *p : {(void *)b.ple_rows, (void *)b.h_ids, (void *)b.h_wts, (void *)b.h_tok, (void *)b.h_entw, (void *)b.h_pos, (void *)b.h_btok,
-                    (void *)b.h_work, (void *)b.h_x16, (void *)b.h_cout, (void *)b.h_topv, (void *)b.h_topi, (void *)b.h_draft, (void *)sh})
+                    (void *)b.h_work, (void *)b.h_x16, (void *)b.h_cout, (void *)b.h_topv, (void *)b.h_topi, (void *)b.h_draft, (void *)sh,
+                    (void *)sh_pred})
         if (p) (void)hipHostFree(p);
     if (embd.q) { void *h = nullptr; (void)hipHostGetDevicePointer(&h, embd.q, 0); }
     if (embd_host) (void)hipHostFree(embd_host);
-    embd_host = nullptr; embd.q = nullptr; sh = d_sh = nullptr;
+    embd_host = nullptr; embd.q = nullptr; sh = d_sh = nullptr; sh_pred = d_sh_pred = nullptr;
     if (stage_state) (void)hipFree(stage_state);
     if (route_dec) (void)hipFree(route_dec);
     route_dec = nullptr;
@@ -658,7 +673,8 @@ void Engine::shutdown() {
     free_pages.clear(); page_ref.clear();
     if (cold_mem) (void)hipHostUnregister(cold_mem);
     (void)hipGetLastError();
-    (void)hipStreamDestroy(st); (void)hipStreamDestroy(cst); (void)hipStreamDestroy(pst);
+    (void)hipStreamDestroy(st); (void)hipStreamDestroy(cst); (void)hipStreamDestroy(pst); (void)hipStreamDestroy(lst);
+    (void)hipEventDestroy(la_ready); (void)hipEventDestroy(la_done);
     if (cold_mem) munmap(cold_mem, cold_bytes);
     if (ngram_map) munmap(ngram_map, ngram_map_bytes);
     cold_mem = nullptr; ngram_map = nullptr; cold_bytes = 0; d_cold = nullptr;

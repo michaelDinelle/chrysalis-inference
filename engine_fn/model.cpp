@@ -691,6 +691,19 @@ void Engine::ple_block_run(Seq &s, int c0, int n, bool verify, float *res) {
 // A pass: tokens (host) at positions s.n .. s.n+T-1 (T <= smax) through the 48 layers, layer by layer. Within a layer,
 // the token mixer and the mixers run over sub-chunks of at most umax tokens in order (attention and the recurrent states
 // see every earlier token), then the routed experts once for all T. Leaves the final residual in b.res.
+// The layer's MoE routing predicted from its input residual (see lst in model.h). la.res is a copy, so the token mixer may
+// write the residual meanwhile; the next layer's copy waits until this layer's lookahead has read it.
+void Engine::lookahead(const Layer &w, int layer, int T, const float *res) {
+    CK(hipStreamWaitEvent(st, la_done, 0));
+    CK(hipMemcpyAsync(la.res, res, (size_t)T * HCD * 4, hipMemcpyDeviceToDevice, st));
+    CK(hipEventRecord(la_ready, st));
+    CK(hipStreamWaitEvent(lst, la_ready, 0));
+    hc_mix_fused(la.res, w.hcf.norm, w.hcf.down, w.hcf.up, nullptr, T, la.lo, nullptr, HC, la.inv, la.mx, la.hh, la.hq, lst);
+    router_route_dec(w.router, w.sg_w, la.mx, T, la.logits, la.sg, w.slot_of, la.ids, la.wts, la.hot, d_sh_pred, gfrac, layer,
+                     gen + 1, la.counter, lst);
+    CK(hipEventRecord(la_done, lst));
+}
+
 void Engine::forward(Seq &s, const int *tokens, int T, bool verify) {
     ensure_pages(s, s.n + T, s.n);
     if (T > 8) pmark(-1);
@@ -716,6 +729,7 @@ void Engine::forward(Seq &s, const int *tokens, int T, bool verify) {
                 if (ple_th.joinable()) ple_th.join();
                 ple_block_run(s, c0, n, verify, res);
             }
+            if (T <= 4 && la_on && w.n_cold) lookahead(w, l, n, res);
             hc_mix_run(*this, w.hca, res, n, b.inj_a);
             if (is_attn_layer(l)) attn_block(w, l / 4, s, n, s.n + c0, res, b.inj_a, verify);
             else gdn_block(w, gl, s, n, verify, res, b.inj_a);

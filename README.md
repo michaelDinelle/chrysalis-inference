@@ -177,7 +177,12 @@ ones. One kernel waits for the CPU, sums and updates the residual streams. While
 workgroups on a second stream read the next layer's dense weights into the 96 MB Infinity Cache, where the
 GPU reads them ~2x faster (more workgroups would crowd out the expert kernels). Wave reductions and the
 router's top-10 use DPP / `v_permlanex16` lane exchanges and branch-free compares instead of LDS
-round trips. CPU and PCIe share the RAM's bandwidth, which bounds the cold experts' part of a token.
+round trips. CPU and PCIe share the RAM's bandwidth, which bounds the cold experts' part of a token. That
+bandwidth idles while the GPU runs a layer's token mixer, so a fourth stream runs the layer's own MoE mixer
+and router on a copy of its input residual meanwhile and publishes the predicted CPU picks (they catch ~70%
+of the cold picks); the workers load those experts' weights into their caches until the real handoff
+arrives (prefetch hints are dropped at this volume; plain loads are not). It changes no result and gains
+1-2% at short context, ~4% at 64K.
 
 **Prefill.** A prompt goes through in passes of 8,192 tokens. Within a pass, each layer runs its mixers,
 attention and recurrent state over sub-chunks of 1,024 tokens, then its routed experts once for the whole
@@ -235,7 +240,8 @@ tools/    tests (make test: test_quant, test_attn, test_chat, test_snapshot, tes
 engine_fn/                               the Flash-Next engine (same C API): cpu_moe.cpp cpu_vnni.cpp for the
                                          experts in RAM, moe.hip routing, ple.hip n-gram block, ...
 tools_fn/ fn_quantize.py (builds kiln-fn.gguf), route_stats.py (routing counts for it), test_*_fn.cpp (make test_fn),
-          compare_fn.py, bench_fn.py, bench_dec_fn.cpp / bench_moeg_fn.cpp (decode / prefill MoE kernels alone)
+          compare_fn.py, bench_fn.py, bench_dec_fn.cpp / bench_moeg_fn.cpp / bench_cpudec_fn.cpp (decode / prefill MoE
+          kernels / the CPU's decode handoff alone)
 data/     (not code) rocm/ venv/ models/ llama.cpp/ (quantization tools + reference only)
 ```
 

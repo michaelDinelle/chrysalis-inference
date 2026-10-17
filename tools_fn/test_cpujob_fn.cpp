@@ -87,7 +87,7 @@ int main(int argc, char **argv) {
         }
         cl.down = rd.data(); cl.type_dn = GGML_TYPE_IQ4_NL; cl.row_dn = ggml_row_size(GGML_TYPE_IQ4_NL, FE);
         cl.n0 = NC0; cl.n = NC;
-        CpuMoe cpu; cpu.start(sh, {cl}, 8); cpu.arm();
+        CpuMoe cpu; cpu.start(sh, nullptr, {cl}, 8); cpu.arm();
         std::vector<float> x((size_t)T * D);
         for (auto &v : x) v = nd(rng);
         Job J = make_job(T, 4, NC, rng, x);
@@ -136,7 +136,7 @@ int main(int argc, char **argv) {
         fix(g, bb, doff, gt == GGML_TYPE_Q2_K ? 2 : 1); fix(u, bb, doff, gt == GGML_TYPE_Q2_K ? 2 : 1); fix(dn, 18, 0, 1);
         ColdLayer cl; cl.gate[0] = g.data(); cl.up[0] = u.data(); cl.down = dn.data();
         cl.type_gu[0] = gt; cl.type_dn = GGML_TYPE_IQ4_NL; cl.row_gu[0] = rgu; cl.row_dn = rdn; cl.n0 = cl.n = NC;
-        CpuMoe cpu; cpu.start(sh, {cl}, threads); cpu.arm();
+        CpuMoe cpu; cpu.start(sh, nullptr, {cl}, threads); cpu.arm();
         const double expert_bytes = 2.0 * FE * rgu + (double)D * rdn, macs = 3.0 * FE * D;
         printf("-- %s gate/up + IQ4_NL down, %d experts (%.2f GB)\n", name, NC, NC * expert_bytes / 1e9);
         for (int T : {8, 16, 32, 64, 128, 256, 512}) {

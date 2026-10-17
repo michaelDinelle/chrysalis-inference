@@ -100,7 +100,7 @@ int main() {
     MoeShared *sh; CK(hipHostMalloc((void **)&sh, sizeof(MoeShared), hipHostMallocCoherent | hipHostMallocMapped));
     memset(sh, 0, sizeof(MoeShared));
     MoeShared *dsh; CK(hipHostGetDevicePointer((void **)&dsh, sh, 0));
-    CpuMoe cpu; cpu.start(sh, cl, 8); cpu.arm();
+    CpuMoe cpu; cpu.start(sh, nullptr, cl, 8); cpu.arm();
     int fails = 0;
     uint32_t gen = 0;
 

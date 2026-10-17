@@ -76,8 +76,9 @@ float vnni_dot_dn1(const uint8_t *row, const int8_t *hq, const float *hs, const 
 class CpuMoe {
 public:
     // shared: device-visible host memory (hipHostMalloc coherent); threads: worker count (not pinned: the scheduler
-    // moves a worker off a core that another process is using)
-    void start(MoeShared *shared, const std::vector<ColdLayer> &layers, int threads);
+    // moves a worker off a core that another process is using). pred: the GPU's prediction of the next handoff's picks
+    // (its go = that handoff's generation), whose weights the workers load into their caches while they wait.
+    void start(MoeShared *shared, MoeShared *pred, const std::vector<ColdLayer> &layers, int threads);
     void stop();
     // workers spin on `go` only between arm() and disarm() (decode: the GPU hands over a layer's cold picks every few
     // hundred microseconds), and sleep otherwise until a prefill job arrives
@@ -92,7 +93,9 @@ public:
 private:
     void worker(int id);
     void prefill_work(int id);
-    MoeShared *sh = nullptr;
+    void preload(int id, uint32_t real, uint32_t job);   // load this worker's slice of the predicted picks while sh->go is
+                                                         // `real` and no host job came after `job`
+    MoeShared *sh = nullptr, *pr = nullptr;
     std::vector<ColdLayer> L;
     std::vector<std::thread> th;
     int n = 0;
@@ -116,6 +119,8 @@ private:
     // prefill jobs
     MoeJob job;
     std::atomic<uint32_t> jgen{0};               // bumped by submit()
+    std::atomic<uint64_t> sink_{0};              // keeps the preload's loads
+
     std::atomic<int> jtok{0}, jexp{0}, jfin{0};  // next token to quantize, next expert, workers finished
     std::vector<uint8_t> pxq[2];                 // [T] the job's inputs quantized to each group's gate/up dot type
     std::vector<int8_t> vxq; std::vector<float> vxs; std::vector<int32_t> vxsum;   // [T] int8 per 32 + scales + sums per 16 (VNNI)

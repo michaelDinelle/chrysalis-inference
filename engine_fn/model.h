@@ -105,6 +105,17 @@ struct Engine {
 
     // runtime
     hipStream_t st, cst, pst;                    // compute, copies, decode prefetch
+    // Expert lookahead (decode): at a layer's start a fourth stream runs the layer's own MoE mixer and router on the
+    // residual before its token mixer, and publishes the predicted CPU share of the cold picks in sh_pred (go = the
+    // generation the real handoff will carry). The CPU workers load those experts' weights into their caches while the
+    // GPU runs the token mixer, a window in which the memory bus would idle. It finds ~70% of the cold picks and changes
+    // no result.
+    hipStream_t lst = nullptr;
+    hipEvent_t la_ready = nullptr, la_done = nullptr;
+    MoeShared *sh_pred = nullptr, *d_sh_pred = nullptr;
+    struct { float *res, *lo, *inv, *mx, *logits, *sg, *wts; half *hh; QAct hq; int *ids, *hot; unsigned *counter; } la{};
+    bool la_on = getenv("KILN_FN_NO_LOOKAHEAD") == nullptr;   // experiments: tune key "lookahead"
+    void lookahead(const Layer &w, int layer, int T, const float *res);
     hipEvent_t staged, copied, topk_ready, routed;
     hipEvent_t front_ready, front_copied;        // a sub-chunk's MoE inputs and picks are ready / on the host (prefill)
     PrefetchRange *pf_ranges = nullptr;          // per decoder layer: its dense weights, read into the Infinity Cache while

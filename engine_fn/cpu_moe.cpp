@@ -14,9 +14,10 @@ inline uint32_t load_acq(const uint32_t *p) { return __atomic_load_n(p, __ATOMIC
 inline void store_rel(uint32_t *p, uint32_t v) { __atomic_store_n(p, v, __ATOMIC_RELEASE); }
 }
 
-void CpuMoe::start(MoeShared *shared, const std::vector<ColdLayer> &layers, int threads) {
+void CpuMoe::start(MoeShared *shared, MoeShared *pred, const std::vector<ColdLayer> &layers, int threads) {
     ggml_cpu_init();
     sh = shared;
+    pr = pred;
     L = layers;
     n = threads;
     // every layer's groups share their formats (one model file); group 1 may be absent
@@ -143,10 +144,36 @@ void CpuMoe::prefill_work(int id) {
     jfin.fetch_add(1, std::memory_order_release);
 }
 
+// The predicted handoff's weights, this worker's 1/n of each pick's gate, up and down rows, read one load per cache line
+// (prefetch hints are dropped at this volume; loads keep ~20 misses in flight per core and the lines stay in L2 / L3).
+// Stops as soon as the real handoff (or a host job) arrives: then whatever was loaded is a cache hit.
+void CpuMoe::preload(int id, uint32_t real, uint32_t job) {
+    const int layer = pr->layer, T = std::min(pr->T, MOE_MAX_T);
+    if (layer < 0 || layer >= (int)L.size()) return;
+    const ColdLayer &c = L[layer];
+    int slot[MOE_MAX_T * MOE_MAX_E], np = 0;
+    for (int j = 0; j < T * MOE_MAX_E; j++) { const int s = pr->slot[j]; if (s >= 0 && s < c.n) slot[np++] = s; }
+    uint64_t sink = 0;
+    for (int p = 0; p < np; p++) {
+        const uint8_t *seg[3] = {c.gu_row(false, slot[p], 0), c.gu_row(true, slot[p], 0), c.dn_row(slot[p], 0)};
+        const size_t g = c.grp(slot[p]), len[3] = {640 * c.row_gu[g], 640 * c.row_gu[g], 2560 * c.row_dn};
+        for (int k = 0; k < 3; k++) {
+            const size_t a = len[k] * id / n / 64 * 64, b = len[k] * (id + 1) / n;
+            for (size_t o = a; o < b; o += 64 * 32) {
+                if (load_acq(&sh->go) != real || jgen.load(std::memory_order_relaxed) != job) { sink_ += sink; return; }
+                const size_t e = std::min(b, o + 64 * 32);
+                for (size_t q = o; q < e; q += 64) sink += *(const volatile uint64_t *)(seg[k] + q);
+            }
+        }
+    }
+    sink_ += sink;
+}
+
 void CpuMoe::worker(int id) {
-    uint32_t last = seen.load(), jlast = jgen.load();
+    uint32_t last = seen.load(), jlast = jgen.load(), plast = pr ? load_acq(&pr->go) : 0;
     for (;;) {
-        // wait for the next generation (GPU decode handoff) or host job: spin while armed, sleep otherwise
+        // wait for the next generation (GPU decode handoff) or host job: spin while armed, sleep otherwise; meanwhile
+        // load the weights of a prediction for the next handoff
         uint32_t g;
         bool host_job = false;
         for (;;) {
@@ -157,6 +184,13 @@ void CpuMoe::worker(int id) {
             g = load_acq(&sh->go);
             if (g != last) break;
             if (!armed.load(std::memory_order_acquire)) { wake.wait(wk, std::memory_order_acquire); continue; }
+            if (pr) {
+                const uint32_t p = load_acq(&pr->go);
+                if (p != plast) {
+                    plast = p;
+                    if (p == last + 1) { preload(id, last, jlast); continue; }
+                }
+            }
             _mm_pause();
         }
         if (host_job) { prefill_work(id); continue; }
