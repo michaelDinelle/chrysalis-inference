@@ -146,7 +146,7 @@ void ple_commit(float *state, const float *xconv, int n, hipStream_t st);
 
 // routed experts at prefill (quant.hip / moe.hip) ------------------------------------------------------
 struct MoeWork { int slot, m0, n, tier; };
-constexpr int MOE_ITEM = 64;                     // tokens per work item at most (an expert's tokens split into items)
+constexpr int MOE_ITEM = 256;                     // tokens per work item at most (an expert's tokens split into items)
 void moe_gemm_gateup(const QTensor &g0, const QTensor &u0, const QTensor &g1, const QTensor &u1, const MoeWork *work, int nwork,
                      const half *X, half *H, hipStream_t st);
 void moe_gemm_down(const QTensor &d0, const QTensor &d1, const MoeWork *work, int nwork, const half *H, const float *wts, half *Y, hipStream_t st);

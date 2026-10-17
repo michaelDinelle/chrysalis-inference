@@ -363,6 +363,13 @@ void Engine::moe_front(const Layer &w, int n, int c0) {
     CK(hipMemcpyAsync(x, b.hh, (size_t)n * D * 2, hipMemcpyDeviceToDevice, st));
     gemm(w.router, NE, D, x, D, n, b.rlog, NE, false, false);
     route_many(b.rlog, w.sg_w, b.mx, n, b.idsT + (size_t)c0 * TOPK_E, b.wtsT + (size_t)c0 * TOPK_E, b.sgT + c0, st);
+    // the sub-chunk's picks (and inputs, for the CPU's experts) go to the host on the copy stream while the next
+    // sub-chunks run, so moe_back only waits for the last one
+    CK(hipEventRecord(front_ready, st));
+    CK(hipStreamWaitEvent(cst, front_ready, 0));
+    CK(hipMemcpyAsync(b.h_ids + (size_t)c0 * TOPK_E, b.idsT + (size_t)c0 * TOPK_E, (size_t)n * TOPK_E * 4, hipMemcpyDeviceToHost, cst));
+    CK(hipMemcpyAsync(b.h_wts + (size_t)c0 * TOPK_E, b.wtsT + (size_t)c0 * TOPK_E, (size_t)n * TOPK_E * 4, hipMemcpyDeviceToHost, cst));
+    if (w.n_cold) CK(hipMemcpyAsync(b.h_x16 + (size_t)c0 * D, x, (size_t)n * D * 2, hipMemcpyDeviceToHost, cst));
     half *g = b.att_h, *u = b.att_h + (size_t)n * FS;           // shared expert as GEMMs: gate | up -> silu * up -> down
     linear(w.sh_gate, n, NO_Q, x, D, g, FS, GEMV_STORE, true);
     linear(w.sh_up, n, NO_Q, x, D, u, FS, GEMV_STORE, true);
@@ -379,10 +386,8 @@ void Engine::moe_front(const Layer &w, int n, int c0) {
 // its tokens' rows of b.moe in router order, so the result does not depend on how the work was split.
 void Engine::moe_back(const Layer &w, int layer, int T) {
     const int N = T * TOPK_E, P = smax;
-    CK(hipMemcpyAsync(b.h_ids, b.idsT, (size_t)N * 4, hipMemcpyDeviceToHost, st));
-    CK(hipMemcpyAsync(b.h_wts, b.wtsT, (size_t)N * 4, hipMemcpyDeviceToHost, st));
-    if (w.n_cold) CK(hipMemcpyAsync(b.h_x16, b.hmoe, (size_t)T * D * 2, hipMemcpyDeviceToHost, st));
-    CK(hipStreamSynchronize(st));
+    CK(hipEventRecord(front_copied, cst));        // the copies moe_front queued for this pass's sub-chunks
+    CK(hipEventSynchronize(front_copied));
     const std::vector<int> &slot_of = w.slot_h;
     std::vector<int> cnt(NE, 0);
     for (int j = 0; j < N; j++) cnt[b.h_ids[j]]++;

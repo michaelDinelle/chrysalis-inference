@@ -169,6 +169,15 @@ int main(int argc, char **argv) {
     };
     int li = 0;
     const float us = time_us(st, reps, [&] { layer(li++); });
+    if (getenv("BENCH_GRAPH")) {   // the same sequence (NLAY layers) captured once and replayed as a graph
+        hipGraph_t g; hipGraphExec_t ge;
+        CK(hipStreamBeginCapture(st, hipStreamCaptureModeGlobal));
+        for (int i = 0; i < NLAY; i++) layer(i);
+        CK(hipStreamEndCapture(st, &g));
+        CK(hipGraphInstantiate(&ge, g, nullptr, nullptr, 0));
+        const float gus = time_us(st, reps / NLAY + 1, [&] { CK(hipGraphLaunch(ge, st)); }) / NLAY;
+        printf("as a graph: %.1f us per layer\n", gus);
+    }
     printf("GDN layer sequence (%d weight copies, GPU cold pick %s, prefetch %s): %.1f us per layer\n", NLAY, cold_gpu ? "on" : "off",
            pf_on ? "on" : "off", us);
 }

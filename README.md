@@ -55,10 +55,10 @@ Development: `cd web && bun run dev` (hot reload), `bun run check`.
 | Decode, coding prompt, thinking, Qwen sampling | **100–114 tok/s** (MTP, 3 drafts) | 39.8 tok/s |
 | Decode, greedy | **112–116 tok/s** | |
 | Decode at 131K of real code (thinking, MTP) | **80 tok/s** (37 without drafts) | ~17 tok/s at 128K (reported) |
-| Decode at 260K of real code | **64 tok/s** (31 without drafts) | |
+| Decode at 260K of real code | **64-69 tok/s** (31 without drafts) | |
 | Prefill, 2K-token chunks | **1,350 tok/s** | 1,015 tok/s |
 | Prefill, short appends (one forward pass) | **16 tokens in 43 ms, 64 in 73 ms, 256 in 222 ms** | |
-| Prefill at 128K | **~730 tok/s**; filling 260K from empty: 381 s (683 tok/s) | ~390 tok/s (reported) |
+| Prefill at 128K | **~740 tok/s**; filling 260K from empty: 377 s (690 tok/s) | ~390 tok/s (reported) |
 | 1,024-token append at 260K | **2.4 s** to the first token | |
 | Agent turn TTFT (small tool output) | **0.11–0.18 s**; large outputs add ~1,300 tok/s | full re-prefill whenever history diverges |
 | OpenCode compaction | **0.2 s**: served from the cached conversation | full re-read: minutes at 200K |
@@ -120,7 +120,8 @@ to fp16 first (that copy costs ~140 ms per pass). WMMA wants each fragment in bo
 half-wave dequantizes or loads half of it and they swap with `v_permlanex16` (the halves may hold K in
 different orders as long as A and B agree), halving that work. Longer chunks use hipBLASLt fp16 GEMMs
 (~95 TFLOPS on this card vs ~60 for rocBLAS) on weights dequantized per layer. Token-parallel conv,
-LDS-staged recurrent scan.
+LDS-staged recurrent scan (16 tokens per stage, so every workgroup of a layer is resident at once, and
+4-way split dot products for a short dependency chain per token).
 
 **Caching (TTFT)** — `kiln/chat.py` renders the chat template straight to token ids, byte-identical
 to the official template, and replays assistant turns kiln generated as their exact ids, so each agent
@@ -158,8 +159,9 @@ held-out sessions (cross-validated by task), so a third fewer experts come from 
 code prefill's (64% before).
 
 **Decode.** Per layer the GPU routes (one fused router + top-10 kernel) and hands the cold picks over
-through pinned coherent memory: the CPU workers (one per physical core) compute most of them with ggml's
-AVX-512 kernels. The shared expert, the hot experts and the GPU's own share of the cold experts (read from
+through pinned coherent memory: the CPU workers (one per physical core) compute most of them with AVX-512
+VNNI row kernels (each 64-weight register decoded straight from the GGUF blocks, group scales as lane vectors,
+one horizontal sum per row: ~52-56 GB/s from RAM, near the ~62 GB/s the CPU's fabric link allows). The shared expert, the hot experts and the GPU's own share of the cold experts (read from
 RAM over PCIe) run side by side in two launches (gate/up, then down), so the PCIe-bound picks hide the hot
 ones. One kernel waits for the CPU, sums and updates the residual streams. While the CPU works, 8
 workgroups on a second stream read the next layer's dense weights into the 96 MB Infinity Cache, where the
@@ -170,8 +172,10 @@ round trips. CPU and PCIe share the RAM's bandwidth, which bounds the cold exper
 **Prefill.** A prompt goes through in passes of 8,192 tokens. Within a pass, each layer runs its mixers,
 attention and recurrent state over sub-chunks of 1,024 tokens, then its routed experts once for the whole
 pass, so every expert in RAM is read once per pass rather than once per chunk. Hot experts run as grouped
-WMMA GEMMs over work items of up to 64 of an expert's tokens: a workgroup dequantizes its 32 weight rows into
-LDS once per half super-block and its 4 waves each run 16 tokens against them. The sparse attention gives
+WMMA GEMMs over work items of up to 256 of an expert's tokens: a workgroup dequantizes its 32 weight rows into
+LDS once per half super-block and each of its waves runs 16 tokens against them (gate/up 8 waves, down 16:
+up to ~80 TFLOPS). Each sub-chunk's picks and MoE inputs go to the host on the copy stream while the next
+sub-chunks run, so planning a layer's experts waits only for the last one. The sparse attention gives
 each (token, KV head) a workgroup of 8 waves over 128-key stages of the token's selected blocks, split by
 output dims as in the 27B's decode kernel. Of the cold experts, the CPU computes the ones with few tokens in place (an
 AVX-512 VNNI kernel with tokens as lanes) and the GPU DMAs the rest into a staging ring. The split follows a
@@ -185,12 +189,12 @@ model file are dropped from the page cache once copied.
 
 | | |
 |---|---|
-| decode, no drafts / 2 MTP drafts | 61-63 / 78-80 tok/s (in a coding conversation: 62 / 81) |
-| prefill 16K tokens | 6.8 s |
-| append to a 16K conversation: 64 / 256 / 1,024 / 4,096 tokens | 0.22 / 0.44 / 0.85 / 2.00 s to the first token |
-| at 260K context: decode, no drafts / 2 drafts | 54.4 / 66.7 tok/s (27B: 30.6 / 64.1 with 3 drafts) |
-| at 260K context: 1,024-token append | 0.95 s to the first token (27B: 2.40 s) |
-| filling 260K tokens from empty | 113 s, 2,290 tok/s (27B: 381 s) |
+| decode, no drafts / 2 MTP drafts | 66-68 / 82-85 tok/s (in a coding conversation: 62 / 84) |
+| prefill 16K tokens | 6.2 s |
+| append to a 16K conversation: 64 / 256 / 1,024 / 4,096 tokens | 0.18 / 0.42 / 0.82 / 1.89 s to the first token |
+| at 260K context: decode, no drafts / 2 drafts | 57.7 / 65 tok/s (27B: 30.6 / 69 with 3 drafts) |
+| at 260K context: 1,024-token append | 0.91 s to the first token (27B: 2.38 s) |
+| filling 260K tokens from empty | 106 s, 2,450 tok/s (27B: 377 s) |
 | load / switch from the 27B | 18 s / 19 s |
 
 Speed hardly changes with depth (`tools/bench_depth.py`, same code base as context for both models): only 12 of

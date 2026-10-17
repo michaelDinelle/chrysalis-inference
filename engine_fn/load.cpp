@@ -143,6 +143,8 @@ void Engine::load(const std::string &path, int max_seqs, size_t reserve_bytes) {
     CK(hipEventCreateWithFlags(&staged, hipEventDisableTiming));
     CK(hipEventCreateWithFlags(&copied, hipEventDisableTiming));
     CK(hipEventCreateWithFlags(&topk_ready, hipEventDisableTiming));
+    CK(hipEventCreateWithFlags(&front_ready, hipEventDisableTiming));
+    CK(hipEventCreateWithFlags(&front_copied, hipEventDisableTiming));
     CK(hipEventRecord(copied, cst));
 
     // ---- plan the VRAM weights: every dense tensor and the hot / MTP expert tiers --------------------------------

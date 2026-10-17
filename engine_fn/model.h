@@ -102,6 +102,7 @@ struct Engine {
     // runtime
     hipStream_t st, cst, pst;                    // compute, copies, decode prefetch
     hipEvent_t staged, copied, topk_ready, routed;
+    hipEvent_t front_ready, front_copied;        // a sub-chunk's MoE inputs and picks are ready / on the host (prefill)
     PrefetchRange *pf_ranges = nullptr;          // per decoder layer: its dense weights, read into the Infinity Cache while
     std::vector<int> pf_off, pf_n;               // the CPU computes the previous layer's cold experts (decode)
     unsigned *pf_sink = nullptr;

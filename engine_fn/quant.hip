@@ -1011,21 +1011,23 @@ __device__ __forceinline__ void frags64(const QTensor &W, int row, int ch, int h
     }
 }
 
-constexpr int MOE_TW = 1;                         // token tiles of 16 per wave: work items of up to 4 * 16 * MOE_TW tokens
-// gate/up: 4 waves on 32 rows of gate and up and the work item's tokens (at most MOE_ITEM), 16 * MOE_TW per wave. Per half super-block
+constexpr int MOE_TW = 1;                         // token tiles of 16 per wave
+constexpr int MOE_NW_GU = 8, MOE_NW_DN = 16;          // waves per workgroup (gate/up loops over an item's tokens in two
+                                                    // super-tiles; down takes all MOE_ITEM at once): measured best
+// gate/up: MOE_NW_GU waves on 32 rows of gate and up and the work item's tokens (at most MOE_ITEM), 16 * MOE_TW per wave. Per half super-block
 // (128 columns: steps c = 2h, 2h + 1 hold its fragments in every format) the 32 rows are dequantized once into LDS (fp16,
 // natural K order) by all threads, then every wave runs its tokens against them, so a weight is decoded once per work
 // item rather than once per token tile.
 template <int QT>
-__global__ __launch_bounds__(128) __attribute__((amdgpu_waves_per_eu(6))) void k_moe_gateup(QTensor g0, QTensor u0, QTensor g1,
+__global__ __launch_bounds__(32 * MOE_NW_GU) __attribute__((amdgpu_waves_per_eu(6))) void k_moe_gateup(QTensor g0, QTensor u0, QTensor g1,
         QTensor u1, const MoeWork *work, const half *X, half *H) {
     __shared__ _Float16 Ws[2][32][128 + 8];                 // gate | up rows of the current half super-block
     const MoeWork wk = work[blockIdx.y];
     const QTensor &G = wk.tier ? g1 : g0, &U = wk.tier ? u1 : u0;
     const int tid = threadIdx.x, wave = tid / 32, l = tid % 32, hf = l >> 4, r = l & 15;
     const int row0 = wk.slot * FE + blockIdx.x * 32;
-    for (int tt = 0; tt < wk.n; tt += 4 * 16 * MOE_TW) {   // one pass for the engine's items (at most MOE_ITEM tokens)
-    const int nt = min(4 * 16 * MOE_TW, wk.n - tt), m0 = wk.m0 + tt;
+    for (int tt = 0; tt < wk.n; tt += MOE_NW_GU * 16 * MOE_TW) {   // one pass for the engine's items (at most MOE_ITEM tokens)
+    const int nt = min(MOE_NW_GU * 16 * MOE_TW, wk.n - tt), m0 = wk.m0 + tt;
     const int ntw = min(MOE_TW, (nt - 16 * MOE_TW * wave + 15) / 16);   // wave-uniform: this wave's token tiles
     const _Float16 *xl[MOE_TW];                             // B: lane = token
 #pragma unroll
@@ -1034,7 +1036,7 @@ __global__ __launch_bounds__(128) __attribute__((amdgpu_waves_per_eu(6))) void k
     for (int hs = 0; hs < 2 * (D / 256); hs++) {
         const int sb = hs >> 1, h2 = hs & 1;
 #pragma unroll 1
-        for (int u = tid; u < 2 * 32 * 2 * 2; u += 128) {   // (matrix, row, step, half) units: 4 fragments x 8 values each
+        for (int u = tid; u < 2 * 32 * 2 * 2; u += 32 * MOE_NW_GU) {   // (matrix, row, step, half) units: 4 fragments x 8 values each
             const int mat = u >> 7, row = (u >> 2) & 31, c = 2 * h2 + ((u >> 1) & 1), h = u & 1;
             const QTensor &W = mat ? U : G;
             const SbScales sc = sb_scales<QT>(W, row0 + row, sb);
@@ -1074,16 +1076,16 @@ __global__ __launch_bounds__(128) __attribute__((amdgpu_waves_per_eu(6))) void k
     }
 }
 
-// down: 4 waves on 32 rows of Dn and the work item's tokens (at most MOE_ITEM), 16 * MOE_TW per wave; the 32 rows (K = FE) are
+// down: MOE_NW_DN waves on 32 rows of Dn and the work item's tokens (at most MOE_ITEM), 16 * MOE_TW per wave; the 32 rows (K = FE) are
 // dequantized once into LDS, as above.
 template <int QT>
-__global__ __launch_bounds__(128) void k_moe_down_g(QTensor d0, QTensor d1, const MoeWork *work, const half *H, const float *wts, half *Y) {
+__global__ __launch_bounds__(32 * MOE_NW_DN) void k_moe_down_g(QTensor d0, QTensor d1, const MoeWork *work, const half *H, const float *wts, half *Y) {
     __shared__ _Float16 Ws[32][FE + 8];
     const MoeWork wk = work[blockIdx.y];
     const QTensor &W = wk.tier ? d1 : d0;
     const int tid = threadIdx.x, wave = tid / 32, l = tid % 32, hf = l >> 4, r = l & 15;
     const int row0 = wk.slot * D + blockIdx.x * 32;
-    for (int u = tid; u < 32 * (FE / 64) * 2; u += 128) {   // (row, 64-chunk, half) units
+    for (int u = tid; u < 32 * (FE / 64) * 2; u += 32 * MOE_NW_DN) {   // (row, 64-chunk, half) units
         const int row = u / (FE / 64 * 2), ch = (u >> 1) % (FE / 64), h = u & 1;
         int2 q[4]; float sc[4];
         frags64<QT>(W, row0 + row, ch, h, q, sc);
@@ -1091,8 +1093,8 @@ __global__ __launch_bounds__(128) void k_moe_down_g(QTensor d0, QTensor d1, cons
         for (int gi = 0; gi < 4; gi++) *(u4v *)&Ws[row][ch * 64 + (gi >> 1) * 32 + (gi & 1) * 16 + 8 * h] = to_h8(q[gi], sc[gi]);
     }
     __syncthreads();
-    for (int tt = 0; tt < wk.n; tt += 4 * 16 * MOE_TW) {
-    const int nt = min(4 * 16 * MOE_TW, wk.n - tt), m0 = wk.m0 + tt;
+    for (int tt = 0; tt < wk.n; tt += MOE_NW_DN * 16 * MOE_TW) {
+    const int nt = min(MOE_NW_DN * 16 * MOE_TW, wk.n - tt), m0 = wk.m0 + tt;
     const int ntw = min(MOE_TW, (nt - 16 * MOE_TW * wave + 15) / 16);
     if (ntw <= 0) continue;
     const _Float16 *hl[MOE_TW];
@@ -1131,17 +1133,17 @@ void moe_gemm_gateup(const QTensor &g0, const QTensor &u0, const QTensor &g1, co
     const dim3 grid(FE / 32, nwork);
     const int t = g0.type;
     if (g1.q && g1.type != t) FAIL("moe_gemm_gateup: tiers must share a format per call");
-    if (t == Q5_0) k_moe_gateup<Q5_0><<<grid, 128, 0, st>>>(g0, u0, g1, u1, work, X, H);
-    else if (t == IQ4_XS) k_moe_gateup<IQ4_XS><<<grid, 128, 0, st>>>(g0, u0, g1, u1, work, X, H);
-    else if (t == IQ4_NL) k_moe_gateup<IQ4_NL><<<grid, 128, 0, st>>>(g0, u0, g1, u1, work, X, H);
-    else if (t == Q3_K) k_moe_gateup<Q3_K><<<grid, 128, 0, st>>>(g0, u0, g1, u1, work, X, H);
-    else if (t == Q2_K) k_moe_gateup<Q2_K><<<grid, 128, 0, st>>>(g0, u0, g1, u1, work, X, H);
+    if (t == Q5_0) k_moe_gateup<Q5_0><<<grid, 32 * MOE_NW_GU, 0, st>>>(g0, u0, g1, u1, work, X, H);
+    else if (t == IQ4_XS) k_moe_gateup<IQ4_XS><<<grid, 32 * MOE_NW_GU, 0, st>>>(g0, u0, g1, u1, work, X, H);
+    else if (t == IQ4_NL) k_moe_gateup<IQ4_NL><<<grid, 32 * MOE_NW_GU, 0, st>>>(g0, u0, g1, u1, work, X, H);
+    else if (t == Q3_K) k_moe_gateup<Q3_K><<<grid, 32 * MOE_NW_GU, 0, st>>>(g0, u0, g1, u1, work, X, H);
+    else if (t == Q2_K) k_moe_gateup<Q2_K><<<grid, 32 * MOE_NW_GU, 0, st>>>(g0, u0, g1, u1, work, X, H);
     else FAIL("moe_gemm_gateup: type %d", t);
 }
 void moe_gemm_down(const QTensor &d0, const QTensor &d1, const MoeWork *work, int nwork, const half *H, const float *wts, half *Y, hipStream_t st) {
     if (!nwork) return;
     const dim3 grid(D / 32, nwork);
-    if (d0.type == Q5_0) k_moe_down_g<Q5_0><<<grid, 128, 0, st>>>(d0, d1, work, H, wts, Y);
-    else if (d0.type == IQ4_NL) k_moe_down_g<IQ4_NL><<<grid, 128, 0, st>>>(d0, d1, work, H, wts, Y);
+    if (d0.type == Q5_0) k_moe_down_g<Q5_0><<<grid, 32 * MOE_NW_DN, 0, st>>>(d0, d1, work, H, wts, Y);
+    else if (d0.type == IQ4_NL) k_moe_down_g<IQ4_NL><<<grid, 32 * MOE_NW_DN, 0, st>>>(d0, d1, work, H, wts, Y);
     else FAIL("moe_gemm_down: type %d", d0.type);
 }
