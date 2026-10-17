@@ -7,7 +7,6 @@ static Engine *E = nullptr;
 float load_progress();                          // load.cpp (C++ linkage, so declared outside extern "C")
 
 extern "C" {
-struct KilnSampling { float temperature, top_p, min_p, presence_penalty; int top_k, n_draft, ban; };
 
 // Loads the model; returns KV capacity in tokens.
 int kiln_init(const char *path, int max_seqs, int umax, long long reserve_mb) {
@@ -39,6 +38,13 @@ void kiln_seq_begin(int id, uint64_t seed) {
     s.rng.seed(seed);
     s.seen.clear();
 }
+// The prompt's tail that DRY looks back over (with the reply), for the next reply of this sequence.
+void kiln_seq_context(int id, const int *tokens, int n) { E->seqs.at(id).ctx.assign(tokens, tokens + n); }
+// DRY's sequence breakers: token ids that end a repeated run.
+void kiln_dry_breakers(const int *ids, int n) {
+    dry_breakers.assign(VOCAB, 0);
+    for (int i = 0; i < n; i++) if (ids[i] >= 0 && ids[i] < VOCAB) dry_breakers[ids[i]] = 1;
+}
 int kiln_free_tokens() { return (int)E->free_pages.size() * PAGE; }
 int kiln_snapshot(int id) { return E->snapshot(id); }
 int kiln_restore(int id, int snap) { try { E->restore(id, snap); return 0; } catch (const std::exception &) { return -1; } }
@@ -48,11 +54,9 @@ void kiln_sync() { CK(hipStreamSynchronize(E->st)); }
 int kiln_prefill(int id, const int *tokens, int n) {
     try { E->prefill(id, tokens, n); return 0; } catch (const std::exception &) { return -1; }
 }
-int kiln_generate(int id, const KilnSampling *p, int *out, int max_out) {
-    Sampling sp;
-    sp.temperature = p->temperature; sp.top_p = p->top_p; sp.min_p = p->min_p;
-    sp.presence_penalty = p->presence_penalty; sp.top_k = p->top_k; sp.n_draft = p->n_draft; sp.ban = p->ban;
-    try { return E->generate(id, sp, out, max_out); } catch (const std::exception &) { return -1; }
+// rows_v / rows_i: null, or room for max_out rows of SAMPLE_N candidates (each emitted token's, for log probs).
+int kiln_generate(int id, const Sampling *sp, int *out, int max_out, float *rows_v, int *rows_i) {
+    try { return E->generate(id, *sp, out, max_out, rows_v, rows_i); } catch (const std::exception &) { return -1; }
 }
 // Full logits of the last prefilled position (validation against reference implementations).
 void kiln_last_logits(float *out) { CK(hipMemcpy(out, E->b.logits, (size_t)VOCAB * 4, hipMemcpyDeviceToHost)); }

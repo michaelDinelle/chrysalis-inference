@@ -2,6 +2,8 @@
 // MTP drafting and speculative decoding steps.
 #pragma once
 #include "kernels.h"
+#include "sampler.h"
+static_assert(TOPK == SAMPLE_N, "the sampler takes the engine's rows as they are");
 #include <random>
 #include <hipblaslt/hipblaslt.h>
 #include <map>
@@ -22,12 +24,6 @@ struct Layer {
     float *q_norm = nullptr, *k_norm = nullptr;
 };
 
-struct Sampling {                                // mirrors KilnSampling in api.cpp
-    float temperature = 1.0f, top_p = 0.95f, min_p = 0.0f, presence_penalty = 0.0f;
-    int top_k = 20, n_draft = 3;
-    int ban = -1;                                // a token never drawn (-1: none): <tool_call> when a request offers no tools
-};
-
 struct Seq {
     bool used = false;
     int n = 0;                       // tokens in the KV cache / recurrent state
@@ -38,7 +34,8 @@ struct Seq {
     float *h_last = nullptr;         // final hidden of token n-1 (MTP pairs it with token n)
     std::vector<float> top_v;        // host top-k logits for the next position (valid when pending < 0)
     std::vector<int> top_i;
-    std::vector<int> seen;           // tokens of the current reply (presence penalty)
+    Seen seen;                       // tokens of the current reply (presence penalty, DRY)
+    std::vector<int> ctx;            // the prompt's tail, for DRY (set per reply when DRY is on)
     std::mt19937_64 rng;             // reseeded for every reply, see kiln_seq_begin
 };
 
@@ -100,7 +97,7 @@ struct Engine {
     void restore(int id, int snap);
     void snap_free(int snap);
     void prefill(int id, const int *tokens, int n);
-    int generate(int id, const Sampling &sp, int *out, int max_out);
+    int generate(int id, const Sampling &sp, int *out, int max_out, float *rows_v = nullptr, int *rows_i = nullptr);
 
     // internals
     void forward(Seq &s, int T, bool verify);          // tokens in b.tokens, positions s.n..s.n+T-1

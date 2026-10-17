@@ -9,14 +9,23 @@ class KVFull(RuntimeError):
     """The KV cache has no free pages left for this request."""
 
 
-class Sampling(C.Structure):
-    """ban: a token id never drawn (-1: none)."""
-    _fields_ = [("temperature", C.c_float), ("top_p", C.c_float), ("min_p", C.c_float),
-                ("presence_penalty", C.c_float), ("top_k", C.c_int), ("n_draft", C.c_int), ("ban", C.c_int)]
+STAGES = ("top_k", "temperature", "top_p", "min_p")   # the sampler's stages, by their ids in engine/sampler.h
 
-    def __init__(self, **kw):
+
+class Sampling(C.Structure):
+    """Mirrors struct Sampling in engine/sampler.h. ban: a token id never drawn (-1: none). order: the stages' ids
+    in the order they act. dry_multiplier 0 turns DRY off."""
+    _fields_ = [("temperature", C.c_float), ("top_p", C.c_float), ("min_p", C.c_float),
+                ("presence_penalty", C.c_float), ("top_k", C.c_int), ("n_draft", C.c_int), ("ban", C.c_int),
+                ("dry_multiplier", C.c_float), ("dry_base", C.c_float), ("dry_allowed_length", C.c_int),
+                ("order", C.c_int * 4)]
+
+    def __init__(self, order=STAGES, **kw):
         kw.setdefault("ban", -1)
+        kw.setdefault("dry_base", 1.75)
+        kw.setdefault("dry_allowed_length", 2)
         super().__init__(**kw)
+        self.order[:] = [STAGES.index(s) for s in order]
 
 
 def wake_gpus():
@@ -66,7 +75,9 @@ class Engine:
         L.kiln_init.argtypes = [C.c_char_p, C.c_int, C.c_int, C.c_longlong]
         L.kiln_prefill.argtypes = [C.c_int, C.POINTER(C.c_int), C.c_int]
         L.kiln_prefill.restype = C.c_int
-        L.kiln_generate.argtypes = [C.c_int, C.POINTER(Sampling), C.POINTER(C.c_int), C.c_int]
+        L.kiln_generate.argtypes = [C.c_int, C.POINTER(Sampling), C.POINTER(C.c_int), C.c_int, C.c_void_p, C.c_void_p]
+        L.kiln_seq_context.argtypes = [C.c_int, C.POINTER(C.c_int), C.c_int]
+        L.kiln_dry_breakers.argtypes = [C.POINTER(C.c_int), C.c_int]
         L.kiln_seq_begin.argtypes = [C.c_int, C.c_uint64]
         L.kiln_last_logits.argtypes = [C.POINTER(C.c_float)]
         global _loading
@@ -121,12 +132,25 @@ class Engine:
         """Start a reply after the prompt is prefilled: seeds the sampler and resets the presence penalty."""
         self.lib.kiln_seq_begin(sid, seed)
 
-    def generate(self, sid, sampling, max_out=16):
+    def generate(self, sid, sampling, max_out=16, rows=False):
+        """The next tokens; with rows, also each one's candidates (logits [n][64], ids [n][64]) for log probs."""
+        import numpy as np
         out = (C.c_int * max_out)()
-        n = self.lib.kiln_generate(sid, C.byref(sampling), out, max_out)
+        rv = np.empty((max_out, 64), np.float32) if rows else None
+        ri = np.empty((max_out, 64), np.int32) if rows else None
+        n = self.lib.kiln_generate(sid, C.byref(sampling), out, max_out, rv.ctypes.data if rows else None, ri.ctypes.data if rows else None)
         if n < 0:
             raise KVFull()
-        return list(out[:n])
+        return (list(out[:n]), rv[:n], ri[:n]) if rows else list(out[:n])
+
+    def set_context(self, sid, tokens):
+        """The prompt's tail that DRY looks back over in the next reply."""
+        arr = (C.c_int * len(tokens))(*tokens)
+        self.lib.kiln_seq_context(sid, arr, len(tokens))
+
+    def set_dry_breakers(self, ids):
+        arr = (C.c_int * len(ids))(*ids)
+        self.lib.kiln_dry_breakers(arr, len(ids))
 
     def snapshot(self, sid):
         """Capture the sequence's state at its current length; returns a snapshot id."""

@@ -844,61 +844,15 @@ void Engine::prefill(int id, const int *tokens, int n) {
     cpu.disarm();
 }
 
-namespace {
-struct Dist { int n = 0; int id[TOPK]; float p[TOPK]; };
-
-Dist make_dist(const float *v, const int *ids, const Sampling &sp, const std::vector<int> &seen) {
-    std::pair<float, int> c[TOPK];
-    int nc = 0;
-    for (int i = 0; i < TOPK; i++) {
-        if (ids[i] == sp.ban) continue;                 // not a candidate at all (so not a fallback either)
-        float x = v[i];
-        if (sp.presence_penalty != 0 && std::find(seen.begin(), seen.end(), ids[i]) != seen.end()) x -= sp.presence_penalty;
-        c[nc++] = {x, ids[i]};
-    }
-    std::sort(c, c + nc, [](auto &a, auto &b) { return a.first > b.first; });
-    Dist d;
-    if (sp.temperature <= 0) { d.n = 1; d.id[0] = c[0].second; d.p[0] = 1; return d; }
-    const int k = std::max(1, std::min(sp.top_k > 0 ? sp.top_k : nc, nc));
-    double sum = 0;
-    for (int i = 0; i < k; i++) { d.p[i] = expf((c[i].first - c[0].first) / sp.temperature); d.id[i] = c[i].second; sum += d.p[i]; }
-    d.n = k;
-    double cum = 0;
-    for (int i = 0; i < k; i++) {
-        d.p[i] /= sum; cum += d.p[i];
-        if (cum >= sp.top_p) { d.n = i + 1; break; }
-    }
-    int m = 0;
-    for (int i = 0; i < d.n; i++) if (d.p[i] >= sp.min_p * d.p[0]) { d.p[m] = d.p[i]; d.id[m++] = d.id[i]; }
-    d.n = m;
-    sum = 0;
-    for (int i = 0; i < d.n; i++) sum += d.p[i];
-    for (int i = 0; i < d.n; i++) d.p[i] /= sum;
-    return d;
-}
-
-int draw(const Dist &d, std::mt19937_64 &rng) {
-    double u = std::uniform_real_distribution<double>(0, 1)(rng), c = 0;
-    for (int i = 0; i < d.n; i++) { c += d.p[i]; if (u < c) return d.id[i]; }
-    return d.id[d.n - 1];
-}
-
-float prob(const Dist &d, int tok) {
-    for (int i = 0; i < d.n; i++) if (d.id[i] == tok) return d.p[i];
-    return 0;
-}
-
-int draw_without(Dist d, int tok, std::mt19937_64 &rng) {
-    double sum = 0;
-    for (int i = 0; i < d.n; i++) { if (d.id[i] == tok) d.p[i] = 0; sum += d.p[i]; }
-    if (sum <= 0) return d.id[0];
-    for (int i = 0; i < d.n; i++) d.p[i] /= sum;
-    return draw(d, rng);
-}
-}  // namespace
 
 // One speculative step. Emits the pending token (if newly sampled), accepted drafts and one more token.
-int Engine::generate(int id, const Sampling &sp, int *out, int max_out) {
+static void keep_row(const float *v, const int *i, float *rows_v, int *rows_i, int at) {
+    std::copy(v, v + TOPK, rows_v + (size_t)at * TOPK);
+    std::copy(i, i + TOPK, rows_i + (size_t)at * TOPK);
+}
+
+// rows_v / rows_i (optional): each emitted token's row, the SAMPLE_N candidates it was drawn from (log probs).
+int Engine::generate(int id, const Sampling &sp, int *out, int max_out, float *rows_v, int *rows_i) {
     Seq &s = seqs.at(id);
     int nout = 0;
     if (route_dec_file && !route_dec) {
@@ -914,8 +868,9 @@ int Engine::generate(int id, const Sampling &sp, int *out, int max_out) {
     }
     if (s.pending < 0) {
         if (s.top_v.empty()) FAIL("generate: nothing to continue from");
-        s.pending = draw(make_dist(s.top_v.data(), s.top_i.data(), sp, s.seen), s.rng);
-        s.seen.push_back(s.pending);
+        s.pending = draw(make_dist(s.top_v.data(), s.top_i.data(), sp, s.seen, s.ctx), s.rng);
+        s.seen.push(s.pending);
+        if (rows_v) keep_row(s.top_v.data(), s.top_i.data(), rows_v, rows_i, nout);
         out[nout++] = s.pending;
         if (is_eos(s.pending)) return nout;
     }
@@ -966,20 +921,22 @@ int Engine::generate(int id, const Sampling &sp, int *out, int max_out) {
     // 4. accept drafts (rejection sampling against greedy drafts is lossless) and draw the next token
     int a = 0, next = -1;
     for (; a < k; a++) {
-        const Dist d = make_dist(&tv[a * TOPK], &ti[a * TOPK], sp, s.seen);
+        const Dist d = make_dist(&tv[a * TOPK], &ti[a * TOPK], sp, s.seen, s.ctx);
         const int tok = drafts[a + 1];
         const float pa = prob(d, tok);
         if (std::uniform_real_distribution<float>(0, 1)(s.rng) < pa) {
             if (is_eos(tok)) { next = tok; break; }
-            out[nout++] = tok; s.seen.push_back(tok);
+            if (rows_v) keep_row(&tv[a * TOPK], &ti[a * TOPK], rows_v, rows_i, nout);
+            out[nout++] = tok; s.seen.push(tok);
             continue;
         }
         next = draw_without(d, tok, s.rng);
         break;
     }
-    if (next < 0) next = draw(make_dist(&tv[a * TOPK], &ti[a * TOPK], sp, s.seen), s.rng);
+    if (next < 0) next = draw(make_dist(&tv[a * TOPK], &ti[a * TOPK], sp, s.seen, s.ctx), s.rng);
+    if (rows_v) keep_row(&tv[a * TOPK], &ti[a * TOPK], rows_v, rows_i, nout);
     out[nout++] = next;
-    s.seen.push_back(next);
+    s.seen.push(next);
 
     // 5. commit the recurrent states to the accepted prefix (pending + a drafts)
     if (k > 0) {
