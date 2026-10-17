@@ -363,16 +363,14 @@ class Server:
                         trace.append(("first step", t_first - t_prefill))
                 steps += 1
                 stop = next((i for i, t in enumerate(ids) if t in self.tok.eos), None)
+                n, room = len(ids) if stop is None else stop, max_tokens - len(out)   # reply tokens in this step; allowed
                 out += ids
-                emit = ids if stop is None else ids[:stop]
-                if len(out) > max_tokens:
-                    emit = emit[:max(0, len(emit) - (len(out) - max_tokens))]
-                for ev in parser.feed(emit):
+                for ev in parser.feed(ids[:min(n, room)]):
                     yield ev
-                if stop is not None:
-                    break
-                if len(out) >= max_tokens:
+                if n > room or n == room and stop is None:   # cut at max_tokens (a step can carry several tokens)
                     finish = "length"
+                    break
+                if stop is not None:
                     break
             for ev in parser.finish():
                 yield ev
@@ -387,7 +385,7 @@ class Server:
             reply = {"role": "assistant", "content": content, "reasoning_content": reasoning,
                      "tool_calls": [{"type": "function", "function": {"name": n, "arguments": json.dumps(a, ensure_ascii=False)}} for n, a in calls]}
             if content or calls:                         # an empty reply's key would match every other one
-                gen = out[:-1] if out and out[-1] in self.tok.eos else out[:max_tokens]
+                gen = (out[:-1] if out and out[-1] in self.tok.eos else out)[:max_tokens]   # what the client was sent
                 self.replay.put(message_key(reply, False), (thinking, gen))   # for clients that drop the reasoning
                 self.replay.put(message_key(reply), (thinking, gen))
             if record:                                   # the conversation's latest state, for compaction
