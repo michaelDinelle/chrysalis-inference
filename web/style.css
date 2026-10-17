@@ -78,6 +78,7 @@ button { font: inherit; color: inherit; cursor: pointer; }
 .conv:hover { background: var(--hover); color: var(--text); }
 .conv.active { background: var(--accent-soft); color: var(--text); }
 .conv-title { flex: 1; overflow: hidden; white-space: nowrap; text-overflow: ellipsis; }
+.conv.running .conv-title::before { content: ""; display: inline-block; width: 6px; height: 6px; margin-right: 7px; border-radius: 50%; background: var(--accent); vertical-align: 1px; animation: pulse 1.2s ease-in-out infinite; }   /* a reply being written */
 .conv-del { visibility: hidden; padding: 0 6px; border: 0; border-radius: 6px; background: none; color: var(--faint); font-size: 13px; line-height: 22px; }
 .conv:hover .conv-del, .conv-del.armed { visibility: visible; }
 .conv-del:hover, .conv-del.armed { color: var(--danger); }

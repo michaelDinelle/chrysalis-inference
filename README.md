@@ -36,13 +36,16 @@ provider at `http://127.0.0.1:8080/v1`, set up in `~/.config/opencode/opencode.j
 
 `web/` is a small Bun app: `server.ts` serves the page and proxies kiln's API on the same origin; `app.ts` is
 plain TypeScript (marked, highlight.js, DOMPurify). Conversations live in the tab's sessionStorage: a reload
-keeps them, closing the tab ends them, and nothing is stored on the server.
+keeps them, closing the tab ends them, and nothing is stored on the server's disk. A reply belongs to the web server
+while it is written (in RAM, until 15 minutes after it ends): opening another chat, reloading, closing the tab, a
+laptop asleep or a dropped connection leave it running, and the page follows it again from the last event it saw;
+only Stop (the button, or Esc when no dialog is open) or deleting the chat ends it early.
 Replies stream with their reasoning (collapsible), each one shows time to first token, tok/s, how much of the
 prompt came from cache and its seed. The Think switch picks the reasoning effort (Max, Medium, Low) or the
 no-thinking model (Off). Settings holds the system prompt, the sampling values (temperature, top-p, top-k,
 min-p, presence penalty, max reply tokens) and the seed; they apply to every conversation in the tab and are
 kept with them. A blank field uses Qwen's recommended value for the thinking mode, a blank seed a new one for
-every reply: set a reply's seed to draw it again. Esc stops a reply, the last turn can be regenerated or
+every reply: set a reply's seed to draw it again. The last turn can be regenerated or
 edited, and the sidebar starts or unloads the model (sending a message starts it too). Assistant turns go back
 to kiln exactly as received, so every turn of a conversation is a cache hit.
 Replies render block by block: while one streams, finished paragraphs, code blocks and tables keep their nodes

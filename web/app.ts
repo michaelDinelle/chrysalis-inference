@@ -7,7 +7,7 @@ import { marked, type Links, type Token } from "marked";
 
 type Effort = "xhigh" | "medium" | "low" | "off";
 interface Stats { ttft: number; tps: number; tokens: number; prompt: number; cached: number; thought?: number; seed?: number; model?: string }
-interface Message { role: "user" | "assistant"; content: string; reasoning?: string; stats?: Stats; error?: string; stopped?: boolean }
+interface Message { role: "user" | "assistant"; content: string; reasoning?: string; stats?: Stats; error?: string; stopped?: boolean; job?: string }
 interface Conversation { id: string; title: string; named?: boolean; updated: number; effort: Effort; messages: Message[] }
 type SamplingKey = "temperature" | "top_p" | "top_k" | "min_p" | "presence_penalty" | "max_tokens" | "seed";
 type Sampling = Partial<Record<SamplingKey, number>>;
@@ -15,6 +15,16 @@ interface Settings { system: string; sampling: Sampling }
 interface Status { state: "online" | "loading" | "offline"; build?: string; model?: string; loading?: string; progress?: number; context?: number; kv_tokens?: number; cache?: { free_kv_tokens: number } }
 interface View { el: HTMLElement; think: HTMLDetailsElement; summary: HTMLElement; thought: HTMLElement; body: HTMLElement; foot: HTMLElement; shown?: string; blocks?: Blocks }
 interface Live { phase: "waiting" | "thinking" | "writing"; since: number; note: string; loading?: boolean }
+// A reply being written. The web server owns it (a job, m.job its id): the page only follows it, so opening another
+// chat, reloading, sleeping or a dropped connection leaves it running, and the page picks it up again from the last
+// event it saw. Only Stop (or deleting the chat) ends it early.
+interface Run {
+  conv: Conversation; m: Message; live: Live;
+  at: number;                                       // events of the job seen so far
+  stopping: boolean; gone?: boolean;                // Stop pressed; the chat was deleted
+  usage?: any; seed?: number; timing?: { start: number; first?: number; answer?: number; last?: number };
+  frame: number; saved: number;
+}
 
 // kiln keeps one model on the GPU. The picker by Load / Unload chooses it (switching takes 5-20 s); every chat then
 // talks to the model that is loaded.
@@ -324,7 +334,8 @@ function store(key: string, value: unknown) {
 const chats: Record<string, Conversation> = load("chats", {});
 let settings: Settings = load("settings", { system: "", sampling: {} });
 let conv = blank();
-let busy: AbortController | null = null;
+const runs = new Map<string, Run>();               // conversation id -> its reply being written
+const running = (c: Conversation = conv) => runs.get(c.id);
 let status: Status = { state: "offline" };
 let build = "";                                     // the server's code version when this page loaded
 let follow = true;                                  // keep the newest text in view unless the user scrolled up
@@ -355,7 +366,7 @@ function messageView(m: Message, i: number): HTMLElement {
   if (m.role === "assistant") {
     const v = assistantView(i);
     views.set(m, v);
-    paint(v, m);
+    paint(v, m, [...runs.values()].find((r) => r.m === m)?.live);
     return v.el;
   }
   const el = h("article", "msg user"), foot = h("footer", "msg-foot");
@@ -424,9 +435,10 @@ function emptyState() {
 }
 
 function renderComposer() {
+  const busy = !!running();
   sendBtn.innerHTML = icon(busy ? "stop" : "send");
   sendBtn.setAttribute("aria-label", busy ? "Stop" : "Send");
-  sendBtn.classList.toggle("stop", !!busy);
+  sendBtn.classList.toggle("stop", busy);
   $("effort").replaceChildren(h("span", "label", "Think"), ...EFFORTS.map(([value, label]) => {
     const b = h("button", "", label);
     b.type = "button";
@@ -451,7 +463,7 @@ function renderList() {
   nav.replaceChildren();
   for (const s of Object.values(chats).sort((a, b) => b.updated - a.updated)) {
     if (group(s.updated) !== current) nav.append(h("div", "group", (current = group(s.updated))));
-    const a = h("a", s.id === conv.id ? "conv active" : "conv"), del = h("button", "conv-del", "×");
+    const a = h("a", `conv${s.id === conv.id ? " active" : ""}${runs.has(s.id) ? " running" : ""}`), del = h("button", "conv-del", "×");
     a.href = `#${s.id}`;
     del.type = "button";
     del.title = "Delete";
@@ -595,7 +607,7 @@ async function refreshStatus() {
   }
   if (current() !== was && !conv.messages.length) render();
   // The server has newer code: reload into it once nothing would be lost (chats are kept in sessionStorage).
-  if (status.build && status.build !== build && !busy && !input.value && !settingsDialog.open) return location.reload();
+  if (status.build && status.build !== build && !runs.size && !input.value && !settingsDialog.open) return location.reload();
   renderStatus();
 }
 
@@ -620,7 +632,8 @@ function request(c: Conversation) {
   };
 }
 
-// Server-sent events of an OpenAI streaming response, as parsed JSON chunks.
+// Server-sent events of a reply, as parsed JSON chunks, then DONE.
+const DONE = Symbol("done");
 async function* events(body: ReadableStream<Uint8Array>): AsyncGenerator<any> {
   const reader = body.getReader(), decoder = new TextDecoder();
   let buf = "";
@@ -631,88 +644,160 @@ async function* events(body: ReadableStream<Uint8Array>): AsyncGenerator<any> {
     for (let end = buf.indexOf("\n\n"); end >= 0; end = buf.indexOf("\n\n")) {
       const data = buf.slice(0, end).split("\n").filter((l) => l.startsWith("data: ")).map((l) => l.slice(6)).join("\n");
       buf = buf.slice(end + 2);
-      if (data === "[DONE]") return;
+      if (data === "[DONE]") return void (yield DONE);
       if (data) yield JSON.parse(data);
     }
   }
 }
 
-async function ensureOnline(signal: AbortSignal) {
+async function ensureOnline(run: Run) {
   if (status.state === "offline") await start();
   for (const deadline = Date.now() + 180_000; status.state !== "online" || status.loading; await refreshStatus()) {
-    if (signal.aborted) throw new DOMException("stopped", "AbortError");
+    if (run.stopping) throw new DOMException("stopped", "AbortError");
     if (Date.now() > deadline) throw new Error("kiln did not start: see `kiln logs`");
     await sleep(100);
   }
 }
 
-async function generate() {
-  const c = conv, m: Message = { role: "assistant", content: "", reasoning: "" }, ctrl = new AbortController();
+const CUT_OFF = "The reply was cut off: the web server restarted while it was being written";
+
+async function generate(c: Conversation = conv) {
+  const m: Message = { role: "assistant", content: "", reasoning: "" };
   c.messages.push(m);
-  busy = ctrl;
-  follow = true;
-  render();
-  const v = views.get(m)!, live: Live = { phase: "waiting", since: performance.now(), note: "Reading the prompt" };
-  let frame = 0;
-  const show = () => { frame = 0; paint(v, m, live); if (follow) scroller.scrollTop = scroller.scrollHeight; };
-  const schedule = () => { frame ||= requestAnimationFrame(show); };
-  const timer = setInterval(schedule, 250);
-  let t0 = performance.now(), tFirst = 0, tAnswer = 0, tLast = 0, usage: any, seed: number | undefined;
+  const run: Run = { conv: c, m, live: { phase: "waiting", since: performance.now(), note: "Reading the prompt" }, at: 0, stopping: false, frame: 0, saved: 0 };
+  runs.set(c.id, run);
+  if (c === conv) {
+    follow = true;
+    render();
+  }
   try {
     if (status.state !== "online" || status.loading) {
-      live.loading = true;
-      await ensureOnline(ctrl.signal);
-      live.note = "Reading the prompt";
-      live.loading = false;
-      live.since = t0 = performance.now();
+      run.live.loading = true;
+      await ensureOnline(run);
+      run.live.note = "Reading the prompt";
+      run.live.loading = false;
+      run.live.since = performance.now();
     }
-    const res = await fetch("/api/chat", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(request(c)), signal: ctrl.signal });
+    if (run.stopping) throw new DOMException("stopped", "AbortError");
+    const res = await fetch("/api/chat", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(request(c)) });
     if (!res.ok || !res.body) throw new Error((await res.json().catch(() => null))?.error?.message ?? `HTTP ${res.status}`);
-    for await (const ev of events(res.body)) {
-      const d = ev.choices?.[0]?.delta ?? {}, now = performance.now();
-      if (d.reasoning_content) {
-        if (live.phase !== "thinking") {
-          live.phase = "thinking";
-          live.since = now;
-          v.think.open = true;
-        }
-        m.reasoning += d.reasoning_content;
-      }
-      if (d.content) {
-        if (!tAnswer) {
-          tAnswer = now;
-          v.think.open = false;
-        }
-        live.phase = "writing";
-        m.content += d.content;
-      }
-      if (d.reasoning_content || d.content) {
-        tFirst ||= now;
-        tLast = now;
-        schedule();
-      }
-      if (ev.usage) usage = ev.usage;
-      if (ev.seed !== undefined) seed = ev.seed;
-    }
-    if (usage && tFirst) {
-      m.stats = {
-        ttft: (tFirst - t0) / 1000, tps: usage.completion_tokens / Math.max((tLast - tFirst) / 1000, 1e-3),
-        tokens: usage.completion_tokens, prompt: usage.prompt_tokens, cached: usage.prompt_tokens_details?.cached_tokens ?? 0,
-        thought: m.reasoning && tAnswer ? (tAnswer - tFirst) / 1000 : undefined, seed, model: current(),
-      };
-    }
+    m.job = res.headers.get("X-Kiln-Job") ?? undefined;
+    save(c);                                       // a reload finds the reply and follows it again
+    if (run.stopping) stopRun(run, true);
+    await stream(run, res.body);
   } catch (e) {
-    if (ctrl.signal.aborted) m.stopped = true;
+    if (run.stopping) m.stopped = true;
     else m.error = e instanceof Error ? e.message : String(e);
-  } finally {
-    clearInterval(timer);
-    cancelAnimationFrame(frame);
-    if (busy === ctrl) busy = null;              // a newer reply may have started after this one was stopped
   }
+  finish(run);
+}
+
+// A reply that was being written when the page (re)loaded: followed again from its first event. The saved text stays
+// until the server answers; if it no longer knows the reply, that text stays and says why it ends there.
+async function resume(c: Conversation, m: Message) {
+  const run: Run = { conv: c, m, live: { phase: "waiting", since: performance.now(), note: "Reading the prompt" }, at: 0, stopping: false, frame: 0, saved: 0 };
+  runs.set(c.id, run);
+  try {
+    const res = await fetch(`/api/chat/${m.job}?from=0`);
+    if (res.status === 404) throw new Error(CUT_OFF);
+    if (!res.ok || !res.body) throw new Error(`HTTP ${res.status}`);
+    m.content = m.reasoning = "";
+    await stream(run, res.body);
+  } catch (e) {
+    if (run.stopping) m.stopped = true;
+    else m.error = e instanceof Error ? e.message : String(e);
+  }
+  finish(run);
+}
+
+// Follows a reply to its end. A dropped connection (sleep, network, the server busy) is picked up again from the last
+// event seen, after 0.3, 0.6, 1.2 ... up to 8 s; only a server that no longer knows the reply ends it.
+async function stream(run: Run, body: ReadableStream<Uint8Array> | null) {
+  for (let attempt = 0; ; ) {
+    if (body) {
+      try {
+        for await (const ev of events(body)) {
+          run.at++;
+          attempt = 0;
+          if (ev === DONE) return;
+          take(run, ev);
+        }
+      } catch { /* the connection dropped */ }
+    }
+    body = null;
+    if (run.stopping && run.at === 0 && !run.m.job) throw new DOMException("stopped", "AbortError");
+    await sleep(Math.min(8000, 300 * 2 ** attempt++));
+    const res = await fetch(`/api/chat/${run.m.job}?from=${run.at}`).catch(() => null);
+    if (res?.status === 404) throw new Error(CUT_OFF);
+    if (res?.ok) body = res.body;
+    else if (run.stopping) throw new DOMException("stopped", "AbortError");   // Stop while the server is unreachable
+  }
+}
+
+// One event of a reply into its message, and onto the screen on the next frame.
+function take(run: Run, ev: any) {
+  const { m, live } = run, d = ev.choices?.[0]?.delta ?? {}, now = performance.now(), v = views.get(m);
+  if (ev.error) m.error = ev.error.message;
+  if (ev.stopped) m.stopped = true;
+  if (ev.timing) run.timing = ev.timing;
+  if (ev.usage) run.usage = ev.usage;
+  if (ev.seed !== undefined) run.seed = ev.seed;
+  if (d.reasoning_content) {
+    if (live.phase !== "thinking") {
+      live.phase = "thinking";
+      live.since = now;
+      if (v) v.think.open = true;
+    }
+    m.reasoning += d.reasoning_content;
+  }
+  if (d.content) {
+    if (live.phase !== "writing" && v) v.think.open = false;
+    live.phase = "writing";
+    m.content += d.content;
+  }
+  if (now - run.saved > 2000) {                    // a reload shows the text so far even if the server forgets it
+    run.saved = now;
+    save(run.conv);
+  }
+  schedule(run);
+}
+
+function schedule(run: Run) {
+  run.frame ||= requestAnimationFrame(() => {
+    run.frame = 0;
+    const v = views.get(run.m);
+    if (!v) return;                                // its chat is not on screen
+    paint(v, run.m, run.live);
+    if (follow) scroller.scrollTop = scroller.scrollHeight;
+  });
+}
+setInterval(() => { for (const r of runs.values()) schedule(r); }, 250);   // the elapsed-time labels
+
+function finish(run: Run) {
+  const { conv: c, m, usage, timing: t } = run;
+  if (usage && t?.first && t.last) {
+    m.stats = {
+      ttft: (t.first - t.start) / 1000, tps: usage.completion_tokens / Math.max((t.last - t.first) / 1000, 1e-3),
+      tokens: usage.completion_tokens, prompt: usage.prompt_tokens, cached: usage.prompt_tokens_details?.cached_tokens ?? 0,
+      thought: m.reasoning && t.answer ? (t.answer - t.first) / 1000 : undefined, seed: run.seed, model: current(),
+    };
+  }
+  delete m.job;
+  cancelAnimationFrame(run.frame);
+  if (runs.get(c.id) === run) runs.delete(c.id);
+  if (run.gone) return;
   c.updated = Date.now();
   if (c === conv) render();
+  else renderList();
   save(c);
-  if (!c.named && !m.error) await name(c);
+  if (!c.named && !m.error) void name(c);
+}
+
+// Stop: kiln stops and the reply ends with what it has. (Without a job yet, generate() sends this once it has one.)
+function stopRun(run: Run, now = false) {
+  if (run.stopping && !now) return;
+  run.stopping = true;
+  if (run.m.job) void fetch(`/api/chat/${run.m.job}/stop`, { method: "POST" }).catch(() => {});
 }
 
 // Titles come from the -fast model with a title-generator prompt, which kiln runs as a low-priority request.
@@ -737,7 +822,7 @@ async function name(c: Conversation) {
 
 function submit(text: string) {
   text = text.trim();
-  if (!text || busy) return;
+  if (!text || running()) return;
   input.value = "";
   grow();
   if (!conv.messages.length) conv.title = text.split("\n")[0].slice(0, 60);
@@ -746,15 +831,13 @@ function submit(text: string) {
 }
 
 function openConversation(id: string) {
-  busy?.abort();
-  conv = chats[id] ? structuredClone(chats[id]) : blank();
+  conv = runs.get(id)?.conv ?? (chats[id] ? structuredClone(chats[id]) : blank());   // a reply being written keeps going
   document.body.classList.remove("nav-open");
   render();
   scroller.scrollTop = scroller.scrollHeight;
 }
 
 function newChat() {
-  busy?.abort();
   conv = blank();
   history.replaceState(null, "", location.pathname);
   document.body.classList.remove("nav-open");
@@ -763,6 +846,11 @@ function newChat() {
 }
 
 function remove(id: string) {
+  const r = runs.get(id);
+  if (r) {
+    r.gone = true;
+    stopRun(r);
+  }
   delete chats[id];
   store("chats", chats);
   if (id === conv.id) newChat();
@@ -802,7 +890,7 @@ thread.addEventListener("click", (e) => {
   if (!act) return;
   const i = Number(act.closest<HTMLElement>("article")?.dataset.i), m = conv.messages[i];
   if (act.dataset.act === "copy") return void copy(m.content, act);
-  if (busy) return;
+  if (running()) return;
   if (act.dataset.act === "retry") {
     conv.messages.splice(i);
     void generate();
@@ -816,7 +904,8 @@ thread.addEventListener("click", (e) => {
 });
 $("composer").addEventListener("submit", (e) => {
   e.preventDefault();
-  if (busy) busy.abort();
+  const r = running();
+  if (r) stopRun(r);
   else submit(input.value);
 });
 input.addEventListener("input", grow);
@@ -826,10 +915,13 @@ input.addEventListener("keydown", (e) => {
     submit(input.value);
   }
 });
+// Esc stops this chat's reply, unless it is closing something: a menu, a dialog (Settings, a picture at full size)
 document.addEventListener("keydown", (e) => {
-  if (e.key !== "Escape") return;
+  if (e.key !== "Escape" || e.defaultPrevented) return;
   if (menuOpen) return setMenu(false);
-  if (busy) busy.abort();
+  if (document.querySelector("dialog[open]")) return;
+  const r = running();
+  if (r) stopRun(r);
 });
 scroller.addEventListener("scroll", () => { follow = scroller.scrollHeight - scroller.scrollTop - scroller.clientHeight < 80; });
 window.addEventListener("hashchange", () => {
@@ -867,6 +959,10 @@ $("brand-mark").innerHTML = `<svg class="flame" viewBox="0 0 24 24">${ICONS.flam
 $("new-chat").innerHTML = `${icon("plus")}New chat`;
 $("menu").innerHTML = icon("menu");
 await refreshStatus();
+for (const c of Object.values(chats)) {
+  const m = c.messages.at(-1);
+  if (m?.role === "assistant" && m.job) void resume(c, m);
+}
 if (location.hash.length > 1) openConversation(location.hash.slice(1));
 else render();
 // Every 4 s, or 4 times a second while a model loads (5-20 s).
