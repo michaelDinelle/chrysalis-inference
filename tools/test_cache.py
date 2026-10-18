@@ -60,6 +60,7 @@ def serve(c, e, prompt, reply=0):
     out = list(range(10_000, 10_000 + reply))
     e.prefill(slot.sid, out)
     slot.tokens = np.concatenate([prompt, np.array(out, np.int32)])
+    slot.busy = False                                         # the reply is done: the slot is free for others
     return cached
 
 

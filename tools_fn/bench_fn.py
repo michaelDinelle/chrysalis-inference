@@ -1,4 +1,5 @@
-"""Flash-Next speed on this machine: load time, decode tok/s (drafts 0/1/2, Qwen sampling and greedy), and the time to
+"""Flash-Next speed on this machine: load time, decode tok/s (drafts 0/1/2, Qwen sampling and greedy; in a coding
+conversation; two prose replies in turn, the second after the expert pool has followed the first), and the time to
 first token of appends of various sizes on top of an existing conversation (what an agent turn costs).
   python tools_fn/bench_fn.py [n_tokens] [--decode-only] [--model FILE] [--use qwen3.8-27b]   (--use: the same for another model)"""
 import os
@@ -56,6 +57,21 @@ for k in sorted({0, spec["draft"]}):
         out += eng.generate(s, sp, 16); steps += 1
     dt = time.time() - t0
     print(f"decode in a 4K code context, drafts={k}: {len(out) / dt:6.1f} tok/s  {len(out) / steps:.2f} tokens/step", flush=True)
+    eng.free_seq(s)
+
+# prose: the file's VRAM tier is chosen from coding work, so the first reply moves the expert pool and the second reads it
+story = tok.encode("<|im_start|>user\nWrite a long story about a lighthouse keeper and a storm.<|im_end|>\n"
+                   "<|im_start|>assistant\n<think>\n", add_special_tokens=False).ids
+for reply in (1, 2):
+    s = eng.new_seq(); eng.begin(s, 100 + reply)
+    eng.prefill(s, story)
+    sp = Sampling(temperature=1.0, top_p=0.95, min_p=0.0, presence_penalty=0.0, top_k=20, n_draft=spec["draft"])
+    out, steps = [], 0
+    t0 = time.time()
+    while len(out) < n_tok:
+        out += eng.generate(s, sp, 16); steps += 1
+    dt = time.time() - t0
+    print(f"decode, prose reply {reply}, drafts={spec['draft']}: {len(out) / dt:6.1f} tok/s  {len(out) / steps:.2f} tokens/step", flush=True)
     eng.free_seq(s)
 
 if "--decode-only" in sys.argv:

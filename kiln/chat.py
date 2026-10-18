@@ -5,11 +5,18 @@ Rendering follows the model's chat_template.jinja exactly, with two deliberate d
     "<|im_end|>" stays text instead of ending the turn;
   * assistant turns that kiln generated are replayed as the exact token ids it produced, so every
     request in an agent loop extends the cached sequence instead of diverging from it.
+A picture renders as <|vision_start|>, its image tokens (one per merged 2 x 2 patch block, as the processor expands
+<|image_pad|>; ids naming the picture, engine/model.h) and <|vision_end|>; a video as the processor expands <|video_pad|>:
+each frame pair's time ("<1.5 seconds>") and its tokens between markers of its own, inside the video's.
 """
 import functools
 import json
 import re
+from typing import NamedTuple
+
 from tokenizers import Tokenizer
+
+from .vision import LOW_DETAIL
 
 EFFORT = {
     "xhigh": "Reasoning effort is set to xhigh. Please think carefully through the task, validate key assumptions, "
@@ -28,7 +35,9 @@ TOOL_FORMAT = (
     "language BEFORE the function call, but NOT after\n- If there is no function call available, answer the question "
     "like normal with your current knowledge and do not tell the user about function calls\n</IMPORTANT>")
 STRUCT = ["<|im_start|>", "<|im_end|>", "<|endoftext|>", "<think>", "</think>", "<tool_call>", "</tool_call>",
-          "<tool_response>", "</tool_response>"]
+          "<tool_response>", "</tool_response>", "<|vision_start|>", "<|vision_end|>"]
+NO_VISION = "[image omitted: this model server has no vision tower loaded]"
+NO_VIDEO = "[video omitted: this model server has no vision tower loaded]"
 
 
 VOLATILE = re.compile(r"^(Today's date:|You are powered by the model|Here is some useful information about the environment|<env>)", re.M)
@@ -106,18 +115,49 @@ class Tokens:
         return self.full.decode(ids, skip_special_tokens=False)
 
 
-def text_of(content):
+class Picture(NamedTuple):
+    """An image part: its URL and the most pixels it asks to be resized to (None: as the request or server says)."""
+    url: str
+    max_pixels: int | float | None = None
+
+
+class Clip(NamedTuple):
+    """A video part: its URL and the frames a second to take of it (None: kiln/vision.py's)."""
+    url: str
+    fps: int | float | None = None
+
+
+def parts(content):
+    """A message's content as ("text", str), ("image", Picture) and ("video", Clip) parts, in order (OpenAI's image_url
+    parts, with detail "low" or a max_pixels as qwen-vl-utils takes it; video_url parts, as vLLM takes them, with an fps;
+    or the template's image and video items)."""
     if content is None:
-        return ""
+        return []
     if isinstance(content, str):
-        return content
-    parts = []
+        return [("text", content)]
+    out = []
     for item in content:
-        if isinstance(item, dict) and item.get("type") == "text":
-            parts.append(item.get("text", ""))
-        elif isinstance(item, dict) and item.get("type") in ("image", "image_url", "video"):
-            parts.append("[image omitted: this model server is text-only]")
-    return "".join(parts)
+        if not isinstance(item, dict):
+            continue
+        if item.get("type") in ("image_url", "image") or "image_url" in item:
+            url = item.get("image_url", item.get("image"))
+            spec = url if isinstance(url, dict) else {}
+            limit = item.get("max_pixels", spec.get("max_pixels"))
+            if limit is None and (spec.get("detail") or item.get("detail")) == "low":
+                limit = LOW_DETAIL
+            out.append(("image", Picture(spec.get("url") if isinstance(url, dict) else url, limit)))
+        elif item.get("type") in ("video_url", "video") or "video_url" in item:
+            url = item.get("video_url", item.get("video"))
+            spec = url if isinstance(url, dict) else {}
+            out.append(("video", Clip(spec.get("url") if isinstance(url, dict) else url, item.get("fps", spec.get("fps")))))
+        elif "text" in item:
+            out.append(("text", item.get("text") or ""))
+    return out
+
+
+def text_of(content):
+    """The text of a message's content (its pictures left out)."""
+    return "".join(v for k, v in parts(content) if k == "text")
 
 
 def call_args(tc):
@@ -142,19 +182,55 @@ def message_key(msg, reasoning=True):
 
 
 class Renderer:
-    def __init__(self, tok: Tokens, replay):
+    def __init__(self, tok: Tokens, replay, images=None):
         self.t, self.replay = tok, replay       # replay: message_key -> (thinking, generated ids without stop token)
+        # images: a Picture -> its image token ids, a Clip -> (time, image token ids) per frame pair; None: no vision
+        # tower (a note instead)
+        self.images = images
 
-    def render(self, messages, tools=None, enable_thinking=True, effort="xhigh", preserve_thinking=True, think_reply=None):
+    def content(self, content, images=None):
+        """Pieces of a message's content: text and pictures in order, the whole trimmed at its ends as the template trims
+        the rendered string (a picture's markers are not whitespace, so text beside a picture keeps its spaces)."""
+        segs, images = [], images or self.images
+        vs, ve = self.t.id["<|vision_start|>"], self.t.id["<|vision_end|>"]
+        for kind, val in parts(content):
+            if kind in ("image", "video"):
+                got = images(val) if images else None
+                if got is not None and kind == "image":
+                    segs.append([vs, *got, ve])
+                    continue
+                if got is not None:
+                    segs.append([vs] + [x for t, ids in got for x in self.t.full.encode(f"<{t:.1f} seconds>", add_special_tokens=False).ids
+                                        + [vs, *ids, ve]] + [ve])
+                    continue
+                val = NO_VISION if kind == "image" else NO_VIDEO
+            if segs and isinstance(segs[-1], str):
+                segs[-1] += val
+            else:
+                segs.append(val)
+        if segs and isinstance(segs[0], str):
+            segs[0] = segs[0].lstrip()
+        if segs and isinstance(segs[-1], str):
+            segs[-1] = segs[-1].rstrip()
+        return [x for s in segs for x in ([Content(s)] if isinstance(s, str) else s)]
+
+    def render(self, messages, tools=None, enable_thinking=True, effort="xhigh", preserve_thinking=True, think_reply=None,
+               images=None):
         """Returns (token ids, marks): token offsets of cache points -- "tools" (end of the tool block, shared by
         every session; None without tools), "system" (end of the system turn), "messages" (start of each
         later turn) and "prompt" (start of the generation prompt). think_reply=False: the conversation as with
-        enable_thinking, but a reply without thinking."""
+        enable_thinking, but a reply without thinking. images: this request's pictures and videos as the renderer's own
+        takes them (else that one)."""
         T, S = self.t, self.t.id
         ri = EFFORT.get(effort, EFFORT["xhigh"]) if enable_thinking else ""
         pieces, marks = [], []
         start = 0
         if messages and messages[0].get("role") == "system":
+            kinds = {k for k, _ in parts(messages[0].get("content"))}
+            if "image" in kinds:
+                raise ValueError("System message cannot contain images.")
+            if "video" in kinds:
+                raise ValueError("System message cannot contain videos.")
             sys_text, start = text_of(messages[0].get("content")).strip(), 1
         else:
             sys_text = ""
@@ -189,7 +265,7 @@ class Renderer:
                 raise ValueError("system message must be first")
             if role == "user":
                 marks.append(("messages", len(pieces)))
-                pieces += [S["<|im_start|>"], "user\n", Content(content), S["<|im_end|>"], "\n"]
+                pieces += [S["<|im_start|>"], "user\n", *self.content(m.get("content"), images), S["<|im_end|>"], "\n"]
             elif role == "assistant":
                 marks.append(("messages", len(pieces)))
                 hit = self.replay(message_key(m))
@@ -218,7 +294,7 @@ class Renderer:
                 if i == 0 or messages[i - 1].get("role") != "tool":
                     marks.append(("messages", len(pieces)))
                     pieces += [S["<|im_start|>"], "user"]
-                pieces += ["\n", S["<tool_response>"], "\n", Content(content), "\n", S["</tool_response>"]]
+                pieces += ["\n", S["<tool_response>"], "\n", *self.content(m.get("content"), images), "\n", S["</tool_response>"]]
                 if i == len(messages) - 1 or messages[i + 1].get("role") != "tool":
                     pieces += [S["<|im_end|>"], "\n"]
             else:
@@ -342,3 +418,55 @@ class OutputParser:
 
     def text(self):
         return "".join(self.reasoning).strip(), "".join(self.content).strip()
+
+
+class StopText:
+    """OpenAI's `stop`: the answer ends where the first of these strings to be completed (character by character)
+    begins, so how the text is split into pieces does not matter. Only the answer is searched: a stop string in the
+    reasoning would end a reply before it starts. Answer text that may begin one is held back until the next pieces
+    tell. Events of other kinds pass straight through, after the held text: a stop string never spans one."""
+
+    def __init__(self, stops):
+        self.stops = [s for s in stops if s]
+        self.held = []               # content events, in order
+        self.hit = False             # a stop string was found: nothing more is let through
+        self.matched = None          # which one
+        self.content = []            # the answer text let through
+
+    def feed(self, events):
+        out = []
+        for ev in events:
+            if self.hit:
+                break
+            if ev[0] != "content":
+                out += self.flush()
+                out.append(ev)
+                continue
+            self.held.append(ev)
+            text = "".join(e[1] for e in self.held)
+            found = [(i + len(s), i, s) for s in self.stops if (i := text.find(s)) >= 0]
+            if found:
+                _, at, self.matched = min(found)             # completed first; of those, the longest
+                out += self._take(at, split=True)
+                self.held, self.hit = [], True
+                break
+            maybe = max((k for s in self.stops for k in range(1, min(len(s), len(text) + 1)) if text.endswith(s[:k])), default=0)
+            out += self._take(len(text) - maybe, split=False)
+        return out
+
+    def flush(self):
+        """At the end of the reply (or before another kind of event): what is held is the answer's."""
+        return self._take(sum(len(e[1]) for e in self.held), split=False)
+
+    def _take(self, n, split):
+        """The held events making up the first n characters; split: cut the one that straddles n (its log prob entry
+        then spells the part kept)."""
+        out = []
+        while self.held and (len(self.held[0][1]) <= n or split and n > 0):
+            ev = self.held.pop(0)
+            if len(ev[1]) > n:                           # an entry's token is its event's text (OutputParser._flush)
+                ev = (ev[0], ev[1][:n], dict(ev[2], token=ev[1][:n]) if len(ev) > 2 and ev[2] else None)
+            out.append(ev)
+            self.content.append(ev[1])
+            n -= len(ev[1])
+        return out

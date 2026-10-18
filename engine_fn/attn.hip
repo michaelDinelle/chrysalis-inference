@@ -56,9 +56,13 @@ __device__ __forceinline__ float block_sum256(float v, float *red) {
     return s;
 }
 
+// M-RoPE (Qwen3.8's interleaved sections [11, 11, 10]): of the 32 frequency pairs, f % 3 == 1 (f < 33) turn with the
+// row position, f % 3 == 2 (f < 30) with the column, the rest with the sequence position; text has all three equal.
+__device__ __forceinline__ int mrope_section(int f) { return f % 3 == 1 && f < 33 ? 1 : f % 3 == 2 && f < 30 ? 2 : 0; }
+
 // grid (NH + 2*NKV jobs, T), 256 threads = one head dim each.
 __global__ __launch_bounds__(256) void k_attn_prep(const float *qg, const float *kin, const float *vin, const float *qnw,
-                                                   const float *knw, int pos0, KVRef kv, int layer, half *Q16) {
+                                                   const float *knw, int pos0, int rope0, const int *rpos, KVRef kv, int layer, half *Q16) {
     __shared__ float red[8], buf[HD];
     const int job = blockIdx.x, t = blockIdx.y, i = threadIdx.x, pos = pos0 + t;
     float x;
@@ -71,8 +75,9 @@ __global__ __launch_bounds__(256) void k_attn_prep(const float *qg, const float 
         __syncthreads();
         if (i < ROT) {               // NeoX-style pairs (i, i + 32) over the first 64 dims
             const int f = i % (ROT / 2);
+            const int rp = rpos ? rpos[t * 3 + mrope_section(f)] : rope0 + t;
             float s, c;
-            sincosf(pos * powf(ROPE_BASE, -2.0f * f / ROT), &s, &c);
+            sincosf(rp * powf(ROPE_BASE, -2.0f * f / ROT), &s, &c);
             x = i < ROT / 2 ? x * c - buf[i + ROT / 2] * s : x * c + buf[i - ROT / 2] * s;
         }
     }
@@ -105,8 +110,8 @@ __global__ __launch_bounds__(256) void k_attn_prep(const float *qg, const float 
 }
 
 void attn_prep(const float *qg, const float *k, const float *v, const float *qnw, const float *knw, int T, int pos0,
-               KVRef kv, int layer, half *Q16, hipStream_t st) {
-    k_attn_prep<<<dim3(NH + 2 * NKV, T), 256, 0, st>>>(qg, k, v, qnw, knw, pos0, kv, layer, Q16);
+               int rope0, const int *rpos, KVRef kv, int layer, half *Q16, hipStream_t st) {
+    k_attn_prep<<<dim3(NH + 2 * NKV, T), 256, 0, st>>>(qg, k, v, qnw, knw, pos0, rope0, rpos, kv, layer, Q16);
 }
 
 constexpr int QLD = HD + 8;   // padded LDS row (halves) for K tiles
@@ -389,8 +394,9 @@ __device__ __forceinline__ half *idx_pool(const KVRef &kv, int layer, int block)
            (size_t)((cell % PAGE) / KPOOL) * IDX_D;
 }
 
-// rmsnorm over 128 values (one per thread of a 128-thread block) times w, then NeoX rotation of the first ROT dims
-__device__ __forceinline__ float norm_rope128(float x, const float *w, int pos, float *red, float *buf) {
+// rmsnorm over 128 values (one per thread of a 128-thread block) times w, then NeoX rotation of the first ROT dims at the
+// M-RoPE position p
+__device__ __forceinline__ float norm_rope128(float x, const float *w, Pos3 p, float *red, float *buf) {
     const int i = threadIdx.x;
     float ss = warp_sum(x * x);
     if ((i & 31) == 0) red[i >> 5] = ss;
@@ -401,33 +407,38 @@ __device__ __forceinline__ float norm_rope128(float x, const float *w, int pos, 
     if (i < ROT) buf[i] = x;
     __syncthreads();
     if (i < ROT) {
-        const int f = i % (ROT / 2);
+        const int f = i % (ROT / 2), sec = mrope_section(f);
         float s, c;
-        sincosf(pos * powf(ROPE_BASE, -2.0f * f / ROT), &s, &c);
+        sincosf((sec == 0 ? p.t : sec == 1 ? p.h : p.w) * powf(ROPE_BASE, -2.0f * f / ROT), &s, &c);
         x = i < ROT / 2 ? x * c - buf[i + ROT / 2] * s : x * c + buf[i - ROT / 2] * s;
     }
     __syncthreads();
     return x;
 }
+__device__ __forceinline__ Pos3 pos_at(int t, int rope0, const int *rpos) {
+    return rpos ? Pos3{rpos[t * 3], rpos[t * 3 + 1], rpos[t * 3 + 2]} : Pos3{rope0 + t, rope0 + t, rope0 + t};
+}
 
 // grid (1 + IDX_H, T), 128 threads: job 0 stores the raw key of token t (fp16, in the pass buffer), jobs 1.. norm +
 // rotate its query heads
-__global__ __launch_bounds__(128) void k_idx_prep(const float *kraw, const float *qraw, const float *qnw, int pos0, half *praw,
-                                                  half *q16) {
+__global__ __launch_bounds__(128) void k_idx_prep(const float *kraw, const float *qraw, const float *qnw, int rope0, const int *rpos,
+                                                  half *praw, half *q16) {
     __shared__ float red[4], buf[ROT];
-    const int job = blockIdx.x, t = blockIdx.y, i = threadIdx.x, pos = pos0 + t;
+    const int job = blockIdx.x, t = blockIdx.y, i = threadIdx.x;
     if (job == 0) {
         praw[(size_t)t * IDX_D + i] = __float2half(kraw[(size_t)t * IDX_D + i]);
         return;
     }
     const int h = job - 1;
-    const float x = norm_rope128(qraw[((size_t)t * IDX_H + h) * IDX_D + i], qnw, pos, red, buf);
+    const float x = norm_rope128(qraw[((size_t)t * IDX_H + h) * IDX_D + i], qnw, pos_at(t, rope0, rpos), red, buf);
     q16[((size_t)t * IDX_H + h) * IDX_D + i] = __float2half(x);
 }
 
 // one block per pooled key completed by tokens pos0 .. pos0+T-1 (blocks b0 ..), 128 threads; raw keys of cells before
-// pos0 come from the sequence's tail (slot = cell % KPOOL), the rest from this pass's buffer
-__global__ __launch_bounds__(128) void k_idx_pool(int b0, int pos0, const half *tail, const half *praw, KVRef kv, int layer, const float *knw) {
+// pos0 come from the sequence's tail (slot = cell % KPOOL), the rest from this pass's buffer; the key turns with its first
+// cell's position (tail_pos when that cell came before the pass)
+__global__ __launch_bounds__(128) void k_idx_pool(int b0, int pos0, int rope0, const int *rpos, Pos3 tail_pos, const half *tail,
+                                                  const half *praw, KVRef kv, int layer, const float *knw) {
     __shared__ float red[4], buf[ROT];
     const int b = b0 + blockIdx.x, i = threadIdx.x;
     float x = 0;
@@ -435,7 +446,8 @@ __global__ __launch_bounds__(128) void k_idx_pool(int b0, int pos0, const half *
         const int cell = b * KPOOL + c;
         x += __half2float(cell < pos0 ? tail[(cell % KPOOL) * IDX_D + i] : praw[(size_t)(cell - pos0) * IDX_D + i]);
     }
-    x = norm_rope128(x * (1.0f / KPOOL), knw, b * KPOOL, red, buf);
+    const int first = b * KPOOL;
+    x = norm_rope128(x * (1.0f / KPOOL), knw, first < pos0 ? tail_pos : pos_at(first - pos0, rope0, rpos), red, buf);
     idx_pool(kv, layer, b)[i] = __float2half(x);
 }
 
@@ -448,12 +460,12 @@ __global__ __launch_bounds__(128) void k_idx_tail(half *tail, const half *praw, 
         tl[(cell % KPOOL) * IDX_D + threadIdx.x] = pr[(size_t)(cell - pos0) * IDX_D + threadIdx.x];
 }
 
-void idx_prep(const float *kraw, const float *qraw, const float *qnw, const float *knw, int T, int pos0, KVRef kv, int layer,
-              half *tail, half *praw, bool keep_tail, half *q16, hipStream_t st) {
-    k_idx_prep<<<dim3(1 + IDX_H, T), 128, 0, st>>>(kraw, qraw, qnw, pos0, praw, q16);
+void idx_prep(const float *kraw, const float *qraw, const float *qnw, const float *knw, int T, int pos0, int rope0, const int *rpos,
+              Pos3 tail_pos, KVRef kv, int layer, half *tail, half *praw, bool keep_tail, half *q16, hipStream_t st) {
+    k_idx_prep<<<dim3(1 + IDX_H, T), 128, 0, st>>>(kraw, qraw, qnw, rope0, rpos, praw, q16);
     // blocks completed in this pass: b with b*KPOOL + KPOOL-1 in [pos0, pos0 + T - 1]
     const int first = pos0 / KPOOL, last = (pos0 + T) / KPOOL - 1;
-    if (last >= first) k_idx_pool<<<last - first + 1, 128, 0, st>>>(first, pos0, tail, praw, kv, layer, knw);
+    if (last >= first) k_idx_pool<<<last - first + 1, 128, 0, st>>>(first, pos0, rope0, rpos, tail_pos, tail, praw, kv, layer, knw);
     if (keep_tail) k_idx_tail<<<1, 128, 0, st>>>(tail, praw, 0, pos0, pos0 + T);
 }
 

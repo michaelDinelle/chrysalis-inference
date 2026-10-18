@@ -413,8 +413,8 @@ void Engine::warmup() {
     const bool borrowed = id < 0;
     if (borrowed) id = 0;
     const std::vector<int> toks(9, 0);
-    prefill(id, toks.data(), 1);
-    prefill(id, toks.data(), 9);
+    prefill(id, toks.data(), nullptr, 1);
+    prefill(id, toks.data(), nullptr, 9);
     if (borrowed) seq_truncate(id, 0);
     else seq_free(id);
     CK(hipStreamSynchronize(st));
@@ -441,6 +441,7 @@ void Engine::alloc_buffers(int max_seqs) {
         add(8 * 64 * TOPK * 8 * 2);                        // top-k
         add(48 * 8 * (QKV + GK * GD + GV * GD + 2 * GV) * 4);   // verify-batch GDN inputs
         add(8 * D * 4 * 2); add(64);                       // mtp_x small, drafts
+        add(U * sizeof(half *)); add(U * 3 * 4);           // a prefill chunk's image rows, M-RoPE positions
         barena.init(need + (1 << 20));
     }
     b.tokens = barena.get<int>(U);
@@ -462,6 +463,7 @@ void Engine::alloc_buffers(int max_seqs) {
     b.v_raw = barena.get<float>(48 * 8 * QKV); b.v_kn = barena.get<float>(48 * 8 * GK * GD);
     b.v_vc = barena.get<float>(48 * 8 * GV * GD); b.v_ab = barena.get<float>(48 * 8 * 2 * GV);
     b.mtp_x = barena.get<float>(8 * D); b.draft = barena.get<int>(16);
+    b.img = barena.get<const half *>(U); b.rpos = barena.get<int>(U * 3);
 
     // sequence slots: the recurrent state stays resident
     CK(hipMalloc(&stage_state, state_bytes()));

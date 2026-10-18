@@ -154,15 +154,19 @@ void Engine::load(const std::string &path, int max_seqs, size_t reserve_bytes) {
     CK(hipEventCreateWithFlags(&front_copied, hipEventDisableTiming));
     CK(hipEventRecord(copied, cst));
 
-    // Plan the VRAM weights: every dense tensor and the hot / MTP expert tiers.
-    // layer: the decoder layer a tensor belongs to (-1: global, NL: the MTP block); hot expert tiers are not prefetched
-    struct Up { const GGUFTensor *t; QTensor *q = nullptr; float **f = nullptr; half **h = nullptr; int **i = nullptr; int layer = -1; bool pf = true; };
+    // Plan the VRAM weights: every dense tensor, the MTP block's experts and the expert pool (common.h slot_view), which
+    // starts out holding each layer's VRAM tier, layer after layer.
+    // layer: the decoder layer a tensor belongs to (-1: global, NL: the MTP block); expert tensors are not prefetched.
+    // b0 >= 0: the tensor goes into *q (the pool, made beforehand) from block b0 on.
+    struct Up { const GGUFTensor *t; QTensor *q = nullptr; float **f = nullptr; half **h = nullptr; int layer = -1; bool pf = true;
+                int64_t b0 = -1; };
     std::vector<Up> ups;
     int cur = -1;
-    auto quant = [&](const std::string &name, QTensor &q) { ups.push_back({get(name), &q, nullptr, nullptr, nullptr, cur}); };
-    auto vec = [&](const std::string &name, float *&f) { ups.push_back({get(name), nullptr, &f, nullptr, nullptr, cur}); };
-    auto f16 = [&](const std::string &name, half *&h) { ups.push_back({get(name), nullptr, nullptr, &h, nullptr, cur}); };
-    auto i32 = [&](const std::string &name, int *&i) { ups.push_back({get(name), nullptr, nullptr, nullptr, &i, cur, false}); };
+    auto quant = [&](const std::string &name, QTensor &q) { ups.push_back({get(name), &q, nullptr, nullptr, cur}); };
+    auto vec = [&](const std::string &name, float *&f) { ups.push_back({get(name), nullptr, &f, nullptr, cur}); };
+    auto f16 = [&](const std::string &name, half *&h) { ups.push_back({get(name), nullptr, nullptr, &h, cur}); };
+    n_slots = 0;
+    std::vector<int> first_slot(NL, 0);
     auto hcmix = [&](const std::string &p, HcMix &m, bool inject) {
         vec(p + "norm.weight", m.norm); quant(p + "down.weight", m.down); quant(p + "up.weight", m.up);
         if (inject) quant(p + "inject.weight", m.inject);
@@ -197,15 +201,24 @@ void Engine::load(const std::string &path, int max_seqs, size_t reserve_bytes) {
         f16(p + "ffn_router.weight", w.router);
         vec(p + "ffn_gate_inp_shexp.weight", w.sg_w);
         quant(p + "ffn_gate_shexp.weight", w.sh_gate); quant(p + "ffn_up_shexp.weight", w.sh_up); quant(p + "ffn_down_shexp.weight", w.sh_down);
-        const std::string tier = l < NL ? "hot" : "mtp";
-        if (g.get(p + "ffn_gate_" + tier + ".weight")) {
-            quant(p + "ffn_gate_" + tier + ".weight", w.hot_gate); quant(p + "ffn_up_" + tier + ".weight", w.hot_up);
-            quant(p + "ffn_down_" + tier + ".weight", w.hot_down);
+        if (l == NL && g.get(p + "ffn_gate_mtp.weight")) {
+            quant(p + "ffn_gate_mtp.weight", w.hot_gate); quant(p + "ffn_up_mtp.weight", w.hot_up); quant(p + "ffn_down_mtp.weight", w.hot_down);
             for (int k = 1; k <= 3; k++) ups[ups.size() - k].pf = false;
-            w.n_hot = (int)get(p + "ffn_gate_" + tier + ".weight")->ne[2];
+            w.n_hot = (int)get(p + "ffn_gate_mtp.weight")->ne[2];
         }
         if (l < NL) {
-            i32(p + "ffn_exp_slot", w.slot_of);
+            const GGUFTensor *hg = g.get(p + "ffn_gate_hot.weight");
+            w.n_hot = hg ? (int)hg->ne[2] : 0;
+            if (hg) {
+                if (hg->type != IQ4_XS || get(p + "ffn_up_hot.weight")->type != IQ4_XS || get(p + "ffn_down_hot.weight")->type != IQ4_NL)
+                    FAIL("layer %d: VRAM experts must be IQ4_XS gate / up, IQ4_NL down", l);
+                const int64_t b0 = (int64_t)n_slots * FE * D / 256, d0 = (int64_t)n_slots * D * FE / 32;
+                ups.push_back({hg, &pool_gate, nullptr, nullptr, cur, false, b0});
+                ups.push_back({get(p + "ffn_up_hot.weight"), &pool_up, nullptr, nullptr, cur, false, b0});
+                ups.push_back({get(p + "ffn_down_hot.weight"), &pool_down, nullptr, nullptr, cur, false, d0});
+            }
+            first_slot[l] = n_slots;
+            n_slots += w.n_hot;
             const GGUFTensor *c = g.get(p + "ffn_down_cold.weight");
             w.n_cold = c ? (int)c->ne[2] : 0;
         }
@@ -219,13 +232,26 @@ void Engine::load(const std::string &path, int max_seqs, size_t reserve_bytes) {
     size_t wbytes = 0;
     auto shape = [](const GGUFTensor *t, int &rows, int &cols) { cols = (int)t->ne[0]; rows = (int)(t->ne[1] * t->ne[2] * t->ne[3]); };
     for (Up &u : ups) {
+        if (u.b0 >= 0) continue;
         if (u.q) {
             int rows, cols; shape(u.t, rows, cols);
             Arena dry; dry.cap = SIZE_MAX; make_qtensor(dry, u.t->type, rows, cols); wbytes += dry.used;
         } else wbytes += (u.t->nbytes + 255) & ~size_t(255);
     }
+    {
+        Arena dry; dry.cap = SIZE_MAX;
+        make_qtensor(dry, IQ4_XS, n_slots * FE, D); make_qtensor(dry, IQ4_XS, n_slots * FE, D); make_qtensor(dry, IQ4_NL, n_slots * D, FE);
+        dry.get<int>((size_t)NL * NE); dry.get<uint8_t>(n_slots);
+        wbytes += dry.used;
+    }
     wbytes += (size_t)NE * 4 + 2 * (size_t)NGDN * GV * 4 + (1 << 20) + ups.size() * 8 * sizeof(PrefetchRange);
     warena.init(wbytes);
+    pool_gate = make_qtensor(warena, IQ4_XS, n_slots * FE, D);
+    pool_up = make_qtensor(warena, IQ4_XS, n_slots * FE, D);
+    pool_down = make_qtensor(warena, IQ4_NL, n_slots * D, FE);
+    d_slot_of = warena.get<int>((size_t)NL * NE);
+    d_fmt = warena.get<uint8_t>(n_slots);
+    for (int l = 0; l < NL; l++) { L[l].hot_gate = pool_gate; L[l].hot_up = pool_up; L[l].hot_down = pool_down; L[l].slot_of = d_slot_of + (size_t)l * NE; }
 
     // Cold experts -> system RAM (hugepages), copied by 8 threads while the VRAM upload below runs: both are reads
     // of the same file, so together they take about as long as the disk needs for all of it. Per layer: gate / up of
@@ -309,7 +335,7 @@ void Engine::load(const std::string &path, int max_seqs, size_t reserve_bytes) {
     for (Up &u : ups) {
         if (u.q) {
             int rows, cols; shape(u.t, rows, cols);
-            *u.q = make_qtensor(warena, u.t->type, rows, cols);
+            if (u.b0 < 0) *u.q = make_qtensor(warena, u.t->type, rows, cols);
             const int bb = qbytes_of(u.t->type);
             if (!bb) FAIL("unsupported type %d for %s", u.t->type, "tensor");
             const size_t piece = STAGE / bb * bb;
@@ -318,7 +344,7 @@ void Engine::load(const std::string &path, int max_seqs, size_t reserve_bytes) {
                 CK(hipEventSynchronize(ev[slot]));
                 fetch(pin[slot], u.t->data + off, len);
                 CK(hipMemcpyAsync(dev[slot], pin[slot], len, hipMemcpyHostToDevice, st));
-                relayout(*u.q, dev[slot], st, off / bb, len / bb);
+                relayout(*u.q, dev[slot], st, std::max<int64_t>(u.b0, 0) + off / bb, len / bb);
                 CK(hipEventRecord(ev[slot], st));
                 slot ^= 1;
             }
@@ -332,7 +358,6 @@ void Engine::load(const std::string &path, int max_seqs, size_t reserve_bytes) {
             g.drop(u.t->data, u.t->nbytes);
             if (u.f) *u.f = (float *)d;
             if (u.h) *u.h = (half *)d;
-            if (u.i) *u.i = (int *)d;
         }
     }
     // decode prefetch lists: each decoder layer's dense weights (everything but its hot experts), in load order
@@ -343,7 +368,7 @@ void Engine::load(const std::string &path, int max_seqs, size_t reserve_bytes) {
             if (u.layer < 0 || u.layer >= NL || !u.pf) continue;
             arrs.clear();
             if (u.q) qtensor_arrays(*u.q, arrs);
-            else arrs.push_back({u.f ? (const void *)*u.f : u.h ? (const void *)*u.h : (const void *)*u.i, u.t->nbytes});
+            else arrs.push_back({u.f ? (const void *)*u.f : (const void *)*u.h, u.t->nbytes});
             for (auto [p, n] : arrs) if (n >= 16) pr[u.layer].push_back({(const int4 *)p, n / 16});
         }
         std::vector<PrefetchRange> all;
@@ -360,17 +385,27 @@ void Engine::load(const std::string &path, int max_seqs, size_t reserve_bytes) {
         CK(hipMemcpyAsync(gdn_A + gl * GV, ssm_a[gl], GV * 4, hipMemcpyDeviceToDevice, st));
         CK(hipMemcpyAsync(gdn_dt + gl * GV, ssm_dt[gl], GV * 4, hipMemcpyDeviceToDevice, st));
     }
-    {   // MTP experts are all in VRAM: identity slot map
+    {   // MTP experts are all in VRAM: identity slot map. The decoder layers' maps: the file's VRAM-tier slot h is pool slot
+        // first_slot + h, its RAM-tier slots stay as they are.
         std::vector<int> id(NE);
         for (int e = 0; e < NE; e++) id[e] = e;
         M.slot_of = warena.get<int>(NE);
         CK(hipMemcpyAsync(M.slot_of, id.data(), NE * 4, hipMemcpyHostToDevice, st));
-        CK(hipStreamSynchronize(st));
         M.slot_h = id;
+        std::vector<int> all((size_t)NL * NE);
         for (int l = 0; l < NL; l++) {
             const int *s = (const int *)get("blk." + std::to_string(l) + ".ffn_exp_slot")->data;
-            L[l].slot_h.assign(s, s + NE);
+            L[l].slot_h.resize(NE);
+            for (int e = 0; e < NE; e++) {
+                if (s[e] >= L[l].n_hot || -1 - s[e] >= L[l].n_cold) FAIL("layer %d: expert %d has slot %d", l, e, s[e]);
+                L[l].slot_h[e] = all[(size_t)l * NE + e] = s[e] >= 0 ? first_slot[l] + s[e] : s[e];
+            }
         }
+        CK(hipMemcpyAsync(d_slot_of, all.data(), all.size() * 4, hipMemcpyHostToDevice, st));
+        std::vector<uint8_t> f(n_slots, IQ4_XS);
+        CK(hipMemcpyAsync(d_fmt, f.data(), f.size(), hipMemcpyHostToDevice, st));
+        CK(hipStreamSynchronize(st));
+        file_fd = g.fd; file_base = g.base;
     }
     for (int i = 0; i < 2; i++) { CK(hipHostFree(pin[i])); CK(hipFree(dev[i])); CK(hipEventDestroy(ev[i])); }
     const double t_vram = now();
@@ -385,8 +420,15 @@ void Engine::load(const std::string &path, int max_seqs, size_t reserve_bytes) {
         d_cold = (uint8_t *)dp;
     }
     for (int l = 0; l < NL; l++) {
-        if (!L[l].n_cold) continue;
         ColdLayer &c = cold[l];
+        if (L[l].n_hot) {                           // the file's VRAM tier, for the CPU while the pool holds no copy
+            const std::string p = "blk." + std::to_string(l) + ".";
+            c.gate[2] = get(p + "ffn_gate_hot.weight")->data; c.up[2] = get(p + "ffn_up_hot.weight")->data;
+            c.down2 = get(p + "ffn_down_hot.weight")->data;
+            c.type_gu[2] = IQ4_XS; c.row_gu[2] = qrow_bytes(IQ4_XS, D); c.n2 = L[l].n_hot;
+            c.type_dn = IQ4_NL; c.row_dn = qrow_bytes(IQ4_NL, FE);
+        }
+        if (!L[l].n_cold) continue;
         ColdDec &cd = cold_dev[l];
         for (int grp = 0; grp < 2; grp++) {
             const GGUFTensor *tg = ct[l][2 * grp];
@@ -453,6 +495,7 @@ void Engine::load(const std::string &path, int max_seqs, size_t reserve_bytes) {
     hipblasLtCreate(&lt);
     CK(hipMalloc(&lt_ws, lt_ws_size));
     alloc_buffers(max_seqs);
+    experts_init();
     size_t free_b, total_b;
     CK(hipMemGetInfo(&free_b, &total_b));
     const size_t want = free_b > reserve_bytes ? free_b - reserve_bytes : 0;
@@ -482,7 +525,7 @@ void Engine::alloc_buffers(int max_seqs) {
     // cold expert staging, sized for the widest of the file's cold gate/up formats
     stage_gu = stage_soa = 0;
     for (const ColdLayer &c : cold)
-        for (int g = 0; g < 2; g++) {
+        for (int g = 0; g < 3; g++) {
             if (!c.gate[g]) continue;
             Arena dry; dry.cap = SIZE_MAX;
             make_qtensor(dry, c.type_gu[g], STAGE_G * FE, D);
@@ -581,6 +624,8 @@ void Engine::alloc_buffers(int max_seqs) {
             b.sgu[k] = a.get<uint8_t>(2 * stage_soa);
             b.sd_[k] = make_qtensor(a, IQ4_NL, STAGE_G * D, FE);
         }
+        b.img = a.get<const half *>(S);                   // a pass's picture rows and M-RoPE positions
+        b.rpos = a.get<int>((size_t)S * 3);
     };
     Arena dry; dry.cap = SIZE_MAX;
     carve(dry);
@@ -595,6 +640,7 @@ void Engine::alloc_buffers(int max_seqs) {
     CK(hipHostMalloc(&b.h_x16, (size_t)S * D * 2)); CK(hipHostMalloc(&b.h_cout, P * D * 2));
     CK(hipHostMalloc(&b.h_topv, (size_t)8 * TOPK * 4)); CK(hipHostMalloc(&b.h_topi, (size_t)8 * TOPK * 4)); CK(hipHostMalloc(&b.h_draft, 64));
     for (int k = 0; k < NSLOT; k++) {
+        CK(hipHostMalloc(&b.bounce[k], raw_bytes));
         CK(hipEventCreateWithFlags(&raw_free[k], hipEventDisableTiming));
         CK(hipEventCreateWithFlags(&raw_ready[k], hipEventDisableTiming));
         CK(hipEventRecord(raw_free[k], st));
@@ -621,12 +667,19 @@ void Engine::warmup() {
     const bool borrowed = id < 0;                   // the server's cache holds every slot (all still empty): borrow slot 0
     if (borrowed) id = 0;
     std::vector<int> toks(24, 198);
-    prefill(id, toks.data(), (int)toks.size());
+    const bool on = xc.on;                             // the pool keeps what it holds, and forgets these picks
+    xc.on = false;
+    prefill(id, toks.data(), nullptr, (int)toks.size());
     Sampling sp;
     sp.temperature = 0.0f; sp.n_draft = 1;
     int out[4];
     generate(id, sp, out, 4);
     CK(hipStreamSynchronize(st));
+    xc.on = on;
+    std::fill(xc.fresh.begin(), xc.fresh.end(), 0u);
+    std::fill(xc.total.begin(), xc.total.end(), 0ull);
+    xc.tokens = 0; xc.counts_pending = false;
+    CK(hipMemsetAsync(xc.d_counts, 0, (size_t)NL * NE * 4, st));
     if (borrowed) seq_reset(seqs[0]); else seq_free(id);
     snap_warm = true;
     snap_reserve_finish();                             // every snapshot slot the server asked for (2 by default)
@@ -634,6 +687,7 @@ void Engine::warmup() {
 
 void Engine::shutdown() {
     cpu.stop();
+    experts_stop();
     CK(hipDeviceSynchronize());
     if (kv_pool) (void)hipFree(kv_pool);
     for (Seq &s : seqs) { (void)hipFree(s.d_pages); (void)hipFree(s.ssm); (void)hipFree(s.conv); (void)hipFree(s.ple); (void)hipFree(s.h_last); (void)hipFree(s.idx_tail); }
@@ -660,8 +714,9 @@ void Engine::shutdown() {
     if (embd_host) (void)hipHostFree(embd_host);
     embd_host = nullptr; embd.q = nullptr; sh = d_sh = nullptr; sh_pred = d_sh_pred = nullptr;
     if (stage_state) (void)hipFree(stage_state);
-    if (route_dec) (void)hipFree(route_dec);
-    route_dec = nullptr;
+    if (d_mask) (void)hipFree(d_mask);
+    d_mask = nullptr;
+    for (uint8_t *&p : b.bounce) { if (p) (void)hipHostFree(p); p = nullptr; }
     if (lt_ws) (void)hipFree(lt_ws);
     if (lt) hipblasLtDestroy(lt);
     lt = nullptr; lt_ws = nullptr; stage_state = nullptr; kv_pool = nullptr;

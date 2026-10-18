@@ -29,9 +29,31 @@ def c_comments(src, ts):
             while j < n and src[j] != c:
                 j += 2 if src[j] == "\\" else 1
             i = j + 1
+        elif ts and c == "/" and regex_starts(src, i):
+            # a regex literal (a quote in /[A-Za-z']/ would otherwise open a string that hides the code after it)
+            j, in_class = i + 1, False
+            while j < n and src[j] != "\n" and (in_class or src[j] != "/"):
+                if src[j] == "\\":
+                    j += 1
+                elif src[j] in "[]":
+                    in_class = src[j] == "["
+                j += 1
+            i = j + 1
         else:
             i += 1
     return out
+
+
+def regex_starts(src, i):
+    """A / that begins a regex literal rather than dividing: after an operator, an opening bracket, punctuation, a
+    keyword that takes an expression, or nothing."""
+    k = i - 1
+    while k >= 0 and src[k] in " \t\r\n":
+        k -= 1
+    if k < 0 or src[k] in "(,=:[!&|?{};+-*%<>~^":
+        return True
+    word = re.search(r"[A-Za-z_$]+$", src[:k + 1])
+    return bool(word) and word.group(0) in ("return", "typeof", "case", "of", "in", "void", "delete", "throw", "new", "else", "do", "yield", "await")
 
 
 def hash_comments(src, python):

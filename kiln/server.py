@@ -1,4 +1,5 @@
-"""OpenAI-compatible HTTP server around the kiln engine, built for coding-agent loops (OpenCode).
+"""OpenAI-compatible HTTP server around the kiln engine, built for coding-agent loops (OpenCode); it also speaks
+Anthropic's Messages API and OpenAI's Responses API (kiln/apis.py).
 
 What keeps time-to-first-token low:
   * prompts render to token ids; assistant turns kiln generated are replayed as their exact ids, so each
@@ -13,6 +14,7 @@ What keeps time-to-first-token low:
 import functools
 import hashlib
 import ipaddress
+import itertools
 import json
 import os
 import random
@@ -28,10 +30,14 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 import numpy as np
 
-from .cache import Cache
-from .chat import Content, OutputParser, Renderer, Tokens, message_key, text_of
-from .engine import STAGES, Engine, KVFull, Sampling, load_async, load_progress
+from . import apis, vision
+from .cache import Cache, Disk
+from .chat import Clip, Content, OutputParser, Renderer, StopText, Tokens, message_key, text_of
+from .documents import DocumentError, Documents
+from .structured import Grammars
+from .engine import IMG_BASE, IMG_ROWS, STAGES, Engine, KVFull, Sampling, load_async, load_progress
 from .models import MODELS
+from .sleep import SleepGuard, vram_used, wait_vram_freed
 
 MODEL = "qwen3.8-27b"
 _ROOT = __import__("os").path.dirname(__import__("os").path.dirname(__import__("os").path.abspath(__file__)))
@@ -45,15 +51,20 @@ DEFAULTS = {True: dict(temperature=1.0, top_p=0.95, top_k=20, min_p=0.0, presenc
 SIDE_PROMPTS = ("You are a title generator", "Summarize what was done in this conversation")
 COMPACT_PROMPT = "You are a context summarization agent"
 TRACE = bool(os.environ.get("KILN_TRACE"))     # log where each request's time to first token went
+SNAPSHOT_DIR = os.environ.get("KILN_SNAPSHOTS") or os.path.join(_ROOT, "data/cache")   # one directory per model
 EFFORTS = {"xhigh": "xhigh", "high": "xhigh", "medium": "medium", "low": "low", "minimal": "low"}
 
 
 class RequestError(ValueError):
-    code = "invalid_request"
+    code, status = "invalid_request", 400
 
 
 class ContextError(RequestError):
     code = "context_length_exceeded"
+
+
+class Asleep(RequestError):
+    code, status = "unavailable", 503
 
 
 def first_text(content):
@@ -71,45 +82,189 @@ def merge_system(messages):
 
 
 class LRU(OrderedDict):
+    """Requests write their replies concurrently (Batcher), so each use holds the lock; values() is a copy."""
+
     def __init__(self, limit):
         super().__init__()
-        self.limit = limit
+        self.limit, self.lock = limit, threading.Lock()
 
     def put(self, k, v):
-        self[k] = v
-        self.move_to_end(k)
-        while len(self) > self.limit:
-            self.popitem(last=False)
+        with self.lock:
+            self[k] = v
+            self.move_to_end(k)
+            while len(self) > self.limit:
+                self.popitem(last=False)
 
     def get(self, k, default=None):
-        if k not in self:
-            return default
-        self.move_to_end(k)
-        return self[k]
+        with self.lock:
+            if k not in self:
+                return default
+            self.move_to_end(k)
+            return self[k]
+
+    def values(self):
+        with self.lock:
+            return list(super().values())
 
 
 DATE = re.compile(r"(Today's date: )([^\n]*)")
 
 
+class Pictures:
+    """The pictures and videos requests have sent, by content and how they are read (kiln/vision.py pixel_limit: a
+    picture's own max_pixels or detail, else its request's, at most the server's `cap`; a video's frames a second). Each
+    picture, and each pair of a video's frames, keeps one image-token slot for the life of the engine, so its tokens are
+    the same in every request and the prompt cache tells them apart by them (a slot is never given to another while cached
+    state may hold its tokens), and its grid. The engine holds their embeddings only for prefills: encoded when a prompt's
+    uncached part needs them, the least recently used dropped beyond `budget` (never those of the prompt being read)."""
+    SLOTS = (2**31 - IMG_BASE) // IMG_ROWS
+
+    def __init__(self, engine, width, budget, cap=vision.MAX_PIXELS):
+        self.e, self.width, self.budget, self.cap = engine, width, budget, cap
+        self.lock = threading.Lock()             # renders run on request threads, beside the request on the GPU
+        self.by_digest, self.grid, self.limit = {}, {}, {}   # key -> slot; slot -> grid, how a picture is read
+        self.pair = {}                           # slot -> which frame pair of its video
+        self.videos = OrderedDict()              # (digest, frames a second) -> kiln.vision.Video, the latest few
+        self.encoded = OrderedDict()             # slot -> bytes held by the engine, least recently used first
+
+    def slot(self, key, grid):
+        """The slot of a picture or frame pair (lock held)."""
+        slot = self.by_digest.get(key)
+        if slot is None:
+            if len(self.grid) >= self.SLOTS:
+                raise vision.ImageError("this server has seen too many pictures since it started; restart it")
+            slot = len(self.grid)
+            self.by_digest[key], self.grid[slot] = slot, grid
+        return slot
+
+    def ids(self, slot):
+        base = IMG_BASE + slot * IMG_ROWS
+        gh, gw = self.grid[slot]
+        return list(range(base, base + gh * gw // 4))
+
+    def tokens(self, item, seen, limit=None):
+        """A picture's (chat.Picture) image token ids, or a video's (chat.Clip) (time, image token ids) for each frame pair;
+        seen (slot -> picture bytes or kiln.vision.Video) collects the request's for encoding. limit: the request's
+        max_pixels."""
+        if isinstance(item, Clip):
+            return self.video_tokens(item, seen)
+        data = vision.image_bytes(item.url)
+        limit = vision.pixel_limit(item.max_pixels, limit, cap=self.cap)
+        key = (vision.digest(data), limit)
+        with self.lock:
+            known = self.by_digest.get(key)
+        grid = self.grid[known] if known is not None else vision.grid(data, limit)
+        with self.lock:
+            slot = self.slot(key, grid)
+            self.limit[slot] = limit
+        seen[slot] = data
+        return self.ids(slot)
+
+    def video_tokens(self, clip, seen):
+        data = vision.image_bytes(clip.url, "videos")
+        rate = float(clip.fps or vision.VIDEO_FPS)
+        if not 0 < rate <= 30:
+            raise vision.VideoError("a video's fps must be over 0 and at most 30")
+        key = (vision.digest(data), rate)
+        with self.lock:
+            video = self.videos.get(key)
+        if video is None:
+            video = vision.Video(data, rate)
+        with self.lock:
+            self.videos[key] = video
+            self.videos.move_to_end(key)
+            while len(self.videos) > 4:
+                self.videos.popitem(last=False)
+            out = []
+            for i, t in enumerate(video.times):
+                slot = self.slot(key + (i,), video.grid)
+                self.pair[slot] = i
+                seen[slot] = video
+                out.append((t, self.ids(slot)))
+        return out
+
+    def positions(self, prompt):
+        """The prompt's M-RoPE positions (kiln/vision.py), or None when it has no pictures (text positions)."""
+        img = prompt >= IMG_BASE
+        if not img.any():
+            return None
+        edges = np.flatnonzero(np.diff(np.concatenate([[0], img.view(np.int8), [0]])))
+        segs, prev = [], 0
+        for a, b in zip(edges[::2], edges[1::2]):    # a run of image tokens is one picture (markers stand between two)
+            if a > prev:
+                segs.append(("text", int(a - prev)))
+            gh, gw = self.grid[int(prompt[a] - IMG_BASE) // IMG_ROWS]
+            segs.append(("image", gh // 2, gw // 2))
+            prev = b
+        if prev < len(prompt):
+            segs.append(("text", int(len(prompt) - prev)))
+        return vision.positions(segs)
+
+    def runs(self, prompt):
+        """(start, end, slot) of each picture's tokens in the prompt."""
+        img = prompt >= IMG_BASE
+        edges = np.flatnonzero(np.diff(np.concatenate([[0], img.view(np.int8), [0]])))
+        return [(int(a), int(b), int(prompt[a] - IMG_BASE) // IMG_ROWS) for a, b in zip(edges[::2], edges[1::2])]
+
+    def ensure(self, slots, seen):
+        """The engine holds these slots' embeddings (the vision tower runs for those it does not: a video is decoded once
+        for all its pairs); then the least recently used beyond the budget are dropped, but not these. Returns how many
+        were encoded."""
+        frames, n = {}, 0
+        for slot in slots:
+            if slot in self.encoded:
+                self.encoded.move_to_end(slot)
+                continue
+            src = seen[slot]
+            if isinstance(src, vision.Video):
+                if id(src) not in frames:
+                    frames[id(src)] = src.frames()
+                i = self.pair[slot]
+                ok = self.e.video_encode(slot, vision.pair_patches(frames[id(src)][2 * i:2 * i + 2])[0], self.grid[slot])
+            else:
+                patches, grid = vision.patches(src, self.limit[slot])
+                if grid != self.grid[slot]:
+                    raise vision.ImageError("the picture's size reads differently from its header and its pixels")
+                ok = self.e.image_encode(slot, patches, grid)
+            if not ok:
+                raise vision.ImageError("the picture is too large for the GPU memory kiln can lend the vision tower")
+            gh, gw = self.grid[slot]
+            self.encoded[slot] = gh * gw // 4 * self.width * 2
+            n += 1
+        keep = set(slots)
+        while sum(self.encoded.values()) > self.budget:
+            old = next((s for s in self.encoded if s not in keep), None)
+            if old is None:
+                break
+            del self.encoded[old]
+            self.e.image_free(old)
+        return n
+
+
 class Turnstile:
-    """One request on the GPU at a time. Side requests (titles, summaries) go last: they wait while agent requests
-    queue, and start only after SIDE_IDLE seconds without an agent request, counted from their own arrival too.
-    OpenCode sends a new session's title request 8 ms before the session's first request, and an agent's next step
-    ~25 ms after a tool returns, so a side request that took the GPU whenever it was free would hold up the turn
-    the user is waiting for."""
+    """One holder of the GPU at a time: a prompt being read, a pass of replies (Batcher), a model switch. Side requests
+    (titles, summaries) go last: they wait while agent requests queue, and start only after SIDE_IDLE seconds without an
+    agent request, counted from their own arrival too. OpenCode sends a new session's title request 8 ms before the
+    session's first request, and an agent's next step ~25 ms after a tool returns, so a side request that took the GPU
+    whenever it was free would hold up the turn the user is waiting for."""
     SIDE_IDLE = 0.3
 
     def __init__(self):
         self.cv = threading.Condition()
         self.busy, self.waiting = False, 0
         self.main_seen = 0.0                             # an agent request last arrived or finished
+        # Agent requests take turns in the order they asked: a reply being written takes the GPU again for every pass
+        # (Batcher), and would otherwise have it back before a prompt waiting to be read woke up.
+        self.ticket = self.serving = 0
 
     def acquire(self, main):
         with self.cv:
             if main:
+                turn, self.ticket = self.ticket, self.ticket + 1
                 self.waiting += 1
                 self.main_seen = time.time()
-                self.cv.wait_for(lambda: not self.busy)
+                self.cv.wait_for(lambda: not self.busy and self.serving == turn)
+                self.serving += 1
                 self.waiting -= 1
             else:
                 arrived = time.time()
@@ -126,6 +281,139 @@ class Turnstile:
             if main:
                 self.main_seen = time.time()
             self.cv.notify_all()
+
+
+class Lanes:
+    """Requests in flight at once: one per cache slot, so each has its own. A model switch or sleep has the engine alone:
+    new requests wait, and those in flight finish first."""
+
+    def __init__(self, n):
+        self.cv = threading.Condition()
+        self.n, self.used, self.exclusive = n, 0, False
+
+    def enter(self):
+        with self.cv:
+            self.cv.wait_for(lambda: self.used < self.n and not self.exclusive)
+            self.used += 1
+
+    def leave(self):
+        with self.cv:
+            self.used -= 1
+            self.cv.notify_all()
+
+    def hold(self, mine=False):
+        """Until release(): mine, the caller is a request in flight, which gives up its lane while the others finish (two
+        requests that both switch then take turns) and has it back."""
+        with self.cv:
+            if mine:
+                self.used -= 1
+                self.cv.notify_all()
+            self.cv.wait_for(lambda: not self.exclusive)
+            self.exclusive = True
+            self.cv.wait_for(lambda: self.used == 0)
+            self.used += mine
+
+    def release(self):
+        with self.cv:
+            self.exclusive = False
+            self.cv.notify_all()
+
+
+class Held:
+    """A request's turn at the GPU, taken and given back as it goes: its prompt is read with the GPU to itself, its reply's
+    steps share passes (Batcher), and a constrained answer's steps or a freeing of KV pages take it for the moment."""
+
+    def __init__(self, gpu, main):
+        self.gpu, self.main, self.on = gpu, main, False
+        self.slot = None                             # the cache slot its reply is written in, freed when it ends
+
+    def take(self):
+        if not self.on:
+            self.gpu.acquire(self.main)
+            self.on = True
+
+    def drop(self):
+        if self.on:
+            self.gpu.release(self.main)
+            self.on = False
+
+
+class Batcher:
+    """Replies being written share the GPU. The first to ask for its next step waits a moment for the others (each spends
+    a little between steps sending out its tokens) and runs all their steps in one pass (Engine.generate_batch), which
+    reads the weights once for all of them: two replies at once write 141 tok/s together where 107 in turn. A reply alone,
+    or one that wants log probs, steps as before (with prompt lookup). A prompt being read takes the GPU between passes."""
+    GATHER = 0.002                                   # seconds the first waits for the rest
+
+    def __init__(self, gpu):
+        self.gpu, self.cv = gpu, threading.Condition()
+        self.writing = 0                             # replies whose steps come through here
+        self.queue, self.done, self.leading = {}, {}, False
+        self.shared = 0                              # passes that carried several replies
+
+    def begin(self):
+        with self.cv:
+            self.writing += 1
+
+    def end(self):
+        with self.cv:
+            self.writing -= 1
+            self.cv.notify_all()
+
+    def step(self, engine, sid, sp, rows=False, most=16):
+        """The reply's next tokens, at most `most` (with their candidate rows if asked: (ids, values, ids of candidates))."""
+        with self.cv:
+            self.queue[sid] = (sp, rows, most)
+            self.cv.notify_all()
+            while sid not in self.done:
+                if self.leading:
+                    self.cv.wait()
+                    continue
+                self.leading = True
+                deadline = time.time() + self.GATHER
+                while len(self.queue) < self.writing and (left := deadline - time.time()) > 0:
+                    self.cv.wait(left)
+                batch, self.queue = self.queue, {}
+                self.cv.release()
+                try:
+                    results = self.run(engine, batch)
+                except BaseException as e:           # every reply in the pass hears of it
+                    results = dict.fromkeys(batch, e)
+                finally:
+                    self.cv.acquire()
+                    self.leading = False
+                self.done.update(results)
+                self.cv.notify_all()
+            got = self.done.pop(sid)
+        if isinstance(got, BaseException):
+            raise got
+        return got
+
+    def run(self, engine, batch):
+        """The pass: results by sequence, its tokens or the exception (KVFull) its step raised."""
+        alone = [sid for sid, (sp, rows, most) in batch.items() if rows or most < 16 or len(batch) == 1 or not engine.batched]
+        together = [sid for sid in batch if sid not in alone]
+        if len(together) == 1:
+            alone += together
+            together = []
+        out = {}
+        self.gpu.acquire(True)
+        try:
+            if together:
+                self.shared += 1
+                try:
+                    out.update(zip(together, engine.generate_batch(together, [batch[sid][0] for sid in together])))
+                except KVFull as e:
+                    out.update(dict.fromkeys(together, e))
+            for sid in alone:
+                sp, rows, most = batch[sid]
+                try:
+                    out[sid] = engine.generate(sid, sp, most, rows=True) if rows else engine.generate(sid, sp, most)
+                except KVFull as e:
+                    out[sid] = e
+        finally:
+            self.gpu.release(True)
+        return out
 
 
 class Sticky:
@@ -164,11 +452,14 @@ class Sticky:
 
 
 class Server:
-    def __init__(self, model_path, tokenizer_path, slots=3, n_draft=3, umax=None, log=sys.stderr, engine=None, warmup=True,
-                 model=MODEL):
+    def __init__(self, model_path, tokenizer_path, slots=3, n_draft=None, umax=None, log=sys.stderr, engine=None, warmup=True,
+                 model=MODEL, lookup=None, max_pixels=None):
         """engine: a future of the Engine (engine.load_async) if its load already started; by default it loads here,
         alongside the tokenizer. warmup=False leaves Engine.warmup() to the caller (serve() runs it under the GPU lock).
-        model: the name of the model that model_path holds (see MODELS); requests can switch to the others."""
+        model: the name of the model that model_path holds (see MODELS); requests can switch to the others. n_draft,
+        lookup: MTP and prompt-lookup drafts per step for it (default: its MODELS entry's, as a switch back would set).
+        max_pixels: the most pixels a picture is read at (default: the official 16,777,216); requests may ask for fewer."""
+        self.max_pixels = vision.pixel_limit(max_pixels)
         if engine is None:
             engine = load_async(model_path, max_seqs=slots, umax=umax or MODELS.get(model, MODELS[MODEL])["chunk"], warmup=False,
                                 lib=__import__("os").path.join(_ROOT, MODELS.get(model, MODELS[MODEL])["lib"]))
@@ -180,14 +471,45 @@ class Server:
         self.renderer = Renderer(self.tok, self.replay.get)
         self.sticky = Sticky()
         self.sessions = LRU(64)          # latest request + reply per conversation, for compaction rewrites
+        self.stored = LRU(256)           # Responses API: a response's conversation, by its id (previous_response_id)
+        self.grammars = None             # response_format's JSON schemas as grammars (made at the first)
+        self.documents = Documents()     # PDFs and text files attached to messages, read
         self.gpu = Turnstile()
-        self.n_draft, self.log = n_draft, log
+        self.lanes = Lanes(slots)
+        self.batcher = Batcher(self.gpu)
+        self.replying = set()            # the sequences replies are being written in (a prompt being read makes way for them)
+        self.pausing = threading.Event()  # the machine is about to sleep: GPU work ends at its next step (sleep())
+        self.log = log
+        spec = MODELS.get(model, MODELS[MODEL])
+        self.n_draft = spec["draft"] if n_draft is None else n_draft
+        self.lookup = spec.get("lookup", 0) if lookup is None else lookup
         self.recent = LRU(64)
         self.engine = engine.result()
         self.capacity = min(MAX_CONTEXT, self.engine.capacity)
-        self.cache = Cache(self.engine, slots, max_snapshots=MODELS.get(model, MODELS[MODEL])["snapshots"])
+        self.cache = Cache(self.engine, slots, max_snapshots=MODELS.get(model, MODELS[MODEL])["snapshots"],
+                           disk=self.snapshot_disk(model, model_path))
+        self.pictures = self.open_vision(model)
         if warmup:
             self.engine.warmup()
+
+    def snapshot_disk(self, name, model_path):
+        """Where the model's shared prefixes are kept on disk (kiln/cache.py Disk), if its engine can write them out."""
+        import os
+        if not self.engine.persistent:
+            return None
+        lib = os.path.join(_ROOT, MODELS.get(name, MODELS[MODEL])["lib"])
+        identity = "|".join(f"{os.path.basename(p)}:{st.st_size}:{st.st_mtime_ns}" for p in (model_path, lib) for st in [os.stat(p)])
+        return Disk(os.path.join(SNAPSHOT_DIR, name), identity)
+
+    def open_vision(self, name):
+        """The model's vision tower, when the engine and its GGUF are there (else pictures become a note)."""
+        import os
+        spec = MODELS.get(name, {})
+        path = spec.get("vision") and os.path.join(_ROOT, spec["vision"])
+        if not (path and os.path.exists(path) and self.engine.vision):
+            return None
+        self.engine.vision_open(path)
+        return Pictures(self.engine, 5120 if name == "qwen3.8-27b" else 2560, spec["pictures"], self.max_pixels)
 
     def resolve(self, name):
         """The MODELS key a request names ("-fast" variants included); unknown names mean the active model."""
@@ -199,18 +521,12 @@ class Server:
         dropped: they are that model's KV and states."""
         if name == self.active:
             return
-        import os
         t0 = time.time()
-        spec = MODELS[name]
         with self.state_lock:                         # waits for a stats() call that is reading the engine
             self.loading = name
         try:
             self.engine.shutdown()
-            self.engine = Engine(os.path.join(_ROOT, spec["path"]), max_seqs=self.slots, umax=self.umax or spec["chunk"],
-                                 lib=os.path.join(_ROOT, spec["lib"]), warmup=True)
-            self.capacity = min(MAX_CONTEXT, self.engine.capacity)
-            self.cache = Cache(self.engine, self.slots, max_snapshots=spec["snapshots"])
-            self.n_draft = spec["draft"]
+            self.load_engine(name)
             print(f"kiln: switched {self.active} -> {name} in {time.time() - t0:.1f} s (context {self.capacity} tokens)",
                   file=self.log, flush=True)
             self.active = name
@@ -218,10 +534,49 @@ class Server:
             with self.state_lock:
                 self.loading = None
 
+    def load_engine(self, name):
+        import os
+        spec = MODELS[name]
+        self.engine = Engine(os.path.join(_ROOT, spec["path"]), max_seqs=self.slots, umax=self.umax or spec["chunk"],
+                             lib=os.path.join(_ROOT, spec["lib"]), warmup=True)
+        self.capacity = min(MAX_CONTEXT, self.engine.capacity)
+        self.cache = Cache(self.engine, self.slots, max_snapshots=spec["snapshots"],
+                           disk=self.snapshot_disk(name, os.path.join(_ROOT, spec["path"])))
+        self.pictures = self.open_vision(name)
+        self.n_draft, self.lookup = spec["draft"], spec.get("lookup", 0)
+
+    def sleep(self):
+        """The machine is about to sleep (kiln/sleep.py): a reply being written ends at its next step, cut short as at
+        max_tokens; a prompt being read stops at its next piece; then the GPU is freed. It stays taken until wake()."""
+        t0 = time.time()
+        self.pausing.set()
+        self.lanes.hold()                                # the requests in flight end (pausing) and new ones wait
+        self.gpu.acquire(main=True)
+        with self.state_lock:
+            self.loading = self.active
+        held = vram_used()
+        self.engine.shutdown()
+        wait_vram_freed(held)
+        print(f"kiln: the machine is going to sleep: GPU freed in {time.time() - t0:.2f} s", file=self.log, flush=True)
+
+    def wake(self):
+        """The machine woke up: the model it had loads again, its cache empty as after a restart (the shared prefixes on
+        disk read back when asked for)."""
+        t0 = time.time()
+        try:
+            self.load_engine(self.active)
+            print(f"kiln: awake: {self.active} loaded in {time.time() - t0:.1f} s", file=self.log, flush=True)
+        finally:
+            with self.state_lock:
+                self.loading = None
+            self.pausing.clear()
+            self.gpu.release()
+            self.lanes.release()
+
     def chat(self, body):
-        """Runs one chat completion. Yields ("reasoning"|"content", text), ("tool_call", (name, args)),
-        finally ("done", info)."""
-        messages = merge_system(body.get("messages") or [])
+        """Runs one chat completion. Yields ("start", prompt info) once the prompt is read, ("reasoning"|"content",
+        text), ("tool_call", (name, args)), finally ("done", info); a continued reply first ("prefix", its text)."""
+        messages = self.read_documents(merge_system(body.get("messages") or []))
         if not any(m.get("role") == "user" for m in messages):
             raise RequestError("the request needs at least one user message")
         # continue_final_message (as in vLLM): the final assistant message is left open and the model writes on
@@ -246,11 +601,18 @@ class Server:
             messages, tools, style = rewrite
             thinking = style[0]
         messages = self.sticky.apply(messages)
-        cont = None
-        if final is None:
-            prompt, marks = self.renderer.render(messages, tools, *style, think_reply=False if aside else None)
-        else:
-            prompt, marks = self.renderer.render(messages[:-1], tools, *style, think_reply=False if aside else None)
+
+        def render(pictures, seen):
+            """The prompt (without a continued reply) for these pictures' token slots; seen collects its pictures."""
+            images = (lambda pic: pictures.tokens(pic, seen, body.get("max_pixels"))) if pictures else None
+            try:
+                return self.renderer.render(messages if final is None else messages[:-1], tools, *style,
+                                            think_reply=False if aside else None, images=images)
+            except ValueError as e:                      # a picture kiln cannot read, a malformed conversation
+                raise RequestError(str(e)) from None
+        cont, seen, pictures, prefix = None, {}, self.pictures, []
+        prompt, marks = render(pictures, seen)
+        if final is not None:
             reply_thinking = bool(thinking) and not aside
             prefix = self.reply_prefix(final, body.get("kiln_original"), reply_thinking)
             if body.get("kiln_append_token") is not None:        # a token picked among the reply's alternatives
@@ -270,7 +632,7 @@ class Server:
         order = [x for x in order if x in STAGES]
         sp = Sampling(temperature=float(body.get("temperature", d["temperature"])), top_p=float(body.get("top_p", d["top_p"])),
                       min_p=float(body.get("min_p", d["min_p"])), presence_penalty=float(body.get("presence_penalty", d["presence_penalty"])),
-                      top_k=int(body.get("top_k", d["top_k"])), n_draft=self.n_draft,
+                      top_k=int(body.get("top_k", d["top_k"])), n_draft=self.n_draft, lookup=self.lookup,
                       dry_multiplier=float(body.get("dry_multiplier") or 0), dry_base=float(body.get("dry_base") or 1.75),
                       dry_allowed_length=int(body.get("dry_allowed_length") or 2),
                       order=order + [x for x in STAGES if x not in order],
@@ -279,6 +641,18 @@ class Server:
                       # the reply ends there: so without tools <tool_call> is never drawn and it answers in text.
                       ban=-1 if tools else self.tok.id["<tool_call>"])
         top_lp = int(body.get("top_logprobs") or 0) if body.get("logprobs") else -1   # -1: no log probs
+        stops = body.get("stop") or []
+        stops = [stops] if isinstance(stops, str) else stops
+        if not isinstance(stops, list) or not all(isinstance(x, str) for x in stops):
+            raise RequestError("stop must be a string or a list of strings")
+        schemas = {t["function"]["name"]: t["function"].get("parameters") or {} for t in tools or [] if "function" in t}
+        answer, strict = self.constraints(body, tools, schemas)
+        if (answer is not None or strict is not None) and (top_lp >= 0 or final is not None):
+            raise RequestError("response_format, strict tools and tool_choice cannot be combined with logprobs or "
+                               "continue_final_message")
+        budget = body.get("thinking_budget", kw.get("thinking_budget", (body.get("reasoning") or {}).get("max_tokens")))
+        if budget is not None and (isinstance(budget, bool) or not isinstance(budget, int) or budget < 0):
+            raise RequestError("thinking_budget must be a whole number of tokens")
         max_tokens = int(body.get("max_completion_tokens") or body.get("max_tokens") or MAX_OUTPUT)
         if side:
             max_tokens = min(max_tokens, 256)
@@ -286,21 +660,134 @@ class Server:
             raise ContextError(f"the request ({len(prompt)} tokens) exceeds the available context size "
                                f"({self.capacity} tokens), try increasing it")
         max_tokens = min(max_tokens, self.capacity - len(prompt) - 1)
-        schemas = {t["function"]["name"]: t["function"].get("parameters") or {} for t in tools or [] if "function" in t}
         record = None if side or compacting or cont or aside else {"messages": messages, "tools": tools, "style": style}
-        self.gpu.acquire(main=not side)
+        self.lanes.enter()
+        held = Held(self.gpu, main=not side)
         try:
             want = self.active if side else self.resolve(body.get("model"))   # titles never cause a switch
-            if want != self.active:
-                self.use(want)
-                sp.n_draft = self.n_draft
-                if len(prompt) + 1 >= self.capacity:
-                    raise ContextError(f"the request ({len(prompt)} tokens) exceeds the available context size "
-                                       f"({self.capacity} tokens), try increasing it")
+            if want != self.active:                      # replies in flight finish on the model they began with
+                self.lanes.hold(mine=True)
+                try:
+                    held.take()
+                    if want != self.active:
+                        self.use(want)
+                finally:
+                    self.lanes.release()
+            held.take()
+            if self.pausing.is_set():
+                raise Asleep("the machine is going to sleep; kiln loads the model again when it wakes")
+            sp.n_draft, sp.lookup = self.n_draft, self.lookup
+            if len(prompt) + 1 >= self.capacity:
+                raise ContextError(f"the request ({len(prompt)} tokens) exceeds the available context size "
+                                   f"({self.capacity} tokens), try increasing it")
+            if seen and self.pictures is not pictures:   # a switch or a wake gave pictures new token slots: render again
+                seen = {}
+                prompt, marks = render(self.pictures, seen)
+                prompt += prefix
             yield from self.run(np.array(prompt, np.int32), marks, sp, seed, max_tokens, bool(thinking), schemas, record, side,
-                                cont=cont, top_lp=min(top_lp, 64), aside=aside)
+                                cont=cont, top_lp=min(top_lp, 64), aside=aside, stops=stops, seen=seen, answer=answer, held=held,
+                                strict=strict, budget=budget if thinking else None)
         finally:
-            self.gpu.release(main=not side)
+            held.drop()
+            if held.slot:
+                held.slot.busy = False
+            self.lanes.leave()
+
+    def constraints(self, body, tools, schemas):
+        """What a reply's answer is held to (kiln/structured.py): (answer, strict). answer: a Matcher for all of the answer
+        after any reasoning: tool calls when tool_choice is "required" or names a tool, else response_format's JSON (or a
+        tool call instead, when tools are offered). strict: makes the Matcher for tool calls the model begins in an answer
+        otherwise free, when a tool is marked strict."""
+        choice, only = body.get("tool_choice"), None
+        if isinstance(choice, dict):
+            only = (choice.get("function") or {}).get("name") or choice.get("name")
+            if only not in schemas:
+                raise RequestError(f"tool_choice names {only!r}, which is not among the tools")
+        required = choice == "required" or only is not None
+        if required and not schemas:
+            raise RequestError('tool_choice "required" needs tools')
+        parallel = body.get("parallel_tool_calls") is not False
+        try:
+            schema = Grammars.schema_of(body.get("response_format"))
+            if schema is None and not required and not any((t.get("function") or {}).get("strict") for t in tools or []):
+                return None, None
+            if self.grammars is None:
+                self.grammars = Grammars(self.tok)
+            if required:
+                return self.grammars.matcher(tools=schemas, only=only, parallel=parallel), None
+            if schema is not None:
+                return self.grammars.matcher(schema=schema, tools=schemas or None, parallel=parallel), None
+            self.grammars.matcher(tools=schemas, parallel=parallel, inside=True)     # its errors before the reply starts
+            return None, lambda: self.grammars.matcher(tools=schemas, parallel=parallel, inside=True)
+        except ValueError as e:
+            raise RequestError(str(e)) from None
+
+    def held_step(self, slot, sp, answer, unread, room):
+        """The next tokens of an answer held to a grammar, and what of the reply the engine then has not read. Where the
+        engine can (Engine.masked), a step verifies drafts: the tokens the grammar forces next, then the MTP head's guesses,
+        each position masked to what the grammar allows there; unread is the pending token alone, or none when the engine
+        has just read up to here (the first token is then drawn from those logits). Otherwise the engine reads what it has
+        not, a token is drawn from the logits the grammar allows (the engine's sampler, over the largest 64 of them), then
+        come the tokens it forces."""
+        if self.engine.masked and len(unread) == 1:
+            drafts = self.engine.draft(slot.sid, sp, answer.forced(), min(7, room - 1))
+            masks, k = answer.masks(drafts)
+            toks = self.engine.generate_masked(slot.sid, sp, drafts[:k], masks, room)
+            answer.consume(toks)
+            return toks, toks[-1:]
+        if unread:
+            self.engine.prefill(slot.sid, unread)
+        tok = self.engine.draw(slot.sid, *self.engine.masked_top(answer.bitmask()), sp)
+        if self.engine.masked:
+            answer.consume([tok])
+            if tok not in self.tok.eos:
+                self.engine.set_pending(slot.sid, tok)
+            return [tok], [tok]
+        toks = [tok] if tok in self.tok.eos else [tok] + answer.take(tok)[:max(room - 1, 0)]
+        return toks, toks
+
+    @functools.cache
+    def close_thinking(self):
+        """The words that end the reasoning at a thinking budget, as Qwen3's technical report gives them, and </think>."""
+        enc = lambda t: self.tok.full.encode(t, add_special_tokens=False).ids
+        return enc("\n\nConsidering the limited time by the user, I have to give the solution based on the thinking "
+                   "directly now.\n") + [self.tok.id["</think>"]] + enc("\n\n")
+
+    def inject(self, slot, held, pending, toks):
+        """The reply goes on after tokens it did not draw: the engine reads its pending token (a list: none at the reply's
+        start) and them, and the next step draws from the logits after them."""
+        held.take()
+        try:
+            self.engine.prefill(slot.sid, pending + toks)
+        finally:
+            held.drop()
+
+    def read_documents(self, messages):
+        """The messages with their attached files read (kiln/documents.py): a PDF's pages as text, and as pictures when the
+        model has a vision tower."""
+        try:
+            return self.documents.expand(messages, self.pictures is not None)
+        except DocumentError as e:
+            raise RequestError(str(e)) from None
+
+    def count_tokens(self, body):
+        """The prompt tokens a chat body renders to, without running it (Anthropic's count_tokens)."""
+        messages = self.read_documents(merge_system(body.get("messages") or []))
+        tools = body.get("tools") if body.get("tool_choice") != "none" else None
+
+        def images(item):                                # a picture's or video's tokens, by their sizes alone
+            if isinstance(item, Clip):
+                video = vision.Video(vision.image_bytes(item.url, "videos"), float(item.fps or vision.VIDEO_FPS))
+                return [(t, [IMG_BASE] * (video.grid[0] * video.grid[1] // 4)) for t in video.times]
+            limit = vision.pixel_limit(item.max_pixels, body.get("max_pixels"), cap=self.max_pixels)
+            rows, cols = vision.grid(vision.image_bytes(item.url), limit)
+            return [IMG_BASE] * (rows * cols // 4)
+        try:
+            prompt, _ = self.renderer.render(messages, tools, body.get("enable_thinking", True), "xhigh", True,
+                                             images=images if self.pictures else None)
+        except ValueError as e:
+            raise RequestError(str(e)) from None
+        return len(prompt)
 
     def reply_prefix(self, msg, original, thinking):
         """Token ids of a partial reply to continue: as kiln generated them when it can (its replay; when `msg` is
@@ -371,40 +858,76 @@ class Server:
                    + "<conversation>\n(the conversation above)\n</conversation>" + user[m.end():])
         return rec["messages"] + [rec["reply"], {"role": "user", "content": request}], rec["tools"], rec["style"]
 
-    def prefill(self, slot, prompt, a, b):
+    def prefill(self, slot, prompt, a, b, pos=None, held=None):
+        """prompt[a:b] into the slot a prefill chunk at a time (the engine chunks one call the same way, so the numbers are
+        the same), so a sleep (pausing) waits for one chunk at most. While other replies are being written, the GPU goes
+        back to them after each chunk for as long as the chunk took (held: this request's turn at it): a long prompt
+        halves their speed where it would stop them, and is read at half speed itself. pos: the prompt's M-RoPE positions
+        when it has pictures."""
+        chunk = self.umax or MODELS[self.active]["chunk"]
         while a < b:
+            if self.pausing.is_set():
+                raise Asleep("the machine is going to sleep; kiln loads the model again when it wakes")
+            t = time.time()
             try:
-                self.engine.prefill(slot.sid, prompt[a:b].tolist())
-                a = b
+                e = min(b, a + chunk)
+                self.engine.prefill(slot.sid, prompt[a:e].tolist(), None if pos is None else pos[a:e])
+                a = e
             except KVFull:
                 a = self.engine.seq_len(slot.sid)
                 slot.tokens = prompt[:a]
                 if not self.free_kv(b - a + 64, keep=slot):
                     raise ContextError("the request exceeds the available context size (KV cache full), try increasing it")
             slot.tokens = prompt[:a]
+            if held is not None and a < b and self.replying - {slot.sid}:
+                spent = time.time() - t
+                held.drop()
+                time.sleep(spent)
+                held.take()
 
     def free_kv(self, need, keep):
-        """Drop snapshots, then other sessions' slots, until `need` tokens of KV are free."""
+        """Drop snapshots, then other sessions' slots (not those a reply is being written in), until `need` tokens of KV
+        are free."""
         self.cache.trim(need)
         for s in sorted(self.cache.slots, key=lambda s: s.used):
             if self.engine.free_tokens() >= need:
                 break
-            if s is not keep and len(s.tokens):
+            if s is not keep and not s.busy and len(s.tokens):
                 self.engine.truncate(s.sid, 0)
                 s.tokens = s.tokens[:0]
         return self.engine.free_tokens() >= need
 
-    def run(self, prompt, marks, sp, seed, max_tokens, thinking, schemas, record, side=False, cont=None, top_lp=-1, aside=False):
+    def run(self, prompt, marks, sp, seed, max_tokens, thinking, schemas, record, side=False, cont=None, top_lp=-1, aside=False,
+            stops=(), seen=None, answer=None, held=None, strict=None, budget=None):
         """cont: (prefix ids, primed parser) when the prompt ends inside a reply being continued (its ids are then
         part of the reply too). top_lp >= 0: text events carry log probs with that many alternatives. aside: keep
-        the conversation it extends resumable (a snapshot of where it ended), and no replay of the reply."""
+        the conversation it extends resumable (a snapshot of where it ended), and no replay of the reply. stops: the
+        answer ends before the first of these strings (OpenAI's `stop`). seen: the request's pictures (slot -> bytes).
+        answer: a grammar (kiln/structured.py Matcher) the answer is held to, after any reasoning. strict: makes the
+        grammar a tool call the model starts is held to, to the reply's end (strict tools). budget: the reasoning tokens
+        after which kiln closes the reasoning for the model (thinking_budget). held: the request's turn at the GPU (Held):
+        taken for the prompt, given back for the reply, whose steps share passes (Batcher)."""
         t0 = time.time()
         trace = [] if TRACE else None
-        slot, cached = self.cache.acquire(prompt)
+        # a held answer's first token is drawn from the full logits, which only a prefill of the prompt's end makes
+        slot, cached = self.cache.acquire(prompt[:-1] if answer else prompt)
+        held.slot = slot
         if aside and cached and cached == len(slot.tokens):   # appending to a live conversation: keep it as it was
             self.cache.checkpoint(slot)
         if trace is not None:
             trace.append(("acquire", time.time() - t0))
+        pos = self.pictures.positions(prompt) if seen else None
+        encoded = 0
+        if seen:                                         # tokens to prefill: the engine needs their pictures' embeddings
+            t = time.time()
+            try:
+                encoded = self.pictures.ensure([pic for a, b, pic in self.pictures.runs(prompt) if b > cached], seen)
+            except vision.ImageError as e:
+                raise RequestError(str(e)) from None
+            if trace is not None and encoded:
+                trace.append((f"{encoded} pictures", time.time() - t))
+        if encoded and not MODELS[self.active].get("vision_stays", True):
+            self.engine.vision_release()
         # Cache points: the prompt is prefilled in pieces that end at them, whichever state it starts from, so a seed
         # draws the same reply from a cold cache and from a snapshot. The last one is the prompt's end, kept with the
         # next token's distribution: the same prompt again (a retry, a redraw) needs no prefill at all, and an agent
@@ -412,15 +935,15 @@ class Server:
         # (the title / summary instructions) is shared by every session, so it is kept like the tool block; side
         # prompts are never resent, so their end is not kept.
         points = [(marks["tools"], True), (marks["static"], True), (marks["system"], side)]
-        pos = cached
+        done = cached
         for at, pinned in sorted(p for p in points if p[0] is not None and p[0] > cached) + [(len(prompt), False)]:
-            if at <= pos:
+            if at <= done:
                 continue
             t = time.time()
-            self.prefill(slot, prompt, pos, at)
+            self.prefill(slot, prompt, done, at, pos, held)
             if trace is not None:
-                trace.append((f"prefill {at - pos}", time.time() - t))
-            pos = at
+                trace.append((f"prefill {at - done}", time.time() - t))
+            done = at
             if at < len(prompt) or not side:
                 t = time.time()
                 self.cache.checkpoint(slot, pinned, logits=at == len(prompt))
@@ -430,18 +953,73 @@ class Server:
         if sp.dry_multiplier > 0:
             self.dry_breakers()
             self.engine.set_context(slot.sid, prompt[-32768:].tolist())
+        if sp.lookup > 0:
+            self.engine.set_lookup(slot.sid, prompt)
         self.engine.begin(slot.sid, seed)
         prefix, parser = cont or ([], OutputParser(self.tok, thinking, schemas))
-        out, finish, steps, completed = [], "stop", 0, False
+        stop_text = StopText(stops)
+        out, finish, steps, completed, calls = [], "stop", 0, False, []
+        # A held answer starts at once, or after the reasoning: a step then ends at </think> (at <tool_call> for strict calls
+        # in a free answer) and the answer goes on in steps of its own from there. behind: emitted tokens the engine has not
+        # read (a step leaves its last one pending); unread: those of a held answer.
+        think_end, call_start = self.tok.id["</think>"], self.tok.id["<tool_call>"]
+        holding, unread, behind = answer is not None and not thinking, [], 0
+        sp.halt = think_end if answer is not None and thinking else call_start if strict is not None else -1
+        hsp = Sampling.from_buffer_copy(sp)
+        hsp.halt = -1                                    # a held answer's steps end where its grammar says
+        held.drop()                                      # the prompt is read: the reply's steps share passes
+        batched = not holding
+        if batched:
+            self.batcher.begin()
+        self.replying.add(slot.sid)
         try:
+            yield "start", {"prompt_tokens": len(prompt), "cached_tokens": cached}
             while True:
-                try:
-                    if top_lp >= 0:
-                        ids, rv, ri = self.engine.generate(slot.sid, sp, 16, rows=True)
+                if budget is not None and parser.state == "reasoning" and len(out) >= budget:
+                    # Qwen3's own way to end its thinking at a budget (its technical report, 4.3): these words and </think>
+                    close = self.close_thinking()
+                    if len(close) > max_tokens - len(out):
+                        finish = "length"
+                        break
+                    if batched:
+                        self.batcher.end()
+                        batched = False
+                    try:
+                        self.inject(slot, held, out[-1:] if behind else [], close)
+                    except KVFull:
+                        finish = "length"
+                        break
+                    out += close
+                    behind, budget = 0, None
+                    for ev in stop_text.feed(parser.feed(close)):
+                        yield ev
+                    if answer is not None:               # its first token comes from the logits after the closing words
+                        holding, unread = True, []
                     else:
-                        ids = self.engine.generate(slot.sid, sp, 16)
+                        self.batcher.begin()
+                        batched = True
+                most = 16 if budget is None or parser.state != "reasoning" else min(16, budget - len(out))
+                try:
+                    if holding:
+                        held.take()
+                        try:
+                            ids, unread = self.held_step(slot, hsp, answer, unread, max_tokens - len(out))
+                        finally:
+                            held.drop()
+                        behind = len(unread)
+                    elif top_lp >= 0:
+                        ids, rv, ri = self.batcher.step(self.engine, slot.sid, sp, rows=True, most=most)
+                        behind = 1
+                    else:
+                        ids = self.batcher.step(self.engine, slot.sid, sp, most=most)
+                        behind = 1
                 except KVFull:
-                    if self.free_kv(64, keep=slot):
+                    held.take()
+                    try:
+                        freed = self.free_kv(64, keep=slot)
+                    finally:
+                        held.drop()
+                    if freed:
                         continue
                     finish = "length"
                     break
@@ -454,26 +1032,46 @@ class Server:
                 n, room = len(ids) if stop is None else stop, max_tokens - len(out)   # reply tokens in this step; allowed
                 out += ids
                 emit = ids[:min(n, room)]
-                for ev in parser.feed(emit, self.logprobs(emit, rv, ri, top_lp, sp.ban) if top_lp >= 0 else None):
+                for ev in stop_text.feed(parser.feed(emit, self.logprobs(emit, rv, ri, top_lp, sp.ban) if top_lp >= 0 else None)):
+                    calls += [ev[1]] if ev[0] == "tool_call" else []
                     yield ev
+                if stop_text.hit:
+                    break
                 if n > room or n == room and stop is None:   # cut at max_tokens (a step can carry several tokens)
                     finish = "length"
                     break
-                if stop is not None:
+                if stop is not None or holding and answer.done():
                     break
-            for ev in parser.finish():
+                if self.pausing.is_set():                # the machine is going to sleep
+                    finish = "length"
+                    break
+                if not holding and sp.halt >= 0 and ids[-1] == sp.halt:
+                    if sp.halt == call_start:
+                        answer = strict()
+                    holding, unread = True, [sp.halt]
+                    self.batcher.end()                   # its steps go on outside the passes
+                    batched = False
+            for ev in stop_text.feed(parser.finish()) + stop_text.flush():
+                calls += [ev[1]] if ev[0] == "tool_call" else []
                 yield ev
             completed = True
         finally:
+            self.replying.discard(slot.sid)
+            if batched:
+                self.batcher.end()
             # Also runs when the client goes away mid-stream (OpenCode's Esc, a Stop button). The engine holds
             # prompt + out[:-1] (the last emitted token is still pending) and the cache must agree, or the next
             # request would be appended after the abandoned reply.
-            slot.tokens = np.concatenate([prompt, np.array(out[:-1], np.int32)]) if out else prompt
+            read = len(out) - behind
+            slot.tokens = np.concatenate([prompt, np.array(out[:read], np.int32)]) if out else prompt
             reasoning, content = parser.text()
-            calls = parser.calls
+            if stops:                                    # what the client was sent of the answer
+                content = "".join(stop_text.content).strip()
             reply = {"role": "assistant", "content": content, "reasoning_content": reasoning,
                      "tool_calls": [{"type": "function", "function": {"name": n, "arguments": json.dumps(a, ensure_ascii=False)}} for n, a in calls]}
-            if (content or calls) and not aside:         # an empty reply's key would match every other one
+            # An empty reply's key would match every other one. A reply cut at a stop string may end inside a token: the
+            # client's copy of it is re-tokenized next time instead.
+            if (content or calls) and not aside and not stop_text.hit:
                 gen = prefix + (out[:-1] if out and out[-1] in self.tok.eos else out)[:max_tokens]   # what the client was sent
                 self.replay.put(message_key(reply, False), (thinking, gen))   # for clients that drop the reasoning
                 self.replay.put(message_key(reply), (thinking, gen))
@@ -484,15 +1082,16 @@ class Server:
             if not completed:
                 print(f"kiln: prompt {len(prompt)} (cached {cached}) | stopped by the client after {len(out)} tokens "
                       f"| slot {slot.sid}", file=self.log, flush=True)
-        if finish == "stop" and calls:
+        if finish == "stop" and calls and not stop_text.hit:
             finish = "tool_calls"
         t1 = time.time()
         n_gen = len(out)
         info = {"prompt_tokens": len(prompt), "cached_tokens": cached, "completion_tokens": min(n_gen, max_tokens),
                 "finish_reason": finish, "ttft": (t_first if steps else t1) - t0, "prefill_s": t_prefill - t0,
-                "decode_tps": n_gen / max(t1 - t_prefill, 1e-6), "tokens_per_step": n_gen / max(steps, 1), "seed": seed}
+                "decode_tps": n_gen / max(t1 - t_prefill, 1e-6), "tokens_per_step": n_gen / max(steps, 1), "seed": seed,
+                "stop_sequence": stop_text.matched}
         self.recent.put(time.time(), info)
-        print(f"kiln: prompt {len(prompt)} (cached {cached}) ttft {info['ttft']:.2f}s | gen {n_gen} "
+        print(f"kiln: prompt {len(prompt)} (cached {cached}){f' | {encoded} pictures encoded' if encoded else ''} ttft {info['ttft']:.2f}s | gen {n_gen} "
               f"{info['decode_tps']:.1f} tok/s {info['tokens_per_step']:.2f}/step | {finish} | slot {slot.sid}"
               + (" | " + ", ".join(f"{k} {v * 1000:.0f} ms" for k, v in trace) if trace else ""),
               file=self.log, flush=True)
@@ -506,14 +1105,20 @@ class Server:
                     "cache": self.cache.stats(), "recent": list(self.recent.values())[-16:]}
 
     def load(self, name):
-        """Switch to a model now (the web chat's model picker), after the request on the GPU, if any."""
+        """Switch to a model now (the web chat's model picker), after the replies in flight, if any."""
         if name not in MODELS:
             raise RequestError(f"unknown model {name!r}; kiln has {', '.join(MODELS)}")
-        self.gpu.acquire(main=True)
+        self.lanes.hold()
         try:
-            self.use(name)
+            self.gpu.acquire(main=True)
+            try:
+                if self.pausing.is_set():
+                    raise Asleep("the machine is going to sleep; kiln loads the model again when it wakes")
+                self.use(name)
+            finally:
+                self.gpu.release()
         finally:
-            self.gpu.release()
+            self.lanes.release()
 
 
 # DNS rebinding guard: a web page from another site that points its own name at this machine still sends that name
@@ -579,10 +1184,13 @@ def make_handler(state, ready):
                 try:
                     body = json.loads(self.rfile.read(int(self.headers.get("Content-Length") or 0)) or b"{}")
                     srv.load(str(body.get("model", "")))
-                except (json.JSONDecodeError, RequestError) as e:
+                except json.JSONDecodeError as e:
                     return self.send_json(400, {"error": {"message": str(e), "type": "invalid_request_error"}})
+                except RequestError as e:
+                    return self.send_json(e.status, {"error": {"message": str(e), "type": "invalid_request_error", "code": e.code}})
                 return self.send_json(200, {"model": srv.active, "context": srv.capacity})
-            if self.path.rstrip("/") not in ("/v1/chat/completions", "/chat/completions"):
+            path = self.path.split("?")[0].rstrip("/").removeprefix("/v1")
+            if path not in ("/chat/completions", "/messages", "/messages/count_tokens", "/responses"):
                 return self.send_json(404, {"error": {"message": "not found"}})
             ready.wait()
             srv = state["srv"]
@@ -590,12 +1198,16 @@ def make_handler(state, ready):
                 body = json.loads(self.rfile.read(int(self.headers.get("Content-Length") or 0)) or b"{}")
             except json.JSONDecodeError:
                 return self.send_json(400, {"error": {"message": "invalid JSON", "type": "invalid_request_error"}})
+            if path.startswith("/messages"):
+                return self.messages_api(srv, body, path.endswith("count_tokens"))
+            if path == "/responses":
+                return self.responses_api(srv, body)
             rid, created, model = "chatcmpl-" + uuid.uuid4().hex[:24], int(time.time()), body.get("model") or srv.active
             gen = srv.chat(body)
             try:
                 first = next(gen)                         # surfaces request errors before any bytes are sent
             except RequestError as e:
-                return self.send_json(400, {"error": {"message": str(e), "type": "invalid_request_error", "code": e.code}})
+                return self.send_json(e.status, {"error": {"message": str(e), "type": "invalid_request_error", "code": e.code}})
             except Exception as e:
                 print(f"kiln: request failed: {e!r}", file=srv.log, flush=True)
                 return self.send_json(500, {"error": {"message": f"internal error: {e}", "type": "server_error"}})
@@ -608,6 +1220,95 @@ def make_handler(state, ready):
                 pass
             finally:
                 gen.close()
+
+        def messages_api(self, srv, req, count):
+            """Anthropic's Messages API (kiln/apis.py), and its token count."""
+            def error(status, kind, message):
+                self.send_json(status, {"type": "error", "error": {"type": kind, "message": message}})
+            try:
+                body = apis.messages_body(req)
+                if count:
+                    return self.send_json(200, {"input_tokens": srv.count_tokens(body)})
+                gen = srv.chat(body)
+                first = next(gen)
+            except RequestError as e:
+                kind = "overloaded_error" if isinstance(e, Asleep) else "invalid_request_error"
+                return error(e.status, kind, str(e))
+            except ValueError as e:
+                return error(400, "invalid_request_error", str(e))
+            except Exception as e:
+                print(f"kiln: request failed: {e!r}", file=srv.log, flush=True)
+                return error(500, "api_error", f"internal error: {e}")
+            model = req.get("model") or srv.active
+            events = itertools.chain([first], gen)
+            try:
+                if req.get("stream"):
+                    self.events(apis.messages_stream(events, model),
+                                lambda e: ("error", {"type": "error", "error": {"type": "api_error", "message": str(e)}}))
+                else:
+                    self.send_json(200, apis.messages_result(events, model))
+            except (BrokenPipeError, ConnectionResetError):
+                pass
+            finally:
+                gen.close()
+
+        def responses_api(self, srv, req):  # not "responses": BaseHTTPRequestHandler's status texts
+            """OpenAI's Responses API (kiln/apis.py); a stored response's conversation goes on with previous_response_id."""
+            def error(status, message, code=None):
+                self.send_json(status, {"error": {"message": message, "type": "invalid_request_error", "param": None, "code": code}})
+            prev = req.get("previous_response_id")
+            history = srv.stored.get(prev) if prev else None
+            if prev and history is None:
+                return error(404, f"no stored response {prev} (kiln keeps the last {srv.stored.limit}, until it restarts)",
+                             "previous_response_not_found")
+            try:
+                body = apis.responses_body(req, history)
+                gen = srv.chat(body)
+                first = next(gen)
+            except RequestError as e:
+                return error(e.status, str(e), e.code)
+            except ValueError as e:
+                return error(400, str(e))
+            except Exception as e:
+                print(f"kiln: request failed: {e!r}", file=srv.log, flush=True)
+                return self.send_json(500, {"error": {"message": f"internal error: {e}", "type": "server_error", "param": None, "code": None}})
+            build = apis.ResponseBuilder(req, req.get("model") or srv.active, lambda text: len(srv.tok.full.encode(text).ids))
+            events = itertools.chain([first], gen)
+            try:
+                if req.get("stream"):
+                    self.events(build.events(events),
+                                lambda e: build.event("error", code="server_error", message=str(e), param=None))
+                else:
+                    self.send_json(200, build.result(events))
+                if req.get("store", True):
+                    srv.stored.put(build.id, build.history(body))
+            except (BrokenPipeError, ConnectionResetError):
+                pass
+            finally:
+                gen.close()
+
+        def events(self, stream, on_error):
+            """Server-sent events with names (Anthropic's and the Responses API's): (name, data) pairs from stream; an
+            error once it has begun becomes on_error(exception)'s event."""
+            self.send_response(200)
+            self.send_header("Content-Type", "text/event-stream")
+            self.send_header("Cache-Control", "no-cache")
+            self.send_header("Transfer-Encoding", "chunked")
+            self.end_headers()
+            try:
+                for name, data in stream:
+                    self.event(name, data)
+            except (BrokenPipeError, ConnectionResetError):
+                raise
+            except Exception as e:
+                self.event(*on_error(e))
+            self.wfile.write(b"0\r\n\r\n")
+            self.wfile.flush()
+
+        def event(self, name, obj):
+            data = b"event: " + name.encode() + b"\ndata: " + json.dumps(obj, ensure_ascii=False).encode() + b"\n\n"
+            self.wfile.write(b"%x\r\n%s\r\n" % (len(data), data))
+            self.wfile.flush()
 
         def chunk(self, obj):
             data = b"data: " + (obj if isinstance(obj, bytes) else json.dumps(obj, ensure_ascii=False).encode()) + b"\n\n"
@@ -627,6 +1328,9 @@ def make_handler(state, ready):
                 kind, val = ev[0], ev[1]
                 if kind == "prefix":                      # a continued message as it now stands (kiln extension)
                     self.chunk({**base, "choices": [{"index": 0, "delta": {"kiln_prefix": val}, "finish_reason": None}]})
+                    ev = next(gen)
+                    continue
+                if kind == "start":
                     ev = next(gen)
                     continue
                 if kind == "done":
@@ -654,7 +1358,7 @@ def make_handler(state, ready):
             reasoning, content, calls, lps, ev = [], [], [], [], first
             while ev[0] != "done":
                 kind, val = ev[0], ev[1]
-                if kind == "prefix":
+                if kind in ("prefix", "start"):
                     pass
                 elif kind == "tool_call":
                     calls.append({"id": "call_" + uuid.uuid4().hex[:24], "type": "function",
@@ -726,4 +1430,5 @@ def serve(make_server, host="127.0.0.1", port=8080, model=None):
     print(f"kiln: serving {srv.active} on http://{host}:{port}/v1 (context {srv.capacity} tokens)", file=srv.log, flush=True)
     srv.engine.warmup()
     srv.gpu.release()
+    SleepGuard(srv.sleep, srv.wake, srv.log).start()
     threading.Event().wait()

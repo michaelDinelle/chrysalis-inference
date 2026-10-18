@@ -4,10 +4,16 @@
 #pragma once
 #include "kernels.h"
 #include "../engine/sampler.h"
+#include "../engine/lookup.h"
 static_assert(TOPK == SAMPLE_N, "the sampler takes the engine's rows as they are");
 #include "cpu_moe.h"
+#include "../engine/vision.h"
 #include <hipblaslt/hipblaslt.h>
+#include <atomic>
+#include <condition_variable>
+#include <deque>
 #include <map>
+#include <mutex>
 #include <random>
 #include <string>
 #include <thread>
@@ -36,27 +42,30 @@ struct Layer {
     half *router = nullptr;                      // [NE][D] fp16
     float *sg_w = nullptr;                       // shared expert gate [D]
     QTensor sh_gate, sh_up, sh_down;             // shared expert
-    QTensor hot_gate, hot_up, hot_down;          // experts in VRAM: [n_hot*FE][D], [n_hot*D][FE]
-    int *slot_of = nullptr;                      // device [NE]: hot slot >= 0, cold slot -1 - s
+    QTensor hot_gate, hot_up, hot_down;          // experts in VRAM: the expert pool (the MTP block: its own [512*FE][D], [512*D][FE])
+    int *slot_of = nullptr;                      // device [NE]: pool slot >= 0, RAM slot -1 - s (ColdLayer's numbering)
     std::vector<int> slot_h;                     // the same, host copy (prefill sorts its picks on the host)
-    int n_hot = 0, n_cold = 0;
+    int n_hot = 0, n_cold = 0;                   // the file's VRAM and RAM tiers
 };
 
 struct Seq {
     bool used = false;
     int n = 0;                       // tokens in the KV cache / recurrent state
+    int pos = 0;                     // M-RoPE position of the next text token: n, until a picture (its tokens take fewer)
+    Pos3 tail_pos{0, 0, 0};          // M-RoPE position of the first cell of the incomplete indexer block (idx_tail)
     int pending = -1;                // sampled but not yet processed token
     std::vector<int> pages;          // KV pages, one per PAGE tokens
     int *d_pages = nullptr;          // device copy of the page table
     float *ssm = nullptr, *conv = nullptr, *ple = nullptr;   // GDN states, GDN conv states, PLE conv history
     float *h_last = nullptr;         // residual [HC][D] after the last layer for token n-1 (MTP pairs it with token n)
     half *idx_tail = nullptr;        // [NKVL][KPOOL][IDX_D] raw indexer keys of the cells after the last complete block
-    int hist[2] = {-1, -1};          // the two tokens before position n (n-gram hash), -1 = none
+    int hist[2] = {-1, -1};          // the two tokens before position n (n-gram hash; a picture's as IMAGE_PAD), -1 = none
     std::vector<float> top_v;        // host top-k logits for the next position (valid when pending < 0)
     std::vector<int> top_i;
     Seen seen;                       // tokens of the current reply (presence penalty, DRY)
     std::vector<int> ctx;            // the prompt's tail, for DRY (set per reply when DRY is on)
     std::mt19937_64 rng;
+    Lookup look;                     // prompt lookup's view of the conversation (engine/lookup.h)
 };
 
 struct Engine {
@@ -73,13 +82,69 @@ struct Engine {
     const uint8_t *ngram = nullptr; size_t ngram_map_bytes = 0; uint8_t *ngram_map = nullptr;
     uint64_t ple_mult[3] = {};
     uint32_t ple_off[PLE_HEADS] = {}, ple_voc[PLE_HEADS] = {};
+    // The expert pool (common.h slot_view) and which experts it holds: at load each layer's VRAM tier, then the experts the
+    // passes pick most (experts.cpp). An expert is computed from its own copy in the file's format wherever it is.
+    QTensor pool_gate, pool_up, pool_down;
+    int n_slots = 0;
+    int *d_slot_of = nullptr;                    // [NL][NE] the decoder layers' slot_of
+    uint8_t *d_fmt = nullptr;                    // [n_slots] each slot's gate / up format
+    int file_fd = -1; const uint8_t *file_base = nullptr;   // the model file and its mapping (VRAM-tier experts out of the pool)
+    struct Experts {
+        bool on = true;                          // experiments and tests (kiln_tune "experts"): false keeps the pool as it is
+        double half_life = 256;                  // tokens over which an expert's picks count half (from a story to code:
+                                                 // 81% of the picks in the pool after 320 steps, where 1,024 had 66%)
+        std::vector<int> owner;                  // per slot: layer * NE + expert
+        std::vector<uint8_t> fmt;                // per slot: the device table's copy
+        std::vector<int> slot, home, type;       // per layer * NE + expert: pool slot (-1: none), RAM slot, gate / up format
+        std::vector<float> score, mb;            // decayed picks; MB the CPU reads to compute it
+        std::vector<uint32_t> fresh;             // picks not yet in the scores
+        std::vector<uint64_t> total;             // all decode picks (KILN_FN_DECODE_COUNTS)
+        std::vector<uint8_t> busy;               // per slot: an expert is on its way into it
+        std::vector<uint8_t> coming;             // per layer * NE + expert: on its way into the pool
+        double tokens = 0;                       // tokens passed since the scores last decayed
+        unsigned *d_counts = nullptr;            // [NL][NE] decode picks, counted by the router
+        uint32_t *h_counts = nullptr;            // pinned: their copy, read at the next pass
+        hipEvent_t counted = nullptr;
+        bool counts_pending = false;
+        int placed = 0, loaded_file = 0;         // experts placed, of them read from the model file
+        double copied_bytes = 0, copied_ms = 0;  // the loads' copies since the DMA rate was last updated
+        uint64_t picks = 0, hits = 0;            // decode picks, of them of experts in the pool (as of the pass after)
+        double recent_hits = 0;                  // the share in the pool of recent decode picks
+        // Below this share the CPU computes enough of the picks for the expert lookahead and the dense-weight prefetch
+        // to pay (measured on prose and code: 3-10% faster with the file's VRAM tier alone, 5-10% slower at 80-95% hits).
+        static constexpr double CPU_HEAVY = 0.75;
+        enum { FREE, QUEUED, COPYING };
+        struct Load {
+            std::atomic<int> state{FREE};
+            int key = -1, slot = -1;             // the expert coming in, the slot it takes
+            uint8_t *stage = nullptr;            // VRAM: its GGUF blocks, gate | up | down
+            uint8_t *bounce = nullptr;           // pinned: the same, read from the model file
+            hipEvent_t start = nullptr, copied = nullptr, done = nullptr;   // its copies begin; the stage is filled; the placement
+                                                                            // that read it ran
+        };
+        Load loads[PLACE_MAX];
+        hipStream_t xst = nullptr;               // the loads' copies
+        std::thread loader;                      // reads and queues the loads' copies (a file read may wait on the disk)
+        std::mutex mu;
+        std::condition_variable cv;
+        std::deque<int> readahead;               // experts back in the model file whose pages the loader asks for
+        bool quit = false;
+    } xc;
+    void experts_init();
+    void experts_place(int T);                   // before a pass of T tokens: place what has arrived
+    void experts_plan();                         // after it is queued: count its picks, choose what to load
+    void experts_loader();
+    void experts_stop();
+    void file_read(uint8_t *dst, const uint8_t *src, size_t n) const;   // src: inside the model file's mapping
     // cold experts in system RAM and the CPU that computes them
     std::vector<ColdLayer> cold;
     std::vector<ColdDec> cold_dev;               // the same as the GPU sees them
     uint8_t *cold_mem = nullptr; size_t cold_bytes = 0;
     MoeShared *sh = nullptr, *d_sh = nullptr;
     CpuMoe cpu;
-    float gfrac = 0.3f;                          // share of the decode cold picks the GPU reads over PCIe itself (calibrate())
+    float gfrac = 0.3f;                          // share of the decode cold picks the GPU reads over PCIe itself (calibrate(),
+                                                 // then the expert loads' measured copy rate, unless pinned by kiln_tune)
+    bool gfrac_pinned = false;
     double cal_cpu_bw = 50e9, cal_cpu_mac = 150e9, cal_dma_bw = 25e9;   // measured at load: CPU read and VNNI rates, DMA
     double cpu_bias = 1.0;                       // learned correction of the CPU's estimated cost in the prefill split
     int adapt_left = 480;                        // balance-feedback steps left (10 passes' worth): then cpu_bias stays,
@@ -91,9 +156,8 @@ struct Engine {
     // KILN_FN_PROF: time prefill phases (syncing the stream at each boundary, so phases do not overlap) and print them
     bool prof = getenv("KILN_FN_PROF") != nullptr;
     std::vector<int64_t> route_counts;           // picks per (layer, expert) in prefill passes, when enabled (kiln_route_counts)
-    // KILN_FN_DECODE_COUNTS=file: picks per (layer, expert) at decode, counted on the GPU and written to the file (int64
-    // [NL][NE]) every 256 steps, for tuning which experts live in VRAM to what the model generates
-    unsigned *route_dec = nullptr;
+    // KILN_FN_DECODE_COUNTS=file: picks per (layer, expert) at decode (Experts::total) written to the file (int64 [NL][NE])
+    // every 256 steps
     const char *route_dec_file = getenv("KILN_FN_DECODE_COUNTS");
     int route_dec_steps = 0;
     double prof_t[12] = {}, prof_last = 0;
@@ -110,21 +174,21 @@ struct Engine {
     hipEvent_t la_ready = nullptr, la_done = nullptr;
     MoeShared *sh_pred = nullptr, *d_sh_pred = nullptr;
     struct { float *res, *lo, *inv, *mx, *logits, *sg, *wts; half *hh; QAct hq; int *ids, *hot; unsigned *counter; } la{};
-    bool la_on = getenv("KILN_FN_NO_LOOKAHEAD") == nullptr;   // experiments: tune key "lookahead"
+    bool la_on = getenv("KILN_FN_NO_LOOKAHEAD") == nullptr;   // experiments: tune key "lookahead" (else Experts::CPU_HEAVY decides)
     void lookahead(const Layer &w, int layer, int T, const float *res);
     hipEvent_t staged, copied, topk_ready, routed;
     hipEvent_t front_ready, front_copied;        // a sub-chunk's MoE inputs and picks are ready / on the host (prefill)
     PrefetchRange *pf_ranges = nullptr;          // per decoder layer: its dense weights, read into the Infinity Cache while
     std::vector<int> pf_off, pf_n;               // the CPU computes the previous layer's cold experts (decode)
     unsigned *pf_sink = nullptr;
-    bool pf_on = true;                           // experiments (kiln_tune "prefetch")
+    bool pf_on = true;                           // experiments (kiln_tune "prefetch"; else Experts::CPU_HEAVY decides)
     uint8_t *stage_state = nullptr;
     hipblasLtHandle_t lt = nullptr;
     void *lt_ws = nullptr;
     size_t lt_ws_size = 32 << 20;
-    struct LtPlan { hipblasLtMatmulDesc_t desc; hipblasLtMatrixLayout_t a, b, c; hipblasLtMatmulAlgo_t algo; };
-    std::map<std::tuple<int, int, int, int, int>, LtPlan> lt_plans;
-    LtPlan &lt_plan(int N, int K, int T, int ldx, int ldd);
+    using LtPlan = lt_tune::Plan;
+    std::map<std::tuple<int, int, int, int, int, int>, LtPlan> lt_plans;
+    LtPlan &lt_plan(int N, int K, int T, int ldx, int ldd, bool c32, const half *W, const half *x, void *d);
     int smax = 8192;                 // tokens per pass (a prefill is split into passes): the MoE reads each expert once per pass
     int umax = 1024;                 // tokens per sub-chunk of a pass for everything else (attention, GDN, mixers)
     int max_ctx = 262144;
@@ -157,6 +221,9 @@ struct Engine {
         uint16_t *h_x16, *h_cout;                // pinned host: MoE inputs for the CPU, its per-pick outputs (fp16)
         float *h_topv; int *h_topi, *h_draft;    // pinned host: a step's top-k and drafts
         uint8_t *raw[4], *sgu[4]; QTensor sd_[4];   // cold expert staging ring: GGUF blocks, then gate | up SoA arrays, down
+        uint8_t *bounce[4];                      // pinned: a ring slot's GGUF blocks read from the model file (format group 2)
+        const half **img;                        // per token of a pass: its picture's embedding row, or null
+        int *rpos;                               // per token of a pass with pictures: M-RoPE (t, h, w)
     } b{};
     static constexpr int STAGE_G = 8;            // cold experts staged per group
     static constexpr int NSLOT = 2;              // staging ring slots: copies run up to NSLOT - 1 groups ahead of the GPU
@@ -172,9 +239,13 @@ struct Engine {
     std::vector<int> page_ref;
     // top_v / top_i: the next token's top-k logits when the snapshot ends a prompt (empty otherwise), so a restore
     // there samples at once
-    struct Snap { bool used = false; int n = 0; int hist[2] = {-1, -1}; std::vector<int> pages; void *host = nullptr;
-                  std::vector<float> top_v; std::vector<int> top_i; };
+    struct Snap { bool used = false; int n = 0, pos = 0; Pos3 tail_pos{0, 0, 0}; int hist[2] = {-1, -1}; std::vector<int> pages;
+                  void *host = nullptr; std::vector<float> top_v; std::vector<int> top_i; };
+    Vision vision;                               // opened by kiln_vision_open
+    struct Image { half *rows = nullptr; int n = 0; };   // a picture's embeddings [n][D] fp16, pinned host memory
+    std::vector<Image> images;
     std::vector<Snap> snaps;
+    uint32_t *d_mask = nullptr;      // held answers' token bitmasks, a row per position of a step (mask_rows())
     float *ssm_pool = nullptr;
     // Snapshot host buffers, made ahead of need in one pinned region (reserve_snapshots): made one at a time on demand,
     // each took 0.1-0.4 s in the minutes after a load (direct reclaim and compaction), paid by a request.
@@ -201,16 +272,28 @@ struct Engine {
     void reserve_snapshots(int n);              // buffers for n snapshots in all (made at warmup(), or now if it ran)
     void restore(int id, int snap);
     void snap_free(int snap);
-    void prefill(int id, const int *tokens, int n);
+    void prefill(int id, const int *tokens, const int *pos3, int n);   // pos3: [n][3] M-RoPE positions, or null (text)
+    int image_encode(int slot, const float *patches, int gh, int gw, int frames = 1);
     int generate(int id, const Sampling &sp, int *out, int max_out, float *rows_v = nullptr, int *rows_i = nullptr);
+    int draft(int id, const Sampling &sp, const int *fixed, int nfixed, int max_k, int *out);
+    int generate_masked(int id, const Sampling &sp, const int *drafts, int k, const uint32_t *masks, int *out, int max_out);
+    int verify(Seq &s, const Sampling &sp, const std::vector<int> &drafts, bool masked, int *out, int nout, float *rows_v, int *rows_i);
+    uint32_t *mask_rows();
+    size_t snap_bytes(int snap) const;
+    void snap_export(int snap, uint8_t *dst);
+    int snap_import(const uint8_t *src, size_t bytes);
     void shutdown();                            // frees everything
 
-    void forward(Seq &s, const int *tokens, int T, bool verify);       // tokens (host) at positions s.n..s.n+T-1
+    // tokens (host) at cells s.n..s.n+T-1, at M-RoPE positions pos3 (host [T][3], uploaded to b.rpos) or s.pos.. (text);
+    // img: b.img holds the pass's picture rows
+    void forward(Seq &s, const int *tokens, int T, bool verify, const int *pos3 = nullptr, bool img = false);
     void ple_rows(const Seq &s, const int *tokens, int T);              // n-gram rows for these tokens -> b.ple_rows
     void ple_ids(int h0, int h1, const int *tokens, int T, size_t *rows) const;   // their table rows (hash)
     void ple_prefetch(const size_t *rows, size_t n) const;              // start reading their pages (async)
-    void mtp_forward(Seq &s, int T, int pos0, const float *h_prev, const int *d_tokens, bool spec);
-    void mtp_catch_up(Seq &s, int T, int pos0, bool spec);   // spec: the pass may still be rejected (drafts)
+    void mtp_forward(Seq &s, int T, int pos0, const float *h_prev, const int *d_tokens, bool spec, int rope0, const int *rpos,
+                     Pos3 tail_pos, const half *const *img);
+    // spec: the pass may still be rejected (drafts); pos3 / img: the pass's, as forward's
+    void mtp_catch_up(Seq &s, int T, int pos0, bool spec, const int *pos3 = nullptr, bool img = false);
     void lm_head(const QAct &in, int T, int rows);
     void ensure_pages(Seq &s, int n_tokens, int from);
     int page_alloc();
@@ -218,8 +301,11 @@ struct Engine {
     KVRef kv(const Seq &s) const { return {kv_pool, s.d_pages}; }
     void linear(const QTensor &W, int T, const QAct &qin, const half *hin, int ldin, void *out, int ldo, int mode, bool out_f16 = false);
     void gemm(const half *W, int N, int K, const half *x, int ldx, int T, void *y, int ldy, bool y_f16, bool accumulate);
+    void gemm32(const half *W, int N, int K, const half *x, int ldx, int T, float *y, int ldy);
     void hc_mix_block(const HcMix &m, int T, float *inject, bool want_f16);   // b.res -> b.mx (+ b.hq or b.hh), inject
-    void attn_block(const Layer &w, int kvl, Seq &s, int T, int pos0, float *res, float *inject, bool spec);   // res += output (HC)
+    // res += output (HC); rotated at rope0.. or rpos (device), the incomplete block's first cell at tail_pos
+    void attn_block(const Layer &w, int kvl, Seq &s, int T, int pos0, float *res, float *inject, bool spec, int rope0,
+                    const int *rpos, Pos3 tail_pos);
     void gdn_block(const Layer &w, int gl, Seq &s, int T, bool verify, float *res, float *inject);
     void moe_block(const Layer &w, int layer, int T, bool cpu_cold, float *res, float *inject);   // res += its output (HC)
     void moe_front(const Layer &w, int n, int c0);   // a sub-chunk's router, shared expert, MoE inputs (passes of T > 8)

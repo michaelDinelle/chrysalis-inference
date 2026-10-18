@@ -29,6 +29,65 @@ __global__ void k_q3k_scales(const uint8_t *raw, int8_t *out, int64_t nblocks) {
         out[i * 16 + g] = (int8_t)((((sc[g & 7] >> (4 * (g >> 3))) & 0xf) | (((sc[8 + (g & 3)] >> (2 * (g >> 2))) & 3) << 4)) - 32);
 }
 
+// len bytes from a 2-byte aligned source to a 4-byte aligned destination (len a multiple of 4)
+__device__ __forceinline__ void copy_words(const uint8_t *src, uint8_t *dst, int len) {
+    const uint16_t *s16 = (const uint16_t *)src;
+    for (int w = 0; w < len / 4; w++) ((uint32_t *)dst)[w] = s16[2 * w] | ((uint32_t)s16[2 * w + 1] << 16);
+}
+
+// One thread per GGUF block of the placed experts (gate, then up: FE * D / 256 super-blocks each; then down: D * FE / 32
+// IQ4_NL blocks), written where slot_view and the down rows put them; block (0, 0)'s first threads apply the table patches.
+// Placements and patches run in stream order with the passes, so no pass sees a slot half written.
+__global__ void k_place(PlaceArgs a) {
+    constexpr int64_t NGU = (int64_t)FE * D / 256, NDN = (int64_t)D * FE / 32;
+    const Place &p = a.p[blockIdx.y];
+    const int64_t t = blockIdx.x * (int64_t)blockDim.x + threadIdx.x;
+    if (blockIdx.x == 0 && blockIdx.y == 0)
+        for (int i = threadIdx.x; i < a.npatch; i += blockDim.x) {
+            if (a.patch[i].slot_of >= 0) a.slot_of[a.patch[i].slot_of] = a.patch[i].value;
+            if (a.patch[i].fmt >= 0) a.fmt[a.patch[i].fmt] = (uint8_t)a.patch[i].value;
+        }
+    if ((int)blockIdx.y >= a.n) return;
+    const int bb = qbytes_of(p.type);
+    if (t < 2 * NGU) {
+        const int m = t >= NGU;
+        const int64_t b = t - m * NGU;
+        const QTensor v = slot_view(m ? a.up : a.gate, p.slot, p.type);
+        const uint8_t *src = p.src + (m * NGU + b) * bb;
+        if (p.type == IQ4_XS) {
+            v.d[b] = *(const half *)src;
+            v.sh[b] = *(const uint16_t *)(src + 2);
+            copy_words(src + 4, v.sc + b * 4, 4);
+            copy_words(src + 8, v.q + b * 128, 128);
+        } else if (p.type == Q3_K) {
+            copy_words(src, v.qh + b * 32, 32);
+            copy_words(src + 32, v.q + b * 64, 64);
+            v.d[b] = *(const half *)(src + 108);
+            const uint16_t *s16 = (const uint16_t *)(src + 96);
+            uint8_t sc[12];
+            for (int k = 0; k < 6; k++) { sc[2 * k] = (uint8_t)s16[k]; sc[2 * k + 1] = (uint8_t)(s16[k] >> 8); }
+            for (int g = 0; g < 16; g++)
+                ((int8_t *)v.sc)[b * 16 + g] = (int8_t)((((sc[g & 7] >> (4 * (g >> 3))) & 0xf) | (((sc[8 + (g & 3)] >> (2 * (g >> 2))) & 3) << 4)) - 32);
+        } else {                                                        // Q2_K
+            copy_words(src, v.sc + b * 16, 16);
+            copy_words(src + 16, v.q + b * 64, 64);
+            v.d[b] = *(const half *)(src + 80);
+            v.dm[b] = *(const half *)(src + 82);
+        }
+    } else if (t < 2 * NGU + NDN) {
+        const int64_t b = t - 2 * NGU, o = (int64_t)p.slot * NDN + b;
+        const uint8_t *src = p.src + 2 * NGU * bb + b * 18;
+        a.down.d[o] = *(const half *)src;
+        copy_words(src + 2, a.down.q + o * 16, 16);
+    }
+}
+
+void place_experts(const PlaceArgs &a, hipStream_t st) {
+    constexpr int64_t blocks = (2 * ((int64_t)FE * D / 256) + (int64_t)D * FE / 32 + 255) / 256;
+    if (a.n) k_place<<<dim3(blocks, a.n), 256, 0, st>>>(a);
+    else if (a.npatch) k_place<<<dim3(1, 1), 256, 0, st>>>(a);
+}
+
 // Blocks b0 .. b0 + nb of the tensor, read from raw (which starts at block b0); nb < 0: the whole tensor.
 void relayout(const QTensor &t, const uint8_t *raw_dev, hipStream_t st, int64_t b0, int64_t nb) {
     const int64_t n = (int64_t)t.rows * t.cols;

@@ -17,7 +17,8 @@ void gemv(const QTensor &W, QAct x, int T, float *y, int ldy, int mode, hipStrea
 // y[t] (+)= W x[t] for 9..384 fp16 inputs, fp32 or fp16 (y_f16) output, weights dequantized in registers
 void gemm_q(const QTensor &W, const half *x, int ldx, int T, void *y, int ldy, int mode, bool y_f16, hipStream_t st);
 void dequant(const QTensor &W, half *out, hipStream_t st);
-void embed(const QTensor &W, const int *tokens, int T, float *out, hipStream_t st);
+// rows: null, or per token a picture's embedding row (fp16, host memory) to take instead of the token's (image tokens)
+void embed(const QTensor &W, const int *tokens, const half *const *rows, int T, float *out, hipStream_t st);
 void quant_act(const float *x, int64_t n, QAct out, hipStream_t st);
 
 constexpr int TOPK = 64;   // candidates per row handed to the host sampler
@@ -26,6 +27,7 @@ void norm_rows(const float *x, const float *w, int T, float *of, half *oh, QAct 
 void swiglu_h(half *g, const half *u, int64_t n, hipStream_t st);
 void store_f16(const half *x, int n, int T, float *y, int ldy, bool accumulate, hipStream_t st);
 void topk(const float *logits, int T, int n, int ld, float *scratch_v, int *scratch_i, float *ov, int *oi, hipStream_t st);
+void mask_logits(float *logits, const uint32_t *mask, int n, int rows, hipStream_t st);
 void argmax(const float *logits, int T, int n, int ld, int *out, hipStream_t st);
 
 struct GdnScanArgs {
@@ -62,6 +64,8 @@ struct AttnArgs {
     half *out_h = nullptr;                 // [T][NH*HD] when not partial
     float *part_o = nullptr, *part_ml = nullptr;
 };
+// Tokens go to KV slots pos0.. and are rotated at M-RoPE positions: rpos[t] (t, h, w) when given (prompt chunks with
+// pictures), else rope0 + t in all three (text).
 void attn_prep(const float *qg, const float *k, const float *v, const float *qnw, const float *knw, int T, int pos0,
-               KVRef kv, int layer, half *Q16, hipStream_t st);
+               int rope0, const int *rpos, KVRef kv, int layer, half *Q16, hipStream_t st);
 void attention(AttnArgs a, half *oh, QAct oq, hipStream_t st);

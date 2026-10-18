@@ -1,6 +1,9 @@
-// QSA checks on random data: (1) sparse attention over every visible block equals dense attention (context <= 2048
-// cells, where the top-512 selection is everything); (2) the GPU's top-512 block selection equals a CPU reference
-// computed from the same pooled keys and indexer queries.
+// QSA checks on random data: (0) the attention's M-RoPE turns a picture's queries (and keys) as the host does; (1) sparse
+// attention over every visible block equals dense attention (context <= 2048 cells, where the top-512 selection is
+// everything); (2) the GPU's top-512 block selection equals a CPU reference computed from the same pooled keys and
+// indexer queries; pooled keys equal ones built on the host, each turned with the M-RoPE position of its block's first
+// cell. The cells sit at M-RoPE positions: text, then a picture whose rows and
+// columns are far apart, then text far from its cell index, so a key turned with the wrong position shows.
 #include "../engine_fn/kernels.h"
 #include <algorithm>
 #include <cmath>
@@ -8,6 +11,16 @@
 #include <vector>
 
 static float h2f(half h) { return __half2float(h); }
+
+// Which of a cell's three positions (t, h, w) each frequency pair turns with: transformers'
+// Qwen4ExpTextRotaryEmbedding.recomposition_frequencies, mrope_section [11, 11, 10] (H takes 1:33:3, W 2:30:3).
+static std::vector<int> mrope_sections() {
+    std::vector<int> sec(ROT / 2, 0);
+    const int section[3] = {11, 11, 10};
+    for (int dim = 1; dim <= 2; dim++)
+        for (int f = dim; f < section[dim] * 3; f += 3) sec[f] = dim;
+    return sec;
+}
 
 int main() {
     std::mt19937 rng(3);
@@ -33,6 +46,19 @@ int main() {
     CK(hipMalloc(&tail, IDX_TAIL * 2)); CK(hipMalloc(&praw, (size_t)C * IDX_D * 2));
     // every raw indexer key fed in, to build the reference pooled keys
     std::vector<float> all_kr((size_t)N * IDX_D);
+    // every cell's M-RoPE position: text, a 30 x 40 picture from cell 1500 (rows 3 apart, columns 7), then text 600 behind
+    // its cell, as text after a picture is (positions stay small: fp32 angles of large ones differ between host and GPU)
+    std::vector<int> P3((size_t)N * 3);
+    for (int c = 0; c < N; c++) {
+        const int img = c - 1500;
+        const bool in_img = img >= 0 && img < 1200;
+        const int p = c < 1500 ? c : c - 600;
+        P3[c * 3] = in_img ? 1500 : p;
+        P3[c * 3 + 1] = in_img ? 1500 + 3 * (img / 40) : p;
+        P3[c * 3 + 2] = in_img ? 1500 + 7 * (img % 40) : p;
+    }
+    int *dP3; CK(hipMalloc(&dP3, P3.size() * 4)); CK(hipMemcpy(dP3, P3.data(), P3.size() * 4, hipMemcpyHostToDevice));
+    auto tail_of = [&](int p0) { const int c = p0 / KPOOL * KPOOL; return Pos3{P3[c * 3], P3[c * 3 + 1], P3[c * 3 + 2]}; };
     // passes of uneven sizes (so blocks straddle passes and the tail carries cells over), the cache filled to N
     std::vector<int> sizes;
     for (int p0 = 0, i = 0; p0 < N; i++) { const int T = std::min({C, N - p0, (int)(37 + 61 * (i % 4) + (i % 3))}); sizes.push_back(T); p0 += T; }
@@ -44,18 +70,48 @@ int main() {
         CK(hipMemcpy(dv, v.data(), v.size() * 4, hipMemcpyHostToDevice)); CK(hipMemcpy(dkr, kr.data(), kr.size() * 4, hipMemcpyHostToDevice));
         CK(hipMemcpy(dqr, qr.data(), qr.size() * 4, hipMemcpyHostToDevice));
         std::copy(kr.begin(), kr.begin() + (size_t)T * IDX_D, all_kr.begin() + (size_t)p0 * IDX_D);
-        attn_prep(dqg, dk, dv, dones, dones, T, p0, kv, layer, dQ16, st);
-        idx_prep(dkr, dqr, dones, dones, T, p0, kv, layer, tail, praw, true, dq16, st);
+        attn_prep(dqg, dk, dv, dones, dones, T, p0, 0, dP3 + 3 * p0, kv, layer, dQ16, st);
+        idx_prep(dkr, dqr, dones, dones, T, p0, 0, dP3 + 3 * p0, tail_of(p0), kv, layer, tail, praw, true, dq16, st);
     }
     CK(hipStreamSynchronize(st));
     int fails = 0;
+    // (0) the attention's own M-RoPE: queries of picture cells (rows and columns far from the cell index) against the host
+    // turning them; keys go through the same lines. Layer 0: the checks below read layer 3's cache.
+    {
+        const int c0 = 1537, T = 200;
+        for (auto &x : qg) x = nd(rng);
+        CK(hipMemcpy(dqg, qg.data(), qg.size() * 4, hipMemcpyHostToDevice));
+        attn_prep(dqg, dk, dv, dones, dones, T, c0, 0, dP3 + 3 * c0, kv, 0, dQ16, st);
+        std::vector<half> got((size_t)T * NH * HD);
+        CK(hipMemcpy(got.data(), dQ16, got.size() * 2, hipMemcpyDeviceToHost));
+        const std::vector<int> sec = mrope_sections();
+        double worst = 0;
+        for (int t = 0; t < T; t++)
+            for (int h = 0; h < NH; h++) {
+                const float *x = &qg[((size_t)t * NH + h) * 2 * HD];
+                double ss = 0;
+                for (int i = 0; i < HD; i++) ss += (double)x[i] * x[i];
+                const float r = 1.0f / sqrtf((float)(ss / HD) + EPS);
+                for (int i = 0; i < HD; i++) {
+                    float y = x[i] * r;
+                    if (i < ROT) {
+                        const int f = i % (ROT / 2);
+                        const float th = P3[(c0 + t) * 3 + sec[f]] * powf(ROPE_BASE, -2.0f * f / ROT), c = cosf(th), sn = sinf(th);
+                        y = i < ROT / 2 ? x[i] * r * c - x[i + ROT / 2] * r * sn : x[i] * r * c + x[i - ROT / 2] * r * sn;
+                    }
+                    worst = std::max(worst, (double)fabsf(h2f(got[((size_t)t * NH + h) * HD + i]) - y * 0.0625f));
+                }
+            }
+        printf("M-RoPE queries of %d picture cells vs the host: max diff %.2e %s\n", T, worst, worst < 1e-3 ? "ok" : "FAIL");
+        fails += worst >= 1e-3;
+    }
     // (1) dense vs sparse-all at position P (context P+1 <= 2048 cells); P = 1997: a tail block with a later cell to mask
     for (const int P : {1999, 1997}) {
         for (auto &x : qg) x = nd(rng); for (auto &x : k) x = nd(rng); for (auto &x : v) x = nd(rng);
         CK(hipMemcpy(dqg, qg.data(), (size_t)NH * 2 * HD * 4, hipMemcpyHostToDevice));
         CK(hipMemcpy(dk, k.data(), (size_t)NKV * HD * 4, hipMemcpyHostToDevice));
         CK(hipMemcpy(dv, v.data(), (size_t)NKV * HD * 4, hipMemcpyHostToDevice));
-        attn_prep(dqg, dk, dv, dones, dones, 1, P, kv, layer, dQ16, st);   // overwrite cell P as the query token
+        attn_prep(dqg, dk, dv, dones, dones, 1, P, P, nullptr, kv, layer, dQ16, st);   // overwrite cell P as the query token
         float *po, *pml; half *o1, *o2;
         CK(hipMalloc(&po, (size_t)PART_ROWS * NH * HD * 4)); CK(hipMalloc(&pml, (size_t)PART_ROWS * NH * 2 * 4));
         CK(hipMalloc(&o1, NH * HD * 2)); CK(hipMalloc(&o2, NH * HD * 2));
@@ -83,7 +139,7 @@ int main() {
         for (auto &x : qg) x = nd(rng); for (auto &x : k) x = nd(rng); for (auto &x : v) x = nd(rng);
         CK(hipMemcpy(dqg, qg.data(), qg.size() * 4, hipMemcpyHostToDevice));
         CK(hipMemcpy(dk, k.data(), k.size() * 4, hipMemcpyHostToDevice)); CK(hipMemcpy(dv, v.data(), v.size() * 4, hipMemcpyHostToDevice));
-        attn_prep(dqg, dk, dv, dones, dones, T, P0, kv, layer, dQ16, st);
+        attn_prep(dqg, dk, dv, dones, dones, T, P0, P0, nullptr, kv, layer, dQ16, st);
         std::vector<int> sel((size_t)T * (SEL_BLOCKS + 1), -1);
         for (int t = 0; t < T; t++) {
             const int p = P0 + t, vis = (p + 1) / KPOOL;
@@ -126,7 +182,7 @@ int main() {
         // indexer queries for the last G cells: a speculative pass over them (no tail update), raw keys as before, so
         // the pooled key of a block it completes comes out as it was
         CK(hipMemcpy(dkr, all_kr.data() + (size_t)P0 * IDX_D, (size_t)G * IDX_D * 4, hipMemcpyHostToDevice));
-        idx_prep(dkr, dqr, dones, dones, G, P0, kv, layer, tail, praw, false, dq16, st);
+        idx_prep(dkr, dqr, dones, dones, G, P0, 0, dP3 + 3 * P0, tail_of(P0), kv, layer, tail, praw, false, dq16, st);
         const int nblk = N / KPOOL;
         float *score; int *dsel;
         CK(hipMalloc(&score, (size_t)G * nblk * 4)); CK(hipMalloc(&dsel, (size_t)G * (SEL_BLOCKS + 1) * 4));
@@ -163,7 +219,8 @@ int main() {
         std::vector<half> q16((size_t)G * IDX_H * IDX_D);
         CK(hipMemcpy(q16.data(), dq16, q16.size() * 2, hipMemcpyDeviceToHost));
         // pooled keys back from the pages, checked against pooled keys built on the host from every raw key (fp16, mean,
-        // RMS norm, rotation to the block's first cell)
+        // RMS norm, rotation to the block's first cell's position)
+        const std::vector<int> sec = mrope_sections();
         std::vector<half> pk((size_t)nblk * IDX_D);
         int pool_bad = 0;
         for (int b = 0; b < nblk; b++) {
@@ -180,7 +237,7 @@ int main() {
             const float inv = 1.0f / sqrtf((float)(ss / IDX_D) + EPS);
             for (int i = 0; i < IDX_D; i++) x[i] *= inv;
             for (int i = 0; i < ROT / 2; i++) {
-                const float th = cell * powf(ROPE_BASE, -2.0f * i / ROT), c0 = cosf(th), s0 = sinf(th);
+                const float th = P3[cell * 3 + sec[i]] * powf(ROPE_BASE, -2.0f * i / ROT), c0 = cosf(th), s0 = sinf(th);
                 const float a = x[i], bb = x[i + ROT / 2];
                 x[i] = a * c0 - bb * s0; x[i + ROT / 2] = bb * c0 + a * s0;
             }

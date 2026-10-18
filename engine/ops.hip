@@ -139,6 +139,18 @@ void topk(const float *logits, int T, int n, int ld, float *scratch_v, int *scra
     k_topk2<<<T, 512, 0, st>>>(scratch_v, scratch_i, nb * TOPK, ov, oi);
 }
 
+// Tokens a grammar does not allow (bit t % 32 of word t / 32 clear: llguidance's bitmask) drop out of rows of logits, each
+// row with its own mask (a held answer's step verifies several positions), so topk then finds the allowed candidates.
+__global__ void k_mask_logits(float *logits, const uint32_t *mask, int n) {
+    const int i = blockIdx.x * blockDim.x + threadIdx.x;
+    logits += (size_t)blockIdx.y * n;
+    mask += (size_t)blockIdx.y * ((n + 31) / 32);
+    if (i < n && !((mask[i >> 5] >> (i & 31)) & 1u)) logits[i] = -INFINITY;
+}
+void mask_logits(float *logits, const uint32_t *mask, int n, int rows, hipStream_t st) {
+    k_mask_logits<<<dim3((n + 255) / 256, rows), 256, 0, st>>>(logits, mask, n);
+}
+
 // Greedy pick for drafts: argmax of each row, written to a device token buffer.
 __global__ __launch_bounds__(1024) void k_argmax(const float *logits, int n, int ld, int *out) {
     __shared__ float bv[32];

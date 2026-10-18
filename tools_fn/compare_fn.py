@@ -3,8 +3,12 @@
 The two run different weights (kiln-fn.gguf: Q6_K/Q8_0 dense, IQ4_XS experts in VRAM, Q3_K / Q2_K in RAM; llama.cpp:
 Q8_0), so the numbers are kiln's quantization error plus any implementation error: decode, prefill and mixed paths must
 agree with each other, and the KL should match the prediction (~0.017): a path fails past its MAX_KL or under
-MIN_TOP1. The cold experts' CPU / GPU split is fixed here (all of a prefill's on the CPU, gfrac 0.3 at decode): the
-load-time calibration would otherwise move it, and with it the rounding, so every run gives the same numbers.
+MIN_TOP1. The cold experts' CPU / GPU split is fixed here (all of a prefill's on the CPU, gfrac 0.3 at decode, the expert
+pool as loaded): the load-time calibration and the pool would otherwise move it, and with it the rounding, so every run
+gives the same numbers. Then the pool moves (engine_fn/experts.cpp) and the paths run again under the same limits: once
+after a prose reply has pushed the text's experts out of VRAM (the file's VRAM-tier ones then computed by the CPU from
+the model file), once after the text itself has pulled them back in (RAM-tier experts in their own formats in pool slots,
+VRAM-tier ones read back from the file into other slots).
   python tools_fn/compare_fn.py [--fresh] [--ref-only] [--text FILE --tag NAME] [--model FILE]
 """
 import os
@@ -94,29 +98,83 @@ def stats(name, pairs, max_kl):
 
 eng = Engine(MODEL, max_seqs=2, umax=MODELS["qwen3.8-flash-next"]["chunk"], lib=os.path.join(ROOT, "build/libkiln_fn.so"))
 eng.lib.kiln_tune.restype, eng.lib.kiln_tune.argtypes = C.c_double, [C.c_char_p, C.c_double]
-eng.lib.kiln_tune(b"split", 1); eng.lib.kiln_tune(b"gfrac", 0.3)
-s = eng.new_seq()
-pairs = []
-for i, t in enumerate(ids):                 # decode path: one token at a time
-    eng.prefill(s, [t])
-    pairs.append((i, eng.last_logits()))
-fails = not stats("decode (T=1 per token)", pairs, MAX_KL["decode"])
-eng.free_seq(s)
+eng.lib.kiln_tune(b"split", 1); eng.lib.kiln_tune(b"gfrac", 0.3); eng.lib.kiln_tune(b"experts", 0)
+eng.lib.kiln_expert_stats.argtypes = [C.c_void_p]
 
-pairs = []
-for cut in (16, 64, n // 2, n):             # prefill path
+
+def paths(tag):
     s = eng.new_seq()
-    eng.prefill(s, ids[:cut])
-    pairs.append((cut - 1, eng.last_logits()))
+    pairs = []
+    for i, t in enumerate(ids):             # decode path: one token at a time
+        eng.prefill(s, [t])
+        pairs.append((i, eng.last_logits()))
+    bad = not stats(f"decode (T=1 per token){tag}", pairs, MAX_KL["decode"])
     eng.free_seq(s)
-fails += not stats("prefill (one chunk)", pairs, MAX_KL["prefill"])
 
-s = eng.new_seq()
-eng.prefill(s, ids[:40])
-pairs = []
-for i in range(40, n):                      # mixed: prefill then decode on top
-    eng.prefill(s, [ids[i]])
-    pairs.append((i, eng.last_logits()))
-fails += not stats("prefill 40 + decode", pairs, MAX_KL["mixed"])
+    pairs = []
+    for cut in (16, 64, n // 2, n):         # prefill path
+        s = eng.new_seq()
+        eng.prefill(s, ids[:cut])
+        pairs.append((cut - 1, eng.last_logits()))
+        eng.free_seq(s)
+    bad += not stats(f"prefill (one chunk){tag}", pairs, MAX_KL["prefill"])
+    if tag:                                 # the cold experts staged on the GPU instead (the file's through pinned memory)
+        eng.lib.kiln_tune(b"split", 0)
+        pairs = []
+        for cut in (16, 64, n // 2, n):
+            s = eng.new_seq()
+            eng.prefill(s, ids[:cut])
+            pairs.append((cut - 1, eng.last_logits()))
+            eng.free_seq(s)
+        eng.lib.kiln_tune(b"split", 1)
+        bad += not stats(f"prefill, cold on the GPU{tag}", pairs, MAX_KL["prefill"])
+
+    s = eng.new_seq()
+    eng.prefill(s, ids[:40])
+    pairs = []
+    for i in range(40, n):                  # mixed: prefill then decode on top
+        eng.prefill(s, [ids[i]])
+        pairs.append((i, eng.last_logits()))
+    bad += not stats(f"prefill 40 + decode{tag}", pairs, MAX_KL["mixed"])
+    eng.free_seq(s)
+    return bad
+
+
+def placed():
+    st = (C.c_int64 * 4)()
+    eng.lib.kiln_expert_stats(st)
+    return st[0], st[1]
+
+
+def move_pool(prompt, steps):
+    """The pool follows a reply to prompt (token ids) for steps decode steps, then holds still."""
+    from kiln.engine import Sampling
+    eng.lib.kiln_tune(b"experts", 1)
+    s = eng.new_seq()
+    eng.prefill(s, prompt)
+    eng.begin(s, 7)
+    sp = Sampling(temperature=1.0, top_p=0.95, min_p=0.0, presence_penalty=0.0, top_k=20, n_draft=2)
+    for _ in range(steps):
+        eng.generate(s, sp, 16)
+    eng.free_seq(s)
+    eng.lib.kiln_tune(b"experts", 0)
+
+
+fails = paths("")
+prose = tok.encode("<|im_start|>user\nWrite a long story about a lighthouse keeper and a storm.<|im_end|>\n<|im_start|>assistant\n",
+                   add_special_tokens=False).ids
+a = placed()
+move_pool(prose, 400)
+b = placed()
+ok = b[0] - a[0] >= 1000 and b[1] - a[1] > 0
+print(f"pool after a prose reply: {b[0] - a[0]} experts placed, {b[1] - a[1]} read from the model file  {'ok' if ok else 'FAIL'}", flush=True)
+fails += not ok
+fails += paths(", pool moved by prose")
+move_pool(ids, 400)
+c = placed()
+ok = c[0] - b[0] >= 300 and c[1] - b[1] > 0
+print(f"pool after the text: {c[0] - b[0]} experts placed, {c[1] - b[1]} read from the model file  {'ok' if ok else 'FAIL'}", flush=True)
+fails += not ok
+fails += paths(", pool moved by the text")
 print("all ok" if not fails else f"{fails} FAILURES")
 sys.exit(fails != 0)

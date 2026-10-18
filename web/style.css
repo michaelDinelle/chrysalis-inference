@@ -136,6 +136,9 @@ button { font: inherit; color: inherit; cursor: pointer; }
 .conv-del { visibility: hidden; padding: 0 6px; border: 0; border-radius: 6px; background: none; color: var(--faint); font-size: 13px; line-height: 22px; }
 .conv:hover .conv-del, .conv-del.armed { visibility: visible; }
 .conv-del:hover, .conv-del.armed { color: var(--danger); }
+.side-foot { display: flex; flex: none; gap: 6px; padding-top: 8px; border-top: 1px solid var(--line); }
+.side-foot .btn { flex: 1; height: 30px; color: var(--muted); font-size: 13px; }
+.side-foot .btn:hover { color: var(--text); }
 
 .dot { width: 8px; height: 8px; flex: none; border-radius: 50%; background: var(--faint); }
 .dot.online { background: var(--ok); box-shadow: 0 0 0 3px rgb(108 207 142 / 0.16); }
@@ -169,6 +172,19 @@ main { display: flex; flex-direction: column; min-height: 0; grid-column: 2; }
 
 .msg { margin-bottom: 22px; }
 .msg.user { display: flex; flex-direction: column; align-items: flex-end; }
+/* attached files: chips in the message box (with a remove button) and above a sent message (pictures as pictures) */
+.attachments { display: flex; flex-wrap: wrap; gap: 6px; margin: -2px 0 10px -6px; }
+.att { display: inline-flex; align-items: center; gap: 8px; max-width: 280px; height: 42px; padding: 0 6px 0 4px; border: 1px solid var(--line); border-radius: 10px; background: var(--panel); font-size: 13px; }
+.att img, .att-icon { flex: none; width: 34px; height: 34px; border-radius: 7px; object-fit: cover; }
+.att-icon { display: grid; place-items: center; background: var(--hover); color: var(--muted); font: 600 9px var(--mono); text-transform: uppercase; }
+.att-text { display: flex; min-width: 0; flex-direction: column; line-height: 1.25; }
+.att-name { overflow: hidden; white-space: nowrap; text-overflow: ellipsis; }
+.att-size { color: var(--faint); font-size: 11.5px; white-space: nowrap; }
+.att-x { width: 22px; height: 22px; }
+.msg-files { display: flex; flex-wrap: wrap; justify-content: flex-end; gap: 6px; max-width: min(85%, 640px); margin-bottom: 6px; }
+.msg-files img { display: block; max-width: 280px; max-height: 200px; border: 1px solid var(--line); border-radius: 12px; cursor: zoom-in; }
+.composer-box.dropping { border-color: var(--accent); box-shadow: 0 0 0 3px var(--accent-soft), var(--shadow); }
+.svg-zoom-paper > img { display: block; max-width: 92vw; max-height: 88vh; }
 .bubble { max-width: min(85%, 640px); padding: 10px 15px; border: 1px solid var(--line); border-radius: 18px 18px 6px 18px; background: var(--raised); white-space: pre-wrap; overflow-wrap: anywhere; }
 .msg-foot { display: flex; align-items: center; gap: 2px; min-height: 32px; margin-top: 4px; color: var(--faint); font-size: 12px; }
 .msg.user .msg-foot { opacity: 0; transition: opacity 0.15s; }
@@ -204,6 +220,9 @@ main { display: flex; flex-direction: column; min-height: 0; grid-column: 2; }
 .markdown h3 { font-size: 1.1em; }
 .markdown a { color: var(--accent-hi); text-underline-offset: 2px; }
 .markdown strong { font-weight: 650; }
+/* KaTeX sets math at 1.21em, a size up from the text around it */
+.markdown .katex { font-size: 1.1em; }
+.markdown .katex-display { margin: 0.8em 0; overflow-x: auto; overflow-y: hidden; padding: 2px 0; }
 .markdown :not(pre) > code { padding: 0.12em 0.38em; border-radius: 5px; background: var(--hover); font: 0.87em var(--mono); }
 .markdown blockquote { margin: 0.8em 0; padding-left: 14px; border-left: 3px solid var(--line); color: var(--muted); }
 .markdown table { display: block; overflow-x: auto; margin: 0.9em 0; border-collapse: collapse; font-size: 14px; }
@@ -230,7 +249,8 @@ main { display: flex; flex-direction: column; min-height: 0; grid-column: 2; }
 .svg-acts button.done { color: var(--ok); }
 .svg-fig:hover .svg-acts, .svg-fig:focus-within .svg-acts { opacity: 1; }
 @media (hover: none) { .svg-acts { opacity: 1; } }
-.svg-fig.drawing .svg-acts, .svg-fig.failed [data-svg=code], .svg-fig.failed [data-svg=zoom] { display: none; }
+.svg-fig.drawing .svg-acts, .svg-fig.failed [data-svg=code], .svg-fig.failed [data-svg=zoom],
+.svg-fig.failed[data-kind=mermaid] [data-svg=save] { display: none; }
 .svg-code { display: none; margin: 0; }
 .svg-fig.show-code .svg-code, .svg-fig.failed .svg-code { display: block; }
 .svg-fig.show-code .svg-paper, .svg-fig.failed .svg-paper { display: none; }
@@ -238,6 +258,15 @@ main { display: flex; flex-direction: column; min-height: 0; grid-column: 2; }
 .svg-zoom[open] { display: grid; place-items: center; }
 .svg-zoom::backdrop { background: rgb(0 0 0 / 0.72); }
 .svg-zoom-paper { padding: 20px; border-radius: 14px; background: var(--paper); }
+/* HTML pages from replies: a white page (what pages assume), as wide as the column */
+.page-frame { display: block; width: 100%; border: 1px solid var(--line); border-radius: 12px; background: #fff; color-scheme: light; }
+.page-fig.show-code .page-frame { display: none; }
+.page-fig.show-code .svg-code { display: block; }
+.page-zoom { width: 100vw; height: 100vh; max-width: none; max-height: none; margin: 0; padding: 0; border: 0; background: none; }
+.page-zoom[open] { display: grid; place-items: center; }
+.page-zoom::backdrop { background: rgb(0 0 0 / 0.72); }
+.page-zoom-box { width: 94vw; height: 92vh; }
+.page-zoom-box .page-frame { height: 100%; }
 .copy.done { color: var(--ok); }
 .code pre { margin: 0; padding: 12px 16px; overflow-x: auto; }
 .code code { font: 13px/1.6 var(--mono); }
@@ -314,6 +343,8 @@ main { display: flex; flex-direction: column; min-height: 0; grid-column: 2; }
 .model-btn .i { width: 13px; height: 13px; transition: transform 0.15s; }
 .model-btn .dot { width: 7px; height: 7px; margin-right: 2px; }
 .model-pct { color: var(--faint); font: 11.5px var(--mono); font-variant-numeric: tabular-nums; }
+.attach { flex: none; width: 30px; height: 30px; margin-right: -4px; }
+.attach .i { width: 17px; height: 17px; }
 .power { width: 30px; height: 30px; }
 .power .i { width: 15px; height: 15px; }
 .power:disabled { cursor: default; opacity: 0.5; }

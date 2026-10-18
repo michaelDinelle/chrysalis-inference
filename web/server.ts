@@ -8,7 +8,7 @@ import app from "./index.html";
 const KILN = process.env.KILN_URL ?? "http://127.0.0.1:8080";
 // Changes with the page's code. Open tabs compare it on every status poll and reload to pick up an update
 // (their chats are in sessionStorage, so a reload keeps them).
-const BUILD = Bun.hash((await Promise.all(["index.html", "app.ts", "sampler.ts", "style.css"].map((f) => Bun.file(`${import.meta.dir}/${f}`).text()))).join("\0")).toString(36);
+const BUILD = Bun.hash((await Promise.all(["index.html", "app.ts", "sampler.ts", "files.ts", "style.css"].map((f) => Bun.file(`${import.meta.dir}/${f}`).text()))).join("\0")).toString(36);
 
 // DNS rebinding guard: a page from another site that points its own name at this machine still sends that name as
 // Host. Requests addressed to an IP address or to this machine's names are fine.
@@ -110,12 +110,37 @@ function follow(job: Job, from: number): Response {
   return new Response(stream, { headers: { "Content-Type": "text/event-stream", "Cache-Control": "no-cache", "X-Kiln-Job": job.id } });
 }
 
+// Mermaid's ES module build (the page imports it the first time it draws a diagram): its entry and the chunks it
+// loads, straight from the package and nothing else from node_modules.
+const MERMAID = `${import.meta.dir}/node_modules/mermaid/dist/`;
+const vendor = (req: Request) => {
+  const file = new URL(req.url).pathname.slice("/vendor/mermaid/".length);
+  if (!/^(mermaid\.esm\.min\.mjs|chunks\/mermaid\.esm\.min\/[\w-]+\.mjs)$/.test(file)) return new Response("not found", { status: 404 });
+  return new Response(Bun.file(MERMAID + file), { headers: { "Content-Type": "text/javascript", "Cache-Control": "max-age=86400" } });
+};
+
+// The frame an HTML page from a reply runs in. Two walls: the page's iframe is sandboxed (allow-scripts only: an opaque
+// origin, so no cookies, storage or access to the chat), and this policy lets its own inline code run but nothing
+// load from or talk to anywhere, kiln included. The chat posts the page in, which replaces this document.
+const SANDBOX = `<!doctype html><meta charset="utf-8"><script>
+addEventListener("message", (e) => {
+  if (e.source !== parent || typeof e.data?.kilnPage !== "string") return;
+  document.open(); document.write(e.data.kilnPage); document.close();
+}, { once: true });
+parent.postMessage({ kilnReady: true }, "*");
+</script>`;
+const SANDBOX_CSP = "default-src 'none'; script-src 'unsafe-inline' 'unsafe-eval'; style-src 'unsafe-inline'; img-src data: blob:; " +
+  "font-src data:; media-src data: blob:; form-action 'none'; base-uri 'none'; frame-ancestors 'self'; sandbox allow-scripts allow-modals";
+
 const server = Bun.serve({
   hostname: process.env.KILN_HOST ?? "127.0.0.1",          // 0.0.0.0 after `kiln start --lan`
+  maxRequestBodySize: 1 << 30,                              // a chat resends its files: a 64 MB video is ~85 MB of base64
   port: Number(process.env.PORT ?? 8081),
   development: process.env.NODE_ENV !== "production",
   routes: {
     "/": app,
+    "/vendor/mermaid/*": { GET: guarded(vendor) },
+    "/sandbox": { GET: guarded(() => new Response(SANDBOX, { headers: { "Content-Type": "text/html; charset=utf-8", "Content-Security-Policy": SANDBOX_CSP } })) },
 
     // A streamed reply starts a job and follows it (its id in X-Kiln-Job); other requests (session titles) pass
     // through. Nothing arrives before the first token, which takes a while for a long prompt: no idle timeout.

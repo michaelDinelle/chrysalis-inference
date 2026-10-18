@@ -12,6 +12,20 @@ struct PrefetchRange { const int4 *p; size_t n16; };   // 16-byte aligned VRAM r
 void prefetch(const PrefetchRange *r, int n, unsigned *sink, hipStream_t st);
 // relayout.hip: blocks b0 .. b0 + nb (nb < 0: all) of a tensor from raw GGUF data starting at block b0
 void relayout(const QTensor &t, const uint8_t *raw_dev, hipStream_t st, int64_t b0 = 0, int64_t nb = -1);
+// Experts into pool slots (common.h, slot_view): src = an expert's GGUF blocks in VRAM, gate | up (`type`: IQ4_XS, Q3_K,
+// Q2_K) | down (IQ4_NL); and patches of the routing tables applied in the same launch (index < 0: none).
+struct Place { const uint8_t *src = nullptr; int slot = 0, type = 0; };
+struct Patch { int slot_of = -1, fmt = -1, value = 0; };   // slot_of[slot_of] = value, fmt[fmt] = value
+constexpr int PLACE_MAX = 32;                     // loads in flight, so experts placed per pass at most (following a
+                                                  // story at 16, every pass placed 16 and the pool held 64% of the
+                                                  // picks by step 128; at 32, 77-82%)
+struct PlaceArgs {
+    QTensor gate, up, down;                     // the pool
+    int *slot_of = nullptr; uint8_t *fmt = nullptr;   // [NL][NE] routing table, [slots] gate / up format per slot
+    Place p[PLACE_MAX]; int n = 0;
+    Patch patch[3 * PLACE_MAX]; int npatch = 0;
+};
+void place_experts(const PlaceArgs &a, hipStream_t st);
 struct GemvSeg { QTensor W; float *y = nullptr; int ldy = 0; };
 struct GemvArgs {
     GemvSeg seg[3]; int nseg = 1;
@@ -27,7 +41,6 @@ void gemv_hc(const QTensor &W, QAct x, int T, float *res, const float *inj, hipS
 void gemm_q(const QTensor &W, const half *x, int ldx, int T, void *y, int ldy, int mode, bool y_f16, hipStream_t st);
 void dequant(const QTensor &W, half *out, hipStream_t st);
 // token embeddings: IQ4_XS (SoA) or Q8_0 rows in GGUF block order, e.g. in pinned host memory
-void embed(const QTensor &W, const int *tokens, int T, float *out, hipStream_t st);
 void quant_act(const float *x, int64_t n, QAct out, hipStream_t st);
 
 constexpr int TOPK = 64;   // candidates per row handed to the host sampler
@@ -35,6 +48,7 @@ void rmsnorm(const float *x, const float *w, int T, int n, int ldx, int ldo, flo
 void swiglu_h(half *g, const half *u, int64_t n, hipStream_t st);
 void store_f16(const half *x, int n, int T, float *y, int ldy, bool accumulate, hipStream_t st);
 void topk(const float *logits, int T, int n, int ld, float *scratch_v, int *scratch_i, float *ov, int *oi, hipStream_t st);
+void mask_logits(float *logits, const uint32_t *mask, int n, int rows, hipStream_t st);
 void argmax(const float *logits, int T, int n, int ld, int *out, hipStream_t st);
 // hyper-connections: res [T][HC][D]
 void hc_init(const float *x, float *res, int T, hipStream_t st);
@@ -76,16 +90,18 @@ struct MoeShared;
 void router_dec(const half *W, const float *wsg, const float *x, int T, float *logits, float *sg, hipStream_t st);
 // router_dec + route_dec in one launch (counter: a zeroed device word the kernel resets itself); counts: if set, picks per
 // (layer, expert) are added to it ([NL][NE])
+// slot_of[e]: the expert's pool slot, or -1 - its RAM slot (ColdLayer's numbering); the GPU reads its share gfrac of the
+// cold picks from RAM itself, of those below n_ram (the rest are on the CPU's side only)
 void router_route_dec(const half *W, const float *wsg, const float *x, int T, float *logits, float *sg, const int *slot_of,
-                      int *ids, float *wts, int *hot_slot, MoeShared *sh, float gfrac, int layer, uint32_t gen, unsigned *counter,
-                      hipStream_t st, unsigned *counts = nullptr);
-void route_dec(const float *logits, int T, const int *slot_of, int *ids, float *wts, int *hot_slot, MoeShared *sh, float gfrac,
-               const float *x, int layer, uint32_t gen, hipStream_t st);
+                      int n_ram, int *ids, float *wts, int *hot_slot, MoeShared *sh, float gfrac, int layer, uint32_t gen,
+                      unsigned *counter, hipStream_t st, unsigned *counts = nullptr);
+void route_dec(const float *logits, int T, const int *slot_of, int n_ram, int *ids, float *wts, int *hot_slot, MoeShared *sh,
+               float gfrac, const float *x, int layer, uint32_t gen, hipStream_t st);
 // the GPU's routed picks (hot_slot >= 0) and, if sgate is set, each token's shared expert as pick T*TOPK_E + t (y rows
-// weighted by sg[t]); hq / y have T * (TOPK_E + 1) rows
-void moe_experts_dec(const QTensor &gate, const QTensor &up, const QTensor &down, const QTensor &sgate, const QTensor &sup,
-                     const QTensor &sdown, const int *hot_slot, int T, QAct x, QAct hq, const float *wts, const float *sg, float *y,
-                     hipStream_t st);
+// weighted by sg[t]); hq / y have T * (TOPK_E + 1) rows. fmt: each slot's gate / up format (null: all IQ4_XS).
+void moe_experts_dec(const QTensor &gate, const QTensor &up, const QTensor &down, const uint8_t *fmt, const QTensor &sgate,
+                     const QTensor &sup, const QTensor &sdown, const int *hot_slot, int T, QAct x, QAct hq, const float *wts,
+                     const float *sg, float *y, hipStream_t st);
 // the GPU's share of the cold picks (hot_slot <= -2), GGUF blocks read from registered host memory
 struct ColdDec {                       // a layer's RAM experts as the GPU sees them (device pointers)
     const uint8_t *gate[2] = {}, *up[2] = {}, *down = nullptr;
@@ -94,8 +110,9 @@ struct ColdDec {                       // a layer's RAM experts as the GPU sees 
 };
 void moe_cold_dec(const ColdDec &c, const int *hot_slot, int T, QAct x, QAct hq, const float *wts, float *y, hipStream_t st);
 // both in two launches, the cold picks (c, may be nullptr) side by side with the hot ones and the shared expert
-void moe_dec(const QTensor &gate, const QTensor &up, const QTensor &down, const QTensor &sgate, const QTensor &sup, const QTensor &sdown,
-             const ColdDec *c, const int *hot_slot, int T, QAct x, QAct hq, const float *wts, const float *sg, float *y, hipStream_t st);
+void moe_dec(const QTensor &gate, const QTensor &up, const QTensor &down, const uint8_t *fmt, const QTensor &sgate, const QTensor &sup,
+             const QTensor &sdown, const ColdDec *c, const int *hot_slot, int T, QAct x, QAct hq, const float *wts, const float *sg,
+             float *y, hipStream_t st);
 // the end of a decode MoE block in one launch: wait for the CPU's sum (done = nullptr: no CPU part), add the shared rows
 // (sg = nullptr: already weighted) and the GPU's picks, and update the hyper-connections (res += 2 sigmoid(inject / HC) * out)
 void moe_finish(const uint32_t *done, uint32_t gen, const float *y, const int *hot_slot, const float *shared, const float *sg,
@@ -112,14 +129,17 @@ struct AttnArgs {
     half *out_h = nullptr;                 // [T][NH*HD] when not partial
     float *part_o = nullptr, *part_ml = nullptr;
 };
+// Tokens go to KV cells pos0.. and are rotated at M-RoPE positions: rpos[t] (t, h, w) when given (prompt passes with
+// pictures), else rope0 + t in all three (text).
 void attn_prep(const float *qg, const float *k, const float *v, const float *qnw, const float *knw, int T, int pos0,
-               KVRef kv, int layer, half *Q16, hipStream_t st);
+               int rope0, const int *rpos, KVRef kv, int layer, half *Q16, hipStream_t st);
 void attention(AttnArgs a, half *oh, QAct oq, hipStream_t st);           // dense causal (all cells up to each query)
 // indexer: raw keys -> praw (this pass, fp16 [T][IDX_D]), queries normed + rotated -> q16, pooled keys of the blocks this
-// pass completes (cells before pos0 from tail = the sequence's incomplete block); keep_tail: the pass is final, so the
-// tail takes its new incomplete block (speculative passes leave that to idx_tail_commit for the accepted cells)
-void idx_prep(const float *kraw, const float *qraw, const float *qnw, const float *knw, int T, int pos0, KVRef kv, int layer,
-              half *tail, half *praw, bool keep_tail, half *q16, hipStream_t st);
+// pass completes (cells before pos0 from tail = the sequence's incomplete block, rotated at tail_pos, the position of its
+// first cell); keep_tail: the pass is final, so the tail takes its new incomplete block (speculative passes leave that to
+// idx_tail_commit for the accepted cells). Positions as attn_prep's.
+void idx_prep(const float *kraw, const float *qraw, const float *qnw, const float *knw, int T, int pos0, int rope0, const int *rpos,
+              Pos3 tail_pos, KVRef kv, int layer, half *tail, half *praw, bool keep_tail, half *q16, hipStream_t st);
 void idx_tail_commit(half *tails, const half *praw, size_t praw_layer, int layers, int pos0, int n_end, hipStream_t st);
 // block selection for G tokens at pos0..: score scratch [G][nblk], sel [G][SEL_BLOCKS + 1]
 void idx_select(const half *q16, int pos0, int G, int nblk, KVRef kv, int layer, float *score, uint32_t *hist, int *sel,
@@ -128,6 +148,8 @@ void idx_select_ref(const half *q16, int pos0, int G, int nblk, KVRef kv, int la
 void attention_sel(AttnArgs a, const int *sel, half *oh, QAct oq, hipStream_t st);   // sparse, per-token block lists
 
 void ple_embed(const uint8_t *rows, int T, float *of, half *oh, QAct oq, hipStream_t st);
+// rows: null, or per token a picture's embedding row (fp16, host memory) to take instead of the token's (image tokens)
+void embed(const QTensor &W, const int *tokens, const half *const *rows, int T, float *out, hipStream_t st);
 void ple_block(const float *key, const float *value, float *res, const float *nk, const float *nq, const float *nc,
                const float *conv_w, const float *state, float *xconv, int T, hipStream_t st);
 void ple_commit(float *state, const float *xconv, int n, hipStream_t st);
@@ -135,8 +157,9 @@ void ple_commit(float *state, const float *xconv, int n, hipStream_t st);
 // Routed experts at prefill.
 struct MoeWork { int slot, m0, n, tier; };
 constexpr int MOE_ITEM = 256;                     // tokens per work item at most (an expert's tokens split into items)
+// slot_type >= 0: the items are pool slots holding experts of that format (g0 / u0: the pool's gate / up, slot_view)
 void moe_gemm_gateup(const QTensor &g0, const QTensor &u0, const QTensor &g1, const QTensor &u1, const MoeWork *work, int nwork,
-                     const half *X, half *H, hipStream_t st);
+                     const half *X, half *H, hipStream_t st, int slot_type = -1);
 void moe_gemm_down(const QTensor &d0, const QTensor &d1, const MoeWork *work, int nwork, const half *H, const float *wts, half *Y, hipStream_t st);
 void route_many(const float *logits, const float *wsg, const float *x, int T, int *ids, float *wts, float *sg, hipStream_t st);
 void gather_rows(const half *src, const int *idx, int n, half *dst, hipStream_t st);

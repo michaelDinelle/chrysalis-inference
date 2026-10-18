@@ -91,10 +91,10 @@ int main(int argc, char **argv) {
         GemvArgs g; g.seg[0] = {qkv, proj, QKV}; g.seg[1] = {z, zb, GV * GD}; g.nseg = 2; g.x = hq; g.T = T; gemv(g, st); })});
     out.push_back({"gemv_hc ssm_out (Q8_0, 16.7 MB)", time_us(st, reps, [&] { gemv_hc(sout, hq6, T, res, inject, st); })});
     out.push_back({"router_route_dec (no CPU handoff)", time_us(st, reps, [&] {
-        router_route_dec(router, wsg, mx, T, logits, sgv, slot_of, ids, wts, hot, nullptr, 0.25f, 0, 0, counter, st); })});
+        router_route_dec(router, wsg, mx, T, logits, sgv, slot_of, NE, ids, wts, hot, nullptr, 0.25f, 0, 0, counter, st); })});
     CK(hipMemcpy(hot, hs.data(), hs.size() * 4, hipMemcpyHostToDevice));   // the router overwrote the pick set
     out.push_back({"moe_experts_dec (6 hot + shared)", time_us(st, reps, [&] {
-        moe_experts_dec(hg, hu, hd, sg_, su, sd, hot, T, hq, hqe, wts, sgv, y, st); })});
+        moe_experts_dec(hg, hu, hd, nullptr, sg_, su, sd, hot, T, hq, hqe, wts, sgv, y, st); })});
     out.push_back({"moe_cold_dec (1 pick from RAM)", time_us(st, reps, [&] { moe_cold_dec(cd, hot, T, hq, hqe, wts, y, st); })});
     {   // hot only / cold only / both in the merged launches
         std::vector<int> hot_only = hs, cold_only = hs;
@@ -103,7 +103,7 @@ int main(int argc, char **argv) {
         for (auto [name, set] : {std::pair{"moe_dec hot only (6 + shared)", &hot_only}, std::pair{"moe_dec cold only (1 pick)", &cold_only},
                                  std::pair{"moe_dec both", &hs}}) {
             CK(hipMemcpy(hot, set->data(), set->size() * 4, hipMemcpyHostToDevice));
-            out.push_back({name, time_us(st, reps, [&] { moe_dec(hg, hu, hd, sg_, su, sd, &cd, hot, T, hq, hqe, wts, sgv, y, st); })});
+            out.push_back({name, time_us(st, reps, [&] { moe_dec(hg, hu, hd, nullptr, sg_, su, sd, &cd, hot, T, hq, hqe, wts, sgv, y, st); })});
         }
         CK(hipMemcpy(hot, hs.data(), hs.size() * 4, hipMemcpyHostToDevice));
     }
@@ -158,13 +158,13 @@ int main(int argc, char **argv) {
         gdn_step(gs, st);
         gemv_hc(l.sout, hq6, T, res, inject, st);
         hc_mix_fused(res, gamma, l.fd, l.fu, &l.fi, T, lo, inject, HC, inv, mx, hh, hq, st);
-        router_route_dec(l.router, wsg, mx, T, logits, sgv, l.slot_of, ids, wts, hot, nullptr, 0.25f, 0, 0, counter, st);
+        router_route_dec(l.router, wsg, mx, T, logits, sgv, l.slot_of, NE, ids, wts, hot, nullptr, 0.25f, 0, 0, counter, st);
         CK(hipMemcpyAsync(hot, hs.data(), hs.size() * 4, hipMemcpyHostToDevice, st));   // the fixed pick set
         if (pf_on) {
             CK(hipEventRecord(routed, st)); CK(hipStreamWaitEvent(pst, routed, 0));
             prefetch(pf[(i + 1) % NLAY], pfn[(i + 1) % NLAY], sink, pst);
         }
-        moe_dec(l.hg, l.hu, l.hd, l.sg, l.su, l.sd, cold_gpu ? &cd : nullptr, hot, T, hq, hqe, wts, sgv, y, st);
+        moe_dec(l.hg, l.hu, l.hd, nullptr, l.sg, l.su, l.sd, cold_gpu ? &cd : nullptr, hot, T, hq, hqe, wts, sgv, y, st);
         moe_finish(nullptr, 0, y, hot, y + (size_t)T * TOPK_E * D, nullptr, nullptr, inject, res, T, st);
     };
     int li = 0;

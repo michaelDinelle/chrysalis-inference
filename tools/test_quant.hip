@@ -1,9 +1,10 @@
 // Checks the weight relayout, fp16 dequantization, int8 GEMVs and the small-batch GEMM against a plain
-// CPU reference decoded straight from the GGUF bytes. Their speed is tools/bench_quant.hip.
+// CPU reference decoded straight from the GGUF bytes, and the GEMVs of different pass sizes against each other. Their speed is tools/bench_quant.hip.
 //   build/test_quant data/models/kiln-mix.gguf
 #include "../engine/kernels.h"
 #include "../engine/gguf.h"
 #include <cmath>
+#include <cstring>
 #include <random>
 #include <vector>
 
@@ -87,6 +88,26 @@ int main(int argc, char **argv) {
         printf("gemv    %-24s T=%d rel err %.4f %s\n", names[wi], T, rel, ok ? "ok" : "FAIL");
         fails += !ok;
         CK(hipFree(dx)); CK(hipFree(dy)); CK(hipFree(qa.q)); CK(hipFree(qa.d));
+    }
+    // A row comes out the same whatever the pass's size (up to 4 tokens and from 5 are different kernels): what a pass of
+    // 8 tokens gives its first 4 and its first, bit for bit, against passes of 4 and of 1 (parallel replies and prompt
+    // lookup draw what they would alone only so)
+    for (int wi = 0; wi < 3; wi++) {
+        const QTensor &t = W[wi]; const int K = t.cols, N = t.rows;
+        std::vector<float> x((size_t)8 * K); for (auto &v : x) v = nd(rng);
+        float *dx, *y8, *y4, *y1; QAct qa;
+        CK(hipMalloc(&dx, x.size() * 4)); CK(hipMalloc(&qa.q, x.size())); CK(hipMalloc(&qa.d, x.size() / 32 * 4));
+        CK(hipMalloc(&y8, (size_t)8 * N * 4)); CK(hipMalloc(&y4, (size_t)4 * N * 4)); CK(hipMalloc(&y1, (size_t)N * 4));
+        CK(hipMemcpy(dx, x.data(), x.size() * 4, hipMemcpyHostToDevice));
+        quant_act(dx, x.size(), qa, st);
+        gemv(t, qa, 8, y8, N, GEMV_STORE, st); gemv(t, qa, 4, y4, N, GEMV_STORE, st); gemv(t, qa, 1, y1, N, GEMV_STORE, st);
+        std::vector<float> a((size_t)8 * N), b((size_t)4 * N), c(N);
+        CK(hipMemcpy(a.data(), y8, a.size() * 4, hipMemcpyDeviceToHost)); CK(hipMemcpy(b.data(), y4, b.size() * 4, hipMemcpyDeviceToHost));
+        CK(hipMemcpy(c.data(), y1, c.size() * 4, hipMemcpyDeviceToHost));
+        const bool ok = !memcmp(a.data(), b.data(), b.size() * 4) && !memcmp(a.data(), c.data(), c.size() * 4);
+        printf("gemv    %-24s T=8 = T=4 = T=1 on their rows: %s\n", names[wi], ok ? "bit-identical ok" : "FAIL");
+        fails += !ok;
+        CK(hipFree(dx)); CK(hipFree(qa.q)); CK(hipFree(qa.d)); CK(hipFree(y8)); CK(hipFree(y4)); CK(hipFree(y1));
     }
     // small-batch GEMM (fp16 activations, weights dequantized in registers) against the CPU, on a sample of rows
     for (int T : {9, 40, 100}) for (int wi = 0; wi < 3; wi++) for (int mode : {0, 1, 2}) {   // fp32 store, fp32 add, fp16 store

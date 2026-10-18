@@ -1,4 +1,4 @@
-// Checks attention prep (norm, RoPE, int8 KV) + WMMA flash attention + split combine against a CPU reference.
+// Checks attention prep (norm, RoPE and M-RoPE, int8 KV) + WMMA flash attention + split combine against a CPU reference.
 #include "../engine/kernels.h"
 #include <cmath>
 #include <random>
@@ -13,16 +13,29 @@ static void fwht(float *x) {   // normalized, self-inverse
 }
 static float round_f16(float x) { return (float)(_Float16)x; }
 
+// Which of a token's three M-RoPE positions (t, h, w) each frequency pair turns with: transformers'
+// Qwen3_5TextRotaryEmbedding.recomposition_frequencies, mrope_section [11, 11, 10] (H takes 1:33:3, W 2:30:3).
+static vector<int> mrope_sections() {
+    vector<int> sec(ROT / 2, 0);
+    const int section[3] = {11, 11, 10};
+    for (int dim = 1; dim <= 2; dim++)
+        for (int f = dim; f < section[dim] * 3; f += 3) sec[f] = dim;
+    return sec;
+}
+
 struct Ref {   // CPU model of the same math, keeping the dequantized cache
     vector<float> K, V;   // [pos][NKV][HD]
+    // rpos: null (text: every token at its slot), or per token its (t, h, w)
     void prep(const float *qg, const float *k, const float *v, const float *qw, const float *kw, int T, int pos0,
-              vector<float> &Q) {
-        auto rope_norm = [&](const float *x, const float *w, int pos, float *o) {
+              const int *rpos, vector<float> &Q) {
+        static const vector<int> sec = mrope_sections();
+        auto rope_norm = [&](const float *x, const float *w, int t, float *o) {
             double ss = 0; for (int i = 0; i < HD; i++) ss += x[i] * x[i];
             float inv = 1.0f / sqrtf(ss / HD + EPS), y[HD];
             for (int i = 0; i < HD; i++) y[i] = x[i] * inv * w[i];
             for (int i = 0; i < HD; i++) o[i] = y[i];
             for (int i = 0; i < ROT / 2; i++) {
+                const int pos = rpos ? rpos[t * 3 + sec[i]] : pos0 + t;
                 float s, c; sincosf(pos * powf(ROPE_BASE, -2.0f * i / ROT), &s, &c);
                 o[i] = y[i] * c - y[i + ROT / 2] * s; o[i + ROT / 2] = y[i + ROT / 2] * c + y[i] * s;
             }
@@ -30,11 +43,11 @@ struct Ref {   // CPU model of the same math, keeping the dequantized cache
         K.resize((size_t)(pos0 + T) * NKV * HD); V.resize(K.size()); Q.resize((size_t)T * NH * HD);
         for (int t = 0; t < T; t++) {
             for (int h = 0; h < NH; h++) {
-                float o[HD]; rope_norm(qg + ((size_t)t * NH + h) * 2 * HD, qw, pos0 + t, o);
+                float o[HD]; rope_norm(qg + ((size_t)t * NH + h) * 2 * HD, qw, t, o);
                 for (int i = 0; i < HD; i++) Q[((size_t)t * NH + h) * HD + i] = round_f16(o[i] * 0.0625f);
             }
             for (int h = 0; h < NKV; h++) {
-                float o[HD]; rope_norm(k + ((size_t)t * NKV + h) * HD, kw, pos0 + t, o);
+                float o[HD]; rope_norm(k + ((size_t)t * NKV + h) * HD, kw, t, o);
                 float vv[HD]; for (int i = 0; i < HD; i++) vv[i] = v[((size_t)t * NKV + h) * HD + i];
                 fwht(vv);
                 for (int b = 0; b < HD / 32; b++) {
@@ -87,8 +100,11 @@ int main() {
     float *dqw, *dkw; CK(hipMalloc(&dqw, HD * 4)); CK(hipMalloc(&dkw, HD * 4));
     CK(hipMemcpy(dqw, qw.data(), HD * 4, hipMemcpyHostToDevice)); CK(hipMemcpy(dkw, kw.data(), HD * 4, hipMemcpyHostToDevice));
     Ref ref; int fails = 0, pos = 0;
-    struct Case { int T; const char *name; bool check = true; };
-    vector<Case> cases = {{100, "prefill 100"}, {50, "prefill +50"}, {1, "decode"}, {4, "verify 4"}, {8, "verify 8"}, {1, "decode"}};
+    struct Case { int T; const char *name; bool check = true; bool mrope = false; };
+    // M-RoPE: a picture of 4 x 5 tokens between text, its rows and columns far apart so a pair turned with the wrong
+    // position shows: (p, p, p) for text, (p0, p0 + 300 r, p0 + 700 c) in the picture
+    vector<Case> cases = {{100, "prefill 100"}, {50, "prefill +50"}, {1, "decode"}, {4, "verify 4"}, {8, "verify 8"}, {1, "decode"},
+                          {24, "M-RoPE picture", true, true}, {1, "decode after it"}};
     // then a deep context (prefilled in engine-sized chunks, not checked) where attention() splits the keys many ways:
     // decode / verify, and a short append on the prefill path (T = 9: 32 key splits at this depth)
     for (int i = 0; i < 16; i++) cases.push_back({2048, "prefill 2048", false});
@@ -105,13 +121,24 @@ int main() {
         CK(hipMalloc(&Q16, (size_t)T * NH * HD * 2)); CK(hipMalloc(&oh, (size_t)T * NH * HD * 2));
         CK(hipMemcpy(dqg, qg.data(), qg.size() * 4, hipMemcpyHostToDevice));
         CK(hipMemcpy(dk, k.data(), k.size() * 4, hipMemcpyHostToDevice)); CK(hipMemcpy(dv, v.data(), v.size() * 4, hipMemcpyHostToDevice));
-        attn_prep(dqg, dk, dv, dqw, dkw, T, pos, kv, 5, Q16, st);
+        vector<int> rp;
+        int *drp = nullptr;
+        if (c.mrope) {
+            for (int t = 0; t < T; t++) {
+                const int p = pos + t, img = t - 2;   // two text tokens, then the picture
+                if (img < 0) rp.insert(rp.end(), {p, p, p});
+                else rp.insert(rp.end(), {pos + 2, pos + 2 + 300 * (img / 5), pos + 2 + 700 * (img % 5)});
+            }
+            CK(hipMalloc(&drp, rp.size() * 4)); CK(hipMemcpy(drp, rp.data(), rp.size() * 4, hipMemcpyHostToDevice));
+        }
+        attn_prep(dqg, dk, dv, dqw, dkw, T, pos, pos, drp, kv, 5, Q16, st);
         AttnArgs a; a.Q16 = Q16; a.kv = kv; a.layer = 5; a.T = T; a.pos0 = pos; a.qg = dqg; a.part_o = po; a.part_ml = pml;
         QAct none{nullptr, nullptr};
         attention(a, oh, none, st);
         CK(hipStreamSynchronize(st));
         vector<_Float16> got((size_t)T * NH * HD); CK(hipMemcpy(got.data(), oh, got.size() * 2, hipMemcpyDeviceToHost));
-        vector<float> Q, want; ref.prep(qg.data(), k.data(), v.data(), qw.data(), kw.data(), T, pos, Q);
+        vector<float> Q, want; ref.prep(qg.data(), k.data(), v.data(), qw.data(), kw.data(), T, pos, c.mrope ? rp.data() : nullptr, Q);
+        if (drp) CK(hipFree(drp));
         if (!c.check) { pos += T; CK(hipFree(dqg)); CK(hipFree(dk)); CK(hipFree(dv)); CK(hipFree(Q16)); CK(hipFree(oh)); continue; }
         ref.attend(Q, qg.data(), T, pos, want);
         double e2 = 0, r2 = 0, emax = 0;

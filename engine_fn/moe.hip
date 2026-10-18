@@ -31,9 +31,10 @@ void router_dec(const half *W, const float *wsg, const float *x, int T, float *l
 
 // Softmax over the 512 logits, top 10, weights renormalized to sum 1. One 512-thread workgroup does all T tokens
 // (T <= 8 at decode) so it can publish the cold picks to the CPU with one fence: slot_of maps an expert to its
-// hot slot (>= 0) or cold slot (-1 - slot). hot_slot per pick: the hot slot, -1 for a cold pick the CPU computes, or
-// -2 - cold slot for one the GPU reads from system RAM itself: a share gfrac of the cold picks, spread evenly.
-__global__ __launch_bounds__(512) void k_route(const float *logits, int T, const int *slot_of, int *ids, float *wts,
+// pool slot (>= 0) or RAM slot (-1 - slot). hot_slot per pick: the pool slot, -1 for a cold pick the CPU computes, or
+// -2 - RAM slot for one the GPU reads from system RAM itself: a share gfrac of the cold picks in registered RAM (RAM slots
+// below n_ram), spread evenly.
+__global__ __launch_bounds__(512) void k_route(const float *logits, int T, const int *slot_of, int n_ram, int *ids, float *wts,
                                                int *hot_slot, MoeShared *sh, float gfrac, const float *x, int layer, uint32_t gen) {
     __shared__ float v[NE], redv[16];
     __shared__ int redi[16], pick[TOPK_E];
@@ -62,8 +63,9 @@ __global__ __launch_bounds__(512) void k_route(const float *logits, int T, const
             for (int k = 0; k < TOPK_E; k++) {
                 const int j = t * TOPK_E + k, ex = pick[k], sl = slot_of[ex];
                 const float w = pw[k] / s;
-                const bool gpu = sl < 0 && floorf((nc + 1) * gfrac) > floorf(nc * gfrac);
-                nc += sl < 0;
+                const bool ram = sl < 0 && -1 - sl < n_ram;
+                const bool gpu = ram && floorf((nc + 1) * gfrac) > floorf(nc * gfrac);
+                nc += ram;
                 ids[j] = ex; wts[j] = w;
                 hot_slot[j] = sl >= 0 ? sl : gpu ? -2 - (-1 - sl) : -1;
                 if (sh) { sh->slot[j] = sl < 0 && !gpu ? -1 - sl : -1; sh->w[j] = w; }
@@ -81,22 +83,22 @@ __global__ __launch_bounds__(512) void k_route(const float *logits, int T, const
         __hip_atomic_store(&sh->go, gen, __ATOMIC_RELEASE, __HIP_MEMORY_SCOPE_SYSTEM);
     }
 }
-void route_dec(const float *logits, int T, const int *slot_of, int *ids, float *wts, int *hot_slot, MoeShared *sh, float gfrac,
-               const float *x, int layer, uint32_t gen, hipStream_t st) {
-    k_route<<<1, 512, 0, st>>>(logits, T, slot_of, ids, wts, hot_slot, sh, gfrac, x, layer, gen);
+void route_dec(const float *logits, int T, const int *slot_of, int n_ram, int *ids, float *wts, int *hot_slot, MoeShared *sh,
+               float gfrac, const float *x, int layer, uint32_t gen, hipStream_t st) {
+    k_route<<<1, 512, 0, st>>>(logits, T, slot_of, n_ram, ids, wts, hot_slot, sh, gfrac, x, layer, gen);
 }
 
 // Router and routing in one launch (decode, T <= 8). 64 workgroups of 8 waves compute the 512 logits (a wave per
-// expert, 16-byte weight loads) and block 0 the shared expert gate; the last workgroup to finish (atomic counter)
-// selects the top 10 per token (each wave the top 10 of its 64 logits, then wave 0 the top 10 of those 80; ties go to
-// the lower expert id, as in k_route), computes the weights, splits the cold picks between GPU and CPU and publishes
-// the CPU's share. Same outputs as router_dec + route_dec.
+// expert, 16-byte weight loads), block 0 the shared expert gate, and each workgroup copies its share of the tokens' MoE
+// inputs to the host for the CPU; the last workgroup to finish (atomic counter) selects every token's top 10 at once (a
+// wave per token, 16 logits per lane; ties go to the lower expert id, as in k_route), computes the weights, splits the
+// cold picks between GPU and CPU (in pick order across the tokens) and publishes the CPU's share. Same outputs as
+// router_dec + route_dec.
 __global__ __launch_bounds__(256) void k_router_route(const half *W, const float *wsg, const float *x, int T, float *logits,
-        float *sg, const int *slot_of, int *ids, float *wts, int *hot_slot, MoeShared *sh, float gfrac, int layer,
+        float *sg, const int *slot_of, int n_ram, int *ids, float *wts, int *hot_slot, MoeShared *sh, float gfrac, int layer,
         uint32_t gen, unsigned *counter, unsigned *counts) {
     __shared__ bool last;
-    __shared__ float cv[8][TOPK_E];
-    __shared__ int ci[8][TOPK_E];
+    __shared__ int ram_n[8];
     const int tid = threadIdx.x, wave = tid / 32, lane = tid % 32;
     {
         const int e = blockIdx.x * 8 + wave;
@@ -130,72 +132,54 @@ __global__ __launch_bounds__(256) void k_router_route(const half *W, const float
             if (lane == 0) sg[wave] = sigmoid(v);
         }
     }
+    if (sh) {                                           // the MoE inputs, before this workgroup counts itself done
+        const int n = T * D, per = (n + gridDim.x - 1) / gridDim.x, a = blockIdx.x * per, z = min(n, a + per);
+        for (int i = a + tid; i < z; i += 256) sh->x[i] = x[i];
+        __threadfence_system();
+    }
     __threadfence();
     __syncthreads();
     if (tid == 0) last = atomicAdd(counter, 1u) == gridDim.x - 1;
     __syncthreads();
     if (!last) return;
-    int nc = 0;                                         // cold picks so far (wave 0, uniform)
-    for (int t = 0; t < T; t++) {
-        const int i0 = wave * 64 + lane, i1 = i0 + 32;   // L1 may hold an older layer's logits: load them from L2
-        float v0 = __hip_atomic_load(&logits[(size_t)t * NE + i0], __ATOMIC_RELAXED, __HIP_MEMORY_SCOPE_AGENT);
-        float v1 = __hip_atomic_load(&logits[(size_t)t * NE + i1], __ATOMIC_RELAXED, __HIP_MEMORY_SCOPE_AGENT);
-        for (int k = 0; k < TOPK_E; k++) {
-            const bool first = v0 >= v1;
-            float b = first ? v0 : v1; int bi = first ? i0 : i1;
+    float pv = -INFINITY; int pe = 0;                   // wave t, lane k < 10: token t's pick k
+    if (wave < T) {
+        float v[16];                                    // experts lane + 32k; L1 may hold an older layer's: load from L2
+#pragma unroll
+        for (int k = 0; k < 16; k++) v[k] = __hip_atomic_load(&logits[(size_t)wave * NE + lane + 32 * k], __ATOMIC_RELAXED, __HIP_MEMORY_SCOPE_AGENT);
+        for (int r = 0; r < TOPK_E; r++) {
+            float b = v[0]; int bi = lane;
+#pragma unroll
+            for (int k = 1; k < 16; k++) { const bool tk = v[k] > b; b = tk ? v[k] : b; bi = tk ? lane + 32 * k : bi; }
             wave_argmax(b, bi);
-            if (lane == 0) { cv[wave][k] = b; ci[wave][k] = bi; }
-            v0 = bi == i0 ? -INFINITY : v0;
-            v1 = bi == i1 ? -INFINITY : v1;
+            if (lane == r) { pv = b; pe = bi; }
+#pragma unroll
+            for (int k = 0; k < 16; k++) v[k] = lane + 32 * k == bi ? -INFINITY : v[k];
         }
-        __syncthreads();
-        if (wave == 0) {
-            float c[3]; int ce[3];
-#pragma unroll
-            for (int q = 0; q < 3; q++) {
-                const int idx = lane + 32 * q;
-                c[q] = idx < 80 ? cv[idx / 10][idx % 10] : -INFINITY;
-                ce[q] = idx < 80 ? ci[idx / 10][idx % 10] : 0x7fffffff;
-            }
-            float pv[TOPK_E]; int pe[TOPK_E];
-            for (int k = 0; k < TOPK_E; k++) {
-                float b = c[0]; int bi = ce[0];
-#pragma unroll
-                for (int q = 1; q < 3; q++) {
-                    const bool tk = (c[q] > b) | ((c[q] == b) & (ce[q] < bi));
-                    b = tk ? c[q] : b; bi = tk ? ce[q] : bi;
-                }
-                wave_argmax(b, bi);
-                pv[k] = b; pe[k] = bi;
-#pragma unroll
-                for (int q = 0; q < 3; q++) c[q] = ce[q] == bi ? -INFINITY : c[q];
-            }
-            // lane k < 10 takes pick k: weight (softmax restricted to the picks), tier, and the GPU's share of the cold
-            // picks in pick order (cold picks before it: ballot), all in parallel
-            float v = -INFINITY; int ex = 0;
-#pragma unroll
-            for (int k = 0; k < TOPK_E; k++) if (lane == k) { v = pv[k]; ex = pe[k]; }
-            const float p = lane < TOPK_E ? __expf(v - pv[0]) : 0.0f;
-            const float wk = p / warp_sum(p);
-            const int sl = lane < TOPK_E ? slot_of[ex] : 0;
-            const bool cold = lane < TOPK_E && sl < 0;
-            const uint32_t bal = (uint32_t)__ballot(cold);
-            const int before = nc + __popc(bal & ((1u << lane) - 1u));
-            const bool gpu = cold && floorf((before + 1) * gfrac) > floorf(before * gfrac);
-            nc += __popc(bal);
-            if (lane < TOPK_E) {
-                const int j = t * TOPK_E + lane;
-                if (counts && layer < NL) atomicAdd(&counts[layer * NE + ex], 1u);
-                ids[j] = ex; wts[j] = wk;
-                hot_slot[j] = sl >= 0 ? sl : gpu ? -2 - (-1 - sl) : -1;
-                if (sh) { sh->slot[j] = cold && !gpu ? -1 - sl : -1; sh->w[j] = wk; }
-            }
-        }
-        __syncthreads();
+    }
+    // lane k < 10 takes pick k: weight (softmax restricted to the picks), tier, and the GPU's share of the cold picks in
+    // RAM in pick order (those of earlier tokens: ram_n; of earlier picks of this token: ballot)
+    const float top = __shfl(pv, 0);
+    const float p = lane < TOPK_E ? __expf(pv - top) : 0.0f;
+    const float wk = p / warp_sum(p);
+    const int sl = wave < T && lane < TOPK_E ? slot_of[pe] : 0;
+    const bool cold = wave < T && lane < TOPK_E && sl < 0, ram = cold && -1 - sl < n_ram;
+    const uint32_t bal = (uint32_t)__ballot(ram);
+    if (lane == 0) ram_n[wave] = __popc(bal);
+    __syncthreads();
+    int nc = 0;
+    for (int w = 0; w < wave; w++) nc += ram_n[w];
+    const int before = nc + __popc(bal & ((1u << lane) - 1u));
+    const bool gpu = ram && floorf((before + 1) * gfrac) > floorf(before * gfrac);
+    if (wave < T && lane < TOPK_E) {
+        const int j = wave * TOPK_E + lane;
+        if (counts && layer < NL) atomicAdd(&counts[layer * NE + pe], 1u);
+        ids[j] = pe; wts[j] = wk;
+        hot_slot[j] = sl >= 0 ? sl : gpu ? -2 - (-1 - sl) : -1;
+        if (sh) { sh->slot[j] = cold && !gpu ? -1 - sl : -1; sh->w[j] = wk; }
     }
     if (tid == 0) *counter = 0;                        // for the next launch
     if (!sh) return;
-    for (int i = tid; i < T * D; i += 256) sh->x[i] = x[i];
     __threadfence_system();
     __syncthreads();
     if (tid == 0) {
@@ -205,9 +189,10 @@ __global__ __launch_bounds__(256) void k_router_route(const half *W, const float
     }
 }
 void router_route_dec(const half *W, const float *wsg, const float *x, int T, float *logits, float *sg, const int *slot_of,
-                      int *ids, float *wts, int *hot_slot, MoeShared *sh, float gfrac, int layer, uint32_t gen, unsigned *counter,
-                      hipStream_t st, unsigned *counts) {
-    k_router_route<<<NE / 8, 256, 0, st>>>(W, wsg, x, T, logits, sg, slot_of, ids, wts, hot_slot, sh, gfrac, layer, gen, counter, counts);
+                      int n_ram, int *ids, float *wts, int *hot_slot, MoeShared *sh, float gfrac, int layer, uint32_t gen,
+                      unsigned *counter, hipStream_t st, unsigned *counts) {
+    k_router_route<<<NE / 8, 256, 0, st>>>(W, wsg, x, T, logits, sg, slot_of, n_ram, ids, wts, hot_slot, sh, gfrac, layer, gen,
+                                           counter, counts);
 }
 
 // The end of a decode MoE block in one launch: wait for the CPU's answer (one thread per workgroup spins on the host

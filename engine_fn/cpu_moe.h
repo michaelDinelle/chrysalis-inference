@@ -26,18 +26,24 @@ struct MoeShared {                     // pinned, coherent host memory shared wi
     alignas(64) float y[MOE_MAX_T * 2560];
 };
 
-struct ColdLayer {                     // one layer's cold experts in system RAM, GGUF block order
-    // gate / up in up to two format groups (slots below n0, then the rest), down one tensor for all slots
-    const uint8_t *gate[2] = {}, *up[2] = {}, *down = nullptr;
-    int type_gu[2] = {-1, -1}, type_dn = -1;   // ggml types
-    size_t row_gu[2] = {}, row_dn = 0;         // bytes per row
-    int n0 = 0, n = 0;                 // slots in group 0, in all
-    int grp(int s) const { return s >= n0; }
+struct ColdLayer {                     // one layer's experts outside VRAM, GGUF block order
+    // gate / up in up to three format groups: the RAM tier's (slots below n0, then up to n; down one tensor for both) and,
+    // slots n.. n + n2, the file's VRAM-tier experts that the expert pool holds no copy of, read from the model file's
+    // mapping (its own down tensor)
+    const uint8_t *gate[3] = {}, *up[3] = {}, *down = nullptr, *down2 = nullptr;
+    int type_gu[3] = {-1, -1, -1}, type_dn = -1;   // ggml types
+    size_t row_gu[3] = {}, row_dn = 0;             // bytes per row
+    int n0 = 0, n = 0, n2 = 0;
+    int grp(int s) const { return s < n0 ? 0 : s < n ? 1 : 2; }
+    int idx(int s) const { return s < n0 ? s : s < n ? s - n0 : s - n; }   // the slot within its group
     const uint8_t *gu_row(bool is_up, int s, int r) const {   // row r (< 640) of expert s's gate or up matrix
-        const int g = s >= n0;
-        return (is_up ? up[g] : gate[g]) + ((size_t)(g ? s - n0 : s) * 640 + r) * row_gu[g];
+        const int g = grp(s);
+        return (is_up ? up[g] : gate[g]) + ((size_t)idx(s) * 640 + r) * row_gu[g];
     }
-    const uint8_t *dn_row(int s, int r) const { return down + ((size_t)s * 2560 + r) * row_dn; }
+    const uint8_t *dn_row(int s, int r) const {
+        return s < n ? down + ((size_t)s * 2560 + r) * row_dn : down2 + ((size_t)(s - n) * 2560 + r) * row_dn;
+    }
+    size_t bytes(int s) const { return 2 * 640 * row_gu[grp(s)] + 2560 * row_dn; }
 };
 
 struct MoeJob {                        // a prefill chunk's cold experts that the CPU computes (all host memory)
@@ -111,19 +117,19 @@ private:
     // scratch shared by the workers within one handoff
     std::vector<float> gu;                       // [picks][2 * 640] gate | up results
     // inputs quantized to each gate/up group's dot type (group 1 shares group 0's when the types agree)
-    std::vector<uint8_t> xq[2];                  // [T]
+    std::vector<uint8_t> xq[3];                  // [T]
     std::vector<uint8_t> hq;                     // [picks] silu(g) * u quantized to the down dot type
     // the VNNI decode path's operands: per token x int8 per 32, scales, per-16 sums and lane vectors; per pick h int8
     std::vector<int8_t> dxq, dhq; std::vector<float> dxs, ds16, df16, dhs, dhc; std::vector<int32_t> dxsum;
-    size_t xq_row[2] = {}, hq_row = 0;
-    int dot_gu[2] = {-1, -1};                    // vec_dot types of the gate/up groups
+    size_t xq_row[3] = {}, hq_row = 0;
+    int dot_gu[3] = {-1, -1, -1};                // vec_dot types of the gate/up groups
     bool dot_same = true;
     MoeJob job;
     std::atomic<uint32_t> jgen{0};               // bumped by submit()
     std::atomic<uint64_t> sink_{0};              // keeps the preload's loads
 
     std::atomic<int> jtok{0}, jexp{0}, jfin{0};  // next token to quantize, next expert, workers finished
-    std::vector<uint8_t> pxq[2];                 // [T] the job's inputs quantized to each group's gate/up dot type
+    std::vector<uint8_t> pxq[3];                 // [T] the job's inputs quantized to each group's gate/up dot type
     std::vector<int8_t> vxq; std::vector<float> vxs; std::vector<int32_t> vxsum;   // [T] int8 per 32 + scales + sums per 16 (VNNI)
     bool vnni = false, vnni_ok = false;
     struct Scratch { std::vector<float> gu, y; std::vector<uint8_t> hq; VnniScratch v; };

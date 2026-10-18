@@ -38,11 +38,18 @@ __device__ __forceinline__ int dot16(int4 w, int4 x, int acc) {
 }
 
 // Decode GEMV: y[t][row] (+)= W[row] . x[t] for T <= 8 tokens.
-// A wave computes R rows at once (R consecutive rows of one matrix, or the gate and up rows of the
-// FFN), so every activation load is reused R times; lanes stride over 32- or 64-weight chunks.
-// One launch covers up to 3 matrices stacked by rows (e.g. q|k|v) with their own types and outputs.
-// Modes: STORE, ADD (residual stream), GLU: silu(gate) * up quantized straight into the int8 input of
-// the down projection (1024-thread workgroups = 32 rows = one int8 block per token).
+// A wave computes R rows at once (R consecutive rows of one matrix, or the gate and up rows of the FFN), so every
+// activation load is reused R times; lane i takes chunks i, i + 32, ... of a row (32 weights, 64 for Q6_K) and sums them
+// in that order in every kernel here, with each chunk's term an explicit fma (left to the compiler, its contraction
+// differs between kernels), so a row comes out the same in a pass of 1 token or 8. Up to 4 tokens each wave reads its
+// activations itself: the pass is bound by streaming the weights. From 5, each wave reading them from L2 would make it
+// compute-bound, so the workgroup's activations go through LDS in slabs of 32 chunks, double-buffered, read by all its
+// waves (k_gemv_staged). Measured per pass of 8 tokens: 32.1 ms in all where 36.6 unstaged (4 tokens: 23.4); the 5120-row
+// matrices 10.1 ms where 14.1, the gated delta net's projections 3.9 where 5.0. The 1024-thread GLU stays unstaged:
+// staged it took 13.0 ms where 10.0, a workgroup that fills a CU stalling it at every slab's barrier.
+// One launch covers up to 3 matrices stacked by rows (e.g. q|k|v) with their own types and outputs, all of one chunk
+// width. Modes: STORE, ADD (residual stream), GLU: silu(gate) * up quantized straight into the int8 input of the down
+// projection (1024-thread workgroups = 32 rows = one int8 block per token).
 
 template <int QT, int T, int R>
 __device__ __forceinline__ void rows_dot(const QTensor *const W[R], const int row[R], int lane, QAct x, float acc[R][T]) {
@@ -62,7 +69,7 @@ __device__ __forceinline__ void rows_dot(const QTensor *const W[R], const int ro
                 const int4 a = *(const int4 *)xp, b = *(const int4 *)(xp + 16);
                 const float xd = x.d[t * (K / 32) + ch];
 #pragma unroll
-                for (int r = 0; r < R; r++) acc[r][t] += dw[r] * xd * dot16(w1[r], b, dot16(w0[r], a, 0));
+                for (int r = 0; r < R; r++) acc[r][t] = __builtin_fmaf(dw[r] * xd, (float)dot16(w1[r], b, dot16(w0[r], a, 0)), acc[r][t]);
             }
         }
     } else if constexpr (QT == IQ4_XS) {
@@ -83,7 +90,7 @@ __device__ __forceinline__ void rows_dot(const QTensor *const W[R], const int ro
                 const int4 a = *(const int4 *)xp, b = *(const int4 *)(xp + 16);
                 const float xd = x.d[t * (K / 32) + ch];
 #pragma unroll
-                for (int r = 0; r < R; r++) acc[r][t] += dl[r] * xd * dot16(hi[r], b, dot16(lo[r], a, 0));
+                for (int r = 0; r < R; r++) acc[r][t] = __builtin_fmaf(dl[r] * xd, (float)dot16(hi[r], b, dot16(lo[r], a, 0)), acc[r][t]);
             }
         }
     } else if constexpr (QT == Q6_K) {
@@ -113,7 +120,7 @@ __device__ __forceinline__ void rows_dot(const QTensor *const W[R], const int ro
                     const int4 a = *(const int4 *)(x.q + (size_t)t * K + blk * 32 + c * 16);
                     const float xd = x.d[t * (K / 32) + blk];
 #pragma unroll
-                    for (int r = 0; r < R; r++) acc[r][t] += sc[r][k] * xd * dot16(q[r][k], a, 0);
+                    for (int r = 0; r < R; r++) acc[r][t] = __builtin_fmaf(sc[r][k] * xd, (float)dot16(q[r][k], a, 0), acc[r][t]);
                 }
             }
         }
@@ -172,16 +179,156 @@ __global__ __launch_bounds__(1024) void k_gemv_glu(GemvArgs a) {
     }
 }
 
+template <int T, int CW> struct Slabs {                // alignas: else the compiler splits 16-byte reads of q in four
+    alignas(16) int8_t q[2][T][32 * CW];
+    float d[2][T][CW];
+};
+
+// slab s of the activations into buffer buf, by the workgroup's 256 threads
+template <int T, int CW>
+__device__ __forceinline__ void stage(Slabs<T, CW> &S, int buf, QAct x, int K, int s) {
+    constexpr int SLAB = 32 * CW;
+    const int k0 = s * SLAB, n = min(SLAB, K - k0), nb = n / 32;
+    for (int i = threadIdx.x * 16; i < T * n; i += 256 * 16) {
+        const int t = i / n, k = i - t * n;
+        *(int4 *)&S.q[buf][t][k] = *(const int4 *)(x.q + (size_t)t * K + k0 + k);
+    }
+    for (int i = threadIdx.x; i < T * nb; i += 256) {
+        const int t = i / nb, j = i - t * nb;
+        S.d[buf][t][j] = x.d[t * (K / 32) + k0 / 32 + j];
+    }
+}
+
+// acc[r][t] += chunk ch of W's row row0 + r . token t's activations, the chunk being c of the slab in buffer buf
+template <int QT, int T, int R, int CW>
+__device__ __forceinline__ void chunk_dot(const QTensor &W, int row0, int ch, const Slabs<T, CW> &S, int buf, int c, float acc[R][T]) {
+    const int K = W.cols;
+    if constexpr (QT == Q8_0) {
+        int4 w0[R], w1[R]; float dw[R];
+#pragma unroll
+        for (int r = 0; r < R; r++) {
+            const int row = row0 + r;
+            const int8_t *wr = (const int8_t *)W.q + (size_t)row * K + ch * 32;
+            w0[r] = *(const int4 *)wr; w1[r] = *(const int4 *)(wr + 16);
+            dw[r] = __half2float(W.d[(size_t)row * (K / 32) + ch]);
+        }
+#pragma unroll
+        for (int t = 0; t < T; t++) {
+            const int4 a = *(const int4 *)&S.q[buf][t][c * 32], b = *(const int4 *)&S.q[buf][t][c * 32 + 16];
+            const float xd = S.d[buf][t][c];
+#pragma unroll
+            for (int r = 0; r < R; r++) acc[r][t] = __builtin_fmaf(dw[r] * xd, (float)dot16(w1[r], b, dot16(w0[r], a, 0)), acc[r][t]);
+        }
+    } else if constexpr (QT == IQ4_XS) {
+        const int sb = ch >> 3, ib = ch & 7;
+        int4 lo[R], hi[R]; float dl[R];
+#pragma unroll
+        for (int r = 0; r < R; r++) {
+            const int row = row0 + r;
+            const size_t gsb = (size_t)row * (K / 256) + sb;
+            const int4 w = *(const int4 *)(W.q + (size_t)row * (K / 2) + sb * 128 + ib * 16);
+            const int2 p0 = iq4_lookup(w.x), p1 = iq4_lookup(w.y), p2 = iq4_lookup(w.z), p3 = iq4_lookup(w.w);
+            lo[r] = make_int4(p0.x, p1.x, p2.x, p3.x); hi[r] = make_int4(p0.y, p1.y, p2.y, p3.y);
+            dl[r] = __half2float(W.d[gsb]) * iq4_scale(W, gsb, ib);
+        }
+#pragma unroll
+        for (int t = 0; t < T; t++) {
+            const int4 a = *(const int4 *)&S.q[buf][t][c * 32], b = *(const int4 *)&S.q[buf][t][c * 32 + 16];
+            const float xd = S.d[buf][t][c];
+#pragma unroll
+            for (int r = 0; r < R; r++) acc[r][t] = __builtin_fmaf(dl[r] * xd, (float)dot16(hi[r], b, dot16(lo[r], a, 0)), acc[r][t]);
+        }
+    } else if constexpr (QT == Q6_K) {
+        const int sb = ch >> 2, h = (ch >> 1) & 1, cc = ch & 1, lsb = c >> 2;   // lsb: the superblock within the slab
+        int4 q[R][4]; float sc[R][4];
+#pragma unroll
+        for (int r = 0; r < R; r++) {
+            const int row = row0 + r;
+            const size_t gsb = (size_t)row * (K / 256) + sb;
+            const uint8_t *ql = W.q + (size_t)row * (K / 2) + sb * 128 + h * 64 + cc * 16;
+            const int4 qa = *(const int4 *)ql, qb = *(const int4 *)(ql + 32);
+            const int4 H = *(const int4 *)(W.qh + (size_t)row * (K / 4) + sb * 64 + h * 32 + cc * 16);
+            const int8_t *s8 = (const int8_t *)W.sc + gsb * 16 + h * 8 + cc;
+            const float dd = __half2float(W.d[gsb]);
+            q[r][0] = make_int4(q6_unpack(qa.x, H.x), q6_unpack(qa.y, H.y), q6_unpack(qa.z, H.z), q6_unpack(qa.w, H.w));
+            q[r][1] = make_int4(q6_unpack(qb.x, H.x >> 2), q6_unpack(qb.y, H.y >> 2), q6_unpack(qb.z, H.z >> 2), q6_unpack(qb.w, H.w >> 2));
+            q[r][2] = make_int4(q6_unpack(qa.x >> 4, H.x >> 4), q6_unpack(qa.y >> 4, H.y >> 4), q6_unpack(qa.z >> 4, H.z >> 4), q6_unpack(qa.w >> 4, H.w >> 4));
+            q[r][3] = make_int4(q6_unpack(qb.x >> 4, H.x >> 6), q6_unpack(qb.y >> 4, H.y >> 6), q6_unpack(qb.z >> 4, H.z >> 6), q6_unpack(qb.w >> 4, H.w >> 6));
+#pragma unroll
+            for (int k = 0; k < 4; k++) sc[r][k] = dd * s8[2 * k];
+        }
+#pragma unroll
+        for (int t = 0; t < T; t++) {
+#pragma unroll
+            for (int k = 0; k < 4; k++) {
+                const int blk = lsb * 8 + h * 4 + k;
+                const int4 a = *(const int4 *)&S.q[buf][t][blk * 32 + cc * 16];
+                const float xd = S.d[buf][t][blk];
+#pragma unroll
+                for (int r = 0; r < R; r++) acc[r][t] = __builtin_fmaf(sc[r][k] * xd, (float)dot16(q[r][k], a, 0), acc[r][t]);
+            }
+        }
+    }
+}
+
+// The wave's rows over all of K, the slabs staged by all 256 threads (every one of them must call this: the slabs are
+// shared; `live` says whether this wave's rows exist).
+template <int T, int R, int CW>
+__device__ __forceinline__ void rows_staged(const QTensor &W, int row0, bool live, QAct x, Slabs<T, CW> &S, float acc[R][T]) {
+    const int K = W.cols, lane = threadIdx.x % 32, nslab = (K + 32 * CW - 1) / (32 * CW);
+    stage<T, CW>(S, 0, x, K, 0);
+    for (int s = 0; s < nslab; s++) {
+        const int buf = s & 1, nch = min(32, (K - s * 32 * CW) / CW);
+        __syncthreads();                             // slab s staged; slab s - 1 no longer read, so its buffer is free
+        if (s + 1 < nslab) stage<T, CW>(S, buf ^ 1, x, K, s + 1);
+        if (live && lane < nch) {
+            if constexpr (CW == 64) chunk_dot<Q6_K, T, R, CW>(W, row0, s * 32 + lane, S, buf, lane, acc);
+            else if (W.type == IQ4_XS) chunk_dot<IQ4_XS, T, R, CW>(W, row0, s * 32 + lane, S, buf, lane, acc);
+            else chunk_dot<Q8_0, T, R, CW>(W, row0, s * 32 + lane, S, buf, lane, acc);
+        }
+    }
+}
+
+template <int T, int R, int CW>
+__global__ __launch_bounds__(256) void k_gemv_staged(GemvArgs a) {
+    __shared__ Slabs<T, CW> S;
+    int row = (blockIdx.x * 8 + threadIdx.x / 32) * R, s = 0;
+    const int lane = threadIdx.x % 32;
+    while (s < a.nseg - 1 && row >= a.seg[s].W.rows) row -= a.seg[s++].W.rows;
+    s = __builtin_amdgcn_readfirstlane(s);           // wave-uniform: the segment's fields stay in scalar registers
+    row = __builtin_amdgcn_readfirstlane(row);
+    const QTensor &W = a.seg[s].W;
+    const bool live = row < W.rows;
+    float acc[R][T] = {};
+    rows_staged<T, R, CW>(W, row, live, a.x, S, acc);
+    if (!live) return;
+#pragma unroll
+    for (int r = 0; r < R; r++)
+#pragma unroll
+        for (int t = 0; t < T; t++) {
+            const float v = warp_sum(acc[r][t]);
+            if (lane == 0) {
+                float *o = a.seg[s].y + (size_t)t * a.seg[s].ldy + row + r;
+                *o = a.mode == GEMV_ADD ? *o + v : v;
+            }
+        }
+}
+
 template <int T>
 static void gemv_launch(const GemvArgs &a, int rows, hipStream_t st) {
     if (a.mode == GEMV_GLU) k_gemv_glu<T><<<rows / 32, 1024, 0, st>>>(a);
-    else if (T >= 5) k_gemv<T, 2><<<(rows + 15) / 16, 256, 0, st>>>(a);   // amortize activation loads
-    else k_gemv<T, 1><<<(rows + 7) / 8, 256, 0, st>>>(a);
+    else if (T <= 4) k_gemv<T, 1><<<(rows + 7) / 8, 256, 0, st>>>(a);
+    else if (a.seg[0].W.type == Q6_K) k_gemv_staged<T, 2, 64><<<(rows + 15) / 16, 256, 0, st>>>(a);
+    else k_gemv_staged<T, 2, 32><<<(rows + 15) / 16, 256, 0, st>>>(a);
 }
 
 void gemv(const GemvArgs &a, hipStream_t st) {
     int rows = 0;
-    for (int i = 0; i < a.nseg; i++) rows += a.seg[i].W.rows;
+    for (int i = 0; i < a.nseg; i++) {
+        if ((a.seg[i].W.type == Q6_K) != (a.seg[0].W.type == Q6_K)) FAIL("gemv: Q6_K and other types in one launch");
+        if (a.T > 4 && a.seg[i].W.rows % 2) FAIL("gemv: %d rows (two per wave)", a.seg[i].W.rows);
+        rows += a.seg[i].W.rows;
+    }
     switch (a.T) {
         case 1: gemv_launch<1>(a, rows, st); break;
         case 2: gemv_launch<2>(a, rows, st); break;
@@ -410,9 +557,14 @@ void dequant(const QTensor &W, half *out, hipStream_t st) {
     k_dequant<<<(nchunks + 255) / 256, 256, 0, st>>>(W, out, nchunks);
 }
 
-// Dequantize selected rows (token embeddings) to fp32.
-__global__ void k_embed(QTensor W, const int *tokens, float *out) {
-    const int t = blockIdx.y, K = W.cols, row = tokens[t];
+// Dequantize selected rows (token embeddings) to fp32; an image token's row is its picture's embedding (fp16, host).
+__global__ void k_embed(QTensor W, const int *tokens, const half *const *rows, float *out) {
+    const int t = blockIdx.y, K = W.cols;
+    if (rows && rows[t]) {
+        for (int c = threadIdx.x; c < K; c += blockDim.x) out[(size_t)t * K + c] = __half2float(rows[t][c]);
+        return;
+    }
+    const int row = tokens[t];
     for (int c = threadIdx.x; c < K / 32; c += blockDim.x) {          // IQ4_XS rows
         const int sb = c >> 3, ib = c & 7;
         const size_t gsb = (size_t)row * (K / 256) + sb;
@@ -429,9 +581,9 @@ __global__ void k_embed(QTensor W, const int *tokens, float *out) {
     }
 }
 
-void embed(const QTensor &W, const int *tokens, int T, float *out, hipStream_t st) {
+void embed(const QTensor &W, const int *tokens, const half *const *rows, int T, float *out, hipStream_t st) {
     if (W.type != IQ4_XS) FAIL("embed: expected IQ4_XS token embeddings");
-    k_embed<<<dim3(1, T), 256, 0, st>>>(W, tokens, out);
+    k_embed<<<dim3(1, T), 256, 0, st>>>(W, tokens, rows, out);
 }
 
 // Activation quantization: fp32 -> int8 with one scale per 32 values.

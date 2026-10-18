@@ -18,6 +18,9 @@ struct Sampling {
     float dry_multiplier = 0.0f, dry_base = 1.75f;   // DRY, off at 0
     int dry_allowed_length = 2;
     int order[STAGES] = {STAGE_TOP_K, STAGE_TEMPERATURE, STAGE_TOP_P, STAGE_MIN_P};
+    int lookup = 0;                                  // drafts copied from earlier in the conversation, at most (0: off)
+    int halt = -1;                                   // a token that ends a step once emitted, as an end of turn does (-1: none):
+                                                     // </think> before an answer kiln constrains token by token (kiln_draw)
 };
 
 // The current reply's tokens, in order (DRY) and as a set (presence penalty: a lookup, not a scan of the reply).

@@ -268,7 +268,7 @@ VnniScratch::~VnniScratch() {
 
 bool vnni_supported() { return __builtin_cpu_supports("avx512vnni") && __builtin_cpu_supports("avx512bw") && __builtin_cpu_supports("bmi2"); }
 bool vnni_formats(const ColdLayer &c) {           // gate / up IQ4_XS, Q3_K or Q2_K (ggml types 23, 11, 10), down IQ4_NL (20)
-    for (int g = 0; g < 2; g++)
+    for (int g = 0; g < 3; g++)
         if (c.gate[g] && c.type_gu[g] != 23 && c.type_gu[g] != 11 && c.type_gu[g] != 10) return false;
     return c.type_dn == 20;
 }

@@ -724,9 +724,14 @@ void dequant(const QTensor &W, half *out, hipStream_t st) {
     k_dequant<<<(nchunks + 255) / 256, 256, 0, st>>>(W, out, nchunks);
 }
 
-// Dequantize selected rows (token embeddings) to fp32.
-__global__ void k_embed(QTensor W, const int *tokens, float *out) {
-    const int t = blockIdx.y, K = W.cols, row = tokens[t];
+// Dequantize selected rows (token embeddings) to fp32; an image token's row is its picture's embedding (fp16, host).
+__global__ void k_embed(QTensor W, const int *tokens, const half *const *rows, float *out) {
+    const int t = blockIdx.y, K = W.cols;
+    if (rows && rows[t]) {
+        for (int c = threadIdx.x; c < K; c += blockDim.x) out[(size_t)t * K + c] = __half2float(rows[t][c]);
+        return;
+    }
+    const int row = tokens[t];
     for (int c = threadIdx.x; c < K / 32; c += blockDim.x) {
         float *o = out + (size_t)t * K + c * 32;
         if (W.type == Q8_0) {                                            // Q8_0 rows in GGUF block order (host memory)
@@ -749,9 +754,9 @@ __global__ void k_embed(QTensor W, const int *tokens, float *out) {
     }
 }
 
-void embed(const QTensor &W, const int *tokens, int T, float *out, hipStream_t st) {
+void embed(const QTensor &W, const int *tokens, const half *const *rows, int T, float *out, hipStream_t st) {
     if (W.type != IQ4_XS && W.type != Q8_0) FAIL("embed: token embeddings must be IQ4_XS or Q8_0 (GGUF blocks)");
-    k_embed<<<dim3(1, T), 256, 0, st>>>(W, tokens, out);
+    k_embed<<<dim3(1, T), 256, 0, st>>>(W, tokens, rows, out);
 }
 
 // Activation quantization: fp32 -> int8 with one scale per 32 values.
@@ -888,12 +893,12 @@ __device__ __forceinline__ void cold_down(const uint8_t *down, int slot, int j, 
 }
 
 // Decode: all of the GPU's routed picks in two launches (gate | up, then down).
-// blockIdx.y = pick j. Hot picks (hot_slot >= 0) and, when sgate is set, each token's shared expert (pick T * TOPK_E + t,
-// weighted by sg[t]) read VRAM, 8 waves x 4 rows per workgroup; the GPU's share of the cold picks (hot_slot <= -2) reads
-// system RAM over PCIe as above; the CPU's picks (-1) exit. Both kinds run side by side in one launch, so the PCIe-bound
-// cold picks hide the hot ones. hq / y have T * (TOPK_E + 1) rows.
-__global__ __launch_bounds__(256) void k_glu_dec(QTensor gate, QTensor up, QTensor sgate, QTensor sup, ColdDec c, const int *hot_slot,
-                                                 int T, QAct x, QAct hq) {
+// blockIdx.y = pick j. Hot picks (hot_slot >= 0: a pool slot, its gate / up in format fmt[slot]) and, when sgate is set,
+// each token's shared expert (pick T * TOPK_E + t, weighted by sg[t]) read VRAM, 8 waves x 4 rows per workgroup; the GPU's
+// share of the cold picks (hot_slot <= -2) reads system RAM over PCIe as above; the CPU's picks (-1) exit. Both kinds run
+// side by side in one launch, so the PCIe-bound cold picks hide the hot ones. hq / y have T * (TOPK_E + 1) rows.
+__global__ __launch_bounds__(256) void k_glu_dec(QTensor gate, QTensor up, const uint8_t *fmt, QTensor sgate, QTensor sup, ColdDec c,
+                                                 const int *hot_slot, int T, QAct x, QAct hq) {
     __shared__ int4 tile[2][CG_ROWS * (D / 256 * 136) / 16];   // cold picks: the widest row format (IQ4_XS)
     __shared__ float act[32];
     const int j = blockIdx.y;
@@ -910,13 +915,15 @@ __global__ __launch_bounds__(256) void k_glu_dec(QTensor gate, QTensor up, QTens
         return;
     }
     const int wave = threadIdx.x / 32, lane = threadIdx.x % 32, t = shared ? j - T * TOPK_E : j / TOPK_E;
-    const QTensor *G = shared ? &sgate : &gate, *U = shared ? &sup : &up;
+    const int f = shared || !fmt ? -1 : fmt[hs];                // the pool: the slot's own rows (slot_view)
+    const QTensor G = shared ? sgate : f >= 0 ? slot_view(gate, hs, f) : gate, U = shared ? sup : f >= 0 ? slot_view(up, hs, f) : up;
+    const int r0 = f >= 0 ? 0 : hs * FE;
     const QTensor *W[8];
     int rows[8];
 #pragma unroll
     for (int i = 0; i < 4; i++) {
-        W[i] = G; W[4 + i] = U;
-        rows[i] = rows[4 + i] = hs * FE + blockIdx.x * 32 + wave * 4 + i;
+        W[i] = &G; W[4 + i] = &U;
+        rows[i] = rows[4 + i] = r0 + blockIdx.x * 32 + wave * 4 + i;
     }
     const QAct xt{x.q + (size_t)t * D, x.d + (size_t)t * (D / 32)};
     float acc[8][1] = {};
@@ -958,24 +965,26 @@ __global__ __launch_bounds__(256) void k_down_dec(QTensor down, QTensor sdown, c
     }
 }
 
-void moe_dec(const QTensor &gate, const QTensor &up, const QTensor &down, const QTensor &sgate, const QTensor &sup, const QTensor &sdown,
-             const ColdDec *c, const int *hot_slot, int T, QAct x, QAct hq, const float *wts, const float *sg, float *y, hipStream_t st) {
+void moe_dec(const QTensor &gate, const QTensor &up, const QTensor &down, const uint8_t *fmt, const QTensor &sgate, const QTensor &sup,
+             const QTensor &sdown, const ColdDec *c, const int *hot_slot, int T, QAct x, QAct hq, const float *wts, const float *sg,
+             float *y, hipStream_t st) {
     if (c)
         for (int g = 0; g < 2; g++)
             if (c->gate[g] && c->type[g] != IQ4_XS && c->type[g] != Q3_K && c->type[g] != Q2_K) FAIL("moe_dec: cold gate/up type %d", c->type[g]);
+    if (fmt && gate.type != IQ4_XS) FAIL("moe_dec: an expert pool of type %d", gate.type);
     const ColdDec none{};
     const int picks = T * TOPK_E + (sgate.type >= 0 ? T : 0);
-    k_glu_dec<<<dim3(FE / 32, picks), 256, 0, st>>>(gate, up, sgate, sup, c ? *c : none, hot_slot, T, x, hq);
+    k_glu_dec<<<dim3(FE / 32, picks), 256, 0, st>>>(gate, up, fmt, sgate, sup, c ? *c : none, hot_slot, T, x, hq);
     k_down_dec<<<dim3(D / CD_ROWS, picks), 256, 0, st>>>(down, sdown, c ? c->down : nullptr, hot_slot, T, hq, wts, sg, y);
 }
-void moe_experts_dec(const QTensor &gate, const QTensor &up, const QTensor &down, const QTensor &sgate, const QTensor &sup,
-                     const QTensor &sdown, const int *hot_slot, int T, QAct x, QAct hq, const float *wts, const float *sg, float *y,
-                     hipStream_t st) {
-    moe_dec(gate, up, down, sgate, sup, sdown, nullptr, hot_slot, T, x, hq, wts, sg, y, st);
+void moe_experts_dec(const QTensor &gate, const QTensor &up, const QTensor &down, const uint8_t *fmt, const QTensor &sgate,
+                     const QTensor &sup, const QTensor &sdown, const int *hot_slot, int T, QAct x, QAct hq, const float *wts,
+                     const float *sg, float *y, hipStream_t st) {
+    moe_dec(gate, up, down, fmt, sgate, sup, sdown, nullptr, hot_slot, T, x, hq, wts, sg, y, st);
 }
 void moe_cold_dec(const ColdDec &c, const int *hot_slot, int T, QAct x, QAct hq, const float *wts, float *y, hipStream_t st) {
     const QTensor none{};
-    moe_dec(none, none, none, none, none, none, &c, hot_slot, T, x, hq, wts, nullptr, y, st);
+    moe_dec(none, none, none, nullptr, none, none, none, &c, hot_slot, T, x, hq, wts, nullptr, y, st);
 }
 
 // Routed experts at prefill: grouped GEMMs over the tokens sorted by expert.
@@ -1012,14 +1021,17 @@ constexpr int MOE_NW_GU = 8, MOE_NW_DN = 16;          // waves per workgroup (ga
 // (128 columns: steps c = 2h, 2h + 1 hold its fragments in every format) the 32 rows are dequantized once into LDS (fp16,
 // natural K order) by all threads, then every wave runs its tokens against them, so a weight is decoded once per work
 // item rather than once per token tile.
-template <int QT>
+// SLOT: the items' slots are pool slots holding experts of format QT (g0 / u0 the pool's tensors, common.h slot_view).
+template <int QT, bool SLOT = false>
 __global__ __launch_bounds__(32 * MOE_NW_GU) __attribute__((amdgpu_waves_per_eu(6))) void k_moe_gateup(QTensor g0, QTensor u0, QTensor g1,
         QTensor u1, const MoeWork *work, const half *X, half *H) {
     __shared__ _Float16 Ws[2][32][128 + 8];                 // gate | up rows of the current half super-block
     const MoeWork wk = work[blockIdx.y];
-    const QTensor &G = wk.tier ? g1 : g0, &U = wk.tier ? u1 : u0;
+    QTensor gs, us;
+    if constexpr (SLOT) { gs = slot_view(g0, wk.slot, QT); us = slot_view(u0, wk.slot, QT); }
+    const QTensor &G = SLOT ? gs : wk.tier ? g1 : g0, &U = SLOT ? us : wk.tier ? u1 : u0;
     const int tid = threadIdx.x, wave = tid / 32, l = tid % 32, hf = l >> 4, r = l & 15;
-    const int row0 = wk.slot * FE + blockIdx.x * 32;
+    const int row0 = (SLOT ? 0 : wk.slot * FE) + blockIdx.x * 32;
     for (int tt = 0; tt < wk.n; tt += MOE_NW_GU * 16 * MOE_TW) {   // one pass for the engine's items (at most MOE_ITEM tokens)
     const int nt = min(MOE_NW_GU * 16 * MOE_TW, wk.n - tt), m0 = wk.m0 + tt;
     const int ntw = min(MOE_TW, (nt - 16 * MOE_TW * wave + 15) / 16);   // wave-uniform: this wave's token tiles
@@ -1122,9 +1134,16 @@ __global__ __launch_bounds__(32 * MOE_NW_DN) void k_moe_down_g(QTensor d0, QTens
 }
 
 void moe_gemm_gateup(const QTensor &g0, const QTensor &u0, const QTensor &g1, const QTensor &u1, const MoeWork *work, int nwork,
-                     const half *X, half *H, hipStream_t st) {
+                     const half *X, half *H, hipStream_t st, int slot_type) {
     if (!nwork) return;
     const dim3 grid(FE / 32, nwork);
+    if (slot_type >= 0 && slot_type != IQ4_XS) {         // an IQ4_XS slot is rows slot * FE.. of the pool, as below
+        if (g0.type != IQ4_XS) FAIL("moe_gemm_gateup: an expert pool of type %d", g0.type);
+        if (slot_type == Q3_K) k_moe_gateup<Q3_K, true><<<grid, 32 * MOE_NW_GU, 0, st>>>(g0, u0, g1, u1, work, X, H);
+        else if (slot_type == Q2_K) k_moe_gateup<Q2_K, true><<<grid, 32 * MOE_NW_GU, 0, st>>>(g0, u0, g1, u1, work, X, H);
+        else FAIL("moe_gemm_gateup: pool slots of type %d", slot_type);
+        return;
+    }
     const int t = g0.type;
     if (g1.q && g1.type != t) FAIL("moe_gemm_gateup: tiers must share a format per call");
     if (t == Q5_0) k_moe_gateup<Q5_0><<<grid, 32 * MOE_NW_GU, 0, st>>>(g0, u0, g1, u1, work, X, H);

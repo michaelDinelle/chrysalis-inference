@@ -22,6 +22,11 @@
           <div class="side-body">
             <button id="new-chat" class="btn" type="button"></button>
             <nav id="conversations" aria-label="Conversations"></nav>
+            <div class="side-foot">
+              <button id="import" class="btn" type="button" title="Add chats from files exported here">Import</button>
+              <button id="export-all" class="btn" type="button" title="Every chat of this tab, in one file">Export all</button>
+              <input id="import-file" type="file" accept=".json,application/json" multiple hidden />
+            </div>
           </div>
           <div class="pane-rail" role="separator" aria-orientation="vertical"></div>
         </div>
@@ -29,14 +34,18 @@
       <main>
         <header class="topbar">
           <h1 id="title">New chat</h1>
+          <button id="export" class="act" type="button" title="Export this chat (a file you can import again)" aria-label="Export this chat" hidden></button>
         </header>
         <div id="scroller"><div id="thread" class="thread"></div></div>
         <form id="composer">
           <div class="composer-box">
             <button id="to-latest" class="act to-latest" type="button" title="Jump to the latest" aria-label="Jump to the latest" hidden></button>
+            <div id="attachments" class="attachments" hidden></div>
             <textarea id="input" rows="1" placeholder="Message kiln" autofocus></textarea>
             <div id="model-pop" class="model-pop" role="listbox" aria-label="Model" hidden></div>
             <div class="composer-row">
+              <button id="attach" class="act attach" type="button" title="Attach text files or pictures (or drop or paste them)" aria-label="Attach files"></button>
+              <input id="attach-file" type="file" multiple hidden />
               <div class="think-ctl">
                 <div id="energy" class="energy" role="slider" tabindex="0" aria-label="Thinking" aria-valuemin="0" aria-valuemax="3"></div>
                 <div id="energy-stops" class="energy-stops"></div>
@@ -89,6 +98,7 @@
     </div>
     <div id="tokpop" class="tokpop" role="dialog" aria-label="Alternatives" hidden></div>
     <dialog id="svg-zoom" class="svg-zoom" aria-label="SVG, full size"><div class="svg-zoom-paper"></div></dialog>
+    <dialog id="page-zoom" class="page-zoom" aria-label="Page, full size"><div class="page-zoom-box"></div></dialog>
     <script type="module" src="./app.ts"></script>
   </body>
 </html>

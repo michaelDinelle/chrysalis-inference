@@ -85,8 +85,10 @@ __device__ __forceinline__ float block_sum256(float v, float *red) {
 }
 
 // grid (NH + 2*NKV jobs, T), 256 threads = one head dim each.
+// M-RoPE (Qwen3.8's interleaved sections [11, 11, 10]): of the 32 frequency pairs, f % 3 == 1 (f < 33) turn with the
+// row position, f % 3 == 2 (f < 30) with the column, the rest with the sequence position; text has all three equal.
 __global__ __launch_bounds__(256) void k_attn_prep(const float *qg, const float *kin, const float *vin, const float *qnw,
-                                                   const float *knw, int pos0, KVRef kv, int layer, half *Q16) {
+                                                   const float *knw, int pos0, int rope0, const int *rpos, KVRef kv, int layer, half *Q16) {
     __shared__ float red[8], buf[HD];
     const int job = blockIdx.x, t = blockIdx.y, i = threadIdx.x, pos = pos0 + t;
     float x;
@@ -99,8 +101,10 @@ __global__ __launch_bounds__(256) void k_attn_prep(const float *qg, const float 
         __syncthreads();
         if (i < ROT) {               // NeoX-style pairs (i, i + 32) over the first 64 dims
             const int f = i % (ROT / 2);
+            const int sec = f % 3 == 1 && f < 33 ? 1 : f % 3 == 2 && f < 30 ? 2 : 0;
+            const int rp = rpos ? rpos[t * 3 + sec] : rope0 + t;
             float s, c;
-            sincosf(pos * powf(ROPE_BASE, -2.0f * f / ROT), &s, &c);
+            sincosf(rp * powf(ROPE_BASE, -2.0f * f / ROT), &s, &c);
             x = i < ROT / 2 ? x * c - buf[i + ROT / 2] * s : x * c + buf[i - ROT / 2] * s;
         }
     }
@@ -133,8 +137,8 @@ __global__ __launch_bounds__(256) void k_attn_prep(const float *qg, const float 
 }
 
 void attn_prep(const float *qg, const float *k, const float *v, const float *qnw, const float *knw, int T, int pos0,
-               KVRef kv, int layer, half *Q16, hipStream_t st) {
-    k_attn_prep<<<dim3(NH + 2 * NKV, T), 256, 0, st>>>(qg, k, v, qnw, knw, pos0, kv, layer, Q16);
+               int rope0, const int *rpos, KVRef kv, int layer, half *Q16, hipStream_t st) {
+    k_attn_prep<<<dim3(NH + 2 * NKV, T), 256, 0, st>>>(qg, k, v, qnw, knw, pos0, rope0, rpos, kv, layer, Q16);
 }
 
 constexpr int QLD = HD + 8;   // padded LDS row (halves) for K tiles

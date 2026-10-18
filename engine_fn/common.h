@@ -35,6 +35,10 @@ constexpr int PLE_HIST = (PLE_K - 1) * PLE_DIL;      // 9 positions of conv hist
 constexpr float EPS = 1e-6f;
 constexpr float ROPE_BASE = 1e7f;
 constexpr int EOS_IM_END = 248046, EOS_TEXT = 248044;   // <|im_end|>, <|endoftext|>
+// Image tokens: IMG_BASE + picture * IMG_ROWS + row names row `row` of a picture's embeddings (as in engine/model.h); the
+// n-gram block hashes them as the <|image_pad|> they stand for, as the original's ple_input_ids hold it.
+constexpr int IMG_BASE = 1 << 30, IMG_ROWS = 1 << 14, IMAGE_PAD = 248056;
+struct Pos3 { int t, h, w; };      // an M-RoPE position (text: all three equal)
 inline bool is_attn_layer(int l) { return l % 4 == 3; }
 
 // KV cache: page -> layer (12 QSA layers + MTP) -> kv head -> block of PAGE tokens, kiln's format:
@@ -84,6 +88,26 @@ __host__ __device__ constexpr int qbytes_of(int type) {
          : type == IQ4_XS ? 136 : type == F32 ? 4 : type == F16 ? 2 : 0;
 }
 inline size_t qrow_bytes(int type, int cols) { return (size_t)cols / qk_of(type) * qbytes_of(type); }
+
+// The expert pool in VRAM: one IQ4_XS gate, one IQ4_XS up and one IQ4_NL down tensor for the 48 layers' VRAM experts, slot
+// s owning rows s * FE.. of gate and up and s * D.. of down. A slot may hold a RAM-tier expert in its own format instead:
+// its gate (or up) is then that format's arrays for FE rows (as make_qtensor carves them) inside the slot's share of the
+// IQ4_XS nibble array, FE * D / 2 bytes, which Q3_K (729,600 bytes) and Q2_K (537,600) fit; its down is IQ4_NL like any
+// other. slot_view: slot s's gate or up (pool = the pool's gate or up tensor) as a tensor of FE rows of `type`.
+__host__ __device__ inline QTensor slot_view(const QTensor &pool, int s, int type) {
+    constexpr size_t n = (size_t)FE * D;
+    QTensor t;
+    t.type = type; t.rows = FE; t.cols = D;
+    uint8_t *base = pool.q + (size_t)s * (n / 2);
+    if (type == Q3_K) {
+        t.q = base; t.qh = base + n / 4; t.sc = t.qh + n / 8; t.d = (half *)(t.sc + n / 16);
+    } else if (type == Q2_K) {
+        t.q = base; t.sc = base + n / 4; t.d = (half *)(t.sc + n / 16); t.dm = t.d + n / 256;
+    } else {
+        t.q = base; t.sc = pool.sc + (size_t)s * (n / 64); t.sh = pool.sh + (size_t)s * (n / 256); t.d = pool.d + (size_t)s * (n / 256);
+    }
+    return t;
+}
 
 // Activations for the int8 dot-product GEMVs: per 32 values one fp32 scale.
 struct QAct { int8_t *q; float *d; };

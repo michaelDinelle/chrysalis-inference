@@ -4,7 +4,10 @@
 // every conversation.
 import DOMPurify from "dompurify";
 import hljs from "highlight.js/lib/common";
+import katex from "katex";
+import "katex/dist/katex.min.css";
 import { marked, type Links, type Token } from "marked";
+import { type Attachment, KINDS, attach, dataUrl, fmtBytes, get as getFile, put as putFile, textBlock } from "./files";
 import { type Cand, type Odds, type SamplerKey, type Stage, dryRuns, sample } from "./sampler";
 
 type Effort = "xhigh" | "medium" | "low" | "off";
@@ -14,6 +17,7 @@ interface Message {
   params?: string;                                  // the sampling values that differed from the recommended ones
   effort?: Effort;                                  // the thinking setting it was written with (Continue keeps it)
   finish?: string; edited?: boolean;
+  files?: Attachment[];                             // a user message's attached files (their contents: files.ts)
 }
 interface Conversation { id: string; title: string; named?: boolean; updated: number; effort: Effort; messages: Message[] }
 type Sampler = Partial<Record<SamplerKey, number>> & { order?: Stage[] };
@@ -106,6 +110,9 @@ const ICONS = {
   tokens: '<path d="M4 19V11M9 19V5M14 19v-6M19 19V9"/>',
   wand: '<path d="M12 3l1.6 4.4L18 9l-4.4 1.6L12 15l-1.6-4.4L6 9l4.4-1.6z"/><path d="M18.5 14.5l.7 1.8 1.8.7-1.8.7-.7 1.8-.7-1.8-1.8-.7 1.8-.7z"/>',
   down: '<path d="M12 5v14M5 12l7 7 7-7"/>',
+  download: '<path d="M12 4v11M7.5 10.5 12 15l4.5-4.5M5 20h14"/>',
+  clip: '<path d="M20 11.6 12.3 19.3a5.2 5.2 0 0 1-7.4-7.4l8.3-8.3a3.5 3.5 0 0 1 4.9 4.9l-8.3 8.3a1.7 1.7 0 0 1-2.5-2.5l7.4-7.4"/>',
+  x: '<path d="M7 7l10 10M17 7 7 17"/>',
   grip: '<circle cx="9" cy="6" r="1.3" fill="currentColor" stroke="none"/><circle cx="15" cy="6" r="1.3" fill="currentColor" stroke="none"/><circle cx="9" cy="12" r="1.3" fill="currentColor" stroke="none"/><circle cx="15" cy="12" r="1.3" fill="currentColor" stroke="none"/><circle cx="9" cy="18" r="1.3" fill="currentColor" stroke="none"/><circle cx="15" cy="18" r="1.3" fill="currentColor" stroke="none"/>',
   power: '<path d="M12 3.5v8"/><path d="M6.6 6.8a7.5 7.5 0 1 0 10.8 0"/>',
   dice: '<rect x="4" y="4" width="16" height="16" rx="3.5"/><circle cx="9" cy="9" r="1.1" fill="currentColor"/><circle cx="15" cy="15" r="1.1" fill="currentColor"/><circle cx="15" cy="9" r="1.1" fill="currentColor"/><circle cx="9" cy="15" r="1.1" fill="currentColor"/>',
@@ -148,14 +155,46 @@ marked.use({
     code({ text, lang }) {
       const language = (lang ?? "").trim().split(/\s/)[0].toLowerCase();
       const html = hljs.getLanguage(language) ? hljs.highlight(text, { language, ignoreIllegals: true }).value : escapeHtml(text);
+      const preview = PAGE_LANGS.has(language) ? `<button type="button" class="code-act" data-page="preview">Preview</button>` : "";
       return `<div class="code"><div class="code-head"><span>${escapeHtml(language || "text")}</span>` +
-        `<button type="button" class="copy">Copy</button></div><pre><code class="hljs">${html}</code></pre></div>`;
+        `<span class="code-acts">${preview}<button type="button" class="copy">Copy</button></span></div><pre><code class="hljs">${html}</code></pre></div>`;
     },
   },
 });
 const markdown = (src: string) => DOMPurify.sanitize(marked.parse(src, { async: false }));
 
-// ---- replies, block by block --------------------------------------------------------------------------------------
+// TeX as Qwen writes it: $$ … $$ or \[ … \] on their own lines (display), $ … $ or \( … \) in a line. A $ opens math
+// only before a non-space and closes it only after one, not before a digit, and math never crosses a backtick (a code
+// span's $ is not a closing one), so prices stay text. The lexer leaves a
+// placeholder; KaTeX typesets it once the block is sanitized: its output (with trust off) is safe, and DOMPurify would
+// strip the MathML it carries for screen readers.
+const INLINE_MATH = [/^\$\$([\s\S]+?)\$\$/, /^\\\(([\s\S]+?)\\\)/, /^\$(?![\s$])((?:\\[\s\S]|[^\\$\n`])+?)(?<![\s\\])\$(?!\d)/];
+marked.use({
+  extensions: [{
+    name: "mathBlock", level: "block",
+    start: (src) => src.match(/^ {0,3}(?:\$\$|\\\[)/m)?.index,
+    tokenizer(src) {
+      const m = src.match(/^ {0,3}\$\$([\s\S]+?)\$\$[ \t]*(?:\n|$)/) ?? src.match(/^ {0,3}\\\[([\s\S]+?)\\\][ \t]*(?:\n|$)/);
+      if (m) return { type: "mathBlock", raw: m[0], text: m[1].trim() };
+    },
+    renderer: (t) => `<div class="math display" data-tex="${escapeHtml(t.text)}"></div>`,
+  }, {
+    name: "math", level: "inline",
+    start: (src) => src.match(/(?<!\\)\$|\\\(/)?.index,
+    tokenizer(src) {
+      for (const [k, re] of INLINE_MATH.entries()) {
+        const m = src.match(re);
+        if (m) return { type: "math", raw: m[0], text: m[1].trim(), display: k === 0 };
+      }
+    },
+    renderer: (t) => `<span class="math${t.display ? " display" : ""}" data-tex="${escapeHtml(t.text)}"></span>`,
+  }],
+});
+function typeset(root: ParentNode) {
+  for (const el of root.querySelectorAll<HTMLElement>(".math[data-tex]"))
+    katex.render(el.dataset.tex!, el, { displayMode: el.classList.contains("display"), throwOnError: false, strict: "ignore", output: "htmlAndMathml" });
+}
+
 // A reply renders as its blocks (paragraphs, lists, code blocks, tables...). While it streams, only blocks that changed
 // are rebuilt: finished ones keep their nodes (no re-highlighting; selections and toggles survive), so the work per
 // update is the size of the growing tail, not of the reply. And the tail shows only settled text: whole words, whole
@@ -167,6 +206,9 @@ function settle(src: string): string {
   const nl = src.lastIndexOf("\n"), head = src.slice(0, nl + 1);
   let line = src.slice(nl + 1);
   if ((src.match(FENCE)?.length ?? 0) % 2) return head;                    // in a code block: its whole lines
+  const prose = src.replace(/^ {0,3}(`{3,}|~{3,})[^]*?^ {0,3}\1.*$/gm, "").replace(/`[^`\n]*`/g, "");
+  if ((prose.match(/\$\$/g)?.length ?? 0) % 2) return src.slice(0, src.lastIndexOf("$$"));   // display math once it closes
+  if (prose.lastIndexOf("\\[") > prose.lastIndexOf("\\]")) return src.slice(0, src.lastIndexOf("\\["));
   if (/^\s*\|/.test(line)) return head;                                   // a table row once it is complete
   if (/^\s*(?:[#>*+-]|\d+[.)])*\s*$/.test(line)) return head;             // a bare "#", "-", "1." ... line
   if (!/\s$/.test(line)) line = line.replace(/[A-Za-z0-9À-ɏ'’_-]{1,24}$/, "");   // a word once it ends
@@ -176,6 +218,10 @@ function settle(src: string): string {
     .replace(/\[([^\]\n]*)\]\([^)\n]*$/, "$1").replace(/\[([^\]\n]*)$/, "$1")   // a link is its text until it is whole,
     .replace(/<\/?[A-Za-z][^>\n]*$/, "")                                  // no half HTML tag,
     .replace(/(?:\*{1,3}|_{1,3}|~{1,2}|`+)$/, "");                        // markers with nothing after them wait;
+  const dollars = [...para.replace(/`[^`]*`/g, (c) => " ".repeat(c.length)).matchAll(/(?<![\\$])\$(?!\$)/g)];
+  const lastDollar = dollars.at(-1)?.index ?? 0;                          // inline math once it closes ($5 is a price)
+  if (dollars.length % 2 && !/^\$\d/.test(para.slice(lastDollar))) para = para.slice(0, lastDollar);
+  if (para.lastIndexOf("\\(") > para.lastIndexOf("\\)")) para = para.slice(0, para.lastIndexOf("\\("));
   if ((para.replace(/```[\s\S]*?```/g, "").match(/`/g)?.length ?? 0) % 2) para += "`";   // open code and bold close
   if ((para.match(/\*\*/g)?.length ?? 0) % 2) para += "**";
   if ((para.match(/~~/g)?.length ?? 0) % 2) para += "~~";
@@ -185,6 +231,7 @@ function settle(src: string): string {
 function htmlNodes(t: Token, links: Links): Node[] {
   const tpl = document.createElement("template");
   tpl.innerHTML = DOMPurify.sanitize(marked.parser(Object.assign([t], { links })));      // (options here would drop marked.use's renderer)
+  typeset(tpl.content);
   return [...tpl.content.childNodes];
 }
 
@@ -195,7 +242,10 @@ function renderBlocks(v: View, src: string, live: boolean) {
   while (k < blocks.length && k < b.raws.length && b.raws[k] === blocks[k].raw) k++;
   for (; k < blocks.length; k++) {
     const t = blocks[k], old = b.nodes[k] ?? [];
-    const now = t.type === "code" && SVG_START.test(t.text) ? [svgFigure(old[0], t.text, live && k === blocks.length - 1)] : htmlNodes(t, tokens.links);
+    const tail = live && k === blocks.length - 1;
+    const page = t.type === "code" && !tail && PAGE_LANGS.has((t.lang ?? "").toLowerCase()) && (PAGE_DOC.test(t.text) || previewed.has(t.text));
+    const now = t.type !== "code" ? htmlNodes(t, tokens.links) : SVG_START.test(t.text) ? [svgFigure(old[0], t.text, tail)]
+      : /^mermaid$/i.test(t.lang ?? "") ? [mermaidFigure(old[0], t.text, tail)] : page ? [pageFigure(old[0], t.text)] : htmlNodes(t, tokens.links);
     b.raws[k] = t.raw;
     if (now.length === 1 && old.length === 1 && now[0] === old[0]) continue;   // a figure updated in place
     const at = b.nodes.slice(k).flat()[0] ?? null;
@@ -208,11 +258,11 @@ function renderBlocks(v: View, src: string, live: boolean) {
   // a figure that was drawing at the tail finishes once something follows it (its block no longer changes)
   b.nodes.forEach((n, k) => {
     const f = n[0], t = blocks[k];
-    if (f instanceof HTMLElement && f.classList.contains("drawing") && !(live && k === blocks.length - 1) && t.type === "code") svgFigure(f, t.text, false);
+    if (f instanceof HTMLElement && f.classList.contains("drawing") && !(live && k === blocks.length - 1) && t.type === "code")
+      (f.dataset.kind === "mermaid" ? mermaidFigure : svgFigure)(f, t.text, false);
   });
 }
 
-// ---- SVG figures ----------------------------------------------------------------------------------------------------
 // A code block holding an SVG document (models label it svg, xml or html) shows the picture instead, as a figure that
 // draws itself while it streams: its size is set once the <svg> tag is in (the viewBox), then each element appears,
 // with a short fade, once its tag is complete. The markup is sanitized (no scripts, handlers, foreignObject, external
@@ -320,16 +370,20 @@ function drawSvg(root: ShadowRoot, markup: string | null, fade: boolean): boolea
   return true;
 }
 
+// The figure around a picture: the light page, its caption with the actions, and the code a click away.
+function figureShell(lang: "svg" | "mermaid"): HTMLElement {
+  const fig = h("figure", "svg-fig");
+  fig.dataset.kind = lang;
+  fig.innerHTML = `<div class="svg-paper"></div><figcaption class="svg-bar"><span class="svg-state"></span><span class="svg-acts">` +
+    ["code:Code", "copy:Copy", "save:Download", "zoom:Expand"].map((a) => `<button type="button" data-svg="${a.split(":")[0]}">${a.split(":")[1]}</button>`).join("") +
+    `</span></figcaption><div class="code svg-code"><div class="code-head"><span>${lang}</span><button type="button" class="copy">Copy</button></div>` +
+    `<pre><code class="hljs"></code></pre></div>`;
+  fig.querySelector(".svg-paper")!.attachShadow({ mode: "open" }).innerHTML = `<style>${SVG_SHADOW}</style>`;
+  return fig;
+}
+
 function svgFigure(old: Node | undefined, text: string, drawing: boolean): HTMLElement {
-  let fig = old instanceof HTMLElement && old.classList.contains("svg-fig") ? old : null;
-  if (!fig) {
-    fig = h("figure", "svg-fig");
-    fig.innerHTML = `<div class="svg-paper"></div><figcaption class="svg-bar"><span class="svg-state"></span><span class="svg-acts">` +
-      ["code:Code", "copy:Copy", "save:Download", "zoom:Expand"].map((a) => `<button type="button" data-svg="${a.split(":")[0]}">${a.split(":")[1]}</button>`).join("") +
-      `</span></figcaption><div class="code svg-code"><div class="code-head"><span>svg</span><button type="button" class="copy">Copy</button></div>` +
-      `<pre><code class="hljs"></code></pre></div>`;
-    fig.querySelector(".svg-paper")!.attachShadow({ mode: "open" }).innerHTML = `<style>${SVG_SHADOW}</style>`;
-  }
+  const fig = old instanceof HTMLElement && old.dataset.kind === "svg" ? old : figureShell("svg");
   svgSource.set(fig, text);
   fig.classList.toggle("drawing", drawing);
   const t = performance.now();
@@ -348,39 +402,36 @@ function svgFigure(old: Node | undefined, text: string, drawing: boolean): HTMLE
 
 // A drawing as large as what can be seen at once: the column's width, or the scroll area's height less the caption,
 // whichever runs out first, its shape kept. Set when its <svg> tag arrives, so it never changes size while it draws.
-function fitFigure(fig: Element) {
-  const paper = fig.querySelector<HTMLElement>(".svg-paper")!, vb = paper.shadowRoot!.querySelector("svg")?.viewBox.baseVal;
-  if (!vb || !vb.width || !vb.height) return;
+function fitFigure(fig: HTMLElement) {
+  const paper = fig.querySelector<HTMLElement>(".svg-paper"), vb = paper?.shadowRoot!.querySelector("svg")?.viewBox.baseVal;
+  if (!paper || !vb || !vb.width || !vb.height) return;               // (a page figure has no picture)
   const room = thread.clientWidth - 48 - 30;             // the column (the thread's padding), less the paper's padding and border
   const tall = Math.max(scroller.clientHeight - 74, 320); // the scroll area, less 8 + 6 px of gap, the paper's padding and the caption
-  const w = `${Math.floor(Math.min(room, tall * (vb.width / vb.height)))}px`;
+  const natural = fig.dataset.kind === "mermaid" ? vb.width : Infinity;   // a diagram's text stays at its size
+  const w = `${Math.floor(Math.min(room, tall * (vb.width / vb.height), natural))}px`;
   if (paper.style.getPropertyValue("--fig-w") !== w) paper.style.setProperty("--fig-w", w);
 }
-addEventListener("resize", () => thread.querySelectorAll(".svg-fig").forEach(fitFigure));
+addEventListener("resize", () => thread.querySelectorAll<HTMLElement>(".svg-fig").forEach(fitFigure));
 
-function svgCode(fig: Element) {
+function svgCode(fig: HTMLElement) {
   const code = fig.querySelector(".svg-code code")!, text = svgSource.get(fig) ?? "";
-  if (code.textContent !== text) code.innerHTML = hljs.highlight(text, { language: "xml", ignoreIllegals: true }).value;
+  if (code.textContent !== text)
+    code.innerHTML = fig.dataset.kind === "svg" ? hljs.highlight(text, { language: "xml", ignoreIllegals: true }).value : escapeHtml(text);
 }
 
 function svgAction(btn: HTMLElement) {
-  const fig = btn.closest(".svg-fig")!, text = svgSource.get(fig) ?? "";
-  const act = btn.dataset.svg;
+  const fig = btn.closest<HTMLElement>(".svg-fig")!, text = svgSource.get(fig) ?? "";
+  const act = btn.dataset.svg, picture = fig.dataset.kind === "mermaid" ? pictures.get(fig) ?? "" : text;
   if (act === "code") {
     btn.textContent = fig.classList.toggle("show-code") ? "Picture" : "Code";
     svgCode(fig);
   } else if (act === "copy") copy(text, btn);
-  else if (act === "save") {
-    const a = h("a");
-    a.href = URL.createObjectURL(new Blob([svgFile(text)], { type: "image/svg+xml" }));
-    a.download = "image.svg";
-    a.click();
-    setTimeout(() => URL.revokeObjectURL(a.href), 1000);
-  } else if (act === "zoom") {
+  else if (act === "save") download(fig.dataset.kind === "mermaid" ? "diagram.svg" : "image.svg", svgFile(picture), "image/svg+xml");
+  else if (act === "zoom") {
     const dlg = $<HTMLDialogElement>("svg-zoom"), host = h("div");
     host.className = "zoom";
     host.attachShadow({ mode: "open" }).innerHTML = `<style>${SVG_SHADOW}</style>`;
-    drawSvg(host.shadowRoot!, svgPrefix(text), false);
+    drawSvg(host.shadowRoot!, svgPrefix(picture), false);
     const svg = host.shadowRoot!.querySelector("svg"), vb = svg?.viewBox.baseVal;
     if (svg && vb && vb.width && vb.height) {                           // as large as the window allows, its shape kept
       const ar = vb.width / vb.height, w = Math.min(innerWidth * 0.94 - 40, (innerHeight * 0.92 - 40) * ar);
@@ -391,6 +442,140 @@ function svgAction(btn: HTMLElement) {
     dlg.showModal();
   }
 }
+
+// A ```mermaid block becomes a diagram in the SVG figure (Code shows its Mermaid source, Download saves the picture).
+// Mermaid is most of the page's code, so it loads with the first diagram. While the block streams, each settled
+// version that parses replaces the picture, a few times a second, so the diagram grows as it is written; a finished
+// block that does not parse shows its source. Labels are SVG text (no HTML in foreignObject, which drawSvg removes).
+const pictures = new WeakMap<Element, string>();      // a diagram's SVG as drawn
+const DIAGRAMS: Record<string, string> = { graph: "flowchart", flowchart: "flowchart", sequenceDiagram: "sequence diagram",
+  classDiagram: "class diagram", stateDiagram: "state diagram", "stateDiagram-v2": "state diagram", erDiagram: "ER diagram",
+  gantt: "Gantt chart", pie: "pie chart", mindmap: "mind map", timeline: "timeline", journey: "user journey", gitGraph: "git graph",
+  quadrantChart: "quadrant chart", xychart: "XY chart", "xychart-beta": "XY chart", sankey: "Sankey diagram", "sankey-beta": "Sankey diagram" };
+// Mermaid's own ES module build, served by server.ts: imported by URL, so the page's bundle leaves it out, and it loads
+// each kind of diagram's code when one is first drawn.
+const MERMAID_URL = "/vendor/mermaid/mermaid.esm.min.mjs";
+let mermaidLib: Promise<typeof import("mermaid").default> | undefined, mermaidSeq = 0;
+const loadMermaid = () => mermaidLib ??= (import(MERMAID_URL) as Promise<typeof import("mermaid")>).then(({ default: m }) => {
+  m.initialize({ startOnLoad: false, securityLevel: "strict", htmlLabels: false, flowchart: { htmlLabels: false }, theme: "base",
+    fontFamily: "ui-sans-serif, system-ui, sans-serif", themeVariables: { primaryColor: "#fbe6d6", primaryBorderColor: "#d8621f",
+      primaryTextColor: "#1f1b19", lineColor: "#6d635b", secondaryColor: "#f1ebe4", tertiaryColor: "#ffffff" } });
+  return m;
+});
+
+function mermaidFigure(old: Node | undefined, text: string, drawing: boolean): HTMLElement {
+  const fig = old instanceof HTMLElement && old.dataset.kind === "mermaid" ? old : figureShell("mermaid");
+  svgSource.set(fig, text);
+  fig.classList.toggle("drawing", drawing);
+  const t = performance.now();
+  if (!drawing || t - Number(fig.dataset.drawn ?? 0) > 300) {
+    fig.dataset.drawn = String(t);
+    void drawMermaid(fig, text, drawing);
+  }
+  captionMermaid(fig);
+  return fig;
+}
+
+async function drawMermaid(fig: HTMLElement, text: string, drawing: boolean) {
+  const seq = String(++mermaidSeq);
+  fig.dataset.seq = seq;
+  const m = await loadMermaid();
+  let svg: string | undefined;
+  if (await m.parse(text, { suppressErrors: true })) svg = await m.render(`kiln-mermaid-${seq}`, text).then((r) => r.svg, () => undefined);
+  if (fig.dataset.seq !== seq) return;                   // a later version is on its way
+  if (svg) {
+    pictures.set(fig, svg);
+    drawSvg(fig.querySelector(".svg-paper")!.shadowRoot!, svg, false);
+    fitFigure(fig);
+  }
+  fig.classList.toggle("failed", !drawing && !svg);
+  captionMermaid(fig);
+  if (fig.classList.contains("show-code") || fig.classList.contains("failed")) svgCode(fig);
+  keepUp();
+}
+
+function captionMermaid(fig: HTMLElement) {
+  const kind = DIAGRAMS[(svgSource.get(fig) ?? "").replace(/^\s*(%%.*\n\s*)*/, "").split(/[\s;]/)[0]] ?? "diagram";
+  fig.querySelector(".svg-state")!.textContent = fig.classList.contains("drawing") ? "Drawing"
+    : fig.classList.contains("failed") ? "Couldn't draw this diagram" : `Mermaid · ${kind}`;
+}
+
+
+// A ```html block holding a whole document runs as a page once it is written; a fragment does when its Preview is
+// clicked. The page runs in an iframe on /sandbox (server.ts): its own code runs, but it can reach neither the chat nor
+// the network. It reports its height and the frame takes it, up to what can be seen at once (a taller page scrolls
+// inside). A page sized by the viewport (100vh) reports the frame's own height, so the frame starts at a useful size.
+const PAGE_LANGS = new Set(["html", "htm"]);
+const PAGE_DOC = /^\s*(?:<!--[\s\S]*?-->\s*)*(?:<!doctype html|<html[\s>])/i;
+const previewed = new Set<string>();                  // fragments whose Preview was clicked
+const pageText = new WeakMap<HTMLIFrameElement, string>();
+// The root element's box: its content's height (scrollHeight would never report less than the frame already is).
+const REPORT = `<script>(() => { const html = document.documentElement, post = () => parent.postMessage({ kilnHeight: Math.ceil(html.getBoundingClientRect().height) }, "*");
+  new ResizeObserver(post).observe(html); addEventListener("load", post); post(); })()</script>`;
+const pageRoom = () => Math.max(scroller.clientHeight - 74, 240);
+
+function pageFrame(text: string, fixed: boolean): HTMLIFrameElement {
+  const frame = h("iframe", "page-frame");
+  frame.setAttribute("sandbox", "allow-scripts allow-modals");
+  frame.title = "Page from the reply";
+  if (fixed) frame.dataset.fixed = "1";
+  else frame.style.height = `${Math.min(480, pageRoom())}px`;
+  pageText.set(frame, (PAGE_DOC.test(text) ? "" : "<!doctype html>") + text);
+  frame.src = "/sandbox";
+  return frame;
+}
+
+function pageFigure(old: Node | undefined, text: string): HTMLElement {
+  if (old instanceof HTMLElement && old.dataset.kind === "page" && svgSource.get(old) === text) return old;
+  const fig = h("figure", "svg-fig page-fig");
+  fig.dataset.kind = "page";
+  svgSource.set(fig, text);
+  const title = text.match(/<title[^>]*>([^<]*)<\/title>/i)?.[1].trim();
+  fig.innerHTML = `<figcaption class="svg-bar"><span class="svg-state"></span><span class="svg-acts">` +
+    ["code:Code", "copy:Copy", "save:Download", "reload:Reload", "zoom:Expand"].map((a) => `<button type="button" data-page="${a.split(":")[0]}">${a.split(":")[1]}</button>`).join("") +
+    `</span></figcaption><div class="code svg-code"><div class="code-head"><span>html</span><button type="button" class="copy">Copy</button></div>` +
+    `<pre><code class="hljs"></code></pre></div>`;
+  fig.querySelector(".svg-state")!.textContent = title ? `Page · ${title}` : "Page";
+  fig.prepend(pageFrame(text, false));
+  return fig;
+}
+
+addEventListener("message", (e) => {
+  const frame = [...document.querySelectorAll<HTMLIFrameElement>("iframe.page-frame")].find((f) => f.contentWindow === e.source);
+  if (!frame) return;
+  if (e.data?.kilnReady) frame.contentWindow!.postMessage({ kilnPage: pageText.get(frame) + REPORT }, "*");
+  else if (typeof e.data?.kilnHeight === "number" && !frame.dataset.fixed) {
+    const px = `${Math.round(Math.min(Math.max(e.data.kilnHeight, 60), pageRoom()))}px`;
+    if (frame.style.height !== px) frame.style.height = px;
+  }
+});
+
+function pageAction(btn: HTMLElement) {
+  const act = btn.dataset.page;
+  if (act === "preview") {                               // a fragment's code block becomes its page
+    const block = btn.closest<HTMLElement>(".code")!, text = block.querySelector("code")?.textContent ?? "";
+    const m = conv.messages[Number(block.closest<HTMLElement>("article")?.dataset.i)], b = m && views.get(m)?.blocks;
+    previewed.add(text);
+    const fig = pageFigure(undefined, text), k = b ? b.nodes.findIndex((n) => n.includes(block)) : -1;
+    block.replaceWith(fig);
+    if (b && k >= 0) b.nodes[k] = [fig];
+    return;
+  }
+  const fig = btn.closest<HTMLElement>(".page-fig")!, text = svgSource.get(fig) ?? "";
+  if (act === "code") {
+    btn.textContent = fig.classList.toggle("show-code") ? "Page" : "Code";
+    const code = fig.querySelector(".svg-code code")!;
+    if (code.textContent !== text) code.innerHTML = hljs.highlight(text, { language: "xml", ignoreIllegals: true }).value;
+  } else if (act === "copy") copy(text, btn);
+  else if (act === "save") download("page.html", text, "text/html");
+  else if (act === "reload") fig.querySelector("iframe")!.replaceWith(pageFrame(text, false));
+  else if (act === "zoom") {
+    const dlg = $<HTMLDialogElement>("page-zoom");
+    dlg.querySelector(".page-zoom-box")!.replaceChildren(pageFrame(text, true));
+    dlg.showModal();
+  }
+}
+
 const fmtK = (n: number) => (n < 1000 ? String(n) : `${(n / 1000).toFixed(n < 10_000 ? 1 : 0)}K`);
 const fmtS = (s: number) => `${s < 10 ? s.toFixed(1) : Math.round(s)} s`;
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
@@ -432,12 +617,11 @@ function blank(): Conversation {
   return { id: randomId(), title: "New chat", updated: Date.now(), effort: pref("effort", "xhigh") as Effort, messages: [] };
 }
 
-// ---- rendering ---------------------------------------------------------------------------------------------
-
 function render() {
   views.clear();
   thread.replaceChildren(...(conv.messages.length ? conv.messages.map(messageView) : [emptyState()]));
   $("title").textContent = conv.title;
+  $("export").hidden = !conv.messages.length;
   document.title = conv.messages.length ? `${conv.title} · kiln` : "kiln";
   renderComposer();
   renderList();
@@ -454,7 +638,9 @@ function messageView(m: Message, i: number): HTMLElement {
   const el = h("article", "msg user"), foot = h("footer", "msg-foot");
   el.dataset.i = String(i);
   foot.innerHTML = slots([["copy", true], ["edit", !running()], ["trash", !running()]]);
-  el.append(h("div", "bubble", m.content), foot);
+  if (m.files?.length) el.append(filesView(m.files));
+  if (m.content || !m.files?.length) el.append(h("div", "bubble", m.content));
+  el.append(foot);
   return el;
 }
 
@@ -753,8 +939,6 @@ function renderStatus() {
   renderControls();
 }
 
-// ---- talking to kiln ---------------------------------------------------------------------------------------
-
 async function refreshStatus() {
   const was = current();
   try { status = await (await fetch("/api/status")).json(); } catch { status = { state: "offline" }; }
@@ -794,7 +978,7 @@ function request(c: Conversation, upto: Message[], o: { effort?: Effort; samplin
   const effort = o.effort ?? c.effort, mode: Mode = effort === "off" ? "fast" : "think";
   const messages: object[] = upto
     .filter((m) => m.role === "user" || m.content || m.reasoning)
-    .map((m) => (m.reasoning ? { role: m.role, content: m.content, reasoning_content: m.reasoning } : { role: m.role, content: m.content }));
+    .map((m) => (m.reasoning ? { role: m.role, content: m.content, reasoning_content: m.reasoning } : { role: m.role, content: m.role === "user" ? userContent(m) : m.content }));
   if (settings.system.trim()) messages.unshift({ role: "system", content: settings.system.trim() });
   if (o.final) messages.push(o.final);
   return {
@@ -835,8 +1019,9 @@ const CUT_OFF = "The reply was cut off: the web server restarted while it was be
 
 async function generate(c: Conversation = conv) {
   const m: Message = { id: randomId(), role: "assistant", content: "", reasoning: "", params: changed(modeOf(c)) || undefined, effort: c.effort };
+  const upto = c.messages.slice();
   c.messages.push(m);
-  await startRun(c, m, request(c, c.messages.slice(0, -1)));
+  await startRun(c, m, () => request(c, upto));
 }
 
 // Writes on from the end of the last reply, or (pick) from one of its tokens replaced by an alternative. kiln is
@@ -853,11 +1038,13 @@ function continueReply(m: Message, pick?: { ch: "reasoning" | "content"; i: numb
   m.stopped = false;
   m.params = changed(effort === "off" ? "fast" : "think") || undefined;
   const extra = pick ? { continue_final_message: true, kiln_original: original, kiln_append_token: pick.alt.id } : { continue_final_message: true };
-  void startRun(c, m, request(c, c.messages.slice(0, at), { effort, final, extra }),
+  const upto = c.messages.slice(0, at);
+  void startRun(c, m, () => request(c, upto, { effort, final, extra }),
     pick && { t: pick.alt.t, p: pick.alt.p, alts: tokens.get(m.id!)?.[pick.ch][pick.i]?.alts ?? [] });
 }
 
-async function startRun(c: Conversation, m: Message, body: object, pick?: Tok) {
+// body: the request, made once the conversation's files are read (a file that is gone ends the reply with an error)
+async function startRun(c: Conversation, m: Message, body: () => object, pick?: Tok) {
   const phase = m.content ? "writing" : m.reasoning ? "thinking" : "waiting";
   const run: Run = { conv: c, m, live: { phase, since: performance.now(), note: "Reading the prompt" }, at: 0, stopping: false, frame: 0, saved: 0, calls: [], pick };
   runs.set(c.id, run);
@@ -874,7 +1061,8 @@ async function startRun(c: Conversation, m: Message, body: object, pick?: Tok) {
       run.live.since = performance.now();
     }
     if (run.stopping) throw new DOMException("stopped", "AbortError");
-    const res = await fetch("/api/chat", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body) });
+    await filesReady(c.messages);
+    const res = await fetch("/api/chat", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body()) });
     if (!res.ok || !res.body) throw new Error((await res.json().catch(() => null))?.error?.message ?? `HTTP ${res.status}`);
     m.job = res.headers.get("X-Kiln-Job") ?? undefined;
     save(c);                                       // a reload finds the reply and follows it again
@@ -1055,7 +1243,7 @@ async function name(c: Conversation) {
       method: "POST", headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ model: `${current()}-fast`, max_tokens: 24, messages: [
         { role: "system", content: "You are a title generator. Reply with a title of at most six words for the conversation that starts with the user's message below. Reply with the title only." },
-        { role: "user", content: c.messages[0].content.slice(0, 2000) },
+        { role: "user", content: (c.messages[0].content || (c.messages[0].files ?? []).map((f) => f.name).join(", ")).slice(0, 2000) },
       ] }),
     });
     const title: string | undefined = (await res.json()).choices?.[0]?.message?.content?.split("\n")[0]?.replace(/^[\s#*"']+|[\s*"'.]+$/g, "");
@@ -1065,19 +1253,170 @@ async function name(c: Conversation) {
   if (c === conv) $("title").textContent = document.title = c.title;
 }
 
-// ---- user actions ------------------------------------------------------------------------------------------
-
 function submit(text: string) {
   text = text.trim();
-  if (!text || running() || drafting) return;
+  if ((!text && !pending.length) || running() || drafting) return;
   input.value = "";
   grow();
-  if (!conv.messages.length) conv.title = text.split("\n")[0].slice(0, 60);
-  conv.messages.push({ role: "user", content: text });
+  const files = pending;
+  pending = [];
+  renderPending();
+  if (!conv.messages.length) conv.title = (text || files.map((f) => f.name).join(", ")).split("\n")[0].slice(0, 60);
+  conv.messages.push({ role: "user", content: text, ...(files.length ? { files } : {}) });
   void generate();
 }
 
-// ---- a draft of the user's next message ----------------------------------------------------------------------
+// Picked with the clip, dropped anywhere on the page or pasted: shown as chips in the message box until it is sent,
+// then above the message (pictures as pictures). kiln is sent each file before the text that was typed.
+let pending: Attachment[] = [];
+const bodies = new Map<string, string>();               // a file's text, or a picture's data URL, ready for requests
+const thumbs = new Map<string, Promise<string>>();      // a picture's object URL, for showing it
+
+const thumb = (a: Attachment) => {
+  let u = thumbs.get(a.id);
+  if (!u) thumbs.set(a.id, (u = getFile(a.id).then((b) => (b instanceof Blob ? URL.createObjectURL(b) : ""))));
+  return u;
+};
+
+function fileChip(a: Attachment, remove?: () => void): HTMLElement {
+  const el = h("span", "att"), text = h("span", "att-text");
+  if (a.kind === "image") {
+    const img = h("img");
+    img.alt = "";
+    void thumb(a).then((u) => { img.src = u; });
+    el.append(img);
+  } else el.append(h("span", "att-icon", (a.name.includes(".") ? a.name.split(".").pop()! : "txt").slice(0, 4)));
+  text.append(h("span", "att-name", a.name), h("span", "att-size", fmtBytes(a.size)));
+  el.title = a.name;
+  el.append(text);
+  if (remove) {
+    const x = h("button", "act att-x");
+    x.type = "button";
+    x.innerHTML = icon("x");
+    x.title = x.ariaLabel = `Remove ${a.name}`;
+    x.onclick = remove;
+    el.append(x);
+  }
+  return el;
+}
+
+function filesView(files: Attachment[]) {
+  const box = h("div", "msg-files");
+  for (const a of files) {
+    if (a.kind !== "image") { box.append(fileChip(a)); continue; }
+    const img = h("img");
+    img.alt = img.title = a.name;
+    img.dataset.zoom = a.id;
+    void thumb(a).then((u) => { img.src = u; });
+    box.append(img);
+  }
+  return box;
+}
+
+function renderPending() {
+  const box = $("attachments");
+  box.hidden = !pending.length;
+  box.replaceChildren(...pending.map((a) => fileChip(a, () => { pending = pending.filter((x) => x !== a); renderPending(); input.focus(); })));
+}
+
+async function addFiles(list: Iterable<File>) {
+  for (const f of list) {
+    const r = await attach(f);
+    if (typeof r === "string") toast(r);
+    else pending.push(r);
+  }
+  renderPending();
+  input.focus();
+}
+
+async function filesReady(msgs: Message[]) {
+  for (const a of msgs.flatMap((m) => m.files ?? [])) {
+    if (bodies.has(a.id)) continue;
+    const data = await getFile(a.id);
+    if (data === undefined) throw new Error(`${a.name} is no longer in this tab (closed tabs' files are deleted): attach it again`);
+    bodies.set(a.id, typeof data === "string" ? data : await dataUrl(data));
+  }
+}
+
+// A user message as kiln gets it: its files (pictures as images, PDFs as files, videos as videos, texts as fenced
+// blocks), then the text typed.
+function userContent(m: Message): string | object[] {
+  if (!m.files?.length) return m.content;
+  const parts: object[] = m.files.map((a) => {
+    const body = bodies.get(a.id) ?? "";
+    if (a.kind === "image") return { type: "image_url", image_url: { url: body } };
+    if (a.kind === "pdf") return { type: "file", file: { file_data: body, filename: a.name } };
+    if (a.kind === "video") return { type: "video_url", video_url: { url: body } };
+    return { type: "text", text: `${textBlock(a.name, body)}\n\n` };
+  });
+  if (m.content) parts.push({ type: "text", text: m.content });
+  return parts;
+}
+
+// Chats live and die with the tab; a file keeps one. Export writes the open chat (or all of them) as JSON, Import adds
+// chats from such files under new ids, so nothing already here is replaced. Token odds stay behind (this page only).
+interface ChatFile { kiln: "chats"; version: 1; exported: string; conversations: Conversation[]; files?: Record<string, string> }
+
+function download(name: string, data: string, type: string) {
+  const a = h("a");
+  a.href = URL.createObjectURL(new Blob([data], { type }));
+  a.download = name;
+  a.click();
+  setTimeout(() => URL.revokeObjectURL(a.href), 1000);
+}
+
+// Attached files go along: texts as they are, pictures as data URLs.
+async function exportChats(list: Conversation[], name: string) {
+  const files: Record<string, string> = {};
+  for (const a of list.flatMap((c) => c.messages.flatMap((m) => m.files ?? []))) {
+    const data = await getFile(a.id);
+    if (data !== undefined) files[a.id] = typeof data === "string" ? data : await dataUrl(data);
+  }
+  const file: ChatFile = { kiln: "chats", version: 1, exported: new Date().toISOString(),
+    conversations: list.map((c) => ({ ...structuredClone(c), messages: c.messages.map(({ job, ...m }) => m) })), files };
+  download(name, JSON.stringify(file, null, 1), "application/json");
+}
+
+const blobOf = (url: string) => {                       // a data URL's bytes (fetch would need connect-src data:)
+  const [head, b64] = url.split(",", 2), bytes = Uint8Array.from(atob(b64), (ch) => ch.charCodeAt(0));
+  return new Blob([bytes], { type: head.slice(5).split(";")[0] });
+};
+const fileName = (title: string) => `${title.replace(/[^\p{L}\p{N}]+/gu, "-").replace(/^-+|-+$/g, "").slice(0, 60) || "chat"}.kiln.json`;
+
+// One chat from a file, or null if it is not one: roles and text only where kiln expects them.
+function importedChat(x: any): Conversation | null {
+  if (!x || typeof x !== "object" || !Array.isArray(x.messages)) return null;
+  const messages: Message[] = [];
+  for (const m of x.messages) {
+    if (!m || (m.role !== "user" && m.role !== "assistant") || typeof m.content !== "string") return null;
+    const { job, ...rest } = m;
+    if (rest.files !== undefined && !(Array.isArray(rest.files) && rest.files.every((a: any) => typeof a?.id === "string"
+      && typeof a.name === "string" && KINDS.includes(a.kind)))) return null;
+    messages.push(rest);
+  }
+  if (!messages.length) return null;
+  return { id: randomId(), title: typeof x.title === "string" && x.title ? x.title.slice(0, 80) : "Imported chat", named: true,
+    updated: Date.now(), effort: EFFORTS.includes(x.effort) ? x.effort : "xhigh", messages };
+}
+
+async function importFiles(files: FileList) {
+  let added: Conversation[] = [], bad = 0;
+  for (const f of files) {
+    try {
+      const data = JSON.parse(await f.text());
+      for (const [id, body] of Object.entries(data?.files ?? {}))
+        if (typeof body === "string") await putFile(id, body.startsWith("data:image/") ? blobOf(body) : body);
+      const list = (data?.kiln === "chats" && Array.isArray(data.conversations) ? data.conversations : [data]).map(importedChat);
+      bad += list.filter((c: Conversation | null) => !c).length;
+      added = added.concat(list.filter(Boolean));
+    } catch { bad++; }
+  }
+  for (const c of added) save(c);
+  if (added.length) openConversation(added.at(-1)!.id);
+  toast(added.length ? `Imported ${added.length} chat${added.length > 1 ? "s" : ""}${bad ? ` (${bad} not a kiln chat)` : ""}`
+    : "Nothing to import: not a chat exported from kiln");
+}
+
 // kiln writes the message the user would likely send next, into the composer to edit and send. It is asked as the
 // assistant (Qwen will not write a user turn: at one it just ends it), without thinking, from the conversation
 // kiln has cached, which it leaves as it was (kiln_aside). Text already in the composer is how the draft begins.
@@ -1093,6 +1432,7 @@ async function draft() {
   const c = conv, begin = input.value;
   if (running(c) || !c.messages.length || status.state !== "online") return;
   const d: { job?: string; stop: boolean } = (drafting = { stop: false });
+  try { await filesReady(c.messages); } catch (e) { drafting = null; return toast(`The draft failed: ${e instanceof Error ? e.message : e}`); }
   const body = request(c, c.messages, {
     sampling: "fast", final: begin.trim() ? { role: "assistant", content: begin } : undefined,
     extra: { kiln_aside: true, max_tokens: 400, logprobs: false, seed: undefined, ...(begin.trim() ? { continue_final_message: true } : {}) },
@@ -1174,6 +1514,9 @@ function copy(text: string, button: HTMLElement) {
 }
 
 $("svg-zoom").addEventListener("click", (e) => (e.currentTarget as HTMLDialogElement).close());   // a click anywhere closes it
+// a page at full size takes clicks: only one beside it closes it (or Esc)
+$("page-zoom").addEventListener("click", (e) => { if (e.target === e.currentTarget) (e.currentTarget as HTMLDialogElement).close(); });
+$("page-zoom").addEventListener("close", () => $("page-zoom").querySelector(".page-zoom-box")!.replaceChildren());
 
 function grow() {
   input.style.height = "auto";
@@ -1187,6 +1530,15 @@ thread.addEventListener("click", (e) => {
   if (code) return void copy(code.closest(".code")?.querySelector("code")?.textContent ?? "", code);
   const svg = t.closest<HTMLElement>("[data-svg]");
   if (svg) return void svgAction(svg);
+  const page = t.closest<HTMLElement>("[data-page]");
+  if (page) return void pageAction(page);
+  if (t instanceof HTMLImageElement && t.dataset.zoom) {
+    const big = h("img");
+    big.src = t.src;
+    big.alt = t.alt;
+    $("svg-zoom").querySelector(".svg-zoom-paper")!.replaceChildren(big);
+    return void $<HTMLDialogElement>("svg-zoom").showModal();
+  }
   if (!act) return;
   const i = Number(act.closest<HTMLElement>("article")?.dataset.i), m = conv.messages[i];
   if (act.dataset.act === "copy") return void copy(m.content, act);
@@ -1270,8 +1622,42 @@ window.addEventListener("hashchange", () => {
   if (id && id !== conv.id) openConversation(id);
 });
 $("new-chat").addEventListener("click", newChat);
+$("export").addEventListener("click", () => void exportChats([conv], fileName(conv.title)));
+$("export-all").addEventListener("click", () => {
+  const all = Object.values(chats).sort((a, b) => b.updated - a.updated);
+  if (all.length) void exportChats(all, `kiln-chats-${new Date().toISOString().slice(0, 10)}.json`);
+  else toast("No chats to export yet");
+});
+$("attach").addEventListener("click", () => $("attach-file").click());
+$("attach-file").addEventListener("change", (e) => {
+  const picker = e.currentTarget as HTMLInputElement;
+  if (picker.files?.length) void addFiles(picker.files).finally(() => { picker.value = ""; });
+});
+input.addEventListener("paste", (e) => {
+  const files = [...(e.clipboardData?.files ?? [])];
+  if (!files.length) return;
+  e.preventDefault();
+  void addFiles(files);
+});
+// Files dragged over the page light up the message box; dropped anywhere, they are attached.
+let dragDepth = 0;
+const dragsFiles = (e: DragEvent) => !!e.dataTransfer?.types.includes("Files");
+document.addEventListener("dragenter", (e) => { if (dragsFiles(e) && dragDepth++ === 0) document.querySelector(".composer-box")!.classList.add("dropping"); });
+document.addEventListener("dragleave", (e) => { if (dragsFiles(e) && --dragDepth === 0) document.querySelector(".composer-box")!.classList.remove("dropping"); });
+document.addEventListener("dragover", (e) => { if (dragsFiles(e)) e.preventDefault(); });
+document.addEventListener("drop", (e) => {
+  if (!dragsFiles(e)) return;
+  e.preventDefault();
+  dragDepth = 0;
+  document.querySelector(".composer-box")!.classList.remove("dropping");
+  void addFiles(e.dataTransfer!.files);
+});
+$("import").addEventListener("click", () => $("import-file").click());
+$("import-file").addEventListener("change", (e) => {
+  const input = e.currentTarget as HTMLInputElement;
+  if (input.files?.length) void importFiles(input.files).finally(() => { input.value = ""; });
+});
 
-// ---- the side panels -------------------------------------------------------------------------------------------
 // The conversations (left) and Settings (right) work alike: a toggle fixed in the panel's top corner (it never moves)
 // and a key. Where the window has room a panel sits beside the chat (the chat glides to its new place), its inner
 // edge resizes it, and it stays as it was left, width and all; with too little room it slides over the chat, starts
@@ -1389,7 +1775,6 @@ document.addEventListener("pointerdown", (e) => {
   const t = e.target as Node;
   for (const p of PANES) if (!p.el.contains(t) && !p.toggle.contains(t) && !$("toast").contains(t)) closeOver(p);
 });
-// ---- the message box's controls: how hard it thinks, and which model -----------------------------------------
 // Thinking is an energy bar of four stops, Off to Max, always in view: it runs hotter to the right (Medium flows; Max
 // is molten: it flows faster, a shine sweeps it, sparks rise from it). The model's name beside the send button opens
 // the models, a flat list; it is the only place a model is chosen (the sidebar shows the engine's state).
@@ -1514,7 +1899,6 @@ function renderControls() {
   pop.replaceChildren(...rows);
 }
 
-// ---- settings ----------------------------------------------------------------------------------------------
 // A panel beside the chat (it opens without moving the chat when there is room). Every change applies to the next
 // reply and can be undone; each value shows what kiln is sent, marked where it differs from the recommended one.
 
@@ -1570,7 +1954,6 @@ function useSeed(seed: number) {
   toast(`Seed ${seed} is fixed for the next replies`, () => { settings.seed = before; saveSettings(); });
 }
 
-// ---- the odds charts --------------------------------------------------------------------------------------------
 // Two real moments of Qwen3.8-Flash-Next run through kiln's sampler (make_dist in engine/sampler.h) with the settings
 // as they stand: the first name of a reply (what the stages do) and the next name of a list that has started to repeat
 // itself (what presence and DRY do). Each sits above the values it shows.
@@ -1923,6 +2306,8 @@ document.addEventListener("visibilitychange", () => { if (!document.hidden) void
 
 $("brand-mark").innerHTML = `<svg class="flame" viewBox="0 0 24 24">${ICONS.flame}</svg>`;
 $("new-chat").innerHTML = `${icon("plus")}New chat`;
+$("export").innerHTML = icon("download");
+$("attach").innerHTML = icon("clip");
 $("draft").addEventListener("click", () => void draft());
 buildControls();
 $("to-latest").innerHTML = icon("down");

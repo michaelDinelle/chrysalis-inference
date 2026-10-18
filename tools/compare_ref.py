@@ -10,7 +10,7 @@ from tokenizers import Tokenizer
 from kiln.engine import Engine
 
 MODEL = "data/models/kiln-mix.gguf"
-# mean KL measured 2026-10-17 (deterministic): decode 0.0022, prefill 0.0050, mixed 0.0021; a decode step that forgets
+# mean KL measured 2026-10-18 (deterministic): decode 0.0022, prefill 0.0035, mixed 0.0022; a decode step that forgets
 # twice as fast lands at 0.024
 MAX_KL, MIN_TOP1 = {"decode": 0.004, "prefill": 0.008, "mixed": 0.004}, 0.95
 TEXT = '''<|im_start|>user
