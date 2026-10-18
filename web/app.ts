@@ -86,11 +86,15 @@ const LOOP: { reply: [string, number][]; cands: [string, number, number][] } = {
 // project structure" and calls to list_files / read_file: 16 replies out of 16, and the Q8_0 original as well); with
 // it, 16 of 16 draw.
 const DEFAULT_SYSTEM = "There are no tools or files in this chat. Answer directly.";
-const EFFORTS: [Effort, string][] = [["xhigh", "Max"], ["medium", "Medium"], ["low", "Low"], ["off", "Off"]];
+// Thinking, a slider in the message box: no thinking (the model's no-thinking mode), then Qwen's three efforts.
+const EFFORTS: Effort[] = ["off", "low", "medium", "xhigh"];
+const LEVEL: Record<Effort, [string]> = { off: ["Off"], low: ["Low"], medium: ["Medium"], xhigh: ["Max"] };
+const HEAT = ["off", "low", "medium", "max"];      // each stop's look, cool to molten
 const ICONS = {
   flame: '<path fill="currentColor" stroke="none" d="M12 1.5c.9 3.6-.9 5.9-2.6 7.9C7.8 11.2 6 13.1 6 15.9 6 19.3 8.7 22 12 22s6-2.6 6-6.2c0-2.7-1.4-4.7-2.6-6.1-.3 1.6-1.2 2.7-2.4 3.2 1-3.9-.2-8.1-1-11.4z"/>',
   plus: '<path d="M12 5v14M5 12h14"/>',
-  menu: '<path d="M4 6h16M4 12h16M4 18h16"/>',
+  paneLeft: '<rect x="3" y="3" width="18" height="18" rx="3"/><path d="M9 3v18"/><path class="chev" d="M15.5 9 12.5 12l3 3"/>',
+  paneRight: '<rect x="3" y="3" width="18" height="18" rx="3"/><path d="M15 3v18"/><path class="chev" d="M8.5 9l3 3-3 3"/>',
   send: '<path d="M12 19V5M5 12l7-7 7 7"/>',
   stop: '<rect x="7" y="7" width="10" height="10" rx="2" fill="currentColor" stroke="none"/>',
   copy: '<rect x="9" y="9" width="11" height="11" rx="2"/><path d="M5 15V5a2 2 0 0 1 2-2h10"/>',
@@ -98,14 +102,13 @@ const ICONS = {
   edit: '<path d="M12 20h9"/><path d="M16.5 3.5a2.1 2.1 0 0 1 3 3L7 19l-4 1 1-4Z"/>',
   check: '<path d="M5 12.5l4.5 4.5L19 7.5"/>',
   chevron: '<path d="M7 10l5 5 5-5"/>',
-  sliders: '<path d="M4 7h9M17 7h3M4 17h3M11 17h9"/><circle cx="15" cy="7" r="2"/><circle cx="9" cy="17" r="2"/>',
-  close: '<path d="M6 6l12 12M18 6 6 18"/>',
   trash: '<path d="M4 7h16M10 11v6M14 11v6M6 7l1 12a2 2 0 0 0 2 2h6a2 2 0 0 0 2-2l1-12M9 7V4h6v3"/>',
   cont: '<path d="M5 6l6 6-6 6M13 6l6 6-6 6"/>',
   tokens: '<path d="M4 19V11M9 19V5M14 19v-6M19 19V9"/>',
   wand: '<path d="M12 3l1.6 4.4L18 9l-4.4 1.6L12 15l-1.6-4.4L6 9l4.4-1.6z"/><path d="M18.5 14.5l.7 1.8 1.8.7-1.8.7-.7 1.8-.7-1.8-1.8-.7 1.8-.7z"/>',
   down: '<path d="M12 5v14M5 12l7 7 7-7"/>',
   grip: '<circle cx="9" cy="6" r="1.3" fill="currentColor" stroke="none"/><circle cx="15" cy="6" r="1.3" fill="currentColor" stroke="none"/><circle cx="9" cy="12" r="1.3" fill="currentColor" stroke="none"/><circle cx="15" cy="12" r="1.3" fill="currentColor" stroke="none"/><circle cx="9" cy="18" r="1.3" fill="currentColor" stroke="none"/><circle cx="15" cy="18" r="1.3" fill="currentColor" stroke="none"/>',
+  power: '<path d="M12 3.5v8"/><path d="M6.6 6.8a7.5 7.5 0 1 0 10.8 0"/>',
   dice: '<rect x="4" y="4" width="16" height="16" rx="3.5"/><circle cx="9" cy="9" r="1.1" fill="currentColor"/><circle cx="15" cy="15" r="1.1" fill="currentColor"/><circle cx="15" cy="9" r="1.1" fill="currentColor"/><circle cx="9" cy="15" r="1.1" fill="currentColor"/>',
 };
 const TITLES = { copy: "Copy", edit: "Edit", trash: "Delete", tokens: "Token odds", retry: "Regenerate" };
@@ -114,6 +117,22 @@ const icon = (name: keyof typeof ICONS) => `<svg class="i" viewBox="0 0 24 24" a
 const $ = <T extends HTMLElement = HTMLElement>(id: string) => document.getElementById(id) as T;
 const thread = $("thread"), scroller = $("scroller"), input = $<HTMLTextAreaElement>("input"), sendBtn = $<HTMLButtonElement>("send");
 const panel = $("settings"), systemInput = $<HTMLTextAreaElement>("system-input");
+// The side panels (the conversations, Settings): one mechanism, in "the side panels" below. A panel's default width
+// is style.css's (widthVar); `preferred` is the width it was given, `width` what the window allows of it.
+interface Pane {
+  name: string; el: HTMLElement; toggle: HTMLElement; key: string; beside: MediaQueryList; byDefault: boolean;
+  widthVar: string; min: number; def: number; preferred: number; width: number; onOpen?: () => void;
+}
+const pane = (name: string, el: HTMLElement, key: string, besideFrom: number, widthVar: string, min: number, onOpen?: () => void): Pane => {
+  const def = parseFloat(getComputedStyle(document.documentElement).getPropertyValue(widthVar));
+  return { name, el, toggle: $(`${name}-toggle`), key, beside: matchMedia(`(min-width: ${besideFrom}px)`), byDefault: el.hasAttribute("data-open"),
+    widthVar, min, def, preferred: def, width: def, onOpen };
+};
+const panes = {
+  conversations: pane("conversations", $("sidebar"), "b", 761, "--side-open", 208),
+  settings: pane("settings", panel, ",", 1460, "--panel-open", 340, () => { syncSettings(); growSystem(); }),
+};
+const PANES = Object.values(panes);
 
 function h<K extends keyof HTMLElementTagNameMap>(tag: K, cls = "", text = ""): HTMLElementTagNameMap[K] {
   const e = document.createElement(tag);
@@ -421,7 +440,6 @@ function render() {
   thread.replaceChildren(...(conv.messages.length ? conv.messages.map(messageView) : [emptyState()]));
   $("title").textContent = conv.title;
   document.title = conv.messages.length ? `${conv.title} · kiln` : "kiln";
-  renderSettingsButton();
   renderComposer();
   renderList();
 }
@@ -673,28 +691,16 @@ function renderComposer() {
   draftBtn.classList.toggle("on", !!drafting);
   draftBtn.hidden = busy || !conv.messages.length;
   $("composer").classList.toggle("drafting", !!drafting);
-  $("effort").replaceChildren(h("span", "label", "Think"), ...EFFORTS.map(([value, label]) => {
-    const b = h("button", "", label);
-    b.type = "button";
-    b.setAttribute("role", "radio");
-    b.setAttribute("aria-checked", String(conv.effort === value));
-    b.onclick = () => { conv.effort = value; setPref("effort", value); renderComposer(); };
-    return b;
-  }));
-  if (modeOf(conv) !== chatMode) {                  // Settings shows the values of the Think setting below
+  renderControls();
+  if (modeOf(conv) !== chatMode) {                  // Settings shows the values of the thinking slider's mode
     chatMode = modeOf(conv);
-    if (!panel.hidden) syncSettings();
+    syncSettings();                                 // (it does nothing while Settings is closed)
   }
-  const s = conv.messages.findLast((m) => m.stats)?.stats;
-  $("meter").textContent = s ? `${fmtK(s.prompt + s.tokens)} / ${fmtK(status.context ?? 262144)} tokens` : "";
 }
 
-// Marked while anything differs from the recommended values.
-function renderSettingsButton() {
-  const custom = settings.system !== DEFAULT_SYSTEM || Object.keys(settings.think).length + Object.keys(settings.fast).length > 0
-    || !!settings.max_tokens || settings.seed !== undefined;
-  $("settings-btn").classList.toggle("on", custom);
-}
+// Anything differs from the recommended values (what Reset all settings would change).
+const customized = () => settings.system !== DEFAULT_SYSTEM || Object.keys(settings.think).length + Object.keys(settings.fast).length > 0
+  || !!settings.max_tokens || settings.seed !== undefined;
 
 function renderList() {
   const nav = $("conversations"), today = new Date().setHours(0, 0, 0, 0);
@@ -705,6 +711,7 @@ function renderList() {
     if (group(s.updated) !== current) nav.append(h("div", "group", (current = group(s.updated))));
     const a = h("a", `conv${s.id === conv.id ? " active" : ""}${runs.has(s.id) ? " running" : ""}`), del = h("button", "conv-del", "×");
     a.href = `#${s.id}`;
+    a.onclick = (e) => { if (!e.defaultPrevented) closeOver(panes.conversations); };   // the open chat too (no hash change)
     del.type = "button";
     del.title = "Delete";
     del.onclick = (e) => {
@@ -742,97 +749,9 @@ async function pickModel(model: string) {
   }
 }
 
-// The model menu opens above the status line: the models with a line each, a check on the one in use.
-let menuOpen = false;
-function setMenu(open: boolean) {
-  menuOpen = open;
-  const menu = $("model-menu"), btn = document.querySelector<HTMLElement>(".model-btn");
-  btn?.setAttribute("aria-expanded", String(open));
-  btn?.classList.toggle("open", open);
-  if (!open) return void (menu.hidden = true);
-  menu.replaceChildren(...MODELS.map(([id, label, about]) => {
-    const item = h("button", id === current() ? "model-item current" : "model-item");
-    item.type = "button";
-    item.setAttribute("role", "menuitemradio");
-    item.setAttribute("aria-checked", String(id === current()));
-    const text = h("span", "model-text");
-    text.append(h("span", "model-label", label), h("span", "model-about", about));
-    const mark = h("span", "model-check");
-    if (id === current()) mark.innerHTML = icon("check");
-    item.append(text, mark);
-    item.onclick = () => { setMenu(false); if (id !== current()) void pickModel(id); };
-    return item;
-  }));
-  const sidebar = $("sidebar").getBoundingClientRect(), statusTop = $("status").getBoundingClientRect().top;
-  menu.style.bottom = `${sidebar.bottom - statusTop + 6}px`;
-  menu.hidden = false;
-  (menu.querySelector(".current") as HTMLElement | null)?.focus();
-}
-document.addEventListener("click", (e) => {
-  if (menuOpen && !(e.target as HTMLElement).closest("#model-menu, .model-btn")) setMenu(false);
-});
-
-let shownStatus = "";
+// The engine's state lives with the model in the message box (renderControls): nothing of it in the sidebar.
 function renderStatus() {
-  const el = $("status");
-  const loading = status.state === "loading" || !!status.loading;
-  const pct = status.progress == null ? null : Math.round(status.progress * 100);
-  // While a model loads only the bar moves: update it in place so its width animates between polls.
-  if (loading && el.dataset.view === `loading:${current()}`) {
-    const fill = el.querySelector<HTMLElement>(".bar.load > i"), num = el.querySelector(".pct");
-    if (pct != null && fill && num) {
-      el.querySelector(".bar.load")!.classList.remove("indeterminate");
-      fill.style.width = `${pct}%`;
-      num.textContent = `${pct}%`;
-    }
-    return;
-  }
-  // Polled every 4 s: redraw only what changed, so an idle page does not repaint.
-  const key = JSON.stringify([status.state, status.model, status.loading, picked, status.context, status.kv_tokens, status.cache?.free_kv_tokens]);
-  if (key === shownStatus) return;
-  shownStatus = key;
-  const line = h("div", "status-line");
-  line.append(h("span", `dot ${loading ? "loading" : status.state}`));
-  el.replaceChildren(line);
-  el.dataset.view = loading ? `loading:${current()}` : status.state;
-  if (loading) {
-    if (menuOpen) setMenu(false);
-    line.append(h("span", "loading-name", `Loading ${modelName(current())}`), h("span", "pct", pct == null ? "" : `${pct}%`));
-    const bar = h("div", pct == null ? "bar load indeterminate" : "bar load"), fill = h("i");
-    fill.style.width = `${pct ?? 0}%`;
-    bar.append(fill);
-    el.append(bar);
-    return;
-  }
-  const button = (label: string, action: () => Promise<void>) => {
-    const b = h("button", "link-btn", label);
-    b.type = "button";
-    b.onclick = async () => { await action(); await refreshStatus(); };
-    return b;
-  };
-  const pick = h("button", "model-btn");
-  pick.type = "button";
-  pick.title = "Choose the model";
-  pick.setAttribute("aria-haspopup", "menu");
-  pick.setAttribute("aria-expanded", String(menuOpen));
-  pick.append(h("span", "", modelName(current())));
-  pick.insertAdjacentHTML("beforeend", icon("chevron"));
-  pick.onclick = () => setMenu(!menuOpen);
-  line.append(pick);
-  if (status.state === "online") {
-    const used = status.kv_tokens && status.cache ? 1 - status.cache.free_kv_tokens / status.kv_tokens : 0;
-    const bar = h("div", "bar"), fill = h("i");
-    fill.style.width = `${Math.round(used * 100)}%`;
-    bar.append(fill);
-    bar.title = `${fmtK(status.cache?.free_kv_tokens ?? 0)} of ${fmtK(status.kv_tokens ?? 0)} KV tokens free (cached conversations are dropped as needed)`;
-    line.append(button("Unload", async () => { await fetch("/api/kiln/stop", { method: "POST" }); }));
-    const kv = h("div", "status-line kv");
-    kv.append(h("span", "", `${fmtK(status.context ?? 0)} context · cache ${Math.round(used * 100)}%`), bar);
-    el.append(kv);
-  } else {
-    line.append(button("Load", start));
-  }
-  if (menuOpen) setMenu(true);                    // the line moved: keep the menu above it
+  renderControls();
 }
 
 // ---- talking to kiln ---------------------------------------------------------------------------------------
@@ -1210,7 +1129,7 @@ async function draft() {
 
 function openConversation(id: string) {
   conv = runs.get(id)?.conv ?? (chats[id] ? structuredClone(chats[id]) : blank());   // a reply being written keeps going
-  document.body.classList.remove("nav-open");
+  closeOver(panes.conversations);
   render();
   scroller.scrollTop = scroller.scrollHeight;
   follow = true;
@@ -1220,7 +1139,7 @@ function openConversation(id: string) {
 function newChat() {
   conv = blank();
   history.replaceState(null, "", location.pathname);
-  document.body.classList.remove("nav-open");
+  closeOver(panes.conversations);
   render();
   input.focus();
 }
@@ -1305,18 +1224,20 @@ input.addEventListener("keydown", (e) => {
     submit(input.value);
   }
 });
-// Esc stops this chat's reply, unless it is closing something: a menu, a picture at full size, Settings (when it is
-// in use or covers the chat)
+// Ctrl+B and Ctrl+, toggle the side panels. Esc stops this chat's reply, unless it is closing something: a menu, a
+// picture at full size, a panel over the chat.
 document.addEventListener("keydown", (e) => {
-  if (e.key === "," && (e.ctrlKey || e.metaKey) && !e.altKey) {
+  const keyed = (e.ctrlKey || e.metaKey) && !e.altKey && !e.shiftKey && PANES.find((p) => e.key.toLowerCase() === p.key);
+  if (keyed) {
     e.preventDefault();
-    return setPanel(panel.hidden !== false);
+    return setPane(keyed, !isOpen(keyed));
   }
   if (e.key !== "Escape" || e.defaultPrevented) return;
   if (!$("tokpop").hidden) return closeTokPop();
-  if (menuOpen) return setMenu(false);
+  if (modelsOpen) return setModelsOpen(false, true);
   if (document.querySelector("dialog[open]")) return;
-  if (!panel.hidden && (panel.contains(document.activeElement) || !docked.matches)) return setPanel(false);
+  const over = PANES.find((p) => isOpen(p) && !p.beside.matches);
+  if (over) return setPane(over, false);
   const r = running();
   if (r) stopRun(r);
 });
@@ -1350,13 +1271,254 @@ window.addEventListener("hashchange", () => {
   if (id && id !== conv.id) openConversation(id);
 });
 $("new-chat").addEventListener("click", newChat);
-$("menu").addEventListener("click", () => document.body.classList.toggle("nav-open"));
-$("scrim").addEventListener("click", () => document.body.classList.remove("nav-open"));
+
+// ---- the side panels -------------------------------------------------------------------------------------------
+// The conversations (left) and Settings (right) work alike: a toggle fixed in the panel's top corner (it never moves)
+// and a key. Where the window has room a panel sits beside the chat (the chat glides to its new place), its inner
+// edge resizes it, and it stays as it was left, width and all; with too little room it slides over the chat, starts
+// closed, and a click outside it or Esc closes it. One panel over the chat at a time.
+const MAIN_MIN = 640;                                    // the chat beside the panels keeps this much (its message box fits)
+const isOpen = (p: Pane) => p.el.hasAttribute("data-open");
+const besideOpen = (p: Pane) => isOpen(p) && p.beside.matches;
+// Changes to the layout while `still` > 0 (a drag, a window being resized, a state restored) take effect at once
+// rather than easing.
+let still = 0;
+function hush() {
+  still++;
+  document.documentElement.classList.add("no-anim");
+}
+function unhush() {
+  requestAnimationFrame(() => requestAnimationFrame(() => { if (--still === 0) document.documentElement.classList.remove("no-anim"); }));
+}
+// Each panel's width: the one it was given, as far as the window allows. The chat keeps MAIN_MIN, and Settings gives
+// way to the conversations (down to its minimum) before they give way to it.
+function fitPanes() {
+  const { conversations: c, settings: s } = panes, room = innerWidth - MAIN_MIN;
+  c.width = Math.round(Math.max(c.min, Math.min(c.preferred, room - (besideOpen(s) ? s.min : 0))));
+  s.width = Math.round(Math.max(s.min, Math.min(s.preferred, room - (besideOpen(c) ? c.width : 0))));
+  for (const p of PANES) document.documentElement.style.setProperty(p.widthVar, `${p.width}px`);
+}
+function setPane(p: Pane, open: boolean, { focus = true, animate = true } = {}) {
+  if (!animate) hush();
+  p.el.toggleAttribute("data-open", open);
+  p.el.toggleAttribute("data-over", !p.beside.matches);
+  p.el.inert = !open;
+  p.toggle.setAttribute("aria-expanded", String(open));
+  if (p.beside.matches) setPref(`pane-${p.name}`, open ? "open" : "closed");
+  if (open && !p.beside.matches) for (const q of PANES) if (q !== p) closeOver(q);
+  fitPanes();                                            // the other panel may have more room now, or less
+  if (open) {
+    p.onOpen?.();
+    if (focus && !p.beside.matches) p.el.focus({ preventScroll: true });
+  } else if (p.el.contains(document.activeElement)) p.toggle.focus();
+  if (!animate) unhush();
+}
+function closeOver(p: Pane) {
+  if (isOpen(p) && !p.beside.matches) setPane(p, false, { focus: false });
+}
+// as it was left (beside the chat) or closed (over it), at the width it was given, without sliding there
+function restorePane(p: Pane) {
+  const saved = pref(`pane-${p.name}`, "");
+  p.preferred = Number(pref(`pane-${p.name}-width`, "")) || p.def;
+  setPane(p, p.beside.matches && (saved ? saved === "open" : p.byDefault), { focus: false, animate: false });
+}
+// Dragging the inner edge resizes the panel: it follows the pointer (no easing), within the window's limits, and the
+// width it ends at is kept. A press that does not move (2 px) changes nothing; a double click gives the panel its
+// default width back, eased.
+function resizeWith(p: Pane, rail: HTMLElement) {
+  const dir = p.el.dataset.side === "left" ? 1 : -1;
+  rail.addEventListener("pointerdown", (e) => {
+    if (e.button !== 0 || !besideOpen(p)) return;
+    e.preventDefault();
+    rail.setPointerCapture(e.pointerId);
+    const x0 = e.clientX, w0 = p.width;
+    let x = x0, frame = 0, moved = false;
+    const apply = () => {
+      frame = 0;
+      if (!moved) return;
+      p.preferred = w0 + (x - x0) * dir;
+      fitPanes();
+    };
+    const move = (ev: PointerEvent) => {
+      x = ev.clientX;
+      if (!moved && Math.abs(x - x0) > 2) {
+        moved = true;
+        hush();
+      }
+      frame ||= requestAnimationFrame(apply);
+    };
+    const up = (ev: PointerEvent) => { x = ev.clientX; };
+    const end = () => {                                  // capture ends on pointerup and on pointercancel
+      cancelAnimationFrame(frame);
+      apply();
+      rail.classList.remove("dragging");
+      document.documentElement.classList.remove("pane-resizing");
+      rail.removeEventListener("pointermove", move);
+      rail.removeEventListener("pointerup", up);
+      rail.removeEventListener("lostpointercapture", end);
+      if (!moved) return;
+      p.preferred = p.width;
+      setPref(`pane-${p.name}-width`, String(p.width));
+      unhush();
+    };
+    rail.classList.add("dragging");
+    document.documentElement.classList.add("pane-resizing");
+    rail.addEventListener("pointermove", move);
+    rail.addEventListener("pointerup", up);
+    rail.addEventListener("lostpointercapture", end);
+  });
+  rail.addEventListener("dblclick", () => {
+    p.preferred = p.def;
+    setPref(`pane-${p.name}-width`, "");
+    fitPanes();
+  });
+}
+for (const p of PANES) {
+  const label = p.toggle.getAttribute("aria-label")!;
+  p.toggle.innerHTML = icon(p.el.dataset.side === "left" ? "paneLeft" : "paneRight");
+  p.toggle.title = `${label} (Ctrl+${p.key.toUpperCase()})`;
+  p.toggle.addEventListener("click", () => setPane(p, !isOpen(p)));
+  const rail = p.el.querySelector<HTMLElement>(".pane-rail")!;
+  rail.title = "Drag to resize · double-click for the default width";
+  rail.setAttribute("aria-label", `Resize ${label.toLowerCase()}`);
+  resizeWith(p, rail);
+  p.beside.addEventListener("change", () => restorePane(p));
+}
+addEventListener("resize", () => { hush(); fitPanes(); unhush(); });
+// Over the chat, a click outside the panel closes it (and goes on to do what it was for), except on a toast (its Undo).
+document.addEventListener("pointerdown", (e) => {
+  const t = e.target as Node;
+  for (const p of PANES) if (!p.el.contains(t) && !p.toggle.contains(t) && !$("toast").contains(t)) closeOver(p);
+});
+// ---- the message box's controls: how hard it thinks, and which model -----------------------------------------
+// Thinking is an energy bar of four stops, Off to Max, always in view: it runs hotter to the right (Medium flows; Max
+// is molten: it flows faster, a shine sweeps it, sparks rise from it). The model's name beside the send button opens
+// the models, a flat list; it is the only place a model is chosen (the sidebar shows the engine's state).
+let modelsOpen = false;
+
+function buildControls() {
+  const energy = $("energy"), seeded = (i: number) => ((Math.sin(i * 12.9898) * 43758.5453) % 1 + 1) % 1;
+  const sparks = Array.from({ length: 12 }, (_, i) =>
+    `<b class="spark" style="--x:${(4 + seeded(i) * 92).toFixed(1)}%;--d:${(1.1 + seeded(i + 40) * 1.2).toFixed(2)}s;--delay:-${(seeded(i + 80) * 2.4).toFixed(2)}s;--dx:${((seeded(i + 120) - 0.5) * 8).toFixed(1)}px;--w:${seeded(i + 160) > 0.7 ? 2.5 : 1.5}px"></b>`).join("");
+  energy.innerHTML = `<span class="energy-track"><span class="energy-fill"><i class="energy-shine"></i>${sparks}</span>` +
+    EFFORTS.map((_, k) => `<i class="energy-dot" style="--k:${k}"></i>`).join("") + `</span><span class="energy-thumb"></span>`;
+  $("energy-stops").innerHTML = EFFORTS.map((e, k) => `<button type="button" tabindex="-1" data-stop="${k}" style="--k:${k}">${LEVEL[e][0]}</button>`).join("");
+  $("energy-stops").addEventListener("click", (e) => {
+    const b = (e.target as Element).closest<HTMLElement>("[data-stop]");
+    if (b) setEffort(Number(b.dataset.stop));
+  });
+  // A third of the way to a stop takes it (the thumb leads the hand), and it snaps there in under 0.1 s.
+  const stopAt = (x: number, dir: number) => {
+    const r = energy.getBoundingClientRect(), t = energy.querySelector<HTMLElement>(".energy-thumb")!.offsetWidth;
+    return Math.min(3, Math.max(0, Math.round(((x - r.left - t / 2) / (r.width - t)) * 3 + 0.17 * dir)));
+  };
+  let lastX = 0;
+  energy.addEventListener("pointerdown", (e) => {
+    energy.setPointerCapture(e.pointerId);
+    energy.classList.add("dragging");
+    lastX = e.clientX;
+    setEffort(stopAt(e.clientX, 0));
+  });
+  energy.addEventListener("pointermove", (e) => {
+    if (!energy.hasPointerCapture(e.pointerId)) return;
+    const dir = Math.sign(e.clientX - lastX);
+    lastX = e.clientX;
+    if (dir) setEffort(stopAt(e.clientX, dir));
+  });
+  for (const end of ["pointerup", "pointercancel"]) energy.addEventListener(end, () => energy.classList.remove("dragging"));
+  energy.addEventListener("keydown", (e) => {
+    const at = EFFORTS.indexOf(conv.effort), step = ({ ArrowLeft: -1, ArrowDown: -1, ArrowRight: 1, ArrowUp: 1 } as Record<string, number>)[e.key];
+    if (step) setEffort(at + step);
+    else if (e.key === "Home" || e.key === "End") setEffort(e.key === "Home" ? 0 : 3);
+    else return;
+    e.preventDefault();
+  });
+  $("model-btn").addEventListener("click", () => setModelsOpen(!modelsOpen));
+  $("power").addEventListener("click", async () => {
+    if (status.state === "online") await fetch("/api/kiln/stop", { method: "POST" });
+    else await start();
+    await refreshStatus();
+  });
+  document.addEventListener("pointerdown", (e) => {
+    if (modelsOpen && !(e.target as Element).closest("#model-pop, #model-btn")) setModelsOpen(false);
+  });
+}
+
+function setEffort(i: number) {
+  const e = EFFORTS[Math.min(3, Math.max(0, i))];
+  if (e === conv.effort) return;
+  conv.effort = e;
+  setPref("effort", e);
+  renderComposer();
+}
+
+function setModelsOpen(open: boolean, refocus = false) {
+  modelsOpen = open;
+  $("model-pop").hidden = !open;
+  delete $("model-pop").dataset.key;
+  renderControls();
+  if (open) $("model-pop").querySelector<HTMLElement>(".current")?.focus();
+  else if (refocus) $("model-btn").focus();
+}
+
+const shortName = (id: string) => modelName(id).replace(/^Qwen3\.8-/, "");
+function renderControls() {
+  const at = EFFORTS.indexOf(conv.effort), energy = $("energy");
+  energy.dataset.heat = HEAT[at];
+  energy.style.setProperty("--v", String(at));
+  energy.setAttribute("aria-valuenow", String(at));
+  energy.setAttribute("aria-valuetext", LEVEL[conv.effort][0]);
+  energy.title = `Thinking: ${LEVEL[conv.effort][0]}`;
+  energy.querySelectorAll(".energy-dot").forEach((d, k) => d.classList.toggle("lit", at > 0 && k <= at));   // the stops inside the fill
+  $("energy-stops").dataset.heat = HEAT[at];
+  $("energy-stops").querySelectorAll("button").forEach((b, k) => b.classList.toggle("on", k === at));
+  // the model, and the engine's state: a dot (ready, loading, stopped), the load's progress while it switches
+  const state = status.loading || status.state === "loading" ? "loading" : status.state;
+  const pct = status.progress == null ? "" : `${Math.round(status.progress * 100)}%`, name = modelName(current());
+  const btn = $("model-btn");
+  btn.innerHTML = `<span class="dot ${state}"></span>${shortName(current())}${state === "loading" && pct ? `<span class="model-pct">${pct}</span>` : ""}${icon("chevron")}`;
+  btn.title = state === "online" ? `${name}: ready` : state === "loading" ? `Loading ${name}` : `${name}: stopped`;
+  btn.setAttribute("aria-expanded", String(modelsOpen));
+  btn.classList.toggle("open", modelsOpen);
+  // usage, in view: this chat's length against the context, and how full kiln's cache of conversations is
+  const used = status.kv_tokens && status.cache ? 1 - status.cache.free_kv_tokens / status.kv_tokens : 0, ctx = fmtK(status.context ?? 262144);
+  const s = conv.messages.findLast((m) => m.stats)?.stats, meter = $("meter");
+  meter.textContent = [s ? `${fmtK(s.prompt + s.tokens)} / ${ctx} context` : state === "online" ? `${ctx} context` : "",
+    state === "online" ? `cache ${Math.round(used * 100)}%` : ""].filter(Boolean).join(" · ");
+  meter.title = state === "online" ? `${fmtK(status.cache?.free_kv_tokens ?? 0)} of ${fmtK(status.kv_tokens ?? 0)} KV tokens free (cached conversations are dropped as needed)` : "";
+  // power: unload the model, or load it when it is stopped
+  const power = $<HTMLButtonElement>("power");
+  power.innerHTML = icon("power");
+  power.title = power.ariaLabel = state === "online" ? `Unload ${name}` : state === "loading" ? `Loading ${name}` : `Load ${name}`;
+  power.disabled = state === "loading";
+  if (!modelsOpen) return;
+  // the list (redrawn only when something in it changed, so a poll never takes the focus from it)
+  const pop = $("model-pop");
+  const key = JSON.stringify([current(), state, pct]);
+  if (pop.dataset.key === key) return;
+  pop.dataset.key = key;
+  const rows = MODELS.map(([id, label]) => {
+    const on = id === current(), item = h("button", on ? "model-item current" : "model-item");
+    item.type = "button";
+    item.setAttribute("role", "option");
+    item.setAttribute("aria-selected", String(on));
+    const mark = h("span", "model-check");
+    if (on && state === "loading") mark.textContent = pct || "…";
+    else if (on) mark.innerHTML = icon("check");
+    item.append(h("span", "model-label", label), mark);
+    item.onclick = () => {
+      if (!on || state === "offline") { picked = id; setPref("model", id); void (state === "offline" ? start().then(refreshStatus) : pickModel(id)); }
+      setModelsOpen(false, true);
+    };
+    return item;
+  });
+  pop.replaceChildren(...rows);
+}
+
 // ---- settings ----------------------------------------------------------------------------------------------
 // A panel beside the chat (it opens without moving the chat when there is room). Every change applies to the next
 // reply and can be undone; each value shows what kiln is sent, marked where it differs from the recommended one.
 
-const docked = matchMedia("(min-width: 1460px)");    // beside the chat; narrower, it slides over it
 const modeOf = (c: Conversation): Mode => (c.effort === "off" ? "fast" : "think");
 let chatMode: Mode | undefined;                     // the Think setting Settings last showed
 const shownMode = (): Mode => modeOf(conv);             // the values Settings shows: those of the chat's Think setting
@@ -1372,7 +1534,6 @@ function loadSettings(): Settings {
 }
 function saveSettings() {
   store("settings2", settings);
-  renderSettingsButton();
   syncSettings();
 }
 const value = (mode: Mode, key: SamplerKey) => settings[mode][key] ?? RECOMMENDED[mode][key];
@@ -1607,6 +1768,7 @@ function knob(k: KnobSpec) {
   num.spellcheck = false;
   num.autocomplete = "off";
   range.type = "range";
+  range.className = "slider";
   range.min = "0";
   range.max = "1";
   range.step = "any";
@@ -1767,21 +1929,13 @@ function buildSettings() {
     toast("The system prompt is back to the default", () => { settings.system = before; saveSettings(); growSystem(); });
   };
   $("settings-reset").onclick = () => {
-    if (!$("settings-btn").classList.contains("on")) return toast("Everything is already at the recommended values");
+    if (!customized()) return toast("Everything is already at the recommended values");
     const before = structuredClone(settings);
     settings = { system: DEFAULT_SYSTEM, think: {}, fast: {} };
     saveSettings();
     growSystem();
     toast("Everything is back to the recommended values", () => { settings = before; saveSettings(); growSystem(); });
   };
-  $("settings-btn").onclick = () => setPanel(!document.body.classList.contains("settings-open"));
-  $("settings-close").onclick = () => setPanel(false);
-  // Slid over the chat (narrow windows), a click outside closes it.
-  document.addEventListener("pointerdown", (e) => {
-    const t = e.target as Node;
-    if (document.body.classList.contains("settings-open") && !docked.matches && !panel.contains(t) && !$("settings-btn").contains(t)
-      && !$("toast").contains(t)) setPanel(false);
-  });
   measureScrollbar();
   addEventListener("resize", measureScrollbar);
 }
@@ -1819,7 +1973,7 @@ function placeStages() {
 }
 
 function syncSettings() {
-  if (!document.body.classList.contains("settings-open")) return;
+  if (!isOpen(panes.settings)) return;
   if (document.activeElement !== systemInput && systemInput.value !== settings.system) systemInput.value = settings.system;
   $("system-reset").classList.toggle("on", settings.system !== DEFAULT_SYSTEM);
 
@@ -1830,30 +1984,17 @@ function syncSettings() {
   drawCharts();
 }
 
-function setPanel(open: boolean, focus = true) {
-  document.body.classList.toggle("settings-open", open);
-  panel.inert = !open;
-  $("settings-btn").setAttribute("aria-expanded", String(open));
-  if (docked.matches) setPref("settings", open ? "open" : "");
-  if (open) {
-    syncSettings();
-    growSystem();
-    if (focus) panel.focus({ preventScroll: true });
-  } else if (panel.contains(document.activeElement)) $("settings-btn").focus();
-}
-
 document.addEventListener("visibilitychange", () => { if (!document.hidden) void refreshStatus(); });
 
 $("brand-mark").innerHTML = `<svg class="flame" viewBox="0 0 24 24">${ICONS.flame}</svg>`;
 $("new-chat").innerHTML = `${icon("plus")}New chat`;
-$("menu").innerHTML = icon("menu");
-$("settings-btn").innerHTML = `${icon("sliders")}<span>Settings</span>`;
 $("draft").addEventListener("click", () => void draft());
-$("settings-close").innerHTML = icon("close");
+buildControls();
 $("to-latest").innerHTML = icon("down");
 $("settings-reset").insertAdjacentHTML("afterbegin", icon("retry"));
 for (const id of ["system-reset", "order-reset"]) $(id).innerHTML = icon("retry");
 buildSettings();
+for (const p of PANES) restorePane(p);
 await refreshStatus();
 for (const c of Object.values(chats)) {
   const m = c.messages.at(-1);
@@ -1861,7 +2002,6 @@ for (const c of Object.values(chats)) {
 }
 if (location.hash.length > 1) openConversation(location.hash.slice(1));
 else render();
-setPanel(docked.matches && pref("settings", "") === "open", false);
 // Every 4 s, or 4 times a second while a model loads (5-20 s).
 (async () => {
   for (;;) {

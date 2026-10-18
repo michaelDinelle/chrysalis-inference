@@ -41,8 +41,12 @@ while it is written (in RAM, until 15 minutes after it ends): opening another ch
 laptop asleep or a dropped connection leave it running, and the page follows it again from the last event it saw;
 only Stop (the button, or Esc when nothing else is open) or deleting the chat ends it early.
 Replies stream with their reasoning (collapsible), each one shows time to first token, tok/s, how much of the
-prompt came from cache, the sampling values that differed from the recommended ones and its seed. The Think switch
-picks the reasoning effort (Max, Medium, Low) or the no-thinking model (Off).
+prompt came from cache, the sampling values that differed from the recommended ones and its seed. In the message box,
+an energy bar sets the thinking: Off (the no-thinking mode), Low, Medium or Max. It runs hotter to the right (Medium
+flows; Max is molten, with a sweeping shine and rising sparks), and dragging takes a stop a third of the way to it.
+The model's name beside the send button opens the models; it is the only place a model is chosen. Beside it are the
+engine's state (a dot: ready, loading with its progress, or stopped), a power button (unload, or load) and the usage:
+this chat against the context, and how full kiln's cache of conversations is.
 Message actions keep fixed places (from the right: delete, edit, copy on every message, then a reply's token odds,
 regenerate and continue), so none moves between messages. Every message can be edited in place (a reply's thinking too; on the last question, Save & regenerate draws a new
 reply) or deleted (with Undo). The last reply can be regenerated or continued (Continue is spelled out when the
@@ -58,8 +62,8 @@ and can be undone, for every conversation in the tab (kept with them). It shows 
   coding-agent task ("let me first explore the project structure", then calls to tools that do not exist), as the
   Q8_0 original does too.
 - Sampling: top-k, temperature, top-p and min-p, one row each in the order the sampler applies them (drag a row by
-  its grip to reorder), one set with thinking and one without, starting from Qwen's recommended values. Think in the
-  message box is the one switch: the panel shows (and edits) the set it selects.
+  its grip to reorder), one set with thinking and one without, starting from Qwen's recommended values. The thinking bar
+  in the message box is the one switch: the panel shows (and edits) the set its level selects.
 - Repetition: presence penalty and DRY (with its allowed run and growth).
 Each group sits under a chart of real odds run through kiln's whole sampler with the settings as they stand. Sampling:
 Qwen naming a cat (the first word, 2,000 draws), a row per name with a bar for its odds now and a tick where the model
@@ -70,8 +74,12 @@ candidates): the reply line marks the names presence counts as used and the run 
 explanations elsewhere are tooltips, so nothing in the panel changes size while it is used.
 - The reply's max length and the seed: random for every reply, or fixed. Clicking a reply's seed fixes it.
 A value that differs from the recommended one is marked; ↺ or a double click on its slider brings it back. The
-sidebar starts or unloads the model (sending a message starts it too). Assistant turns go back
-to kiln exactly as received, so every turn of a conversation is a cache hit.
+sidebar holds the conversations (sending a message starts the model too). It and Settings are side panels that work
+alike: a toggle fixed in the window's top corner (left: conversations, Ctrl+B; right: Settings, Ctrl+,), which
+never moves. With room, a panel sits beside the chat, dragging its inner edge resizes it (a double click gives it its
+default width back; the chat keeps at least 640 px), and it stays as it was left, width and all; in a narrower window
+it slides over the chat and a click outside it or Esc closes it. Assistant turns go back to kiln exactly as
+received, so every turn of a conversation is a cache hit.
 While a reply streams the page follows it, until you scroll up (wheel, touch, keys or the scrollbar); back at the
 end, or with the ↓ over the message box, it follows again, and it never scrolls up on its own. A figure being drawn
 is shown from its top, as large as what can be seen at once (the column's width or the visible height), and the page

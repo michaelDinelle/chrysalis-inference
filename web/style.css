@@ -12,6 +12,9 @@
   --accent: #f07a3c;
   --accent-hi: #ff9d62;
   --accent-soft: rgb(240 122 60 / 0.14);
+  --heat-1: #f0a462;          /* the thinking levels, cool to hot: Low, Medium, Max */
+  --heat-2: #f07a3c;
+  --heat-3: #ffa45c;
   --ok: #6ccf8e;
   --warn: #e8b04a;
   --danger: #f2706b;
@@ -43,6 +46,9 @@
     --accent: #d8621f;
     --accent-hi: #b9500f;
     --accent-soft: rgb(216 98 31 / 0.11);
+    --heat-1: #b26a3a;
+    --heat-2: #d8621f;
+    --heat-3: #c2410c;
     --code: #f8f4ef;
     --paper: #ffffff;
     --shadow: 0 12px 32px rgb(70 45 20 / 0.09);
@@ -63,13 +69,63 @@ button { font: inherit; color: inherit; cursor: pointer; }
 .i { width: 18px; height: 18px; flex: none; fill: none; stroke: currentColor; stroke-width: 2; stroke-linecap: round; stroke-linejoin: round; }
 .flame { color: var(--accent); }
 
-#app { display: grid; grid-template-columns: 272px minmax(0, 1fr) 0; height: 100dvh; transition: grid-template-columns 0.26s cubic-bezier(0.2, 0.7, 0.2, 1); }
-#scrim { display: none; }
+/* ---- the side panels: the conversations (left) and Settings (right), one mechanism ----
+   Beside the chat a panel is a grid column whose width is an animated length, and the chat column reads the same
+   lengths for its place, so the grid and the column move together, frame for frame. Over the chat (where app.ts finds
+   too little room: data-over) it slides in on top. Its content keeps its width either way: it slides, it is never
+   squeezed. Its width is its own (its inner edge resizes it); these are the defaults, and app.ts keeps them within
+   what the window allows. */
+@property --side-w { syntax: "<length>"; inherits: true; initial-value: 0px; }
+@property --panel-w { syntax: "<length>"; inherits: true; initial-value: 0px; }
+:root { --side-open: 272px; --panel-open: 380px; --pane-ease: 0.26s cubic-bezier(0.2, 0.7, 0.2, 1); --bar-h: 52px;
+  --toggle-size: 28px; --toggle-inset: 12px; --toggle-room: calc(var(--toggle-size) + 2 * var(--toggle-inset)); }
+@media (max-width: 639px) { :root { --toggle-size: 32px; } }     /* a finger's size where windows are a phone's */
+#app { --side-w: 0px; --panel-w: 0px; display: grid; grid-template-columns: var(--side-w) minmax(0, 1fr) var(--panel-w); height: 100dvh;
+  transition: --side-w var(--pane-ease), --panel-w var(--pane-ease); }
+#app:has(> #sidebar[data-open]:not([data-over])) { --side-w: var(--side-open); }
+#app:has(> #settings[data-open]:not([data-over])) { --panel-w: var(--panel-open); }
+#sidebar { --pane-w: var(--side-open); grid-column: 1; }
+#settings { --pane-w: var(--panel-open); grid-column: 3; }
+.pane { position: relative; min-width: 0; min-height: 0; overflow: hidden; background: var(--panel); outline: none; }
+.pane-inner { position: absolute; top: 0; bottom: 0; display: flex; flex-direction: column; width: var(--pane-w); }
+.pane[data-side="left"] .pane-inner { right: 0; border-right: 1px solid var(--line); }
+.pane[data-side="right"] .pane-inner { left: 0; border-left: 1px solid var(--line); }
+.pane[data-over] { position: fixed; top: 0; bottom: 0; z-index: 30; width: min(var(--pane-w), 100vw); transition: transform var(--pane-ease); }
+.pane[data-over] .pane-inner { width: 100%; }
+.pane[data-over][data-side="left"] { left: 0; transform: translateX(-100%); }
+.pane[data-over][data-side="right"] { right: 0; transform: translateX(100%); }
+.pane[data-over][data-open] { transform: none; box-shadow: var(--shadow); }
+.no-anim #app, .no-anim .pane, .no-anim .pane-toggle .chev { transition: none !important; }
+/* the head: as tall as the chat's top bar (one line runs under all three), with room for the toggle in its corner */
+.pane-head { display: flex; flex: none; align-items: center; gap: 8px; height: var(--bar-h); border-bottom: 1px solid var(--line); }
+.pane[data-side="left"] .pane-head { padding: 0 12px 0 var(--toggle-room); }
+.pane[data-side="right"] .pane-head { padding: 0 var(--toggle-room) 0 20px; }
+/* the toggle: fixed in its corner, above a panel over the chat; open, a chevron points the way it closes */
+.act.pane-toggle { position: fixed; top: calc((var(--bar-h) - var(--toggle-size)) / 2); z-index: 45; width: var(--toggle-size); height: var(--toggle-size); border-radius: 8px; }
+.act.pane-toggle .i { width: 16px; height: 16px; }   /* (over .act's 28px and 15px, which come later) */
+.pane-toggle[data-side="left"] { left: var(--toggle-inset); }
+.pane-toggle[data-side="right"] { right: var(--toggle-inset); }
+.pane-toggle .chev { opacity: 0; transition: opacity 0.2s, transform 0.2s; }
+.pane-toggle[data-side="left"] .chev { transform: translateX(2px); }
+.pane-toggle[data-side="right"] .chev { transform: translateX(-2px); }
+.pane-toggle[aria-expanded="true"] .chev { opacity: 1; transform: none; }
+/* the inner edge, beside the chat: drag it to resize the panel, double-click it for the default width. Inside the
+   panel, so it never covers the chat's scrollbar (nor the list's, nor the stage grips). */
+.pane-rail { position: absolute; top: 0; bottom: 0; z-index: 1; width: 6px; cursor: col-resize; touch-action: none; }
+.pane[data-side="left"] .pane-rail { right: 0; }
+.pane[data-side="right"] .pane-rail { left: 0; }
+.pane[data-over] .pane-rail { display: none; }
+.pane-rail::after { content: ""; position: absolute; top: 0; bottom: 0; width: 2px; transition: background-color 0.15s; }
+.pane[data-side="left"] .pane-rail::after { right: -1px; }
+.pane[data-side="right"] .pane-rail::after { left: -1px; }
+.pane-rail:hover::after { background: var(--faint); }
+.pane-rail.dragging::after { background: var(--accent); }
+.pane-resizing, .pane-resizing * { cursor: col-resize !important; user-select: none !important; }
 
-/* ---- sidebar ---- */
-#sidebar { position: relative; display: flex; flex-direction: column; gap: 6px; min-height: 0; padding: 14px 10px 10px; background: var(--panel); border-right: 1px solid var(--line); }
-.brand { display: flex; align-items: center; gap: 8px; padding: 2px 8px 10px; font-size: 18px; font-weight: 650; letter-spacing: 0.01em; }
-.brand svg { display: block; width: 22px; height: 22px; }
+/* ---- conversations ---- */
+.brand { display: flex; align-items: center; gap: 8px; font-size: 17px; font-weight: 650; letter-spacing: 0.01em; }
+.brand svg { display: block; width: 20px; height: 20px; }
+.side-body { display: flex; flex: 1; flex-direction: column; gap: 6px; min-height: 0; padding: 10px; }
 #new-chat { justify-content: flex-start; }
 #conversations { flex: 1; min-height: 0; overflow-y: auto; margin: 4px -4px 0; padding: 0 4px; }
 .group { margin: 14px 10px 4px; font-size: 11px; font-weight: 600; letter-spacing: 0.07em; text-transform: uppercase; color: var(--faint); }
@@ -82,42 +138,23 @@ button { font: inherit; color: inherit; cursor: pointer; }
 .conv:hover .conv-del, .conv-del.armed { visibility: visible; }
 .conv-del:hover, .conv-del.armed { color: var(--danger); }
 
-.status { display: grid; gap: 8px; padding: 12px 8px 4px; border-top: 1px solid var(--line); font-size: 12.5px; color: var(--muted); }
-.status-line { display: flex; align-items: center; gap: 8px; }
-.status-line.kv { gap: 10px; color: var(--faint); white-space: nowrap; }
 .dot { width: 8px; height: 8px; flex: none; border-radius: 50%; background: var(--faint); }
 .dot.online { background: var(--ok); box-shadow: 0 0 0 3px rgb(108 207 142 / 0.16); }
 .dot.loading { background: var(--warn); animation: pulse 1s ease-in-out infinite; }
-.bar { flex: 1; height: 4px; overflow: hidden; border-radius: 4px; background: var(--hover); }
-.bar > i { display: block; height: 100%; border-radius: 4px; background: var(--accent); }
-.link-btn { flex: none; margin-left: auto; padding: 0; border: 0; background: none; color: var(--accent); font-size: 12.5px; }
-.model-btn { display: inline-flex; align-items: center; gap: 5px; min-width: 0; margin: -3px 0; padding: 3px 7px 3px 6px; border: 0; border-radius: 7px; background: none; color: var(--text); font: inherit; cursor: pointer; }
-.model-btn span { min-width: 0; overflow: hidden; white-space: nowrap; text-overflow: ellipsis; }
-.model-btn .i { width: 13px; height: 13px; flex: none; color: var(--muted); transition: transform 0.15s; }
-.model-btn:hover, .model-btn.open { background: var(--hover); }
-.model-btn.open .i { transform: rotate(180deg); }
-.model-menu { position: absolute; z-index: 20; left: 10px; right: 10px; display: grid; gap: 2px; padding: 5px; border: 1px solid var(--line); border-radius: 12px; background: var(--panel); box-shadow: var(--shadow); }
-.model-menu[hidden] { display: none; }
 .model-item { display: flex; align-items: center; gap: 10px; padding: 8px 10px; border: 0; border-radius: 8px; background: none; color: var(--text); text-align: left; cursor: pointer; }
 .model-item:hover, .model-item:focus-visible { background: var(--hover); outline: none; }
 .model-text { display: grid; gap: 1px; min-width: 0; flex: 1; }
-.model-label { font-size: 13.5px; font-weight: 550; }
+.model-label { flex: 1; font-size: 13.5px; }
 .model-about { color: var(--muted); font-size: 11.5px; line-height: 1.35; text-wrap: pretty; }
-.model-check { width: 16px; height: 16px; flex: none; color: var(--accent); }
+.model-check { min-width: 16px; height: 16px; flex: none; color: var(--accent); font: 11.5px/16px var(--mono); text-align: right; }
 .model-check .i { width: 16px; height: 16px; }
-.loading-name { overflow: hidden; white-space: nowrap; text-overflow: ellipsis; color: var(--text); }
-.pct { margin-left: auto; color: var(--muted); font-variant-numeric: tabular-nums; }
-.bar.load { height: 5px; }
-.bar.load > i { transition: width 0.35s ease-out; }
-.bar.load.indeterminate > i { width: 35% !important; animation: slide 1.1s ease-in-out infinite; }
-@keyframes slide { from { transform: translateX(-100%); } to { transform: translateX(290%); } }
-.link-btn:hover { color: var(--accent-hi); }
 
 /* ---- chat ---- */
-main { display: flex; flex-direction: column; min-height: 0; }
-.topbar { display: flex; align-items: center; gap: 10px; min-height: 52px; padding: 8px 18px; border-bottom: 1px solid var(--line); }
+main { display: flex; flex-direction: column; min-height: 0; grid-column: 2; }
+/* the toggles' corners are kept clear while no panel's head is under them: the gutter grows as a panel closes */
+.topbar { display: flex; flex: none; align-items: center; gap: 10px; height: var(--bar-h); border-bottom: 1px solid var(--line);
+  padding: 0 max(18px, var(--toggle-room) - var(--panel-w)) 0 max(18px, var(--toggle-room) - var(--side-w)); }
 .topbar h1 { flex: 1; margin: 0; overflow: hidden; font-size: 15px; font-weight: 600; white-space: nowrap; text-overflow: ellipsis; }
-#menu { display: none; }
 /* buttons: one look for every labeled button (Settings, New chat, Reset all settings, Cancel, Undo); the main action
    of a form adds .primary. Icon buttons are .act, choices .segmented. */
 .btn { position: relative; display: inline-flex; align-items: center; justify-content: center; gap: 7px; height: 32px; padding: 0 12px; border: 1px solid var(--line);
@@ -130,7 +167,7 @@ main { display: flex; flex-direction: column; min-height: 0; }
 #scroller { flex: 1; overflow-y: auto; }
 /* The chat column keeps the place it has with Settings closed (centered) as far as the room beside Settings allows, so
    opening it moves nothing when there is room and only slides the column when there is not (never re-wraps it). */
-.thread { max-width: 800px; margin: 0 auto 0 max(0px, min((100vw - 272px - var(--sb, 0px) - 800px) / 2, 100% - 824px)); padding: 28px 24px 16px; }
+.thread { max-width: 800px; margin: 0 auto 0 max(0px, min((100vw - var(--side-w) - var(--sb, 0px) - 800px) / 2, 100% - 824px)); padding: 28px 24px 16px; }
 
 .msg { margin-bottom: 22px; }
 .msg.user { display: flex; flex-direction: column; align-items: flex-end; }
@@ -141,7 +178,7 @@ main { display: flex; flex-direction: column; min-height: 0; }
 .stats { flex: 1 1 auto; min-width: 0; margin-right: 6px; font: 11.5px var(--mono); }   /* pushes the actions to their fixed places */
 .act.ghost { visibility: hidden; }
 .msg-foot .act { flex: none; }
-.act { display: inline-grid; place-items: center; width: 28px; height: 28px; border: 0; border-radius: 7px; background: none; color: var(--faint); }
+.act { display: inline-grid; place-items: center; width: 28px; height: 28px; border: 0; border-radius: 7px; background: none; color: var(--muted); }
 .act:hover { background: var(--hover); color: var(--text); }
 .act.done { color: var(--ok); }
 .act .i { width: 15px; height: 15px; }
@@ -231,6 +268,66 @@ main { display: flex; flex-direction: column; min-height: 0; }
 @media (prefers-reduced-motion: reduce) { .empty > .flame { animation: none; } }
 
 /* ---- composer ---- */
+/* thinking: an energy bar of four stops, Off to Max, in view in the message box. A 10px capsule and an 18px thumb on a
+   stop; filled to the thumb, and the fill runs hotter to the right: Low a warm amber, Medium an orange that flows,
+   Max molten (it flows faster, a shine sweeps it, sparks rise from it) */
+[data-heat=off] { --heat: var(--muted); }
+[data-heat=low] { --heat: var(--heat-1); }
+[data-heat=medium] { --heat: var(--heat-2); }
+[data-heat=max] { --heat: var(--heat-3); }
+.think-ctl { flex: none; width: 196px; margin-left: 4px; }   /* the thinking bar and its stops (not .thinking: that is a reply's Thoughts) */
+.energy { --t: 18px; position: relative; height: 22px; cursor: pointer; outline: none; touch-action: none; }
+.energy-track { position: absolute; inset: 6px 0; overflow: hidden; border-radius: 999px; background: var(--hover); box-shadow: inset 0 1px 2px rgb(0 0 0 / 0.25); }
+.energy-fill { position: absolute; top: 0; bottom: 0; left: 0; overflow: hidden; width: calc(var(--t) + (100% - var(--t)) * var(--v, 0) / 3); border-radius: inherit;
+  transition: width 0.09s cubic-bezier(0.2, 0.9, 0.3, 1); }
+[data-heat=off] .energy-fill { background: none; }
+[data-heat=low] .energy-fill { background: linear-gradient(90deg, #e08a4c, var(--heat-1)); }
+[data-heat=medium] .energy-fill { background: linear-gradient(90deg, #ea6a2a 0%, var(--heat-2) 12.5%, #ff9a52 25%, var(--heat-2) 37.5%, #ea6a2a 50%, var(--heat-2) 62.5%, #ff9a52 75%,
+  var(--heat-2) 87.5%, #ea6a2a 100%) 0 0 / 200% 100%; animation: flow 7s linear infinite; }
+[data-heat=max] .energy-fill { background: linear-gradient(90deg, #c2410c 0%, var(--heat-2) 12.5%, #ffc46b 25%, var(--heat-3) 37.5%, #c2410c 50%, var(--heat-2) 62.5%,
+  #ffc46b 75%, var(--heat-3) 87.5%, #c2410c 100%) 0 0 / 200% 100%; animation: flow 2.8s linear infinite; }
+@keyframes flow { to { background-position: 100% 0; } }   /* half the 200% image: the pattern repeats there, so the loop has no seam */
+.energy-shine { position: absolute; inset: 0; opacity: 0; background: linear-gradient(100deg, transparent 35%, rgb(255 255 255 / 0.55) 50%, transparent 65%) no-repeat;
+  background-size: 45% 100%; }
+[data-heat=max] .energy-shine { opacity: 1; animation: shine 2.4s ease-in-out infinite; }
+@keyframes shine { from { background-position: -60% 0; } to { background-position: 160% 0; } }
+.spark { position: absolute; bottom: 0; left: var(--x); display: none; width: var(--w); height: var(--w); border-radius: 50%; background: #fff4d6; box-shadow: 0 0 3px 1px #ffc46b;
+  animation: spark var(--d) ease-in var(--delay) infinite; }
+[data-heat=max] .spark { display: block; }
+@keyframes spark { from { transform: translate(0, 2px); opacity: 0; } 25% { opacity: 1; } to { transform: translate(var(--dx), -9px); opacity: 0; } }
+.energy-dot { position: absolute; top: 50%; left: calc(var(--t) / 2 + (100% - var(--t)) * var(--k) / 3); z-index: 1; width: 3px; height: 3px; margin: -1.5px 0 0 -1.5px;
+  border-radius: 50%; background: var(--faint); transition: background 0.15s; }
+.energy-dot.lit { background: rgb(255 255 255 / 0.85); }
+.energy-thumb { position: absolute; top: 2px; left: calc((100% - var(--t)) * var(--v, 0) / 3); z-index: 2; width: var(--t); height: var(--t); border-radius: 50%; background: #fff;
+  box-shadow: 0 1px 2px rgb(0 0 0 / 0.35), 0 2px 8px rgb(0 0 0 / 0.25); transition: left 0.09s cubic-bezier(0.2, 0.9, 0.3, 1), transform 0.12s, box-shadow 0.2s; }
+.energy:hover .energy-thumb, .energy.dragging .energy-thumb { transform: scale(1.08); }
+[data-heat=max] .energy-thumb { box-shadow: 0 1px 2px rgb(0 0 0 / 0.35), 0 0 12px 2px rgb(255 150 60 / 0.55); }
+.energy:focus-visible .energy-thumb { box-shadow: 0 1px 2px rgb(0 0 0 / 0.35), 0 0 0 3px color-mix(in srgb, var(--accent) 50%, transparent); }
+/* the stops' names under the bar, the current one in its heat */
+.energy-stops { position: relative; height: 13px; }
+.energy-stops button { position: absolute; top: 0; left: calc(9px + (100% - 18px) * var(--k) / 3); padding: 0 2px; border: 0; background: none; color: var(--faint);
+  font: 10.5px/13px var(--sans); translate: -50% 0; transition: color 0.15s; }
+.energy-stops button:first-child { left: -2px; translate: 0; }
+.energy-stops button:last-child { right: -2px; left: auto; translate: 0; }
+.energy-stops button:hover { color: var(--text); }
+.energy-stops button.on { color: var(--heat); font-weight: 600; }
+/* the model: its name beside the send button with the engine's state (a dot; the load's progress), opening the
+   models (a flat list) and the engine's line (context, cache, Unload or Load) over the box */
+.model-btn { display: inline-flex; align-items: center; gap: 5px; height: 30px; padding: 0 7px 0 10px; border: 0; border-radius: 9px; background: none; color: var(--muted);
+  font-size: 13px; white-space: nowrap; }
+.model-btn:hover, .model-btn.open { background: var(--hover); color: var(--text); }
+.model-btn .i { width: 13px; height: 13px; transition: transform 0.15s; }
+.model-btn .dot { width: 7px; height: 7px; margin-right: 2px; }
+.model-pct { color: var(--faint); font: 11.5px var(--mono); font-variant-numeric: tabular-nums; }
+.power { width: 30px; height: 30px; }
+.power .i { width: 15px; height: 15px; }
+.power:disabled { cursor: default; opacity: 0.5; }
+.model-btn.open .i { transform: rotate(180deg); }
+.model-pop { position: absolute; right: 84px; bottom: calc(100% + 8px); z-index: 35; display: grid; gap: 2px; min-width: 220px; padding: 5px; border: 1px solid var(--line);
+  border-radius: 12px; background: var(--raised); box-shadow: var(--shadow); transition: opacity 0.14s, translate 0.14s; }
+@starting-style { .model-pop { opacity: 0; translate: 0 4px; } }
+.model-pop[hidden] { display: none; }
+@media (prefers-reduced-motion: reduce) { .energy-fill, .energy-shine, .spark { animation: none !important; } }
 /* back to the end of the chat, over the message box while the page is away from it */
 .to-latest { position: absolute; top: -46px; left: 50%; width: 34px; height: 34px; border: 1px solid var(--line); border-radius: 50%; background: var(--raised);
   color: var(--text); box-shadow: var(--shadow); transform: translateX(-50%); }
@@ -238,22 +335,20 @@ main { display: flex; flex-direction: column; min-height: 0; }
 .to-latest[hidden] { display: none; }
 .to-latest .i { width: 16px; height: 16px; }
 #composer { padding: 0 24px 12px; }
-.composer-box { position: relative; max-width: 800px; margin: 0 auto 0 max(0px, min((100vw - 272px - 48px - 800px) / 2, 100% - 800px)); padding: 12px 10px 10px 16px; border: 1px solid var(--line); border-radius: 20px; background: var(--raised); box-shadow: var(--shadow); }
+.composer-box { position: relative; max-width: 800px; margin: 0 auto 0 max(0px, min((100vw - var(--side-w) - 48px - 800px) / 2, 100% - 800px)); padding: 12px 10px 10px 16px; border: 1px solid var(--line); border-radius: 20px; background: var(--raised); box-shadow: var(--shadow); }
 .composer-box:focus-within { border-color: color-mix(in srgb, var(--accent) 45%, var(--line)); }
 #input { display: block; width: 100%; max-height: 240px; padding: 2px 0; border: 0; outline: 0; resize: none; background: none; color: var(--text); font: 15px/1.55 var(--sans); }
 #input::placeholder { color: var(--faint); }
 .composer-row { display: flex; align-items: center; gap: 10px; margin-top: 10px; }
-.choices { display: flex; flex-wrap: wrap; gap: 6px 8px; min-width: 0; }
 .segmented { display: inline-flex; align-items: center; gap: 2px; padding: 2px; border: 1px solid var(--line); border-radius: 999px; background: var(--panel); font-size: 12.5px; }
-.segmented .label { padding: 0 6px 0 9px; color: var(--faint); }
 .segmented button { padding: 3px 10px; border: 0; border-radius: 999px; background: none; color: var(--muted); }
 .segmented button:hover { color: var(--text); }
 .segmented button[aria-checked="true"] { background: var(--accent-soft); color: var(--accent-hi); }
-.meter { margin-left: auto; color: var(--faint); font: 11.5px var(--mono); white-space: nowrap; }
+.meter { min-width: 0; margin-left: auto; overflow: hidden; color: var(--faint); font: 11.5px var(--mono); white-space: nowrap; text-overflow: ellipsis; }   /* gives way first in a narrow chat */
 .send { display: grid; place-items: center; width: 36px; height: 36px; flex: none; border: 0; border-radius: 50%; background: var(--accent); color: #fff; }
 .send:hover { background: var(--accent-hi); }
 .send.stop { background: var(--text); color: var(--bg); }
-.hint { max-width: 800px; margin: 8px auto 0 max(0px, min((100vw - 272px - 48px - 800px) / 2, 100% - 800px)); color: var(--faint); font-size: 11.5px; text-align: center; }
+.hint { max-width: 800px; margin: 8px auto 0 max(0px, min((100vw - var(--side-w) - 48px - 800px) / 2, 100% - 800px)); color: var(--faint); font-size: 11.5px; text-align: center; }
 
 
 /* ---- dialogs (a picture at full size) ---- */
@@ -261,15 +356,8 @@ dialog { padding: 20px; border: 1px solid var(--line); border-radius: 16px; back
 dialog::backdrop { background: rgb(0 0 0 / 0.45); }
 
 /* ---- settings: a panel beside the chat ---- */
-body.settings-open #app { grid-template-columns: 272px minmax(0, 1fr) 380px; }
-#settings-btn[aria-expanded="true"] { border-color: var(--faint); background: var(--hover); }
-#settings-btn.on::after { content: ""; position: absolute; top: -3px; right: -3px; width: 8px; height: 8px; border-radius: 50%; background: var(--accent); box-shadow: 0 0 0 2px var(--bg); }
-.settings { position: relative; min-width: 0; overflow: hidden; background: var(--panel); outline: none; }
-body.settings-open .settings { border-left: 1px solid var(--line); }
-.settings-inner { position: absolute; inset: 0 0 0 auto; display: flex; flex-direction: column; width: 380px; }
-.set-head { display: flex; align-items: center; gap: 8px; padding: 12px 12px 12px 20px; border-bottom: 1px solid var(--line); }
-.set-head h2 { margin: 0; font-size: 15px; font-weight: 600; }
-.set-head span { flex: 1; color: var(--faint); font-size: 12px; }
+#settings .pane-head h2 { margin: 0; font-size: 15px; font-weight: 600; }
+#settings .pane-head span { flex: 1; color: var(--faint); font-size: 12px; }
 .set-body { flex: 1; min-height: 0; overflow-y: auto; overscroll-behavior: contain; }
 .set-sec { padding: 14px 20px 16px; }
 .set-sec + .set-sec { border-top: 1px solid var(--line); }
@@ -327,7 +415,7 @@ body.settings-open .settings { border-left: 1px solid var(--line); }
 .knobs { display: grid; gap: 4px; }
 .knob { position: relative; display: grid; grid-template-columns: 84px minmax(0, 1fr) 68px 22px; align-items: center; gap: 8px; min-height: 28px; --fill-c: var(--faint); }
 /* the stage rows' grip, in the margin: drag a row to change the order the sampler applies them in */
-.grip { position: absolute; top: 50%; left: -19px; display: grid; place-items: center; width: 16px; height: 22px; margin-top: -11px; padding: 0; border: 0; border-radius: 4px;
+.grip { position: absolute; top: 50%; left: -14px; display: grid; place-items: center; width: 12px; height: 22px; margin-top: -11px; padding: 0; border: 0; border-radius: 4px;
   background: none; color: var(--faint); cursor: grab; opacity: 0; touch-action: none; transition: opacity 0.12s; }
 .grip .i { width: 12px; height: 12px; }
 .knob:hover .grip, .grip:focus-visible, .knob.dragging .grip { opacity: 1; }
@@ -346,12 +434,15 @@ body.settings-open .settings { border-left: 1px solid var(--line); }
 .knob-reset .i { width: 13px; height: 13px; }
 .knob-reset.on { visibility: visible; }   /* the system prompt's and the order's, in their headers */
 .knob-track { position: relative; height: 16px; }
-.knob-track input { position: relative; width: 100%; height: 16px; margin: 0; background: none; cursor: pointer; appearance: none; -webkit-appearance: none; }
-.knob-track input::-webkit-slider-runnable-track { height: 4px; border-radius: 4px; background: linear-gradient(to right, var(--fill-c) var(--fill), var(--hover) var(--fill)); }
-.knob-track input::-moz-range-track { height: 4px; border-radius: 4px; background: linear-gradient(to right, var(--fill-c) var(--fill), var(--hover) var(--fill)); }
-.knob-track input::-webkit-slider-thumb { width: 14px; height: 14px; margin-top: -5px; border: 0; border-radius: 50%; background: var(--text); box-shadow: 0 0 0 3px var(--panel); -webkit-appearance: none; transition: transform 0.1s; }
-.knob-track input::-moz-range-thumb { width: 14px; height: 14px; border: 0; border-radius: 50%; background: var(--text); box-shadow: 0 0 0 3px var(--panel); }
-.knob-track input:active::-webkit-slider-thumb { transform: scale(1.15); }
+/* every slider (Settings' values, the thinking slider): a 4px track filled to the value (--fill, in --fill-c), a 14px thumb */
+.slider { position: relative; width: 100%; height: 16px; margin: 0; background: none; cursor: pointer; appearance: none; -webkit-appearance: none; }
+.slider::-webkit-slider-runnable-track { height: 4px; border-radius: 4px; background: linear-gradient(to right, var(--fill-c) var(--fill), var(--hover) var(--fill)); }
+.slider::-moz-range-track { height: 4px; border-radius: 4px; background: linear-gradient(to right, var(--fill-c) var(--fill), var(--hover) var(--fill)); }
+.slider::-webkit-slider-thumb { width: 14px; height: 14px; margin-top: -5px; border: 0; border-radius: 50%; background: var(--text); box-shadow: 0 0 0 3px var(--slider-bg, var(--panel)); -webkit-appearance: none; transition: transform 0.1s; }
+.slider::-moz-range-thumb { width: 14px; height: 14px; border: 0; border-radius: 50%; background: var(--text); box-shadow: 0 0 0 3px var(--slider-bg, var(--panel)); }
+.slider:active::-webkit-slider-thumb { transform: scale(1.15); }
+.slider:focus-visible { outline: none; }
+.slider:focus-visible::-webkit-slider-thumb { box-shadow: 0 0 0 3px var(--slider-bg, var(--panel)), 0 0 0 5px color-mix(in srgb, var(--accent) 60%, transparent); }
 /* the recommended value: a notch under the slider, which the thumb covers while it sits there */
 .knob-rec { position: absolute; top: 3px; left: calc(7px + (100% - 14px) * var(--at, 0)); width: 2px; height: 10px; margin-left: -1px; border-radius: 1px; background: var(--muted); }
 .knob-more { display: grid; gap: 4px; margin-left: 4px; padding-left: 10px; border-left: 2px solid var(--line); }
@@ -407,32 +498,14 @@ main { position: relative; }
 .draft[hidden] { display: none; }
 #composer.drafting #input { color: var(--muted); }
 
-/* narrower: Settings slides over the chat */
-@media (max-width: 1459px) {
-  body.settings-open #app { grid-template-columns: 272px minmax(0, 1fr) 0; }
-  .settings { position: fixed; inset: 0 0 0 auto; z-index: 30; width: min(380px, 100vw); border-left: 1px solid var(--line); transform: translateX(100%);
-    transition: transform 0.26s cubic-bezier(0.2, 0.7, 0.2, 1); }
-  body.settings-open .settings { transform: none; box-shadow: var(--shadow); }
-  .settings-inner { width: 100%; }
-  body.settings-open .toast { left: calc(50% - 190px); }
-}
-@media (prefers-reduced-motion: reduce) { #app, .settings { transition: none; } }
+#app:has(> #settings[data-open][data-over]) .toast { left: calc(50% - 190px); }   /* in what Settings leaves of the chat */
+@media (prefers-reduced-motion: reduce) { #app, .pane, .pane-toggle .chev { transition: none; } }
 
 @keyframes pulse { 50% { opacity: 0.3; } }
 
-/* ---- narrow screens: the conversation list slides over the chat ---- */
+/* ---- narrow screens (the conversations slide over the chat: app.ts) ---- */
 @media (max-width: 760px) {
-  #app { grid-template-columns: minmax(0, 1fr); }
-  #sidebar { position: fixed; inset: 0 auto 0 0; z-index: 20; width: 280px; transform: translateX(-100%); transition: transform 0.2s; }
-  body.nav-open #sidebar { transform: none; box-shadow: var(--shadow); }
-  body.nav-open #scrim { display: block; position: fixed; inset: 0; z-index: 10; background: rgb(0 0 0 / 0.4); }
-  #menu { display: inline-grid; }
-  .topbar { padding: 8px 10px; }
   .thread { padding: 20px 16px 12px; }
   #composer { padding: 0 10px 10px; }
-  body.settings-open #app { grid-template-columns: minmax(0, 1fr); }
-  #settings-btn { padding: 0 8px; }
-  #settings-btn span { display: none; }
   .hint, .meter { display: none; }
-  .segmented .label { display: none; }
 }

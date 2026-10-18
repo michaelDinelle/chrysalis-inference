@@ -12,30 +12,38 @@
   </head>
   <body>
     <div id="app">
-      <aside id="sidebar">
-        <div class="brand"><span id="brand-mark"></span>kiln</div>
-        <button id="new-chat" class="btn" type="button"></button>
-        <nav id="conversations" aria-label="Conversations"></nav>
-        <div id="model-menu" class="model-menu" role="menu" aria-label="Model" hidden></div>
-        <div id="status" class="status"></div>
+      <!-- the side panels: the conversations (left) and Settings (right), alike. Each has a toggle fixed in its top
+           corner, so it never moves; the chat's top bar and the panel's head leave it room. data-open is the state a
+           panel starts in where it sits beside the chat (it is remembered from then on). -->
+      <button id="conversations-toggle" class="act pane-toggle" data-side="left" type="button" aria-controls="sidebar" aria-label="Conversations" title="Conversations (Ctrl+B)"></button>
+      <aside id="sidebar" class="pane" data-side="left" data-open tabindex="-1">
+        <div class="pane-inner">
+          <div class="pane-head"><span class="brand"><span id="brand-mark"></span>kiln</span></div>
+          <div class="side-body">
+            <button id="new-chat" class="btn" type="button"></button>
+            <nav id="conversations" aria-label="Conversations"></nav>
+          </div>
+          <div class="pane-rail" role="separator" aria-orientation="vertical"></div>
+        </div>
       </aside>
-      <div id="scrim"></div>
       <main>
         <header class="topbar">
-          <button id="menu" class="act" type="button" aria-label="Conversations"></button>
           <h1 id="title">New chat</h1>
-          <button id="settings-btn" class="btn" type="button" aria-controls="settings" aria-expanded="false" title="Settings (Ctrl+,)"></button>
         </header>
         <div id="scroller"><div id="thread" class="thread"></div></div>
         <form id="composer">
           <div class="composer-box">
             <button id="to-latest" class="act to-latest" type="button" title="Jump to the latest" aria-label="Jump to the latest" hidden></button>
             <textarea id="input" rows="1" placeholder="Message kiln" autofocus></textarea>
+            <div id="model-pop" class="model-pop" role="listbox" aria-label="Model" hidden></div>
             <div class="composer-row">
-              <div class="choices">
-                <div id="effort" class="segmented" role="radiogroup" aria-label="Thinking"></div>
+              <div class="think-ctl">
+                <div id="energy" class="energy" role="slider" tabindex="0" aria-label="Thinking" aria-valuemin="0" aria-valuemax="3"></div>
+                <div id="energy-stops" class="energy-stops"></div>
               </div>
               <span id="meter" class="meter"></span>
+              <button id="model-btn" class="model-btn" type="button" aria-haspopup="listbox" aria-expanded="false" aria-controls="model-pop"></button>
+              <button id="power" class="act power" type="button"></button>
               <button id="draft" class="draft" type="button" hidden></button>
               <button id="send" class="send" type="submit" aria-label="Send"></button>
             </div>
@@ -46,12 +54,12 @@
       </main>
       <!-- Settings: a panel beside the chat, not a dialog over it, so a change can be tried at once (Regenerate) and
            compared; every change applies as it is made, and what it shows is exactly what kiln is sent -->
-      <aside id="settings" class="settings" aria-label="Settings" tabindex="-1" inert>
-        <div class="settings-inner">
-          <header class="set-head">
+      <button id="settings-toggle" class="act pane-toggle" data-side="right" type="button" aria-controls="settings" aria-label="Settings" title="Settings (Ctrl+,)"></button>
+      <aside id="settings" class="pane" data-side="right" aria-label="Settings" tabindex="-1">
+        <div class="pane-inner">
+          <header class="pane-head">
             <h2>Settings</h2>
             <span>every chat in this tab</span>
-            <button id="settings-close" class="act" type="button" aria-label="Close settings" title="Close (Esc)"></button>
           </header>
           <div class="set-body">
             <section class="set-sec">
@@ -59,7 +67,7 @@
               <textarea id="system-input" rows="2" placeholder="No system prompt" title="Sent as written; empty sends none. The default keeps the model from acting as a coding agent when it doesn't think. A change makes each chat read its history again once."></textarea>
             </section>
             <section class="set-sec">
-              <div class="set-sec-head"><span class="set-title">Sampling</span><span class="set-aside"><button id="order-reset" class="act knob-reset" type="button" title="Back to the default order" aria-label="Restore the default order"></button><span id="mode-note" title="Set by Think in the message box"></span></span></div>
+              <div class="set-sec-head"><span class="set-title">Sampling</span><span class="set-aside"><button id="order-reset" class="act knob-reset" type="button" title="Back to the default order" aria-label="Restore the default order"></button><span id="mode-note" title="Set by the thinking bar in the message box"></span></span></div>
               <figure id="odds-first" class="odds" title="Qwen3.8-Flash-Next naming a cat (thinking off): 2,000 real draws of the first word"><div class="odd-head">Qwen names a cat</div></figure>
               <div id="samplers" class="knobs"></div>
             </section>
@@ -75,6 +83,7 @@
           </div>
           <footer class="set-foot"><button id="settings-reset" class="btn" type="button"
             title="The default system prompt and Qwen's recommended values, with thinking and without (Undo brings yours back)">Reset all settings</button></footer>
+          <div class="pane-rail" role="separator" aria-orientation="vertical"></div>
         </div>
       </aside>
     </div>
