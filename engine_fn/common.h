@@ -1,4 +1,3 @@
-// Shared definitions for the Flash-Next engine: model constants, quant formats, small device helpers.
 #pragma once
 #include <hip/hip_runtime.h>
 #include <hip/hip_fp16.h>
@@ -10,10 +9,10 @@
     fprintf(stderr, "kiln: HIP error '%s' at %s:%d\n", hipGetErrorString(e_), __FILE__, __LINE__); abort(); } } while (0)
 #define FAIL(...) do { fprintf(stderr, "kiln: " __VA_ARGS__); fprintf(stderr, "\n"); abort(); } while (0)
 
-// ---- Qwen3.8-Flash-Next (qwen4_exp) -----------------------------------------------------------
+// Qwen3.8-Flash-Next (GGUF architecture qwen4_exp)
 constexpr int D = 2560;            // hidden size (one hyper-connection stream)
 constexpr int HC = 4;              // hyper-connection streams: the residual is HC x D wide
-constexpr int HCD = HC * D;        // 10240
+constexpr int HCD = HC * D;
 constexpr int HCR = 320;           // hyper-connection bottleneck rank
 constexpr int VOCAB = 248320;
 constexpr int NL = 48;             // decoder layers; every 4th (l % 4 == 3) is QSA attention, the rest Gated DeltaNet
@@ -38,8 +37,7 @@ constexpr float ROPE_BASE = 1e7f;
 constexpr int EOS_IM_END = 248046, EOS_TEXT = 248044;   // <|im_end|>, <|endoftext|>
 inline bool is_attn_layer(int l) { return l % 4 == 3; }
 
-// ---- paged KV cache -------------------------------------------------------------------------------
-// page -> layer (12 QSA layers + MTP) -> kv head -> block of PAGE tokens, kiln's format:
+// KV cache: page -> layer (12 QSA layers + MTP) -> kv head -> block of PAGE tokens, kiln's format:
 //   K int8 [PAGE][HD] | K scales fp16 [PAGE][HD/32] |
 //   V 5-bit, transposed: low nibbles [HD][PAGE/2] | high bits [HD][PAGE/8] | V scales fp16 [HD/32][PAGE]
 // then, per layer, the QSA indexer cache: pooled keys fp16 [PAGE/KPOOL][IDX_D] (normed and rotated to the block's
@@ -57,7 +55,6 @@ constexpr size_t IDX_TAIL = (size_t)KPOOL * IDX_D;     // halfs per layer: raw k
 constexpr size_t KV_PAGE = KV_LAYER * NKVL;
 struct KVRef { uint8_t *pool; const int *pages; };
 
-// ---- quantized weight formats --------------------------------------------------------------
 // GGUF stores blocks as packed structs; at load time tensors in VRAM are split into separate arrays (same
 // bits, "structure of arrays") so every array is aligned for wide loads. Cold experts stay in GGUF block
 // order in host memory (the CPU's ggml kernels and the GPU's zero-copy prefill read them as they are).
@@ -91,7 +88,6 @@ inline size_t qrow_bytes(int type, int cols) { return (size_t)cols / qk_of(type)
 // Activations for the int8 dot-product GEMVs: per 32 values one fp32 scale.
 struct QAct { int8_t *q; float *d; };
 
-// Bump allocator over one device allocation.
 struct Arena {
     uint8_t *base = nullptr;
     size_t used = 0, cap = 0;

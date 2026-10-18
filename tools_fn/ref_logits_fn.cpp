@@ -2,7 +2,7 @@
 // Flash-Next variant: the Q8_0 source (188 GB with the n-gram table) runs on the CPU from the page cache. It does not
 // fit in RAM, and llama.cpp's load-time readahead of the whole file just thrashes, so a layer-by-layer prefetcher
 // follows the computation: the next layers' tensors are read ahead (POSIX_FADV_WILLNEED) and finished layers dropped.
-// Usage: ref_logits_fn model-00001-of-N.gguf tokens.bin out.bin [n_gpu_layers]
+// Build: make build_fn/ref_logits_fn. Usage: ref_logits_fn model-00001-of-N.gguf tokens.bin out.bin [n_gpu_layers]
 #include "llama.h"
 #include "../engine_fn/gguf.h"
 #include <cstdio>

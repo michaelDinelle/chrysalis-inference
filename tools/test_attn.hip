@@ -87,11 +87,13 @@ int main() {
     float *dqw, *dkw; CK(hipMalloc(&dqw, HD * 4)); CK(hipMalloc(&dkw, HD * 4));
     CK(hipMemcpy(dqw, qw.data(), HD * 4, hipMemcpyHostToDevice)); CK(hipMemcpy(dkw, kw.data(), HD * 4, hipMemcpyHostToDevice));
     Ref ref; int fails = 0, pos = 0;
-    struct Case { int T, split; const char *name; bool check = true; };
-    vector<Case> cases = {{100, 0, "prefill 100"}, {50, 0, "prefill +50"}, {1, 64, "decode split64"}, {4, 32, "verify4 split32"}, {8, 16, "verify8 split16"}, {1, 0, "decode nosplit"}};
-    // then a deep context (prefilled in engine-sized chunks, not checked) for decode / verify with many multi-stage splits
-    for (int i = 0; i < 16; i++) cases.push_back({2048, 0, "prefill 2048", false});
-    for (int t : {1, 2, 3, 4, 8, 5, 1}) cases.push_back({t, 0, "deep decode/verify"});
+    struct Case { int T; const char *name; bool check = true; };
+    vector<Case> cases = {{100, "prefill 100"}, {50, "prefill +50"}, {1, "decode"}, {4, "verify 4"}, {8, "verify 8"}, {1, "decode"}};
+    // then a deep context (prefilled in engine-sized chunks, not checked) where attention() splits the keys many ways:
+    // decode / verify, and a short append on the prefill path (T = 9: 32 key splits at this depth)
+    for (int i = 0; i < 16; i++) cases.push_back({2048, "prefill 2048", false});
+    for (int t : {1, 2, 3, 4, 8, 5, 1}) cases.push_back({t, "deep decode/verify"});
+    cases.push_back({9, "deep append"});
     float *po, *pml;
     CK(hipMalloc(&po, (size_t)MAX_SPLITS * 8 * NH * HD * 4)); CK(hipMalloc(&pml, (size_t)MAX_SPLITS * 8 * NH * 2 * 4));
     for (auto c : cases) {
@@ -104,11 +106,8 @@ int main() {
         CK(hipMemcpy(dqg, qg.data(), qg.size() * 4, hipMemcpyHostToDevice));
         CK(hipMemcpy(dk, k.data(), k.size() * 4, hipMemcpyHostToDevice)); CK(hipMemcpy(dv, v.data(), v.size() * 4, hipMemcpyHostToDevice));
         attn_prep(dqg, dk, dv, dqw, dkw, T, pos, kv, 5, Q16, st);
-        AttnArgs a; a.Q16 = Q16; a.kv = kv; a.layer = 5; a.T = T; a.pos0 = pos; a.split_len = c.split; a.qg = dqg; a.part_o = po; a.part_ml = pml;
+        AttnArgs a; a.Q16 = Q16; a.kv = kv; a.layer = 5; a.T = T; a.pos0 = pos; a.qg = dqg; a.part_o = po; a.part_ml = pml;
         QAct none{nullptr, nullptr};
-        if (c.split > 0) { // force the combine path with fp16 output
-            a.split_len = c.split;
-        }
         attention(a, oh, none, st);
         CK(hipStreamSynchronize(st));
         vector<_Float16> got((size_t)T * NH * HD); CK(hipMemcpy(got.data(), oh, got.size() * 2, hipMemcpyDeviceToHost));

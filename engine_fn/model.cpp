@@ -1,4 +1,3 @@
-// Engine implementation: sequences, snapshots, forward passes, MTP drafting, speculative steps.
 #include "model.h"
 #include <chrono>
 #include <thread>
@@ -10,8 +9,6 @@
 
 static const QAct NO_Q{nullptr, nullptr};
 static QAct qoff(QAct a, size_t elems) { return {a.q + elems, a.d + elems / 32}; }
-
-// ---- sequences --------------------------------------------------------------------------------
 
 int Engine::seq_new() {
     for (size_t i = 0; i < seqs.size(); i++) {
@@ -85,7 +82,7 @@ void Engine::ensure_pages(Seq &s, int n_tokens, int from) {
         CK(hipMemcpyAsync(s.d_pages + dirty, s.pages.data() + dirty, (need - dirty) * 4, hipMemcpyHostToDevice, st));
 }
 
-// ---- snapshots: recurrent state copied to pinned host memory, KV pages shared copy-on-write ----------
+// Snapshots: recurrent state copied to pinned host memory, KV pages shared copy-on-write.
 
 // Pinned host memory for a snapshot slot: hugepage anonymous memory registered with the GPU (hipHostMalloc pins page by
 // page, ~0.3 s for a slot while the cold experts hold most of RAM; this takes a few ms)
@@ -210,8 +207,6 @@ void Engine::snap_free(int snap) {
     sn.pages.clear();
     sn.used = false;
 }
-
-// ---- building blocks --------------------------------------------------------------------------
 
 Engine::LtPlan &Engine::lt_plan(int N, int K, int T, int ldx, int ldd) {
     const auto key = std::make_tuple(N, K, T, ldx, ldd);
@@ -367,8 +362,8 @@ void Engine::gdn_block(const Layer &w, int gl, Seq &s, int T, bool verify, float
     hc_combine(res, inject, HC, b.blk, nullptr, T, st);
 }
 
-// Routed experts + shared expert for T tokens of b.mx / b.hq. Decode path, also used (8 tokens at a time) by
-// prefill until the grouped GEMM path exists: hot picks on the GPU, cold picks on the CPU (cpu_cold).
+// Routed experts + shared expert for T tokens of b.mx / b.hq, added into res: decode-sized passes (hot picks on the GPU,
+// cold picks on the CPU when cpu_cold) and the MTP block, whose catch-up passes (T > 8) go through moe_front / moe_back.
 void Engine::moe_block(const Layer &w, int layer, int T, bool cpu_cold, float *res, float *inject) {
     if (T > 8) {                                  // a pass of one sub-chunk (the MTP block's catch-up)
         moe_front(w, T, 0);
@@ -628,7 +623,7 @@ void Engine::moe_back(const Layer &w, int layer, int T) {
     }
 }
 
-// n-gram rows of tokens[0..T) at positions s.n.. : the hash of llama.cpp's llm_graph_input_qwen4exp_ple
+// llama.cpp's n-gram hash (llm_graph_input_qwen4exp_ple).
 // Table rows of the n-gram heads for tokens at the positions after history (h0, h1) (-1 = none): 8 bigram heads, then
 // 8 trigram heads; an EOS (or no token) cuts the context at and before it.
 void Engine::ple_ids(int h0, int h1, const int *tokens, int T, size_t *rows) const {
@@ -690,9 +685,6 @@ void Engine::ple_block_run(Seq &s, int c0, int n, bool verify, float *res) {
     if (!verify) ple_commit(s.ple, b.xconv, n, st);
 }
 
-// A pass: tokens (host) at positions s.n .. s.n+T-1 (T <= smax) through the 48 layers, layer by layer. Within a layer,
-// the token mixer and the mixers run over sub-chunks of at most umax tokens in order (attention and the recurrent states
-// see every earlier token), then the routed experts once for all T. Leaves the final residual in b.res.
 // The layer's MoE routing predicted from its input residual (see lst in model.h). la.res is a copy, so the token mixer may
 // write the residual meanwhile; the next layer's copy waits until this layer's lookahead has read it.
 void Engine::lookahead(const Layer &w, int layer, int T, const float *res) {
@@ -706,6 +698,9 @@ void Engine::lookahead(const Layer &w, int layer, int T, const float *res) {
     CK(hipEventRecord(la_done, lst));
 }
 
+// A pass: tokens (host) at positions s.n .. s.n+T-1 (T <= smax) through the 48 layers, layer by layer. Within a layer,
+// the token mixer and the mixers run over sub-chunks of at most umax tokens in order (attention and the recurrent states
+// see every earlier token), then the routed experts once for all T. Leaves the final residual in b.res.
 void Engine::forward(Seq &s, const int *tokens, int T, bool verify) {
     ensure_pages(s, s.n + T, s.n);
     if (T > 8) pmark(-1);
@@ -806,8 +801,6 @@ void Engine::mtp_catch_up(Seq &s, int T, int pos0, bool spec) {
     }
 }
 
-// ---- prefill and speculative generation --------------------------------------------------------
-
 void Engine::prefill(int id, const int *tokens, int n) {
     if (!embd.q) FAIL("prefill before warmup(): the token embeddings are not loaded");
     Seq &s = seqs.at(id);
@@ -845,14 +838,15 @@ void Engine::prefill(int id, const int *tokens, int n) {
 }
 
 
-// One speculative step. Emits the pending token (if newly sampled), accepted drafts and one more token.
 static void keep_row(const float *v, const int *i, float *rows_v, int *rows_i, int at) {
     std::copy(v, v + TOPK, rows_v + (size_t)at * TOPK);
     std::copy(i, i + TOPK, rows_i + (size_t)at * TOPK);
 }
 
+// One speculative step. Emits the pending token (if newly sampled), accepted drafts and one more token.
 // rows_v / rows_i (optional): each emitted token's row, the SAMPLE_N candidates it was drawn from (log probs).
 int Engine::generate(int id, const Sampling &sp, int *out, int max_out, float *rows_v, int *rows_i) {
+    if (max_out < 1) return 0;
     Seq &s = seqs.at(id);
     int nout = 0;
     if (route_dec_file && !route_dec) {
@@ -872,7 +866,7 @@ int Engine::generate(int id, const Sampling &sp, int *out, int max_out, float *r
         s.seen.push(s.pending);
         if (rows_v) keep_row(s.top_v.data(), s.top_i.data(), rows_v, rows_i, nout);
         out[nout++] = s.pending;
-        if (is_eos(s.pending)) return nout;
+        if (is_eos(s.pending) || nout == max_out) return nout;   // a step below emits at least one more token
     }
     {   // its n-gram rows load while the MTP head drafts (normally already started at the end of the last step)
         size_t rows[PLE_HEADS];

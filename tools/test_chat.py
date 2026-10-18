@@ -73,10 +73,9 @@ ok = full[:len(prompt) + len(gen)] == prompt + gen
 fails += not ok
 print(f"replayed turn extends the previous prompt     {'ok' if ok else 'FAIL'}")
 
-# output parser
 p = OutputParser(tok, thinking=True, schemas={"read": tools[0]["function"]["parameters"]})
 events = []
-for i in gen + tok.full.encode("", add_special_tokens=False).ids:
+for i in gen:
     events += p.feed([i])
 events += p.finish()
 kinds = [k for k, *_ in events]

@@ -1,5 +1,5 @@
-// Flash-Next Gated DeltaNet prefill scan alone: one layer, T tokens, random normalized q/k, time per call; and a check
-// against a CPU recurrent reference (state and outputs).
+// Flash-Next Gated DeltaNet prefill scan alone: one layer, T tokens, random normalized q/k, time per call. Its
+// correctness is tools_fn/test_gdn_fn.cpp.
 //   build_fn/bench_gdn_fn [T]
 #include "../engine_fn/kernels.h"
 #include <cmath>
@@ -29,33 +29,7 @@ int main(int argc, char **argv) {
     CK(hipMemcpy(dA, A.data(), GV * 4, hipMemcpyHostToDevice)); CK(hipMemcpy(ddt, dt.data(), GV * 4, hipMemcpyHostToDevice));
     GdnScanArgs a{};
     a.S = dS; a.qn = dq; a.kn = dk; a.vc = dv; a.ab = dab; a.A = dA; a.dtb = ddt; a.T = T; a.write_state = 1; a.out = dout;
-    // check: one call from S0 against the CPU recurrence
     CK(hipMemcpy(dS, S0.data(), S0.size() * 4, hipMemcpyHostToDevice));
-    gdn_scan(a, 1, st);
-    std::vector<float> gS(S0.size()), gO(v.size());
-    CK(hipMemcpy(gS.data(), dS, gS.size() * 4, hipMemcpyDeviceToHost)); CK(hipMemcpy(gO.data(), dout, gO.size() * 4, hipMemcpyDeviceToHost));
-    double eo = 0, ro = 0, es = 0, rs = 0;
-    for (int h = 0; h < GV; h++) {
-        std::vector<double> S(S0.begin() + (size_t)h * GD * GD, S0.begin() + (size_t)(h + 1) * GD * GD);   // S[j][i]
-        const int kh = h % GK;
-        for (int t = 0; t < T; t++) {
-            const double x = ab[(size_t)t * 2 * GV + h] + dt[h];
-            const double decay = exp(A[h] * (x > 20 ? x : log1p(exp(x)))), beta = 1 / (1 + exp(-ab[(size_t)t * 2 * GV + GV + h]));
-            const float *kk = &k[((size_t)t * GK + kh) * GD], *qq = &q[((size_t)t * GK + kh) * GD], *vv = &v[((size_t)t * GV + h) * GD];
-            for (int j = 0; j < GD; j++) {
-                double kv = 0;
-                for (int i = 0; i < GD; i++) { S[j * GD + i] *= decay; kv += S[j * GD + i] * kk[i]; }
-                const double delta = beta * (vv[j] - kv);
-                double o = 0;
-                for (int i = 0; i < GD; i++) { S[j * GD + i] += kk[i] * delta; o += S[j * GD + i] * qq[i]; }
-                const double g = gO[((size_t)t * GV + h) * GD + j], w = o / sqrt(128.0);
-                eo += (g - w) * (g - w); ro += w * w;
-            }
-        }
-        for (size_t i = 0; i < S.size(); i++) { const double g = gS[(size_t)h * GD * GD + i]; es += (g - S[i]) * (g - S[i]); rs += S[i] * S[i]; }
-    }
-    printf("T=%d vs the CPU recurrence: outputs rel %.2e, state rel %.2e %s\n", T, sqrt(eo / ro), sqrt(es / rs),
-           sqrt(eo / ro) < 1e-4 && sqrt(es / rs) < 1e-4 ? "ok" : "FAIL");
     hipEvent_t e0, e1; CK(hipEventCreate(&e0)); CK(hipEventCreate(&e1));
     for (int i = 0; i < 3; i++) gdn_scan(a, 1, st);
     CK(hipEventRecord(e0, st));

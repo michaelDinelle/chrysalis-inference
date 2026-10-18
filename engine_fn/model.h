@@ -60,7 +60,6 @@ struct Seq {
 };
 
 struct Engine {
-    // weights
     QTensor embd;                    // Q8_0 rows in pinned host memory
     void *embd_host = nullptr;
     QTensor out;                     // LM head (Q8_0, VRAM)
@@ -101,7 +100,6 @@ struct Engine {
     void pmark(int phase);
     uint32_t gen = 0;
 
-    // runtime
     hipStream_t st, cst, pst;                    // compute, copies, decode prefetch
     // Expert lookahead (decode): at a layer's start a fourth stream runs the layer's own MoE mixer and router on the
     // residual before its token mixer, and publishes the predicted CPU share of the cold picks in sh_pred (go = the
@@ -189,7 +187,7 @@ struct Engine {
     void snap_reserve_start();                   // map the missing buffers' region, fault it in on a few threads
     void snap_reserve_finish();                  // wait for them, pin the region, hand the buffers out
 
-    void load(const std::string &path, int max_seqs, size_t reserve_bytes);   // load.cpp
+    void load(const std::string &path, int max_seqs, size_t reserve_bytes);
     void calibrate();                            // this machine's CPU / DMA rates for the cold expert split
     void warmup();
     void alloc_buffers(int max_seqs);
@@ -207,7 +205,6 @@ struct Engine {
     int generate(int id, const Sampling &sp, int *out, int max_out, float *rows_v = nullptr, int *rows_i = nullptr);
     void shutdown();                            // frees everything
 
-    // internals
     void forward(Seq &s, const int *tokens, int T, bool verify);       // tokens (host) at positions s.n..s.n+T-1
     void ple_rows(const Seq &s, const int *tokens, int T);              // n-gram rows for these tokens -> b.ple_rows
     void ple_ids(int h0, int h1, const int *tokens, int T, size_t *rows) const;   // their table rows (hash)

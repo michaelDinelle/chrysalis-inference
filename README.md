@@ -295,14 +295,16 @@ engine/   common.h kernels.h gguf.h      constants, kernel entry points, GGUF re
           model.cpp model.h api.cpp      weights, sequences, snapshots, forward, MTP, C API
           sampler.h                      the host sampler (both engines): penalties, DRY, ordered stages
 kiln/     engine.py chat.py cache.py server.py __main__.py
-web/      server.ts app.ts index.html style.css   Bun web UI
-tools/    tests (make test: test_quant, test_attn, test_sampler, test_chat, test_cache, test_snapshot, test_server; the last two take
-          --use qwen3.8-flash-next), compare_ref.py, benchmarks (bench_opencode.py: OpenCode's real requests), agent_sim.py
+web/      server.ts app.ts sampler.ts index.html style.css   Bun web UI (make test_web: sampler.test.ts, server.test.ts)
+tools/    tests (make test: test_quant, test_attn, test_gdn, test_sampler, test_chat, test_cache, test_snapshot, test_server,
+          compare_ref.py: the next-token distributions against llama.cpp's), benchmarks (bench_quant.hip, bench_opencode.py:
+          OpenCode's real requests), agent_sim.py, lint_comments.py (make lint: the mechanical cases of AGENTS.md's comment rule)
 engine_fn/                               the Flash-Next engine (same C API): cpu_moe.cpp cpu_vnni.cpp for the
                                          experts in RAM, moe.hip routing, ple.hip n-gram block, ...
 tools_fn/ fn_quantize.py (builds kiln-fn.gguf), route_stats.py (routing counts for it), test_*_fn.cpp (make test_fn),
-          compare_fn.py, bench_fn.py, bench_dec_fn.cpp / bench_moeg_fn.cpp / bench_cpudec_fn.cpp (decode / prefill MoE
-          kernels / the CPU's decode handoff alone)
+          compare_fn.py (make test_fn_model, with test_snapshot / test_server on Flash-Next), bench_fn.py,
+          bench_dec_fn.cpp / bench_moeg_fn.cpp / bench_cpudec_fn.cpp / bench_cpujob_fn.cpp (decode / prefill MoE kernels /
+          the CPU's decode handoff / the CPU's prefill job alone)
 data/     (not code) rocm/ venv/ models/ llama.cpp/ (quantization tools + reference only)
 ```
 

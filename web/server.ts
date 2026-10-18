@@ -8,7 +8,7 @@ import app from "./index.html";
 const KILN = process.env.KILN_URL ?? "http://127.0.0.1:8080";
 // Changes with the page's code. Open tabs compare it on every status poll and reload to pick up an update
 // (their chats are in sessionStorage, so a reload keeps them).
-const BUILD = Bun.hash((await Promise.all(["index.html", "app.ts", "style.css"].map((f) => Bun.file(`${import.meta.dir}/${f}`).text()))).join("\0")).toString(36);
+const BUILD = Bun.hash((await Promise.all(["index.html", "app.ts", "sampler.ts", "style.css"].map((f) => Bun.file(`${import.meta.dir}/${f}`).text()))).join("\0")).toString(36);
 
 // DNS rebinding guard: a page from another site that points its own name at this machine still sends that name as
 // Host. Requests addressed to an IP address or to this machine's names are fine.
@@ -30,7 +30,6 @@ async function pickModel(req: Request): Promise<string | undefined> {
   return model;
 }
 
-// ---- replies as jobs -------------------------------------------------------------------------------------------
 // A reply belongs to this server, not to the page that asked for it: the request to kiln runs to its end whatever
 // the page does (reloads, closes, sleeps with the laptop, loses Wi-Fi, opens another chat), and any page can follow it
 // again from where it left off: every event has a position. Only an explicit stop ends a reply early. A reply stays

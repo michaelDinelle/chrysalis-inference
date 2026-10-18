@@ -51,10 +51,3 @@ void relayout(const QTensor &t, const uint8_t *raw_dev, hipStream_t st, int64_t 
     if (t.type == Q3_K) k_q3k_scales<<<(nblocks + 255) / 256, 256, 0, st>>>(raw_dev, (int8_t *)t.sc + b0 * 16, nblocks);
 }
 
-__global__ void k_f32_to_f16(const float *in, half *out, int64_t n) {
-    const int64_t i = blockIdx.x * (int64_t)blockDim.x + threadIdx.x;
-    if (i < n) out[i] = __float2half(in[i]);
-}
-void f32_to_f16(const float *in, half *out, int64_t n, hipStream_t st) {
-    k_f32_to_f16<<<std::max<int64_t>(1, (n + 255) / 256), 256, 0, st>>>(in, out, n);   // n = 0: just loads this code object
-}

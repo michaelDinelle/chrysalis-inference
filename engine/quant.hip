@@ -1,10 +1,6 @@
-// Quantized weights: their structure-of-arrays layout (filled by relayout.hip), decode GEMVs built on int8
-// dot products, dequantization to fp16 for the prefill GEMMs, and activation quantization.
 #include "kernels.h"
 #include <algorithm>
 #include <vector>
-
-// ---- weight arrays (relayout from GGUF blocks: relayout.hip) -------------------------------------
 
 QTensor make_qtensor(Arena &a, int type, int rows, int cols) {
     QTensor t; t.type = type; t.rows = rows; t.cols = cols;
@@ -19,8 +15,6 @@ QTensor make_qtensor(Arena &a, int type, int rows, int cols) {
     }
     return t;
 }
-
-// ---- unpacking helpers --------------------------------------------------------------------
 
 // IQ4_XS non-linear codebook, as four little-endian words for v_perm_b32 lookups.
 __device__ __forceinline__ int2 iq4_lookup(uint32_t q) {
@@ -43,7 +37,7 @@ __device__ __forceinline__ int dot16(int4 w, int4 x, int acc) {
     return dot4(w.w, x.w, dot4(w.z, x.z, dot4(w.y, x.y, dot4(w.x, x.x, acc))));
 }
 
-// ---- decode GEMV: y[t][row] (+)= W[row] . x[t] for T <= 8 tokens ----------------------------------
+// Decode GEMV: y[t][row] (+)= W[row] . x[t] for T <= 8 tokens.
 // A wave computes R rows at once (R consecutive rows of one matrix, or the gate and up rows of the
 // FFN), so every activation load is reused R times; lanes stride over 32- or 64-weight chunks.
 // One launch covers up to 3 matrices stacked by rows (e.g. q|k|v) with their own types and outputs.
@@ -207,7 +201,7 @@ void gemv(const QTensor &W, QAct x, int T, float *y, int ldy, int mode, hipStrea
     gemv(a, st);
 }
 
-// ---- small-batch GEMM: y[t][row] (+)= W[row] . x[t] for prefill chunks of 9..384 tokens --------------
+// Small-batch GEMM: y[t][row] (+)= W[row] . x[t] for prefill chunks of 9..384 tokens.
 // Weights are dequantized in registers straight into WMMA fragments (fp16 x fp16 -> fp32), so a pass
 // reads the quantized weights once instead of writing and re-reading an fp16 copy of every matrix (that
 // costs ~140 ms per forward and dominated short prefills). A workgroup is 4 waves on the same 32 rows and
@@ -358,7 +352,7 @@ void gemm_q(const QTensor &W, const half *x, int ldx, int T, void *y, int ldy, i
     else FAIL("gemm_q: type %d", W.type);
 }
 
-// ---- dequantization to fp16 (long prefill chunks feed hipBLASLt) ------------------------------
+// Dequantization to fp16 (long prefill chunks feed hipBLASLt).
 
 // 16 int8 values times a scale -> 16 halves, written as two 16-byte stores.
 __device__ __forceinline__ void store16(half *o, int4 q, float d) {
@@ -440,7 +434,7 @@ void embed(const QTensor &W, const int *tokens, int T, float *out, hipStream_t s
     k_embed<<<dim3(1, T), 256, 0, st>>>(W, tokens, out);
 }
 
-// ---- activation quantization: fp32 -> int8 with one scale per 32 values ------------------------
+// Activation quantization: fp32 -> int8 with one scale per 32 values.
 
 __global__ void k_quant_act(const float *x, int64_t n, QAct out) {
     const int64_t i = blockIdx.x * (int64_t)blockDim.x + threadIdx.x;   // one lane per value, one wave per block

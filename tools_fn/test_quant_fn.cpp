@@ -47,7 +47,6 @@ int main() {
         uint8_t *draw = a.get(raw.size());
         CK(hipMemcpy(draw, raw.data(), raw.size(), hipMemcpyHostToDevice));
         relayout(W, draw, st);
-        // dequant
         half *dq = a.get<half>(n);
         dequant(W, dq, st);
         std::vector<half> dqh(n); CK(hipMemcpyAsync(dqh.data(), dq, n * 2, hipMemcpyDeviceToHost, st)); CK(hipStreamSynchronize(st));

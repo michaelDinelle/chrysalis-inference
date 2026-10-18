@@ -289,7 +289,7 @@ def main():
         if ids:
             W.add_tensor(f"blk.{l}.{out_name}.weight", [ne[0], ne[1], len(ids)], tt, produce)
 
-    # ---- global tensors
+    # global tensors
     keep("token_embd.weight")
     requant("output.weight", Q6_K, "output.weight" if I.vec("output.weight") is not None else None)
     keep("output_hc_norm.weight"); keep("output_hc_down.weight"); keep("output_hc_up.weight")

@@ -1,4 +1,3 @@
-// Engine implementation: loading, sequences, forward passes, MTP drafting, speculative steps.
 #include "model.h"
 #include "gguf.h"
 #include <algorithm>
@@ -7,7 +6,6 @@
 #include <stdexcept>
 
 static const QAct NO_Q{nullptr, nullptr};
-// ---- sequences --------------------------------------------------------------------------------
 
 int Engine::seq_new() {
     for (size_t i = 0; i < seqs.size(); i++) {
@@ -81,7 +79,7 @@ void Engine::ensure_pages(Seq &s, int n_tokens, int from) {
         CK(hipMemcpyAsync(s.d_pages + dirty, s.pages.data() + dirty, (need - dirty) * 4, hipMemcpyHostToDevice, st));
 }
 
-// ---- snapshots: recurrent state copied to pinned host memory, KV pages shared copy-on-write ----------
+// Snapshots: recurrent state copied to pinned host memory, KV pages shared copy-on-write.
 
 int Engine::snapshot(int id) {
     Seq &s = seqs.at(id);
@@ -137,8 +135,6 @@ void Engine::snap_free(int snap) {
     sn.pages.clear();
     sn.used = false;
 }
-
-// ---- building blocks --------------------------------------------------------------------------
 
 // y = x W^T for prefill (x fp16 [T][ldx], W fp16 [N][K]) with hipBLASLt (~95 TFLOPS on gfx1100 vs ~60
 // for rocBLAS). Its fp16-output kernels are the fast ones, so fp32 results go through an fp16 scratch and
@@ -307,8 +303,6 @@ void Engine::lm_head(const QAct &in, int T, int rows) {
     gemv(w, in, T, b.logits, VOCAB, GEMV_STORE, st);
 }
 
-// ---- prefill and speculative generation --------------------------------------------------------
-
 void Engine::prefill(int id, const int *tokens, int n) {
     if (!embd.q) FAIL("prefill before warmup(): the token embeddings are not loaded");
     Seq &s = seqs.at(id);
@@ -342,14 +336,15 @@ void Engine::mtp_catch_up(Seq &s, int T, int pos0) {
 }
 
 
-// One speculative step. Emits the pending token (if newly sampled), accepted drafts and one more token.
 static void keep_row(const float *v, const int *i, float *rows_v, int *rows_i, int at) {
     std::copy(v, v + TOPK, rows_v + (size_t)at * TOPK);
     std::copy(i, i + TOPK, rows_i + (size_t)at * TOPK);
 }
 
+// One speculative step. Emits the pending token (if newly sampled), accepted drafts and one more token.
 // rows_v / rows_i (optional): each emitted token's row, the SAMPLE_N candidates it was drawn from (log probs).
 int Engine::generate(int id, const Sampling &sp, int *out, int max_out, float *rows_v, int *rows_i) {
+    if (max_out < 1) return 0;
     Seq &s = seqs.at(id);
     int nout = 0;
     if (s.pending < 0) {
@@ -358,7 +353,7 @@ int Engine::generate(int id, const Sampling &sp, int *out, int max_out, float *r
         s.seen.push(s.pending);
         if (rows_v) keep_row(s.top_v.data(), s.top_i.data(), rows_v, rows_i, nout);
         out[nout++] = s.pending;
-        if (is_eos(s.pending)) return nout;
+        if (is_eos(s.pending) || nout == max_out) return nout;   // a step below emits at least one more token
     }
     const int k = std::max(0, std::min(sp.n_draft, std::min(7, max_out - nout - 1)));
     const int q = s.n;

@@ -1,5 +1,5 @@
-// CPU side of the routed experts: the cold experts (GGUF blocks in system RAM) are computed here with ggml's AVX-512
-// kernels while the GPU runs the shared expert and the hot experts.
+// CPU side of the routed experts: the cold experts (GGUF blocks in system RAM) the GPU leaves to it, computed with
+// ggml's dot products or cpu_vnni.cpp's AVX-512 VNNI kernels while the GPU runs the shared expert and the hot experts.
 // Decode: per layer the GPU writes its tokens' MoE inputs and their cold expert picks into pinned host memory and
 // bumps `go`; the workers answer with the weighted sum of those experts and bump `done`, which a GPU kernel spins on.
 // Prefill: the host hands over a MoeJob (the chunk's cold experts that the CPU takes, with their tokens) and the
@@ -13,6 +13,8 @@
 
 constexpr int MOE_MAX_T = 8;           // tokens per handoff (decode and MTP verify passes)
 constexpr int MOE_MAX_E = 10;          // routed experts per token
+constexpr int VNNI_MIN_TOKENS = 3;     // a prefill expert with fewer tokens takes ggml's per-row dot products (as fast:
+                                       // bandwidth-bound), one with more the VNNI kernel
 
 struct MoeShared {                     // pinned, coherent host memory shared with the GPU
     alignas(64) uint32_t go;           // generation written by the GPU when the inputs below are ready
@@ -116,7 +118,6 @@ private:
     size_t xq_row[2] = {}, hq_row = 0;
     int dot_gu[2] = {-1, -1};                    // vec_dot types of the gate/up groups
     bool dot_same = true;
-    // prefill jobs
     MoeJob job;
     std::atomic<uint32_t> jgen{0};               // bumped by submit()
     std::atomic<uint64_t> sink_{0};              // keeps the preload's loads

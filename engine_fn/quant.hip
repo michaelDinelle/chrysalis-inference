@@ -1,10 +1,6 @@
-// Quantized weights: their structure-of-arrays layout (filled by relayout.hip), decode GEMVs built on int8
-// dot products, dequantization to fp16 for the prefill GEMMs, and activation quantization.
 #include "kernels.h"
 #include <algorithm>
 #include <vector>
-
-// ---- weight arrays (relayout from GGUF blocks: relayout.hip) -------------------------------------
 
 // t (rows set) = rows r0.. of W: each array offset by r0 rows' worth of its elements
 void qtensor_rows(QTensor &t, const QTensor &W, int r0) {
@@ -80,8 +76,6 @@ QTensor make_qtensor(Arena &a, int type, int rows, int cols) {
     return t;
 }
 
-// ---- unpacking helpers --------------------------------------------------------------------
-
 // IQ4_XS non-linear codebook, as four little-endian words for v_perm_b32 lookups.
 __device__ __forceinline__ int2 iq4_lookup(uint32_t q) {
     constexpr uint32_t T0 = 0xBFAD9881u, T1 = 0xF6EADDCFu, T2 = 0x26190D01u, T3 = 0x71594535u;  // -127 ... 113
@@ -128,7 +122,7 @@ __device__ __forceinline__ int q3_vals(uint32_t w, uint32_t hm, int j, int bit) 
     return (int)(((u | 0x80808080u) - 0x04040404u) ^ 0x80808080u);
 }
 
-// ---- decode GEMV: y[t][row] (+)= W[row] . x[t] for T <= 8 tokens ----------------------------------
+// Decode GEMV: y[t][row] (+)= W[row] . x[t] for T <= 8 tokens.
 // A wave computes R rows at once (R consecutive rows of one matrix, or the gate and up rows of the
 // FFN), so every activation load is reused R times; lanes stride over 32- or 64-weight chunks.
 // One launch covers up to 3 matrices stacked by rows (e.g. q|k|v) with their own types and outputs.
@@ -417,7 +411,7 @@ void gemv_hc(const QTensor &W, QAct x, int T, float *res, const float *inj, hipS
     gemv(a, st);
 }
 
-// ---- small-batch GEMM: y[t][row] (+)= W[row] . x[t] for prefill chunks of 9..384 tokens --------------
+// Small-batch GEMM: y[t][row] (+)= W[row] . x[t] for prefill chunks of 9..384 tokens.
 // Weights are dequantized in registers straight into WMMA fragments (fp16 x fp16 -> fp32), so a pass
 // reads the quantized weights once instead of writing and re-reading an fp16 copy of every matrix (that
 // costs ~140 ms per forward and dominated short prefills). A workgroup is 4 waves on the same 32 rows and
@@ -426,7 +420,7 @@ void gemv_hc(const QTensor &W, QAct x, int T, float *res, const float *inj, hipS
 // WMMA wants every 16-wide K fragment in both half-waves. Here the lower half produces K 0..7 and the
 // upper half K 8..15 (dequantizing or loading only 8 values per lane), then the halves swap with
 // v_permlanex16. The upper half ends up holding (8..15, 0..7): each half-wave's outputs are computed from
-// its own operands, so a K order that A and B share is exact (checked in tools/test_quant.hip).
+// its own operands, so a K order that A and B share is exact (checked in tools_fn/test_quant_fn.cpp).
 
 typedef uint32_t u4v __attribute__((ext_vector_type(4)));
 typedef uint32_t u8v __attribute__((ext_vector_type(8)));
@@ -632,7 +626,7 @@ void gemm_q(const QTensor &W, const half *x, int ldx, int T, void *y, int ldy, i
     else FAIL("gemm_q: type %d", W.type);
 }
 
-// ---- dequantization to fp16 (long prefill chunks feed hipBLASLt) ------------------------------
+// Dequantization to fp16 (long prefill chunks feed hipBLASLt).
 
 // 16 int8 values times a scale -> 16 halves, written as two 16-byte stores.
 __device__ __forceinline__ void store16(half *o, int4 q, float d) {
@@ -760,7 +754,7 @@ void embed(const QTensor &W, const int *tokens, int T, float *out, hipStream_t s
     k_embed<<<dim3(1, T), 256, 0, st>>>(W, tokens, out);
 }
 
-// ---- activation quantization: fp32 -> int8 with one scale per 32 values ------------------------
+// Activation quantization: fp32 -> int8 with one scale per 32 values.
 
 __global__ void k_quant_act(const float *x, int64_t n, QAct out) {
     const int64_t i = blockIdx.x * (int64_t)blockDim.x + threadIdx.x;   // one lane per value, one wave per block
@@ -777,12 +771,12 @@ void quant_act(const float *x, int64_t n, QAct out, hipStream_t st) {
     k_quant_act<<<(n + 255) / 256, 256, 0, st>>>(x, n, out);
 }
 
-// ---- routed experts at decode (T <= 8 tokens, up to 10 picks each) ---------------------------------
+// Routed experts at decode (T <= 8 tokens, up to 10 picks each).
 // A tier tensor holds its experts' rows back to back: gate / up [n_experts * FE][D], down [n_experts * D][FE].
 // hot_slot[j] is pick j's slot in the tier (token j / TOPK_E), or -1 when another device computes it.
 
 
-// ---- decode: the GPU's share of the cold experts, read straight from system RAM ------------------------------------
+// Decode: the GPU's share of the cold experts, read straight from system RAM.
 // Picks with hot_slot <= -2 (cold slot -2 - hot_slot) are the GPU's: their GGUF blocks come over PCIe from registered
 // host memory. A workgroup copies a tile of whole rows into LDS with 16-byte loads (rows are 16-byte aligned, so every
 // byte crosses the bus once, in full lines) and its waves decode from there. Gate / up come in per-group formats
@@ -893,7 +887,7 @@ __device__ __forceinline__ void cold_down(const uint8_t *down, int slot, int j, 
     }
 }
 
-// ---- decode: all of the GPU's routed picks in two launches (gate | up, then down) -----------------------------------
+// Decode: all of the GPU's routed picks in two launches (gate | up, then down).
 // blockIdx.y = pick j. Hot picks (hot_slot >= 0) and, when sgate is set, each token's shared expert (pick T * TOPK_E + t,
 // weighted by sg[t]) read VRAM, 8 waves x 4 rows per workgroup; the GPU's share of the cold picks (hot_slot <= -2) reads
 // system RAM over PCIe as above; the CPU's picks (-1) exit. Both kinds run side by side in one launch, so the PCIe-bound
@@ -984,7 +978,7 @@ void moe_cold_dec(const ColdDec &c, const int *hot_slot, int T, QAct x, QAct hq,
     moe_dec(none, none, none, none, none, none, &c, hot_slot, T, x, hq, wts, nullptr, y, st);
 }
 
-// ---- routed experts at prefill: grouped GEMMs over the tokens sorted by expert ---------------------------
+// Routed experts at prefill: grouped GEMMs over the tokens sorted by expert.
 // Work item w = one expert's run of rows [m0, m0 + n) of the sorted inputs X [entries][D] (fp16). Gate/up: H = silu(X G^T)
 // * (X U^T) (fp16 [entries][FE]); down: Y = w * (H Dn^T) (fp32 [entries][D]). Weights are structure-of-arrays tier
 // tensors (rows of expert `slot` start at slot * FE resp. slot * D); a work item may point at a staging buffer instead.

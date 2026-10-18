@@ -1,4 +1,4 @@
-// CPU cold-expert workers: see cpu_moe.h. Built with -march=native; the dot products are ggml's own kernels.
+// CPU cold-expert workers (see cpu_moe.h): ggml's dot products, or the AVX-512 VNNI kernels of cpu_vnni.cpp.
 #include "cpu_moe.h"
 #include "ggml.h"
 #include "ggml-cpu.h"
@@ -9,7 +9,6 @@
 
 namespace {
 constexpr int D_ = 2560, FE_ = 640;
-constexpr int VNNI_MIN_TOKENS = 3;              // below this ggml's per-row dot products are as fast (bandwidth-bound)
 inline uint32_t load_acq(const uint32_t *p) { return __atomic_load_n(p, __ATOMIC_ACQUIRE); }
 inline void store_rel(uint32_t *p, uint32_t v) { __atomic_store_n(p, v, __ATOMIC_RELEASE); }
 }

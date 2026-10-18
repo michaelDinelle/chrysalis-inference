@@ -2,9 +2,11 @@
 // reference built from ggml's dequantization. The cold experts come in two gate / up format groups as in kiln-fn.gguf
 // (5 Q3_K, then 3 Q2_K, down IQ4_NL for all); the hot tier runs once per VRAM format (IQ4_XS as in the file, Q3_K as the
 // MTP experts, Q2_K and Q5_0 for completeness).
-//   decode: route_dec + hot GEMVs + the CPU workers (ggml kernels) + wait + sum, T = 3; then half of the cold picks read
-//           by the GPU straight from host memory
-//   prefill: grouped WMMA GEMMs on the hot tier and on cold experts staged into VRAM per format group (DMA + relayout)
+//   decode, T = 3, as Engine::moe_block runs it: route_dec, one moe_dec for the hot picks, the shared expert (Q6_K gate /
+//           up, Q8_0 down as in the file) and the GPU's share of the cold picks (none, then half, read straight from host
+//           memory), the CPU workers for the other cold picks, moe_finish
+//   prefill, T = 64, as Engine::moe_back runs it: grouped WMMA GEMMs on the hot tier and on cold experts staged into VRAM
+//           per format group (DMA + relayout), then moe_shared and moe_accum over two batches of picks
 #include "../engine_fn/kernels.h"
 #include "../engine_fn/cpu_moe.h"
 #include "ggml.h"
@@ -103,8 +105,18 @@ int main() {
     CpuMoe cpu; cpu.start(sh, nullptr, cl, 8); cpu.arm();
     int fails = 0;
     uint32_t gen = 0;
+    std::uniform_real_distribution<float> gate(0.2f, 0.8f);   // shared-expert gates sg[t]
+    auto upload = [&](const QTensor &t, const std::vector<uint8_t> &raw) {
+        uint8_t *d = a.get(raw.size());
+        CK(hipMemcpy(d, raw.data(), raw.size(), hipMemcpyHostToDevice));
+        relayout(t, d, st);
+    };
+    static_assert(FS == FE, "expert_ref computes the shared expert with the routed experts' width");
+    Experts shx = make_experts(1, 1, GGML_TYPE_Q6_K, GGML_TYPE_Q6_K, GGML_TYPE_Q8_0, rng);
+    QTensor sgate = make_qtensor(a, Q6_K, FS, D), sup = make_qtensor(a, Q6_K, FS, D), sdown = make_qtensor(a, Q8_0, D, FS);
+    upload(sgate, shx.g[0].raw); upload(sup, shx.u[0].raw); upload(sdown, shx.d.raw);
 
-    // ---- fused router + routing against router_dec + route_dec: random fp16 router, T = 1..4 ----
+    // Fused router + routing against router_dec + route_dec: random fp16 router, T = 1..4.
     {
         std::vector<half> wr((size_t)NE * D); std::vector<float> wsg(D), x((size_t)4 * D);
         std::normal_distribution<float> wd(0.f, 0.05f);
@@ -138,8 +150,8 @@ int main() {
         }
     }
 
-    // ---- the zero-copy cold decode kernels (GGUF blocks in host memory) against the VRAM GEMVs on SoA copies of the same
-    //      experts, from the same int8 inputs: one token whose 8 picks are the 8 cold experts ----
+    // The zero-copy cold decode kernels (GGUF blocks in host memory) against the VRAM GEMVs on SoA copies of the same
+    // experts, from the same int8 inputs: one token whose 8 picks are the 8 cold experts.
     {
         const size_t mark = a.used;
         QTensor sg[2], su[2], sdn[2];
@@ -188,14 +200,9 @@ int main() {
         const size_t mark = a.used;
         Experts hot = make_experts(NH_, NH_, hf.gt_gu, hf.gt_gu, hf.gt_dn, rng);
         QTensor hg = make_qtensor(a, hf.gt_gu, NH_ * FE, D), hu = make_qtensor(a, hf.gt_gu, NH_ * FE, D), hd = make_qtensor(a, hf.gt_dn, NH_ * D, FE);
-        auto upload = [&](const QTensor &t, const std::vector<uint8_t> &raw) {
-            uint8_t *d = a.get(raw.size());
-            CK(hipMemcpy(d, raw.data(), raw.size(), hipMemcpyHostToDevice));
-            relayout(t, d, st);
-        };
         upload(hg, hot.g[0].raw); upload(hu, hot.u[0].raw); upload(hd, hot.d.raw);
 
-        // ---- decode, T = 3: cold picks all on the CPU, then half of them read by the GPU from host memory ----
+        // Decode, T = 3: the cold picks all on the CPU, then half of them read by the GPU from host memory.
         for (int pass = 0; pass < 2; pass++) {
             const int T = 3;
             const float gfrac = pass ? 0.5f : 0.0f;
@@ -203,20 +210,21 @@ int main() {
             for (auto &v : x) v = nd(rng);
             for (int t = 0; t < T; t++) for (int e = 0; e < 16; e++) lg[(size_t)t * NE + e] = nd(rng);
             float *dx = a.get<float>(x.size()), *dlg = a.get<float>(lg.size()), *dwts = a.get<float>(80), *dy = a.get<float>((size_t)80 * D);
-            float *dsh_out = a.get<float>((size_t)T * D), *dsg = a.get<float>(T);
+            std::vector<float> sg(T);
+            for (auto &v : sg) v = gate(rng);
+            float *dsg = a.get<float>(T);
             int *dids = a.get<int>(80), *dhot = a.get<int>(80);
             QAct xq{a.get<int8_t>(x.size()), a.get<float>(x.size() / 32)}, hq{a.get<int8_t>(80 * FE), a.get<float>(80 * FE / 32)};
             CK(hipMemcpy(dx, x.data(), x.size() * 4, hipMemcpyHostToDevice)); CK(hipMemcpy(dlg, lg.data(), lg.size() * 4, hipMemcpyHostToDevice));
-            CK(hipMemset(dsh_out, 0, (size_t)T * D * 4)); CK(hipMemset(dsg, 0, T * 4));
+            CK(hipMemcpy(dsg, sg.data(), T * 4, hipMemcpyHostToDevice));
             quant_act(dx, (int64_t)x.size(), xq, st);
             gen++;
             route_dec(dlg, T, dslot, dids, dwts, dhot, dsh, gfrac, dx, 0, gen, st);
-            moe_experts_dec(hg, hu, hd, QTensor{}, QTensor{}, QTensor{}, dhot, T, xq, hq, dwts, nullptr, dy, st);
-            if (gfrac > 0) moe_cold_dec(cd, dhot, T, xq, hq, dwts, dy, st);
+            moe_dec(hg, hu, hd, sgate, sup, sdown, gfrac > 0 ? &cd : nullptr, dhot, T, xq, hq, dwts, dsg, dy, st);
             // moe_finish: wait + sum + the HC update; inject 0 makes every stream's weight 1 and res starts at 0
             float *dres = a.get<float>((size_t)T * HC * D), *dinj = a.get<float>(T * HC);
             CK(hipMemset(dres, 0, (size_t)T * HC * D * 4)); CK(hipMemset(dinj, 0, T * HC * 4));
-            moe_finish(&dsh->done, gen, dy, dhot, dsh_out, dsg, dsh->y, dinj, dres, T, st);
+            moe_finish(&dsh->done, gen, dy, dhot, dy + (size_t)T * TOPK_E * D, nullptr, dsh->y, dinj, dres, T, st);   // shared rows weighted
             std::vector<float> res4((size_t)T * HC * D), out((size_t)T * D); std::vector<int> ids(T * 10), hs(T * 10); std::vector<float> w(T * 10);
             CK(hipMemcpy(res4.data(), dres, res4.size() * 4, hipMemcpyDeviceToHost));
             for (int t = 0; t < T; t++) for (int i = 0; i < D; i++) out[(size_t)t * D + i] = res4[((size_t)t * HC + 3) * D + i];   // stream 3
@@ -237,13 +245,14 @@ int main() {
                     if (slot_of[e] >= 0) expert_ref(hot, slot_of[e], &x[(size_t)t * D], &ref[(size_t)t * D], wk);
                     else expert_ref(cold, -1 - slot_of[e], &x[(size_t)t * D], &ref[(size_t)t * D], wk);
                 }
+                expert_ref(shx, 0, &x[(size_t)t * D], &ref[(size_t)t * D], sg[t]);
             }
             const double r = rel(out, ref);
-            printf("decode MoE, hot %-6s (T=3; cold Q3_K/Q2_K: %d on the GPU from host memory (%d Q2_K), %d on the CPU): rel diff %.2e %s\n",
+            printf("decode MoE + shared, hot %-6s (T=3; cold Q3_K/Q2_K: %d on the GPU from host memory (%d Q2_K), %d on the CPU): rel diff %.2e %s\n",
                    hf.name, n_gpu, n_g1, n_cpu, r, r < 2e-2 ? "ok" : "FAIL");
             fails += r >= 2e-2 || (pass && n_gpu == 0);
         }
-        // ---- prefill grouped GEMMs, T = 64 ----
+        // Prefill grouped GEMMs, T = 64.
         {
             const int T = 64, N = T * 10;
             std::vector<float> x((size_t)T * D);
@@ -259,7 +268,7 @@ int main() {
                 for (int k = 0; k < 10; k++) { r[k] = std::abs(nd(rng)) + 0.1; s += r[k]; }
                 for (int k = 0; k < 10; k++) { ids[t * 10 + k] = e[k]; w[t * 10 + k] = (float)(r[k] / s); }
             }
-            // host-side sort by tier and slot, as Engine::moe_prefill does; cold work items per format group, slots relative
+            // host-side sort by tier and slot, as Engine::moe_back does; cold work items per format group, slots relative
             std::vector<int> key(16), cnt(16, 0), off(16), order(16);
             for (int e = 0; e < 16; e++) { key[e] = slot_of[e] >= 0 ? slot_of[e] : NE + (-1 - slot_of[e]); order[e] = e; }
             std::sort(order.begin(), order.end(), [&](int p, int q) { return key[p] < key[q]; });
@@ -283,7 +292,10 @@ int main() {
             CK(hipMemcpy(dew, ew.data(), N * 4, hipMemcpyHostToDevice));
             CK(hipMemcpy(dhw, hw.data(), hw.size() * sizeof(MoeWork), hipMemcpyHostToDevice));
             for (int g = 0; g < 2; g++) CK(hipMemcpy(dcw[g], cw[g].data(), cw[g].size() * sizeof(MoeWork), hipMemcpyHostToDevice));
-            CK(hipMemset(dshr, 0, (size_t)T * D * 4)); CK(hipMemset(dsg, 0, T * 4));
+            std::vector<float> shr((size_t)T * D), sgv(T);           // the shared expert's output (moe_shared only scales it)
+            for (auto &v : shr) v = 0.05f * nd(rng);
+            for (auto &v : sgv) v = gate(rng);
+            CK(hipMemcpy(dshr, shr.data(), shr.size() * 4, hipMemcpyHostToDevice)); CK(hipMemcpy(dsg, sgv.data(), T * 4, hipMemcpyHostToDevice));
             gather_rows(dX, dtok, N, dXs, st);
             QTensor none{};
             moe_gemm_gateup(hg, hu, none, none, dhw, (int)hw.size(), dXs, dH, st);
@@ -304,7 +316,17 @@ int main() {
                 moe_gemm_gateup(cg, cu, none, none, dcw[g], (int)cw[g].size(), dXs, dH, st);
                 moe_gemm_down(cdn, none, dcw[g], (int)cw[g].size(), dH, dew, dY, st);
             }
-            moe_combine(dY, dpos, dshr, dsg, T, dout, st);
+            // the output as Engine::moe_back assembles it: moe = sg * shared, then the picks in batches ([0, N/2), [N/2, N)),
+            // each with its outputs in Y rows from 0 and its tokens in first-seen order
+            moe_shared(dshr, dsg, T, dout, st);
+            int *dbtok = a.get<int>(2 * T);
+            for (int bt = 0; bt < 2; bt++) {
+                const int p0 = bt ? N / 2 : 0, p1 = bt ? N : N / 2;
+                std::vector<int> toks, seen(T, 0);
+                for (int p = p0; p < p1; p++) if (!seen[tok[p]]) { seen[tok[p]] = 1; toks.push_back(tok[p]); }
+                CK(hipMemcpy(dbtok + bt * T, toks.data(), toks.size() * 4, hipMemcpyHostToDevice));
+                moe_accum(dY + (size_t)p0 * D, dpos, p0, p1, dbtok + bt * T, (int)toks.size(), dout, st);
+            }
             std::vector<float> out((size_t)T * D);
             CK(hipMemcpy(out.data(), dout, out.size() * 4, hipMemcpyDeviceToHost));
             std::vector<double> ref((size_t)T * D, 0.0);
@@ -314,8 +336,10 @@ int main() {
                     if (slot_of[e] >= 0) expert_ref(hot, slot_of[e], &x[(size_t)t * D], &ref[(size_t)t * D], w[t * 10 + k]);
                     else expert_ref(cold, -1 - slot_of[e], &x[(size_t)t * D], &ref[(size_t)t * D], w[t * 10 + k]);
                 }
+            for (int t = 0; t < T; t++)
+                for (int i = 0; i < D; i++) ref[(size_t)t * D + i] += (double)sgv[t] * shr[(size_t)t * D + i];
             const double r = rel(out, ref);
-            printf("prefill MoE, hot %-6s (T=64, grouped WMMA, hot + staged cold Q3_K/Q2_K): rel diff %.2e %s\n", hf.name, r, r < 1e-2 ? "ok" : "FAIL");
+            printf("prefill MoE, hot %-6s (T=64, grouped WMMA, hot + staged cold Q3_K/Q2_K, 2 batches): rel diff %.2e %s\n", hf.name, r, r < 1e-2 ? "ok" : "FAIL");
             fails += r >= 1e-2;
         }
         CK(hipStreamSynchronize(st));

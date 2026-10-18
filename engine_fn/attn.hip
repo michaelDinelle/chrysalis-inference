@@ -4,8 +4,8 @@
 // key splits and applies the sigmoid output gate.
 //
 // Query rows of a KV group are numbered r = t * 12 + j (token t, q head 12g + j), so a 16-row WMMA tile
-// mixes heads and tokens freely; prefill and decode differ only in T and the number of key splits.
-// The kernel computes S^T = K Q^T and O^T = V^T P^T, which keeps each lane on a single query row.
+// mixes heads and tokens freely.
+// The kernels compute S^T = K Q^T and O^T = V^T P^T, which keeps each lane on a single query row.
 #include "kernels.h"
 #include <algorithm>
 #include <initializer_list>
@@ -181,7 +181,7 @@ __global__ __launch_bounds__(AW * 32) void k_attn(AttnArgs a) {
             mx = fmaxf(mx, fmaxf(s0[i], s1[i]));
         }
         mx = fmaxf(mx, lane_xor<16>(mx));
-        if (mx > m) {                                             // rescale only when the max grows
+        if (mx > m) {
             const float alpha = m == -INFINITY ? 0.0f : __expf(m - mx);
             l *= alpha;
 #pragma unroll
@@ -348,7 +348,8 @@ __global__ __launch_bounds__(256) void k_attn_combine(const float *part_o, const
 }
 
 // Full attention for T query tokens at positions pos0.. (keys 0 .. pos0+T-1 must already be cached).
-// Decode passes split_len > 0 and gets fp16/int8 output via the combine kernel; prefill uses one split.
+// Sets split_len itself (whatever the caller passed) and always merges the splits in k_attn_combine: fp16 and/or
+// int8 output for decode / verify, fp16 only for prefill.
 void attention(AttnArgs a, half *oh, QAct oq, hipStream_t st) {
     const int ntiles = (a.T * QPK + 15) / 16;
     const int nkeys = a.pos0 + a.T;
@@ -376,7 +377,7 @@ void attention(AttnArgs a, half *oh, QAct oq, hipStream_t st) {
     if (a.partial) k_attn_combine<<<a.T * NH, 256, 0, st>>>(a.part_o, a.part_ml, a.nsplit, a.T * NH, a.qg, oh, oq);
 }
 
-// ---- QSA indexer ------------------------------------------------------------------------------------
+// QSA indexer.
 // Each cell keeps its raw indexer key (fp16, unnormed, unrotated); every complete block of KPOOL cells keeps one
 // pooled key: the mean of its raw keys, RMS-normed and rotated to the position of its first cell. A query's
 // indexer heads (normed, rotated) score block b as sum_h relu(q_h . k_b) / sqrt(IDX_D); the query attends the
@@ -566,7 +567,7 @@ __global__ __launch_bounds__(1024) void k_idx_select(const float *score, int pos
     }
 }
 
-// ---- faster selection (decode at long context: 65K blocks per QSA layer at 262K) ------------------------------------
+// Selection at long context (decode: 65K blocks per QSA layer at 262K).
 // Scores: 16 lanes per block (16-byte loads, coalesced), 16 blocks per workgroup step; each workgroup also counts the
 // top 10 bits of its scores (non-negative floats order like their bits) and adds its non-empty bins to the token's
 // histogram, so the selection starts from a 1024-bin histogram instead of 4 radix passes over every score.
@@ -828,13 +829,13 @@ void idx_select(const half *q16, int pos0, int G, int nblk, KVRef kv, int layer,
     }
     k_idx_select2<<<G, 1024, 0, st>>>(score, hist, pos0, nblk, sel);
 }
-// the earlier two kernels, kept as the reference the unit test compares against
+// The two-kernel selection (k_idx_score, k_idx_select): the reference tools_fn/test_attn_fn.cpp compares against.
 void idx_select_ref(const half *q16, int pos0, int G, int nblk, KVRef kv, int layer, float *score, int *sel, hipStream_t st) {
     k_idx_score<<<dim3((nblk + 255) / 256, G), 256, 0, st>>>(q16, pos0, nblk, kv, layer, score);
     k_idx_select<<<G, 1024, 0, st>>>(score, pos0, nblk, sel);
 }
 
-// ---- sparse attention over selected blocks ------------------------------------------------------------
+// Sparse attention over the selected blocks.
 // One 256-thread workgroup (8 waves) per (token, kv head, split of the token's block list); the selected blocks
 // (SEL_BLOCKS of KPOOL = 4 cells, then the tail block) in stages of 32 blocks = 128 keys. As the 27B engine's decode
 // kernel: wave w scores keys 16w..16w+15 of the stage (4 blocks) for the token's 12 query heads (one 16-row tile), the

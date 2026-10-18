@@ -15,14 +15,24 @@ build/%: tools/%.hip $(KERN) $(wildcard engine/*.h)
 	$(HIPCC) $(FLAGS) -o $@ $< $(KERN) $(LIBS)
 
 build/test_sampler: tools/test_sampler.cpp engine/sampler.h
+	@mkdir -p build
 	g++ -O2 -std=c++20 -o $@ $<
 
-test: build/libkiln.so build/test_quant build/test_attn build/test_sampler
-	./build/test_quant data/models/kiln-mix.gguf && ./build/test_attn && ./build/test_sampler
+build/sampler_cases: tools/sampler_cases.cpp engine/sampler.h
+	@mkdir -p build
+	g++ -O2 -std=c++20 -o $@ $<
+
+# the web UI (no GPU): its copy of the sampler against the engine's, the server's replies against a fake kiln
+test_web: build/sampler_cases
+	cd web && bun test
+
+test: test_web build/libkiln.so build/test_quant build/test_attn build/test_gdn build/test_sampler build/ref_logits
+	./build/test_quant data/models/kiln-mix.gguf && ./build/test_attn && ./build/test_gdn && ./build/test_sampler
 	data/venv/bin/python tools/test_chat.py
 	data/venv/bin/python tools/test_cache.py
 	data/venv/bin/python tools/test_snapshot.py
 	data/venv/bin/python tools/test_server.py
+	data/venv/bin/python tools/compare_ref.py
 
 # Qwen3.8-Flash-Next engine (engine_fn/): its cold experts run on the CPU with ggml's kernels from data/llama.cpp
 GGML  := $(CURDIR)/data/llama.cpp
@@ -51,8 +61,33 @@ build_fn/test_linear_fn: tools_fn/test_linear_fn.cpp $(FN_SRC) $(wildcard engine
 	@mkdir -p build_fn
 	$(HIPCC) $(FLAGS) -I$(GGML)/ggml/include -x hip -o $@ $< $(filter-out engine_fn/api.cpp,$(FN_SRC)) $(FN_LIBS)
 
-test_fn: build_fn/test_quant_fn build_fn/test_attn_fn build_fn/test_mix_fn build_fn/test_moe_fn build_fn/test_cpujob_fn build_fn/test_linear_fn
-	./build_fn/test_quant_fn && ./build_fn/test_attn_fn && ./build_fn/test_mix_fn && ./build_fn/test_moe_fn && ./build_fn/test_cpujob_fn && \
-	./build_fn/test_linear_fn
+build_fn/test_gdn_fn: tools/test_gdn.hip
 
-.PHONY: test fn test_fn
+test_fn: build_fn/test_quant_fn build_fn/test_attn_fn build_fn/test_gdn_fn build_fn/test_mix_fn build_fn/test_moe_fn build_fn/test_cpujob_fn \
+         build_fn/test_linear_fn
+	./build_fn/test_quant_fn && ./build_fn/test_attn_fn && ./build_fn/test_gdn_fn && ./build_fn/test_mix_fn && ./build_fn/test_moe_fn && \
+	./build_fn/test_cpujob_fn && ./build_fn/test_linear_fn
+
+# the Flash-Next model in-process (kiln stopped, ~47 GiB of system RAM): generation and snapshots, the server, and its
+# next-token distributions against llama.cpp's
+test_fn_model: build/libkiln_fn.so build_fn/ref_logits_fn
+	data/venv/bin/python tools/test_snapshot.py --use qwen3.8-flash-next
+	data/venv/bin/python tools/test_server.py --use qwen3.8-flash-next
+	data/venv/bin/python tools_fn/compare_fn.py
+
+# llama.cpp's logits for those comparisons (tools/compare_ref.py, tools_fn/compare_fn.py)
+LLAMA      := -O2 -std=c++17 -I$(GGML)/include -I$(GGML)/ggml/include
+LLAMA_LIBS := -L$(GGML)/build/bin -lllama -lggml -lggml-base -Wl,-rpath,$(GGML)/build/bin:$(ROCM)/lib
+build/ref_logits: tools/ref_logits.cpp
+	@mkdir -p build
+	g++ $(LLAMA) -o $@ $< $(LLAMA_LIBS)
+
+build_fn/ref_logits_fn: tools_fn/ref_logits_fn.cpp
+	@mkdir -p build_fn
+	g++ $(LLAMA) -o $@ $< $(LLAMA_LIBS)
+
+# the mechanical cases of AGENTS.md's comment rule
+lint:
+	python3 -I tools/lint_comments.py
+
+.PHONY: test test_web fn test_fn test_fn_model lint

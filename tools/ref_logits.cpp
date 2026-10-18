@@ -1,5 +1,5 @@
 // Reference logits from llama.cpp for a token sequence: writes float32 [n][vocab] (all positions).
-// Build: see tools/compare_ref.py. Usage: ref_logits model.gguf tokens.bin out.bin
+// Build: make build/ref_logits. Usage: ref_logits model.gguf tokens.bin out.bin
 #include "llama.h"
 #include <cstdio>
 #include <vector>

@@ -1,4 +1,3 @@
-// Small fused ops: RMSNorm (with fp16 / int8 / fp32 outputs), SwiGLU, top-k for sampling.
 #include "kernels.h"
 
 __device__ __forceinline__ float block_sum(float v, float *red) {   // blockDim.x == 256
@@ -36,29 +35,6 @@ void rmsnorm(const float *x, const float *w, int T, int n, int ldx, int ldo, flo
     k_rmsnorm<<<T, 256, 0, st>>>(x, w, n, ldx, ldo, of, oh, oq);
 }
 
-// Decode-path RMSNorm (row length D, T <= 8 rows): D/256 blocks per row each reduce the whole row
-// (cheap, L2-resident) and normalize their own 256 elements, so the norm is one short, wide launch.
-__global__ __launch_bounds__(256) void k_norm_rows(const float *x, const float *w, float *of, half *oh, QAct oq) {
-    __shared__ float red[8];
-    const float *xr = x + (size_t)blockIdx.y * D;
-    float ss = 0;
-    for (int i = threadIdx.x; i < D; i += 256) ss += xr[i] * xr[i];
-    const float inv = rsqrtf(block_sum(ss, red) / D + EPS);
-    const int i = blockIdx.x * 256 + threadIdx.x;
-    const size_t o = (size_t)blockIdx.y * D + i;
-    const float v = xr[i] * inv * w[i];
-    if (of) of[o] = v;
-    if (oh) oh[o] = __float2half(v);
-    if (oq.q) {
-        const float d = warp_max(fabsf(v)) / 127.0f;
-        oq.q[o] = (int8_t)__float2int_rn(d > 0 ? v / d : 0.0f);
-        if ((threadIdx.x & 31) == 0) oq.d[o / 32] = d;
-    }
-}
-void norm_rows(const float *x, const float *w, int T, float *of, half *oh, QAct oq, hipStream_t st) {
-    k_norm_rows<<<dim3(D / 256, T), 256, 0, st>>>(x, w, of, oh, oq);
-}
-
 // g = silu(g) * u in place, for the prefill FFN (gate/up come from separate fp16 GEMMs).
 __global__ void k_swiglu_h(half *g, const half *u, int64_t n) {
     const int64_t i = blockIdx.x * (int64_t)blockDim.x + threadIdx.x;
@@ -80,15 +56,7 @@ void store_f16(const half *x, int n, int T, float *y, int ldy, bool accumulate, 
     k_store_f16<<<dim3((n + 255) / 256, T), 256, 0, st>>>(x, n, y, ldy, accumulate);
 }
 
-__global__ void k_to_half(const float *x, half *y, int64_t n) {
-    const int64_t i = blockIdx.x * (int64_t)blockDim.x + threadIdx.x;
-    if (i < n) y[i] = __float2half(x[i]);
-}
-void to_half(const float *x, half *y, int64_t n, hipStream_t st) {
-    k_to_half<<<(n + 255) / 256, 256, 0, st>>>(x, y, n);
-}
-
-// ---- top-k over vocabulary rows: two passes of bitonic sorts in LDS ---------------------------
+// Top-k over vocabulary rows: two passes of bitonic sorts in LDS.
 // Pass 1: each block sorts a 4096-wide slice of one row and keeps its best TOPK.
 // Pass 2: one block per row merges the candidates and keeps the global best TOPK.
 
@@ -167,7 +135,7 @@ void argmax(const float *logits, int T, int n, int ld, int *out, hipStream_t st)
     k_argmax<<<T, 1024, 0, st>>>(logits, n, ld, out);
 }
 
-// ---- hyper-connections ----------------------------------------------------------------------
+// Hyper-connections.
 // The residual is HC parallel streams [T][HC][D]. Before each block (token mixer, MoE) and before the LM head:
 //   xn_s   = rmsnorm(res_s) * gamma_s                       (gamma folded to 1 + w by the converter)
 //   lo     = silu((W_down xn) / HC)                         (10240 -> 320)
@@ -276,7 +244,7 @@ void mtp_pack(const float *e, const float *xn, int T, float *out, half *out_h, h
     k_mtp_pack<<<dim3(2 * D / 256, HC, T), 256, 0, st>>>(e, xn, out, out_h);
 }
 
-// ---- fused HC mixer at decode (T <= 4 tokens): two kernels instead of norm / down / lo / up / inject / mix -----------
+// Fused HC mixer at decode (T <= 4 tokens): two kernels instead of norm / down / lo / up / inject / mix.
 __device__ __forceinline__ int dot16i(int4 w, int4 x, int acc) {
     return dot4(w.w, x.w, dot4(w.z, x.z, dot4(w.y, x.y, dot4(w.x, x.x, acc))));
 }
@@ -325,7 +293,7 @@ __global__ __launch_bounds__(MIX_WG) void k_mix_down(const float *res, const flo
             if (lane == 0) xd[t][blk] = d;
         }
     __syncthreads();
-    // 3. rows
+    // 3. one row per wave: W_down's 320 rows -> lo, then W_inject's 4 -> inject
     const int row = blockIdx.x * NW + wave;
     const QTensor *W = row < HCR ? &down : &inj;
     const int r = row < HCR ? row : row - HCR;

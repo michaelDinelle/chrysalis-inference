@@ -117,7 +117,7 @@ void Engine::load(const std::string &path, int max_seqs, size_t reserve_bytes) {
         embd.type = IQ4_XS; embd.rows = (int)t->ne[1]; embd.cols = (int)t->ne[0];
     }
 
-    // ---- plan (CPU only): which tensor goes where, in file order -------------------------------------------
+    // The plan (CPU only): which tensor goes where, in file order.
     std::vector<Job> jobs;
     auto get = [&](const std::string &name) {
         const GGUFTensor *t = g.get(name);
@@ -207,7 +207,7 @@ void Engine::load(const std::string &path, int max_seqs, size_t reserve_bytes) {
     const int n = (int)pieces.size();
     load_total = total_bytes;
 
-    // ---- prefetch: pull the file into the page cache in load order (a no-op when it is cached) ----------------
+    // Prefetch: pull the file into the page cache in load order (a no-op when it is cached).
     std::atomic<size_t> prefetched{0};      // file offset up to which the data is in the page cache
     const size_t lo = jobs.front().t->data - g.base, hi = jobs.back().t->data - g.base + jobs.back().t->nbytes;
     size_t disk_bytes = 0;                  // read from disk (the rest was in the page cache)
@@ -232,7 +232,7 @@ void Engine::load(const std::string &path, int max_seqs, size_t reserve_bytes) {
         ::close(fd);
     });
 
-    // ---- the GPU: waking it takes most of hipInit when it was runtime-suspended ------------------------------
+    // Waking a runtime-suspended GPU is most of hipInit.
     CK(hipInit(0));
     CK(hipSetDevice(0));
     CK(hipFree(nullptr));
@@ -246,7 +246,7 @@ void Engine::load(const std::string &path, int max_seqs, size_t reserve_bytes) {
     std::vector<hipEvent_t> done(n);
     for (hipEvent_t &e : done) CK(hipEventCreateWithFlags(&e, hipEventDisableTiming));
 
-    // ---- writers fill the ring from now on; the rest of the setup overlaps their first lap ------------------
+    // The writers fill the ring from now on; the rest of the setup overlaps their first lap.
     std::atomic<int> next{0}, submitted{0};
     std::vector<std::atomic<uint8_t>> filled(n);
     std::vector<std::thread> writers;
@@ -302,7 +302,7 @@ void Engine::load(const std::string &path, int max_seqs, size_t reserve_bytes) {
         }
     });
 
-    // ---- this thread hands each piece to the GPU in order -----------------------------------------------------
+    // This thread hands each piece to the GPU in order.
     for (int i = 0; i < n; i++) {
         const Piece &pc = pieces[i];
         Job &j = jobs[pc.job];

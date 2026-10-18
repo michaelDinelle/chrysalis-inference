@@ -236,8 +236,6 @@ class Renderer:
         return ids, out
 
 
-# ---- output parsing --------------------------------------------------------------------------------
-
 PARAM = re.compile(r"<parameter=([^>\n]+)>\n?(.*?)\n?</parameter>\s*(?=<parameter=|</function>|$)", re.S)
 
 

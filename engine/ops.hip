@@ -1,4 +1,3 @@
-// Small fused ops: RMSNorm (with fp16 / int8 / fp32 outputs), SwiGLU, top-k for sampling.
 #include "kernels.h"
 
 __device__ __forceinline__ float block_sum(float v, float *red) {   // blockDim.x == 256
@@ -80,15 +79,7 @@ void store_f16(const half *x, int n, int T, float *y, int ldy, bool accumulate, 
     k_store_f16<<<dim3((n + 255) / 256, T), 256, 0, st>>>(x, n, y, ldy, accumulate);
 }
 
-__global__ void k_to_half(const float *x, half *y, int64_t n) {
-    const int64_t i = blockIdx.x * (int64_t)blockDim.x + threadIdx.x;
-    if (i < n) y[i] = __float2half(x[i]);
-}
-void to_half(const float *x, half *y, int64_t n, hipStream_t st) {
-    k_to_half<<<(n + 255) / 256, 256, 0, st>>>(x, y, n);
-}
-
-// ---- top-k over vocabulary rows: two passes of bitonic sorts in LDS ---------------------------
+// Top-k over vocabulary rows: two passes of bitonic sorts in LDS.
 // Pass 1: each block sorts a 4096-wide slice of one row and keeps its best TOPK.
 // Pass 2: one block per row merges the candidates and keeps the global best TOPK.
 

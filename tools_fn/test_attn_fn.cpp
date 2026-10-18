@@ -132,7 +132,7 @@ int main() {
         CK(hipMalloc(&score, (size_t)G * nblk * 4)); CK(hipMalloc(&dsel, (size_t)G * (SEL_BLOCKS + 1) * 4));
         uint32_t *dhist; CK(hipMalloc(&dhist, (size_t)G * 1024 * 4));
         idx_select(dq16, P0, G, nblk, kv, layer, score, dhist, dsel, st);
-        {   // the new kernels pick exactly what the reference kernels pick, for every query and several context lengths
+        {   // idx_select picks exactly what the reference idx_select_ref picks, for every query and several context lengths
             int *rsel; CK(hipMalloc(&rsel, (size_t)G * (SEL_BLOCKS + 1) * 4));
             int bad = 0;
             for (int pos_end : {300, 2047, 2049, 4000, N}) {

@@ -154,7 +154,7 @@ void Engine::load(const std::string &path, int max_seqs, size_t reserve_bytes) {
     CK(hipEventCreateWithFlags(&front_copied, hipEventDisableTiming));
     CK(hipEventRecord(copied, cst));
 
-    // ---- plan the VRAM weights: every dense tensor and the hot / MTP expert tiers --------------------------------
+    // Plan the VRAM weights: every dense tensor and the hot / MTP expert tiers.
     // layer: the decoder layer a tensor belongs to (-1: global, NL: the MTP block); hot expert tiers are not prefetched
     struct Up { const GGUFTensor *t; QTensor *q = nullptr; float **f = nullptr; half **h = nullptr; int **i = nullptr; int layer = -1; bool pf = true; };
     std::vector<Up> ups;
@@ -227,9 +227,9 @@ void Engine::load(const std::string &path, int max_seqs, size_t reserve_bytes) {
     wbytes += (size_t)NE * 4 + 2 * (size_t)NGDN * GV * 4 + (1 << 20) + ups.size() * 8 * sizeof(PrefetchRange);
     warena.init(wbytes);
 
-    // ---- cold experts -> system RAM (hugepages), copied by 8 threads while the VRAM upload below runs: both are reads
+    // Cold experts -> system RAM (hugepages), copied by 8 threads while the VRAM upload below runs: both are reads
     // of the same file, so together they take about as long as the disk needs for all of it. Per layer: gate / up of
-    // each format group (ffn_{gate,up}_cold0, _cold1; slots of group 0 first), down of all of them (ffn_down_cold) ----
+    // each format group (ffn_{gate,up}_cold0, _cold1; slots of group 0 first), down of all of them (ffn_down_cold).
     enum { G0, U0, G1, U1, DN };
     std::vector<std::array<const GGUFTensor *, 5>> ct(NL);
     std::vector<std::array<size_t, 5>> coff(NL);
@@ -279,7 +279,7 @@ void Engine::load(const std::string &path, int max_seqs, size_t reserve_bytes) {
         ~Joiner() { for (auto &t : th) if (t.joinable()) t.join(); }
     } joiner{cold_th};
 
-    // ---- upload through pinned staging + a device scratch, relayout on the GPU --------------------------------------
+    // Upload through pinned staging + a device scratch, relayout on the GPU.
     constexpr size_t STAGE = 64 << 20;
     uint8_t *pin[2], *dev[2];
     hipEvent_t ev[2];
@@ -375,7 +375,6 @@ void Engine::load(const std::string &path, int max_seqs, size_t reserve_bytes) {
     for (int i = 0; i < 2; i++) { CK(hipHostFree(pin[i])); CK(hipFree(dev[i])); CK(hipEventDestroy(ev[i])); }
     const double t_vram = now();
 
-    // ---- the cold copy started above: wait for it -------------------------------------------------------------------
     for (auto &t : cold_th) t.join();
     cold_th.clear();
     cold_dev.assign(NL, ColdDec{});
@@ -405,7 +404,7 @@ void Engine::load(const std::string &path, int max_seqs, size_t reserve_bytes) {
     }
     const double t_cold = now();
 
-    // ---- token embeddings -> pinned host memory (the GPU reads its rows over PCIe) --------------------------------
+    // Token embeddings -> pinned host memory (the GPU reads its rows over PCIe).
     {
         const GGUFTensor *t = get("token_embd.weight");
         if (t->type != Q8_0) FAIL("token embeddings must be Q8_0");
@@ -418,7 +417,7 @@ void Engine::load(const std::string &path, int max_seqs, size_t reserve_bytes) {
         CK(hipHostGetDevicePointer(&devp, host, 0));
         embd.type = Q8_0; embd.rows = (int)t->ne[1]; embd.cols = (int)t->ne[0]; embd.q = (uint8_t *)devp;
     }
-    // ---- n-gram table: memory-map the source file ------------------------------------------------------------------
+    // The n-gram table: memory-map the source file.
     if (!ngram_map) {
         std::string f = g.strs["kilnfn.ngram_file"];
         if (f.empty()) FAIL("no n-gram table path in %s", path.c_str());
@@ -437,7 +436,7 @@ void Engine::load(const std::string &path, int max_seqs, size_t reserve_bytes) {
         for (int i = 0; i < 3; i++) ple_mult[i] = (uint64_t)m[i];
         for (int h = 0; h < PLE_HEADS; h++) { ple_off[h] = (uint32_t)o[h]; ple_voc[h] = (uint32_t)v[h]; }
     }
-    // ---- CPU workers for the cold experts ---------------------------------------------------------------------------
+    // CPU workers for the cold experts.
     {
         auto shared = [](MoeShared *&h, MoeShared *&d) {
             void *p, *dp;
@@ -451,7 +450,6 @@ void Engine::load(const std::string &path, int max_seqs, size_t reserve_bytes) {
         n_workers = physical_cores();
         cpu.start(sh, sh_pred, cold, n_workers);
     }
-    // ---- hipBLASLt, buffers, sequences, KV pool -----------------------------------------------------------------
     hipblasLtCreate(&lt);
     CK(hipMalloc(&lt_ws, lt_ws_size));
     alloc_buffers(max_seqs);
@@ -590,7 +588,6 @@ void Engine::alloc_buffers(int max_seqs) {
     carve(barena);
     CK(hipMemsetAsync(b.rr_counter, 0, 4, st));
     CK(hipMemsetAsync(la.counter, 0, 4, st));
-    // pinned host buffers
     CK(hipHostMalloc(&b.ple_rows, (size_t)S * PLE_HEADS * 170));
     CK(hipHostMalloc(&b.h_ids, N * 4)); CK(hipHostMalloc(&b.h_wts, N * 4)); CK(hipHostMalloc(&b.h_tok, N * 4));
     CK(hipHostMalloc(&b.h_entw, N * 4)); CK(hipHostMalloc(&b.h_pos, N * 4)); CK(hipHostMalloc(&b.h_btok, N * 4));
@@ -602,7 +599,6 @@ void Engine::alloc_buffers(int max_seqs) {
         CK(hipEventCreateWithFlags(&raw_ready[k], hipEventDisableTiming));
         CK(hipEventRecord(raw_free[k], st));
     }
-    // sequences
     seqs.assign(max_seqs, Seq{});
     for (Seq &s : seqs) {
         CK(hipMalloc(&s.d_pages, ((size_t)max_ctx * 2 / PAGE + 8) * 4));

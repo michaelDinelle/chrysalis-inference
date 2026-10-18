@@ -1,5 +1,3 @@
-// The Qwen3.8-27B engine: weights, sequences (paged KV + recurrent state), forward passes,
-// MTP drafting and speculative decoding steps.
 #pragma once
 #include "kernels.h"
 #include "sampler.h"
@@ -51,7 +49,6 @@ struct Engine {
     float *enorm = nullptr, *hnorm = nullptr, *head_norm = nullptr;
     float *gdn_A = nullptr, *gdn_dt = nullptr;   // [48][GV], contiguous for the all-layer commit
 
-    // runtime
     hipStream_t st, cst;                // compute stream, snapshot copy stream
     hipEvent_t staged, copied;
     uint8_t *stage_state = nullptr;     // device staging copy of one sequence's recurrent state
@@ -85,7 +82,7 @@ struct Engine {
     std::vector<Snap> snaps;
     float *ssm_pool = nullptr, *conv_pool = nullptr;
 
-    void load(const std::string &path, int max_seqs, size_t reserve_bytes);   // load.cpp
+    void load(const std::string &path, int max_seqs, size_t reserve_bytes);
     void warmup();
     void alloc_buffers(int max_seqs);
     void add_kv_memory(uint8_t *p, size_t bytes);
@@ -99,7 +96,6 @@ struct Engine {
     void prefill(int id, const int *tokens, int n);
     int generate(int id, const Sampling &sp, int *out, int max_out, float *rows_v = nullptr, int *rows_i = nullptr);
 
-    // internals
     void forward(Seq &s, int T, bool verify);          // tokens in b.tokens, positions s.n..s.n+T-1
     void mtp_forward(Seq &s, int T, int pos0, const float *h_prev, const int *tokens);
     void mtp_catch_up(Seq &s, int T, int pos0);

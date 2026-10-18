@@ -113,7 +113,7 @@ int main(int argc, char **argv) {
     for (auto &r : out) { printf("%-36s %7.1f us\n", r.name, r.us); tot += r.us; }
     printf("%-36s %7.1f us\n", "sum", tot);
 
-    // ---- a GDN layer's whole decode sequence, cycling over NLAY copies of the weights (more than the Infinity Cache holds) ----
+    // A GDN layer's whole decode sequence, cycling over NLAY copies of the weights (more than the Infinity Cache holds).
     constexpr int NLAY = 6;
     struct Lw { QTensor qkv, z, sout, ad, au, ai, fd, fu, fi, hg, hu, hd, sg, su, sd; half *router, *Wab; int *slot_of; };
     std::vector<Lw> lw(NLAY);

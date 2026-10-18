@@ -19,8 +19,8 @@ struct GGUFTensor {
 
 struct GGUF {
     std::map<std::string, GGUFTensor> tensors;
-    std::map<std::string, int64_t> ints;      // integer metadata
-    std::map<std::string, std::string> strs;  // string metadata
+    std::map<std::string, int64_t> ints;
+    std::map<std::string, std::string> strs;
     std::map<std::string, std::vector<int64_t>> arrs;   // integer array metadata
     uint8_t *base = nullptr;
     size_t size = 0;

@@ -290,7 +290,7 @@ VNNI void vnni_quant_x(const float *x, int8_t *q, float *s, int32_t *sum) {
     }
 }
 
-// ---- decode: one token per pick, many rows ---------------------------------------------------------------------
+// Decode: one token per pick, many rows.
 // A row's GGUF blocks are decoded straight into 64-byte registers (weights in natural order, unsigned as above) and
 // multiplied with the token's int8 activations by vpdpbusd: each int32 lane holds 4 products of one 16-weight group, so
 // the groups' scales (weight scale times the activation scale of the 32-block) apply as a per-lane vector, and a row

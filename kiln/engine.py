@@ -1,4 +1,4 @@
-"""ctypes binding to build/libkiln.so."""
+"""ctypes binding to the engines' C API: build/libkiln.so (27B) or build/libkiln_fn.so (Flash-Next), per kiln/models.py."""
 import ctypes as C
 import os
 
@@ -141,6 +141,8 @@ class Engine:
         n = self.lib.kiln_generate(sid, C.byref(sampling), out, max_out, rv.ctypes.data if rows else None, ri.ctypes.data if rows else None)
         if n < 0:
             raise KVFull()
+        if n > max_out:
+            raise RuntimeError(f"kiln_generate wrote {n} tokens into room for {max_out}")
         return (list(out[:n]), rv[:n], ri[:n]) if rows else list(out[:n])
 
     def set_context(self, sid, tokens):

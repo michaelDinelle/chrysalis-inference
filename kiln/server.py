@@ -189,8 +189,6 @@ class Server:
         if warmup:
             self.engine.warmup()
 
-    # ---- model switching ---------------------------------------------------------------------
-
     def resolve(self, name):
         """The MODELS key a request names ("-fast" variants included); unknown names mean the active model."""
         base = str(name or "").removesuffix("-fast")
@@ -219,8 +217,6 @@ class Server:
         finally:
             with self.state_lock:
                 self.loading = None
-
-    # ---- request translation ----------------------------------------------------------------
 
     def chat(self, body):
         """Runs one chat completion. Yields ("reasoning"|"content", text), ("tool_call", (name, args)),
@@ -375,8 +371,6 @@ class Server:
                    + "<conversation>\n(the conversation above)\n</conversation>" + user[m.end():])
         return rec["messages"] + [rec["reply"], {"role": "user", "content": request}], rec["tools"], rec["style"]
 
-    # ---- engine work --------------------------------------------------------------------------
-
     def prefill(self, slot, prompt, a, b):
         while a < b:
             try:
@@ -521,8 +515,6 @@ class Server:
         finally:
             self.gpu.release()
 
-
-# ---- HTTP ------------------------------------------------------------------------------------------
 
 # DNS rebinding guard: a web page from another site that points its own name at this machine still sends that name
 # as Host. Requests addressed to an IP address or to this machine's names are fine.

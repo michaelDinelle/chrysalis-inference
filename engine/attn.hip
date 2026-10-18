@@ -179,7 +179,7 @@ struct AttnRaw {                              // one thread's share of a stage's
         for (int j = 0; j < KJ; j++) {
             const int job = tid + j * NT, kk = job >> 3, blk = job & 7;
             if (job < KST * 8) {
-                const _Float16 d = (_Float16)kd[j];  // exact: an fp16 scale; (fp16) k * d rounds once, as before
+                const _Float16 d = (_Float16)kd[j];  // exact (an fp16 scale): k8_frag gives (_Float16)k * d, rounded once
                 *(h16 *)&Ks[kk][blk * 32] = k8_frag(k[j][0], d);
                 *(h16 *)&Ks[kk][blk * 32 + 16] = k8_frag(k[j][1], d);
             }
@@ -246,7 +246,7 @@ __global__ __launch_bounds__(AW * 32) void k_attn(AttnArgs a) {
             mx = fmaxf(mx, fmaxf(s0[i], s1[i]));
         }
         mx = fmaxf(mx, lane_xor<16>(mx));
-        if (mx > m) {                                             // rescale only when the max grows
+        if (mx > m) {
             const float alpha = m == -INFINITY ? 0.0f : __expf(m - mx);
             l *= alpha;
 #pragma unroll
@@ -503,7 +503,8 @@ __global__ __launch_bounds__(256) void k_attn_combine(const float *part_o, const
 }
 
 // Full attention for T query tokens at positions pos0.. (keys 0 .. pos0+T-1 must already be cached).
-// Decode passes split_len > 0 and gets fp16/int8 output via the combine kernel; prefill uses one split.
+// Sets split_len itself (whatever the caller passed) and always merges the splits in k_attn_combine: fp16 and/or
+// int8 output for decode / verify, fp16 only for prefill.
 void attention(AttnArgs a, half *oh, QAct oq, hipStream_t st) {
     const int ntiles = (a.T * 6 + 15) / 16;
     const int nkeys = a.pos0 + a.T;

@@ -5,6 +5,7 @@
 import DOMPurify from "dompurify";
 import hljs from "highlight.js/lib/common";
 import { marked, type Links, type Token } from "marked";
+import { type Cand, type Odds, type SamplerKey, type Stage, dryRuns, sample } from "./sampler";
 
 type Effort = "xhigh" | "medium" | "low" | "off";
 interface Stats { ttft: number; tps: number; tokens: number; prompt: number; cached: number; thought?: number; seed?: number; model?: string }
@@ -15,8 +16,6 @@ interface Message {
   finish?: string; edited?: boolean;
 }
 interface Conversation { id: string; title: string; named?: boolean; updated: number; effort: Effort; messages: Message[] }
-type Stage = "top_k" | "temperature" | "top_p" | "min_p";
-type SamplerKey = Stage | "presence_penalty" | "dry_multiplier" | "dry_allowed_length" | "dry_base";
 type Sampler = Partial<Record<SamplerKey, number>> & { order?: Stage[] };
 type Mode = "think" | "fast";                       // thinking on (Max, Medium, Low) or off: Qwen recommends other values
 // Only what differs from the recommended values is kept, so whatever is left alone follows them.
@@ -1576,72 +1575,8 @@ function useSeed(seed: number) {
 // as they stand: the first name of a reply (what the stages do) and the next name of a list that has started to repeat
 // itself (what presence and DRY do). Each sits above the values it shows.
 
-interface Cand { word: string; logit: number; id: number }
-interface Odds { word: string; raw: number; p: number; cut: Stage | ""; pres: number; dry: number }
 const FIRST: Cand[] = ODDS.map(([word, c], i) => ({ word, logit: Math.log(c), id: -1 - i }));
 const NEXT: Cand[] = LOOP.cands.map(([t, lp, id]) => ({ word: t.trim(), logit: lp, id }));
-const breaker = (t: string) => /[\n:"*]/.test(t);    // DRY's sequence breakers (the server's set)
-
-// DRY's runs (dry_runs in engine/sampler.h): for each token that followed an earlier occurrence of the context's last
-// token, how many tokens before it match the end of the context; and where the longest run sits, to show it.
-function dryRuns(ctx: [string, number][]) {
-  const runs = new Map<number, number>(), n = ctx.length;
-  let best: { run: number; at: number } | null = null;
-  if (n < 2 || breaker(ctx[n - 1][0])) return { runs, best };
-  for (let i = n - 2; i >= 0; i--) {
-    if (ctx[i][1] !== ctx[n - 1][1] || breaker(ctx[i + 1][0])) continue;
-    let run = 1;
-    while (run < 48 && i >= run && ctx[i - run][1] === ctx[n - 1 - run][1] && !breaker(ctx[i - run][0])) run++;
-    const next = ctx[i + 1][1];
-    runs.set(next, Math.max(runs.get(next) ?? 0, run));
-    if (!best || run > best.run) best = { run, at: i };
-  }
-  return { runs, best };
-}
-
-// The sampler on a set of candidates after a reply so far: penalties, then the stages in their order. Each
-// candidate's odds before (the model's) and after, what cut it, and its penalties; and min P's line.
-function sample(cands: Cand[], reply: [string, number][], mode: Mode) {
-  const v = (k: SamplerKey) => value(mode, k), T = v("temperature");
-  const seen = new Set(reply.map(([, id]) => id)), { runs } = dryRuns(reply);
-  const top = Math.max(...cands.map((c) => c.logit)), z = cands.reduce((a, c) => a + Math.exp(c.logit - top), 0);
-  const rows: Odds[] = cands.map((c) => {
-    const run = runs.get(c.id) ?? 0, allowed = v("dry_allowed_length");
-    const dry = v("dry_multiplier") > 0 && run >= allowed ? v("dry_multiplier") * v("dry_base") ** (run - allowed) : 0;
-    return { word: c.word, raw: Math.exp(c.logit - top) / z, p: 0, cut: "", pres: seen.has(c.id) ? v("presence_penalty") : 0, dry };
-  });
-  const x = cands.map((c, i) => c.logit - rows[i].dry - rows[i].pres);
-  const order = rows.map((_, i) => i).sort((a, b) => x[b] - x[a]);
-  let n = order.length, t = 1, minLine: { at: number; tempered: boolean } | undefined;
-  if (T <= 0) {
-    order.forEach((r, j) => { if (j) rows[r].cut = "temperature"; });
-    rows[order[0]].p = 1;
-    return { rows, minLine };
-  }
-  const probs = (temp: number) => {
-    const e = order.slice(0, n).map((r) => Math.exp((x[r] - x[order[0]]) / temp)), sum = e.reduce((a, y) => a + y, 0);
-    return e.map((y) => y / sum);
-  };
-  const cut = (to: number, stage: Stage) => { for (let j = to; j < n; j++) rows[order[j]].cut ||= stage; n = to; };
-  for (const s of orderOf(mode)) {
-    if (s === "top_k") { const k = v("top_k"); cut(Math.max(1, Math.min(k > 0 ? k : n, n)), s); }
-    else if (s === "temperature") t = T;
-    else if (s === "top_p") {
-      const P = probs(t);
-      let cum = 0, keep = n;
-      for (let j = 0; j < n; j++) { cum += P[j]; if (cum >= v("top_p")) { keep = j + 1; break; } }
-      cut(keep, s);
-    } else {
-      const P = probs(t), min = v("min_p");
-      let m = 1;
-      while (m < n && P[m] >= min * P[0]) m++;
-      cut(m, s);
-      if (min > 0) minLine = { at: min, tempered: t === T };
-    }
-  }
-  probs(T).forEach((p, j) => { rows[order[j]].p = p; });
-  return { rows, minLine };
-}
 
 const pct = (p: number) => (p >= 0.995 ? "100%" : p >= 0.01 ? `${Math.round(p * 100)}%` : p > 0 ? "<1%" : "");
 const CUT_BY: Record<Stage, string> = { top_k: "top-k", top_p: "top-p", min_p: "min-p", temperature: "temp 0" };
@@ -1703,7 +1638,7 @@ function drawCharts() {
   const mode = shownMode();
   // the first name of a reply: what the stages keep
   drawFirst ??= chart($("odds-first"), [0, 1, 2, 3, 4, 5], () => "");
-  const first = sample(FIRST, [], mode);
+  const first = sample(FIRST, [], (k) => value(mode, k), orderOf(mode));
   drawFirst(first.rows, first.minLine, (r, rest) => {
     if (rest) {
       const by = STAGES.map((s) => [s, rest.filter((x) => x.cut === s).length] as const).filter(([, c]) => c);
@@ -1716,7 +1651,7 @@ function drawCharts() {
   });
   // the next name of a list that repeats itself: what presence and DRY push down
   drawNext ??= chart($("odds-next"), [0, 1, 4, 5], (r) => [r.pres > 0 ? "used" : r.pres < 0 ? "used, boosted" : "", r.dry ? "repeats" : ""].filter(Boolean).join(" · "));
-  const next = sample(NEXT, LOOP.reply, mode), { best } = dryRuns(LOOP.reply), allowed = value(mode, "dry_allowed_length");
+  const next = sample(NEXT, LOOP.reply, (k) => value(mode, k), orderOf(mode)), { best } = dryRuns(LOOP.reply), allowed = value(mode, "dry_allowed_length");
   const dryOn = value(mode, "dry_multiplier") > 0 && !!best && best.run >= allowed, presOn = value(mode, "presence_penalty") !== 0;
   const runText = best ? LOOP.reply.slice(best.at - best.run + 1, best.at + 2).map(([t]) => t).join("").trim() : "";
   drawNext(next.rows, next.minLine, (r, rest) => {

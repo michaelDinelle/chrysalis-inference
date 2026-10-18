@@ -210,32 +210,9 @@ void router_route_dec(const half *W, const float *wsg, const float *x, int T, fl
     k_router_route<<<NE / 8, 256, 0, st>>>(W, wsg, x, T, logits, sg, slot_of, ids, wts, hot_slot, sh, gfrac, layer, gen, counter, counts);
 }
 
-// spin until the CPU has answered generation gen
-__global__ void k_moe_wait(const uint32_t *done, uint32_t gen) {
-    while (__hip_atomic_load(done, __ATOMIC_ACQUIRE, __HIP_MEMORY_SCOPE_SYSTEM) != gen) __builtin_amdgcn_s_sleep(1);
-}
-void moe_wait(const uint32_t *done, uint32_t gen, hipStream_t st) { k_moe_wait<<<1, 1, 0, st>>>(done, gen); }
-
-// out[t] = sg[t] * shared[t] + the y of every pick the GPU computed (hot, or cold read from RAM) + cold[t] (the CPU's
-// answer, read from host memory)
-__global__ __launch_bounds__(256) void k_moe_sum(const float *y, const int *hot_slot, const float *shared, const float *sg,
-                                                 const float *cold, float *out) {
-    const int i = blockIdx.x * 256 + threadIdx.x, t = blockIdx.y;
-    float s = sg[t] * shared[(size_t)t * D + i];
-    for (int k = 0; k < TOPK_E; k++) {
-        const int j = t * TOPK_E + k;
-        if (hot_slot[j] != -1) s += y[(size_t)j * D + i];
-    }
-    if (cold) s += cold[(size_t)t * D + i];
-    out[(size_t)t * D + i] = s;
-}
-void moe_sum(const float *y, const int *hot_slot, const float *shared, const float *sg, const float *cold, int T, float *out, hipStream_t st) {
-    k_moe_sum<<<dim3(D / 256, T), 256, 0, st>>>(y, hot_slot, shared, sg, cold, out);
-}
-
 // The end of a decode MoE block in one launch: wait for the CPU's answer (one thread per workgroup spins on the host
 // flag), out = sg * shared + the y of every pick the GPU computed + the CPU's sum, then the hyper-connection update
-// res[t][s] += 2 sigmoid(inject[t][s] / HC) * out in place (what moe_wait + moe_sum + hc_combine did).
+// res[t][s] += 2 sigmoid(inject[t][s] / HC) * out in place.
 __global__ __launch_bounds__(256) void k_moe_finish(const uint32_t *done, uint32_t gen, const float *y, const int *hot_slot,
                                                     const float *shared, const float *sg, const float *cold, const float *inject, float *res) {
     const int i = blockIdx.x * 256 + threadIdx.x, t = blockIdx.y;
@@ -259,7 +236,7 @@ void moe_finish(const uint32_t *done, uint32_t gen, const float *y, const int *h
     k_moe_finish<<<dim3(D / 256, T), 256, 0, st>>>(done, gen, y, hot_slot, shared, sg, cold, inject, res);
 }
 
-// ---- prefill (T > 32 tokens): routing for many tokens, gather by expert, final sum -------------------------
+// Prefill (passes of T > 8 tokens): routing for many tokens, gather by expert, final sum.
 
 // one 512-thread workgroup per token: top 10 of the logits, softmax over them
 __global__ __launch_bounds__(512) void k_route_many(const float *logits, int *ids, float *wts) {
@@ -333,13 +310,3 @@ void moe_accum(const half *Y, const int *pos, int p0, int p1, const int *toks, i
     if (ntok) k_moe_accum<<<dim3(D / 256, ntok), 256, 0, st>>>(Y, pos, p0, p1, toks, moe);
 }
 
-// out[t] = sg[t] * shared[t] + sum_k Y[pos[t*10+k]]  (picks in router order: deterministic)
-__global__ __launch_bounds__(256) void k_moe_combine(const half *Y, const int *pos, const float *shared, const float *sg, float *out) {
-    const int i = blockIdx.x * 256 + threadIdx.x, t = blockIdx.y;
-    float s = sg[t] * shared[(size_t)t * D + i];
-    for (int k = 0; k < TOPK_E; k++) s += __half2float(Y[(size_t)pos[t * TOPK_E + k] * D + i]);
-    out[(size_t)t * D + i] = s;
-}
-void moe_combine(const half *Y, const int *pos, const float *shared, const float *sg, int T, float *out, hipStream_t st) {
-    k_moe_combine<<<dim3(D / 256, T), 256, 0, st>>>(Y, pos, shared, sg, out);
-}

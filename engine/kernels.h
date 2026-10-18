@@ -1,8 +1,6 @@
-// Host-side entry points for all GPU kernels.
 #pragma once
 #include "common.h"
 
-// quant.hip
 enum { GEMV_STORE = 0, GEMV_ADD = 1, GEMV_GLU = 2 };
 QTensor make_qtensor(Arena &a, int type, int rows, int cols);
 // relayout.hip: blocks b0 .. b0 + nb (nb < 0: all) of a tensor from raw GGUF data starting at block b0
@@ -22,17 +20,14 @@ void dequant(const QTensor &W, half *out, hipStream_t st);
 void embed(const QTensor &W, const int *tokens, int T, float *out, hipStream_t st);
 void quant_act(const float *x, int64_t n, QAct out, hipStream_t st);
 
-// ops.hip
 constexpr int TOPK = 64;   // candidates per row handed to the host sampler
 void rmsnorm(const float *x, const float *w, int T, int n, int ldx, int ldo, float *of, half *oh, QAct oq, hipStream_t st);
 void norm_rows(const float *x, const float *w, int T, float *of, half *oh, QAct oq, hipStream_t st);
 void swiglu_h(half *g, const half *u, int64_t n, hipStream_t st);
-void to_half(const float *x, half *y, int64_t n, hipStream_t st);
 void store_f16(const half *x, int n, int T, float *y, int ldy, bool accumulate, hipStream_t st);
 void topk(const float *logits, int T, int n, int ld, float *scratch_v, int *scratch_i, float *ov, int *oi, hipStream_t st);
 void argmax(const float *logits, int T, int n, int ld, int *out, hipStream_t st);
 
-// gdn.hip
 struct GdnScanArgs {
     float *S; size_t S_layer;              // states [layers][GV][GD][GD]
     const float *qn, *kn; size_t in_layer; // normalized q/k [T][GK][GD] per layer
@@ -57,7 +52,6 @@ struct GdnStepArgs {
 };
 void gdn_step(const GdnStepArgs &a, hipStream_t st);
 
-// attn.hip
 constexpr int MAX_SPLITS = 256;          // decode attention key splits (sizes the partial buffers)
 struct AttnArgs {
     const half *Q16;                       // [T][NH][HD], normed + roped + pre-scaled

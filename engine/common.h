@@ -1,4 +1,3 @@
-// Shared definitions for the kiln engine: model constants, quant formats, small device helpers.
 #pragma once
 #include <hip/hip_runtime.h>
 #include <hip/hip_fp16.h>
@@ -10,7 +9,7 @@
     fprintf(stderr, "kiln: HIP error '%s' at %s:%d\n", hipGetErrorString(e_), __FILE__, __LINE__); abort(); } } while (0)
 #define FAIL(...) do { fprintf(stderr, "kiln: " __VA_ARGS__); fprintf(stderr, "\n"); abort(); } while (0)
 
-// ---- Qwen3.8-27B ----------------------------------------------------------------------------
+// Qwen3.8-27B
 constexpr int D = 5120;            // hidden size
 constexpr int FF = 17408;          // FFN intermediate
 constexpr int VOCAB = 248320;
@@ -24,8 +23,7 @@ constexpr float EPS = 1e-6f;
 constexpr float ROPE_BASE = 1e7f;
 inline bool is_attn_layer(int l) { return l % 4 == 3; }
 
-// ---- paged KV cache -------------------------------------------------------------------------------
-// page -> layer (16 attention layers + MTP) -> kv head -> block of PAGE tokens:
+// KV cache: page -> layer (16 attention layers + MTP) -> kv head -> block of PAGE tokens:
 //   K int8 [PAGE][HD] | K scales fp16 [PAGE][HD/32] |
 //   V 5-bit, transposed: low nibbles [HD][PAGE/2] | high bits [HD][PAGE/8] | V scales fp16 [HD/32][PAGE]
 // One scale per token per 32 dims for both. V uses 5 bits (symmetric, stored +16) and is transposed so a
@@ -40,7 +38,6 @@ constexpr size_t KV_LAYER = KV_HEAD * NKV;
 constexpr size_t KV_PAGE = KV_LAYER * NKVL;
 struct KVRef { uint8_t *pool; const int *pages; };
 
-// ---- quantized weight formats --------------------------------------------------------------
 // GGUF stores blocks as packed structs; at load time we split each tensor into separate arrays
 // (same bits, "structure of arrays") so every array is aligned and can be read with wide loads.
 enum QType : int { F32 = 0, F16 = 1, Q8_0 = 8, Q6_K = 14, IQ4_XS = 23 };
@@ -59,7 +56,6 @@ struct QTensor {
 // Activations for the int8 dot-product GEMVs: per 32 values one fp32 scale.
 struct QAct { int8_t *q; float *d; };
 
-// Bump allocator over one device allocation.
 struct Arena {
     uint8_t *base = nullptr;
     size_t used = 0, cap = 0;

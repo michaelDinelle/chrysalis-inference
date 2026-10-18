@@ -1,8 +1,7 @@
 // The fused decode HC mixer (hc_mix_fused: two kernels) against the six-kernel path (hc_norm, W_down GEMV, hc_lo,
 // W_up GEMV, W_inject GEMV, hc_mix) on random Q8_0 weights and residuals, T = 1..4: mixed output, its int8 blocks, and
-// the inject weights. Then the time of each path per call.
+// the inject weights.
 #include "../engine_fn/kernels.h"
-#include <chrono>
 #include <cmath>
 #include <random>
 #include <vector>
@@ -111,17 +110,6 @@ int main() {
             const double r = rel(h2, h1);
             printf("T=%d: output projection + HC update fused vs separate: rel diff %.2e %s\n", T, r, r < 1e-6 ? "ok" : "FAIL");
             fails += r >= 1e-6;
-        }
-    }
-    for (int T : {1, 2}) {
-        for (int path = 0; path < 2; path++) {
-            for (int i = 0; i < 20; i++) path ? new_path(T) : old_path(T);
-            CK(hipStreamSynchronize(st));
-            const auto t0 = std::chrono::steady_clock::now();
-            for (int i = 0; i < 200; i++) path ? new_path(T) : old_path(T);
-            CK(hipStreamSynchronize(st));
-            const double us = std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count() / 200 * 1e6;
-            printf("T=%d %s: %.1f us per mixer\n", T, path ? "fused (2 kernels)" : "old (6 kernels)  ", us);
         }
     }
     printf(fails ? "%d FAILED\n" : "all ok\n", fails);
