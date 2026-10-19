@@ -10,7 +10,7 @@ import { marked, type Links, type Token } from "marked";
 import { type Attachment, KINDS, attach, dataUrl, fmtBytes, get as getFile, put as putFile, textBlock } from "./files";
 import { type Cand, type Odds, type SamplerKey, type Stage, dryRuns, sample } from "./sampler";
 import { type Part, type VoiceAsk, type VoiceInfo, type VoiceReady, VoiceClient } from "./voice";
-import { type Fix, applyFixes, heardParts, readStep, stepOf } from "./heard";
+import { type Fix, applyFixes, fixedParts, readHeard } from "./heard";
 import { DESCRIPTIONS, type ToolChoice, type WireCall, assistantTurn, noted, toolTurn } from "./wire";
 
 type Effort = "xhigh" | "medium" | "low" | "off";
@@ -39,7 +39,7 @@ interface Message {
   voiceMs?: number;                                 // a spoken reply: from the end of the user's speech to its first sound
   interrupted?: boolean;                            // talked over: it keeps only what was heard
   note?: string;                                    // the app's words to the model before a question (voice mode on, off): sent, not shown
-  heard?: Fix[];                                    // a question said aloud: the misheard words its reply's first step fixed
+  heard?: Fix[];                                    // a question said aloud: the misheard words fixed in it (what was heard, on hover)
 }
 interface Conversation { id: string; title: string; named?: boolean; updated: number; effort: Effort; messages: Message[]; tools?: ToolChoice["tools"] }
 type Sampler = Partial<Record<SamplerKey, number>> & { order?: Stage[] };
@@ -132,28 +132,36 @@ const DEFAULT_SYSTEM_TOOLS = "You are {{MODEL}}, running locally in kiln. The to
 const PLAIN_SYSTEM = "There are no tools or files in this chat. Answer directly.";
 // What voice mode tells the model, in a note before the first question said aloud (and again when it changes): the
 // system prompt stays as it is, so a chat's history is never read again for voice mode and the chat's own prompt and
-// tools still hold (kiln's template allows a system message only first). Speech recognition mishears names and terms
-// ("quinn three point eight" for Qwen3.8, "pie game" for pygame), and a model that is not told so says it does not know
-// them: the reply's first step lists what was misheard (heard.ts, server.ts's spoken), as swaps of the transcript's own
-// words (asked to repeat the whole message instead, Flash-Next dropped sentences), by sound (asked by meaning, it made
-// "pie game" "Pong game"). Told to write no code or markdown, it wrote code as plain text, which was read out, and
-// held back ("Let me write that for you", then nothing): so what is shown (code blocks, tables) is apart from what is
-// said. The sentence on reasoning lets it work out loud while it already speaks: on Big Bench Audio (Flash-Next,
-// thinking off, spoken questions through Parakeet, as the system prompt) 92.5% of 200 with it, 77.7% of all 1,000
-// without, where thinking first would hold the first word back by seconds.
-const DEFAULT_VOICE_PROMPT = "The user is talking to you by voice, through speech recognition that mishears some words, mostly names, " +
-  "numbers and technical terms. Begin every reply with <fixes></fixes> holding a line for each misheard word or phrase: the transcript's " +
-  "exact words => the words that sound like them which the user meant (names spelled right, numbers in digits; names of libraries, " +
-  "products and models are often heard as everyday words, as \"pie torch\" for \"PyTorch\"). Only those lines, never a thought or a " +
-  "comment; leave it empty if nothing was misheard, and a name you have no reason to doubt as it is. Your reply is read aloud, except code blocks and tables, which are shown and not " +
-  "read: speak briefly in plain sentences, put code and tables in markdown blocks and say what you put there, and start on what is " +
-  "asked rather than asking first. When a question needs counting or logic, work it out loud in a few short steps, then answer.";
+// tools still hold (kiln's template allows a system message only first). What speech recognition misheard is fixed
+// before the reply, apart from it (heardFor), so the note only says how to talk. Told to write no code or markdown, the
+// model wrote code as plain text, which was read out, and held back ("Let me write that for you", then nothing): so what
+// is shown (code blocks, tables) is apart from what is said. The sentence on reasoning lets it work out loud while it
+// already speaks: on Big Bench Audio (Flash-Next, thinking off, spoken questions through Parakeet, as the system prompt)
+// 92.5% of 200 with it, 77.7% of all 1,000 without, where thinking first would hold the first word back by seconds.
+const DEFAULT_VOICE_PROMPT = "The user is talking to you by voice; a word may still be misheard, so go by how it sounds and by the " +
+  "conversation. Your reply is read aloud, except code blocks and tables, which are shown and not read: speak briefly in plain " +
+  "sentences, put code and tables in markdown blocks and say what you put there, and start on what is asked rather than asking first. " +
+  "When a question needs counting or logic, work it out loud in a few short steps, then answer.";
 // The voice note's sentence for a chat with tools on: the server settles whether a voice reply runs a tool (route in
 // server.ts), this keeps the words around a call true to it. The note on the first typed message after voice mode:
 // replies are read again, so markdown is back.
-const VOICE_TOOLS = "After the fixes, <tool>yes</tool> or <tool>no</tool> says whether answering needs a search, a page or anything " +
-  "else a tool does. Only say you searched or did something once the tool call for it has returned, and never describe results you " +
+const VOICE_TOOLS = "Only say you searched or did something once the tool call for it has returned, and never describe results you " +
   "have not received from a tool. When results come back, give the key points briefly, and say the links are on screen rather than reading them.";
+// What speech recognition misheard of a question said aloud, and whether answering it needs a tool: asked at temperature
+// 0 before the reply, in a conversation of its own beside the chat (a voice session's: these instructions, then a turn
+// per question with what the assistant had just said), which kiln keeps cached, so a check reads ~40 tokens (~0.3 s on
+// Flash-Next). Nothing of it is part of the chat: asked inside the reply, the model copied the fixes into a later
+// reply's words, where they were shown and read out; told in the chat how to answer a check, it began replies with
+// one; asked beside the chat with all of it, a check took 0.7-1.2 s. Fixes are swaps of the transcript's own words
+// (asked to repeat the whole message, it dropped sentences), by sound (asked by meaning, it made "pie game" "Pong
+// game"); heard.ts makes only those that sound like what was heard.
+const CHECK = "You fix speech recognition errors in what a user says to {{MODEL}}, a voice assistant running locally in kiln{{TOOLS}}. " +
+  "For each transcript, write one line per misheard word or phrase: the transcript's exact words => the words that sound like them " +
+  "which the user meant (names spelled right, numbers in digits; names of libraries, products and models are often heard as everyday " +
+  "words, as \"pie torch\" for \"PyTorch\"). Fix only what was misheard: never rephrase, censor, explain or expand, and keep names you " +
+  "have no reason to doubt. Write \"-\" when nothing was misheard.";
+const CHECK_TOOLS = " Then a last line, \"tool: yes\" if answering needs a web search or a page (they ask to search, look up or check " +
+  "something, or the answer depends on current facts such as news, weather, prices or schedules), else \"tool: no\".";
 const VOICE_OFF = "The user is typing again and reads your replies.";
 // kiln answers a prompt that starts "You are a title generator" as a side request (low priority, no thinking)
 const TITLE_PROMPT = "You are a title generator. Reply with a title of at most six words for the conversation that starts with the user's message below. Reply with the title only.";
@@ -729,14 +737,13 @@ function messageView(m: Message, i: number): HTMLElement {
   }
   if (m.files?.length) el.append(filesView(m.files));
   if (m.content || !m.files?.length) el.append(heardBubble(m));
-  if (m.voice && m.heard === undefined && [...runs.values()].some((r) => r.conv.messages[r.conv.messages.indexOf(r.m) - 1] === m)) el.classList.add("unsettled");
+  if (unsettled.has(m)) el.classList.add("unsettled");
   el.append(foot);
   return el;
 }
-const heardText = (m: Message) => (m.heard?.length ? applyFixes(m.content, m.heard).text : m.content);
 function heardBubble(m: Message): HTMLElement {
   const b = h("div", "bubble");
-  for (const p of m.heard?.length ? heardParts(m.content, m.heard) : [m.content]) {
+  for (const p of m.heard?.length ? fixedParts(m.content, m.heard) : [m.content]) {
     if (typeof p === "string") b.append(p);
     else {
       const f = h("span", "fixed", p.said);
@@ -894,7 +901,7 @@ function roundView(r: Round, m: Message): HTMLElement {
     think.append(summary, thought);
     el.append(think);
   }
-  if (stepOf(r.content).rest) renderBlocks({ body }, stepOf(r.content).rest, false);
+  if (r.content) renderBlocks({ body }, r.content, false);
   syncCards(calls, r.calls, m, false);
   el.append(body, calls);
   return el;
@@ -1033,7 +1040,7 @@ function paint(v: View, m: Message, live?: Live) {
     v.body.innerHTML = `<p class="waiting">${live.loading ? "" : `${live.note} · ${fmtS(elapsed)}`}</p>`;
     v.shown = v.blocks = undefined;
   } else if (v.shown !== m.content) {
-    renderBlocks(v, m.rounds?.length ? m.content : stepOf(m.content).rest, !!live);
+    renderBlocks(v, m.content, !!live);
     v.shown = m.content;
   }
   if (live) return;
@@ -1490,13 +1497,7 @@ function take(run: Run, ev: any) {
     Object.assign(live, { phase: "waiting", since: now, note: "Reading the results" });
   }
   if (ev.note) m.notes = [...(m.notes ?? []), ev.note];
-  if (typeof ev.heard === "string") {
-    const u = run.conv.messages[run.conv.messages.indexOf(m) - 1];
-    if (u?.role === "user" && u.voice) {
-      u.heard = applyFixes(u.content, readStep(ev.heard).fixes).made;
-      if (run.conv === conv) render();
-    }
-  }
+
   if (d.reasoning_content) {
     if (live.phase !== "thinking") {
       live.phase = "thinking";
@@ -1653,6 +1654,8 @@ interface VoiceMode {
   asked?: VoiceAsk; pushed?: string;                // the last hello or config; the last config (a refused one is not sent again as is)
   defaults: { stt?: string; tts?: string; voices: Record<string, string> };   // what it runs when not told (voices: by voice model)
   level: number; frame: number;                    // the pill's dots: the level they show, their animation frame
+  check: { role: string; content: string }[];      // the session's check conversation (CHECK)
+  turns: number;                                    // turns heard, so a check that came back late knows it was overtaken
 }
 let voice: VoiceMode | null = null;
 // The service's models and voices as its last ready listed them, so Settings can offer them while voice mode is closed.
@@ -1717,7 +1720,7 @@ async function openVoice() {
     },
     closed: () => { if (mine()) { voice!.error ??= "The voice service stopped"; renderVoice(); } },
   });
-  voice = { client, c: conv, muted: false, partial: "", level: 0, frame: 0, now: {}, defaults: { voices: {} }, asked: voiceWant(null) };
+  voice = { client, c: conv, muted: false, partial: "", level: 0, frame: 0, check: [], turns: 0, now: {}, defaults: { voices: {} }, asked: voiceWant(null) };
   renderVoice();
   if (status.state === "offline") void start().then(refreshStatus);   // the first question finds the model loaded
   // http://<this machine's address> is not a secure page, and there the browser has no microphone to give at all
@@ -1760,7 +1763,8 @@ async function voiceTurn(v: VoiceMode, text: string) {
     await sleep(20);
   }
   if (voice !== v || running(c)) return;
-  const merge = v.merge && c.messages.at(-1) === v.merge ? v.merge : undefined;
+  // a question still being checked takes in what is said next, as one talked over before its reply made a sound does
+  const last = c.messages.at(-1), merge = last && (last === v.merge || unsettled.has(last)) ? last : undefined;
   v.merge = undefined;
   if (merge) merge.content = merge.content ? `${merge.content} ${text}` : text;
   else {
@@ -1768,12 +1772,46 @@ async function voiceTurn(v: VoiceMode, text: string) {
     const note = noteFor(c, true);
     c.messages.push({ role: "user", content: text, voice: true, ...(note ? { note } : {}) });
   }
+  const said = c.messages.at(-1)!, turn = ++v.turns;
+  unsettled.add(said);
+  if (c === conv) render();
+  const heard = await heardFor(v, said);
+  if (v.turns !== turn) return;                    // the next turn took these words in, and its check answers for them
+  unsettled.delete(said);
+  const fixed = applyFixes(said.content, heard.fixes);
+  said.content = fixed.text;
+  said.heard = [...(said.heard ?? []), ...fixed.made];
+  if (voice !== v || running(c) || c.messages.at(-1) !== said) {
+    persist(c);
+    if (c === conv) render();
+    return;
+  }
   const effort = voiceEffort(), mode: Mode = effort === "off" ? "fast" : "think";
   const m: Message = { id: randomId(), role: "assistant", content: "", reasoning: "", effort, params: changed(mode) || undefined };
   const upto = [...c.messages];
   branch(c, c.messages.length, m);
   v.reply = { m, sent: 0, spoken: 0, audible: false };
-  await startRun(c, m, () => request(c, upto, { effort, route: true, ...(effort === "off" ? { extra: { kiln_voice: true } } : {}) }));
+  await startRun(c, m, () => request(c, upto, { effort, route: true, extra: { kiln_voice: { tool: heard.tool } } }));
+}
+
+const unsettled = new WeakSet<Message>();                // questions said aloud whose check is not in yet: grey
+// CHECK for the question `said`: a turn of the session's check conversation (begun again when its instructions change: the
+// model, tools on or off; and past 60 turns). A check that fails leaves the words as they were heard.
+async function heardFor(v: VoiceMode, said: Message): Promise<{ fixes: Fix[]; tool: boolean }> {
+  const c = v.c, system = fill(CHECK.replace("{{TOOLS}}", toolsOn(c) ? ", with web search and page reading" : "")) + (toolsOn(c) ? CHECK_TOOLS : "");
+  if (v.check[0]?.content !== system || v.check.length > 121) v.check = [{ role: "system", content: system }];
+  const before = c.messages[c.messages.indexOf(said) - 1], last = before?.role === "assistant" ? before.content.slice(0, 300) : "";
+  const turn = { role: "user", content: (last ? `The assistant said: ${last}\n` : "") + `Transcript: ${said.content}` };
+  try {
+    const res = await fetch("/api/chat", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({
+      model: `${current()}-fast`, messages: [...v.check, turn], temperature: 0, presence_penalty: 0, max_tokens: 48 }) });
+    const answer: string = (await res.json())?.choices?.[0]?.message?.content ?? "";
+    if (!res.ok || !answer) return { fixes: [], tool: false };
+    v.check.push(turn, { role: "assistant", content: answer });   // as kiln wrote it: the next check is an append
+    return readHeard(answer);
+  } catch {
+    return { fixes: [], tool: false };
+  }
 }
 
 // The chat as the next voice turn will send it, read by kiln while the user starts talking: the voice prompt replaces
@@ -1793,8 +1831,7 @@ async function warmVoice(v: VoiceMode) {
 
 // What of a reply is spoken: each round's text and the text being written (thinking never is). It grows only at its
 // end, so what was sent stays a prefix and the service's chunk offsets point into it.
-const sayable = (m: Message) => [...(m.rounds ?? []).map((r) => r.content), m.content].map((t, i) => (i ? t : stepOf(t).rest))
-  .filter(Boolean).join("\n\n");
+const sayable = (m: Message) => [...(m.rounds ?? []).map((r) => r.content), m.content].filter(Boolean).join("\n\n");
 function feedVoice(m: Message) {
   const r = voice?.reply;
   if (r?.m !== m || cuts.has(m)) return;
@@ -1837,8 +1874,7 @@ function keepHeard(c: Conversation, m: Message, to: number | null) {
     return;
   }
   const before = sayable({ ...m, content: "" }), skip = before ? [...before].length + 2 : 0;
-  const { step, rest } = m.rounds?.length ? { step: "", rest: m.content } : stepOf(m.content);
-  m.content = step + [...rest].slice(0, Math.max(0, to - skip)).join("").trimEnd();
+  m.content = [...m.content].slice(0, Math.max(0, to - skip)).join("").trimEnd();
   m.interrupted = true;
   if (m.id) tokens.delete(m.id);                    // its token odds no longer match its text
 }
@@ -2328,7 +2364,7 @@ thread.addEventListener("click", (e) => {
   }
   if (!act) return;
   const i = Number(act.closest<HTMLElement>("article")?.dataset.i), m = conv.messages[i];
-  if (act.dataset.act === "copy") return void copy(m.role === "user" ? heardText(m) : stepOf(m.content).rest, act);
+  if (act.dataset.act === "copy") return void copy(m.content, act);
   if (act.dataset.act === "seed") return void useSeed(Number(act.dataset.seed));
   if (act.dataset.act === "tokens" && m.id) {
     if (!tokenView.delete(m.id)) tokenView.add(m.id);
@@ -3512,7 +3548,7 @@ async function showSent() {
   if (note) lines.push("", "── your next question said aloud, after this note:", `[${note}]`);
   $("sent-about").textContent = (sent.tools?.length ? "kiln's chat template writes the tools first in the system turn (\"# Tools … <tools> … </tools>\"), " +
     "with how to call them, and the system prompt after them. " : "") + "Your next message goes after these." +
-    (said ? " Each spoken reply first continues from \"<fixes>\" at temperature 0 (what speech recognition misheard, then with tools whether one is needed), and goes on from there." : "");
+    (said ? " Each spoken question is first checked, in a conversation of its own beside this one, for what speech recognition misheard (and with tools whether one is needed): the question is sent fixed." : "");
   $("sent-text").textContent = lines.join("\n");
   $<HTMLDialogElement>("sent-view").showModal();
 }

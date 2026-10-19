@@ -3,18 +3,19 @@
 // (speech, partials word by word, then the turn), and the reply's text comes back as tone chunks of three words (or
 // up to a clause's end), each lasting 0.12 s a word. "interruptAfter": the user talks over the reply once that many
 // chunks were sent and the page plays them; "interruptOnSay": as soon as the reply's first text arrives, before any
-// sound. "after": the line waits for the page's first config. Its catalog has a second speech-to-text and voice model
-// to switch to and one of each not installed (refused, as the real service refuses them); a preview speaks a voice's
-// sample as chunks of the reply "preview". Every message, every chunk (with the voice that spoke it), the audio frames
+// sound. "after": the line waits for the page's first config. "goOn": the next line is said straight after this one.
+// Its catalog has a second speech-to-text and voice model to switch to and one of each not installed (refused, as the
+// real service refuses them); a preview speaks a voice's sample as chunks of the reply "preview". Every message, every chunk (with the voice that spoke it), the audio frames
 // counted and its own start and exit go to FAKE_VOICE_LOG as JSON lines.
 import { appendFileSync } from "node:fs";
 
-interface Line { text: string; interruptAfter?: number; interruptOnSay?: boolean; after?: "config" }
+interface Line { text: string; interruptAfter?: number; interruptOnSay?: boolean; after?: "config"; goOn?: boolean }
 const SCRIPTS: Record<string, Line[]> = {
   plain: [{ text: "hello there" }],
   pie: [{ text: "lets do a snake game in pie game" }],
   story: [{ text: "slow story", interruptAfter: 2 }, { text: "and then" }],
   merge: [{ text: "slow first", interruptOnSay: true }, { text: "second part" }],
+  join: [{ text: "wait lets do a snake game", goOn: true }, { text: "in pie game" }],
   silent: [],
   pick: [{ text: "first" }, { text: "second", after: "config" }],
   notes: [{ text: "first question" }, { text: "second question" }, { text: "third question", after: "config" }],
@@ -103,7 +104,8 @@ function hear(ws: Bun.ServerWebSocket<Session>) {
   if (k === step * (words.length + 2)) {
     ws.send(JSON.stringify({ type: "speech", on: false }));
     ws.send(JSON.stringify({ type: "turn", text: line.text, wait_ms: 210 }));
-    d.listening = false;
+    d.listening = !!line.goOn;
+    d.heard = 0;
     d.line = line;
     d.at++;
   }

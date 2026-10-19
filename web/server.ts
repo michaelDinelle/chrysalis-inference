@@ -6,7 +6,6 @@ import type { Server, Subprocess } from "bun";
 import app from "./index.html";
 import * as registry from "./tools";
 import { lanAddresses, lanTls } from "./tls";
-import { readStep, stepOf } from "./heard";
 import { assistantTurn, DESCRIPTIONS, toolTurn, unnoted, type ToolChoice, type WireCall } from "./wire";
 
 const KILN = process.env.KILN_URL ?? "http://127.0.0.1:8080";
@@ -73,7 +72,7 @@ function startJob(body: string): Job {
   };
   (async () => {
     try {
-      const { req, web, said, tools, notes } = await asSent(JSON.parse(body));
+      const { req, web, said, tool, tools, notes } = await asSent(JSON.parse(body));
       if (!web && !said) return void await round(job, JSON.stringify(req), push);
       for (const note of notes) push({ note });
       const allow = new Set(web?.allow ?? []);
@@ -82,13 +81,14 @@ function startJob(body: string): Job {
       let called = false, force = false, preamble: string | undefined;
       for (let k = 0; ; k++) {
         if (k) push({ round: k });
-        const first = k === 0 && said ? await spoken(job, req, messages, push, route) : undefined;
-        const out = first ? first.out
-          : force ? await forced(job, req, messages, push, preamble) : await round(job, JSON.stringify({ ...req, messages }), push);
-        // the first step called for a tool, or the reply said what it would do and did not: the next round does it
-        if (out && !job.ctrl.signal.aborted && (first?.tool || (route && !out.calls.length && !called && !force && route.announces.test(stepOf(out.content).rest)))) {
+        // a voice turn that needs a tool (the page's check, or the user asked for a search) starts with the call
+        const first = k === 0 && route && (tool || route.asks.test(unnoted(textOf((messages.findLast((m: any) => m.role === "user") as any)?.content))));
+        if (first) preamble = route.preambles[messages.length % route.preambles.length];
+        const out = first || force ? await forced(job, req, messages, push, preamble) : await round(job, JSON.stringify({ ...req, messages }), push);
+        // the reply said what it would do and did not: the next round does it
+        if (out && !job.ctrl.signal.aborted && route && !out.calls.length && !called && !force && !first && route.announces.test(out.content)) {
           force = true;
-          preamble = first?.tool ? route!.preambles[messages.length % route!.preambles.length] : undefined;
+          preamble = undefined;
           for (const f of FIRST_ONLY) delete req[f];
           messages = [...messages, assistantTurn(out.content, out.reasoning)];
           continue;
@@ -124,12 +124,12 @@ function startJob(body: string): Job {
 // (kiln_web's choice), each with kiln's description where it has one (wire.ts). The reply's job and the page's view of
 // what the model is sent (/api/preview) both build it here, so the view is what kiln gets.
 async function asSent(raw: any) {
-  const req = { ...raw }, web: ToolChoice | undefined = req.kiln_web, said = req.kiln_voice === true;
+  const req = { ...raw }, web: ToolChoice | undefined = req.kiln_web, said = !!req.kiln_voice, tool = req.kiln_voice?.tool === true;
   delete req.kiln_web;
   delete req.kiln_voice;
   const { tools, notes } = web ? await registry.select(web.tools ?? {}) : { tools: [] as registry.Named[], notes: [] as string[] };
   if (tools.length) req.tools = tools.map((n) => registry.openai(n, DESCRIPTIONS[n.tool.name]));
-  return { req, web, said, tools, notes };
+  return { req, web, said, tool, tools, notes };
 }
 
 class KilnDown extends Error {}
@@ -185,17 +185,14 @@ async function round(job: Job, body: string, push: (d: string | object) => void,
   return out;
 }
 
-// A voice turn (kiln_voice): its reply opens with a first step at temperature 0 (the same conversation gets the same
-// step), written before any of its words go out: what speech recognition misheard (<fixes>, heard.ts), then with tools
-// whether answering needs one (<tool>yes|no</tool>). The reply goes on from the step out of kiln's cache (the step's prompt is the reply's own: a
-// continued final message, which kiln holds with the next token's distribution, so the rest reads almost nothing). A
-// user who asks for a search (the route's asks) gets a tool call whatever the step says, and a "yes" makes the step a
-// turn of its own followed by a call held to the tools' grammar from its first token (tool_choice "required": kiln holds
-// no grammar for a continued reply), which starts with the spoken line that says what is happening (one of the route's
-// preambles). Asked in the reply, not beside it: a model with thinking off, told its reply is spoken, says "I'm
-// searching for that now" and ends its turn often enough (and copies that turn: measured, 1 call in 6 after one such
-// turn in the history), and may report results it never got. A reply that announces a tool it did not call (its
-// announces, after "I'll", "let me", ...) is made to call one.
+// A voice turn (kiln_voice): whether its reply runs a tool is settled before the reply, not left to its words. The page
+// asks beside the conversation (app.ts, heardFor: with what speech recognition misheard, at temperature 0) and says so
+// here (kiln_voice.tool); a user who asks for a search (the route's asks) gets one whatever it said. A call is held to
+// the tools' grammar from its first token (tool_choice "required"), after the spoken line that says what is happening
+// (one of the route's preambles): a model with thinking off, told its reply is spoken, says "I'm searching for that
+// now" and ends its turn often enough (and then copies that turn: 1 call in 6 after one such turn in the history), and
+// may report results it never got. A reply that announces a tool it did not call (its announces, after "I'll", "let
+// me", ...) is made to call one.
 type Out = NonNullable<Awaited<ReturnType<typeof round>>>;
 // A list of phrases as a pattern for whole words, whatever the spacing between them.
 function phrasePattern(phrases: string[], before = ""): RegExp {
@@ -214,40 +211,6 @@ const ROUTE: Routing = {
 };
 const FORCE = { tool_choice: "required", logprobs: false, top_logprobs: undefined };   // kiln holds no grammar with logprobs
 const textOf = (c: unknown) => (typeof c === "string" ? c : Array.isArray(c) ? c.map((p: any) => p?.text ?? "").join(" ") : "");
-
-// The reply continued from `prefix` at temperature 0, up to `stop` (null when it never got there: no step).
-async function steady(job: Job, req: any, messages: object[], prefix: string, stop: string, max: number): Promise<string | null> {
-  const body = { ...req, messages: [...messages, { role: "assistant", content: prefix }], continue_final_message: true, stream: false,
-    stream_options: undefined, temperature: 0, presence_penalty: 0, dry_multiplier: 0, max_tokens: max, stop: [stop], logprobs: false,
-    top_logprobs: undefined, seed: undefined };
-  const r = await fetch(`${KILN}/v1/chat/completions`, { method: "POST", body: JSON.stringify(body), headers: { "Content-Type": "application/json" },
-    signal: job.ctrl.signal }).catch((e) => { throw job.ctrl.signal.aborted ? e : new KilnDown(); });
-  const c = (await r.json().catch(() => null))?.choices?.[0];
-  return c?.finish_reason === "stop" && typeof c.message?.content === "string" ? c.message.content : null;
-}
-
-async function spoken(job: Job, req: any, messages: object[], push: (d: string | object) => void, r?: Routing): Promise<{ out: Out | null; tool: boolean }> {
-  // One request to the step's end, which the reply then continues: a step in two (the page writing "<tool>" after the
-  // fixes) splits its text into tokens apart from how the model wrote it, and kiln read the step's prompt again
-  const end = r ? "</tool>" : "</fixes>", said = await steady(job, req, messages, "<fixes>", end, 96);
-  // a step is fix lines and nothing else: one that is not (Flash-Next once thought aloud in it, at temperature 0, where
-  // the same request had given its fix: its CPU / GPU split moves results by rounding) is left out, and the reply goes on
-  // from an empty one
-  const lines = (said ?? "").split("</fixes>")[0].split("\n").map((l) => l.trim()).filter(Boolean);
-  const fine = said !== null && (!r || said.includes("</fixes>")) && lines.every((l) => /^\S.*\s=>\s.*\S$/.test(l) && l.length < 200);
-  // The reply goes on from the step's own prompt, so the step starts as that prompt ended, at "<fixes>" (ended at a
-  // newline instead, Flash-Next closed the fixes at once, misheard words and all). One that goes on with punctuation
-  // gets a newline first: ">" and a "</" after it are one token, so "<fixes></fixes>" is not that prompt and more, and
-  // kiln read the turn's prompt again (~1 s)
-  const body = fine ? `${said}${end}` : "</fixes>", step = /^[^\p{L}\p{N}\s]/u.test(body) ? `<fixes>\n${body}` : `<fixes>${body}`;
-  push({ heard: step });
-  const tool = !!r && (r.asks.test(unnoted(textOf((messages.findLast((m: any) => m.role === "user") as any)?.content))) || fine && readStep(step).tool === true);
-  if (tool) {
-    push({ choices: [{ index: 0, delta: { content: step } }] });   // the step is this round's text, as kiln is sent it next
-    return { out: { content: step, reasoning: "", calls: [] }, tool: true };
-  }
-  return { out: await round(job, JSON.stringify({ ...req, messages: [...messages, { role: "assistant", content: step }], continue_final_message: true }), push), tool: false };
-}
 
 async function forced(job: Job, req: any, messages: object[], push: (d: string | object) => void, preamble?: string): Promise<Out | null> {
   if (preamble) {

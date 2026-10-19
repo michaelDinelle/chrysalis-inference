@@ -17,10 +17,9 @@ let kilnAborted = 0;
 // A tool script, as the user's message: "run ", the rounds as JSON (each the calls kiln answers with, or its text), and
 // a line that makes the message unique. Each round is told by the assistant turns the request already holds; every
 // request a script gets is kept.
-// A voice reply's rounds also say what kiln writes as its first step (step: after "<fixes>", up to the stop) and the
-// calls it makes when held to the tools' grammar (forced).
-interface Round { calls?: { name: string; args: string }[]; text?: string; gap?: number; step?: string; forced?: { name: string; args: string }[] }
-const seen = new Map<string, any[]>(), steps = new Map<string, any[]>();
+// A voice reply's rounds also say the calls kiln makes when held to the tools' grammar (forced).
+interface Round { calls?: { name: string; args: string }[]; text?: string; gap?: number; forced?: { name: string; args: string }[] }
+const seen = new Map<string, any[]>();
 const enc = new TextEncoder();
 const sse = (o: unknown) => enc.encode(`data: ${typeof o === "string" ? o : JSON.stringify(o)}\n\n`);
 const fake = Bun.serve({
@@ -36,10 +35,6 @@ const fake = Bun.serve({
     const said: string = String(body.messages.find((m: any) => m.role === "user")?.content ?? "").replace(/^\[[\s\S]*?\]\n\n/, "");
     const script: Round[] | undefined = said.startsWith("run ") ? JSON.parse(said.slice(4).split("\n")[0]) : undefined;
     const k = body.messages.filter((m: any) => m.role === "assistant" && m !== prefix).length, r = script?.[Math.min(k, script.length - 1)];
-    if (!body.stream && prefix?.content === "<fixes>" && r) {
-      steps.set(said, [...(steps.get(said) ?? []), body]);
-      return Response.json({ choices: [{ message: { content: r.step ?? "" }, finish_reason: "stop" }] });
-    }
     if (!body.stream) return Response.json({ choices: [{ message: { content: "a title" } }] });
     req.signal.addEventListener("abort", () => kilnAborted++);
     if (r) {
@@ -579,59 +574,49 @@ test("on the network (KILN_HOST 0.0.0.0): this machine keeps plain HTTP; each ad
   }
 });
 
-// Voice turns (kiln_voice): the reply's first step, at temperature 0, is what decides; the fake kiln plays a script's
-// step and the calls it makes when held to the tools' grammar. A note before what was said speaks of searches itself.
-const NOTE = "[The user is talking to you by voice. After the fixes, <tool>yes</tool> says whether answering needs a search.]\n\n";
-const voiceAsk = (script: Round[], then = "") => {
+// Voice turns (kiln_voice): the page's check beside the chat says whether a tool is needed (kiln_voice.tool); the fake
+// kiln plays a script's text and the calls it makes when held to the tools' grammar. A note before what was said
+// speaks of searches itself.
+const NOTE = "[The user is talking to you by voice. Only speak of a search once the call has returned.]\n\n";
+const voiceAsk = (script: Round[], tool: boolean, then = "") => {
   const said = `run ${JSON.stringify(script)}\n${++asked} ${then}`;
-  const res = fetch(`${base}/api/chat`, { method: "POST", headers: json, body: JSON.stringify({ stream: true, model: "m", kiln_voice: true,
+  const res = fetch(`${base}/api/chat`, { method: "POST", headers: json, body: JSON.stringify({ stream: true, model: "m", kiln_voice: { tool },
     messages: [{ role: "user", content: NOTE + said }], kiln_web: { tools: { "mcp:fake": {} }, route: true } }) });
   return { said, res };
 };
 const contents = (got: Ev[]) => got.map((e) => e.choices?.[0]?.delta?.content).filter(Boolean);
 
-test("voice: the first step is the reply's own start at temperature 0; its fixes go to the page, and a \"no\" lets the reply go on from it", async () => {
-  const { said, res } = voiceAsk([{ step: "tail => table</fixes>\n<tool>no", text: "Here it is." }]);
-  const got = await collect(await res), [step] = steps.get(said)!, [reply] = seen.get(said)!;
-  expect([step.temperature, step.stop, step.stream, step.continue_final_message, step.messages.at(-1)]).toEqual([0, ["</tool>"], false, true, { role: "assistant", content: "<fixes>" }]);
-  expect(JSON.stringify(step.messages.slice(0, -1))).toBe(JSON.stringify(reply.messages.slice(0, -1)));     // the reply's own prompt
-  expect(got.find((e) => e.heard)?.heard).toBe("<fixes>tail => table</fixes>\n<tool>no</tool>");
-  expect(got.findIndex((e) => e.heard)).toBeLessThan(got.findIndex((e) => e.choices?.[0]?.delta?.content));
-  expect([reply.continue_final_message, reply.messages.at(-1), reply.tool_choice]).toEqual([true, { role: "assistant", content: "<fixes>tail => table</fixes>\n<tool>no</tool>" }, undefined]);
-  expect(seen.get(said)!.length).toBe(1);
-  expect(toolEvents(got)).toEqual([]);
-}, 30_000);
-
-test("voice: a \"yes\" makes the step a turn of its own, then a call held to the tools' grammar that starts with the spoken line", async () => {
-  const { said, res } = voiceAsk([{ step: "</fixes>\n<tool>yes" }, { forced: [{ name: "fake__echo", args: '{"text": "x"}' }] }, { text: "Done." }]);
+test("voice: a check that calls for a tool makes the reply start with a call held to the tools' grammar, after a spoken line", async () => {
+  const { said, res } = voiceAsk([{ forced: [{ name: "fake__echo", args: '{"text": "x"}' }] }, { text: "Done." }], true);
   const got = await collect(await res), [forced, after] = seen.get(said)!;
-  expect([forced.tool_choice, forced.logprobs, forced.continue_final_message]).toEqual(["required", false, undefined]);
-  expect(forced.messages.at(-1)).toEqual({ role: "assistant", content: "<fixes>\n</fixes>\n<tool>yes</tool>" });
-  const [step, line, done] = contents(got);
-  expect([step, done, contents(got).length]).toEqual(["<fixes>\n</fixes>\n<tool>yes</tool>", "Done.", 3]);
+  expect([forced.tool_choice, forced.logprobs, forced.kiln_voice]).toEqual(["required", false, undefined]);
+  const [line, done] = contents(got);
+  expect([done, contents(got).length]).toEqual(["Done.", 2]);
   expect(line).toMatch(/^\S.*\.$/);                             // the spoken line the server writes before the call
   expect(toolEvents(got).map((t) => t.state)).toEqual(["running", "done"]);
   expect(after.messages.slice(-2)).toEqual([
-    { role: "assistant", content: line, tool_calls: [{ id: "call_1_0", type: "function", function: { name: "fake__echo", arguments: '{"text": "x"}' } }] },
-    { role: "tool", tool_call_id: "call_1_0", content: "echo: x" }]);
+    { role: "assistant", content: line, tool_calls: [{ id: "call_0_0", type: "function", function: { name: "fake__echo", arguments: '{"text": "x"}' } }] },
+    { role: "tool", tool_call_id: "call_0_0", content: "echo: x" }]);
 }, 30_000);
 
-test("voice: a step that is not fix lines is left out, and the reply goes on from an empty one", async () => {
-  const { said, res } = voiceAsk([{ step: "The user wants two games.\nIt could mean</fixes>\n<tool>no", text: "Here." }]);
-  const got = await collect(await res), [reply] = seen.get(said)!;
-  expect(got.find((e) => e.heard)?.heard).toBe("<fixes>\n</fixes>");
-  expect(reply.messages.at(-1)).toEqual({ role: "assistant", content: "<fixes>\n</fixes>" });
+test("voice: a check that needs no tool lets the reply be as it is; one that only says it will search is made to", async () => {
+  const plain = voiceAsk([{ text: "Paris." }], false);
+  await collect(await plain.res);
+  expect(seen.get(plain.said)!.map((b) => b.tool_choice)).toEqual([undefined]);
+  const announced = voiceAsk([{ text: "Let me check the forecast." }, { forced: [{ name: "fake__echo", args: '{"text": "z"}' }] }, { text: "Here." }], false);
+  const got = await collect(await announced.res);
+  expect(seen.get(announced.said)!.map((b) => b.tool_choice)).toEqual([undefined, "required", undefined]);
+  expect(contents(got)).toEqual(["Let me check the forecast.", "Here."]);
 }, 30_000);
 
 test("voice: what was said decides an ask (\"search\"), not the note before it", async () => {
-  const plain = voiceAsk([{ step: "</fixes>\n<tool>no", text: "Fine." }]);
-  await collect(await plain.res);
-  expect(seen.get(plain.said)!.map((b) => b.tool_choice)).toEqual([undefined]);
-  const asked = voiceAsk([{ step: "</fixes>\n<tool>no" }, { forced: [{ name: "fake__echo", args: '{"text": "y"}' }] }, { text: "Found." }], "search for it");
+  const asked = voiceAsk([{ forced: [{ name: "fake__echo", args: '{"text": "y"}' }] }, { text: "Found." }], false, "search for it");
   const got = await collect(await asked.res);
   expect(seen.get(asked.said)![0].tool_choice).toBe("required");
   expect(contents(got).slice(-1)).toEqual(["Found."]);
-  expect(contents(got).length).toBe(3);                        // the step, the spoken line, the answer
+  const other = voiceAsk([{ text: "Paris." }], false, "the capital of France");   // the note speaks of a search; what was said does not
+  await collect(await other.res);
+  expect(seen.get(other.said)!.map((b) => b.tool_choice)).toEqual([undefined]);
 }, 30_000);
 
 test("the preview of a reply's request is what kiln is then sent for it, tools and all; a voice one says so", async () => {
@@ -641,7 +626,7 @@ test("the preview of a reply's request is what kiln is then sent for it, tools a
   await collect(await fetch(`${base}/api/chat`, { method: "POST", headers: json, body: JSON.stringify(body) }));
   expect(preview.body).toEqual(seen.get(said)![0]);
   expect(preview.body.tools.map((t: any) => t.function.name)).toEqual(["fake__big", "fake__echo", "fake__get_weather", "fake__slow", "fake__write_note", "fetch_url"]);
-  const voiced = await (await fetch(`${base}/api/preview`, { method: "POST", headers: json, body: JSON.stringify({ ...body, kiln_voice: true }) })).json();
+  const voiced = await (await fetch(`${base}/api/preview`, { method: "POST", headers: json, body: JSON.stringify({ ...body, kiln_voice: { tool: false } }) })).json();
   expect([voiced.voice, voiced.body.kiln_voice, preview.voice]).toEqual([true, undefined, false]);
   expect((await fetch(`${base}/api/preview`, { method: "POST", body: JSON.stringify(body) })).status).toBe(415);   // JSON only, as /api/chat
 }, 30_000);

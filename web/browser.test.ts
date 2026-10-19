@@ -46,7 +46,7 @@ const TOOL_ASKS: Record<string, { name: string; args: string }> = {
 };
 let lastStream: any = null, probes = 0, callIds = 0, kilnStopped = 0;  // probes: requests a sandboxed page got through to a server
 const streams: any[] = [];                           // every streamed request kiln got
-const steps: any[] = [];                             // every voice reply's first step kiln was asked for
+const checks: any[] = [];                            // every check of what speech recognition heard (app.ts CHECK)
 const fake = Bun.serve({
   hostname: "127.0.0.1",
   port: 0,
@@ -57,11 +57,12 @@ const fake = Bun.serve({
     if (path !== "/v1/chat/completions") return new Response("not found", { status: 404 });
     const body = await req.json();
     const prefix = body.continue_final_message ? body.messages.at(-1) : undefined;
-    if (!body.stream && prefix?.content === "<fixes>") {
-      steps.push(body);
-      const u = body.messages.findLast((m: any) => m.role === "user"), heard = String(u.content).replace(/^\[[^\]]*\]\n\n/, "");
-      const fixes = heard.includes("pie game") ? "pie game => Pygame" : "";
-      return Response.json({ choices: [{ message: { content: body.stop?.[0] === "</tool>" ? `${fixes}</fixes>\n<tool>no` : fixes }, finish_reason: "stop" }] });
+    if (!body.stream && /^You fix speech recognition errors/.test(body.messages[0]?.content)) {
+      checks.push(body);
+      // "pie game" was misheard; its check takes 0.4 s, and one of words that begin "wait" 2 s (the user goes on talking)
+      const heard = String(body.messages.at(-1).content).split("Transcript: ").at(-1)!;
+      await Bun.sleep(heard.startsWith("wait") ? 2000 : heard.includes("pie game") ? 400 : 0);
+      return Response.json({ choices: [{ message: { content: heard.includes("pie game") ? "pie game => Pygame\ntool: no" : "-" }, finish_reason: "stop" }] });
     }
     if (!body.stream) return Response.json({ choices: [{ message: { content: "A title" } }] });
     lastStream = body;
@@ -465,9 +466,9 @@ test("export and import keep versions and tool rounds, and the imported chat res
 
 // Voice mode. Each page asks the fake speech service for a voice whose script it plays (fake-voice.ts); its log has
 // what the page sent it, session by session.
-// the voice note as Settings shows it; what kiln is sent of a request (a continued reply's start left out)
+// the voice note as Settings shows it
 const noteShown = async (page: Page) => (await openSettings(page), page.$eval("#voice-prompt", (e) => (e as HTMLTextAreaElement).value));
-const sent = (b: any) => b.messages.filter((m: any, i: number, all: any[]) => !(b.continue_final_message && i === all.length - 1));
+const sent = (b: any) => b.messages;
 const voiceLog = (): any[] => { try { return readFileSync(VOICE_LOG, "utf8").trim().split("\n").filter(Boolean).map((l) => JSON.parse(l)); } catch { return []; } };
 const voicePages: Page[] = [];
 async function voicePage(script: string, o: { system?: string; first?: (page: Page) => Promise<void> } = {}) {
@@ -502,11 +503,10 @@ test("voice mode: what is said shows as it is said, becomes the question, and th
   await page.waitForFunction(() => /^voice \d\.\d\d s/.test(document.querySelector('#thread > article[data-i="1"] .stats')?.textContent ?? ""), { timeout: 10_000 });
   const note = await noteShown(page);
   expect(sent(lastStream)).toEqual([{ role: "user", content: `[${note}]\n\nhello there` }]);   // the note, before what was said
-  // the reply went on from its first step, which kiln wrote at temperature 0 from the reply's own prompt
-  expect(lastStream.continue_final_message).toBe(true);
-  expect(lastStream.messages.at(-1)).toEqual({ role: "assistant", content: "<fixes>\n</fixes>" });
-  const step = steps.findLast((b) => JSON.stringify(sent(b)) === JSON.stringify(sent(lastStream)));
-  expect([step?.temperature, step?.stop, step?.stream]).toEqual([0, ["</fixes>"], false]);
+  // what was heard was checked first, at temperature 0 in a conversation of its own, and nothing of it is in the reply's
+  expect(lastStream.continue_final_message).toBeUndefined();
+  const check = checks.findLast((b) => b.messages.at(-1).content === "Transcript: hello there");
+  expect([check?.temperature, check?.stream, check?.model, check?.messages.length]).toEqual([0, undefined, "qwen3.8-27b-fast", 2]);
   expect(lastStream.model).toBe("qwen3.8-27b-fast");
   expect(lastStream.reasoning_effort).toBeUndefined();
   // opening voice mode had kiln read the chat first (a new one's question stands in), so the first turn is an append
@@ -544,8 +544,8 @@ test("voice mode: talking over a reply silences it, stops kiln's request, and th
   expect(chunks.some((c) => chunks.filter((x) => x.to <= c.to).map((x) => x.text).join("").trimEnd() === kept)).toBe(true);
   await page.waitForFunction(() => document.querySelector('#thread > article[data-i="2"] .bubble')?.textContent === "and then", { timeout: 10_000 });
   await page.waitForFunction(() => /voice/.test(document.querySelector('#thread > article[data-i="3"] .stats')?.textContent ?? ""), { timeout: 10_000 });
-  // the kept reply as kiln is sent it again: its first step, then only what was heard
-  expect(sent(lastStream).filter((m: any) => m.role === "assistant").map((m: any) => m.content)).toEqual([`<fixes>\n</fixes>${kept}`]);
+  // the kept reply as kiln is sent it again: only what was heard
+  expect(sent(lastStream).filter((m: any) => m.role === "assistant").map((m: any) => m.content)).toEqual([kept]);
   await page.close();
 }, 30_000);
 
@@ -627,7 +627,7 @@ test("voice picker: the voice models' voices by language and gender; a pick swit
   expect(rows.filter(([c]) => c.startsWith("voice-model"))).toEqual([["voice-model", "Fake TTS"], ["voice-model", "Other TTS"], ["voice-model missing", "Big TTStools/voice_setup.sh big-tts"]]);
   expect(rows.filter(([c]) => c === "voice-group").map(([, t]) => t)).toEqual(["American English · Female", "British English · Male", "Spanish · Female", "American English · Male"]);
   expect(await page.$$eval("#voice-pop .voice-item", (els) => els.map((e) => (e as HTMLElement).dataset.voice))).toEqual(
-    ["plain", "pie", "story", "merge", "silent", "pick", "notes", "echo"].map((v) => `fake-tts/${v}`).concat(["other-tts/ana", "other-tts/bob"]));
+    ["plain", "pie", "story", "merge", "join", "silent", "pick", "notes", "echo"].map((v) => `fake-tts/${v}`).concat(["other-tts/ana", "other-tts/bob"]));
   expect(await page.$$eval('#voice-pop .voice-item[aria-selected="true"]', (els) => els.map((e) => (e as HTMLElement).dataset.voice))).toEqual(["fake-tts/pick"]);
   await page.click('#voice-pop [data-voice="other-tts/bob"]');
   const configs = () => session().filter((e) => e.type === "config").map(({ stack, voice, speed }) => ({ stack, voice, speed }));
@@ -747,19 +747,31 @@ test("voice mode on a page that is not secure (plain HTTP at this machine's addr
   }
 });
 
-test("voice mode: the reply's first step fixes what speech recognition misheard; the question shows the fixed words (the heard ones on hover), and the step is neither shown nor spoken", async () => {
+test("voice mode: a question shows grey as it was heard until its check is in, then white with the misheard words fixed (the heard ones on hover), and is sent and answered fixed", async () => {
   const { page, session } = await voicePage("pie");
-  await page.waitForFunction(() => /^voice /.test(document.querySelector('#thread > article[data-i="1"] .stats')?.textContent ?? ""), { timeout: 15_000 });
   const q = '#thread > article[data-i="0"]';
+  await page.waitForFunction((q) => document.querySelector(`${q} .bubble`)?.textContent === "lets do a snake game in pie game", { timeout: 10_000 }, q);
+  expect(await page.$eval(q, (e) => [e.classList.contains("unsettled"), getComputedStyle(e.querySelector(".bubble")!).color]))
+    .toEqual([true, await page.evaluate(() => { const d = document.createElement("div"); d.style.color = "var(--muted)"; document.body.append(d);
+      const c = getComputedStyle(d).color; d.remove(); return c; })]);
+  await page.waitForFunction(() => /^voice /.test(document.querySelector('#thread > article[data-i="1"] .stats')?.textContent ?? ""), { timeout: 15_000 });
   expect(await page.$eval(`${q} .bubble`, (e) => e.textContent)).toBe("lets do a snake game in Pygame");
   expect(await page.$eval(`${q} .bubble .fixed`, (e) => [e.textContent, (e as HTMLElement).title])).toEqual(["Pygame", 'Speech recognition heard "pie game"']);
   expect(await page.$eval(q, (e) => e.classList.contains("unsettled"))).toBe(false);
-  // kiln is sent what was heard, and the reply goes on from the step that fixed it
-  expect(sent(lastStream).at(-1).content).toMatch(/\n\nlets do a snake game in pie game$/);
-  expect(lastStream.messages.at(-1)).toEqual({ role: "assistant", content: "<fixes>pie game => Pygame</fixes>" });
-  expect(await replyText(page, 1)).toBe("You said: lets do a snake game in pie game");
-  const said = session().filter((e) => e.type === "say").map((e) => e.text).join("");
-  expect(said).toBe("You said: lets do a snake game in pie game");
+  expect(sent(lastStream).at(-1).content).toMatch(/\n\nlets do a snake game in Pygame$/);
+  expect(JSON.stringify(lastStream)).not.toMatch(/=>|pie game/);
+  expect(await replyText(page, 1)).toBe("You said: lets do a snake game in Pygame");
+  expect(session().filter((e) => e.type === "say").map((e) => e.text).join("")).toBe("You said: lets do a snake game in Pygame");
+  await page.close();
+}, 30_000);
+
+test("voice mode: words said while a question is still being checked join it, and the two are answered once", async () => {
+  const n0 = streams.length, { page } = await voicePage("join");
+  await page.waitForFunction(() => /^voice /.test(document.querySelector('#thread > article[data-i="1"] .stats')?.textContent ?? ""), { timeout: 20_000 });
+  expect(await page.$eval('#thread > article[data-i="0"] .bubble', (e) => e.textContent)).toBe("wait lets do a snake game in Pygame");
+  expect(await page.$$eval("#thread > article.msg:not(.ghost)", (els) => els.length)).toBe(2);
+  const replies = streams.slice(n0).filter((b) => b.max_tokens !== 1);
+  expect(replies.map((b) => sent(b).at(-1).content.split("\n\n").at(-1))).toEqual(["wait lets do a snake game in Pygame"]);
   await page.close();
 }, 30_000);
 
