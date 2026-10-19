@@ -84,9 +84,9 @@
           <div class="set-body">
             <section class="set-sec">
               <div class="set-sec-head"><label class="set-title" for="system-input">System prompt</label><button id="system-reset" class="act knob-reset" type="button" title="Back to the default system prompt" aria-label="Restore the default system prompt"></button></div>
-              <textarea id="system-input" rows="2" placeholder="No system prompt" title="Sent to a chat without tools, {{MODEL}} as the chat's model; empty sends none. The default keeps the model from acting as a coding agent when it doesn't think. A change makes each chat read its history again once."></textarea>
-              <div id="system-tools"></div>
+              <textarea id="system-input" rows="2" placeholder="No system prompt" title="Sent as written, {{MODEL}} as the chat's model; empty sends none. The default keeps the model from acting as a coding agent when it doesn't think, and is sent as its tools version in a chat with tools on. A change makes each chat read its history again once."></textarea>
               <p id="system-note" class="set-note" hidden></p>
+              <button id="sent-open" class="btn small" type="button" title="The open chat's next request, exactly as kiln gets it: the tools, the system prompt and every message">What the model is sent</button>
             </section>
             <section class="set-sec">
               <div class="set-sec-head"><span class="set-title">Sampling</span><span class="set-aside"><button id="order-reset" class="act knob-reset" type="button" title="Back to the default order" aria-label="Restore the default order"></button><span id="mode-note" title="Set by the thinking bar in the message box"></span></span></div>
@@ -105,15 +105,9 @@
             <section class="set-sec">
               <div class="set-sec-head"><label class="set-title" for="voice-prompt">Voice mode</label><button id="voice-prompt-reset" class="act knob-reset" type="button" title="Back to the default voice prompt" aria-label="Restore the default voice prompt"></button></div>
               <textarea id="voice-prompt" class="prompt-input" rows="6" placeholder="No prompt" title="A note to the model before the first question said aloud (and again when it changes); the system prompt stays as it is. What the reply writes is spoken."></textarea>
-              <div id="voice-prompts"></div>
               <div id="voice-knobs" class="knobs"></div>
             </section>
-            <section class="set-sec">
-              <div class="set-sec-head"><span class="set-title">Prompts</span></div>
-              <div id="prompts"></div>
-            </section>
-            <!-- what the config file sets up, read-only: the page can reload the file, never change what a server runs;
-                 what the model is told of each tool (its description) is the page's, as every other text it is sent -->
+            <!-- what the config file sets up, read-only: the page can reload the file, never change what a server runs -->
             <section class="set-sec">
               <div class="set-sec-head"><span class="set-title">Tools</span><button id="tools-reload" class="btn small" type="button" title="Read the config file again (servers that changed restart)">Reload config</button></div>
               <div id="tools-list" class="tools-list"></div>
@@ -130,6 +124,12 @@
     <div id="tokpop" class="tokpop" role="dialog" aria-label="Alternatives" hidden></div>
     <dialog id="svg-zoom" class="svg-zoom" aria-label="SVG, full size"><div class="svg-zoom-paper"></div></dialog>
     <dialog id="page-zoom" class="page-zoom" aria-label="Page, full size"><div class="page-zoom-box"></div></dialog>
+    <!-- What the model is sent: read-only, from the web server's own build of the next request (/api/preview) -->
+    <dialog id="sent-view" class="sent-view" aria-labelledby="sent-title">
+      <header class="sent-head"><h2 id="sent-title">What the model is sent</h2><button id="sent-copy" class="btn small" type="button">Copy</button><button id="sent-close" class="act" type="button" aria-label="Close"></button></header>
+      <p id="sent-about" class="set-note"></p>
+      <pre id="sent-text" class="sent-text"></pre>
+    </dialog>
     <script type="module" src="./app.ts"></script>
   </body>
 </html>

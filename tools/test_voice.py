@@ -235,6 +235,15 @@ check("and speaks with it", wer("This one comes from another model.", heard) <= 
 ws.close()
 with open(f"/proc/{svc.pid}/status") as f:
     mem = {l.split(":")[0]: int(l.split()[1]) // 1024 for l in f if l.startswith(("VmRSS", "VmHWM"))}
+# Speech that comes before a session has its parts (the user talks as soon as voice mode opens, while a first
+# start's models load) is kept and heard once they are in
+ws = connect(url, compression=None, max_size=None)
+early = "Tell me a joke about penguins."
+stream(say(early), tail=1.5)
+ws.send(json.dumps({"type": "hello"}))
+t = next((m for m in events(lambda m: kind(m) == "turn", 20) if kind(m) == "turn"), {})
+check("what is said before the parts load is heard", wer(early, t.get("text", "")) <= 0.2, repr(t.get("text")))
+
 # Headphones (or the browser's echo cancellation): a reply plays and the mic stays quiet, so speech over it is the
 # user's and needs no words to stop the reply. A session of its own: the one above has heard its echo.
 ws = connect(url, compression=None, max_size=None)

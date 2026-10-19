@@ -20,6 +20,9 @@ WHOLE = 5 * RATE                     # a turn up to this long is decoded whole a
 WINDOW = 3.0                         # ... a longer one, its last seconds, joined to what the stream has (echo: these alone)
 CLEAN = 2 * RATE                     # reply heard without a turn starting: the mic does not carry it (headphones, AEC)...
 BARGE = 8                            # ... and then voiced frames over a reply that stop it (~0.26 s), words or not
+# Frames that come before the parts have loaded (the first session's models: ~1.1 s): kept, up to 15 s of 20 ms
+# pieces, since the user starts talking as soon as voice mode opens
+EARLY = 750
 STOP_WORDS = {"stop", "wait", "hold", "pause", "hang", "sorry", "excuse", "hey", "quiet", "shush", "enough"}
 
 
@@ -319,13 +322,22 @@ class Talk:
 
     async def listening(self):
         loop = asyncio.get_running_loop()
+        early = collections.deque(maxlen=EARLY)
         while True:
             item = await self.audio.get()
             if item is None:
                 self.listener.reset()
+                early.clear()
                 continue
             if isinstance(item, tuple):             # new parts, in order with the audio around them
                 self.listener.use(*item)
+                if early:                           # what was said while they loaded, heard now (on its own clock)
+                    item = np.concatenate(list(early))
+                    early.clear()
+                else:
+                    continue
+            elif not hasattr(self.listener, "vad"):
+                early.append(item)
                 continue
             for ev in await loop.run_in_executor(self.lp, self.listener.feed, item):
                 if ev["type"] == "interrupt":
@@ -339,7 +351,7 @@ class Talk:
                     trim()
 
     def hear(self, data):
-        if not self.muted and {"vad", "stt", "turn"} <= set(self.names):
+        if not self.muted:
             self.audio.put_nowait(np.frombuffer(data, "<i2").astype(np.float32) / 32768)
 
     async def message(self, m):

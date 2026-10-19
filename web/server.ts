@@ -7,7 +7,7 @@ import app from "./index.html";
 import * as registry from "./tools";
 import { lanAddresses, lanTls } from "./tls";
 import { readStep, stepOf } from "./heard";
-import { assistantTurn, DESCRIPTIONS, phrasePattern, ROUTING, toolTurn, unnoted, type ToolChoice, type WireCall } from "./wire";
+import { assistantTurn, DESCRIPTIONS, toolTurn, unnoted, type ToolChoice, type WireCall } from "./wire";
 
 const KILN = process.env.KILN_URL ?? "http://127.0.0.1:8080";
 // Changes with the page's code. Open tabs compare it on every status poll and reload to pick up an update
@@ -73,16 +73,12 @@ function startJob(body: string): Job {
   };
   (async () => {
     try {
-      const req = JSON.parse(body), web: ToolChoice | undefined = req.kiln_web, said = req.kiln_voice === true;
-      delete req.kiln_web;
-      delete req.kiln_voice;
+      const { req, web, said, tools, notes } = await asSent(JSON.parse(body));
       if (!web && !said) return void await round(job, JSON.stringify(req), push);
-      const { tools, notes } = web ? await registry.select(web.tools ?? {}) : { tools: [], notes: [] };
       for (const note of notes) push({ note });
-      if (tools.length) req.tools = tools.map((n) => registry.openai(n, web?.descriptions?.[n.fn] ?? DESCRIPTIONS[n.tool.name]));
       const allow = new Set(web?.allow ?? []);
       let messages: object[] = req.messages ?? [];
-      const route = said && tools.length ? routing(web?.route ?? true) : undefined;
+      const route = said && tools.length && web?.route ? ROUTE : undefined;
       let called = false, force = false, preamble: string | undefined;
       for (let k = 0; ; k++) {
         if (k) push({ round: k });
@@ -90,7 +86,7 @@ function startJob(body: string): Job {
         const out = first ? first.out
           : force ? await forced(job, req, messages, push, preamble) : await round(job, JSON.stringify({ ...req, messages }), push);
         // the first step called for a tool, or the reply said what it would do and did not: the next round does it
-        if (out && !job.ctrl.signal.aborted && (first?.tool || (route && !out.calls.length && !called && !force && route.announces?.test(stepOf(out.content).rest)))) {
+        if (out && !job.ctrl.signal.aborted && (first?.tool || (route && !out.calls.length && !called && !force && route.announces.test(stepOf(out.content).rest)))) {
           force = true;
           preamble = first?.tool ? route!.preambles[messages.length % route!.preambles.length] : undefined;
           for (const f of FIRST_ONLY) delete req[f];
@@ -122,6 +118,18 @@ function startJob(body: string): Job {
     }
   })();
   return job;
+}
+
+// A reply's request as kiln is sent it: the page's own fields (kiln_web, kiln_voice) taken off, and the chat's tools
+// (kiln_web's choice), each with kiln's description where it has one (wire.ts). The reply's job and the page's view of
+// what the model is sent (/api/preview) both build it here, so the view is what kiln gets.
+async function asSent(raw: any) {
+  const req = { ...raw }, web: ToolChoice | undefined = req.kiln_web, said = req.kiln_voice === true;
+  delete req.kiln_web;
+  delete req.kiln_voice;
+  const { tools, notes } = web ? await registry.select(web.tools ?? {}) : { tools: [] as registry.Named[], notes: [] as string[] };
+  if (tools.length) req.tools = tools.map((n) => registry.openai(n, DESCRIPTIONS[n.tool.name]));
+  return { req, web, said, tools, notes };
 }
 
 class KilnDown extends Error {}
@@ -187,16 +195,23 @@ async function round(job: Job, body: string, push: (d: string | object) => void,
 // preambles). Asked in the reply, not beside it: a model with thinking off, told its reply is spoken, says "I'm
 // searching for that now" and ends its turn often enough (and copies that turn: measured, 1 call in 6 after one such
 // turn in the history), and may report results it never got. A reply that announces a tool it did not call (its
-// announces, after "I'll", "let me", ...) is made to call one. The texts are the page's (Settings), ROUTING's where a
-// request has none.
+// announces, after "I'll", "let me", ...) is made to call one.
 type Out = NonNullable<Awaited<ReturnType<typeof round>>>;
-interface Routing { preambles: string[]; asks: RegExp | null; announces: RegExp | null }
-function routing(r: ToolChoice["route"]): Routing | undefined {
-  if (!r) return undefined;
-  const t = { ...ROUTING, ...(r === true ? {} : r) };
-  return { preambles: t.preambles.length ? t.preambles : ROUTING.preambles, asks: phrasePattern(t.asks),
-    announces: phrasePattern(t.announces, "(I['’]?ll|I will|I['’]?m going to|I am going to|let me|I['’]?m|I am)\\s+(now\\s+|just\\s+|quickly\\s+)?") };
+// A list of phrases as a pattern for whole words, whatever the spacing between them.
+function phrasePattern(phrases: string[], before = ""): RegExp {
+  return new RegExp(`\\b${before}(${phrases.map((p) => p.replace(/[.*+?^${}()|[\]\\]/g, "\\$&").replace(/\s+/g, "\\s+")).join("|")})\\b`, "i");
 }
+interface Routing { preambles: string[]; asks: RegExp; announces: RegExp }
+const ROUTE: Routing = {
+  preambles: ["Let me look that up.", "Let me check.", "One moment, I'll look."],
+  asks: phrasePattern(["search", "google", "look it up", "look that up", "look this up", "look them up", "look up", "browse", "fetch", "online",
+    "on the web", "on the internet", "open the link", "open this link", "open that link", "open the page", "open this page"]),
+  announces: phrasePattern(["search", "searching", "look that up", "look it up", "look this up", "look them up", "look those up", "look up",
+    "looking up", "looking that up", "looking it up", "look for", "looking for", "look into", "looking into", "check on", "check for",
+    "check online", "check the", "check that", "check it", "check this", "checking", "find out", "find that", "find the", "find it",
+    "find a", "find some", "finding", "pull up", "pulling up", "browse", "browsing", "fetch", "fetching", "open the link",
+    "open that link", "open the page", "opening"], "(I['’]?ll|I will|I['’]?m going to|I am going to|let me|I['’]?m|I am)\\s+(now\\s+|just\\s+|quickly\\s+)?"),
+};
 const FORCE = { tool_choice: "required", logprobs: false, top_logprobs: undefined };   // kiln holds no grammar with logprobs
 const textOf = (c: unknown) => (typeof c === "string" ? c : Array.isArray(c) ? c.map((p: any) => p?.text ?? "").join(" ") : "");
 
@@ -222,7 +237,7 @@ async function spoken(job: Job, req: any, messages: object[], push: (d: string |
   const fine = said !== null && (!r || said.includes("</fixes>")) && lines.every((l) => /^\S.*\s=>\s.*\S$/.test(l) && l.length < 200);
   const step = fine ? `<fixes>${said}${end}` : "<fixes></fixes>";
   push({ heard: step });
-  const tool = !!r && (!!r.asks?.test(unnoted(textOf((messages.findLast((m: any) => m.role === "user") as any)?.content))) || fine && readStep(step).tool === true);
+  const tool = !!r && (r.asks.test(unnoted(textOf((messages.findLast((m: any) => m.role === "user") as any)?.content))) || fine && readStep(step).tool === true);
   if (tool) {
     push({ choices: [{ index: 0, delta: { content: step } }] });   // the step is this round's text, as kiln is sent it next
     return { out: { content: step, reasoning: "", calls: [] }, tool: true };
@@ -405,6 +420,14 @@ const serve = (hostname: string, port: number, secure?: { cert: string; key: str
         } catch {
           return Response.json({ error: { message: "kiln is not running" } }, { status: 502 });
         }
+      })),
+    },
+    // What the model is sent (Settings): the next reply's request as kiln would get it, without asking kiln. JSON only,
+    // as /api/chat: it starts the chat's MCP servers to list their tools.
+    "/api/preview": {
+      POST: guarded(json(async (req) => {
+        const { req: body, said } = await asSent(await req.json().catch(() => ({})));
+        return Response.json({ body, voice: said });
       })),
     },
     // a reply again, from event `from` on (a page that reloaded, woke up or came back to the chat)

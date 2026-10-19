@@ -692,11 +692,16 @@ main { position: relative; }
 .ts-tool summary { display: flex; align-items: baseline; gap: 8px; padding: 3px 0; color: var(--muted); cursor: pointer; }
 .ts-tool summary:hover, .ts-tool[open] summary { color: var(--text); }
 .ts-tool-fn { color: var(--faint); font: 11px var(--mono); }
-.ts-tool .prompt-field { margin-top: 4px; }
-.prompt-field { margin-bottom: 10px; }
-.prompt-head { display: flex; align-items: center; justify-content: space-between; gap: 8px; margin-bottom: 4px; }
-.prompt-label { color: var(--muted); font-size: 12.5px; }
-.prompt-field .prompt-input { margin-bottom: 0; }
+.ts-tool-desc { margin: 2px 0 6px; color: var(--muted); line-height: 1.45; }
+/* What the model is sent: the next request as kiln gets it, read-only */
+.sent-view { width: min(860px, 94vw); max-height: 88vh; padding: 16px 18px; }
+.sent-view[open] { display: grid; grid-template-rows: auto auto minmax(0, 1fr); gap: 8px; }
+.sent-view::backdrop { background: rgb(0 0 0 / 0.6); }
+.sent-head { display: flex; align-items: center; gap: 10px; }
+.sent-head h2 { flex: 1; margin: 0; font-size: 15px; }
+.sent-text { margin: 0; overflow: auto; padding: 12px; border: 1px solid var(--line); border-radius: 10px; background: var(--code);
+  font: 12px/1.5 var(--mono); white-space: pre-wrap; overflow-wrap: anywhere; user-select: text; }
+#sent-open { margin-top: 8px; }
 .ts-top { display: flex; align-items: center; gap: 8px; font-size: 13px; }
 .ts-name { flex: 1; font-weight: 600; }
 .ts-state { color: var(--muted); font-size: 12px; }

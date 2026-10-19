@@ -48,6 +48,7 @@ export class VoiceClient {
   private turnAt?: { t: number; wait: number };     // the last turn, until a reply answers it
   private answers = new Map<string, { t: number; wait: number }>();
   private shut = false;
+  private early: ArrayBuffer[] = [];               // microphone frames from before the socket opened
   playing = false;
   muted = false;
 
@@ -61,10 +62,22 @@ export class VoiceClient {
     this.outLevel = this.out.createAnalyser();
     this.outLevel.fftSize = 512;
     this.gain.connect(this.outLevel).connect(this.out.destination);
+    // A faint noise (-80 dB, not heard) keeps the output playing between replies: Bluetooth headphones and some Macs'
+    // outputs sleep on digital silence and wake on the next sound, swallowing its first syllable
+    const hush = this.out.createBuffer(1, this.out.sampleRate, this.out.sampleRate), data = hush.getChannelData(0);
+    for (let i = 0; i < data.length; i++) data[i] = (Math.random() * 2 - 1) * 1e-4;
+    const keep = this.out.createBufferSource();
+    keep.buffer = hush;
+    keep.loop = true;
+    keep.connect(this.out.destination);
+    keep.start();
     void this.out.resume();
     const ws = (this.ws = new WebSocket(`${location.protocol === "https:" ? "wss" : "ws"}://${location.host}/api/voice`));
     ws.binaryType = "arraybuffer";
-    ws.onopen = () => this.send({ type: "hello", ...ask });
+    ws.onopen = () => {
+      this.send({ type: "hello", ...ask });
+      for (const f of this.early.splice(0)) ws.send(f);
+    };
     ws.onmessage = (e) => (typeof e.data === "string" ? this.event(JSON.parse(e.data)) : this.chunk(e.data));
     ws.onclose = () => { if (!this.shut) this.on.closed?.(); };
     this.stream = await navigator.mediaDevices.getUserMedia({ audio: { echoCancellation: true, noiseSuppression: true, autoGainControl: true, channelCount: 1 } });
@@ -85,7 +98,13 @@ export class VoiceClient {
     this.micLevel.fftSize = 512;
     src.connect(node).connect(sink).connect(ctx.destination);
     src.connect(this.micLevel);
-    node.port.onmessage = (e) => { if (!this.muted && this.ws?.readyState === WebSocket.OPEN) this.ws.send(e.data); };
+    // what is said before the socket opens goes once it does (the service keeps it while its models load), so the
+    // first words are heard however soon they come
+    node.port.onmessage = (e) => {
+      if (this.muted) return;
+      if (this.ws?.readyState === WebSocket.OPEN) this.ws.send(e.data);
+      else if (this.ws?.readyState === WebSocket.CONNECTING && this.early.length < 750) this.early.push(e.data);
+    };
     void ctx.resume();
   }
 

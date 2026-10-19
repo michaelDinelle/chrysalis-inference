@@ -13,27 +13,8 @@ export const toolTurn = (id: string, result: string) => ({ role: "tool", tool_ca
 
 // What the page asks server.ts for with a reply (kiln_web in the request, which kiln never sees): the tool sources this
 // chat has on, each with the tools switched off in it (by the source's own names), the tools that run without asking,
-// the tools' descriptions as Settings has them (by function name), and voice mode's routing (route: whether the reply
-// runs a tool is settled before its words go out, in server.ts) with its texts.
-export interface Route { preambles: string[]; asks: string[]; announces: string[] }
-export interface ToolChoice {
-  tools: Record<string, { off?: string[] }>; allow?: string[]; loop?: boolean; fetchChars?: number;
-  descriptions?: Record<string, string>; route?: boolean | Partial<Route>;
-}
-
-// The defaults of the texts both sides use: the page shows and edits them (Settings), server.ts falls back to them
-// for a request that brings none. The question is short because the guidance on when a tool helps is in the tools'
-// own descriptions (DESCRIPTIONS), which the prompt already holds and kiln has cached.
-export const ROUTING: Route = {
-  preambles: ["Let me look that up.", "Let me check.", "One moment, I'll look."],
-  asks: ["search", "google", "look it up", "look that up", "look this up", "look them up", "look up", "browse", "fetch", "online",
-    "on the web", "on the internet", "open the link", "open this link", "open that link", "open the page", "open this page"],
-  announces: ["search", "searching", "look that up", "look it up", "look this up", "look them up", "look those up", "look up",
-    "looking up", "looking that up", "looking it up", "look for", "looking for", "look into", "looking into", "check on", "check for",
-    "check online", "check the", "check that", "check it", "check this", "checking", "find out", "find that", "find the", "find it",
-    "find a", "find some", "finding", "pull up", "pulling up", "browse", "browsing", "fetch", "fetching", "open the link",
-    "open that link", "open the page", "opening"],
-};
+// and route: a voice reply, whether it runs a tool is settled before its words go out (server.ts).
+export interface ToolChoice { tools: Record<string, { off?: string[] }>; allow?: string[]; loop?: boolean; fetchChars?: number; route?: boolean }
 
 // Descriptions kiln sends instead of a server's own, by the tool's name on its server. A description is where a model
 // learns when to call a tool and when not (the vendors' guidance: what it does, when to use it and when not, its limits),
@@ -45,12 +26,6 @@ export const DESCRIPTIONS: Record<string, string> = {
     "search again only if the results miss the question. Cite the pages you use by title and URL. If the results don't answer it, say " +
     "so; never describe results you did not receive.",
 };
-
-// A list of phrases as a pattern for whole words, whatever the spacing between them (null: an empty list).
-export function phrasePattern(phrases: string[], before = ""): RegExp | null {
-  const alts = phrases.map((p) => p.trim()).filter(Boolean).map((p) => p.replace(/[.*+?^${}()|[\]\\]/g, "\\$&").replace(/\s+/g, "\\s+"));
-  return alts.length ? new RegExp(`\\b${before}(${alts.join("|")})\\b`, "i") : null;
-}
 
 // A question's note (voice mode on, off: app.ts) as kiln is sent it, before the question's own text. What is said is
 // checked for asks without it: the note itself speaks of searches.

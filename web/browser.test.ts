@@ -578,7 +578,7 @@ test("voice mode's note goes before the first question said and again when it ch
   await page.close();
 }, 45_000);
 
-test("a tool's description edited in Settings is what kiln is sent, and ↺ brings back the server's own", async () => {
+test("What the model is sent shows the next request as kiln gets it: the tools as JSON, the one system prompt, every message; an edited prompt goes as written", async () => {
   const page = await open();
   await page.setViewport({ width: 1600, height: 900 });
   await page.click("#tools-btn");
@@ -588,21 +588,25 @@ test("a tool's description edited in Settings is what kiln is sent, and ↺ brin
     { timeout: 20_000 });
   await page.click(sw("fetch"));
   await page.keyboard.press("Escape");
-  await page.click("#settings-toggle");
-  const echo = 'details.ts-tool[data-fn="fake__echo"]';
-  await page.waitForSelector(echo, { timeout: 10_000 });
-  await page.click(`${echo} summary`);
-  const own = await page.$eval(`${echo} textarea`, (t) => (t as HTMLTextAreaElement).value);
-  expect(own.length).toBeGreaterThan(0);
-  await page.$eval(`${echo} textarea`, (t) => { (t as HTMLTextAreaElement).value = "Echoes back exactly the text it is given."; t.dispatchEvent(new Event("input")); });
-  await send(page, "described");
-  const sent = () => Object.fromEntries(lastStream.tools.map((t: any) => [t.function.name, t.function.description]));
-  expect(sent().fake__echo).toBe("Echoes back exactly the text it is given.");
-  expect(sent().fetch_url).toBe(await page.$eval('details.ts-tool[data-fn="fetch_url"] textarea', (t) => (t as HTMLTextAreaElement).value));
-  expect(sent().fetch_url).toContain("Only fetch URLs that appeared in the conversation");
-  await page.click(`${echo} .knob-reset`);
-  await send(page, "described again");
-  expect(sent().fake__echo).toBe(own);
+  await send(page, "first");
+  await openSettings(page);
+  await page.click("#sent-open");
+  await page.waitForFunction(() => (document.querySelector("#sent-view") as HTMLDialogElement).open && !!document.querySelector("#sent-text")?.textContent);
+  const shown = await page.$eval("#sent-text", (e) => e.textContent!);
+  await page.keyboard.press("Escape");
+  await send(page, "second");
+  const next = lastStream;                                       // what kiln got next: all of the view, then the new question
+  expect(shown).toContain(JSON.stringify(next.tools, null, 2));
+  let at = 0;
+  for (const m of next.messages.slice(0, -1)) {
+    const k = shown.indexOf(`── ${m.role}\n${m.content}`, at);
+    expect([m.role, k]).not.toEqual([m.role, -1]);
+    at = k;
+  }
+  expect(next.messages[0].content).toContain("The tools offered here are the only ones");
+  await page.$eval("#system-input", (el) => { (el as HTMLTextAreaElement).value = "Be terse, {{MODEL}}."; el.dispatchEvent(new Event("input")); });
+  await send(page, "third");
+  expect(lastStream.messages[0]).toEqual({ role: "system", content: "Be terse, Qwen3.8-27B." });
   await page.close();
 }, 60_000);
 

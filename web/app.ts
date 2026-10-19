@@ -11,7 +11,7 @@ import { type Attachment, KINDS, attach, dataUrl, fmtBytes, get as getFile, put 
 import { type Cand, type Odds, type SamplerKey, type Stage, dryRuns, sample } from "./sampler";
 import { type Part, type VoiceAsk, type VoiceInfo, type VoiceReady, VoiceClient } from "./voice";
 import { type Fix, applyFixes, heardParts, readStep, stepOf } from "./heard";
-import { DESCRIPTIONS, ROUTING, type ToolChoice, type WireCall, assistantTurn, noted, toolTurn } from "./wire";
+import { DESCRIPTIONS, type ToolChoice, type WireCall, assistantTurn, noted, toolTurn } from "./wire";
 
 type Effort = "xhigh" | "medium" | "low" | "off";
 // prompt and cached: summed over a reply's rounds; ctx: the context its last round left (prompt + reply)
@@ -47,10 +47,8 @@ type Mode = "think" | "fast";                       // thinking on (Max, Medium,
 // Only what differs from the recommended values is kept, so whatever is left alone follows them. allow: tools that run
 // without asking (by function name); fetchChars: how much of a page Fetch URL gives the model at a time.
 interface Settings {
-  v?: 3;                                            // settings stored by builds with one system prompt for both kinds of chat have none
-  system: string; systemTools?: string; think: Sampler; fast: Sampler; max_tokens?: number; seed?: number; allow?: string[]; fetchChars?: number;
-  voice?: VoiceSettings; prompts?: Prompts;
-  descriptions?: Record<string, string>;            // tools' descriptions as kiln is sent them, by function name
+  v?: 4;                                            // the settings' shape (loadSettings brings older ones to it)
+  system: string; think: Sampler; fast: Sampler; max_tokens?: number; seed?: number; allow?: string[]; fetchChars?: number; voice?: VoiceSettings;
 }
 // Voice mode's, every one of them (Settings and the dock's voice picker both show these): the speech-to-text and voice
 // models (names from the service's catalog), the voice (an id of that voice model's), its speed, what its replies are
@@ -127,8 +125,8 @@ const LOOP: { reply: [string, number][]; cands: [string, number, number][] } = {
 // it, 16 of 16 draw.
 // {{MODEL}} is the chat's model by name: told nothing, the model does not know it is Qwen3.8 and says so when asked.
 const DEFAULT_SYSTEM = "You are {{MODEL}}, running locally in kiln. There are no tools or files in this chat. Answer directly.";
-// A chat with tools on is sent this one instead (Settings: "With tools on"); the tools themselves come after it in
-// the system turn, as kiln's template writes them, each with its description (Settings > Tools).
+// What the default says instead in a chat with tools on (a prompt the user wrote goes as written); kiln's template
+// writes the tools themselves before it in the system turn (What the model is sent, in Settings, shows them).
 const DEFAULT_SYSTEM_TOOLS = "You are {{MODEL}}, running locally in kiln. The tools offered here are the only ones in this chat, and there are no files or projects to explore. Use a tool when it helps; otherwise answer directly.";
 // the default of builds before {{MODEL}}: settings that still hold it follow the default
 const PLAIN_SYSTEM = "There are no tools or files in this chat. Answer directly.";
@@ -143,35 +141,23 @@ const PLAIN_SYSTEM = "There are no tools or files in this chat. Answer directly.
 // said. The sentence on reasoning lets it work out loud while it already speaks: on Big Bench Audio (Flash-Next,
 // thinking off, spoken questions through Parakeet, as the system prompt) 92.5% of 200 with it, 77.7% of all 1,000
 // without, where thinking first would hold the first word back by seconds.
-const DEFAULT_VOICE_PROMPT = "The user is talking to you by voice. Their words reach you through speech recognition, which mishears " +
-  "some, mostly names, numbers and technical terms. Begin every reply with <fixes></fixes>, and inside it a line for each word or phrase " +
-  "it misheard: the transcript's exact words => the words the user actually said, which sound like them (names and terms spelled right, " +
-  "numbers in digits). Think about how each odd word sounds, above all in a technical chat: names of libraries, products and models are " +
-  "often heard as everyday words (\"pie torch\" => \"PyTorch\", \"jason\" => \"JSON\"). Correct only what was misheard: never rephrase, " +
-  "explain or expand, and leave it empty when nothing was misheard. The fixes are those lines only, never a thought or a comment (think in " +
-  "your reply, after them). Your reply is read aloud, except code blocks and tables, which show " +
-  "in the chat and are not read: speak in short plain sentences, put code, tables and anything long to look at in markdown code blocks " +
-  "or tables, and say in a sentence what you put there. When asked to write or make something, start on it in this reply, choosing " +
-  "sensible details yourself and saying which, rather than asking first; ask only when you cannot guess at all. Keep the spoken part " +
-  "brief. When a question needs counting, logic or several steps, work through it out loud in a few short spoken steps first, then give " +
-  "the answer.";
-// The rest of what the model is sent besides what the user types, each a setting (Prompts), with these defaults. The
-// voice note's sentence for a chat with tools on: the server settles whether a voice reply runs a tool (route in
+const DEFAULT_VOICE_PROMPT = "The user is talking to you by voice, through speech recognition that mishears some words, mostly names, " +
+  "numbers and technical terms. Begin every reply with <fixes></fixes> holding a line for each misheard word or phrase: the transcript's " +
+  "exact words => the words that sound like them which the user meant (names spelled right, numbers in digits; names of libraries, " +
+  "products and models are often heard as everyday words, as \"pie torch\" for \"PyTorch\"). Only those lines, never a thought or a " +
+  "comment; leave it empty if nothing was misheard, and a name you have no reason to doubt as it is. Your reply is read aloud, except code blocks and tables, which are shown and not " +
+  "read: speak briefly in plain sentences, put code and tables in markdown blocks and say what you put there, and start on what is " +
+  "asked rather than asking first. When a question needs counting or logic, work it out loud in a few short steps, then answer.";
+// The voice note's sentence for a chat with tools on: the server settles whether a voice reply runs a tool (route in
 // server.ts), this keeps the words around a call true to it. The note on the first typed message after voice mode:
-// replies are read again, so markdown is back. The routing's texts: wire.ts's, which server.ts falls back to.
-interface Prompts { voiceTools?: string; voiceOff?: string; preambles?: string; asks?: string; announces?: string; title?: string; draft?: string }
-const PROMPTS: Required<Prompts> = {
-  voiceTools: "After the fixes, <tool>yes</tool> or <tool>no</tool> says whether answering needs a search, a page or anything else a " +
-    "tool does. Only say you searched or did something once the tool call for it has returned, and never describe results you have not " +
-    "received from a tool. When results come back, give the key points briefly, and say the links are on screen rather than reading them.",
-  voiceOff: "The user is typing again and reads your replies.",
-  preambles: ROUTING.preambles.join("\n"), asks: ROUTING.asks.join(", "), announces: ROUTING.announces.join(", "),
-  // kiln answers a prompt that starts "You are a title generator" as a side request (low priority, no thinking)
-  title: "You are a title generator. Reply with a title of at most six words for the conversation that starts with the user's message below. Reply with the title only.",
-  draft: "Write the next message I would send in this conversation, as me: same voice, same goals, natural and brief. Reply with only that message.",
-};
-const promptOf = (k: keyof Prompts) => settings.prompts?.[k] ?? PROMPTS[k];
-const listOf = (k: "preambles" | "asks" | "announces") => promptOf(k).split(k === "preambles" ? "\n" : ",").map((x) => x.trim()).filter(Boolean);
+// replies are read again, so markdown is back.
+const VOICE_TOOLS = "After the fixes, <tool>yes</tool> or <tool>no</tool> says whether answering needs a search, a page or anything " +
+  "else a tool does. Only say you searched or did something once the tool call for it has returned, and never describe results you " +
+  "have not received from a tool. When results come back, give the key points briefly, and say the links are on screen rather than reading them.";
+const VOICE_OFF = "The user is typing again and reads your replies.";
+// kiln answers a prompt that starts "You are a title generator" as a side request (low priority, no thinking)
+const TITLE_PROMPT = "You are a title generator. Reply with a title of at most six words for the conversation that starts with the user's message below. Reply with the title only.";
+const DRAFT_PROMPT = "Write the next message I would send in this conversation, as me: same voice, same goals, natural and brief. Reply with only that message.";
 const fill = (text: string) => text.replaceAll("{{MODEL}}", modelName(current()) || "a Qwen model");
 // Thinking, a slider in the message box: no thinking (the model's no-thinking mode), then Qwen's three efforts.
 const EFFORTS: Effort[] = ["off", "low", "medium", "xhigh"];
@@ -1182,7 +1168,7 @@ function renderComposer() {
 }
 
 // Anything differs from the recommended values (what Reset all settings would change).
-const customized = () => settings.system !== DEFAULT_SYSTEM || settings.systemTools !== undefined || !!settings.prompts || !!settings.descriptions
+const customized = () => settings.system !== DEFAULT_SYSTEM
   || Object.keys(settings.think).length + Object.keys(settings.fast).length > 0
   || !!settings.max_tokens || settings.seed !== undefined || !!settings.allow?.length || settings.fetchChars !== undefined
   || Object.keys(settings.voice ?? {}).length > 0;
@@ -1282,8 +1268,7 @@ function request(c: Conversation, upto: Message[], o: { effort?: Effort; samplin
   if (o.final) messages.push(o.final);
   const web: ToolChoice | undefined = toolsOn(c)
     ? { tools: c.tools!, allow: settings.allow, fetchChars: settings.fetchChars, ...(o.loop === false ? { loop: false } : {}),
-      ...(settings.descriptions ? { descriptions: settings.descriptions } : {}),
-      ...(o.route ? { route: { preambles: listOf("preambles"), asks: listOf("asks"), announces: listOf("announces") } } : {}) } : undefined;
+      ...(o.route ? { route: true } : {}) } : undefined;
   return {
     model: effort === "off" ? `${current()}-fast` : current(), reasoning_effort: effort === "off" ? undefined : effort,
     ...samplerFields(o.sampling ?? mode), max_tokens: settings.max_tokens, seed: settings.seed, logprobs: true, top_logprobs: 5,
@@ -1306,7 +1291,7 @@ function wire(m: Message): object[] {
 }
 const toolsOn = (c: Conversation) => !!c.tools && Object.keys(c.tools).length > 0;
 // The system prompt as sent: the user's as written; the default says what is true of the chat (no tools, or these).
-const systemFor = (c: Conversation) => fill((toolsOn(c) ? settings.systemTools ?? DEFAULT_SYSTEM_TOOLS : settings.system).trim());
+const systemFor = (c: Conversation) => fill((settings.system.trim() === DEFAULT_SYSTEM && toolsOn(c) ? DEFAULT_SYSTEM_TOOLS : settings.system).trim());
 
 // Server-sent events of a reply, as parsed JSON chunks, then DONE.
 const DONE = Symbol("done");
@@ -1629,7 +1614,7 @@ async function name(c: Conversation) {
     const res = await fetch("/api/chat", {
       method: "POST", headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ model: `${current()}-fast`, max_tokens: 24, messages: [
-        { role: "system", content: promptOf("title") },
+        { role: "system", content: TITLE_PROMPT },
         { role: "user", content: (c.messages[0].content || (c.messages[0].files ?? []).map((f) => f.name).join(", ")).slice(0, 2000) },
       ] }),
     });
@@ -1674,12 +1659,12 @@ let voice: VoiceMode | null = null;
 let voiceCatalog: VoiceReady["catalog"] = (() => { try { return JSON.parse(pref("voice-catalog", "{}")) ?? {}; } catch { return {}; } })();
 const cuts = new Map<Message, number | null>();     // replies talked over while still written: what to keep once they end (null: none of it)
 const voicePrompt = () => settings.voice?.prompt ?? DEFAULT_VOICE_PROMPT;
-const voiceNote = (c: Conversation) => fill([voicePrompt().trim(), toolsOn(c) ? promptOf("voiceTools").trim() : ""].filter(Boolean).join(" "));
+const voiceNote = (c: Conversation) => fill([voicePrompt().trim(), toolsOn(c) ? VOICE_TOOLS : ""].filter(Boolean).join(" "));
 // The note a new question carries, if any: voice mode's where it starts or its note changed, the typing one where it
 // ends (a note marks which: a voice question's note is the voice one).
 function noteFor(c: Conversation, said: boolean): string | undefined {
   const users = c.messages.filter((m) => m.role === "user"), prev = users.at(-1);
-  if (!said) return prev?.voice ? promptOf("voiceOff").trim() || undefined : undefined;
+  if (!said) return prev?.voice ? VOICE_OFF : undefined;
   const last = users.findLast((m) => m.note && m.voice)?.note, note = voiceNote(c);
   return note && (!prev?.voice || last !== note) ? note : undefined;
 }
@@ -1831,7 +1816,10 @@ function cutVoice(here: boolean) {
   v.reply = undefined;
   renderVoice();
   if (!r) return;
-  const keep = r.audible ? r.spoken : null, run = running(v.c);
+  // taken out (and the next words joined to its question) only when nothing of it happened yet: a reply that ran tools
+  // keeps them and their results, and what was heard of it
+  const worked = !!(r.m.rounds?.length || r.m.calls?.length);
+  const keep = r.audible || worked ? r.spoken : null, run = running(v.c);
   if (keep === null) v.merge = v.c.messages[v.c.messages.indexOf(r.m) - 1];
   if (run?.m === r.m) {
     cuts.set(r.m, keep);
@@ -2234,7 +2222,7 @@ async function draft() {
     sampling: "fast", final: begin.trim() ? { role: "assistant", content: begin } : undefined, loop: false,
     extra: { kiln_aside: true, max_tokens: 400, logprobs: false, seed: undefined, ...(begin.trim() ? { continue_final_message: true } : {}) },
   });
-  (body.messages as object[]).splice(begin.trim() ? -1 : body.messages.length, 0, { role: "user", content: promptOf("draft") });
+  (body.messages as object[]).splice(begin.trim() ? -1 : body.messages.length, 0, { role: "user", content: DRAFT_PROMPT });
   input.readOnly = true;
   renderComposer();
   try {
@@ -2870,27 +2858,14 @@ function renderTools() {
 // Settings' Tools: the config file's servers as they stand (what each runs or reaches, read-only), what Fetch URL
 // may reach, and the tools allowed to run without asking (a click makes one ask again).
 const STATE_WORD: Record<SourceInfo["state"], string> = { idle: "not started", connecting: "starting…", connected: "running", failed: "failed", disabled: "disabled" };
-// Each tool opens to its description as kiln is sent it: the chat's settings', else kiln's own for that tool (wire.ts),
-// else its server's. A description is what tells the model when to call the tool and when not.
-const toolSyncs: (() => void)[] = [];
-const describedAs = (t: ToolInfo) => settings.descriptions?.[t.fn] ?? DESCRIPTIONS[t.name] ?? t.description;
-function setDescription(fn: string, v: string | undefined) {
-  const next = { ...settings.descriptions, [fn]: v };
-  if (v === undefined) delete next[fn];
-  if (Object.keys(next).length) settings.descriptions = next as Record<string, string>;
-  else delete settings.descriptions;
-}
+// Each tool opens to its description as kiln is sent it: kiln's own for that tool where it has one (wire.ts), else its
+// server's. A description is what tells the model when to call the tool and when not.
 function toolDescriptions(tools: ToolInfo[]): HTMLElement[] {
   return [...tools].sort((a, b) => (a.fn < b.fn ? -1 : 1)).map((t) => {
-    const d = h("details", "ts-tool"), sum = h("summary"), def = DESCRIPTIONS[t.name] ?? t.description;
+    const d = h("details", "ts-tool"), sum = h("summary");
     sum.append(h("span", "ts-tool-name", t.title || t.name), h("code", "ts-tool-fn", t.fn));
-    const field = promptFieldOnce({
-      id: `tool-desc-${t.fn}`, label: "Description, as sent", rows: 4,
-      help: "What the model is told of this tool. A change makes each chat with it on read its history again once.",
-      get: () => describedAs(t), def: () => def, set: (v) => setDescription(t.fn, v),
-    });
     d.dataset.fn = t.fn;
-    d.append(sum, field);
+    d.append(sum, h("p", "ts-tool-desc", DESCRIPTIONS[t.name] ?? t.description));
     if (DESCRIPTIONS[t.name] && DESCRIPTIONS[t.name] !== t.description) {
       const own = h("p", "set-note");
       own.append("kiln's description for it; the server's own: ", h("q", "", t.description));
@@ -2904,7 +2879,6 @@ function renderToolSettings() {
   const list = $("tools-list"), key = JSON.stringify(catalog);
   if (list.dataset.key !== key) {
     list.dataset.key = key;
-    toolSyncs.length = 0;
     const rows: HTMLElement[] = [];
     if (!catalog) rows.push(h("p", "set-note", "Asking the web server…"));
     else {
@@ -2939,7 +2913,6 @@ function renderToolSettings() {
     }
     list.replaceChildren(...rows);
   }
-  for (const sync of toolSyncs) sync();
   const allow = $("allow-list"), akey = JSON.stringify(settings.allow ?? []);
   if (allow.dataset.key === akey) return;
   allow.dataset.key = akey;
@@ -3049,20 +3022,18 @@ const shownMode = (): Mode => modeOf(conv);             // the values Settings s
 let systemEdited = false;
 
 function loadSettings(): Settings {
-  const s = load<Settings | null>("settings2", null);
+  const s = load<(Settings & Record<string, unknown>) | null>("settings2", null);
   if (s) {
-    if (!s.v) {                                     // one prompt for both, as it was written; the plain default follows the default
-      if (s.system === PLAIN_SYSTEM) s.system = DEFAULT_SYSTEM;
-      else if (s.system !== DEFAULT_SYSTEM) s.systemTools = s.system;
-      s.v = 3;
-    }
+    if (s.system === PLAIN_SYSTEM) s.system = DEFAULT_SYSTEM;   // the plain default (before {{MODEL}}) follows the default
+    // v3 kept a second system prompt for chats with tools, the other texts sent and each tool's description: gone
+    for (const k of ["systemTools", "prompts", "descriptions"]) delete s[k];
+    s.v = 4;
     return s;
   }
   // the earlier shape: one set of values for both modes, and a system prompt added after a built-in line
   const old = load<{ system?: string; sampling?: Record<string, number> } | null>("settings", null);
   const { max_tokens, seed, ...rest } = old?.sampling ?? {};
-  const system = [DEFAULT_SYSTEM, old?.system?.trim()].filter(Boolean).join("\n\n");
-  return { v: 3, system, ...(old?.system?.trim() ? { systemTools: system } : {}), think: { ...rest }, fast: { ...rest }, max_tokens, seed };
+  return { v: 4, system: [DEFAULT_SYSTEM, old?.system?.trim()].filter(Boolean).join("\n\n"), think: { ...rest }, fast: { ...rest }, max_tokens, seed };
 }
 function saveSettings() {
   store("settings2", settings);
@@ -3226,49 +3197,6 @@ interface KnobSpec {
 }
 const knobs: (() => void)[] = [];
 const roundTo = (v: number, step: number) => Math.round(v / step) * step;
-// A text the model is sent besides what the user types: its box, ↺ back to the default (with Undo), its help as a
-// tooltip. set(undefined) means the default; a box left as the default stores nothing.
-interface PromptSpec { id: string; label: string; help: string; get: () => string; def: () => string; set: (v: string | undefined) => void; rows?: number }
-function promptField(f: PromptSpec) {
-  const el = h("div", "prompt-field"), head = h("div", "prompt-head"), label = h("label", "prompt-label", f.label);
-  const reset = h("button", "act knob-reset"), box = h("textarea", "prompt-input");
-  el.title = f.help;
-  label.htmlFor = box.id = f.id;
-  box.rows = f.rows ?? 2;
-  box.spellcheck = false;
-  reset.type = "button";
-  reset.innerHTML = icon("retry");
-  reset.title = "Back to the default";
-  reset.setAttribute("aria-label", `${f.label}: back to the default`);
-  box.addEventListener("input", () => { f.set(box.value === f.def() ? undefined : box.value); saveSettings(); fit(box); });
-  reset.onclick = () => {
-    const before = f.get();
-    f.set(undefined);
-    saveSettings();
-    toast(`${f.label}: back to the default`, () => { f.set(before === f.def() ? undefined : before); saveSettings(); });
-  };
-  head.append(label, reset);
-  el.append(head, box);
-  knobs.push(() => {
-    if (document.activeElement !== box && box.value !== f.get()) { box.value = f.get(); fit(box); }
-    reset.classList.toggle("on", f.get() !== f.def());
-  });
-  return el;
-}
-function promptFieldOnce(f: PromptSpec) {
-  const at = knobs.length, el = promptField(f);
-  toolSyncs.push(...knobs.splice(at));
-  return el;
-}
-const setPrompt = (k: keyof Prompts) => (v: string | undefined) => {
-  const next: Prompts = { ...settings.prompts, [k]: v };
-  if (v === undefined) delete next[k];
-  if (Object.keys(next).length) settings.prompts = next;
-  else delete settings.prompts;
-};
-const promptSpec = (k: keyof Prompts, label: string, help: string, rows = 2): PromptSpec =>
-  ({ id: `prompt-${k}`, label, help, rows, get: () => promptOf(k), def: () => PROMPTS[k], set: setPrompt(k) });
-
 function knob(k: KnobSpec) {
   const el = h("div", "knob"), label = h("label", "", k.label), reset = h("button", "act knob-reset");
   const num = h("input", "knob-num"), track = h("div", "knob-track"), range = h("input"), rec = h("i", "knob-rec");
@@ -3515,23 +3443,6 @@ function buildSettings() {
     thinkModes.querySelectorAll("button").forEach((b, i) => b.setAttribute("aria-checked", String(EFFORTS[i] === voiceEffort())));
   });
   $("voice-knobs").replaceChildren(stt.row, pick.row, speed, think);
-  $("voice-prompts").replaceChildren(...[
-    promptSpec("voiceTools", "With tools on, also", "Added to the voice note in a chat with tools on: what the reply may say about a tool call."),
-    promptSpec("voiceOff", "Typing again", "The note on the first typed message after voice mode: replies are read again, so markdown is fine."),
-    promptSpec("preambles", "Said before a tool call", "One a line, taken in turn: what voice mode says while a tool call it settled on starts (the call itself has no words).", 3),
-    promptSpec("asks", "Always a tool when said", "Phrases, separated by commas: a voice question with one of them makes a tool call, whatever the model would have done."),
-    promptSpec("announces", "Words that announce a tool", "Phrases, separated by commas, after \"I'll\", \"I will\", \"I'm going to\", \"let me\", \"I'm\" or \"I am\" (and \"now\", \"just\" or \"quickly\"): a voice reply that says one and calls no tool is made to call one.", 3),
-  ].map((spec) => promptField(spec)));
-  $("prompts").replaceChildren(
-    promptField(promptSpec("title", "Chat titles", "The system prompt of the request that names a chat after its first message. kiln answers one that starts \"You are a title generator\" as a side request: low priority, no thinking.")),
-    promptField(promptSpec("draft", "Draft my next message", "Sent as the user's ask after the chat when the wand drafts your next message (as the assistant, without thinking).")),
-  );
-  $("system-tools").append(promptField({
-    id: "system-tools-input", label: "With tools on", rows: 2,
-    help: "Sent instead to a chat with tools on, {{MODEL}} as the chat's model; the tools follow it, each with its description (Tools below).",
-    get: () => settings.systemTools ?? DEFAULT_SYSTEM_TOOLS, def: () => DEFAULT_SYSTEM_TOOLS,
-    set: (v) => { if (v === undefined) delete settings.systemTools; else settings.systemTools = v; },
-  }));
 
   $("tools-reload").onclick = () => void loadCatalog({ reload: true }).then(() => toast(catalog?.error ? "The config file has an error (shown under Tools)"
     : `Config read: ${catalog?.sources.filter((s) => s.kind === "mcp").length ?? 0} MCP server(s)`));
@@ -3552,6 +3463,10 @@ function buildSettings() {
     growSystem();
     saveSettings();
   });
+  $("sent-open").onclick = () => void showSent();
+  $("sent-close").innerHTML = icon("x");
+  $("sent-close").onclick = () => $<HTMLDialogElement>("sent-view").close();
+  $("sent-copy").onclick = () => copy($("sent-text").textContent ?? "", $("sent-copy"));
   $("system-reset").onclick = () => {
     const before = settings.system;
     settings.system = DEFAULT_SYSTEM;
@@ -3562,13 +3477,44 @@ function buildSettings() {
   $("settings-reset").onclick = () => {
     if (!customized()) return toast("Everything is already at the recommended values");
     const before = structuredClone(settings);
-    settings = { v: 3, system: DEFAULT_SYSTEM, think: {}, fast: {} };
+    settings = { v: 4, system: DEFAULT_SYSTEM, think: {}, fast: {} };
     saveSettings();
     growSystem();
     toast("Everything is back to the recommended values", () => { settings = before; saveSettings(); growSystem(); });
   };
   measureScrollbar();
   addEventListener("resize", measureScrollbar);
+}
+
+// What the model is sent: the open chat's next request as the web server builds it for kiln (/api/preview, the same
+// code as a reply's), so it is exactly that: the tools, which kiln's chat template writes first in the system turn, the
+// system prompt after them, then every message as sent, notes included. A file shows as what it is and its size, not
+// its data.
+async function showSent() {
+  const c = conv, said = voice?.c === c, effort = said ? voiceEffort() : c.effort;
+  await filesReady(c.messages);
+  const body = request(c, [...c.messages], { effort, ...(said ? { route: true, ...(effort === "off" ? { extra: { kiln_voice: true } } : {}) } : {}) });
+  const res = await fetch("/api/preview", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body) }).catch(() => null);
+  const sent = res?.ok ? (await res.json()).body : null;
+  if (!sent) return toast("The web server did not answer");
+  const kb = (url: string) => `${Math.round((url.length * 3) / 4 / 1024)} KB`;
+  const part = (p: any): string => p.type === "text" ? p.text : p.type === "image_url" ? `[picture, ${kb(p.image_url.url)}]`
+    : p.type === "file" ? `[PDF ${p.file.filename}, ${kb(p.file.file_data)}]` : p.type === "video_url" ? `[video, ${kb(p.video_url.url)}]` : JSON.stringify(p);
+  const lines = [`model: ${sent.model}${sent.reasoning_effort ? `, thinking ${sent.reasoning_effort}` : ""}`];
+  if (sent.tools?.length) lines.push("", `tools (${sent.tools.length}):`, JSON.stringify(sent.tools, null, 2));
+  for (const m of sent.messages) {
+    lines.push("", `── ${m.role}${m.tool_call_id ? ` (${m.tool_call_id})` : ""}`);
+    if (m.reasoning_content) lines.push(`[reasoning] ${m.reasoning_content}`);
+    lines.push(typeof m.content === "string" ? m.content : (m.content ?? []).map(part).join(""));
+    if (m.tool_calls) lines.push(JSON.stringify(m.tool_calls, null, 2));
+  }
+  const note = said ? noteFor(c, true) : undefined;
+  if (note) lines.push("", "── your next question said aloud, after this note:", `[${note}]`);
+  $("sent-about").textContent = (sent.tools?.length ? "kiln's chat template writes the tools first in the system turn (\"# Tools … <tools> … </tools>\"), " +
+    "with how to call them, and the system prompt after them. " : "") + "Your next message goes after these." +
+    (said ? " Each spoken reply first continues from \"<fixes>\" at temperature 0 (what speech recognition misheard, then with tools whether one is needed), and goes on from there." : "");
+  $("sent-text").textContent = lines.join("\n");
+  $<HTMLDialogElement>("sent-view").showModal();
 }
 
 // The chat stays put when Settings opens beside it: its column keeps the place it has with Settings closed, as far

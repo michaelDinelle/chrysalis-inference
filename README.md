@@ -201,8 +201,11 @@ asked to repeat the whole message instead, Flash-Next dropped sentences), each m
 (`<tool>yes</tool>`). The reply goes on from the step out of kiln's cache. A yes, or a user who asks for a search, gets a
 tool call held to the tools' grammar (~0.8 s on Flash-Next), after a spoken line the page writes ("Let me look that
 up."): a model with thinking off, told its reply is spoken, says "I'm searching for that now" and ends its turn often
-enough, and then copies that turn. A reply that announces a tool it did not call is made to call one. Every one of these
-texts is in Settings, with each tool's description as kiln is sent it. It is a cascade, as Claude's voice mode is: speech-to-text, the model kiln already runs (so the
+enough, and then copies that turn. A reply that announces a tool it did not call is made to call one; a reply that
+ran tools is kept when talked over, its results with it. What is said before the speech models have loaded (a first
+start: ~1.1 s) is kept and heard once they are in. Settings' "What the model is sent" shows a chat's next request as
+kiln gets it (built by the same code as a reply's: the tools as JSON, which kiln's template writes first in the system
+turn, every message with its note, and in voice mode the first step). It is a cascade, as Claude's voice mode is: speech-to-text, the model kiln already runs (so the
 reasoning costs no memory), text-to-speech, all on the CPU (no VRAM) in `voice/`, a Python service the web server
 starts with the first voice session and stops 60 s after the last (`KILN_VOICE_IDLE_MS`): closed, voice mode costs
 nothing. Open, it holds ~0.5 GB of RAM and 4 threads (`KILN_VOICE_THREADS`): at all 16 it took Flash-Next's decode
