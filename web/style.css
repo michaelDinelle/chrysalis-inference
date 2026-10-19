@@ -4,24 +4,24 @@
   --panel: #171413;
   --raised: #171413;          /* #1f1b19 over a large area (the message box) made an LG monitor driven by a Mac
                                  flicker and keep a ghost image; this color tested clean in the same place */
-  --hover: #29231f;
-  --line: #2d2724;
-  --text: #ede6df;
-  --muted: #9b9089;
-  --faint: #6a605a;
-  --accent: #f07a3c;
-  --accent-hi: #ff9d62;
-  --accent-soft: rgb(240 122 60 / 0.14);
-  --heat-1: #f0a462;          /* the thinking levels, cool to hot: Low, Medium, Max */
-  --heat-2: #f07a3c;
-  --heat-3: #ffa45c;
+  --hover: #292224;
+  --line: #2d2628;
+  --text: #efe4e7;
+  --muted: #9c8e92;
+  --faint: #6b5f62;
+  --accent: #e24d85;          /* the logo's pink */
+  --accent-hi: #f982a8;
+  --accent-soft: rgb(226 77 133 / 0.14);
+  --heat-1: #ea99b0;          /* the thinking levels, soft to vivid: Low, Medium, Max */
+  --heat-2: #e24d85;
+  --heat-3: #ff619a;
   --ok: #6ccf8e;
   --warn: #e8b04a;
   --danger: #f2706b;
-  --code: #0d0b0a;
-  --paper: #f3f0eb;           /* SVG figures: a light page, dimmed so it does not glare in the dark */
+  --code: #0d0b0b;
+  --paper: #f5eef0;           /* SVG figures: a light page, dimmed so it does not glare in the dark */
   --shadow: 0 12px 40px rgb(0 0 0 / 0.38);
-  --t-keyword: #ff9d62;
+  --t-keyword: #f982a8;
   --t-string: #a9d37e;
   --t-number: #e9b860;
   --t-title: #82b8ff;
@@ -35,24 +35,24 @@
 @media (prefers-color-scheme: light) {
   :root {
     color-scheme: light;
-    --bg: #fbf9f6;
-    --panel: #f4f0eb;
+    --bg: #fcf8f9;
+    --panel: #f6eff0;
     --raised: #ffffff;
-    --hover: #ebe4dc;
-    --line: #e2d9cf;
-    --text: #1d1916;
-    --muted: #6d635b;
-    --faint: #a1968d;
-    --accent: #d8621f;
-    --accent-hi: #b9500f;
-    --accent-soft: rgb(216 98 31 / 0.11);
-    --heat-1: #b26a3a;
-    --heat-2: #d8621f;
-    --heat-3: #c2410c;
-    --code: #f8f4ef;
+    --hover: #ede2e5;
+    --line: #e5d6da;
+    --text: #1d181a;
+    --muted: #6e6164;
+    --faint: #a39497;
+    --accent: #e24d85;
+    --accent-hi: #b43366;
+    --accent-soft: rgb(226 77 133 / 0.11);
+    --heat-1: #a85771;
+    --heat-2: #e24d85;
+    --heat-3: #bb1562;
+    --code: #faf3f4;
     --paper: #ffffff;
-    --shadow: 0 12px 32px rgb(70 45 20 / 0.09);
-    --t-keyword: #c2410c;
+    --shadow: 0 12px 32px rgb(73 39 50 / 0.09);
+    --t-keyword: #bb1562;
     --t-string: #4d7c0f;
     --t-number: #b45309;
     --t-title: #1d4ed8;
@@ -297,8 +297,8 @@ main { display: flex; flex-direction: column; min-height: 0; grid-column: 2; }
 @media (prefers-reduced-motion: reduce) { .empty > .logo { animation: none; } }
 
 /* thinking: an energy bar of four stops, Off to Max, in view in the message box. A 10px capsule and an 18px thumb on a
-   stop; filled to the thumb, and the fill runs hotter to the right: Low a warm amber, Medium an orange that flows,
-   Max molten (it flows faster, a shine sweeps it, sparks rise from it) */
+   stop; filled to the thumb, and the fill grows more vivid to the right: Low a soft rose, Medium the logo's pink,
+   which flows, Max its most vivid (it flows faster, a shine sweeps it, sparks rise from it) */
 [data-heat=off] { --heat: var(--muted); }
 [data-heat=low] { --heat: var(--heat-1); }
 [data-heat=medium] { --heat: var(--heat-2); }
@@ -309,17 +309,17 @@ main { display: flex; flex-direction: column; min-height: 0; grid-column: 2; }
 .energy-fill { position: absolute; top: 0; bottom: 0; left: 0; overflow: hidden; width: calc(var(--t) + (100% - var(--t)) * var(--v, 0) / 3); border-radius: inherit;
   transition: width 0.09s cubic-bezier(0.2, 0.9, 0.3, 1); }
 [data-heat=off] .energy-fill { background: none; }
-[data-heat=low] .energy-fill { background: linear-gradient(90deg, #e08a4c, var(--heat-1)); }
-[data-heat=medium] .energy-fill { background: linear-gradient(90deg, #ea6a2a 0%, var(--heat-2) 12.5%, #ff9a52 25%, var(--heat-2) 37.5%, #ea6a2a 50%, var(--heat-2) 62.5%, #ff9a52 75%,
-  var(--heat-2) 87.5%, #ea6a2a 100%) 0 0 / 200% 100%; animation: flow 7s linear infinite; }
-[data-heat=max] .energy-fill { background: linear-gradient(90deg, #c2410c 0%, var(--heat-2) 12.5%, #ffc46b 25%, var(--heat-3) 37.5%, #c2410c 50%, var(--heat-2) 62.5%,
-  #ffc46b 75%, var(--heat-3) 87.5%, #c2410c 100%) 0 0 / 200% 100%; animation: flow 2.8s linear infinite; }
+[data-heat=low] .energy-fill { background: linear-gradient(90deg, #d17491, var(--heat-1)); }
+[data-heat=medium] .energy-fill { background: linear-gradient(90deg, #ca3571 0%, var(--heat-2) 12.5%, #f67fa5 25%, var(--heat-2) 37.5%, #ca3571 50%, var(--heat-2) 62.5%, #f67fa5 75%,
+  var(--heat-2) 87.5%, #ca3571 100%) 0 0 / 200% 100%; animation: flow 7s linear infinite; }
+[data-heat=max] .energy-fill { background: linear-gradient(90deg, #ad105a 0%, var(--heat-2) 12.5%, #fcc2d1 25%, var(--heat-3) 37.5%, #ad105a 50%, var(--heat-2) 62.5%,
+  #fcc2d1 75%, var(--heat-3) 87.5%, #ad105a 100%) 0 0 / 200% 100%; animation: flow 2.8s linear infinite; }
 @keyframes flow { to { background-position: 100% 0; } }   /* half the 200% image: the pattern repeats there, so the loop has no seam */
 .energy-shine { position: absolute; inset: 0; opacity: 0; background: linear-gradient(100deg, transparent 35%, rgb(255 255 255 / 0.55) 50%, transparent 65%) no-repeat;
   background-size: 45% 100%; }
 [data-heat=max] .energy-shine { opacity: 1; animation: shine 2.4s ease-in-out infinite; }
 @keyframes shine { from { background-position: -60% 0; } to { background-position: 160% 0; } }
-.spark { position: absolute; bottom: 0; left: var(--x); display: none; width: var(--w); height: var(--w); border-radius: 50%; background: #fff4d6; box-shadow: 0 0 3px 1px #ffc46b;
+.spark { position: absolute; bottom: 0; left: var(--x); display: none; width: var(--w); height: var(--w); border-radius: 50%; background: #ffeff3; box-shadow: 0 0 3px 1px #ff8fb2;
   animation: spark var(--d) ease-in var(--delay) infinite; }
 [data-heat=max] .spark { display: block; }
 @keyframes spark { from { transform: translate(0, 2px); opacity: 0; } 25% { opacity: 1; } to { transform: translate(var(--dx), -9px); opacity: 0; } }
@@ -329,7 +329,7 @@ main { display: flex; flex-direction: column; min-height: 0; grid-column: 2; }
 .energy-thumb { position: absolute; top: 2px; left: calc((100% - var(--t)) * var(--v, 0) / 3); z-index: 2; width: var(--t); height: var(--t); border-radius: 50%; background: #fff;
   box-shadow: 0 1px 2px rgb(0 0 0 / 0.35), 0 2px 8px rgb(0 0 0 / 0.25); transition: left 0.09s cubic-bezier(0.2, 0.9, 0.3, 1), transform 0.12s, box-shadow 0.2s; }
 .energy:hover .energy-thumb, .energy.dragging .energy-thumb { transform: scale(1.08); }
-[data-heat=max] .energy-thumb { box-shadow: 0 1px 2px rgb(0 0 0 / 0.35), 0 0 12px 2px rgb(255 150 60 / 0.55); }
+[data-heat=max] .energy-thumb { box-shadow: 0 1px 2px rgb(0 0 0 / 0.35), 0 0 12px 2px rgb(255 97 154 / 0.55); }
 .energy:focus-visible .energy-thumb { box-shadow: 0 1px 2px rgb(0 0 0 / 0.35), 0 0 0 3px color-mix(in srgb, var(--accent) 50%, transparent); }
 /* the stops' names under the bar, the current one in its heat */
 .energy-stops { position: relative; height: 13px; }

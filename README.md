@@ -72,26 +72,26 @@ another chat, reloading, closing the tab, a laptop asleep or a dropped connectio
 it again from the last event it saw; only Stop (the button, or Esc when nothing else is open) or deleting the chat ends
 it early. Replies stream with their reasoning (collapsible), each one shows time to first token, tok/s, how much of the
 prompt came from cache, the sampling values that differed from the recommended ones and its seed. In the message box, an
-energy bar sets the thinking: Off (the no-thinking mode), Low, Medium or Max. It runs hotter to the right (Medium flows;
-Max is molten, with a sweeping shine and rising sparks), and dragging takes a stop a third of the way to it. The model's
-name beside the send button opens the models; it is the only place a model is chosen. Beside it are the engine's state
-(a dot: ready, loading with its progress, or stopped), a power button (unload, or load) and the usage: this chat against
-the context, and how full Chrysalis's cache of conversations is. Message actions keep fixed places (from the right:
-delete, edit, copy on every message, then a reply's token odds, regenerate and continue), so none moves between
-messages. Every message can be edited in place (Save; a reply's thinking too) or deleted (with Undo). A conversation is
-a tree: sending an edited question (Send, Ctrl+Enter), regenerating any reply, or picking another token makes a new
-version beside the old one, and "‹ 2 / 3 ›" under a message with versions (buttons, keyboard too) switches between them,
-each with all that followed it. Deleting a message that has versions deletes that version. Only the path on screen goes
-to Chrysalis, so switching back is a cache hit. A reply being written goes on in its version while another is shown, and
-shows where it got to when its version is back; a chat writes one reply at a time. The last reply can be continued
-(Continue is spelled out when the reply was cut short); it grows in place. Token odds shows a reply as its tokens,
-tinted by how unsure the model was of each; a click on one lists what else it could have written there, and picking one
-rewrites the reply from that token on. The wand in the message box drafts the user's next message (or finishes the one
-being typed) to edit and send: Chrysalis is asked, as the assistant and without thinking, to write it (Qwen will not
-write a user turn: at one it ends it). Settings (Ctrl+,) sits beside the chat: with room it opens without moving the
-conversation, otherwise it slides the column over (never re-wrapping it) or, in narrow windows, slides over it. Every
-change applies from the next reply and can be undone, for every conversation in the tab (kept with them). It shows
-exactly what Chrysalis is sent:
+energy bar sets the thinking: Off (the no-thinking mode), Low, Medium or Max. It grows more vivid to the right, in the
+logo's pink (Medium flows; Max is brightest, with a sweeping shine and rising sparks), and dragging takes a stop a third
+of the way to it. The model's name beside the send button opens the models; it is the only place a model is chosen.
+Beside it are the engine's state (a dot: ready, loading with its progress, or stopped), a power button (unload, or load)
+and the usage: this chat against the context, and how full Chrysalis's cache of conversations is. Message actions keep
+fixed places (from the right: delete, edit, copy on every message, then a reply's token odds, regenerate and continue),
+so none moves between messages. Every message can be edited in place (Save; a reply's thinking too) or deleted (with
+Undo). A conversation is a tree: sending an edited question (Send, Ctrl+Enter), regenerating any reply, or picking
+another token makes a new version beside the old one, and "‹ 2 / 3 ›" under a message with versions (buttons, keyboard
+too) switches between them, each with all that followed it. Deleting a message that has versions deletes that version.
+Only the path on screen goes to Chrysalis, so switching back is a cache hit. A reply being written goes on in its
+version while another is shown, and shows where it got to when its version is back; a chat writes one reply at a time.
+The last reply can be continued (Continue is spelled out when the reply was cut short); it grows in place. Token odds
+shows a reply as its tokens, tinted by how unsure the model was of each; a click on one lists what else it could have
+written there, and picking one rewrites the reply from that token on. The wand in the message box drafts the user's next
+message (or finishes the one being typed) to edit and send: Chrysalis is asked, as the assistant and without thinking,
+to write it (Qwen will not write a user turn: at one it ends it). Settings (Ctrl+,) sits beside the chat: with room it
+opens without moving the conversation, otherwise it slides the column over (never re-wrapping it) or, in narrow windows,
+slides over it. Every change applies from the next reply and can be undone, for every conversation in the tab (kept with
+them). It shows exactly what Chrysalis is sent:
 - The system prompt, by default "There are no tools or files in this chat. Answer directly." It is an ordinary prompt:
   edit or delete it. Without it, Flash-Next with thinking off takes asks like "design a cute SVG" for a coding-agent
   task ("let me first explore the project structure", then calls to tools that do not exist), as the Q8_0 original does

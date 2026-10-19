@@ -181,7 +181,7 @@ const fill = (text: string) => text.replaceAll("{{MODEL}}", modelName(current())
 // Thinking, a slider in the message box: no thinking (the model's no-thinking mode), then Qwen's three efforts.
 const EFFORTS: Effort[] = ["off", "low", "medium", "xhigh"];
 const LEVEL: Record<Effort, [string]> = { off: ["Off"], low: ["Low"], medium: ["Medium"], xhigh: ["Max"] };
-const HEAT = ["off", "low", "medium", "max"];      // each stop's look, cool to molten
+const HEAT = ["off", "low", "medium", "max"];      // each stop's look, soft to vivid
 const ICONS = {
   plus: '<path d="M12 5v14M5 12h14"/>',
   paneLeft: '<rect x="3" y="3" width="18" height="18" rx="3"/><path d="M9 3v18"/><path class="chev" d="M15.5 9 12.5 12l3 3"/>',
@@ -364,7 +364,7 @@ function renderBlocks(v: { body: HTMLElement; blocks?: Blocks }, src: string, li
 // with a short fade, once its tag is complete. The markup is sanitized (no scripts, handlers, foreignObject, external
 // references) and lives in a shadow root, so its styles and ids stay inside it. The code is a click away.
 const SVG_START = /^\s*(?:<\?xml[^>]*\?>\s*)?(?:<!--[\s\S]*?-->\s*|<!DOCTYPE[^>]*>\s*)*<svg[\s>]/i;
-const SVG_SHADOW = ":host { display: block; color: #1f1b19; } svg { display: block; width: var(--fig-w, 640px); max-width: 100%; height: auto; } " +
+const SVG_SHADOW = ":host { display: block; color: #1f1b1c; } svg { display: block; width: var(--fig-w, 640px); max-width: 100%; height: auto; } " +
   ":host(.zoom) svg { max-width: none; }";
 const svgSource = new WeakMap<Element, string>();
 const reducedMotion = matchMedia("(prefers-reduced-motion: reduce)");
@@ -554,8 +554,8 @@ const MERMAID_URL = "/vendor/mermaid/mermaid.esm.min.mjs";
 let mermaidLib: Promise<typeof import("mermaid").default> | undefined, mermaidSeq = 0;
 const loadMermaid = () => mermaidLib ??= (import(MERMAID_URL) as Promise<typeof import("mermaid")>).then(({ default: m }) => {
   m.initialize({ startOnLoad: false, securityLevel: "strict", htmlLabels: false, flowchart: { htmlLabels: false }, theme: "base",
-    fontFamily: "ui-sans-serif, system-ui, sans-serif", themeVariables: { primaryColor: "#fbe6d6", primaryBorderColor: "#d8621f",
-      primaryTextColor: "#1f1b19", lineColor: "#6d635b", secondaryColor: "#f1ebe4", tertiaryColor: "#ffffff" } });
+    fontFamily: "ui-sans-serif, system-ui, sans-serif", themeVariables: { primaryColor: "#fde1e8", primaryBorderColor: "#e24d85",
+      primaryTextColor: "#1f1b1c", lineColor: "#6e6164", secondaryColor: "#f3e9eb", tertiaryColor: "#ffffff" } });
   return m;
 });
 
@@ -2930,9 +2930,9 @@ document.addEventListener("pointerdown", (e) => {
   const t = e.target as Node;
   for (const p of PANES) if (!p.el.contains(t) && !p.toggle.contains(t) && !$("toast").contains(t)) closeOver(p);
 });
-// Thinking is an energy bar of four stops, Off to Max, always in view: it runs hotter to the right (Medium flows; Max
-// is molten: it flows faster, a shine sweeps it, sparks rise from it). The model's name beside the send button opens
-// the models, a flat list; it is the only place a model is chosen (the sidebar shows the engine's state).
+// Thinking is an energy bar of four stops, Off to Max, always in view: it grows more vivid to the right (Medium flows;
+// Max is brightest: it flows faster, a shine sweeps it, sparks rise from it). The model's name beside the send button
+// opens the models, a flat list; it is the only place a model is chosen (the sidebar shows the engine's state).
 let modelsOpen = false;
 
 function buildControls() {
