@@ -99,6 +99,16 @@ build_fn/ref_logits_mm_fn: tools_fn/ref_logits_mm_fn.cpp
 	@mkdir -p build_fn
 	g++ $(LLAMA) -o $@ $< $(LLAMA_LIBS)
 
+# the web UI's voice service (voice/): its venv and default models (tools/voice_setup.sh NAME fetches the others)
+voice:
+	tools/voice_setup.sh
+
+# the voice service on the CPU: its features against transformers', the turn model, sessions over its WebSocket
+test_voice: voice
+	data/voice-venv/bin/python tools/test_voice.py
+
+.PHONY: voice test_voice
+
 # the mechanical cases of AGENTS.md's comment rule
 lint:
 	python3 -I tools/lint_comments.py

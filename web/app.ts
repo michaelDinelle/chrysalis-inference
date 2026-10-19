@@ -9,6 +9,7 @@ import "katex/dist/katex.min.css";
 import { marked, type Links, type Token } from "marked";
 import { type Attachment, KINDS, attach, dataUrl, fmtBytes, get as getFile, put as putFile, textBlock } from "./files";
 import { type Cand, type Odds, type SamplerKey, type Stage, dryRuns, sample } from "./sampler";
+import { type Part, type VoiceAsk, type VoiceInfo, type VoiceReady, VoiceClient } from "./voice";
 import { type ToolChoice, type WireCall, assistantTurn, toolTurn } from "./wire";
 
 type Effort = "xhigh" | "medium" | "low" | "off";
@@ -33,13 +34,20 @@ interface Message {
   base?: number;                                    // rounds it had before its job began (a reload replays the job's)
   notes?: string[];                                 // what the web server said about the reply (a tool left out, a limit)
   versions?: Versions;
+  voice?: boolean;                                  // a question said in voice mode
+  voiceMs?: number;                                 // a spoken reply: from the end of the user's speech to its first sound
+  interrupted?: boolean;                            // talked over: it keeps only what was heard
 }
 interface Conversation { id: string; title: string; named?: boolean; updated: number; effort: Effort; messages: Message[]; tools?: ToolChoice["tools"] }
 type Sampler = Partial<Record<SamplerKey, number>> & { order?: Stage[] };
 type Mode = "think" | "fast";                       // thinking on (Max, Medium, Low) or off: Qwen recommends other values
 // Only what differs from the recommended values is kept, so whatever is left alone follows them. allow: tools that run
 // without asking (by function name); fetchChars: how much of a page Fetch URL gives the model at a time.
-interface Settings { system: string; think: Sampler; fast: Sampler; max_tokens?: number; seed?: number; allow?: string[]; fetchChars?: number }
+interface Settings { system: string; think: Sampler; fast: Sampler; max_tokens?: number; seed?: number; allow?: string[]; fetchChars?: number; voice?: VoiceSettings }
+// Voice mode's, every one of them (Settings and the dock's voice picker both show these): the speech-to-text and voice
+// models (names from the service's catalog), the voice (an id of that voice model's), its speed, what its replies are
+// told instead of the system prompt, and their thinking. Left unset: what the service runs when it is not told.
+interface VoiceSettings { stt?: string; tts?: string; name?: string; speed?: number; prompt?: string; effort?: Effort }
 // The tool sources server.ts offers (tools.ts catalog()).
 interface ToolInfo { fn: string; name: string; title: string; description: string; readOnly: boolean }
 interface SourceInfo { id: string; label: string; kind: "fetch" | "mcp"; detail: string; state: "idle" | "connecting" | "connected" | "failed" | "disabled"; error?: string; tools: ToolInfo[] }
@@ -112,6 +120,12 @@ const LOOP: { reply: [string, number][]; cands: [string, number, number][] } = {
 const DEFAULT_SYSTEM = "There are no tools or files in this chat. Answer directly.";
 // What the default says instead in a chat with tools on (a prompt the user wrote goes as written).
 const DEFAULT_SYSTEM_TOOLS = "The tools offered here are the only ones in this chat, and there are no files or projects to explore. Use a tool when it helps; otherwise answer directly.";
+// Voice mode's replies are told this instead of the system prompt. Its last sentence lets the model reason out loud
+// while it already speaks: on Big Bench Audio (Flash-Next, thinking off, spoken questions through Parakeet) 92.5% of
+// 200 with it, 77.7% of all 1,000 without, where thinking first would hold the first word back by seconds.
+const DEFAULT_VOICE_PROMPT = "You are talking with the user by voice. Your reply is spoken aloud by text-to-speech, so write plain spoken sentences: " +
+  "no markdown, lists, code or symbols. Keep it brief, usually one to three sentences, unless they ask for more. When a question needs counting, " +
+  "logic or several steps, work through it out loud in a few short spoken steps first, then give the answer.";
 // Thinking, a slider in the message box: no thinking (the model's no-thinking mode), then Qwen's three efforts.
 const EFFORTS: Effort[] = ["off", "low", "medium", "xhigh"];
 const LEVEL: Record<Effort, [string]> = { off: ["Off"], low: ["Low"], medium: ["Medium"], xhigh: ["Max"] };
@@ -143,6 +157,10 @@ const ICONS = {
   next: '<path d="M9.5 6.5 15 12l-5.5 5.5"/>',
   wrench: '<path d="M14.7 6.3a4 4 0 0 0 5 5L21 12.6a6 6 0 0 1-7.4 1.6L7 20.8a2.1 2.1 0 0 1-3-3l6.6-6.6A6 6 0 0 1 12.2 3.8l1.3 1.3a4 4 0 0 0 1.2 1.2z"/>',
   globe: '<circle cx="12" cy="12" r="9"/><path d="M3 12h18M12 3c2.5 2.6 3.8 5.6 3.8 9s-1.3 6.4-3.8 9c-2.5-2.6-3.8-5.6-3.8-9S9.5 5.6 12 3z"/>',
+  wave: '<path d="M4 10v4M8 7v10M12 4v16M16 8v8M20 11v2"/>',
+  play: '<path fill="currentColor" stroke="none" d="M8 5.8v12.4a.8.8 0 0 0 1.2.7l10-6.2a.8.8 0 0 0 0-1.4l-10-6.2a.8.8 0 0 0-1.2.7z"/>',
+  mic: '<rect x="9" y="3" width="6" height="11" rx="3"/><path d="M5.5 11a6.5 6.5 0 0 0 13 0M12 17.5V21"/>',
+  micOff: '<path d="M15 9.4V6a3 3 0 0 0-5.7-1.3M9 9v2a3 3 0 0 0 4.9 2.3M18.5 11a6.5 6.5 0 0 1-1 3.4M5.5 11a6.5 6.5 0 0 0 10.4 5.2M12 17.5V21M4 4l16 16"/>',
 };
 const TITLES = { copy: "Copy", edit: "Edit", trash: "Delete", tokens: "Token odds", retry: "Regenerate (a new version)" };
 const icon = (name: keyof typeof ICONS) => `<svg class="i" viewBox="0 0 24 24" aria-hidden="true">${ICONS[name]}</svg>`;
@@ -655,6 +673,7 @@ function render() {
   document.title = conv.messages.length ? `${conv.title} · kiln` : "kiln";
   renderComposer();
   renderList();
+  paintGhost();
 }
 
 function messageView(m: Message, i: number): HTMLElement {
@@ -667,7 +686,8 @@ function messageView(m: Message, i: number): HTMLElement {
   }
   const el = h("article", "msg user"), foot = h("footer", "msg-foot");
   el.dataset.i = String(i);
-  foot.innerHTML = pager(m) + slots([["copy", true], ["edit", !running()], ["trash", !running()]]);
+  foot.innerHTML = pager(m) + (m.voice ? `<span class="said" title="Said in voice mode">${icon("wave")}</span>` : "")
+    + slots([["copy", true], ["edit", !running()], ["trash", !running()]]);
   if (m.files?.length) el.append(filesView(m.files));
   if (m.content || !m.files?.length) el.append(h("div", "bubble", m.content));
   el.append(foot);
@@ -968,6 +988,8 @@ function paint(v: View, m: Message, live?: Live) {
   const s = m.stats;
   const facts = s ? [...(s.model ? [modelName(s.model)] : []), `${fmtS(s.ttft)} to first token`, `${Math.round(s.tps)} tok/s`, `${fmtK(s.tokens)} tokens`, `prompt ${fmtK(s.cached)}/${fmtK(s.prompt)} cached`]
     : m.stopped ? ["stopped"] : [];
+  if (typeof m.voiceMs === "number") facts.unshift(`voice ${(m.voiceMs / 1000).toFixed(2)} s`);
+  if (m.interrupted) facts.push("interrupted");
   if (m.params) facts.push(m.params);
   if (m.edited) facts.push("edited");
   if (s?.seed !== undefined) facts.push(`<button type="button" class="seed" data-act="seed" data-seed="${s.seed}" title="Use this seed for the next replies">seed ${s.seed}</button>`);
@@ -1092,7 +1114,8 @@ function renderComposer() {
 
 // Anything differs from the recommended values (what Reset all settings would change).
 const customized = () => settings.system !== DEFAULT_SYSTEM || Object.keys(settings.think).length + Object.keys(settings.fast).length > 0
-  || !!settings.max_tokens || settings.seed !== undefined || !!settings.allow?.length || settings.fetchChars !== undefined;
+  || !!settings.max_tokens || settings.seed !== undefined || !!settings.allow?.length || settings.fetchChars !== undefined
+  || Object.keys(settings.voice ?? {}).length > 0;
 
 function renderList() {
   const nav = $("conversations"), today = new Date().setHours(0, 0, 0, 0);
@@ -1182,9 +1205,9 @@ function save(c: Conversation) {
 // read). The reply's tokens come with their odds (log probs, five alternatives each) for the token view. effort: the
 // thinking setting (the chat's by default); sampling: whose values (by default the effort's mode). With tools on,
 // kiln_web tells the web server which to offer (it runs them: server.ts); loop: false offers them without running any.
-function request(c: Conversation, upto: Message[], o: { effort?: Effort; sampling?: Mode; final?: object; extra?: Record<string, unknown>; loop?: boolean } = {}) {
+function request(c: Conversation, upto: Message[], o: { effort?: Effort; sampling?: Mode; final?: object; extra?: Record<string, unknown>; loop?: boolean; system?: string } = {}) {
   const effort = o.effort ?? c.effort, mode: Mode = effort === "off" ? "fast" : "think";
-  const messages: object[] = upto.flatMap(wire), system = systemFor(c);
+  const messages: object[] = upto.flatMap(wire), system = o.system?.trim() ?? systemFor(c);
   if (system) messages.unshift({ role: "system", content: system });
   if (o.final) messages.push(o.final);
   const web: ToolChoice | undefined = toolsOn(c)
@@ -1231,7 +1254,7 @@ async function* events(body: ReadableStream<Uint8Array>): AsyncGenerator<any> {
   }
 }
 
-async function ensureOnline(run: Run) {
+async function ensureOnline(run: { stopping: boolean }) {
   if (status.state === "offline") await start();
   for (const deadline = Date.now() + 180_000; status.state !== "online" || status.loading; await refreshStatus()) {
     if (run.stopping) throw new DOMException("stopped", "AbortError");
@@ -1427,6 +1450,7 @@ function take(run: Run, ev: any) {
     run.saved = now;
     save(run.conv);
   }
+  feedVoice(m);
   schedule(run);
 }
 
@@ -1489,6 +1513,14 @@ function finish(run: Run) {
       ctx: run.last ? run.last.prompt_tokens + run.last.completion_tokens : undefined,
     };
   }
+  const cut = cuts.get(m);
+  if (cut !== undefined) {
+    cuts.delete(m);
+    keepHeard(c, m, cut);
+  } else if (voice?.reply?.m === m) {
+    feedVoice(m);
+    voice.client.done(m.id!);
+  }
   const unrun = (m.calls ?? []).filter((x) => !x.state);
   if (unrun.length && !m.error && !m.stopped && !toolsOn(c))   // shown, not dropped: the reply would otherwise just stop
     m.error = `The model asked to run ${[...new Set(unrun.map((x) => x.name))].join(", ")}, but this chat has no tools on, so the reply ends here.`;
@@ -1540,6 +1572,426 @@ function submit(text: string) {
   if (!conv.messages.length) conv.title = (text || files.map((f) => f.name).join(", ")).split("\n")[0].slice(0, 60);
   conv.messages.push({ role: "user", content: text, ...(files.length ? { files } : {}) });
   void generate();
+}
+
+// Voice mode: the message box becomes a dock (the orb, what it is doing, mute and end) and the conversation goes on in
+// the chat as ordinary messages. voice.ts carries the sound; here what the user said becomes a question, its reply's
+// text is spoken as it is written, and talking over a reply keeps only what was heard of it.
+type VoicePhase = "starting" | "listening" | "thinking" | "speaking" | "muted" | "error";
+interface VoiceReply { m: Message; sent: number; spoken: number; audible: boolean }
+interface Spark { x: number; y: number; vx: number; vy: number; age: number; life: number; size: number }
+interface VoiceMode {
+  client: VoiceClient; c: Conversation; ready?: VoiceReady; muted: boolean; partial: string; error?: string;
+  reply?: VoiceReply;                               // being spoken, or about to be
+  merge?: Message;                                  // a question whose reply was talked over before it said a word: the next turn joins it
+  latency?: number;
+  now: { voice?: string; speed?: number };          // what the service speaks with: its ready's, then what it was asked
+  asked?: VoiceAsk; pushed?: string;                // the last hello or config; the last config (a refused one is not sent again as is)
+  defaults: { stt?: string; tts?: string; voices: Record<string, string> };   // what it runs when not told (voices: by voice model)
+  level: number; frame: number; t: number; sparks: Spark[];
+}
+let voice: VoiceMode | null = null;
+// The service's models and voices as its last ready listed them, so Settings can offer them while voice mode is closed.
+let voiceCatalog: VoiceReady["catalog"] = (() => { try { return JSON.parse(pref("voice-catalog", "{}")) ?? {}; } catch { return {}; } })();
+const cuts = new Map<Message, number | null>();     // replies talked over while still written: what to keep once they end (null: none of it)
+const voicePrompt = () => settings.voice?.prompt ?? DEFAULT_VOICE_PROMPT;
+const voiceEffort = (): Effort => settings.voice?.effort ?? "off";
+
+async function openVoice() {
+  if (voice) return;
+  const mine = () => voice?.client === client;
+  const client: VoiceClient = new VoiceClient({
+    ready: (r) => {
+      if (!mine()) return;
+      const v = voice!, asked = v.asked ?? {}, first = !v.ready;
+      // what it chose for what it was not asked: the parts after the hello, a voice after a voice model's switch
+      if (first && !asked.stack?.stt) v.defaults.stt = r.stack.stt;
+      if (first && !asked.stack?.tts) v.defaults.tts = r.stack.tts;
+      if ((first || asked.stack?.tts) && !asked.voice && r.stack.tts) v.defaults.voices[r.stack.tts] = r.voice;
+      v.ready = r;
+      v.now = { voice: r.voice, speed: r.speed };
+      voiceCatalog = r.catalog ?? {};
+      setPref("voice-catalog", JSON.stringify(voiceCatalog));
+      pushVoice();
+      renderVoice();
+      syncSettings();
+    },
+    partial: (text) => { if (mine()) { voice!.partial = text; paintGhost(); } },
+    turn: (text) => { if (mine()) void voiceTurn(voice!, text); },
+    interrupt: () => { if (mine()) cutVoice(false); },
+    spoken: (id, to) => {
+      const r = mine() ? voice!.reply : undefined;
+      if (r?.m.id === id) Object.assign(r, { spoken: to, audible: true });
+    },
+    audible: (id, ms) => {
+      if (!mine() || ms === undefined) return;
+      const m = [...walk(voice!.c.messages)].find((x) => x.id === id);
+      voice!.latency = ms;
+      renderVoice();
+      if (!m) return;
+      m.voiceMs = Math.round(ms);
+      save(voice!.c);
+      const v = views.get(m);
+      if (v && ![...runs.values()].some((r) => r.m === m)) paint(v, m);
+    },
+    played: (id) => { if (mine() && voice!.reply?.m.id === id) voice!.reply = undefined; },
+    // before it is ready the dock says why it is not; after, a refused ask (a model not installed) is a note and the rest goes on
+    error: (message) => {
+      if (!mine()) return;
+      if (voice!.ready) return toast(`Voice: ${message}`);
+      voice!.error = message;
+      renderVoice();
+    },
+    closed: () => { if (mine()) { voice!.error ??= "The voice service stopped"; renderVoice(); } },
+  });
+  voice = { client, c: conv, muted: false, partial: "", level: 0, frame: 0, t: 0, sparks: [], now: {}, defaults: { voices: {} }, asked: voiceWant(null) };
+  renderVoice();
+  if (status.state === "offline") void start().then(refreshStatus);   // the first question finds the model loaded
+  // http://<this machine's address> is not a secure page, and there the browser has no microphone to give at all
+  if (!navigator.mediaDevices?.getUserMedia) {
+    voice.error = isSecureContext ? "This browser gives no page a microphone"
+      : `The microphone needs a secure page: open https://${location.host} (after kiln start --lan)`;
+    return renderVoice();
+  }
+  void warmVoice(voice);
+  try {
+    await client.open(voice.asked!);
+  } catch (e) {
+    if (!mine()) return;
+    voice!.error = e instanceof DOMException && e.name === "NotAllowedError" ? "The microphone is blocked for this page" : `No microphone: ${e instanceof Error ? e.message : e}`;
+    renderVoice();
+  }
+}
+
+// Ending voice mode silences it; a reply still being written goes on as text.
+function closeVoice() {
+  const v = voice;
+  if (!v) return;
+  voice = null;
+  cancelAnimationFrame(v.frame);
+  v.client.close();
+  setVoicePop(false);
+  paintGhost();
+  renderVoice();
+  input.focus();
+}
+
+async function voiceTurn(v: VoiceMode, text: string) {
+  v.partial = "";
+  paintGhost();
+  text = text.trim();
+  if (!text) return;
+  const c = v.c;
+  for (let i = 0; running(c) && i < 150; i++) {     // a reply talked over ends within a few ms of its stop
+    if (i === 50) stopRun(running(c)!);
+    await sleep(20);
+  }
+  if (voice !== v || running(c)) return;
+  const merge = v.merge && c.messages.at(-1) === v.merge ? v.merge : undefined;
+  v.merge = undefined;
+  if (merge) merge.content = merge.content ? `${merge.content} ${text}` : text;
+  else {
+    if (!c.messages.length) c.title = text.slice(0, 60);
+    c.messages.push({ role: "user", content: text, voice: true });
+  }
+  const effort = voiceEffort(), mode: Mode = effort === "off" ? "fast" : "think";
+  const m: Message = { id: randomId(), role: "assistant", content: "", reasoning: "", effort, params: changed(mode) || undefined };
+  const upto = [...c.messages];
+  branch(c, c.messages.length, m);
+  v.reply = { m, sent: 0, spoken: 0, audible: false };
+  await startRun(c, m, () => request(c, upto, { effort, system: voicePrompt() }));
+}
+
+// The chat as the next voice turn will send it, read by kiln while the user starts talking: the voice prompt replaces
+// the system prompt (an open chat's whole history is read again) and the first request after a while idle is slow
+// (Flash-Next: 1.7-3.3 s to the first token where 0.07-0.25 s warm), so the first turn would wait for both. One token,
+// through the same job path as a reply (tools and all, so the prompt is the turn's own), and nothing is kept of it.
+async function warmVoice(v: VoiceMode) {
+  const effort = voiceEffort();
+  await ensureOnline({ stopping: false }).catch(() => {});
+  if (voice !== v || running(v.c)) return;
+  // kiln wants a question to answer: a new chat's stands in for the one to come (its snapshot ends with the prompt)
+  const upto: Message[] = v.c.messages.length ? [...v.c.messages] : [{ role: "user", content: "Hi" }];
+  const body = { ...request(v.c, upto, { effort, system: voicePrompt() }), max_tokens: 1, logprobs: false, top_logprobs: undefined };
+  const res = await fetch("/api/chat", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body) }).catch(() => null);
+  await res?.body?.cancel().catch(() => {});
+}
+
+// What of a reply is spoken: each round's text and the text being written (thinking never is). It grows only at its
+// end, so what was sent stays a prefix and the service's chunk offsets point into it.
+const sayable = (m: Message) => [...(m.rounds ?? []).map((r) => r.content), m.content].filter(Boolean).join("\n\n");
+function feedVoice(m: Message) {
+  const r = voice?.reply;
+  if (r?.m !== m || cuts.has(m)) return;
+  const text = sayable(m);
+  if (text.length > r.sent) {
+    voice!.client.say(m.id!, text.slice(r.sent));
+    r.sent = text.length;
+  }
+}
+
+// Talked over (the service heard the user, or the orb or Esc): silent at once, the reply stopped, and the chat keeps
+// what was heard of it, which is also what the model is told it said. A reply that had not said a word yet is taken
+// out, and the user's next words join the question it answered, as one.
+function cutVoice(here: boolean) {
+  const v = voice;
+  if (!v) return;
+  if (here) v.client.stop();
+  const r = v.reply;
+  v.reply = undefined;
+  renderVoice();
+  if (!r) return;
+  const keep = r.audible ? r.spoken : null, run = running(v.c);
+  if (keep === null) v.merge = v.c.messages[v.c.messages.indexOf(r.m) - 1];
+  if (run?.m === r.m) {
+    cuts.set(r.m, keep);
+    return stopRun(run);
+  }
+  keepHeard(v.c, r.m, keep);
+  save(v.c);
+  if (v.c === conv) render();
+}
+// `to` counts code points of the spoken text, as the service does.
+function keepHeard(c: Conversation, m: Message, to: number | null) {
+  if (to === null) {
+    const at = c.messages.indexOf(m);
+    if (at >= 0 && at === c.messages.length - 1) c.messages.splice(at, 1);
+    return;
+  }
+  const before = sayable({ ...m, content: "" }), skip = before ? [...before].length + 2 : 0;
+  m.content = [...m.content].slice(0, Math.max(0, to - skip)).join("").trimEnd();
+  m.interrupted = true;
+  if (m.id) tokens.delete(m.id);                    // its token odds no longer match its text
+}
+
+// The user's words while they speak: a faint message at the end of the chat, until the turn makes it a real one.
+function paintGhost() {
+  let g = thread.querySelector<HTMLElement>(".msg.ghost");
+  const text = voice && voice.c === conv ? voice.partial : "";
+  if (!text) return void g?.remove();
+  if (!g) {
+    g = h("article", "msg user ghost");
+    g.append(h("div", "bubble"));
+    thread.querySelector(".empty")?.remove();
+    thread.append(g);
+  }
+  g.firstElementChild!.textContent = text;
+  keepUp();
+}
+
+function voicePhase(v: VoiceMode): VoicePhase {
+  if (v.error) return "error";
+  if (!v.ready) return "starting";
+  if (v.client.playing) return "speaking";
+  if (v.reply) return "thinking";
+  return v.muted ? "muted" : "listening";
+}
+function voiceStatus(v: VoiceMode, phase: VoicePhase) {
+  if (phase === "error") return v.error!;
+  if (phase === "thinking" && running(v.c)?.live.loading) return `Loading ${modelName(current())}…`;
+  return { starting: "Starting voice…", listening: "Listening", thinking: "Thinking", speaking: "Speaking", muted: "Muted" }[phase];
+}
+
+function renderVoice() {
+  const v = voice, dock = $("voice-dock");
+  $("composer").classList.toggle("voicing", !!v);
+  dock.hidden = !v;
+  if (!v) return;
+  const mute = $("voice-mute");
+  mute.innerHTML = icon(v.muted ? "micOff" : "mic");
+  mute.title = v.muted ? "Unmute" : "Mute";
+  mute.setAttribute("aria-label", mute.title);
+  mute.setAttribute("aria-pressed", String(v.muted));
+  mute.classList.toggle("on", v.muted);
+  const cur = currentVoice(), pick = $("voice-pick");
+  pick.innerHTML = `<span class="voice-pick-name">${escapeHtml(voiceInfo(cur.tts, cur.id)?.label ?? cur.id ?? "Voice")}</span>${icon("chevron")}`;
+  pick.title = `Voice: ${voiceInfo(cur.tts, cur.id)?.label ?? cur.id ?? "the service's"}${cur.tts ? ` (${voiceCatalog.tts?.find((m) => m.name === cur.tts)?.label ?? cur.tts})` : ""}`;
+  $("voice-meta").textContent = [v.latency !== undefined ? `${(v.latency / 1000).toFixed(2)} s` : "",
+    v.ready ? (["stt", "turn", "tts"] as Part[]).map((k) => modelLabel(k, v.ready!.stack[k])).filter(Boolean).join(" · ") : ""].filter(Boolean).join(" · ");
+  $("voice-meta").title = v.ready ? Object.entries(v.ready.stack).map(([k, n]) => `${k}: ${n}`).join("\n") + (v.latency !== undefined ? "\nlast reply: from the end of your speech to its first sound" : "") : "";
+  paintVoice();
+  v.frame ||= requestAnimationFrame(drawOrb);
+}
+function paintVoice() {
+  const v = voice!, phase = voicePhase(v), text = voiceStatus(v, phase), dock = $("voice-dock");
+  dock.dataset.phase = phase;
+  if ($("voice-status").textContent !== text) $("voice-status").textContent = text;
+  $("voice-orb-btn").title = phase === "speaking" || phase === "thinking" ? "Interrupt (Esc)" : "";
+}
+
+// The orb, an ember in the chat's own colors: it breathes with the user's voice while listening, swirls hotter with
+// its own while speaking and throws sparks, shimmers slowly while thinking and pulses while it starts. Grey when muted.
+const ORB: Record<VoicePhase, string[]> = {
+  starting: ["#ffe2bd", "#f0a462", "#c95a26", "#5c1d0c"], listening: ["#fff4dc", "#ffc27a", "#f07a3c", "#7a2410"],
+  thinking: ["#ffe9c9", "#f0a462", "#d0612b", "#5c1d0c"], speaking: ["#fffaf0", "#ffcf86", "#ff8a45", "#8a2a12"],
+  muted: ["#cfc8c2", "#8f8680", "#5c5450", "#2b2624"], error: ["#ffd9d6", "#f2706b", "#a83a36", "#3d1514"],
+};
+const alpha = (hex: string, a: number) => `rgb(${[1, 3, 5].map((i) => parseInt(hex.slice(i, i + 2), 16)).join(" ")} / ${Math.max(0, Math.min(1, a)).toFixed(3)})`;
+function drawOrb(now: number) {
+  const v = voice;
+  if (!v) return;
+  v.frame = requestAnimationFrame(drawOrb);
+  const cv = $<HTMLCanvasElement>("voice-orb"), size = cv.clientWidth, dpr = devicePixelRatio || 1;
+  if (!size) return;
+  if (cv.width !== Math.round(size * dpr)) cv.width = cv.height = Math.round(size * dpr);
+  paintVoice();
+  const g = cv.getContext("2d")!, phase = voicePhase(v), still = reducedMotion.matches, t = now / 1000, dt = Math.min(0.05, v.t ? t - v.t : 0);
+  v.t = t;
+  const lv = v.client.levels(), raw = phase === "speaking" ? lv.out : phase === "listening" ? lv.mic : 0;
+  const target = Math.min(1, raw * 6);
+  v.level += (target - v.level) * (target > v.level ? 0.4 : 0.07);   // quick to flare, slow to fade: a glow, not a meter
+  const e = v.level, pulse = phase === "starting" ? 0.5 + 0.5 * Math.sin(t * 2.6) : phase === "thinking" ? 0.5 + 0.5 * Math.sin(t * 1.4) : 0;
+  const cx = size / 2, cy = size / 2, R = size * 0.22 * (still ? 1 : 1 + 0.2 * e + 0.05 * pulse), [hot, warm, body, edge] = ORB[phase];
+  g.setTransform(dpr, 0, 0, dpr, 0, 0);
+  g.clearRect(0, 0, size, size);
+  const halo = g.createRadialGradient(cx, cy, R * 0.7, cx, cy, size / 2);   // gone by the canvas's edge, so it never shows a square
+  halo.addColorStop(0, alpha(body, 0.3 + 0.45 * e + 0.15 * pulse));
+  halo.addColorStop(1, alpha(body, 0));
+  g.fillStyle = halo;
+  g.fillRect(0, 0, size, size);
+  const amp = still ? 0 : phase === "speaking" ? 0.05 + 0.13 * e : phase === "listening" ? 0.025 + 0.09 * e : 0.03;
+  const speed = phase === "speaking" ? 1.7 + e : phase === "thinking" ? 0.55 : 0.85;
+  g.beginPath();
+  for (let i = 0; i <= 120; i++) {
+    const a = (i / 120) * Math.PI * 2, k = 1 + amp * (0.55 * Math.sin(3 * a + t * speed * 1.3) + 0.3 * Math.sin(5 * a - t * speed * 1.9 + 1.7) + 0.15 * Math.sin(8 * a + t * speed * 2.7 + 0.4));
+    g[i ? "lineTo" : "moveTo"](cx + Math.cos(a) * R * k, cy + Math.sin(a) * R * k);
+  }
+  g.closePath();
+  const spin = still ? 0 : t * speed, hx = cx + Math.cos(spin) * R * 0.3, hy = cy + Math.sin(spin * 0.8) * R * 0.24 - R * 0.12;
+  const fill = g.createRadialGradient(hx, hy, R * 0.04, cx, cy, R * 1.12);
+  fill.addColorStop(0, hot);
+  fill.addColorStop(0.32 - 0.1 * e, warm);
+  fill.addColorStop(0.72, body);
+  fill.addColorStop(1, edge);
+  g.fillStyle = fill;
+  g.fill();
+  if (phase === "thinking" && !still) {             // a bright edge going round
+    const a = t * 1.6;
+    g.lineWidth = 2;
+    g.lineCap = "round";
+    g.strokeStyle = alpha(hot, 0.7);
+    g.beginPath();
+    g.arc(cx, cy, R * 1.02, a, a + 1.1);
+    g.stroke();
+  }
+  if (still) return;
+  if ((phase === "speaking" || phase === "listening") && Math.random() < e * 0.6 && v.sparks.length < 24) {
+    const a = -Math.PI / 2 + (Math.random() - 0.5) * 2.2;
+    v.sparks.push({ x: cx + Math.cos(a) * R * 0.9, y: cy + Math.sin(a) * R * 0.9, vx: (Math.random() - 0.5) * 14, vy: -(22 + Math.random() * 30 + 40 * e),
+      age: 0, life: 0.7 + Math.random() * 0.7, size: 0.8 + Math.random() * 1.3 });
+  }
+  v.sparks = v.sparks.filter((p) => (p.age += dt) < p.life);
+  for (const p of v.sparks) {
+    p.x += p.vx * dt;
+    p.y += p.vy * dt;
+    g.fillStyle = alpha(p.age < p.life * 0.4 ? hot : warm, 1 - p.age / p.life);
+    g.beginPath();
+    g.arc(p.x, p.y, p.size, 0, Math.PI * 2);
+    g.fill();
+  }
+}
+
+function setVoice(change: Partial<VoiceSettings>) {
+  const next: VoiceSettings = { ...settings.voice, ...change };
+  for (const k of Object.keys(next) as (keyof VoiceSettings)[]) if (next[k] === undefined) delete next[k];
+  if (Object.keys(next).length) settings.voice = next;
+  else delete settings.voice;
+}
+// What the settings ask the service for; with voice mode open, what is unset is filled in with what the service runs
+// when not told (so taking a choice back goes back to that).
+function voiceWant(v: VoiceMode | null): VoiceAsk {
+  const s = settings.voice ?? {}, d = v?.defaults, stt = s.stt ?? d?.stt, tts = s.tts ?? d?.tts, name = s.name ?? (tts ? d?.voices[tts] : undefined);
+  const stack: VoiceAsk["stack"] = { ...(stt ? { stt } : {}), ...(tts ? { tts } : {}) };
+  return { ...(Object.keys(stack).length ? { stack } : {}), ...(name ? { voice: name } : {}), speed: s.speed ?? 1 };
+}
+// The settings to the service, as far as they differ from what it runs: a model switch it loads (and is ready again),
+// a voice or speed from its next sentence.
+function pushVoice() {
+  const v = voice, r = v?.ready;
+  if (!v || !r) return;
+  const want = voiceWant(v), ask: VoiceAsk = {};
+  const stack = Object.fromEntries(Object.entries(want.stack ?? {}).filter(([k, n]) => r.stack[k as Part] !== n));
+  if (Object.keys(stack).length) ask.stack = stack;
+  if (want.voice && want.voice !== v.now.voice) ask.voice = want.voice;
+  if (want.speed !== v.now.speed) ask.speed = want.speed;
+  const key = JSON.stringify(ask);
+  if (!Object.keys(ask).length || key === v.pushed) return;
+  v.pushed = key;
+  v.asked = ask;
+  Object.assign(v.now, ask.voice ? { voice: ask.voice } : {}, ask.speed ? { speed: ask.speed } : {});
+  v.client.config(ask);
+}
+// The voice in use: the settings' pick, else what the service speaks with for its voice model.
+function currentVoice() {
+  const s = settings.voice, r = voice?.ready, tts = s?.tts ?? r?.stack.tts;
+  return { tts, id: s?.name ?? (r && tts === r.stack.tts ? voice!.now.voice : undefined) };
+}
+const voiceInfo = (tts?: string, id?: string) => voiceCatalog.tts?.find((m) => m.name === tts)?.voices?.find((x) => x.id === id);
+const LANGS = new Intl.DisplayNames(["en"], { type: "language" });
+const langName = (code: string) => { try { return LANGS.of(code) ?? code; } catch { return code; } };
+const voiceGroup = (x: VoiceInfo) => [langName(x.lang), x.gender ? x.gender[0].toUpperCase() + x.gender.slice(1) : ""].filter(Boolean).join(" · ");
+const modelLabel = (part: Part, name?: string) => (name && voiceCatalog[part]?.find((m) => m.name === name)?.label) || name;
+const setupHint = (part: Part, name: string) => voiceCatalog[part]?.find((m) => m.name === name)?.hint ?? `tools/voice_setup.sh ${name}`;
+
+// A voice from the dock's picker: from the next sentence, and a voice of another voice model switches to that model.
+function pickVoice(tts: string, x: VoiceInfo) {
+  const before = { tts: settings.voice?.tts, name: settings.voice?.name };
+  setVoice({ tts, name: x.id });
+  saveSettings();
+  setVoicePop(false, true);
+  toast(`Voice: ${x.label}`, () => { setVoice(before); saveSettings(); });
+}
+
+// The dock's voice picker, as the message box's model picker: the voice's name, opening the voice models' voices by
+// language and gender, each with a play button for its sample. A model that is not installed shows how to set it up.
+let voicePop = false;
+function setVoicePop(open: boolean, refocus = false) {
+  voicePop = open && !!voice;
+  $("voice-pop").hidden = !voicePop;
+  $("voice-pick").classList.toggle("open", voicePop);
+  $("voice-pick").setAttribute("aria-expanded", String(voicePop));
+  delete $("voice-pop").dataset.key;
+  renderVoicePop();
+  if (voicePop) $("voice-pop").querySelector<HTMLElement>(".current .voice-item, .voice-item")?.focus();
+  else if (refocus && voice) $("voice-pick").focus();
+}
+function renderVoicePop() {
+  const pop = $("voice-pop"), cur = currentVoice(), key = JSON.stringify([voiceCatalog.tts, cur]);
+  if (!voicePop || pop.dataset.key === key) return;
+  pop.dataset.key = key;
+  const rows: HTMLElement[] = [];
+  for (const m of voiceCatalog.tts ?? []) {
+    const head = h("div", m.installed ? "voice-model" : "voice-model missing");
+    head.append(h("span", "", m.label));
+    if (!m.installed) head.append(h("code", "voice-hint", setupHint("tts", m.name)));
+    head.title = m.installed ? "" : "Not installed: this command sets it up";
+    rows.push(head);
+    if (!m.installed) continue;
+    const groups = new Map<string, VoiceInfo[]>();
+    for (const x of m.voices ?? []) groups.set(voiceGroup(x), [...(groups.get(voiceGroup(x)) ?? []), x]);
+    for (const [g, list] of groups) {
+      rows.push(h("div", "voice-group", g));
+      for (const x of list) {
+        const on = m.name === cur.tts && x.id === cur.id, row = h("div", on ? "voice-row current" : "voice-row");
+        const item = h("button", "model-item voice-item"), play = h("button", "act voice-play"), mark = h("span", "model-check");
+        item.type = play.type = "button";
+        item.setAttribute("role", "option");
+        item.setAttribute("aria-selected", String(on));
+        item.dataset.voice = `${m.name}/${x.id}`;
+        if (on) mark.innerHTML = icon("check");
+        item.append(h("span", "model-label", x.label), mark);
+        item.onclick = () => pickVoice(m.name, x);
+        play.innerHTML = icon("play");
+        play.title = `Hear ${x.label}`;
+        play.setAttribute("aria-label", play.title);
+        play.onclick = () => voice?.client.preview(x.id);
+        row.append(play, item);
+        rows.push(row);
+      }
+    }
+  }
+  if (!rows.length) rows.push(h("div", "voice-group", "The voice service has not listed its voices yet"));
+  pop.replaceChildren(...rows);
 }
 
 // Picked with the clip, dropped anywhere on the page or pasted: shown as chips in the message box until it is sent,
@@ -1675,6 +2127,7 @@ function importedMessages(list: unknown, depth = 0): Message[] | null {
       && typeof a.name === "string" && KINDS.includes(a.kind)))) return null;
     if (rest.rounds !== undefined && !(Array.isArray(rest.rounds) && rest.rounds.every(isRound))) return null;
     if (rest.calls !== undefined && !(Array.isArray(rest.calls) && rest.calls.every(isCall))) return null;
+    if (typeof rest.voiceMs !== "number") delete rest.voiceMs;
     if (versions !== undefined) {
       const others = Array.isArray(versions?.others) ? versions.others.map((v: unknown) => importedMessages(v, depth + 1)) : null;
       if (!others?.length || others.some((v: Message[] | null) => !v) || !Number.isInteger(versions.shown) || versions.shown < 0 || versions.shown > others.length) return null;
@@ -1762,6 +2215,7 @@ async function draft() {
 }
 
 function openConversation(id: string) {
+  closeVoice();
   conv = runs.get(id)?.conv ?? (chats[id] ? structuredClone(chats[id]) : blank());   // a reply being written keeps going
   closeOver(panes.conversations);
   render();
@@ -1771,6 +2225,7 @@ function openConversation(id: string) {
 }
 
 function newChat() {
+  closeVoice();
   conv = blank();
   history.replaceState(null, "", location.pathname);
   closeOver(panes.conversations);
@@ -1920,9 +2375,11 @@ document.addEventListener("keydown", (e) => {
   if (!$("tokpop").hidden) return closeTokPop();
   if (toolsOpen) return setToolsOpen(false, true);
   if (modelsOpen) return setModelsOpen(false, true);
+  if (voicePop) return setVoicePop(false, true);
   if (document.querySelector("dialog[open]")) return;
   const over = PANES.find((p) => isOpen(p) && !p.beside.matches);
   if (over) return setPane(over, false);
+  if (voice) return voice.reply || voice.client.playing ? cutVoice(true) : closeVoice();
   const r = running();
   if (r) stopRun(r);
 });
@@ -2159,6 +2616,7 @@ function buildControls() {
   });
   document.addEventListener("pointerdown", (e) => {
     if (modelsOpen && !(e.target as Element).closest("#model-pop, #model-btn")) setModelsOpen(false);
+    if (voicePop && !(e.target as Element).closest("#voice-pop, #voice-pick")) setVoicePop(false);
   });
 }
 
@@ -2504,6 +2962,8 @@ function loadSettings(): Settings {
 }
 function saveSettings() {
   store("settings2", settings);
+  pushVoice();
+  if (voice) { renderVoice(); renderVoicePop(); }
   syncSettings();
 }
 const value = (mode: Mode, key: SamplerKey) => settings[mode][key] ?? RECOMMENDED[mode][key];
@@ -2828,6 +3288,87 @@ function buildSettings() {
     custom: () => settings.fetchChars !== undefined, set: (v) => { settings.fetchChars = v; },
     pos: (v) => Math.min(1, Math.max(0, Math.log(v / FLO) / Math.log(FHI / FLO))), val: (p) => Math.round(FLO * (FHI / FLO) ** p / 1000) * 1000,
   }));
+  // Voice mode: its prompt, the voice (the service's list, kept from the last time it said), its speed, its thinking.
+  const voicePromptInput = $<HTMLTextAreaElement>("voice-prompt");
+  voicePromptInput.addEventListener("input", () => {
+    setVoice({ prompt: voicePromptInput.value === DEFAULT_VOICE_PROMPT ? undefined : voicePromptInput.value });
+    saveSettings();
+    fit(voicePromptInput);
+  });
+  $("voice-prompt-reset").onclick = () => {
+    const before = settings.voice?.prompt;
+    setVoice({ prompt: undefined });
+    saveSettings();
+    toast("The voice prompt is back to the default", () => { setVoice({ prompt: before }); saveSettings(); });
+  };
+  // a choice row: label, the select, ↺ back to what the service runs when not told
+  const choice = (id: string, label: string, help: string, change: (value: string) => void, reset: () => void) => {
+    const row = h("div", "knob voice-choice"), lab = h("label", "", label), select = h("select", "voice-select"), back = h("button", "act knob-reset");
+    row.title = help;
+    lab.htmlFor = select.id = id;
+    back.type = "button";
+    back.innerHTML = icon("retry");
+    back.title = "Back to the voice service's default";
+    select.addEventListener("change", () => { change(select.value); saveSettings(); });
+    back.onclick = () => { reset(); saveSettings(); };
+    row.append(lab, select, back);
+    return { row, select };
+  };
+  const stt = choice("voice-stt", "Speech to text", "The model that writes down what you say (the voice service's; a dimmed one is not installed)",
+    (v) => setVoice({ stt: v || undefined }), () => setVoice({ stt: undefined }));
+  knobs.push(() => {
+    const now = settings.voice?.stt ?? "", list = voiceCatalog.stt ?? [], d = voice?.defaults.stt, key = JSON.stringify([list, now, d]);
+    stt.row.classList.toggle("custom", !!now);
+    if (stt.select.dataset.key === key) return;
+    stt.select.dataset.key = key;
+    const opts = list.map((m) => Object.assign(new Option(m.installed ? m.label : `${m.label} (not installed)`, m.name), { disabled: !m.installed, title: m.installed ? "" : setupHint("stt", m.name) }));
+    if (now && !list.some((m) => m.name === now)) opts.push(new Option(now, now));
+    stt.select.replaceChildren(new Option(`Default${d ? ` (${list.find((m) => m.name === d)?.label ?? d})` : ""}`, ""), ...opts);
+    stt.select.value = now;
+  });
+  const pick = choice("voice-name", "Voice", "The voice replies are spoken in; one of another voice model switches to it (also in voice mode's dock)",
+    (v) => { const [tts, name] = v ? JSON.parse(v) : []; setVoice({ tts, name }); }, () => setVoice({ tts: undefined, name: undefined }));
+  knobs.push(() => {
+    const s = settings.voice, now = s?.name ? JSON.stringify([s.tts ?? voice?.ready?.stack.tts ?? "", s.name]) : "", key = JSON.stringify([voiceCatalog.tts, now]);
+    pick.row.classList.toggle("custom", !!now);
+    if (pick.select.dataset.key === key) return;
+    pick.select.dataset.key = key;
+    const groups: HTMLElement[] = [new Option("Default", "")];
+    for (const m of (voiceCatalog.tts ?? []).filter((x) => x.installed)) {
+      const by = new Map<string, HTMLOptGroupElement>();
+      for (const x of m.voices ?? []) {
+        const g = `${m.label} · ${voiceGroup(x)}`;
+        if (!by.has(g)) by.set(g, Object.assign(document.createElement("optgroup"), { label: g }));
+        by.get(g)!.append(new Option(x.label, JSON.stringify([m.name, x.id])));
+      }
+      groups.push(...by.values());
+    }
+    const listed = groups.flatMap((g) => g instanceof HTMLOptionElement ? [g.value] : [...g.querySelectorAll("option")].map((o) => o.value));
+    if (now && !listed.includes(now)) groups.push(new Option(s!.name!, now));   // a voice the service no longer lists
+    pick.select.replaceChildren(...groups);
+    pick.select.value = now;
+  });
+  const speed = knob({
+    id: "voice_speed", label: "Speed", help: "Speed: how fast the voice speaks.", min: 0.5, max: 2, step: 0.05,
+    fmt: (v) => `${v.toFixed(2)}×`, get: () => settings.voice?.speed ?? 1, rec: () => 1, custom: () => settings.voice?.speed !== undefined,
+    set: (v) => setVoice({ speed: v }), pos: (v) => (v - 0.5) / 1.5, val: (p) => 0.5 + p * 1.5,
+  });
+  const think = h("div", "knob voice-think"), thinkModes = h("div", "segmented");
+  think.title = "Thinking in voice mode: off speaks at once; any other level waits for the thinking before the first word.";
+  think.append(h("label", "", "Thinking"), thinkModes);
+  for (const e of EFFORTS) {
+    const b = h("button", "", LEVEL[e][0]);
+    b.type = "button";
+    b.setAttribute("role", "radio");
+    b.onclick = () => { setVoice({ effort: e === "off" ? undefined : e }); saveSettings(); };
+    thinkModes.append(b);
+  }
+  knobs.push(() => {
+    think.classList.toggle("custom", settings.voice?.effort !== undefined);
+    thinkModes.querySelectorAll("button").forEach((b, i) => b.setAttribute("aria-checked", String(EFFORTS[i] === voiceEffort())));
+  });
+  $("voice-knobs").replaceChildren(stt.row, pick.row, speed, think);
+
   $("tools-reload").onclick = () => void loadCatalog({ reload: true }).then(() => toast(catalog?.error ? "The config file has an error (shown under Tools)"
     : `Config read: ${catalog?.sources.filter((s) => s.kind === "mcp").length ?? 0} MCP server(s)`));
   $("allow-list").addEventListener("click", (e) => {
@@ -2902,6 +3443,9 @@ function syncSettings() {
   if (!isOpen(panes.settings)) return;
   if (document.activeElement !== systemInput && systemInput.value !== settings.system) systemInput.value = settings.system;
   $("system-reset").classList.toggle("on", settings.system !== DEFAULT_SYSTEM);
+  const vp = $<HTMLTextAreaElement>("voice-prompt");
+  if (document.activeElement !== vp && vp.value !== voicePrompt()) { vp.value = voicePrompt(); fit(vp); }
+  $("voice-prompt-reset").classList.toggle("on", settings.voice?.prompt !== undefined);
 
   const swapped = settings.system.trim() === DEFAULT_SYSTEM && toolsOn(conv);
   $("system-note").hidden = !swapped;
@@ -2921,12 +3465,24 @@ $("new-chat").innerHTML = `${icon("plus")}New chat`;
 $("export").innerHTML = icon("download");
 $("attach").innerHTML = icon("clip");
 $("draft").addEventListener("click", () => void draft());
+$("voice").innerHTML = icon("wave");
+$("voice").addEventListener("click", () => void openVoice());
+$("voice-end").innerHTML = icon("x");
+$("voice-end").addEventListener("click", closeVoice);
+$("voice-mute").addEventListener("click", () => {
+  if (!voice) return;
+  voice.muted = !voice.muted;
+  voice.client.mute(voice.muted);
+  renderVoice();
+});
+$("voice-orb-btn").addEventListener("click", () => { if (voice?.reply || voice?.client.playing) cutVoice(true); });
+$("voice-pick").addEventListener("click", () => setVoicePop(!voicePop));
 buildControls();
 buildTools();
 void loadCatalog();
 $("to-latest").innerHTML = icon("down");
 $("settings-reset").insertAdjacentHTML("afterbegin", icon("retry"));
-for (const id of ["system-reset", "order-reset"]) $(id).innerHTML = icon("retry");
+for (const id of ["system-reset", "order-reset", "voice-prompt-reset"]) $(id).innerHTML = icon("retry");
 buildSettings();
 for (const p of PANES) restorePane(p);
 await refreshStatus();

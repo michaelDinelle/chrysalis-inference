@@ -38,6 +38,15 @@
         </header>
         <div id="scroller"><div id="thread" class="thread"></div></div>
         <form id="composer">
+          <!-- voice mode: the message box gives way to the orb (a click on it talks over the reply), mute and end -->
+          <div id="voice-dock" class="voice-dock" hidden>
+            <button id="voice-mute" class="voice-round" type="button"></button>
+            <button id="voice-orb-btn" class="voice-orb" type="button" aria-label="Interrupt"><canvas id="voice-orb"></canvas></button>
+            <button id="voice-end" class="voice-round end" type="button" title="End voice mode (Esc)" aria-label="End voice mode"></button>
+            <div class="voice-info"><span id="voice-status" class="voice-status" role="status" aria-live="polite"></span><span id="voice-meta" class="voice-meta"></span></div>
+            <button id="voice-pick" class="model-btn voice-pick" type="button" aria-haspopup="listbox" aria-expanded="false" aria-controls="voice-pop"></button>
+            <div id="voice-pop" class="model-pop voice-pop" role="listbox" aria-label="Voice" hidden></div>
+          </div>
           <div class="composer-box">
             <button id="to-latest" class="act to-latest" type="button" title="Jump to the latest" aria-label="Jump to the latest" hidden></button>
             <div id="attachments" class="attachments" hidden></div>
@@ -56,6 +65,7 @@
               <button id="model-btn" class="model-btn" type="button" aria-haspopup="listbox" aria-expanded="false" aria-controls="model-pop"></button>
               <button id="power" class="act power" type="button"></button>
               <button id="draft" class="draft" type="button" hidden></button>
+              <button id="voice" class="voice" type="button" title="Voice mode" aria-label="Voice mode"></button>
               <button id="send" class="send" type="submit" aria-label="Send"></button>
             </div>
           </div>
@@ -91,6 +101,11 @@
             <section class="set-sec">
               <div class="set-sec-head"><span class="set-title">Reply</span></div>
               <div id="reply-knobs" class="knobs"></div>
+            </section>
+            <section class="set-sec">
+              <div class="set-sec-head"><label class="set-title" for="voice-prompt">Voice mode</label><button id="voice-prompt-reset" class="act knob-reset" type="button" title="Back to the default voice prompt" aria-label="Restore the default voice prompt"></button></div>
+              <textarea id="voice-prompt" class="prompt-input" rows="3" placeholder="No prompt" title="Sent instead of the system prompt with a reply in voice mode: what is written is spoken."></textarea>
+              <div id="voice-knobs" class="knobs"></div>
             </section>
             <!-- what the config file sets up, read-only: the page can reload the file, never change what a server runs -->
             <section class="set-sec">

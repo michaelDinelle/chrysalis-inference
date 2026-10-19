@@ -389,10 +389,11 @@ dialog::backdrop { background: rgb(0 0 0 / 0.45); }
 .set-sec-head { display: flex; align-items: center; justify-content: space-between; gap: 10px; min-height: 24px; margin-bottom: 10px; }
 .set-title { font-size: 11.5px; font-weight: 600; letter-spacing: 0.06em; text-transform: uppercase; color: var(--muted); }
 .set-aside { display: inline-flex; align-items: center; gap: 10px; color: var(--faint); font-size: 12px; }
-#system-input { display: block; width: 100%; min-height: 60px; padding: 9px 11px; border: 1px solid var(--line); border-radius: 10px; background: var(--bg); color: var(--text);
+#system-input, .prompt-input { display: block; width: 100%; min-height: 60px; padding: 9px 11px; border: 1px solid var(--line); border-radius: 10px; background: var(--bg); color: var(--text);
   font: 13.5px/1.55 var(--sans); resize: none; outline: none; }
-#system-input:focus { border-color: color-mix(in srgb, var(--accent) 50%, var(--line)); }
-#system-input::placeholder { color: var(--faint); }
+#system-input:focus, .prompt-input:focus { border-color: color-mix(in srgb, var(--accent) 50%, var(--line)); }
+#system-input::placeholder, .prompt-input::placeholder { color: var(--faint); }
+.prompt-input { margin-bottom: 10px; }
 .set-foot { padding: 11px 20px; border-top: 1px solid var(--line); }
 
 
@@ -528,6 +529,54 @@ main { position: relative; }
 .draft:hover, .draft.on { background: var(--hover); color: var(--accent-hi); }
 .draft[hidden] { display: none; }
 #composer.drafting #input { color: var(--muted); }
+
+/* voice mode: a button beside Send, then a dock where the message box was (the chat stays in view above it) */
+.voice { display: grid; place-items: center; width: 36px; height: 36px; flex: none; border: 0; border-radius: 50%; background: var(--hover); color: var(--text); }
+.voice:hover { background: var(--accent-soft); color: var(--accent-hi); }
+.voice .i { width: 17px; height: 17px; }
+#composer.voicing .composer-box, #composer.voicing .hint { display: none; }
+.voice-dock { position: relative; display: grid; grid-template-columns: 1fr auto 1fr; align-items: center; max-width: 800px; padding: 2px 0 4px;
+  margin: 0 auto 0 max(0px, min((100vw - var(--side-w) - 48px - 800px) / 2, 100% - 800px)); }
+.voice-dock[hidden] { display: none; }
+.voice-orb { grid-column: 2; width: 156px; height: 156px; padding: 0; border: 0; border-radius: 50%; background: none; cursor: default; }
+.voice-dock:is([data-phase="speaking"], [data-phase="thinking"]) .voice-orb { cursor: pointer; }
+.voice-orb canvas { display: block; width: 100%; height: 100%; }
+.voice-orb:focus-visible { outline: 2px solid color-mix(in srgb, var(--accent) 60%, transparent); outline-offset: -18px; }
+.voice-round { display: grid; place-items: center; width: 46px; height: 46px; border: 1px solid var(--line); border-radius: 50%; background: var(--raised); color: var(--text); }
+.voice-round:hover { background: var(--hover); }
+.voice-round .i { width: 19px; height: 19px; }
+#voice-mute { grid-column: 1; justify-self: end; margin-right: 22px; }
+#voice-mute.on { border-color: var(--text); background: var(--text); color: var(--bg); }
+#voice-end { grid-column: 3; justify-self: start; margin-left: 22px; }
+#voice-end:hover { border-color: color-mix(in srgb, var(--danger) 55%, var(--line)); color: var(--danger); }
+.voice-info { display: flex; flex-direction: column; align-items: center; gap: 4px; grid-row: 2; grid-column: 1 / -1; min-height: 38px; margin-top: -10px; }
+/* the voice: where the model's name sits beside Send in the message box, and its list opens above it the same way */
+#voice-pick { grid-row: 2; grid-column: 3; justify-self: end; align-self: end; }
+.voice-pick-name { max-width: 160px; overflow: hidden; text-overflow: ellipsis; }
+.voice-pop { right: 0; bottom: 40px; width: min(320px, 100%); max-height: min(60vh, 460px); overflow-y: auto; overscroll-behavior: contain; }
+.voice-model { display: grid; gap: 3px; padding: 9px 10px 3px; color: var(--muted); font-size: 11.5px; font-weight: 600; letter-spacing: 0.06em; text-transform: uppercase; }
+.voice-model.missing { opacity: 0.55; }
+.voice-hint { color: var(--faint); font: 11px var(--mono); letter-spacing: 0; text-transform: none; user-select: all; }
+.voice-group { padding: 6px 10px 2px; color: var(--faint); font-size: 11.5px; }
+.voice-row { display: flex; align-items: center; gap: 2px; }
+.voice-row .voice-item { flex: 1; padding: 6px 10px; }
+.voice-play { flex: none; }
+.voice-play .i { width: 12px; height: 12px; }
+.voice-status { color: var(--text); font-size: 14px; }
+.voice-dock[data-phase="starting"] .voice-status, .voice-dock[data-phase="thinking"] .voice-status { color: var(--muted); }
+.voice-dock[data-phase="error"] .voice-status { max-width: 560px; color: var(--danger); text-align: center; }
+.voice-meta { color: var(--faint); font: 11px var(--mono); }
+/* the words being said, before the turn ends */
+.msg.ghost .bubble { border-style: dashed; color: var(--muted); }
+.msg.ghost .bubble::after { content: ""; display: inline-block; width: 6px; height: 6px; margin-left: 6px; border-radius: 50%; background: var(--accent); vertical-align: middle; animation: pulse 1.2s ease-in-out infinite; }
+.said { display: inline-grid; place-items: center; width: 22px; height: 28px; color: var(--faint); }
+.said .i { width: 13px; height: 13px; }
+.voice-choice, .voice-think { grid-template-columns: 84px minmax(0, 1fr) 22px; }
+.voice-select { min-width: 0; height: 26px; padding: 0 6px; border: 1px solid var(--line); border-radius: 7px; background: var(--bg); color: var(--text); font: 12.5px var(--sans); }
+.voice-choice.custom .voice-select { border-color: color-mix(in srgb, var(--accent) 45%, var(--line)); color: var(--accent-hi); }
+.voice-think .segmented { justify-self: start; }
+@media (max-width: 639px) { .voice-orb { width: 128px; height: 128px; } #voice-mute { margin-right: 12px; } #voice-end { margin-left: 12px; } }
+@media (prefers-reduced-motion: reduce) { .msg.ghost .bubble::after { animation: none; } }
 
 /* a reply's tool rounds, in order: each round's thinking and text, then a card per call it made */
 .round { margin-bottom: 10px; }

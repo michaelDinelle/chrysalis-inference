@@ -22,8 +22,15 @@ kiln stop                # stops both and frees the GPU (also: restart, status)
 kiln logs                # one line per request: prompt/cached tokens, TTFT, tok/s, draft acceptance
 ```
 
-`--lan` is plain HTTP for a trusted home network, without logins; the firewall has to let other devices in
-(TCP 8080-8081), and a plain `kiln start` or `kiln restart` goes back to this machine only. Either way both servers
+`--lan` is for a trusted home network, without logins; the firewall has to let other devices in (TCP 8080-8081), and
+a plain `kiln start` or `kiln restart` goes back to this machine only. The API stays plain HTTP; the web chat is HTTPS
+on the network (`https://<address>:8081`) and plain HTTP on this machine (`http://127.0.0.1:8081`), as browsers give
+the microphone (voice mode) only to secure pages, which localhost is and `http://<address>` is not. Its certificate
+comes from an authority of this machine's own (`~/.config/kiln/tls`, made by `web/tls.ts`) whose name constraints let
+it vouch only for private addresses and local names: a device warns about the certificate until it trusts
+`https://<address>:8081/kiln-ca.crt` (macOS: open it, then Always Trust in Keychain Access; iOS: install the profile,
+then turn it on in Settings > General > About > Certificate Trust Settings), and trusting it trusts nothing else. A new
+address (another network) gets a new certificate at the next start, from the same authority. Either way both servers
 answer only requests addressed to an IP address or to this machine's name, which keeps web pages from other sites
 out (DNS rebinding). `systemctl --user enable kiln kiln-web` starts both at login. `kiln serve` runs the server in the
 foreground instead of as a service (it takes `--port`, `--draft`, `--use`, ...: `kiln serve -h`). Models:
@@ -173,6 +180,71 @@ and videos can be attached (the clip, a drop anywhere, a paste): kiln gets each 
 as its name and a fenced block, a picture as an image, a PDF as a file (its pages as pictures and text) and a video as a
 video. Their contents live in the tab's IndexedDB (one screenshot is most of sessionStorage), and a closed tab's are
 deleted when a kiln page next loads. Development: `cd web && bun run dev` (hot reload), `bun run check`.
+
+## Voice mode
+
+The wave beside Send talks with the chat's model: the message box becomes a dock (an ember that breathes with your voice
+and burns hotter while kiln speaks, mute, end, the voice), your words show as you say them, a pause ends your turn,
+the reply is spoken as it is written, and talking over it stops it. Both sides land in the chat as ordinary messages
+(a question said aloud is marked so), and a reply talked over keeps only what was heard of it, which is also what the
+model is told it said. It is a cascade, as Claude's voice mode is: speech-to-text, the model kiln already runs (so the
+reasoning costs no memory), text-to-speech, all on the CPU (no VRAM) in `voice/`, a Python service the web server
+starts with the first voice session and stops 60 s after the last (`KILN_VOICE_IDLE_MS`): closed, voice mode costs
+nothing. Open, it holds ~0.5 GB of RAM and 4 threads (`KILN_VOICE_THREADS`): at all 16 it took Flash-Next's decode
+from 95 to 3 tok/s, at 4 ~12%. `make voice` makes its venv (`data/voice-venv`) and fetches the default models into
+`data/voice/` (~250 MB); `tools/voice_setup.sh NAME...` fetches the others.
+
+What runs is a stack of four parts, each behind one small interface in `voice/parts.py` and picked by name: the VAD
+(Silero v6), speech-to-text (Kroko, a streaming zipformer; also Parakeet 110M, Parakeet v3, Nemotron streaming 0.6B,
+Moonshine), the turn model (Smart Turn v3.2, its Whisper features in numpy) and text-to-speech (Kokoro 82M int8;
+also Kitten, Supertonic 3 in 31 languages, Pocket TTS with a cloned voice). The defaults are the small end of what was
+measured on this machine (200 Big Bench Audio questions, 23 voices, word error rate against the questions' text;
+Kokoro's naturalness by UTMOS): Kroko 7.8% WER in ~160 MB where Parakeet v3 is 7.3% in 1.35 GB, Kokoro UTMOS 4.48,
+the best of the small voices. Settings is the one place the choices live (speech-to-text, voice model, voice, speed,
+the voice prompt, thinking), and the voice picker in the dock is a view of the same values: it lists the service's
+models (those not installed dimmed, with how to fetch them) and their voices by language and gender, each with a play
+button for a sample; a pick applies from the next sentence. The service keeps no preferences: it lists what it has and
+loads what a session asks for, so a session switches parts mid-call.
+
+The page and the service speak one protocol over a WebSocket (`/api/voice`, which the web server proxies as it is and
+refuses from any other origin: WebSockets skip CORS), so any other stack can stand in for this one
+(`KILN_VOICE_CMD`, a JSON argv of a program that prints `voice: ws://127.0.0.1:PORT`). The page sends 16 kHz int16
+audio in 20 ms frames and `hello`/`config` (the stack, voice and speed), `say`/`say_end` (the reply's text as it
+streams), `cancel`, `playback` (whether the reply is audible) and `preview`; the service sends `ready` (the stack, its
+catalog of models and voices), `speech`, `partial`, `turn` (the transcript, and `wait_ms` from the end of speech),
+`interrupt`, `said` and audio pieces (a header with the piece's text and its range in the reply, then int16 PCM).
+
+How it behaves, and why:
+- A turn ends at 0.2 s of silence if Smart Turn says the sentence is finished, else at 1.5 s; the wait after speech is
+  ~0.28 s (the silence, ~0.03 s for the VAD to let go, Smart Turn 25 ms, the transcript 22 ms).
+- Kroko decodes in 1.28 s chunks, so its words come out a chunk late, and the last chunk needs 1.5 s of silence after it
+  (sherpa's examples pad 0.66 s, which lost a turn's last word in most chunk alignments). While you talk the service
+  decodes the turn again in a stream of its own every 0.3 s of speech (the whole turn up to 5 s, ~0.08 s at 3 s), so
+  your first words show ~0.6 s after you start rather than 1.3.
+- The reply is read in pieces that grow: the first ends at the first sentence or clause, or (no comma early) before a
+  phrase's first word from the 5th word on ("The average distance from Earth | to the Moon ..."), since Kokoro reads 4
+  words in ~0.2 s and a whole first sentence in up to twice that; later pieces are sentences, synthesized while the
+  ones before play. Markdown, links and code are not read out; pieces end with the pause their punctuation calls for.
+- Speakers bring the reply back into the mic. A turn that starts while a reply plays is presumed to be its echo until
+  it holds two whole words the reply did not say (or one like "wait" or "stop"): then it interrupts (~0.9 s after you
+  start talking) and the turn is what you said. Once 2 s of a reply have played without the VAD hearing it
+  (headphones, or the browser's echo cancellation), the mic is taken not to carry it, and 0.26 s of speech over a
+  reply stops it (~0.4 s), until an echo shows otherwise.
+- Opening voice mode has kiln read the chat with the voice prompt (one token): the prompt replaces the system prompt,
+  and Flash-Next's first request after a while idle took 1.7-3.3 s to its first token.
+
+Time from the end of a spoken question to the reply's first sound, five questions kiln had not seen each
+(`web/bench-voice.ts`: headless Chromium's microphone plays a WAV through the real service and the running kiln; the
+page's own figure, then one from outside, the WAV's end of speech to the first audio buffer's start):
+
+| model | median | wait after speech | first token | first audio | to the speaker |
+|---|---|---|---|---|---|
+| Qwen3.8-27B | **0.81 s** (0.71 outside) | 0.28-0.33 s | 0.09 s | 0.26-0.46 s | 0.06-0.09 s |
+| Qwen3.8-Flash-Next | **1.01 s** (0.97 outside) | 0.28-0.30 s | 0.14-0.18 s | 0.40-0.67 s | 0.06-0.09 s |
+
+Flash-Next's cold experts and the speech models share the CPU: its replies decode at 35-55 tok/s while speaking
+(95 alone) and Kokoro reads a piece ~1.4x slower. For scale, Artificial Analysis measures Grok Voice 3.0 at 0.81 s
+(without saying whether that includes the end of the user's turn).
 
 ## Measured on this machine
 
@@ -487,9 +559,13 @@ engine/   common.h kernels.h gguf.h      constants, kernel entry points, GGUF re
           sampler.h                      the host sampler (both engines): penalties, DRY, ordered stages
 kiln/     engine.py chat.py cache.py server.py apis.py structured.py vision.py documents.py sleep.py link.py warm.py
           metrics.py __main__.py
-web/      server.ts app.ts files.ts sampler.ts wire.ts      Bun web UI; tools.ts tool-fetch.ts tool-mcp.ts its tools
-          index.html style.css                          (make test_web: sampler.test.ts, server.test.ts with fake-mcp.ts,
-                                                        browser.test.ts: the page in headless Chromium)
+web/      server.ts app.ts files.ts sampler.ts wire.ts      Bun web UI; tools.ts tool-fetch.ts tool-mcp.ts its tools; tls.ts HTTPS (--lan)
+          voice.ts voice-worklet.js                     voice mode's client: the microphone, playback, the protocol
+          index.html style.css                          (make test_web: sampler.test.ts, server.test.ts with fake-mcp.ts
+                                                        and fake-voice.ts, browser.test.ts: the page in headless Chromium;
+                                                        bench-voice.ts: voice mode's latency end to end)
+voice/    __main__.py talk.py parts.py                  the voice service: its WebSocket, a session's turns and replies,
+                                                        the parts (make voice / tools/voice_setup.sh; make test_voice)
 tools/    tests (make test: test_quant, test_attn, test_gdn, test_sampler, test_chat, test_cache, test_documents, test_snapshot,
           test_server, compare_ref.py: the next-token distributions against llama.cpp's; test_vision.py: preprocessing, the
           vision tower and prompts with pictures against transformers and llama.cpp, with vision_ref.py, ref_logits_mm.cpp;
@@ -502,7 +578,7 @@ tools_fn/ fn_quantize.py (builds kiln-fn.gguf), route_stats.py (routing counts f
           bench_dec_fn.cpp / bench_moeg_fn.cpp / bench_cpudec_fn.cpp / bench_cpujob_fn.cpp (decode / prefill MoE kernels /
           the CPU's decode handoff / the CPU's prefill job alone)
 data/     (not code) rocm/ venv/ models/ llama.cpp/ (quantization tools + reference only), ref-venv/ (torch and transformers on
-          the CPU: the vision references)
+          the CPU: the vision references, Whisper's features), voice-venv/ voice/ (the voice service's venv and models)
 ```
 
 ## Rebuilding

@@ -37,9 +37,14 @@ urls() {
     if [ "$(host)" = 0.0.0.0 ]; then at=$(lan_ip); fi
     echo "  API       http://$at:8080/v1"
     if [ -n "$WEB" ] && systemctl --user is-active -q kiln-web; then
-        echo "  web chat  http://$at:8081"
-        if [ "$at" != 127.0.0.1 ]; then
-            if command -v qrencode >/dev/null; then qrencode -t ANSIUTF8 -m 2 "http://$at:8081"; fi
+        if [ "$at" = 127.0.0.1 ]; then
+            echo "  web chat  http://$at:8081"
+        else
+            # the network gets HTTPS (a browser gives the microphone, voice mode, only to secure pages); this machine
+            # keeps plain HTTP on 127.0.0.1, which is one
+            echo "  web chat  https://$at:8081   (here: http://127.0.0.1:8081)"
+            echo "            a device warns about the certificate until it trusts https://$at:8081/kiln-ca.crt"
+            if command -v qrencode >/dev/null; then qrencode -t ANSIUTF8 -m 2 "https://$at:8081"; fi
             if systemctl is-active -q ufw && ! grep -qs "8080:8081" /etc/ufw/user.rules; then
                 echo "  ufw blocks other devices until it allows TCP 8080-8081 (~/kiln-ufw.sh does that)"
             fi

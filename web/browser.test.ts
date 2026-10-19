@@ -1,11 +1,13 @@
 // The page in a real browser (headless Chromium) against a fake kiln that streams canned replies: TeX typeset and
 // prices left alone, Mermaid diagrams drawn, a reply's HTML page run in its sandbox where it reaches nothing, attached
 // files (pictures, PDFs, videos, texts) sent as kiln expects them and kept across a reload, chats carried through
-// export and import, versions of messages and replies, and tools (an MCP server, fake-mcp.ts, that server.ts runs).
+// export and import, versions of messages and replies, tools (an MCP server, fake-mcp.ts, that server.ts runs), and
+// voice mode against a scripted speech service (fake-voice.ts) with Chromium's fake microphone.
 import { afterAll, beforeAll, expect, test } from "bun:test";
-import { mkdtempSync, readFileSync, readdirSync, unlinkSync, writeFileSync } from "node:fs";
+import { existsSync, mkdtempSync, readFileSync, readdirSync, unlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import puppeteer, { type Browser, type Page } from "puppeteer-core";
+import { lanAddresses } from "./tls";
 import { deflateSync } from "node:zlib";
 
 const REPLIES: Record<string, string> = {
@@ -42,7 +44,7 @@ const TOOL_ASKS: Record<string, { name: string; args: string }> = {
   "tool echo": { name: "fake__echo", args: '{"text":  "hello"}' },
   "tool note": { name: "fake__write_note", args: '{"text": "n1"}' },
 };
-let lastStream: any = null, probes = 0, callIds = 0;  // probes: requests a sandboxed page got through to a server
+let lastStream: any = null, probes = 0, callIds = 0, kilnStopped = 0;  // probes: requests a sandboxed page got through to a server
 const streams: any[] = [];                           // every streamed request kiln got
 const fake = Bun.serve({
   hostname: "127.0.0.1",
@@ -56,6 +58,7 @@ const fake = Bun.serve({
     if (!body.stream) return Response.json({ choices: [{ message: { content: "A title" } }] });
     lastStream = body;
     streams.push(body);
+    req.signal.addEventListener("abort", () => kilnStopped++);
     const at = body.messages.findLastIndex((m: any) => m.role === "user"), last = body.messages[at];
     const said = typeof last.content === "string" ? last.content : last.content.map((p: any) => p.text ?? "").join("");
     const round = body.messages.slice(at).filter((m: any) => m.role === "assistant").length, ask = TOOL_ASKS[said];
@@ -85,7 +88,7 @@ const fake = Bun.serve({
 });
 
 let web: Bun.Subprocess<"ignore", "pipe", "inherit">, base = "", browser: Browser;
-const dir = mkdtempSync(`${tmpdir()}/kiln-web-`), LOG = `${dir}/mcp.log`;
+const dir = mkdtempSync(`${tmpdir()}/kiln-web-`), LOG = `${dir}/mcp.log`, VOICE_LOG = `${dir}/voice.log`;
 writeFileSync(`${dir}/mcp.json`, JSON.stringify({ mcpServers: {
   fake: { command: process.execPath, args: ["fake-mcp.ts"], cwd: import.meta.dir, env: { FAKE_MCP_LOG: LOG } },
   broken: { command: "/nonexistent/kiln-test-mcp" },
@@ -93,7 +96,8 @@ writeFileSync(`${dir}/mcp.json`, JSON.stringify({ mcpServers: {
 beforeAll(async () => {
   web = Bun.spawn([process.execPath, "server.ts"], {
     cwd: import.meta.dir, stdout: "pipe", stderr: "inherit",
-    env: { ...process.env, PORT: "0", KILN_URL: `http://127.0.0.1:${fake.port}`, KILN_HOST: "127.0.0.1", NODE_ENV: "production", KILN_MCP_CONFIG: `${dir}/mcp.json` },
+    env: { ...process.env, PORT: "0", KILN_URL: `http://127.0.0.1:${fake.port}`, KILN_HOST: "127.0.0.1", NODE_ENV: "production", KILN_MCP_CONFIG: `${dir}/mcp.json`,
+      KILN_VOICE_CMD: JSON.stringify([process.execPath, `${import.meta.dir}/fake-voice.ts`]), FAKE_VOICE_LOG: VOICE_LOG, KILN_VOICE_IDLE_MS: "1500" },
   });
   const reader = web.stdout.getReader(), dec = new TextDecoder();
   let out = "";
@@ -104,7 +108,8 @@ beforeAll(async () => {
   }
   base = out.match(/kiln web: (\S+)/)![1].replace(/\/$/, "");
   REPLIES.page = REPLIES.page.replaceAll("PROBE_URL", `http://127.0.0.1:${fake.port}`);
-  browser = await puppeteer.launch({ executablePath: process.env.CHROMIUM ?? "/usr/bin/chromium", headless: true, args: ["--no-sandbox"] });
+  browser = await puppeteer.launch({ executablePath: process.env.CHROMIUM ?? "/usr/bin/chromium", headless: true,
+    args: ["--no-sandbox", "--use-fake-ui-for-media-stream", "--use-fake-device-for-media-stream", "--autoplay-policy=no-user-gesture-required"] });
 }, 30_000);
 afterAll(async () => { await browser?.close(); web.kill(); fake.stop(true); });
 
@@ -445,3 +450,218 @@ test("export and import keep versions and tool rounds, and the imported chat res
     { role: "assistant", content: "old a", reasoning_content: "hm" }, { role: "user", content: "next" }]);
   for (const p of [page, other, third]) await p.close();
 }, 90_000);
+
+// Voice mode. Each page asks the fake speech service for a voice whose script it plays (fake-voice.ts); its log has
+// what the page sent it, session by session.
+const VOICE_PROMPT = "You are talking with the user by voice. Your reply is spoken aloud by text-to-speech, so write plain spoken sentences: " +
+  "no markdown, lists, code or symbols. Keep it brief, usually one to three sentences, unless they ask for more. When a question needs counting, " +
+  "logic or several steps, work through it out loud in a few short spoken steps first, then give the answer.";
+const voiceLog = (): any[] => { try { return readFileSync(VOICE_LOG, "utf8").trim().split("\n").filter(Boolean).map((l) => JSON.parse(l)); } catch { return []; } };
+const voicePages: Page[] = [];
+async function voicePage(script: string) {
+  const page = await (await browser.createBrowserContext()).newPage();
+  voicePages.push(page);
+  await page.setViewport({ width: 1600, height: 900 });            // Settings beside the chat (from 1460 px), so it stays open while the dock is used
+  page.on("pageerror", (e) => { throw e; });
+  await page.evaluateOnNewDocument((v) => {
+    if (!sessionStorage.getItem("settings2")) sessionStorage.setItem("settings2", JSON.stringify({ system: "", think: {}, fast: {}, voice: { name: v } }));
+  }, script);
+  await page.goto(`${base}/`, { waitUntil: "networkidle0" });
+  await page.click("#voice");
+  await page.waitForFunction(() => document.querySelector("#voice-status")?.textContent === "Listening", { timeout: 10_000 });
+  const s = voiceLog().filter((e) => e.ev === "msg" && e.type === "hello" && e.voice === script).at(-1).s;
+  return { page, session: () => voiceLog().filter((e) => e.s === s) };
+}
+const replyText = (page: Page, i: number) => page.$eval(`#thread > article[data-i="${i}"] .markdown`, (el) => el.textContent?.trim() ?? "");
+
+test("voice mode: what is said shows as it is said, becomes the question, and the reply is spoken as it is written", async () => {
+  const n0 = streams.length;
+  const { page, session } = await voicePage("plain");
+  await page.waitForFunction(() => document.querySelector(".msg.ghost .bubble")?.textContent === "hello", { timeout: 10_000 });
+  await page.waitForFunction(() => document.querySelector('#thread > article[data-i="0"] .bubble')?.textContent === "hello there", { timeout: 10_000 });
+  expect(await page.$(".msg.ghost")).toBeNull();
+  expect(await page.$('#thread > article[data-i="0"] .said')).not.toBeNull();
+  await page.waitForFunction(() => /^voice \d\.\d\d s/.test(document.querySelector('#thread > article[data-i="1"] .stats')?.textContent ?? ""), { timeout: 10_000 });
+  expect(lastStream.messages[0]).toEqual({ role: "system", content: VOICE_PROMPT });
+  expect(lastStream.model).toBe("qwen3.8-27b-fast");
+  expect(lastStream.reasoning_effort).toBeUndefined();
+  // opening voice mode had kiln read the voice prompt first, so the first turn is an append
+  const mine = streams.slice(n0), warm = mine.findIndex((b) => b.max_tokens === 1);
+  expect(mine[warm]?.messages).toEqual([{ role: "system", content: VOICE_PROMPT }, { role: "user", content: "Hi" }]);
+  expect(mine[warm]?.model).toBe("qwen3.8-27b-fast");
+  expect(warm).toBeLessThan(mine.findIndex((b) => b.messages.at(-1)?.content === "hello there"));
+  expect(await replyText(page, 1)).toBe("You said: hello there");
+  const log = session(), says = log.filter((e) => e.type === "say"), id = says[0].id;
+  expect(says.every((e) => e.id === id)).toBe(true);
+  expect(says.map((e) => e.text).join("")).toBe("You said: hello there");
+  expect(log.findIndex((e) => e.type === "say_end" && e.id === id)).toBeGreaterThan(log.findLastIndex((e) => e.type === "say"));
+  await page.waitForFunction(() => document.querySelector("#voice-status")?.textContent === "Listening", { timeout: 10_000 });
+  expect(session().filter((e) => e.type === "playback").map((e) => e.playing)).toEqual([true, false]);
+  await page.close();
+}, 30_000);
+
+test("voice mode: talking over a reply silences it, stops kiln's request, and the chat keeps only what was heard", async () => {
+  const stopped = kilnStopped, { page, session } = await voicePage("story");
+  await page.waitForFunction(() => document.querySelector('#thread > article[data-i="0"] .bubble')?.textContent === "slow story", { timeout: 10_000 });
+  for (const t = Date.now(); !session().some((e) => e.ev === "interrupt") && Date.now() - t < 10_000; ) await Bun.sleep(10);
+  const talked = Date.now();                       // kiln's request stops with the speech, not when the next words come in
+  for (; kilnStopped === stopped && Date.now() - talked < 3000; ) await Bun.sleep(10);
+  expect(kilnStopped).toBe(stopped + 1);
+  expect(Date.now() - talked).toBeLessThan(500);
+  await page.waitForFunction(() => /interrupted/.test(document.querySelector('#thread > article[data-i="1"] .stats')?.textContent ?? ""), { timeout: 10_000 });
+  const kept = await replyText(page, 1), chunks = session().filter((e) => e.ev === "chunk"), full = Array.from({ length: 40 }, (_, k) => `w${k}`).join(" ");
+  expect(kept.length).toBeGreaterThan(0);
+  expect(kept.length).toBeLessThan(full.length);
+  expect(full.startsWith(kept)).toBe(true);
+  expect(chunks.some((c) => chunks.filter((x) => x.to <= c.to).map((x) => x.text).join("").trimEnd() === kept)).toBe(true);
+  await page.waitForFunction(() => document.querySelector('#thread > article[data-i="2"] .bubble')?.textContent === "and then", { timeout: 10_000 });
+  await page.waitForFunction(() => /voice/.test(document.querySelector('#thread > article[data-i="3"] .stats')?.textContent ?? ""), { timeout: 10_000 });
+  expect(lastStream.messages.filter((m: any) => m.role === "assistant").map((m: any) => m.content)).toEqual([kept]);
+  await page.close();
+}, 30_000);
+
+test("voice mode: a reply talked over before it made a sound is taken out, and the next words join its question", async () => {
+  const { page } = await voicePage("merge");
+  await page.waitForFunction(() => document.querySelector('#thread > article[data-i="0"] .bubble')?.textContent === "slow first second part", { timeout: 15_000 });
+  await page.waitForFunction(() => /^w0 w1/.test(document.querySelector('#thread > article[data-i="1"] .markdown')?.textContent ?? ""), { timeout: 10_000 });
+  expect(await page.$$eval("#thread > article.msg:not(.ghost)", (els) => els.length)).toBe(2);
+  expect(lastStream.messages.filter((m: any) => m.role !== "system")).toEqual([{ role: "user", content: "slow first second part" }]);
+  await page.close();
+}, 30_000);
+
+async function openSettings(page: Page) {
+  await page.click("#settings-toggle");
+  await page.waitForFunction(() => { const r = document.querySelector("#voice-knobs")!.getBoundingClientRect(); return r.width > 0 && r.right <= innerWidth; });
+}
+const stored = (page: Page) => page.evaluate(() => JSON.parse(sessionStorage.getItem("settings2") ?? "{}").voice);
+const settled = async (ok: () => boolean, ms = 5000) => { for (const t = Date.now(); !ok() && Date.now() - t < ms; ) await Bun.sleep(25); return ok(); };
+
+test("voice picker: the voice models' voices by language and gender; a pick switches model and voice for the next sentence, and Settings shows the same choice", async () => {
+  const { page, session } = await voicePage("pick");
+  await page.waitForFunction(() => /^voice /.test(document.querySelector('#thread > article[data-i="1"] .stats')?.textContent ?? ""), { timeout: 10_000 });
+  expect(new Set(session().filter((e) => e.ev === "chunk").map((e) => `${e.tts}/${e.voice}`))).toEqual(new Set(["fake-tts/pick"]));
+  expect(await page.$eval("#voice-pick", (el) => el.textContent)).toBe("Pick");
+  await page.click("#voice-pick");
+  const rows = await page.$$eval("#voice-pop > *", (els) => els.map((e) => [e.className, e.textContent]));
+  expect(rows.filter(([c]) => c.startsWith("voice-model"))).toEqual([["voice-model", "Fake TTS"], ["voice-model", "Other TTS"], ["voice-model missing", "Big TTStools/voice_setup.sh big-tts"]]);
+  expect(rows.filter(([c]) => c === "voice-group").map(([, t]) => t)).toEqual(["American English · Female", "British English · Male", "Spanish · Female", "American English · Male"]);
+  expect(await page.$$eval("#voice-pop .voice-item", (els) => els.map((e) => (e as HTMLElement).dataset.voice))).toEqual(
+    ["plain", "story", "merge", "silent", "pick", "echo"].map((v) => `fake-tts/${v}`).concat(["other-tts/ana", "other-tts/bob"]));
+  expect(await page.$$eval('#voice-pop .voice-item[aria-selected="true"]', (els) => els.map((e) => (e as HTMLElement).dataset.voice))).toEqual(["fake-tts/pick"]);
+  await page.click('#voice-pop [data-voice="other-tts/bob"]');
+  const configs = () => session().filter((e) => e.type === "config").map(({ stack, voice, speed }) => ({ stack, voice, speed }));
+  expect(await settled(() => configs().length === 1)).toBe(true);
+  expect(configs()).toEqual([{ stack: { tts: "other-tts" }, voice: "bob", speed: undefined }]);
+  await page.waitForFunction(() => /^voice /.test(document.querySelector('#thread > article[data-i="3"] .stats')?.textContent ?? ""), { timeout: 10_000 });
+  const log = session(), after = log.slice(log.findIndex((e) => e.type === "config")).filter((e) => e.ev === "chunk");
+  expect(after.length).toBeGreaterThan(0);
+  expect(new Set(after.map((e) => `${e.tts}/${e.voice}`))).toEqual(new Set(["other-tts/bob"]));
+  // one value, two views: the dock's picker and Settings show it, and Settings changing it is the dock's change too
+  expect(await page.$eval("#voice-pick", (el) => el.textContent)).toBe("Bob");
+  expect(await stored(page)).toEqual({ tts: "other-tts", name: "bob" });
+  await openSettings(page);
+  await page.waitForFunction(() => (document.querySelector("#voice-name") as HTMLSelectElement)?.value === JSON.stringify(["other-tts", "bob"]));
+  await page.select("#voice-name", JSON.stringify(["other-tts", "ana"]));
+  await page.waitForFunction(() => document.querySelector("#voice-pick")?.textContent === "Ana");
+  expect(await settled(() => configs().length === 2)).toBe(true);
+  expect(configs()[1]).toEqual({ stack: undefined, voice: "ana", speed: undefined });
+  // a pick from the dock is undone like any setting
+  await page.click("#voice-pick");
+  await page.click('#voice-pop [data-voice="fake-tts/echo"]');
+  await page.waitForFunction(() => (document.querySelector("#voice-name") as HTMLSelectElement)?.value === JSON.stringify(["fake-tts", "echo"]));
+  await page.click("#toast .btn");
+  await page.waitForFunction(() => document.querySelector("#voice-pick")?.textContent === "Ana" && (document.querySelector("#voice-name") as HTMLSelectElement)?.value === JSON.stringify(["other-tts", "ana"]));
+  expect(await settled(() => configs().length === 4)).toBe(true);
+  expect(configs().slice(2)).toEqual([{ stack: { tts: "fake-tts" }, voice: "echo", speed: undefined }, { stack: { tts: "other-tts" }, voice: "ana", speed: undefined }]);
+  expect(await stored(page)).toEqual({ tts: "other-tts", name: "ana" });
+  await page.close();
+}, 40_000);
+
+test("voice picker: a voice's play button plays its sample, apart from any reply or turn", async () => {
+  const { page, session } = await voicePage("silent");
+  await page.click("#voice-pick");
+  await page.click('#voice-pop .voice-row:has([data-voice="other-tts/ana"]) .voice-play');
+  expect(await settled(() => session().filter((e) => e.type === "playback").length === 2)).toBe(true);
+  const log = session();
+  expect(log.filter((e) => e.type === "preview").map((e) => e.voice)).toEqual(["ana"]);
+  expect(log.filter((e) => e.ev === "chunk").map((e) => [e.id, e.voice, e.text])).toEqual([["preview", "ana", "This is Ana."]]);
+  expect(log.filter((e) => e.type === "playback").map((e) => e.playing)).toEqual([true, false]);
+  expect(log.some((e) => e.type === "say" || e.type === "config")).toBe(false);
+  expect(await page.$$eval("#thread > article", (els) => els.length)).toBe(0);
+  await page.waitForFunction(() => document.querySelector("#voice-status")?.textContent === "Listening", { timeout: 3000 });   // (drawn on the next frame)
+  expect(await page.$eval("#voice-pick", (el) => el.textContent)).toBe("Silent");
+  expect(await page.$eval("#voice-pop", (el) => (el as HTMLElement).hidden)).toBe(false);
+  await page.close();
+}, 30_000);
+
+test("voice mode: a speech-to-text model chosen in Settings switches the service's; one not installed cannot be chosen", async () => {
+  const { page, session } = await voicePage("silent");
+  await openSettings(page);
+  await page.waitForSelector("#voice-stt option[value='fake-stt-big']");
+  expect(await page.$$eval("#voice-stt option", (os) => os.map((o) => [(o as HTMLOptionElement).value, (o as HTMLOptionElement).disabled]))).toEqual(
+    [["", false], ["fake-stt", false], ["fake-stt-big", false], ["fake-stt-huge", true]]);
+  await page.select("#voice-stt", "fake-stt-big");
+  await page.waitForFunction(() => /^Fake STT Big ·/.test(document.querySelector("#voice-meta")?.textContent ?? ""), { timeout: 5000 });
+  expect(await stored(page)).toEqual({ name: "silent", stt: "fake-stt-big" });
+  await page.click(".voice-choice:has(#voice-stt) .knob-reset");
+  await page.waitForFunction(() => /^Fake STT ·/.test(document.querySelector("#voice-meta")?.textContent ?? ""), { timeout: 5000 });
+  expect(session().filter((e) => e.type === "config").map((e) => e.stack)).toEqual([{ stt: "fake-stt-big" }, { stt: "fake-stt" }]);
+  expect(await stored(page)).toEqual({ name: "silent" });
+  await page.close();
+}, 30_000);
+
+test("voice mode: mute stops the microphone's audio; ending it closes the socket, and the service stops once idle", async () => {
+  for (const p of voicePages.splice(0)) if (!p.isClosed()) await p.close();   // earlier tests' voice sockets, open if they failed
+  const { page, session } = await voicePage("silent");
+  const frames = () => session().filter((e) => e.ev === "frames").at(-1)?.n ?? 0;
+  for (let t = Date.now(); frames() < 20 && Date.now() - t < 5000; ) await Bun.sleep(50);
+  expect(frames()).toBeGreaterThanOrEqual(20);
+  await page.click("#voice-mute");
+  await Bun.sleep(300);
+  const muted = frames();
+  await Bun.sleep(700);
+  expect(frames()).toBe(muted);
+  expect(session().some((e) => e.type === "mute" && e.on === true)).toBe(true);
+  await page.click("#voice-mute");
+  for (let t = Date.now(); frames() < muted + 20 && Date.now() - t < 5000; ) await Bun.sleep(50);
+  expect(frames()).toBeGreaterThanOrEqual(muted + 20);
+  await page.click("#voice-end");
+  expect(await page.$eval("#voice-dock", (el) => (el as HTMLElement).hidden)).toBe(true);
+  expect(await page.$eval(".composer-box", (el) => getComputedStyle(el).display)).not.toBe("none");
+  for (let t = Date.now(); !session().some((e) => e.ev === "close") && Date.now() - t < 3000; ) await Bun.sleep(50);
+  expect(session().some((e) => e.ev === "close")).toBe(true);
+  const starts = voiceLog().filter((e) => e.ev === "start").length;
+  for (let t = Date.now(); voiceLog().filter((e) => e.ev === "exit").length < starts && Date.now() - t < 6000; ) await Bun.sleep(100);
+  expect(voiceLog().filter((e) => e.ev === "exit").length).toBe(starts);
+  await page.close();
+}, 30_000);
+
+test("voice mode on a page that is not secure (plain HTTP at this machine's address) says where the secure page is, and starts nothing", async () => {
+  const ip = lanAddresses()[0], log = `${dir}/voice-insecure.log`;
+  expect(ip).toBeDefined();
+  const insecure = Bun.spawn([process.execPath, "server.ts"], {
+    cwd: import.meta.dir, stdout: "pipe", stderr: "inherit",
+    env: { ...process.env, PORT: "0", KILN_URL: `http://127.0.0.1:${fake.port}`, KILN_HOST: ip, NODE_ENV: "production", KILN_MCP_CONFIG: `${dir}/mcp.json`,
+      KILN_VOICE_CMD: JSON.stringify([process.execPath, `${import.meta.dir}/fake-voice.ts`]), FAKE_VOICE_LOG: log },
+  });
+  try {
+    let out = "";
+    for (const reader = insecure.stdout.getReader(), dec = new TextDecoder(); !/kiln web: \S+/.test(out); ) {
+      const { value, done } = await reader.read();
+      if (done) throw new Error(`server.ts exited: ${out}`);
+      out += dec.decode(value);
+    }
+    const url = out.match(/kiln web: (\S+)/)![1].replace(/\/$/, "");
+    const page = await (await browser.createBrowserContext()).newPage();
+    await page.goto(`${url}/`, { waitUntil: "networkidle0" });
+    expect(await page.evaluate(() => isSecureContext)).toBe(false);
+    await page.click("#voice");
+    await page.waitForFunction(() => /secure page/.test(document.querySelector("#voice-status")?.textContent ?? ""), { timeout: 5000 });
+    expect(await page.$eval("#voice-status", (e) => e.textContent)).toContain(`https://${new URL(url).host}`);
+    await Bun.sleep(300);
+    expect(existsSync(log)).toBe(false);                          // no socket, so no service
+    await page.close();
+  } finally {
+    insecure.kill();
+  }
+});

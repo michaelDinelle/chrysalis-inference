@@ -2,15 +2,16 @@
 // replies call (tools.ts). It stores nothing on disk: conversations stay in the browser tab, replies being written stay
 // in RAM (see Job). `bun server.ts` for development, NODE_ENV=production for a minified bundle.
 import { hostname } from "node:os";
-import type { Server } from "bun";
+import type { Server, Subprocess } from "bun";
 import app from "./index.html";
 import * as registry from "./tools";
+import { lanAddresses, lanTls } from "./tls";
 import { assistantTurn, toolTurn, type ToolChoice, type WireCall } from "./wire";
 
 const KILN = process.env.KILN_URL ?? "http://127.0.0.1:8080";
 // Changes with the page's code. Open tabs compare it on every status poll and reload to pick up an update
 // (their chats are in sessionStorage, so a reload keeps them).
-const BUILD = Bun.hash((await Promise.all(["index.html", "app.ts", "sampler.ts", "files.ts", "wire.ts", "style.css"].map((f) => Bun.file(`${import.meta.dir}/${f}`).text()))).join("\0")).toString(36);
+const BUILD = Bun.hash((await Promise.all(["index.html", "app.ts", "sampler.ts", "files.ts", "wire.ts", "voice.ts", "voice-worklet.js", "style.css"].map((f) => Bun.file(`${import.meta.dir}/${f}`).text()))).join("\0")).toString(36);
 await registry.reload();
 for (const sig of ["SIGINT", "SIGTERM"] as const) process.on(sig, () => void registry.closeAll().finally(() => process.exit(0)));   // MCP servers' processes go too
 
@@ -21,11 +22,12 @@ const hostOk = (req: Request) => {
   const host = (req.headers.get("host") ?? "").toLowerCase();
   return host.startsWith("[") || /^\d{1,3}(\.\d{1,3}){3}(:\d+)?$/.test(host) || NAMES.has(host.replace(/:\d+$/, ""));
 };
-const guarded = (handler: (req: Request, srv: Server<undefined>) => Response | Promise<Response>) =>
-  (req: Request, srv: Server<undefined>) => (hostOk(req) ? handler(req, srv) : new Response("unknown host", { status: 403 }));
+type Srv = Server<VoiceSocket>;
+const guarded = (handler: (req: Request, srv: Srv) => Response | undefined | Promise<Response>) =>
+  (req: Request, srv: Srv) => (hostOk(req) ? handler(req, srv) : new Response("unknown host", { status: 403 }));
 // A form on another site can post to this server's address, but not as JSON without asking first (CORS), which it is
 // never allowed: so what starts tools or lets one run takes JSON only.
-const json = (handler: (req: Request, srv: Server<undefined>) => Response | Promise<Response>) => (req: Request, srv: Server<undefined>) =>
+const json = (handler: (req: Request, srv: Srv) => Response | Promise<Response>) => (req: Request, srv: Srv) =>
   (req.headers.get("content-type") ?? "").startsWith("application/json") ? handler(req, srv) : new Response("JSON only", { status: 415 });
 
 const unit = (...args: string[]) => Bun.spawnSync(["systemctl", "--user", ...args, "kiln"]).stdout.toString().trim();
@@ -237,13 +239,73 @@ parent.postMessage({ kilnReady: true }, "*");
 const SANDBOX_CSP = "default-src 'none'; script-src 'unsafe-inline' 'unsafe-eval'; style-src 'unsafe-inline'; img-src data: blob:; " +
   "font-src data:; media-src data: blob:; form-action 'none'; base-uri 'none'; frame-ancestors 'self'; sandbox allow-scripts allow-modals";
 
-const server = Bun.serve({
-  hostname: process.env.KILN_HOST ?? "127.0.0.1",          // 0.0.0.0 after `kiln start --lan`
+// Voice mode's speech service: a process of its own (voice/ in data/voice-venv, or any stack that speaks the same
+// protocol: KILN_VOICE_CMD, a JSON argv), started by the first voice socket and stopped KILN_VOICE_IDLE_MS after the
+// last one closes, so voice mode holds no memory while nobody uses it. It prints `voice: ws://...` once it listens and
+// exits when its stdin closes (this server gone, or the idle time up). Each page's socket is proxied to it verbatim.
+const ROOT = `${import.meta.dir}/..`;
+const VOICE_CMD: string[] = process.env.KILN_VOICE_CMD ? JSON.parse(process.env.KILN_VOICE_CMD) : [`${ROOT}/data/voice-venv/bin/python`, "-m", "voice"];
+const VOICE_IDLE_MS = Number(process.env.KILN_VOICE_IDLE_MS ?? 60_000);
+interface VoiceSocket { up?: WebSocket; queue: (string | Buffer<ArrayBuffer>)[]; closed: boolean }
+let speech: { proc: Subprocess<"pipe", "pipe", "inherit">; url: Promise<string> } | undefined;
+let voiceSockets = 0, voiceIdle: Timer | undefined;
+
+function speechService(): Promise<string> {
+  if (speech) return speech.url;
+  const missing = (why: string) => new Error(`The voice service did not start (${why}): run \`make voice\` to install it`);
+  let proc: Subprocess<"pipe", "pipe", "inherit">;
+  try {
+    proc = Bun.spawn(VOICE_CMD, { cwd: ROOT, stdin: "pipe", stdout: "pipe", stderr: "inherit" });
+  } catch (e) {
+    return Promise.reject(missing(e instanceof Error ? e.message : String(e)));
+  }
+  const url = (async () => {
+    const reader = proc.stdout.getReader(), dec = new TextDecoder();
+    let out = "";
+    for (;;) {
+      const { value, done } = await reader.read();
+      if (done) throw missing(`it exited: ${out.trim().slice(-300) || `code ${await proc.exited}`}`);
+      out += dec.decode(value, { stream: true });
+      const at = /voice: (ws:\/\/\S+)/.exec(out)?.[1];
+      if (!at) continue;
+      void (async () => { for (let r = await reader.read(); !r.done; r = await reader.read()) process.stdout.write(r.value); })();   // its log, and a pipe that never fills
+      return at;
+    }
+  })();
+  const s = { proc, url };
+  speech = s;
+  url.catch(() => { if (speech === s) speech = undefined; proc.kill(); });
+  void proc.exited.then(() => { if (speech === s) speech = undefined; });
+  return url;
+}
+
+function voiceClosed() {
+  if (--voiceSockets > 0) return;
+  clearTimeout(voiceIdle);
+  voiceIdle = setTimeout(() => {
+    const s = speech;
+    if (!s || voiceSockets) return;
+    speech = undefined;
+    s.proc.stdin.end();
+    setTimeout(() => s.proc.kill(), 3000);             // one that does not watch its stdin
+  }, VOICE_IDLE_MS);
+}
+
+// With `kiln start --lan` (KILN_HOST 0.0.0.0) this machine keeps plain HTTP on 127.0.0.1 and the network gets HTTPS on
+// the same port (each of this machine's addresses: ufw already lets the port in): browsers give the microphone only to
+// secure pages, which localhost is and http://<address> is not (tls.ts).
+const LAN = process.env.KILN_HOST === "0.0.0.0", tls = LAN ? lanTls() : undefined;
+const serve = (hostname: string, port: number, secure?: { cert: string; key: string }) => Bun.serve<VoiceSocket>({
+  hostname,
+  ...(secure ? { tls: secure } : {}),
   maxRequestBodySize: 1 << 30,                              // a chat resends its files: a 64 MB video is ~85 MB of base64
-  port: Number(process.env.PORT ?? 8081),
+  port,
   development: process.env.NODE_ENV !== "production",
   routes: {
     "/": app,
+    // the authority behind the network's certificate, for a device to install once and then trust the page
+    "/kiln-ca.crt": { GET: guarded(() => tls ? new Response(tls.ca, { headers: { "Content-Type": "application/x-x509-ca-cert" } })
+      : new Response("not on the network (kiln start --lan)", { status: 404 })) },
     "/vendor/mermaid/*": { GET: guarded(vendor) },
     "/sandbox": { GET: guarded(() => new Response(SANDBOX, { headers: { "Content-Type": "text/html; charset=utf-8", "Content-Security-Policy": SANDBOX_CSP } })) },
 
@@ -305,6 +367,16 @@ const server = Bun.serve({
       })),
     },
 
+    // Voice mode: the page's socket to the speech service. A WebSocket is not held to CORS, so another site's page
+    // could open one to this address and drive the service: only this server's own pages may.
+    "/api/voice": guarded((req, srv) => {
+      let same = false;
+      try { same = new URL(req.headers.get("origin") ?? "").host === req.headers.get("host"); } catch { /* no origin, or "null" */ }
+      if (!same) return new Response("only kiln's own pages", { status: 403 });
+      return srv.upgrade(req, { data: { queue: [], closed: false } }) ? undefined : new Response("a WebSocket only", { status: 426 });
+    }),
+    "/voice-worklet.js": { GET: guarded(() => new Response(Bun.file(`${import.meta.dir}/voice-worklet.js`), { headers: { "Content-Type": "text/javascript" } })) },
+
     // online: serving; loading: the systemd unit runs but the model is still loading (kiln answers 503 until it has
     // loaded, or does not listen yet); offline: stopped
     "/api/status": guarded(async () => {
@@ -338,6 +410,39 @@ const server = Bun.serve({
     // stopping takes ~40 ms: wait for it, so the page can show the new state right away
     "/api/kiln/stop": { POST: guarded(() => (unit("stop"), new Response(null, { status: 204 }))) },
   },
+  // the page's frames go to the service as they come (queued until its socket opens), and its frames come back
+  websocket: {
+    open(ws) {
+      voiceSockets++;
+      clearTimeout(voiceIdle);
+      speechService().then((url) => {
+        if (ws.data.closed) return;
+        const up = new WebSocket(url);
+        up.binaryType = "arraybuffer";
+        ws.data.up = up;
+        up.onopen = () => { for (const m of ws.data.queue.splice(0)) up.send(m); };
+        up.onmessage = (e) => ws.send(e.data);
+        up.onclose = () => ws.close();
+      }, (e: Error) => {
+        ws.send(JSON.stringify({ type: "error", message: e.message }));
+        ws.close();
+      });
+    },
+    message(ws, m) {
+      const up = ws.data.up;
+      if (up?.readyState === WebSocket.OPEN) up.send(m);
+      else ws.data.queue.push(m);
+    },
+    close(ws) {
+      ws.data.closed = true;
+      ws.data.up?.close();
+      voiceClosed();
+    },
+  },
 });
 
+const server = serve(LAN ? "127.0.0.1" : process.env.KILN_HOST ?? "127.0.0.1", Number(process.env.PORT ?? 8081));
+// only the certificate and key: Bun takes a `ca` there as the authority clients must show certificates of
+const secure = tls ? lanAddresses().map((ip) => serve(ip, server.port!, { cert: tls.cert, key: tls.key })) : [];
 console.log(`kiln web: ${server.url}`);
+for (const s of secure) console.log(`kiln web: ${s.url}`);

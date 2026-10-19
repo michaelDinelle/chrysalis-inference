@@ -2,13 +2,15 @@
 // does, any page can follow it again from an event's position, only Stop ends it early (and stops kiln's request), and
 // a request addressed to another site's name is refused (DNS rebinding). With tools, a reply is rounds: the fake kiln
 // plays a script of tool calls, which server.ts runs on real MCP servers (fake-mcp.ts, over stdio and Streamable HTTP,
-// through the SDK) and on the built-in Fetch URL against local sites, and sends back. Nothing here reaches the real
-// kiln or systemd.
+// through the SDK) and on the built-in Fetch URL against local sites, and sends back. Voice mode's socket goes to a
+// speech service (fake-voice.ts) the server starts with the first socket and stops once idle. Nothing here reaches the
+// real kiln or systemd.
 import { afterAll, beforeAll, expect, test } from "bun:test";
 import { mkdtempSync, readFileSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { WebStandardStreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/webStandardStreamableHttp.js";
 import { fakeMcp } from "./fake-mcp";
+import { lanAddresses } from "./tls";
 
 const CHUNKS = 12, GAP_MS = 20;
 let kilnAborted = 0;
@@ -455,3 +457,114 @@ test("Fetch URL gives a long page in parts the model can ask for, within the cha
     await fetch(`${base}/api/tools/reload`, { method: "POST", headers: json });
   }
 }, 30_000);
+
+// Bun's WebSocket takes request headers (an Origin, as a browser sends one); the DOM's type does not know them.
+const Socket = WebSocket as unknown as new (url: string, o: { headers?: Record<string, string> }) => WebSocket;
+// A server of its own, with voice mode's service set up as `env` says.
+async function voiceServer(env: Record<string, string>) {
+  const proc = Bun.spawn([process.execPath, "server.ts"], {
+    cwd: import.meta.dir, stdout: "pipe", stderr: "inherit",
+    env: { ...process.env, PORT: "0", KILN_URL: `http://127.0.0.1:${fake.port}`, KILN_HOST: "127.0.0.1", NODE_ENV: "production", KILN_MCP_CONFIG: CONFIG, ...env },
+  });
+  const reader = proc.stdout.getReader(), dec = new TextDecoder();
+  let out = "";
+  while (!/kiln web: \S+/.test(out)) {
+    const { value, done } = await reader.read();
+    if (done) throw new Error(`server.ts exited: ${out}`);
+    out += dec.decode(value);
+  }
+  const url = out.match(/kiln web: (\S+)/)![1].replace(/\/$/, "");
+  return { proc, url, socket: (origin?: string) => new Socket(`${url.replace(/^http/, "ws")}/api/voice`, origin ? { headers: { Origin: origin } } : {}) };
+}
+const outcome = (s: WebSocket) => new Promise<string>((res) => { s.onopen = () => res("open"); s.onclose = () => res("closed"); });
+const until = async (ok: () => boolean, ms = 5000) => { for (const t = Date.now(); !ok() && Date.now() - t < ms; ) await Bun.sleep(25); return ok(); };
+
+test("voice: only this server's own pages get a socket; it starts the service, passes both sides' frames through as they are, and stops the service once idle", async () => {
+  const log = `${mkdtempSync(`${tmpdir()}/kiln-voice-`)}/voice.log`, events = () => {
+    try { return readFileSync(log, "utf8").trim().split("\n").filter(Boolean).map((l) => JSON.parse(l)); } catch { return []; }
+  };
+  const v = await voiceServer({ KILN_VOICE_CMD: JSON.stringify([process.execPath, `${import.meta.dir}/fake-voice.ts`]), FAKE_VOICE_LOG: log, KILN_VOICE_IDLE_MS: "300" });
+  try {
+    expect(await outcome(v.socket("http://evil.example"))).toBe("closed");
+    expect(await outcome(v.socket())).toBe("closed");
+    expect(events()).toEqual([]);                    // a refused socket starts nothing
+    const s = v.socket(v.url), got: (string | ArrayBuffer)[] = [];
+    s.binaryType = "arraybuffer";
+    s.onmessage = (e) => got.push(e.data);
+    expect(await outcome(s)).toBe("open");
+    s.send(JSON.stringify({ type: "hello", voice: "silent" }));   // before the service listens: held until it does
+    for (let k = 0; k < 10; k++) s.send(new Int16Array(320).buffer);
+    s.send(JSON.stringify({ type: "say", id: "r1", text: "one two three four" }));
+    s.send(JSON.stringify({ type: "say_end", id: "r1" }));
+    expect(await until(() => got.some((m) => typeof m === "string" && JSON.parse(m).type === "said"))).toBe(true);
+    expect(JSON.parse(got[0] as string)).toMatchObject({ type: "ready", voice: "silent", stack: { tts: "fake-tts" } });
+    expect(events().filter((e) => e.ev === "frames").at(-1)?.n).toBe(10);
+    const chunks = got.filter((m): m is ArrayBuffer => typeof m !== "string").map((b) => {
+      const n = new DataView(b).getUint32(0, true);
+      return { head: JSON.parse(new TextDecoder().decode(new Uint8Array(b, 4, n))), samples: (b.byteLength - 4 - n) / 2 };
+    });
+    expect(chunks.map((c) => c.head)).toEqual(events().filter((e) => e.ev === "chunk").map(({ id, text, from, to }, seq) => ({ id, seq, text, from, to, rate: 24000 })));
+    expect(chunks.map((c) => [c.head.text, c.samples])).toEqual([["one two three ", 8640], ["four", 6000]]);
+    s.close();
+    expect(await until(() => events().some((e) => e.ev === "exit"))).toBe(true);
+    expect(events().filter((e) => e.ev === "start").length).toBe(1);
+  } finally {
+    v.proc.kill();
+  }
+}, 20_000);
+
+test("voice: a speech service that cannot start says how to install one", async () => {
+  const v = await voiceServer({ KILN_VOICE_CMD: JSON.stringify(["/nonexistent/kiln-voice"]) });
+  try {
+    const s = v.socket(v.url), got: string[] = [];
+    s.onmessage = (e) => got.push(e.data);
+    expect(await outcome(s)).toBe("open");
+    expect(await until(() => s.readyState === WebSocket.CLOSED)).toBe(true);
+    expect(JSON.parse(got[0])).toMatchObject({ type: "error" });
+    expect(JSON.parse(got[0]).message).toContain("make voice");
+  } finally {
+    v.proc.kill();
+  }
+});
+
+test("on the network (KILN_HOST 0.0.0.0): this machine keeps plain HTTP; each address gets HTTPS whose certificate the server's own authority signs, and no plain HTTP; that authority vouches for nothing public", async () => {
+  const dir = mkdtempSync(`${tmpdir()}/kiln-tls-`), ips = lanAddresses();
+  expect(ips.length).toBeGreaterThan(0);
+  const proc = Bun.spawn([process.execPath, "server.ts"], {
+    cwd: import.meta.dir, stdout: "pipe", stderr: "inherit",
+    env: { ...process.env, PORT: "0", KILN_URL: `http://127.0.0.1:${fake.port}`, KILN_HOST: "0.0.0.0", NODE_ENV: "production", KILN_MCP_CONFIG: CONFIG, KILN_TLS_DIR: dir },
+  });
+  try {
+    const reader = proc.stdout.getReader(), dec = new TextDecoder();
+    let out = "";
+    while ((out.match(/kiln web: \S+/g) ?? []).length < 1 + ips.length) {
+      const { value, done } = await reader.read();
+      if (done) throw new Error(`server.ts exited: ${out}`);
+      out += dec.decode(value);
+    }
+    const urls = [...out.matchAll(/kiln web: (\S+)/g)].map((m) => m[1].replace(/\/$/, "")), port = new URL(urls[0]).port;
+    expect(urls[0]).toBe(`http://127.0.0.1:${port}`);
+    expect(urls.slice(1)).toEqual(ips.map((ip) => `https://${ip}:${port}`));
+    const ca = await (await fetch(`${urls[0]}/kiln-ca.crt`)).text();
+    writeFileSync(`${dir}/ca-served.pem`, ca);
+    // openssl checks the chain: Bun's BoringSSL has no IP name constraints ("unsupported name constraint type"), the
+    // browsers' verifiers do
+    const tlsCheck = (ip: string, ...with_: string[]) => Bun.spawnSync(["openssl", "s_client", "-connect", `${ip}:${port}`, "-verify_return_error",
+      "-verify_ip", ip, ...with_], { stdin: new Uint8Array(), stdout: "pipe", stderr: "pipe" });
+    for (const [k, u] of urls.slice(1).entries()) {
+      const good = tlsCheck(ips[k], "-CAfile", `${dir}/ca-served.pem`);
+      expect(good.stdout.toString()).toContain("Verify return code: 0 (ok)");
+      expect(tlsCheck(ips[k]).exitCode).not.toBe(0);                       // nothing vouches for it without the authority
+      expect((await fetch(`${u}/`, { tls: { rejectUnauthorized: false } })).status).toBe(200);
+      expect(await fetch(`${u.replace("https:", "http:")}/`).then((r) => `plain ${r.status}`, () => "refused")).toBe("refused");
+    }
+    const sign = Bun.spawnSync(["openssl", "req", "-x509", "-newkey", "ec", "-pkeyopt", "ec_paramgen_curve:prime256v1", "-nodes", "-keyout", `${dir}/x.key`,
+      "-out", `${dir}/x.pem`, "-days", "30", "-subj", "/CN=example.com", "-CA", `${dir}/ca.pem`, "-CAkey", `${dir}/ca.key`, "-addext", "subjectAltName=DNS:example.com"]);
+    expect(sign.exitCode).toBe(0);
+    const verify = Bun.spawnSync(["openssl", "verify", "-CAfile", `${dir}/ca-served.pem`, `${dir}/x.pem`], { stderr: "pipe" });
+    expect(verify.exitCode).not.toBe(0);
+    expect(verify.stdout.toString() + verify.stderr.toString()).toContain("permitted subtree violation");
+  } finally {
+    proc.kill();
+  }
+});
