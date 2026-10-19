@@ -10,7 +10,8 @@ import { marked, type Links, type Token } from "marked";
 import { type Attachment, KINDS, attach, dataUrl, fmtBytes, get as getFile, put as putFile, textBlock } from "./files";
 import { type Cand, type Odds, type SamplerKey, type Stage, dryRuns, sample } from "./sampler";
 import { type Part, type VoiceAsk, type VoiceInfo, type VoiceReady, VoiceClient } from "./voice";
-import { DESCRIPTIONS, ROUTING, type ToolChoice, type WireCall, assistantTurn, toolTurn } from "./wire";
+import { type Fix, applyFixes, heardParts, readStep, stepOf } from "./heard";
+import { DESCRIPTIONS, ROUTING, type ToolChoice, type WireCall, assistantTurn, noted, toolTurn } from "./wire";
 
 type Effort = "xhigh" | "medium" | "low" | "off";
 // prompt and cached: summed over a reply's rounds; ctx: the context its last round left (prompt + reply)
@@ -38,6 +39,7 @@ interface Message {
   voiceMs?: number;                                 // a spoken reply: from the end of the user's speech to its first sound
   interrupted?: boolean;                            // talked over: it keeps only what was heard
   note?: string;                                    // the app's words to the model before a question (voice mode on, off): sent, not shown
+  heard?: Fix[];                                    // a question said aloud: the misheard words its reply's first step fixed
 }
 interface Conversation { id: string; title: string; named?: boolean; updated: number; effort: Effort; messages: Message[]; tools?: ToolChoice["tools"] }
 type Sampler = Partial<Record<SamplerKey, number>> & { order?: Stage[] };
@@ -133,22 +135,34 @@ const PLAIN_SYSTEM = "There are no tools or files in this chat. Answer directly.
 // What voice mode tells the model, in a note before the first question said aloud (and again when it changes): the
 // system prompt stays as it is, so a chat's history is never read again for voice mode and the chat's own prompt and
 // tools still hold (kiln's template allows a system message only first). Speech recognition mishears names and terms
-// ("quinn three point eight" for Qwen3.8), and a model that is not told so says it does not know them. The sentence
-// on reasoning lets it work out loud while it already speaks: on Big Bench Audio (Flash-Next, thinking off, spoken
-// questions through Parakeet, this as the system prompt) 92.5% of 200 with it, 77.7% of all 1,000 without, where
-// thinking first would hold the first word back by seconds.
-const DEFAULT_VOICE_PROMPT = "The user is talking to you by voice now. Their words reach you through speech recognition, which mishears " +
-  "some, mostly names, numbers and technical terms: work out what they most likely meant from how it sounds and from the conversation, and " +
-  "if an important name or number is still unclear, ask about it in a few words. Your reply is spoken aloud by text-to-speech, so write plain " +
-  "spoken sentences: no markdown, lists, code or symbols. Keep it brief, usually one to three sentences, unless they ask for more. When a " +
-  "question needs counting, logic or several steps, work through it out loud in a few short spoken steps first, then give the answer.";
+// ("quinn three point eight" for Qwen3.8, "pie game" for pygame), and a model that is not told so says it does not know
+// them: the reply's first step lists what was misheard (heard.ts, server.ts's spoken), as swaps of the transcript's own
+// words (asked to repeat the whole message instead, Flash-Next dropped sentences), by sound (asked by meaning, it made
+// "pie game" "Pong game"). Told to write no code or markdown, it wrote code as plain text, which was read out, and
+// held back ("Let me write that for you", then nothing): so what is shown (code blocks, tables) is apart from what is
+// said. The sentence on reasoning lets it work out loud while it already speaks: on Big Bench Audio (Flash-Next,
+// thinking off, spoken questions through Parakeet, as the system prompt) 92.5% of 200 with it, 77.7% of all 1,000
+// without, where thinking first would hold the first word back by seconds.
+const DEFAULT_VOICE_PROMPT = "The user is talking to you by voice. Their words reach you through speech recognition, which mishears " +
+  "some, mostly names, numbers and technical terms. Begin every reply with <fixes></fixes>, and inside it a line for each word or phrase " +
+  "it misheard: the transcript's exact words => the words the user actually said, which sound like them (names and terms spelled right, " +
+  "numbers in digits). Think about how each odd word sounds, above all in a technical chat: names of libraries, products and models are " +
+  "often heard as everyday words (\"pie torch\" => \"PyTorch\", \"jason\" => \"JSON\"). Correct only what was misheard: never rephrase, " +
+  "explain or expand, and leave it empty when nothing was misheard. The fixes are those lines only, never a thought or a comment (think in " +
+  "your reply, after them). Your reply is read aloud, except code blocks and tables, which show " +
+  "in the chat and are not read: speak in short plain sentences, put code, tables and anything long to look at in markdown code blocks " +
+  "or tables, and say in a sentence what you put there. When asked to write or make something, start on it in this reply, choosing " +
+  "sensible details yourself and saying which, rather than asking first; ask only when you cannot guess at all. Keep the spoken part " +
+  "brief. When a question needs counting, logic or several steps, work through it out loud in a few short spoken steps first, then give " +
+  "the answer.";
 // The rest of what the model is sent besides what the user types, each a setting (Prompts), with these defaults. The
 // voice note's sentence for a chat with tools on: the server settles whether a voice reply runs a tool (route in
 // server.ts), this keeps the words around a call true to it. The note on the first typed message after voice mode:
 // replies are read again, so markdown is back. The routing's texts: wire.ts's, which server.ts falls back to.
 interface Prompts { voiceTools?: string; voiceOff?: string; preambles?: string; asks?: string; announces?: string; title?: string; draft?: string }
 const PROMPTS: Required<Prompts> = {
-  voiceTools: "Only say you searched or did something once the tool call for it has returned, and never describe results you have not " +
+  voiceTools: "After the fixes, <tool>yes</tool> or <tool>no</tool> says whether answering needs a search, a page or anything else a " +
+    "tool does. Only say you searched or did something once the tool call for it has returned, and never describe results you have not " +
     "received from a tool. When results come back, give the key points briefly, and say the links are on screen rather than reading them.",
   voiceOff: "The user is typing again and reads your replies.",
   preambles: ROUTING.preambles.join("\n"), asks: ROUTING.asks.join(", "), announces: ROUTING.announces.join(", "),
@@ -728,9 +742,23 @@ function messageView(m: Message, i: number): HTMLElement {
     el.append(note);
   }
   if (m.files?.length) el.append(filesView(m.files));
-  if (m.content || !m.files?.length) el.append(h("div", "bubble", m.content));
+  if (m.content || !m.files?.length) el.append(heardBubble(m));
+  if (m.voice && m.heard === undefined && [...runs.values()].some((r) => r.conv.messages[r.conv.messages.indexOf(r.m) - 1] === m)) el.classList.add("unsettled");
   el.append(foot);
   return el;
+}
+const heardText = (m: Message) => (m.heard?.length ? applyFixes(m.content, m.heard).text : m.content);
+function heardBubble(m: Message): HTMLElement {
+  const b = h("div", "bubble");
+  for (const p of m.heard?.length ? heardParts(m.content, m.heard) : [m.content]) {
+    if (typeof p === "string") b.append(p);
+    else {
+      const f = h("span", "fixed", p.said);
+      f.title = `Speech recognition heard "${p.heard}"`;
+      b.append(f);
+    }
+  }
+  return b;
 }
 
 // A message edited in place: its text, and a reply's thinking. Save keeps the rest of the chat as it is; a question's
@@ -880,7 +908,7 @@ function roundView(r: Round, m: Message): HTMLElement {
     think.append(summary, thought);
     el.append(think);
   }
-  if (r.content) renderBlocks({ body }, r.content, false);
+  if (stepOf(r.content).rest) renderBlocks({ body }, stepOf(r.content).rest, false);
   syncCards(calls, r.calls, m, false);
   el.append(body, calls);
   return el;
@@ -1019,7 +1047,7 @@ function paint(v: View, m: Message, live?: Live) {
     v.body.innerHTML = `<p class="waiting">${live.loading ? "" : `${live.note} · ${fmtS(elapsed)}`}</p>`;
     v.shown = v.blocks = undefined;
   } else if (v.shown !== m.content) {
-    renderBlocks(v, m.content, !!live);
+    renderBlocks(v, m.rounds?.length ? m.content : stepOf(m.content).rest, !!live);
     v.shown = m.content;
   }
   if (live) return;
@@ -1134,9 +1162,11 @@ function pickToken(m: Message, ch: "reasoning" | "content", i: number, a: Alt) {
 
 function renderComposer() {
   const busy = !!running();
-  sendBtn.innerHTML = icon(busy ? "stop" : "send");
-  sendBtn.setAttribute("aria-label", busy ? "Stop" : "Send");
-  sendBtn.classList.toggle("stop", busy);
+  // in voice mode it ends voice mode (Enter still sends what is typed; Esc talks over the reply)
+  sendBtn.innerHTML = icon(busy || voice ? "stop" : "send");
+  sendBtn.setAttribute("aria-label", voice ? "End voice mode" : busy ? "Stop" : "Send");
+  sendBtn.title = voice ? "End voice mode" : "";
+  sendBtn.classList.toggle("stop", busy || !!voice);
   const draftBtn = $<HTMLButtonElement>("draft");
   draftBtn.innerHTML = icon(drafting ? "stop" : "wand");
   draftBtn.title = drafting ? "Stop the draft" : input.value.trim() ? "Finish my message (draft)" : "Draft my next message";
@@ -1475,6 +1505,13 @@ function take(run: Run, ev: any) {
     Object.assign(live, { phase: "waiting", since: now, note: "Reading the results" });
   }
   if (ev.note) m.notes = [...(m.notes ?? []), ev.note];
+  if (typeof ev.heard === "string") {
+    const u = run.conv.messages[run.conv.messages.indexOf(m) - 1];
+    if (u?.role === "user" && u.voice) {
+      u.heard = applyFixes(u.content, readStep(ev.heard).fixes).made;
+      if (run.conv === conv) render();
+    }
+  }
   if (d.reasoning_content) {
     if (live.phase !== "thinking") {
       live.phase = "thinking";
@@ -1622,7 +1659,6 @@ function submit(text: string) {
 // text is spoken as it is written, and talking over a reply keeps only what was heard of it.
 type VoicePhase = "starting" | "listening" | "thinking" | "speaking" | "muted" | "error";
 interface VoiceReply { m: Message; sent: number; spoken: number; audible: boolean }
-interface Spark { x: number; y: number; vx: number; vy: number; age: number; life: number; size: number }
 interface VoiceMode {
   client: VoiceClient; c: Conversation; ready?: VoiceReady; muted: boolean; partial: string; error?: string;
   reply?: VoiceReply;                               // being spoken, or about to be
@@ -1631,7 +1667,7 @@ interface VoiceMode {
   now: { voice?: string; speed?: number };          // what the service speaks with: its ready's, then what it was asked
   asked?: VoiceAsk; pushed?: string;                // the last hello or config; the last config (a refused one is not sent again as is)
   defaults: { stt?: string; tts?: string; voices: Record<string, string> };   // what it runs when not told (voices: by voice model)
-  level: number; frame: number; t: number; sparks: Spark[];
+  level: number; frame: number;                    // the pill's dots: the level they show, their animation frame
 }
 let voice: VoiceMode | null = null;
 // The service's models and voices as its last ready listed them, so Settings can offer them while voice mode is closed.
@@ -1696,7 +1732,7 @@ async function openVoice() {
     },
     closed: () => { if (mine()) { voice!.error ??= "The voice service stopped"; renderVoice(); } },
   });
-  voice = { client, c: conv, muted: false, partial: "", level: 0, frame: 0, t: 0, sparks: [], now: {}, defaults: { voices: {} }, asked: voiceWant(null) };
+  voice = { client, c: conv, muted: false, partial: "", level: 0, frame: 0, now: {}, defaults: { voices: {} }, asked: voiceWant(null) };
   renderVoice();
   if (status.state === "offline") void start().then(refreshStatus);   // the first question finds the model loaded
   // http://<this machine's address> is not a secure page, and there the browser has no microphone to give at all
@@ -1752,7 +1788,7 @@ async function voiceTurn(v: VoiceMode, text: string) {
   const upto = [...c.messages];
   branch(c, c.messages.length, m);
   v.reply = { m, sent: 0, spoken: 0, audible: false };
-  await startRun(c, m, () => request(c, upto, { effort, route: true }));
+  await startRun(c, m, () => request(c, upto, { effort, route: true, ...(effort === "off" ? { extra: { kiln_voice: true } } : {}) }));
 }
 
 // The chat as the next voice turn will send it, read by kiln while the user starts talking: the voice prompt replaces
@@ -1772,7 +1808,8 @@ async function warmVoice(v: VoiceMode) {
 
 // What of a reply is spoken: each round's text and the text being written (thinking never is). It grows only at its
 // end, so what was sent stays a prefix and the service's chunk offsets point into it.
-const sayable = (m: Message) => [...(m.rounds ?? []).map((r) => r.content), m.content].filter(Boolean).join("\n\n");
+const sayable = (m: Message) => [...(m.rounds ?? []).map((r) => r.content), m.content].map((t, i) => (i ? t : stepOf(t).rest))
+  .filter(Boolean).join("\n\n");
 function feedVoice(m: Message) {
   const r = voice?.reply;
   if (r?.m !== m || cuts.has(m)) return;
@@ -1812,7 +1849,8 @@ function keepHeard(c: Conversation, m: Message, to: number | null) {
     return;
   }
   const before = sayable({ ...m, content: "" }), skip = before ? [...before].length + 2 : 0;
-  m.content = [...m.content].slice(0, Math.max(0, to - skip)).join("").trimEnd();
+  const { step, rest } = m.rounds?.length ? { step: "", rest: m.content } : stepOf(m.content);
+  m.content = step + [...rest].slice(0, Math.max(0, to - skip)).join("").trimEnd();
   m.interrupted = true;
   if (m.id) tokens.delete(m.id);                    // its token odds no longer match its text
 }
@@ -1846,101 +1884,56 @@ function voiceStatus(v: VoiceMode, phase: VoicePhase) {
 }
 
 function renderVoice() {
-  const v = voice, dock = $("voice-dock");
+  const v = voice, pill = $("voice-pill"), pick = $("voice-pick");
   $("composer").classList.toggle("voicing", !!v);
-  dock.hidden = !v;
-  if (!v) return;
+  pill.hidden = pick.hidden = !v;
+  $("voice").hidden = !!v;
+  renderComposer();
+  if (!v) return void delete $("composer").dataset.phase;
   const mute = $("voice-mute");
   mute.innerHTML = icon(v.muted ? "micOff" : "mic");
   mute.title = v.muted ? "Unmute" : "Mute";
   mute.setAttribute("aria-label", mute.title);
   mute.setAttribute("aria-pressed", String(v.muted));
   mute.classList.toggle("on", v.muted);
-  const cur = currentVoice(), pick = $("voice-pick");
-  pick.innerHTML = `<span class="voice-pick-name">${escapeHtml(voiceInfo(cur.tts, cur.id)?.label ?? cur.id ?? "Voice")}</span>${icon("chevron")}`;
-  pick.title = `Voice: ${voiceInfo(cur.tts, cur.id)?.label ?? cur.id ?? "the service's"}${cur.tts ? ` (${voiceCatalog.tts?.find((m) => m.name === cur.tts)?.label ?? cur.tts})` : ""}`;
-  $("voice-meta").textContent = [v.latency !== undefined ? `${(v.latency / 1000).toFixed(2)} s` : "",
-    v.ready ? (["stt", "turn", "tts"] as Part[]).map((k) => modelLabel(k, v.ready!.stack[k])).filter(Boolean).join(" · ") : ""].filter(Boolean).join(" · ");
-  $("voice-meta").title = v.ready ? Object.entries(v.ready.stack).map(([k, n]) => `${k}: ${n}`).join("\n") + (v.latency !== undefined ? "\nlast reply: from the end of your speech to its first sound" : "") : "";
+  const cur = currentVoice(), name = voiceInfo(cur.tts, cur.id)?.label ?? cur.id ?? "Voice", model = modelLabel("tts", cur.tts);
+  pick.innerHTML = `<span class="voice-pick-name">${escapeHtml(name)}</span>${model ? `<span class="voice-pick-model">${escapeHtml(model)}</span>` : ""}${icon("chevron")}`;
+  pick.title = `Voice: ${name}${model ? ` (${model})` : ""}`;
+  // the stack heads the voice list; its names, kind by kind, are the meta line's title
+  $("voice-meta").textContent = v.ready ? (["stt", "turn", "tts"] as Part[]).map((k) => modelLabel(k, v.ready!.stack[k])).filter(Boolean).join(" · ") : "";
+  $("voice-meta").title = v.ready ? Object.entries(v.ready.stack).map(([k, n]) => `${k}: ${n}`).join("\n") : "";
   paintVoice();
-  v.frame ||= requestAnimationFrame(drawOrb);
+  v.frame ||= requestAnimationFrame(animateVoice);
 }
 function paintVoice() {
-  const v = voice!, phase = voicePhase(v), text = voiceStatus(v, phase), dock = $("voice-dock");
-  dock.dataset.phase = phase;
+  const v = voice!, phase = voicePhase(v), text = voiceStatus(v, phase), pill = $("voice-pill"), dots = $("voice-dots");
+  pill.dataset.phase = $("composer").dataset.phase = phase;
   if ($("voice-status").textContent !== text) $("voice-status").textContent = text;
-  $("voice-orb-btn").title = phase === "speaking" || phase === "thinking" ? "Interrupt (Esc)" : "";
+  const latency = v.latency !== undefined ? `\nLast reply: ${(v.latency / 1000).toFixed(2)} s from the end of your speech to its first sound` : "";
+  pill.title = text + latency;
+  dots.title = phase === "speaking" || phase === "thinking" ? "Talk over the reply (Esc)" : "";
+  dots.setAttribute("aria-label", phase === "speaking" || phase === "thinking" ? `${text}: talk over the reply` : text);
 }
 
-// The orb, an ember in the chat's own colors: it breathes with the user's voice while listening, swirls hotter with
-// its own while speaking and throws sparks, shimmers slowly while thinking and pulses while it starts. Grey when muted.
-const ORB: Record<VoicePhase, string[]> = {
-  starting: ["#ffe2bd", "#f0a462", "#c95a26", "#5c1d0c"], listening: ["#fff4dc", "#ffc27a", "#f07a3c", "#7a2410"],
-  thinking: ["#ffe9c9", "#f0a462", "#d0612b", "#5c1d0c"], speaking: ["#fffaf0", "#ffcf86", "#ff8a45", "#8a2a12"],
-  muted: ["#cfc8c2", "#8f8680", "#5c5450", "#2b2624"], error: ["#ffd9d6", "#f2706b", "#a83a36", "#3d1514"],
-};
-const alpha = (hex: string, a: number) => `rgb(${[1, 3, 5].map((i) => parseInt(hex.slice(i, i + 2), 16)).join(" ")} / ${Math.max(0, Math.min(1, a)).toFixed(3)})`;
-function drawOrb(now: number) {
+// The pill's dots: bars the voice being heard stretches, the user's while listening and the reply's while speaking, each
+// a little apart so they read as a voice and not a meter; a wave of light runs along them while thinking and they
+// pulse while voice mode starts. Still dots when muted, with reduced motion, or on an error.
+const DOT_WEIGHT = [0.45, 0.8, 1, 0.8, 0.45];
+function animateVoice(now: number) {
   const v = voice;
   if (!v) return;
-  v.frame = requestAnimationFrame(drawOrb);
-  const cv = $<HTMLCanvasElement>("voice-orb"), size = cv.clientWidth, dpr = devicePixelRatio || 1;
-  if (!size) return;
-  if (cv.width !== Math.round(size * dpr)) cv.width = cv.height = Math.round(size * dpr);
+  v.frame = requestAnimationFrame(animateVoice);
   paintVoice();
-  const g = cv.getContext("2d")!, phase = voicePhase(v), still = reducedMotion.matches, t = now / 1000, dt = Math.min(0.05, v.t ? t - v.t : 0);
-  v.t = t;
-  const lv = v.client.levels(), raw = phase === "speaking" ? lv.out : phase === "listening" ? lv.mic : 0;
-  const target = Math.min(1, raw * 6);
-  v.level += (target - v.level) * (target > v.level ? 0.4 : 0.07);   // quick to flare, slow to fade: a glow, not a meter
-  const e = v.level, pulse = phase === "starting" ? 0.5 + 0.5 * Math.sin(t * 2.6) : phase === "thinking" ? 0.5 + 0.5 * Math.sin(t * 1.4) : 0;
-  const cx = size / 2, cy = size / 2, R = size * 0.22 * (still ? 1 : 1 + 0.2 * e + 0.05 * pulse), [hot, warm, body, edge] = ORB[phase];
-  g.setTransform(dpr, 0, 0, dpr, 0, 0);
-  g.clearRect(0, 0, size, size);
-  const halo = g.createRadialGradient(cx, cy, R * 0.7, cx, cy, size / 2);   // gone by the canvas's edge, so it never shows a square
-  halo.addColorStop(0, alpha(body, 0.3 + 0.45 * e + 0.15 * pulse));
-  halo.addColorStop(1, alpha(body, 0));
-  g.fillStyle = halo;
-  g.fillRect(0, 0, size, size);
-  const amp = still ? 0 : phase === "speaking" ? 0.05 + 0.13 * e : phase === "listening" ? 0.025 + 0.09 * e : 0.03;
-  const speed = phase === "speaking" ? 1.7 + e : phase === "thinking" ? 0.55 : 0.85;
-  g.beginPath();
-  for (let i = 0; i <= 120; i++) {
-    const a = (i / 120) * Math.PI * 2, k = 1 + amp * (0.55 * Math.sin(3 * a + t * speed * 1.3) + 0.3 * Math.sin(5 * a - t * speed * 1.9 + 1.7) + 0.15 * Math.sin(8 * a + t * speed * 2.7 + 0.4));
-    g[i ? "lineTo" : "moveTo"](cx + Math.cos(a) * R * k, cy + Math.sin(a) * R * k);
-  }
-  g.closePath();
-  const spin = still ? 0 : t * speed, hx = cx + Math.cos(spin) * R * 0.3, hy = cy + Math.sin(spin * 0.8) * R * 0.24 - R * 0.12;
-  const fill = g.createRadialGradient(hx, hy, R * 0.04, cx, cy, R * 1.12);
-  fill.addColorStop(0, hot);
-  fill.addColorStop(0.32 - 0.1 * e, warm);
-  fill.addColorStop(0.72, body);
-  fill.addColorStop(1, edge);
-  g.fillStyle = fill;
-  g.fill();
-  if (phase === "thinking" && !still) {             // a bright edge going round
-    const a = t * 1.6;
-    g.lineWidth = 2;
-    g.lineCap = "round";
-    g.strokeStyle = alpha(hot, 0.7);
-    g.beginPath();
-    g.arc(cx, cy, R * 1.02, a, a + 1.1);
-    g.stroke();
-  }
-  if (still) return;
-  if ((phase === "speaking" || phase === "listening") && Math.random() < e * 0.6 && v.sparks.length < 24) {
-    const a = -Math.PI / 2 + (Math.random() - 0.5) * 2.2;
-    v.sparks.push({ x: cx + Math.cos(a) * R * 0.9, y: cy + Math.sin(a) * R * 0.9, vx: (Math.random() - 0.5) * 14, vy: -(22 + Math.random() * 30 + 40 * e),
-      age: 0, life: 0.7 + Math.random() * 0.7, size: 0.8 + Math.random() * 1.3 });
-  }
-  v.sparks = v.sparks.filter((p) => (p.age += dt) < p.life);
-  for (const p of v.sparks) {
-    p.x += p.vx * dt;
-    p.y += p.vy * dt;
-    g.fillStyle = alpha(p.age < p.life * 0.4 ? hot : warm, 1 - p.age / p.life);
-    g.beginPath();
-    g.arc(p.x, p.y, p.size, 0, Math.PI * 2);
-    g.fill();
+  const phase = voicePhase(v), still = reducedMotion.matches || phase === "muted" || phase === "error", t = now / 1000;
+  const lv = v.client.levels(), target = still ? 0 : Math.min(1, (phase === "speaking" ? lv.out : phase === "listening" ? lv.mic : 0) * 6);
+  v.level += (target - v.level) * (target > v.level ? 0.5 : 0.12);    // quick to rise, slower to fall: it follows syllables
+  const dots = $("voice-dots").children as HTMLCollectionOf<HTMLElement>;
+  for (let i = 0; i < dots.length; i++) {
+    const wobble = 0.75 + 0.25 * Math.sin(t * 9 + i * 1.7), w = DOT_WEIGHT[i] ?? 1;
+    const h = still ? 0 : phase === "starting" ? 0.12 * (0.5 + 0.5 * Math.sin(t * 3 - i * 0.6)) : v.level * w * wobble;
+    const o = still || phase !== "thinking" ? 1 : 0.35 + 0.65 * Math.max(0, Math.sin(t * 3.2 - i * 0.9));
+    dots[i].style.setProperty("--h", h.toFixed(3));
+    dots[i].style.setProperty("--o", o.toFixed(3));
   }
 }
 
@@ -1995,7 +1988,7 @@ function pickVoice(tts: string, x: VoiceInfo) {
   toast(`Voice: ${x.label}`, () => { setVoice(before); saveSettings(); });
 }
 
-// The dock's voice picker, as the message box's model picker: the voice's name, opening the voice models' voices by
+// The voice picker beside the pill, as the message box's model picker: the voice's name, opening the voice models' voices by
 // language and gender, each with a play button for its sample. A model that is not installed shows how to set it up.
 let voicePop = false;
 function setVoicePop(open: boolean, refocus = false) {
@@ -2044,7 +2037,7 @@ function renderVoicePop() {
     }
   }
   if (!rows.length) rows.push(h("div", "voice-group", "The voice service has not listed its voices yet"));
-  pop.replaceChildren(...rows);
+  $("voice-list").replaceChildren(...rows);
 }
 
 // Picked with the clip, dropped anywhere on the page or pasted: shown as chips in the message box until it is sent,
@@ -2122,7 +2115,7 @@ async function filesReady(msgs: Message[]) {
 // A user message as kiln gets it: its files (pictures as images, PDFs as files, videos as videos, texts as fenced
 // blocks), then the text typed.
 function userContent(m: Message): string | object[] {
-  const said = m.note ? `[${m.note}]\n\n${m.content}` : m.content;
+  const said = noted(m.note, m.content);
   if (!m.files?.length) return said;
   const parts: object[] = m.files.map((a) => {
     const body = bodies.get(a.id) ?? "";
@@ -2131,7 +2124,7 @@ function userContent(m: Message): string | object[] {
     if (a.kind === "video") return { type: "video_url", video_url: { url: body } };
     return { type: "text", text: `${textBlock(a.name, body)}\n\n` };
   });
-  if (m.note) parts.unshift({ type: "text", text: `[${m.note}]\n\n` });
+  if (m.note) parts.unshift({ type: "text", text: noted(m.note, "") });
   if (m.content) parts.push({ type: "text", text: m.content });
   return parts;
 }
@@ -2184,6 +2177,7 @@ function importedMessages(list: unknown, depth = 0): Message[] | null {
     if (rest.calls !== undefined && !(Array.isArray(rest.calls) && rest.calls.every(isCall))) return null;
     if (typeof rest.voiceMs !== "number") delete rest.voiceMs;
     if (rest.note !== undefined && typeof rest.note !== "string") return null;
+    if (rest.heard !== undefined && !(Array.isArray(rest.heard) && rest.heard.every((f: any) => typeof f?.heard === "string" && typeof f.said === "string"))) return null;
     if (versions !== undefined) {
       const others = Array.isArray(versions?.others) ? versions.others.map((v: unknown) => importedMessages(v, depth + 1)) : null;
       if (!others?.length || others.some((v: Message[] | null) => !v) || !Number.isInteger(versions.shown) || versions.shown < 0 || versions.shown > others.length) return null;
@@ -2346,7 +2340,7 @@ thread.addEventListener("click", (e) => {
   }
   if (!act) return;
   const i = Number(act.closest<HTMLElement>("article")?.dataset.i), m = conv.messages[i];
-  if (act.dataset.act === "copy") return void copy(m.content, act);
+  if (act.dataset.act === "copy") return void copy(m.role === "user" ? heardText(m) : stepOf(m.content).rest, act);
   if (act.dataset.act === "seed") return void useSeed(Number(act.dataset.seed));
   if (act.dataset.act === "tokens" && m.id) {
     if (!tokenView.delete(m.id)) tokenView.add(m.id);
@@ -2407,6 +2401,7 @@ async function decide(btn: HTMLElement) {
 scroller.addEventListener("scroll", () => { if (!$("tokpop").hidden) closeTokPop(); }, { passive: true });
 $("composer").addEventListener("submit", (e) => {
   e.preventDefault();
+  if (voice) return closeVoice();
   const r = running();
   if (r) stopRun(r);
   else submit(input.value);
@@ -2657,7 +2652,7 @@ function buildControls() {
   });
   for (const end of ["pointerup", "pointercancel"]) energy.addEventListener(end, () => energy.classList.remove("dragging"));
   energy.addEventListener("keydown", (e) => {
-    const at = EFFORTS.indexOf(conv.effort), step = ({ ArrowLeft: -1, ArrowDown: -1, ArrowRight: 1, ArrowUp: 1 } as Record<string, number>)[e.key];
+    const at = EFFORTS.indexOf(barEffort()), step = ({ ArrowLeft: -1, ArrowDown: -1, ArrowRight: 1, ArrowUp: 1 } as Record<string, number>)[e.key];
     if (step) setEffort(at + step);
     else if (e.key === "Home" || e.key === "End") setEffort(e.key === "Home" ? 0 : 3);
     else return;
@@ -2675,9 +2670,17 @@ function buildControls() {
   });
 }
 
+// The thinking bar sets what the next reply thinks with: in voice mode, voice mode's own setting (Settings, Voice mode),
+// which its replies use whatever the chat's is.
+const barEffort = (): Effort => (voice ? voiceEffort() : conv.effort);
 function setEffort(i: number) {
   const e = EFFORTS[Math.min(3, Math.max(0, i))];
-  if (e === conv.effort) return;
+  if (e === barEffort()) return;
+  if (voice) {
+    setVoice({ effort: e === "off" ? undefined : e });
+    saveSettings();
+    return renderComposer();
+  }
   conv.effort = e;
   setPref("effort", e);
   renderComposer();
@@ -2985,12 +2988,12 @@ function buildTools() {
 const shortName = (id: string) => modelName(id).replace(/^Qwen3\.8-/, "");
 function renderControls() {
   renderTools();
-  const at = EFFORTS.indexOf(conv.effort), energy = $("energy");
+  const effort = barEffort(), at = EFFORTS.indexOf(effort), energy = $("energy");
   energy.dataset.heat = HEAT[at];
   energy.style.setProperty("--v", String(at));
   energy.setAttribute("aria-valuenow", String(at));
-  energy.setAttribute("aria-valuetext", LEVEL[conv.effort][0]);
-  energy.title = `Thinking: ${LEVEL[conv.effort][0]}`;
+  energy.setAttribute("aria-valuetext", LEVEL[effort][0]);
+  energy.title = `${voice ? "Thinking in voice mode" : "Thinking"}: ${LEVEL[effort][0]}`;
   energy.querySelectorAll(".energy-dot").forEach((d, k) => d.classList.toggle("lit", at > 0 && k <= at));   // the stops inside the fill
   $("energy-stops").dataset.heat = HEAT[at];
   $("energy-stops").querySelectorAll("button").forEach((b, k) => b.classList.toggle("on", k === at));
@@ -3504,7 +3507,7 @@ function buildSettings() {
     const b = h("button", "", LEVEL[e][0]);
     b.type = "button";
     b.setAttribute("role", "radio");
-    b.onclick = () => { setVoice({ effort: e === "off" ? undefined : e }); saveSettings(); };
+    b.onclick = () => { setVoice({ effort: e === "off" ? undefined : e }); saveSettings(); renderComposer(); };   // the bar shows it in voice mode
     thinkModes.append(b);
   }
   knobs.push(() => {
@@ -3629,15 +3632,13 @@ $("attach").innerHTML = icon("clip");
 $("draft").addEventListener("click", () => void draft());
 $("voice").innerHTML = icon("wave");
 $("voice").addEventListener("click", () => void openVoice());
-$("voice-end").innerHTML = icon("x");
-$("voice-end").addEventListener("click", closeVoice);
 $("voice-mute").addEventListener("click", () => {
   if (!voice) return;
   voice.muted = !voice.muted;
   voice.client.mute(voice.muted);
   renderVoice();
 });
-$("voice-orb-btn").addEventListener("click", () => { if (voice?.reply || voice?.client.playing) cutVoice(true); });
+$("voice-dots").addEventListener("click", () => { if (voice?.reply || voice?.client.playing) cutVoice(true); });
 $("voice-pick").addEventListener("click", () => setVoicePop(!voicePop));
 buildControls();
 buildTools();

@@ -183,11 +183,26 @@ deleted when a kiln page next loads. Development: `cd web && bun run dev` (hot r
 
 ## Voice mode
 
-The wave beside Send talks with the chat's model: the message box becomes a dock (an ember that breathes with your voice
-and burns hotter while kiln speaks, mute, end, the voice), your words show as you say them, a pause ends your turn,
-the reply is spoken as it is written, and talking over it stops it. Both sides land in the chat as ordinary messages
-(a question said aloud is marked so), and a reply talked over keeps only what was heard of it, which is also what the
-model is told it said. It is a cascade, as Claude's voice mode is: speech-to-text, the model kiln already runs (so the
+The wave beside Send talks with the chat's model. The message box stays (typing still works): its row gains a pill
+whose dots move with your voice and then kiln's (its mic mutes), the voice beside it opens the voices, and Send becomes
+■, which ends voice mode; the thinking bar sets voice mode's own thinking (Off by default). Your words show in the chat
+as you say them, grey; a pause ends your turn, and the question turns its own color once the reply's first step is in,
+with the words it fixed underlined (what was heard on hover). The reply is spoken as it is written, except code blocks
+and tables, which are shown and not read, and talking over it stops it. Both sides are ordinary messages (a question
+said aloud is marked so), and a reply talked over keeps only what was heard of it, which is also what the model is told
+it said.
+
+The model is told about voice mode in a note on the first question said aloud (again when the note changes; another on
+the first typed message after it), never in the system prompt, so voice mode does not make a chat read its history
+again. A voice reply opens with a first step at temperature 0, before any of its words go out: what speech recognition
+misheard, as swaps of the transcript's own words (`<fixes>quinn three point eight twenty seven B => Qwen3.8-27B</fixes>`;
+asked to repeat the whole message instead, Flash-Next dropped sentences), each made only if it sounds like what was heard
+(`web/heard.ts`: "tail" => "list" is a meaning, not a mishearing), then with tools whether answering needs one
+(`<tool>yes</tool>`). The reply goes on from the step out of kiln's cache. A yes, or a user who asks for a search, gets a
+tool call held to the tools' grammar (~0.8 s on Flash-Next), after a spoken line the page writes ("Let me look that
+up."): a model with thinking off, told its reply is spoken, says "I'm searching for that now" and ends its turn often
+enough, and then copies that turn. A reply that announces a tool it did not call is made to call one. Every one of these
+texts is in Settings, with each tool's description as kiln is sent it. It is a cascade, as Claude's voice mode is: speech-to-text, the model kiln already runs (so the
 reasoning costs no memory), text-to-speech, all on the CPU (no VRAM) in `voice/`, a Python service the web server
 starts with the first voice session and stops 60 s after the last (`KILN_VOICE_IDLE_MS`): closed, voice mode costs
 nothing. Open, it holds ~0.5 GB of RAM and 4 threads (`KILN_VOICE_THREADS`): at all 16 it took Flash-Next's decode

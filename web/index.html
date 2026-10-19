@@ -38,21 +38,13 @@
         </header>
         <div id="scroller"><div id="thread" class="thread"></div></div>
         <form id="composer">
-          <!-- voice mode: the message box gives way to the orb (a click on it talks over the reply), mute and end -->
-          <div id="voice-dock" class="voice-dock" hidden>
-            <button id="voice-mute" class="voice-round" type="button"></button>
-            <button id="voice-orb-btn" class="voice-orb" type="button" aria-label="Interrupt"><canvas id="voice-orb"></canvas></button>
-            <button id="voice-end" class="voice-round end" type="button" title="End voice mode (Esc)" aria-label="End voice mode"></button>
-            <div class="voice-info"><span id="voice-status" class="voice-status" role="status" aria-live="polite"></span><span id="voice-meta" class="voice-meta"></span></div>
-            <button id="voice-pick" class="model-btn voice-pick" type="button" aria-haspopup="listbox" aria-expanded="false" aria-controls="voice-pop"></button>
-            <div id="voice-pop" class="model-pop voice-pop" role="listbox" aria-label="Voice" hidden></div>
-          </div>
           <div class="composer-box">
             <button id="to-latest" class="act to-latest" type="button" title="Jump to the latest" aria-label="Jump to the latest" hidden></button>
             <div id="attachments" class="attachments" hidden></div>
             <textarea id="input" rows="1" placeholder="Message kiln" autofocus></textarea>
             <div id="model-pop" class="model-pop" role="listbox" aria-label="Model" hidden></div>
             <div id="tools-pop" class="tools-pop" role="dialog" aria-label="Tools in this chat" hidden></div>
+            <div id="voice-pop" class="model-pop voice-pop" hidden><div id="voice-meta" class="voice-meta"></div><div id="voice-list" role="listbox" aria-label="Voice"></div></div>
             <div class="composer-row">
               <button id="attach" class="act attach" type="button" title="Attach text files or pictures (or drop or paste them)" aria-label="Attach files"></button>
               <input id="attach-file" type="file" multiple hidden />
@@ -66,10 +58,17 @@
               <button id="power" class="act power" type="button"></button>
               <button id="draft" class="draft" type="button" hidden></button>
               <button id="voice" class="voice" type="button" title="Voice mode" aria-label="Voice mode"></button>
+              <!-- voice mode, as Grok has it: the message box stays and the chat is written above it as it is said; the
+                   pill's dots move with the voice heard (yours, then the reply's), a click on them talks over the reply -->
+              <div id="voice-pill" class="voice-pill" hidden>
+                <button id="voice-dots" class="voice-dots" type="button"><i></i><i></i><i></i><i></i><i></i></button>
+                <button id="voice-mute" class="voice-mic" type="button"></button>
+              </div>
+              <button id="voice-pick" class="model-btn voice-pick" type="button" aria-haspopup="listbox" aria-expanded="false" aria-controls="voice-pop" hidden></button>
               <button id="send" class="send" type="submit" aria-label="Send"></button>
             </div>
           </div>
-          <p class="hint">Enter to send · Shift+Enter for a new line · Esc stops the reply</p>
+          <p class="hint"><span class="hint-text">Enter to send · Shift+Enter for a new line · Esc stops the reply</span><span class="voice-hint-line"><span id="voice-status" role="status" aria-live="polite"></span><span class="voice-keys"> · Esc talks over the reply · ■ ends voice mode</span></span></p>
         </form>
         <div id="toast" class="toast" role="status" aria-live="polite" hidden></div>
       </main>

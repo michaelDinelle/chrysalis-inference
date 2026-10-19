@@ -46,6 +46,7 @@ const TOOL_ASKS: Record<string, { name: string; args: string }> = {
 };
 let lastStream: any = null, probes = 0, callIds = 0, kilnStopped = 0;  // probes: requests a sandboxed page got through to a server
 const streams: any[] = [];                           // every streamed request kiln got
+const steps: any[] = [];                             // every voice reply's first step kiln was asked for
 const fake = Bun.serve({
   hostname: "127.0.0.1",
   port: 0,
@@ -55,6 +56,13 @@ const fake = Bun.serve({
     if (path === "/kiln/stats") return Response.json({ model: "qwen3.8-27b", context: 262144, kv_tokens: 276000, cache: { free_kv_tokens: 270000 } });
     if (path !== "/v1/chat/completions") return new Response("not found", { status: 404 });
     const body = await req.json();
+    const prefix = body.continue_final_message ? body.messages.at(-1) : undefined;
+    if (!body.stream && prefix?.content === "<fixes>") {
+      steps.push(body);
+      const u = body.messages.findLast((m: any) => m.role === "user"), heard = String(u.content).replace(/^\[[^\]]*\]\n\n/, "");
+      const fixes = heard.includes("pie game") ? "pie game => Pygame" : "";
+      return Response.json({ choices: [{ message: { content: body.stop?.[0] === "</tool>" ? `${fixes}</fixes>\n<tool>no` : fixes }, finish_reason: "stop" }] });
+    }
     if (!body.stream) return Response.json({ choices: [{ message: { content: "A title" } }] });
     lastStream = body;
     streams.push(body);
@@ -62,15 +70,17 @@ const fake = Bun.serve({
     const at = body.messages.findLastIndex((m: any) => m.role === "user"), last = body.messages[at];
     // what the user said, without the app's note to the model before it (voice mode's)
     const said = (typeof last.content === "string" ? last.content : last.content.map((p: any) => p.text ?? "").join("")).replace(/^\[[^\]]*\]\n\n/, "");
-    const round = body.messages.slice(at).filter((m: any) => m.role === "assistant").length, ask = TOOL_ASKS[said];
+    const round = body.messages.slice(at).filter((m: any) => m.role === "assistant" && m !== prefix).length, ask = TOOL_ASKS[said];
     const call = ask && body.tools && round === 0 ? ask : undefined;
     const text = call ? "Let me check." : ask ? `The tool said: ${body.messages.at(-1).content}` : said.startsWith("slow")
       ? Array.from({ length: 40 }, (_, k) => `w${k} `).join("") : Object.entries(REPLIES).find(([k]) => said.includes(k))?.[1] ?? `You said: ${said}`;
     const step = said.startsWith("slow") ? 4 : 9, gap = said.startsWith("slow") ? 60 : 5;
-    let i = 0;
+    let i = 0, restated = !prefix;
     return new Response(new ReadableStream({
       async pull(ctl) {
         await Bun.sleep(gap);
+        // a continued reply restates itself first, as kiln does
+        if (!restated) { restated = true; return ctl.enqueue(enc.encode(`data: ${JSON.stringify({ choices: [{ delta: { kiln_prefix: { content: prefix.content } } }] })}\n\n`)); }
         if (i < text.length) { ctl.enqueue(enc.encode(`data: ${JSON.stringify({ choices: [{ delta: { content: text.slice(i, i + step) } }] })}\n\n`)); i += step; return; }
         if (call) {
           ctl.enqueue(enc.encode(`data: ${JSON.stringify({ choices: [{ delta: { tool_calls: [{ index: 0, id: `call_${++callIds}`, type: "function", function: { name: call.name, arguments: call.args } }] } }] })}\n\n`));
@@ -455,11 +465,9 @@ test("export and import keep versions and tool rounds, and the imported chat res
 
 // Voice mode. Each page asks the fake speech service for a voice whose script it plays (fake-voice.ts); its log has
 // what the page sent it, session by session.
-const VOICE_NOTE = "The user is talking to you by voice now. Their words reach you through speech recognition, which mishears some, mostly " +
-  "names, numbers and technical terms: work out what they most likely meant from how it sounds and from the conversation, and if an important " +
-  "name or number is still unclear, ask about it in a few words. Your reply is spoken aloud by text-to-speech, so write plain spoken sentences: " +
-  "no markdown, lists, code or symbols. Keep it brief, usually one to three sentences, unless they ask for more. When a question needs counting, " +
-  "logic or several steps, work through it out loud in a few short spoken steps first, then give the answer.";
+// the voice note as Settings shows it; what kiln is sent of a request (a continued reply's start left out)
+const noteShown = async (page: Page) => (await openSettings(page), page.$eval("#voice-prompt", (e) => (e as HTMLTextAreaElement).value));
+const sent = (b: any) => b.messages.filter((m: any, i: number, all: any[]) => !(b.continue_final_message && i === all.length - 1));
 const voiceLog = (): any[] => { try { return readFileSync(VOICE_LOG, "utf8").trim().split("\n").filter(Boolean).map((l) => JSON.parse(l)); } catch { return []; } };
 const voicePages: Page[] = [];
 async function voicePage(script: string, o: { system?: string; first?: (page: Page) => Promise<void> } = {}) {
@@ -482,24 +490,35 @@ const replyText = (page: Page, i: number) => page.$eval(`#thread > article[data-
 test("voice mode: what is said shows as it is said, becomes the question, and the reply is spoken as it is written", async () => {
   const n0 = streams.length;
   const { page, session } = await voicePage("plain");
+  // the message box stays (it can still take typing), with the pill in its row and Send become "End voice mode"
+  expect(await page.$eval(".composer-box", (el) => el.getBoundingClientRect().height > 0 && !!(el as HTMLElement).offsetParent)).toBe(true);
+  expect(await page.$eval("#input", (el) => (el as HTMLTextAreaElement).offsetHeight > 0)).toBe(true);
+  expect(await page.$eval("#send", (el) => el.getAttribute("aria-label"))).toBe("End voice mode");
+  expect(await page.$eval("#voice-pill", (el) => (el as HTMLElement).title)).toMatch(/^Listening/);
   await page.waitForFunction(() => document.querySelector(".msg.ghost .bubble")?.textContent === "hello", { timeout: 10_000 });
   await page.waitForFunction(() => document.querySelector('#thread > article[data-i="0"] .bubble')?.textContent === "hello there", { timeout: 10_000 });
   expect(await page.$(".msg.ghost")).toBeNull();
   expect(await page.$('#thread > article[data-i="0"] .said')).not.toBeNull();
   await page.waitForFunction(() => /^voice \d\.\d\d s/.test(document.querySelector('#thread > article[data-i="1"] .stats')?.textContent ?? ""), { timeout: 10_000 });
-  expect(lastStream.messages).toEqual([{ role: "user", content: `[${VOICE_NOTE}]\n\nhello there` }]);   // the note, before what was said
+  const note = await noteShown(page);
+  expect(sent(lastStream)).toEqual([{ role: "user", content: `[${note}]\n\nhello there` }]);   // the note, before what was said
+  // the reply went on from its first step, which kiln wrote at temperature 0 from the reply's own prompt
+  expect(lastStream.continue_final_message).toBe(true);
+  expect(lastStream.messages.at(-1)).toEqual({ role: "assistant", content: "<fixes></fixes>" });
+  const step = steps.findLast((b) => JSON.stringify(sent(b)) === JSON.stringify(sent(lastStream)));
+  expect([step?.temperature, step?.stop, step?.stream]).toEqual([0, ["</fixes>"], false]);
   expect(lastStream.model).toBe("qwen3.8-27b-fast");
   expect(lastStream.reasoning_effort).toBeUndefined();
   // opening voice mode had kiln read the chat first (a new one's question stands in), so the first turn is an append
   const mine = streams.slice(n0), warm = mine.findIndex((b) => b.max_tokens === 1);
   expect(mine[warm]?.messages).toEqual([{ role: "user", content: "Hi" }]);
   expect(mine[warm]?.model).toBe("qwen3.8-27b-fast");
-  expect(warm).toBeLessThan(mine.findIndex((b) => b.messages.at(-1)?.content.endsWith("hello there")));
+  expect(warm).toBeLessThan(mine.findIndex((b) => sent(b).at(-1)?.content.endsWith("hello there")));
   expect(await replyText(page, 1)).toBe("You said: hello there");
   expect(await page.$eval('#thread > article[data-i="0"] .msg-note summary', (e) => e.textContent)).toBe("Voice mode note");
   expect(await page.$eval('#thread > article[data-i="0"] .msg-note-text', (e) => e.checkVisibility())).toBe(false);   // closed until asked
   await page.click('#thread > article[data-i="0"] .msg-note summary');
-  expect(await page.$eval('#thread > article[data-i="0"] .msg-note-text', (e) => [e.textContent, e.checkVisibility()])).toEqual([VOICE_NOTE, true]);
+  expect(await page.$eval('#thread > article[data-i="0"] .msg-note-text', (e) => [e.textContent, e.checkVisibility()])).toEqual([note, true]);
   const log = session(), says = log.filter((e) => e.type === "say"), id = says[0].id;
   expect(says.every((e) => e.id === id)).toBe(true);
   expect(says.map((e) => e.text).join("")).toBe("You said: hello there");
@@ -525,7 +544,8 @@ test("voice mode: talking over a reply silences it, stops kiln's request, and th
   expect(chunks.some((c) => chunks.filter((x) => x.to <= c.to).map((x) => x.text).join("").trimEnd() === kept)).toBe(true);
   await page.waitForFunction(() => document.querySelector('#thread > article[data-i="2"] .bubble')?.textContent === "and then", { timeout: 10_000 });
   await page.waitForFunction(() => /voice/.test(document.querySelector('#thread > article[data-i="3"] .stats')?.textContent ?? ""), { timeout: 10_000 });
-  expect(lastStream.messages.filter((m: any) => m.role === "assistant").map((m: any) => m.content)).toEqual([kept]);
+  // the kept reply as kiln is sent it again: its first step, then only what was heard
+  expect(sent(lastStream).filter((m: any) => m.role === "assistant").map((m: any) => m.content)).toEqual([`<fixes></fixes>${kept}`]);
   await page.close();
 }, 30_000);
 
@@ -534,22 +554,23 @@ test("voice mode: a reply talked over before it made a sound is taken out, and t
   await page.waitForFunction(() => document.querySelector('#thread > article[data-i="0"] .bubble')?.textContent === "slow first second part", { timeout: 15_000 });
   await page.waitForFunction(() => /^w0 w1/.test(document.querySelector('#thread > article[data-i="1"] .markdown')?.textContent ?? ""), { timeout: 10_000 });
   expect(await page.$$eval("#thread > article.msg:not(.ghost)", (els) => els.length)).toBe(2);
-  expect(lastStream.messages.filter((m: any) => m.role !== "system")).toEqual([{ role: "user", content: `[${VOICE_NOTE}]\n\nslow first second part` }]);
+  expect(sent(lastStream).filter((m: any) => m.role !== "system")).toEqual([{ role: "user", content: `[${await noteShown(page)}]\n\nslow first second part` }]);
   await page.close();
 }, 30_000);
 
 test("voice mode's note goes before the first question said and again when it changes, the typing note after it, and the system prompt never changes", async () => {
   const n0 = streams.length, CHANGED = "Speak like a pirate.";
   const { page, session } = await voicePage("notes", { system: "Be brief.", first: (p) => send(p, "typed first") });
+  const note = await noteShown(page);
   await page.waitForFunction(() => /^voice /.test(document.querySelector('#thread > article[data-i="5"] .stats')?.textContent ?? ""), { timeout: 15_000 });
   await openSettings(page);
   await page.$eval("#voice-prompt", (el, v) => { (el as HTMLTextAreaElement).value = v; el.dispatchEvent(new Event("input")); }, CHANGED);
   await page.$eval("#knob-voice_speed", (el) => { (el as HTMLInputElement).value = "1.2"; el.dispatchEvent(new Event("change")); });   // the script's next line waits for a config
   await page.waitForFunction(() => /^voice /.test(document.querySelector('#thread > article[data-i="7"] .stats')?.textContent ?? ""), { timeout: 15_000 });
-  await page.click("#voice-end");
+  await page.click("#send");
   await send(page, "typed again");
   const asked = streams.slice(n0).filter((b) => b.max_tokens !== 1);   // not the warm-up when voice mode opened
-  expect(asked.map((b) => b.messages.at(-1).content)).toEqual(["typed first", `[${VOICE_NOTE}]\n\nfirst question`, "second question",
+  expect(asked.map((b) => sent(b).at(-1).content)).toEqual(["typed first", `[${note}]\n\nfirst question`, "second question",
     `[${CHANGED}]\n\nthird question`, "[The user is typing again and reads your replies.]\n\ntyped again"]);
   expect(asked.every((b) => JSON.stringify(b.messages[0]) === JSON.stringify({ role: "system", content: "Be brief." }))).toBe(true);
   expect(session().some((e) => e.type === "config")).toBe(true);
@@ -596,13 +617,13 @@ test("voice picker: the voice models' voices by language and gender; a pick swit
   const { page, session } = await voicePage("pick");
   await page.waitForFunction(() => /^voice /.test(document.querySelector('#thread > article[data-i="1"] .stats')?.textContent ?? ""), { timeout: 10_000 });
   expect(new Set(session().filter((e) => e.ev === "chunk").map((e) => `${e.tts}/${e.voice}`))).toEqual(new Set(["fake-tts/pick"]));
-  expect(await page.$eval("#voice-pick", (el) => el.textContent)).toBe("Pick");
+  expect(await page.$eval("#voice-pick .voice-pick-name", (el) => el.textContent)).toBe("Pick");
   await page.click("#voice-pick");
-  const rows = await page.$$eval("#voice-pop > *", (els) => els.map((e) => [e.className, e.textContent]));
+  const rows = await page.$$eval("#voice-list > *", (els) => els.map((e) => [e.className, e.textContent]));
   expect(rows.filter(([c]) => c.startsWith("voice-model"))).toEqual([["voice-model", "Fake TTS"], ["voice-model", "Other TTS"], ["voice-model missing", "Big TTStools/voice_setup.sh big-tts"]]);
   expect(rows.filter(([c]) => c === "voice-group").map(([, t]) => t)).toEqual(["American English · Female", "British English · Male", "Spanish · Female", "American English · Male"]);
   expect(await page.$$eval("#voice-pop .voice-item", (els) => els.map((e) => (e as HTMLElement).dataset.voice))).toEqual(
-    ["plain", "story", "merge", "silent", "pick", "notes", "echo"].map((v) => `fake-tts/${v}`).concat(["other-tts/ana", "other-tts/bob"]));
+    ["plain", "pie", "story", "merge", "silent", "pick", "notes", "echo"].map((v) => `fake-tts/${v}`).concat(["other-tts/ana", "other-tts/bob"]));
   expect(await page.$$eval('#voice-pop .voice-item[aria-selected="true"]', (els) => els.map((e) => (e as HTMLElement).dataset.voice))).toEqual(["fake-tts/pick"]);
   await page.click('#voice-pop [data-voice="other-tts/bob"]');
   const configs = () => session().filter((e) => e.type === "config").map(({ stack, voice, speed }) => ({ stack, voice, speed }));
@@ -613,12 +634,12 @@ test("voice picker: the voice models' voices by language and gender; a pick swit
   expect(after.length).toBeGreaterThan(0);
   expect(new Set(after.map((e) => `${e.tts}/${e.voice}`))).toEqual(new Set(["other-tts/bob"]));
   // one value, two views: the dock's picker and Settings show it, and Settings changing it is the dock's change too
-  expect(await page.$eval("#voice-pick", (el) => el.textContent)).toBe("Bob");
+  expect(await page.$eval("#voice-pick .voice-pick-name", (el) => el.textContent)).toBe("Bob");
   expect(await stored(page)).toEqual({ tts: "other-tts", name: "bob" });
   await openSettings(page);
   await page.waitForFunction(() => (document.querySelector("#voice-name") as HTMLSelectElement)?.value === JSON.stringify(["other-tts", "bob"]));
   await page.select("#voice-name", JSON.stringify(["other-tts", "ana"]));
-  await page.waitForFunction(() => document.querySelector("#voice-pick")?.textContent === "Ana");
+  await page.waitForFunction(() => document.querySelector("#voice-pick .voice-pick-name")?.textContent === "Ana");
   expect(await settled(() => configs().length === 2)).toBe(true);
   expect(configs()[1]).toEqual({ stack: undefined, voice: "ana", speed: undefined });
   // a pick from the dock is undone like any setting
@@ -626,7 +647,7 @@ test("voice picker: the voice models' voices by language and gender; a pick swit
   await page.click('#voice-pop [data-voice="fake-tts/echo"]');
   await page.waitForFunction(() => (document.querySelector("#voice-name") as HTMLSelectElement)?.value === JSON.stringify(["fake-tts", "echo"]));
   await page.click("#toast .btn");
-  await page.waitForFunction(() => document.querySelector("#voice-pick")?.textContent === "Ana" && (document.querySelector("#voice-name") as HTMLSelectElement)?.value === JSON.stringify(["other-tts", "ana"]));
+  await page.waitForFunction(() => document.querySelector("#voice-pick .voice-pick-name")?.textContent === "Ana" && (document.querySelector("#voice-name") as HTMLSelectElement)?.value === JSON.stringify(["other-tts", "ana"]));
   expect(await settled(() => configs().length === 4)).toBe(true);
   expect(configs().slice(2)).toEqual([{ stack: { tts: "fake-tts" }, voice: "echo", speed: undefined }, { stack: { tts: "other-tts" }, voice: "ana", speed: undefined }]);
   expect(await stored(page)).toEqual({ tts: "other-tts", name: "ana" });
@@ -645,7 +666,7 @@ test("voice picker: a voice's play button plays its sample, apart from any reply
   expect(log.some((e) => e.type === "say" || e.type === "config")).toBe(false);
   expect(await page.$$eval("#thread > article", (els) => els.length)).toBe(0);
   await page.waitForFunction(() => document.querySelector("#voice-status")?.textContent === "Listening", { timeout: 3000 });   // (drawn on the next frame)
-  expect(await page.$eval("#voice-pick", (el) => el.textContent)).toBe("Silent");
+  expect(await page.$eval("#voice-pick .voice-pick-name", (el) => el.textContent)).toBe("Silent");
   expect(await page.$eval("#voice-pop", (el) => (el as HTMLElement).hidden)).toBe(false);
   await page.close();
 }, 30_000);
@@ -681,8 +702,8 @@ test("voice mode: mute stops the microphone's audio; ending it closes the socket
   await page.click("#voice-mute");
   for (let t = Date.now(); frames() < muted + 20 && Date.now() - t < 5000; ) await Bun.sleep(50);
   expect(frames()).toBeGreaterThanOrEqual(muted + 20);
-  await page.click("#voice-end");
-  expect(await page.$eval("#voice-dock", (el) => (el as HTMLElement).hidden)).toBe(true);
+  await page.click("#send");
+  expect(await page.$eval("#voice-pill", (el) => (el as HTMLElement).hidden)).toBe(true);
   expect(await page.$eval(".composer-box", (el) => getComputedStyle(el).display)).not.toBe("none");
   for (let t = Date.now(); !session().some((e) => e.ev === "close") && Date.now() - t < 3000; ) await Bun.sleep(50);
   expect(session().some((e) => e.ev === "close")).toBe(true);
@@ -721,3 +742,36 @@ test("voice mode on a page that is not secure (plain HTTP at this machine's addr
     insecure.kill();
   }
 });
+
+test("voice mode: the reply's first step fixes what speech recognition misheard; the question shows the fixed words (the heard ones on hover), and the step is neither shown nor spoken", async () => {
+  const { page, session } = await voicePage("pie");
+  await page.waitForFunction(() => /^voice /.test(document.querySelector('#thread > article[data-i="1"] .stats')?.textContent ?? ""), { timeout: 15_000 });
+  const q = '#thread > article[data-i="0"]';
+  expect(await page.$eval(`${q} .bubble`, (e) => e.textContent)).toBe("lets do a snake game in Pygame");
+  expect(await page.$eval(`${q} .bubble .fixed`, (e) => [e.textContent, (e as HTMLElement).title])).toEqual(["Pygame", 'Speech recognition heard "pie game"']);
+  expect(await page.$eval(q, (e) => e.classList.contains("unsettled"))).toBe(false);
+  // kiln is sent what was heard, and the reply goes on from the step that fixed it
+  expect(sent(lastStream).at(-1).content).toMatch(/\n\nlets do a snake game in pie game$/);
+  expect(lastStream.messages.at(-1)).toEqual({ role: "assistant", content: "<fixes>pie game => Pygame</fixes>" });
+  expect(await replyText(page, 1)).toBe("You said: lets do a snake game in pie game");
+  const said = session().filter((e) => e.type === "say").map((e) => e.text).join("");
+  expect(said).toBe("You said: lets do a snake game in pie game");
+  await page.close();
+}, 30_000);
+
+test("voice mode: the thinking bar shows and sets voice mode's own thinking, and the chat's comes back when it ends", async () => {
+  const { page } = await voicePage("silent");
+  const bar = () => page.$eval("#energy", (e) => [e.getAttribute("aria-valuetext"), (e as HTMLElement).title]);
+  expect(await bar()).toEqual(["Off", "Thinking in voice mode: Off"]);
+  await page.focus("#energy");
+  await page.keyboard.press("ArrowRight");
+  expect(await bar()).toEqual(["Low", "Thinking in voice mode: Low"]);
+  await openSettings(page);
+  const checked = () => page.$eval('.voice-think [aria-checked="true"]', (e) => e.textContent);
+  expect(await checked()).toBe("Low");
+  await page.$$eval(".voice-think button", (bs) => (bs as HTMLButtonElement[]).find((b) => b.textContent === "Medium")!.click());
+  expect(await bar()).toEqual(["Medium", "Thinking in voice mode: Medium"]);
+  await page.click("#send");                                    // ■: ends voice mode
+  expect((await bar())[1]).toMatch(/^Thinking: /);
+  await page.close();
+}, 30_000);

@@ -15,7 +15,7 @@ export const toolTurn = (id: string, result: string) => ({ role: "tool", tool_ca
 // chat has on, each with the tools switched off in it (by the source's own names), the tools that run without asking,
 // the tools' descriptions as Settings has them (by function name), and voice mode's routing (route: whether the reply
 // runs a tool is settled before its words go out, in server.ts) with its texts.
-export interface Route { ask: string; preambles: string[]; asks: string[]; announces: string[] }
+export interface Route { preambles: string[]; asks: string[]; announces: string[] }
 export interface ToolChoice {
   tools: Record<string, { off?: string[] }>; allow?: string[]; loop?: boolean; fetchChars?: number;
   descriptions?: Record<string, string>; route?: boolean | Partial<Route>;
@@ -25,7 +25,6 @@ export interface ToolChoice {
 // for a request that brings none. The question is short because the guidance on when a tool helps is in the tools'
 // own descriptions (DESCRIPTIONS), which the prompt already holds and kiln has cached.
 export const ROUTING: Route = {
-  ask: "Do you need one of your tools to reply to my last message? Answer yes or no.",
   preambles: ["Let me look that up.", "Let me check.", "One moment, I'll look."],
   asks: ["search", "google", "look it up", "look that up", "look this up", "look them up", "look up", "browse", "fetch", "online",
     "on the web", "on the internet", "open the link", "open this link", "open that link", "open the page", "open this page"],
@@ -52,3 +51,8 @@ export function phrasePattern(phrases: string[], before = ""): RegExp | null {
   const alts = phrases.map((p) => p.trim()).filter(Boolean).map((p) => p.replace(/[.*+?^${}()|[\]\\]/g, "\\$&").replace(/\s+/g, "\\s+"));
   return alts.length ? new RegExp(`\\b${before}(${alts.join("|")})\\b`, "i") : null;
 }
+
+// A question's note (voice mode on, off: app.ts) as kiln is sent it, before the question's own text. What is said is
+// checked for asks without it: the note itself speaks of searches.
+export const noted = (note: string | undefined, text: string) => (note ? `[${note}]\n\n${text}` : text);
+export const unnoted = (text: string) => text.replace(/^\[[\s\S]*?\]\n\n/, "");

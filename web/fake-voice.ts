@@ -12,6 +12,7 @@ import { appendFileSync } from "node:fs";
 interface Line { text: string; interruptAfter?: number; interruptOnSay?: boolean; after?: "config" }
 const SCRIPTS: Record<string, Line[]> = {
   plain: [{ text: "hello there" }],
+  pie: [{ text: "lets do a snake game in pie game" }],
   story: [{ text: "slow story", interruptAfter: 2 }, { text: "and then" }],
   merge: [{ text: "slow first", interruptOnSay: true }, { text: "second part" }],
   silent: [],

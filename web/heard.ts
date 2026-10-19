@@ -59,15 +59,28 @@ export function readStep(step: string): { fixes: Fix[]; tool?: boolean } {
   return { fixes, tool: tool === undefined ? undefined : tool === "yes" };
 }
 
-// The transcript with the fixes that are swaps of its own words and sound like them; the rest are dropped.
-export function applyFixes(transcript: string, fixes: Fix[]): { text: string; made: Fix[] } {
-  let text = transcript;
-  const made: Fix[] = [];
+// The transcript in pieces: its words as they were, and where a fix is made, the fix (a swap of the transcript's own
+// words that sounds like them; a fix inside another's words is not made). The rest of the fixes are dropped.
+export function heardParts(transcript: string, fixes: Fix[]): (string | Fix)[] {
+  const parts: (string | Fix)[] = [transcript];
   for (const f of fixes) {
-    const at = text.toLowerCase().indexOf(f.heard.toLowerCase());
-    if (at < 0 || !f.said || !soundsLike(f.heard, f.said)) continue;
-    text = text.slice(0, at) + f.said + text.slice(at + f.heard.length);
-    made.push(f);
+    const k = parts.findIndex((p) => typeof p === "string" && p.toLowerCase().includes(f.heard.toLowerCase()));
+    if (k < 0 || !f.said || !soundsLike(f.heard, f.said)) continue;
+    const p = parts[k] as string, at = p.toLowerCase().indexOf(f.heard.toLowerCase());
+    parts.splice(k, 1, p.slice(0, at), { heard: p.slice(at, at + f.heard.length), said: f.said }, p.slice(at + f.heard.length));
   }
-  return { text, made };
+  return parts.filter((p) => p !== "");
+}
+
+export function applyFixes(transcript: string, fixes: Fix[]): { text: string; made: Fix[] } {
+  const parts = heardParts(transcript, fixes), made = parts.filter((p): p is Fix => typeof p !== "string");
+  return { text: parts.map((p) => (typeof p === "string" ? p : p.said)).join(""), made: made.map((f) => fixes.find((x) => x.heard.toLowerCase() === f.heard.toLowerCase())!) };
+}
+
+// A reply's first step as it opens the reply's text (the fixes, then with tools the decision), and the rest: what is shown
+// and spoken of the reply is the rest.
+const STEP = /^<fixes>[\s\S]*?<\/fixes>\s*(?:<tool>[\s\S]*?<\/tool>\s*)?/;
+export function stepOf(text: string): { step: string; rest: string } {
+  const step = text.match(STEP)?.[0] ?? (/^<fixes>/.test(text) && !text.includes("</fixes>") ? text : "");
+  return { step, rest: text.slice(step.length) };
 }

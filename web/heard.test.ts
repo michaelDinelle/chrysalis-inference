@@ -1,7 +1,7 @@
 // A voice turn's fixes (heard.ts) on what Flash-Next wrote for real transcripts: the misheard words it found are swapped
 // in when they sound like what was heard, the meanings it offered instead are not, and nothing else of the turn changes.
 import { expect, test } from "bun:test";
-import { applyFixes, readStep, soundsLike } from "./heard";
+import { applyFixes, readStep, soundsLike, stepOf } from "./heard";
 
 test("a fix is made when the words sound like what was heard, numbers and names as written", () => {
   for (const [heard, said] of [["quinn three point eight twenty seven B", "Qwen3.8-27B"], ["tail", "table"], ["pie game", "Pygame"],
@@ -23,4 +23,11 @@ test("the first step's fixes and tool decision are read as written, and only the
   expect(applyFixes(said, fixes)).toEqual({ text: "Let's do a snake game and Pygame, and report it in a tail.", made: [fixes[0]] });
   expect(readStep("<fixes></fixes>\n<tool>yes")).toEqual({ fixes: [], tool: true });
   expect(readStep("<fixes>tail => table")).toEqual({ fixes: [], tool: undefined });       // not closed yet: nothing to act on
+});
+
+test("a reply's first step is set apart from what is shown and spoken, even while it is still being written", () => {
+  expect(stepOf("<fixes>pie game => Pygame</fixes>\n<tool>no</tool>\nHere it is.")).toEqual({ step: "<fixes>pie game => Pygame</fixes>\n<tool>no</tool>\n", rest: "Here it is." });
+  expect(stepOf("<fixes></fixes>Hello.")).toEqual({ step: "<fixes></fixes>", rest: "Hello." });
+  expect(stepOf("<fixes>pie game =>")).toEqual({ step: "<fixes>pie game =>", rest: "" });
+  expect(stepOf("A reply that never had one.")).toEqual({ step: "", rest: "A reply that never had one." });
 });
