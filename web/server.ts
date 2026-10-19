@@ -6,7 +6,7 @@ import type { Server, Subprocess } from "bun";
 import app from "./index.html";
 import * as registry from "./tools";
 import { lanAddresses, lanTls } from "./tls";
-import { assistantTurn, toolTurn, type ToolChoice, type WireCall } from "./wire";
+import { assistantTurn, DESCRIPTIONS, phrasePattern, ROUTING, toolTurn, type ToolChoice, type WireCall } from "./wire";
 
 const KILN = process.env.KILN_URL ?? "http://127.0.0.1:8080";
 // Changes with the page's code. Open tabs compare it on every status poll and reload to pick up an update
@@ -77,12 +77,23 @@ function startJob(body: string): Job {
       if (!web) return void await round(job, JSON.stringify(req), push);
       const { tools, notes } = await registry.select(web.tools ?? {});
       for (const note of notes) push({ note });
-      if (tools.length) req.tools = tools.map(registry.openai);
+      if (tools.length) req.tools = tools.map((n) => registry.openai(n, web.descriptions?.[n.fn] ?? DESCRIPTIONS[n.tool.name]));
       const allow = new Set(web.allow ?? []);
       let messages: object[] = req.messages ?? [];
+      const route = tools.length ? routing(web.route) : undefined;
+      let called = false, force = false;
       for (let k = 0; ; k++) {
         if (k) push({ round: k });
-        const out = await round(job, JSON.stringify({ ...req, messages }), push);
+        const out = k === 0 && route ? await routed(job, req, messages, push, route)
+          : force ? await forced(job, req, messages, push) : await round(job, JSON.stringify({ ...req, messages }), push);
+        if (route && out && !out.calls.length && !called && !force && route.announces?.test(out.content) && !job.ctrl.signal.aborted) {
+          force = true;                                    // said what it would do, did not: the next round does it
+          for (const f of FIRST_ONLY) delete req[f];
+          messages = [...messages, assistantTurn(out.content, out.reasoning)];
+          continue;
+        }
+        force = false;
+        called ||= !!out?.calls.length;
         if (!out || !out.calls.length || web.loop === false || job.ctrl.signal.aborted) break;
         const results = k + 1 < MAX_ROUNDS ? await Promise.all(out.calls.map((c) => call(job, c, tools, allow, web, push)))
           : out.calls.map((c) => {
@@ -110,10 +121,10 @@ function startJob(body: string): Job {
 
 class KilnDown extends Error {}
 // One request to kiln, its events passed on as they come: what it wrote, and the tool calls it ended with.
-async function round(job: Job, body: string, push: (d: string | object) => void) {
+async function round(job: Job, body: string, push: (d: string | object) => void, signal = job.ctrl.signal) {
   const r = await fetch(`${KILN}/v1/chat/completions`, {
-    method: "POST", body, headers: { "Content-Type": "application/json" }, signal: job.ctrl.signal,
-  }).catch((e) => { throw job.ctrl.signal.aborted ? e : new KilnDown(); });
+    method: "POST", body, headers: { "Content-Type": "application/json" }, signal,
+  }).catch((e) => { throw signal.aborted ? e : new KilnDown(); });
   if (!r.ok || !r.body) {
     push({ error: { message: (await r.json().catch(() => null))?.error?.message ?? `kiln answered ${r.status}` } });
     return null;
@@ -154,11 +165,60 @@ async function round(job: Job, body: string, push: (d: string | object) => void)
       }
     }
   } catch (e) {
-    throw job.ctrl.signal.aborted ? e : new KilnDown();
+    throw signal.aborted ? e : new KilnDown();
   } finally {
     if (first && last) job.gen += last - first;
   }
   return out;
+}
+
+// Voice mode (kiln_web.route): whether a reply runs a tool is settled before its words, not left to them. A model with
+// thinking off, told its reply is spoken, says "I'm searching for that now" and ends its turn often enough (and then
+// copies that turn: measured, 1 call in 6 after one such turn in the history), and it may go on to report results it
+// never got. So a user who asks for a search (the route's asks) gets a tool call; otherwise the model is asked first
+// (its ask), yes or no in one token at temperature 0 (the same conversation gets the same answer), and a yes holds the
+// reply to the tools' grammar from its first token (tool_choice "required"), so it starts with the spoken line that
+// says what is happening (one of its preambles), written here. Asked before the reply rather than beside it: kiln reads
+// one prompt at a time, and the question's prompt is the reply's plus a message, so the reply then reads only its own
+// start. A reply that announces a tool it did not call (its announces, after "I'll", "let me", ...) is made to call one.
+// The texts are the page's (Settings), ROUTING's where a request has none.
+type Out = NonNullable<Awaited<ReturnType<typeof round>>>;
+interface Routing { ask: string; preambles: string[]; asks: RegExp | null; announces: RegExp | null }
+function routing(r: ToolChoice["route"]): Routing | undefined {
+  if (!r) return undefined;
+  const t = { ...ROUTING, ...(r === true ? {} : r) };
+  return { ask: t.ask, preambles: t.preambles.length ? t.preambles : ROUTING.preambles, asks: phrasePattern(t.asks),
+    announces: phrasePattern(t.announces, "(I['’]?ll|I will|I['’]?m going to|I am going to|let me|I['’]?m|I am)\\s+(now\\s+|just\\s+|quickly\\s+)?") };
+}
+const FORCE = { tool_choice: "required", logprobs: false, top_logprobs: undefined };   // kiln holds no grammar with logprobs
+const textOf = (c: unknown) => (typeof c === "string" ? c : Array.isArray(c) ? c.map((p: any) => p?.text ?? "").join(" ") : "");
+
+async function needsTool(job: Job, req: any, messages: object[], ask: string): Promise<boolean> {
+  // the reply's own prompt and mode (thinking as it is, with no budget for it), so kiln reads only the question
+  const body = { ...req, messages: [...messages, { role: "user", content: ask }], stream: false, stream_options: undefined,
+    max_tokens: 2, temperature: 0, presence_penalty: 0, dry_multiplier: 0, logprobs: false, top_logprobs: undefined, seed: undefined,
+    ...(String(req.model).endsWith("-fast") ? {} : { thinking_budget: 0 }) };
+  const r = await fetch(`${KILN}/v1/chat/completions`, { method: "POST", body: JSON.stringify(body), headers: { "Content-Type": "application/json" },
+    signal: job.ctrl.signal }).catch((e) => { throw job.ctrl.signal.aborted ? e : new KilnDown(); });
+  const m = (await r.json().catch(() => null))?.choices?.[0]?.message;
+  return !!m?.tool_calls?.length || /^\W*yes/i.test(m?.content ?? "");    // offered tools, it may call one rather than answer
+}
+
+async function forced(job: Job, req: any, messages: object[], push: (d: string | object) => void, preamble?: string): Promise<Out | null> {
+  if (preamble) {
+    push({ choices: [{ index: 0, delta: { content: preamble } }] });
+    job.tFirst ??= Date.now();
+    job.tAnswer ??= Date.now();
+  }
+  const out = await round(job, JSON.stringify({ ...req, messages, ...FORCE }), push);
+  if (out && preamble) out.content = preamble + out.content;
+  return out;
+}
+
+async function routed(job: Job, req: any, messages: object[], push: (d: string | object) => void, r: Routing): Promise<Out | null> {
+  const asked = !!r.asks?.test(textOf((messages.findLast((m: any) => m.role === "user") as any)?.content));
+  if (asked || await needsTool(job, req, messages, r.ask)) return forced(job, req, messages, push, r.preambles[messages.length % r.preambles.length]);
+  return round(job, JSON.stringify({ ...req, messages }), push);
 }
 
 // One tool call, from the model's arguments to the result it is given: refused when the chat did not turn the tool on,

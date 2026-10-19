@@ -10,7 +10,7 @@ import { marked, type Links, type Token } from "marked";
 import { type Attachment, KINDS, attach, dataUrl, fmtBytes, get as getFile, put as putFile, textBlock } from "./files";
 import { type Cand, type Odds, type SamplerKey, type Stage, dryRuns, sample } from "./sampler";
 import { type Part, type VoiceAsk, type VoiceInfo, type VoiceReady, VoiceClient } from "./voice";
-import { type ToolChoice, type WireCall, assistantTurn, toolTurn } from "./wire";
+import { DESCRIPTIONS, ROUTING, type ToolChoice, type WireCall, assistantTurn, toolTurn } from "./wire";
 
 type Effort = "xhigh" | "medium" | "low" | "off";
 // prompt and cached: summed over a reply's rounds; ctx: the context its last round left (prompt + reply)
@@ -37,13 +37,19 @@ interface Message {
   voice?: boolean;                                  // a question said in voice mode
   voiceMs?: number;                                 // a spoken reply: from the end of the user's speech to its first sound
   interrupted?: boolean;                            // talked over: it keeps only what was heard
+  note?: string;                                    // the app's words to the model before a question (voice mode on, off): sent, not shown
 }
 interface Conversation { id: string; title: string; named?: boolean; updated: number; effort: Effort; messages: Message[]; tools?: ToolChoice["tools"] }
 type Sampler = Partial<Record<SamplerKey, number>> & { order?: Stage[] };
 type Mode = "think" | "fast";                       // thinking on (Max, Medium, Low) or off: Qwen recommends other values
 // Only what differs from the recommended values is kept, so whatever is left alone follows them. allow: tools that run
 // without asking (by function name); fetchChars: how much of a page Fetch URL gives the model at a time.
-interface Settings { system: string; think: Sampler; fast: Sampler; max_tokens?: number; seed?: number; allow?: string[]; fetchChars?: number; voice?: VoiceSettings }
+interface Settings {
+  v?: 3;                                            // settings stored by builds with one system prompt for both kinds of chat have none
+  system: string; systemTools?: string; think: Sampler; fast: Sampler; max_tokens?: number; seed?: number; allow?: string[]; fetchChars?: number;
+  voice?: VoiceSettings; prompts?: Prompts;
+  descriptions?: Record<string, string>;            // tools' descriptions as kiln is sent them, by function name
+}
 // Voice mode's, every one of them (Settings and the dock's voice picker both show these): the speech-to-text and voice
 // models (names from the service's catalog), the voice (an id of that voice model's), its speed, what its replies are
 // told instead of the system prompt, and their thinking. Left unset: what the service runs when it is not told.
@@ -117,15 +123,42 @@ const LOOP: { reply: [string, number][]; cands: [string, number, number][] } = {
 // some asks for a coding-agent task when it does not think ("design a cute SVG ..." -> "let me first explore the
 // project structure" and calls to list_files / read_file: 16 replies out of 16, and the Q8_0 original as well); with
 // it, 16 of 16 draw.
-const DEFAULT_SYSTEM = "There are no tools or files in this chat. Answer directly.";
-// What the default says instead in a chat with tools on (a prompt the user wrote goes as written).
-const DEFAULT_SYSTEM_TOOLS = "The tools offered here are the only ones in this chat, and there are no files or projects to explore. Use a tool when it helps; otherwise answer directly.";
-// Voice mode's replies are told this instead of the system prompt. Its last sentence lets the model reason out loud
-// while it already speaks: on Big Bench Audio (Flash-Next, thinking off, spoken questions through Parakeet) 92.5% of
-// 200 with it, 77.7% of all 1,000 without, where thinking first would hold the first word back by seconds.
-const DEFAULT_VOICE_PROMPT = "You are talking with the user by voice. Your reply is spoken aloud by text-to-speech, so write plain spoken sentences: " +
-  "no markdown, lists, code or symbols. Keep it brief, usually one to three sentences, unless they ask for more. When a question needs counting, " +
-  "logic or several steps, work through it out loud in a few short spoken steps first, then give the answer.";
+// {{MODEL}} is the chat's model by name: told nothing, the model does not know it is Qwen3.8 and says so when asked.
+const DEFAULT_SYSTEM = "You are {{MODEL}}, running locally in kiln. There are no tools or files in this chat. Answer directly.";
+// A chat with tools on is sent this one instead (Settings: "With tools on"); the tools themselves come after it in
+// the system turn, as kiln's template writes them, each with its description (Settings > Tools).
+const DEFAULT_SYSTEM_TOOLS = "You are {{MODEL}}, running locally in kiln. The tools offered here are the only ones in this chat, and there are no files or projects to explore. Use a tool when it helps; otherwise answer directly.";
+// the default of builds before {{MODEL}}: settings that still hold it follow the default
+const PLAIN_SYSTEM = "There are no tools or files in this chat. Answer directly.";
+// What voice mode tells the model, in a note before the first question said aloud (and again when it changes): the
+// system prompt stays as it is, so a chat's history is never read again for voice mode and the chat's own prompt and
+// tools still hold (kiln's template allows a system message only first). Speech recognition mishears names and terms
+// ("quinn three point eight" for Qwen3.8), and a model that is not told so says it does not know them. The sentence
+// on reasoning lets it work out loud while it already speaks: on Big Bench Audio (Flash-Next, thinking off, spoken
+// questions through Parakeet, this as the system prompt) 92.5% of 200 with it, 77.7% of all 1,000 without, where
+// thinking first would hold the first word back by seconds.
+const DEFAULT_VOICE_PROMPT = "The user is talking to you by voice now. Their words reach you through speech recognition, which mishears " +
+  "some, mostly names, numbers and technical terms: work out what they most likely meant from how it sounds and from the conversation, and " +
+  "if an important name or number is still unclear, ask about it in a few words. Your reply is spoken aloud by text-to-speech, so write plain " +
+  "spoken sentences: no markdown, lists, code or symbols. Keep it brief, usually one to three sentences, unless they ask for more. When a " +
+  "question needs counting, logic or several steps, work through it out loud in a few short spoken steps first, then give the answer.";
+// The rest of what the model is sent besides what the user types, each a setting (Prompts), with these defaults. The
+// voice note's sentence for a chat with tools on: the server settles whether a voice reply runs a tool (route in
+// server.ts), this keeps the words around a call true to it. The note on the first typed message after voice mode:
+// replies are read again, so markdown is back. The routing's texts: wire.ts's, which server.ts falls back to.
+interface Prompts { voiceTools?: string; voiceOff?: string; preambles?: string; asks?: string; announces?: string; title?: string; draft?: string }
+const PROMPTS: Required<Prompts> = {
+  voiceTools: "Only say you searched or did something once the tool call for it has returned, and never describe results you have not " +
+    "received from a tool. When results come back, give the key points briefly, and say the links are on screen rather than reading them.",
+  voiceOff: "The user is typing again and reads your replies.",
+  preambles: ROUTING.preambles.join("\n"), asks: ROUTING.asks.join(", "), announces: ROUTING.announces.join(", "),
+  // kiln answers a prompt that starts "You are a title generator" as a side request (low priority, no thinking)
+  title: "You are a title generator. Reply with a title of at most six words for the conversation that starts with the user's message below. Reply with the title only.",
+  draft: "Write the next message I would send in this conversation, as me: same voice, same goals, natural and brief. Reply with only that message.",
+};
+const promptOf = (k: keyof Prompts) => settings.prompts?.[k] ?? PROMPTS[k];
+const listOf = (k: "preambles" | "asks" | "announces") => promptOf(k).split(k === "preambles" ? "\n" : ",").map((x) => x.trim()).filter(Boolean);
+const fill = (text: string) => text.replaceAll("{{MODEL}}", modelName(current()) || "a Qwen model");
 // Thinking, a slider in the message box: no thinking (the model's no-thinking mode), then Qwen's three efforts.
 const EFFORTS: Effort[] = ["off", "low", "medium", "xhigh"];
 const LEVEL: Record<Effort, [string]> = { off: ["Off"], low: ["Low"], medium: ["Medium"], xhigh: ["Max"] };
@@ -688,6 +721,12 @@ function messageView(m: Message, i: number): HTMLElement {
   el.dataset.i = String(i);
   foot.innerHTML = pager(m) + (m.voice ? `<span class="said" title="Said in voice mode">${icon("wave")}</span>` : "")
     + slots([["copy", true], ["edit", !running()], ["trash", !running()]]);
+  if (m.note) {                                      // what the app told the model with it: sent, so shown
+    const note = h("details", "msg-note"), sum = h("summary", "", m.voice ? "Voice mode note" : "Note to the model");
+    sum.title = "What the app told the model with this message (Settings, Voice mode)";
+    note.append(sum, h("div", "msg-note-text", m.note));
+    el.append(note);
+  }
   if (m.files?.length) el.append(filesView(m.files));
   if (m.content || !m.files?.length) el.append(h("div", "bubble", m.content));
   el.append(foot);
@@ -1113,7 +1152,8 @@ function renderComposer() {
 }
 
 // Anything differs from the recommended values (what Reset all settings would change).
-const customized = () => settings.system !== DEFAULT_SYSTEM || Object.keys(settings.think).length + Object.keys(settings.fast).length > 0
+const customized = () => settings.system !== DEFAULT_SYSTEM || settings.systemTools !== undefined || !!settings.prompts || !!settings.descriptions
+  || Object.keys(settings.think).length + Object.keys(settings.fast).length > 0
   || !!settings.max_tokens || settings.seed !== undefined || !!settings.allow?.length || settings.fetchChars !== undefined
   || Object.keys(settings.voice ?? {}).length > 0;
 
@@ -1205,13 +1245,15 @@ function save(c: Conversation) {
 // read). The reply's tokens come with their odds (log probs, five alternatives each) for the token view. effort: the
 // thinking setting (the chat's by default); sampling: whose values (by default the effort's mode). With tools on,
 // kiln_web tells the web server which to offer (it runs them: server.ts); loop: false offers them without running any.
-function request(c: Conversation, upto: Message[], o: { effort?: Effort; sampling?: Mode; final?: object; extra?: Record<string, unknown>; loop?: boolean; system?: string } = {}) {
+function request(c: Conversation, upto: Message[], o: { effort?: Effort; sampling?: Mode; final?: object; extra?: Record<string, unknown>; loop?: boolean; route?: boolean } = {}) {
   const effort = o.effort ?? c.effort, mode: Mode = effort === "off" ? "fast" : "think";
-  const messages: object[] = upto.flatMap(wire), system = o.system?.trim() ?? systemFor(c);
+  const messages: object[] = upto.flatMap(wire), system = systemFor(c);
   if (system) messages.unshift({ role: "system", content: system });
   if (o.final) messages.push(o.final);
   const web: ToolChoice | undefined = toolsOn(c)
-    ? { tools: c.tools!, allow: settings.allow, fetchChars: settings.fetchChars, ...(o.loop === false ? { loop: false } : {}) } : undefined;
+    ? { tools: c.tools!, allow: settings.allow, fetchChars: settings.fetchChars, ...(o.loop === false ? { loop: false } : {}),
+      ...(settings.descriptions ? { descriptions: settings.descriptions } : {}),
+      ...(o.route ? { route: { preambles: listOf("preambles"), asks: listOf("asks"), announces: listOf("announces") } } : {}) } : undefined;
   return {
     model: effort === "off" ? `${current()}-fast` : current(), reasoning_effort: effort === "off" ? undefined : effort,
     ...samplerFields(o.sampling ?? mode), max_tokens: settings.max_tokens, seed: settings.seed, logprobs: true, top_logprobs: 5,
@@ -1234,7 +1276,7 @@ function wire(m: Message): object[] {
 }
 const toolsOn = (c: Conversation) => !!c.tools && Object.keys(c.tools).length > 0;
 // The system prompt as sent: the user's as written; the default says what is true of the chat (no tools, or these).
-const systemFor = (c: Conversation) => (settings.system.trim() === DEFAULT_SYSTEM && toolsOn(c) ? DEFAULT_SYSTEM_TOOLS : settings.system.trim());
+const systemFor = (c: Conversation) => fill((toolsOn(c) ? settings.systemTools ?? DEFAULT_SYSTEM_TOOLS : settings.system).trim());
 
 // Server-sent events of a reply, as parsed JSON chunks, then DONE.
 const DONE = Symbol("done");
@@ -1550,7 +1592,7 @@ async function name(c: Conversation) {
     const res = await fetch("/api/chat", {
       method: "POST", headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ model: `${current()}-fast`, max_tokens: 24, messages: [
-        { role: "system", content: "You are a title generator. Reply with a title of at most six words for the conversation that starts with the user's message below. Reply with the title only." },
+        { role: "system", content: promptOf("title") },
         { role: "user", content: (c.messages[0].content || (c.messages[0].files ?? []).map((f) => f.name).join(", ")).slice(0, 2000) },
       ] }),
     });
@@ -1570,7 +1612,8 @@ function submit(text: string) {
   pending = [];
   renderPending();
   if (!conv.messages.length) conv.title = (text || files.map((f) => f.name).join(", ")).split("\n")[0].slice(0, 60);
-  conv.messages.push({ role: "user", content: text, ...(files.length ? { files } : {}) });
+  const note = noteFor(conv, false);
+  conv.messages.push({ role: "user", content: text, ...(files.length ? { files } : {}), ...(note ? { note } : {}) });
   void generate();
 }
 
@@ -1595,6 +1638,15 @@ let voice: VoiceMode | null = null;
 let voiceCatalog: VoiceReady["catalog"] = (() => { try { return JSON.parse(pref("voice-catalog", "{}")) ?? {}; } catch { return {}; } })();
 const cuts = new Map<Message, number | null>();     // replies talked over while still written: what to keep once they end (null: none of it)
 const voicePrompt = () => settings.voice?.prompt ?? DEFAULT_VOICE_PROMPT;
+const voiceNote = (c: Conversation) => fill([voicePrompt().trim(), toolsOn(c) ? promptOf("voiceTools").trim() : ""].filter(Boolean).join(" "));
+// The note a new question carries, if any: voice mode's where it starts or its note changed, the typing one where it
+// ends (a note marks which: a voice question's note is the voice one).
+function noteFor(c: Conversation, said: boolean): string | undefined {
+  const users = c.messages.filter((m) => m.role === "user"), prev = users.at(-1);
+  if (!said) return prev?.voice ? promptOf("voiceOff").trim() || undefined : undefined;
+  const last = users.findLast((m) => m.note && m.voice)?.note, note = voiceNote(c);
+  return note && (!prev?.voice || last !== note) ? note : undefined;
+}
 const voiceEffort = (): Effort => settings.voice?.effort ?? "off";
 
 async function openVoice() {
@@ -1692,14 +1744,15 @@ async function voiceTurn(v: VoiceMode, text: string) {
   if (merge) merge.content = merge.content ? `${merge.content} ${text}` : text;
   else {
     if (!c.messages.length) c.title = text.slice(0, 60);
-    c.messages.push({ role: "user", content: text, voice: true });
+    const note = noteFor(c, true);
+    c.messages.push({ role: "user", content: text, voice: true, ...(note ? { note } : {}) });
   }
   const effort = voiceEffort(), mode: Mode = effort === "off" ? "fast" : "think";
   const m: Message = { id: randomId(), role: "assistant", content: "", reasoning: "", effort, params: changed(mode) || undefined };
   const upto = [...c.messages];
   branch(c, c.messages.length, m);
   v.reply = { m, sent: 0, spoken: 0, audible: false };
-  await startRun(c, m, () => request(c, upto, { effort, system: voicePrompt() }));
+  await startRun(c, m, () => request(c, upto, { effort, route: true }));
 }
 
 // The chat as the next voice turn will send it, read by kiln while the user starts talking: the voice prompt replaces
@@ -1712,7 +1765,7 @@ async function warmVoice(v: VoiceMode) {
   if (voice !== v || running(v.c)) return;
   // kiln wants a question to answer: a new chat's stands in for the one to come (its snapshot ends with the prompt)
   const upto: Message[] = v.c.messages.length ? [...v.c.messages] : [{ role: "user", content: "Hi" }];
-  const body = { ...request(v.c, upto, { effort, system: voicePrompt() }), max_tokens: 1, logprobs: false, top_logprobs: undefined };
+  const body = { ...request(v.c, upto, { effort }), max_tokens: 1, logprobs: false, top_logprobs: undefined };
   const res = await fetch("/api/chat", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body) }).catch(() => null);
   await res?.body?.cancel().catch(() => {});
 }
@@ -2069,7 +2122,8 @@ async function filesReady(msgs: Message[]) {
 // A user message as kiln gets it: its files (pictures as images, PDFs as files, videos as videos, texts as fenced
 // blocks), then the text typed.
 function userContent(m: Message): string | object[] {
-  if (!m.files?.length) return m.content;
+  const said = m.note ? `[${m.note}]\n\n${m.content}` : m.content;
+  if (!m.files?.length) return said;
   const parts: object[] = m.files.map((a) => {
     const body = bodies.get(a.id) ?? "";
     if (a.kind === "image") return { type: "image_url", image_url: { url: body } };
@@ -2077,6 +2131,7 @@ function userContent(m: Message): string | object[] {
     if (a.kind === "video") return { type: "video_url", video_url: { url: body } };
     return { type: "text", text: `${textBlock(a.name, body)}\n\n` };
   });
+  if (m.note) parts.unshift({ type: "text", text: `[${m.note}]\n\n` });
   if (m.content) parts.push({ type: "text", text: m.content });
   return parts;
 }
@@ -2128,6 +2183,7 @@ function importedMessages(list: unknown, depth = 0): Message[] | null {
     if (rest.rounds !== undefined && !(Array.isArray(rest.rounds) && rest.rounds.every(isRound))) return null;
     if (rest.calls !== undefined && !(Array.isArray(rest.calls) && rest.calls.every(isCall))) return null;
     if (typeof rest.voiceMs !== "number") delete rest.voiceMs;
+    if (rest.note !== undefined && typeof rest.note !== "string") return null;
     if (versions !== undefined) {
       const others = Array.isArray(versions?.others) ? versions.others.map((v: unknown) => importedMessages(v, depth + 1)) : null;
       if (!others?.length || others.some((v: Message[] | null) => !v) || !Number.isInteger(versions.shown) || versions.shown < 0 || versions.shown > others.length) return null;
@@ -2168,7 +2224,6 @@ async function importFiles(files: FileList) {
 // kiln writes the message the user would likely send next, into the composer to edit and send. It is asked as the
 // assistant (Qwen will not write a user turn: at one it just ends it), without thinking, from the conversation
 // kiln has cached, which it leaves as it was (kiln_aside). Text already in the composer is how the draft begins.
-const DRAFT_ASK = "Write the next message I would send in this conversation, as me: same voice, same goals, natural and brief. Reply with only that message.";
 let drafting: { job?: string; stop: boolean } | null = null;
 
 async function draft() {
@@ -2185,7 +2240,7 @@ async function draft() {
     sampling: "fast", final: begin.trim() ? { role: "assistant", content: begin } : undefined, loop: false,
     extra: { kiln_aside: true, max_tokens: 400, logprobs: false, seed: undefined, ...(begin.trim() ? { continue_final_message: true } : {}) },
   });
-  (body.messages as object[]).splice(begin.trim() ? -1 : body.messages.length, 0, { role: "user", content: DRAFT_ASK });
+  (body.messages as object[]).splice(begin.trim() ? -1 : body.messages.length, 0, { role: "user", content: promptOf("draft") });
   input.readOnly = true;
   renderComposer();
   try {
@@ -2812,11 +2867,41 @@ function renderTools() {
 // Settings' Tools: the config file's servers as they stand (what each runs or reaches, read-only), what Fetch URL
 // may reach, and the tools allowed to run without asking (a click makes one ask again).
 const STATE_WORD: Record<SourceInfo["state"], string> = { idle: "not started", connecting: "starting…", connected: "running", failed: "failed", disabled: "disabled" };
+// Each tool opens to its description as kiln is sent it: the chat's settings', else kiln's own for that tool (wire.ts),
+// else its server's. A description is what tells the model when to call the tool and when not.
+const toolSyncs: (() => void)[] = [];
+const describedAs = (t: ToolInfo) => settings.descriptions?.[t.fn] ?? DESCRIPTIONS[t.name] ?? t.description;
+function setDescription(fn: string, v: string | undefined) {
+  const next = { ...settings.descriptions, [fn]: v };
+  if (v === undefined) delete next[fn];
+  if (Object.keys(next).length) settings.descriptions = next as Record<string, string>;
+  else delete settings.descriptions;
+}
+function toolDescriptions(tools: ToolInfo[]): HTMLElement[] {
+  return [...tools].sort((a, b) => (a.fn < b.fn ? -1 : 1)).map((t) => {
+    const d = h("details", "ts-tool"), sum = h("summary"), def = DESCRIPTIONS[t.name] ?? t.description;
+    sum.append(h("span", "ts-tool-name", t.title || t.name), h("code", "ts-tool-fn", t.fn));
+    const field = promptFieldOnce({
+      id: `tool-desc-${t.fn}`, label: "Description, as sent", rows: 4,
+      help: "What the model is told of this tool. A change makes each chat with it on read its history again once.",
+      get: () => describedAs(t), def: () => def, set: (v) => setDescription(t.fn, v),
+    });
+    d.dataset.fn = t.fn;
+    d.append(sum, field);
+    if (DESCRIPTIONS[t.name] && DESCRIPTIONS[t.name] !== t.description) {
+      const own = h("p", "set-note");
+      own.append("kiln's description for it; the server's own: ", h("q", "", t.description));
+      d.append(own);
+    }
+    return d;
+  });
+}
 function renderToolSettings() {
   if (!isOpen(panes.settings)) return;
   const list = $("tools-list"), key = JSON.stringify(catalog);
   if (list.dataset.key !== key) {
     list.dataset.key = key;
+    toolSyncs.length = 0;
     const rows: HTMLElement[] = [];
     if (!catalog) rows.push(h("p", "set-note", "Asking the web server…"));
     else {
@@ -2830,6 +2915,7 @@ function renderToolSettings() {
         detail.title = s.detail;
         r.append(top, detail);
         if (s.error) r.append(h("div", "ts-err", s.error));
+        r.append(...toolDescriptions(s.tools));
         rows.push(r);
       }
       if (!mcp.length) {
@@ -2838,12 +2924,19 @@ function renderToolSettings() {
         rows.push(help);
       }
       const f = catalog.sources.find((s) => s.kind === "fetch");
+      if (f) {
+        const r = h("div", "ts-row"), top = h("div", "ts-top");
+        top.append(h("span", `dot ${dotOf(f)}`), h("span", "ts-name", f.label), h("span", "ts-state", "built in"));
+        r.append(top, ...toolDescriptions(f.tools));
+        rows.push(r);
+      }
       const note = h("p", "set-note");
       note.append(`Fetch URL reaches ${f?.detail ?? "public addresses only"}. Config file: `, h("code", "", catalog.config));
       rows.push(note);
     }
     list.replaceChildren(...rows);
   }
+  for (const sync of toolSyncs) sync();
   const allow = $("allow-list"), akey = JSON.stringify(settings.allow ?? []);
   if (allow.dataset.key === akey) return;
   allow.dataset.key = akey;
@@ -2954,11 +3047,19 @@ let systemEdited = false;
 
 function loadSettings(): Settings {
   const s = load<Settings | null>("settings2", null);
-  if (s) return s;
+  if (s) {
+    if (!s.v) {                                     // one prompt for both, as it was written; the plain default follows the default
+      if (s.system === PLAIN_SYSTEM) s.system = DEFAULT_SYSTEM;
+      else if (s.system !== DEFAULT_SYSTEM) s.systemTools = s.system;
+      s.v = 3;
+    }
+    return s;
+  }
   // the earlier shape: one set of values for both modes, and a system prompt added after a built-in line
   const old = load<{ system?: string; sampling?: Record<string, number> } | null>("settings", null);
   const { max_tokens, seed, ...rest } = old?.sampling ?? {};
-  return { system: [DEFAULT_SYSTEM, old?.system?.trim()].filter(Boolean).join("\n\n"), think: { ...rest }, fast: { ...rest }, max_tokens, seed };
+  const system = [DEFAULT_SYSTEM, old?.system?.trim()].filter(Boolean).join("\n\n");
+  return { v: 3, system, ...(old?.system?.trim() ? { systemTools: system } : {}), think: { ...rest }, fast: { ...rest }, max_tokens, seed };
 }
 function saveSettings() {
   store("settings2", settings);
@@ -3122,6 +3223,49 @@ interface KnobSpec {
 }
 const knobs: (() => void)[] = [];
 const roundTo = (v: number, step: number) => Math.round(v / step) * step;
+// A text the model is sent besides what the user types: its box, ↺ back to the default (with Undo), its help as a
+// tooltip. set(undefined) means the default; a box left as the default stores nothing.
+interface PromptSpec { id: string; label: string; help: string; get: () => string; def: () => string; set: (v: string | undefined) => void; rows?: number }
+function promptField(f: PromptSpec) {
+  const el = h("div", "prompt-field"), head = h("div", "prompt-head"), label = h("label", "prompt-label", f.label);
+  const reset = h("button", "act knob-reset"), box = h("textarea", "prompt-input");
+  el.title = f.help;
+  label.htmlFor = box.id = f.id;
+  box.rows = f.rows ?? 2;
+  box.spellcheck = false;
+  reset.type = "button";
+  reset.innerHTML = icon("retry");
+  reset.title = "Back to the default";
+  reset.setAttribute("aria-label", `${f.label}: back to the default`);
+  box.addEventListener("input", () => { f.set(box.value === f.def() ? undefined : box.value); saveSettings(); fit(box); });
+  reset.onclick = () => {
+    const before = f.get();
+    f.set(undefined);
+    saveSettings();
+    toast(`${f.label}: back to the default`, () => { f.set(before === f.def() ? undefined : before); saveSettings(); });
+  };
+  head.append(label, reset);
+  el.append(head, box);
+  knobs.push(() => {
+    if (document.activeElement !== box && box.value !== f.get()) { box.value = f.get(); fit(box); }
+    reset.classList.toggle("on", f.get() !== f.def());
+  });
+  return el;
+}
+function promptFieldOnce(f: PromptSpec) {
+  const at = knobs.length, el = promptField(f);
+  toolSyncs.push(...knobs.splice(at));
+  return el;
+}
+const setPrompt = (k: keyof Prompts) => (v: string | undefined) => {
+  const next: Prompts = { ...settings.prompts, [k]: v };
+  if (v === undefined) delete next[k];
+  if (Object.keys(next).length) settings.prompts = next;
+  else delete settings.prompts;
+};
+const promptSpec = (k: keyof Prompts, label: string, help: string, rows = 2): PromptSpec =>
+  ({ id: `prompt-${k}`, label, help, rows, get: () => promptOf(k), def: () => PROMPTS[k], set: setPrompt(k) });
+
 function knob(k: KnobSpec) {
   const el = h("div", "knob"), label = h("label", "", k.label), reset = h("button", "act knob-reset");
   const num = h("input", "knob-num"), track = h("div", "knob-track"), range = h("input"), rec = h("i", "knob-rec");
@@ -3368,6 +3512,23 @@ function buildSettings() {
     thinkModes.querySelectorAll("button").forEach((b, i) => b.setAttribute("aria-checked", String(EFFORTS[i] === voiceEffort())));
   });
   $("voice-knobs").replaceChildren(stt.row, pick.row, speed, think);
+  $("voice-prompts").replaceChildren(...[
+    promptSpec("voiceTools", "With tools on, also", "Added to the voice note in a chat with tools on: what the reply may say about a tool call."),
+    promptSpec("voiceOff", "Typing again", "The note on the first typed message after voice mode: replies are read again, so markdown is fine."),
+    promptSpec("preambles", "Said before a tool call", "One a line, taken in turn: what voice mode says while a tool call it settled on starts (the call itself has no words).", 3),
+    promptSpec("asks", "Always a tool when said", "Phrases, separated by commas: a voice question with one of them makes a tool call, whatever the model would have done."),
+    promptSpec("announces", "Words that announce a tool", "Phrases, separated by commas, after \"I'll\", \"I will\", \"I'm going to\", \"let me\", \"I'm\" or \"I am\" (and \"now\", \"just\" or \"quickly\"): a voice reply that says one and calls no tool is made to call one.", 3),
+  ].map((spec) => promptField(spec)));
+  $("prompts").replaceChildren(
+    promptField(promptSpec("title", "Chat titles", "The system prompt of the request that names a chat after its first message. kiln answers one that starts \"You are a title generator\" as a side request: low priority, no thinking.")),
+    promptField(promptSpec("draft", "Draft my next message", "Sent as the user's ask after the chat when the wand drafts your next message (as the assistant, without thinking).")),
+  );
+  $("system-tools").append(promptField({
+    id: "system-tools-input", label: "With tools on", rows: 2,
+    help: "Sent instead to a chat with tools on, {{MODEL}} as the chat's model; the tools follow it, each with its description (Tools below).",
+    get: () => settings.systemTools ?? DEFAULT_SYSTEM_TOOLS, def: () => DEFAULT_SYSTEM_TOOLS,
+    set: (v) => { if (v === undefined) delete settings.systemTools; else settings.systemTools = v; },
+  }));
 
   $("tools-reload").onclick = () => void loadCatalog({ reload: true }).then(() => toast(catalog?.error ? "The config file has an error (shown under Tools)"
     : `Config read: ${catalog?.sources.filter((s) => s.kind === "mcp").length ?? 0} MCP server(s)`));
@@ -3398,7 +3559,7 @@ function buildSettings() {
   $("settings-reset").onclick = () => {
     if (!customized()) return toast("Everything is already at the recommended values");
     const before = structuredClone(settings);
-    settings = { system: DEFAULT_SYSTEM, think: {}, fast: {} };
+    settings = { v: 3, system: DEFAULT_SYSTEM, think: {}, fast: {} };
     saveSettings();
     growSystem();
     toast("Everything is back to the recommended values", () => { settings = before; saveSettings(); growSystem(); });
@@ -3447,9 +3608,10 @@ function syncSettings() {
   if (document.activeElement !== vp && vp.value !== voicePrompt()) { vp.value = voicePrompt(); fit(vp); }
   $("voice-prompt-reset").classList.toggle("on", settings.voice?.prompt !== undefined);
 
-  const swapped = settings.system.trim() === DEFAULT_SYSTEM && toolsOn(conv);
-  $("system-note").hidden = !swapped;
-  $("system-note").textContent = swapped ? `This chat has tools on, so the default is sent as: “${DEFAULT_SYSTEM_TOOLS}”` : "";
+  const sent = systemFor(conv), note = $("system-note");
+  note.hidden = false;
+  note.textContent = sent ? `This chat (${toolsOn(conv) ? "tools on" : "no tools"}) is sent: “${sent}”. A change makes each chat read its history again once.`
+    : `This chat (${toolsOn(conv) ? "tools on" : "no tools"}) is sent no system prompt.`;
   renderToolSettings();
   $("mode-note").textContent = shownMode() === "think" ? "with thinking" : "thinking off";
   $("order-reset").classList.toggle("on", !!settings[shownMode()].order);

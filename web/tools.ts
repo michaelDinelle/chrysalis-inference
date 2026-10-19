@@ -112,7 +112,8 @@ export async function select(choice: Record<string, { off?: string[] }>): Promis
   return { tools, notes };
 }
 
-export const openai = (n: Named) => ({ type: "function", function: { name: n.fn, description: n.tool.description, parameters: n.tool.parameters } });
+export const openai = (n: Named, description?: string) =>
+  ({ type: "function", function: { name: n.fn, description: description ?? n.tool.description, parameters: n.tool.parameters } });
 
 // A tool's run, held to its source's time limit and result size: a longer result is cut, and says so.
 export async function run(n: Named, args: Record<string, unknown>, signal: AbortSignal, maxChars?: number): Promise<string> {

@@ -85,7 +85,8 @@
           <div class="set-body">
             <section class="set-sec">
               <div class="set-sec-head"><label class="set-title" for="system-input">System prompt</label><button id="system-reset" class="act knob-reset" type="button" title="Back to the default system prompt" aria-label="Restore the default system prompt"></button></div>
-              <textarea id="system-input" rows="2" placeholder="No system prompt" title="Sent as written; empty sends none. The default keeps the model from acting as a coding agent when it doesn't think. A change makes each chat read its history again once."></textarea>
+              <textarea id="system-input" rows="2" placeholder="No system prompt" title="Sent to a chat without tools, {{MODEL}} as the chat's model; empty sends none. The default keeps the model from acting as a coding agent when it doesn't think. A change makes each chat read its history again once."></textarea>
+              <div id="system-tools"></div>
               <p id="system-note" class="set-note" hidden></p>
             </section>
             <section class="set-sec">
@@ -104,10 +105,16 @@
             </section>
             <section class="set-sec">
               <div class="set-sec-head"><label class="set-title" for="voice-prompt">Voice mode</label><button id="voice-prompt-reset" class="act knob-reset" type="button" title="Back to the default voice prompt" aria-label="Restore the default voice prompt"></button></div>
-              <textarea id="voice-prompt" class="prompt-input" rows="3" placeholder="No prompt" title="Sent instead of the system prompt with a reply in voice mode: what is written is spoken."></textarea>
+              <textarea id="voice-prompt" class="prompt-input" rows="6" placeholder="No prompt" title="A note to the model before the first question said aloud (and again when it changes); the system prompt stays as it is. What the reply writes is spoken."></textarea>
+              <div id="voice-prompts"></div>
               <div id="voice-knobs" class="knobs"></div>
             </section>
-            <!-- what the config file sets up, read-only: the page can reload the file, never change what a server runs -->
+            <section class="set-sec">
+              <div class="set-sec-head"><span class="set-title">Prompts</span></div>
+              <div id="prompts"></div>
+            </section>
+            <!-- what the config file sets up, read-only: the page can reload the file, never change what a server runs;
+                 what the model is told of each tool (its description) is the page's, as every other text it is sent -->
             <section class="set-sec">
               <div class="set-sec-head"><span class="set-title">Tools</span><button id="tools-reload" class="btn small" type="button" title="Read the config file again (servers that changed restart)">Reload config</button></div>
               <div id="tools-list" class="tools-list"></div>

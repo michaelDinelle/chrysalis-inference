@@ -60,7 +60,8 @@ const fake = Bun.serve({
     streams.push(body);
     req.signal.addEventListener("abort", () => kilnStopped++);
     const at = body.messages.findLastIndex((m: any) => m.role === "user"), last = body.messages[at];
-    const said = typeof last.content === "string" ? last.content : last.content.map((p: any) => p.text ?? "").join("");
+    // what the user said, without the app's note to the model before it (voice mode's)
+    const said = (typeof last.content === "string" ? last.content : last.content.map((p: any) => p.text ?? "").join("")).replace(/^\[[^\]]*\]\n\n/, "");
     const round = body.messages.slice(at).filter((m: any) => m.role === "assistant").length, ask = TOOL_ASKS[said];
     const call = ask && body.tools && round === 0 ? ask : undefined;
     const text = call ? "Let me check." : ask ? `The tool said: ${body.messages.at(-1).content}` : said.startsWith("slow")
@@ -261,7 +262,8 @@ test("the Tools popover turns servers and single tools on and off for this chat,
 
   await send(page, "hi");
   expect(lastStream.tools.map((t: any) => t.function.name)).toEqual(["fake__big", "fake__echo", "fake__get_weather", "fake__slow", "fetch_url"]);
-  expect(lastStream.messages[0].content).toContain("The tools offered here are the only ones");
+  expect(lastStream.messages[0].content).toBe("You are Qwen3.8-27B, running locally in kiln. The tools offered here are the only ones in this chat, " +
+    "and there are no files or projects to explore. Use a tool when it helps; otherwise answer directly.");
   const first = await page.evaluate(() => location.hash);
 
   await page.click("#new-chat");                                          // a new chat starts from the last choice
@@ -274,7 +276,7 @@ test("the Tools popover turns servers and single tools on and off for this chat,
   expect(await badge(page)).toEqual(["", "Tools: off in this chat"]);
   await send(page, "no tools");
   expect(lastStream.tools).toBeUndefined();
-  expect(lastStream.messages[0].content).toBe("There are no tools or files in this chat. Answer directly.");
+  expect(lastStream.messages[0].content).toBe("You are Qwen3.8-27B, running locally in kiln. There are no tools or files in this chat. Answer directly.");
 
   await page.goto(`${base}/${first}`, { waitUntil: "networkidle0" });   // the first chat, after a reload: its own choice
   await page.waitForFunction(() => document.querySelector("#tools-btn .tools-n")?.textContent === "5", { timeout: 10_000 });
@@ -446,27 +448,30 @@ test("export and import keep versions and tool rounds, and the imported chat res
   await third.waitForFunction(() => document.querySelectorAll("#thread > article").length === 2);
   expect(await third.$$eval(".pager", (p) => p.length)).toBe(0);
   await send(third, "next");
-  expect(lastStream.messages).toEqual([{ role: "system", content: "There are no tools or files in this chat. Answer directly." }, { role: "user", content: "old q" },
+  expect(lastStream.messages).toEqual([{ role: "system", content: "You are Qwen3.8-27B, running locally in kiln. There are no tools or files in this chat. Answer directly." }, { role: "user", content: "old q" },
     { role: "assistant", content: "old a", reasoning_content: "hm" }, { role: "user", content: "next" }]);
   for (const p of [page, other, third]) await p.close();
 }, 90_000);
 
 // Voice mode. Each page asks the fake speech service for a voice whose script it plays (fake-voice.ts); its log has
 // what the page sent it, session by session.
-const VOICE_PROMPT = "You are talking with the user by voice. Your reply is spoken aloud by text-to-speech, so write plain spoken sentences: " +
+const VOICE_NOTE = "The user is talking to you by voice now. Their words reach you through speech recognition, which mishears some, mostly " +
+  "names, numbers and technical terms: work out what they most likely meant from how it sounds and from the conversation, and if an important " +
+  "name or number is still unclear, ask about it in a few words. Your reply is spoken aloud by text-to-speech, so write plain spoken sentences: " +
   "no markdown, lists, code or symbols. Keep it brief, usually one to three sentences, unless they ask for more. When a question needs counting, " +
   "logic or several steps, work through it out loud in a few short spoken steps first, then give the answer.";
 const voiceLog = (): any[] => { try { return readFileSync(VOICE_LOG, "utf8").trim().split("\n").filter(Boolean).map((l) => JSON.parse(l)); } catch { return []; } };
 const voicePages: Page[] = [];
-async function voicePage(script: string) {
+async function voicePage(script: string, o: { system?: string; first?: (page: Page) => Promise<void> } = {}) {
   const page = await (await browser.createBrowserContext()).newPage();
   voicePages.push(page);
   await page.setViewport({ width: 1600, height: 900 });            // Settings beside the chat (from 1460 px), so it stays open while the dock is used
   page.on("pageerror", (e) => { throw e; });
-  await page.evaluateOnNewDocument((v) => {
-    if (!sessionStorage.getItem("settings2")) sessionStorage.setItem("settings2", JSON.stringify({ system: "", think: {}, fast: {}, voice: { name: v } }));
-  }, script);
+  await page.evaluateOnNewDocument((v, system) => {
+    if (!sessionStorage.getItem("settings2")) sessionStorage.setItem("settings2", JSON.stringify({ system, think: {}, fast: {}, voice: { name: v } }));
+  }, script, o.system ?? "");
   await page.goto(`${base}/`, { waitUntil: "networkidle0" });
+  await o.first?.(page);
   await page.click("#voice");
   await page.waitForFunction(() => document.querySelector("#voice-status")?.textContent === "Listening", { timeout: 10_000 });
   const s = voiceLog().filter((e) => e.ev === "msg" && e.type === "hello" && e.voice === script).at(-1).s;
@@ -482,15 +487,19 @@ test("voice mode: what is said shows as it is said, becomes the question, and th
   expect(await page.$(".msg.ghost")).toBeNull();
   expect(await page.$('#thread > article[data-i="0"] .said')).not.toBeNull();
   await page.waitForFunction(() => /^voice \d\.\d\d s/.test(document.querySelector('#thread > article[data-i="1"] .stats')?.textContent ?? ""), { timeout: 10_000 });
-  expect(lastStream.messages[0]).toEqual({ role: "system", content: VOICE_PROMPT });
+  expect(lastStream.messages).toEqual([{ role: "user", content: `[${VOICE_NOTE}]\n\nhello there` }]);   // the note, before what was said
   expect(lastStream.model).toBe("qwen3.8-27b-fast");
   expect(lastStream.reasoning_effort).toBeUndefined();
-  // opening voice mode had kiln read the voice prompt first, so the first turn is an append
+  // opening voice mode had kiln read the chat first (a new one's question stands in), so the first turn is an append
   const mine = streams.slice(n0), warm = mine.findIndex((b) => b.max_tokens === 1);
-  expect(mine[warm]?.messages).toEqual([{ role: "system", content: VOICE_PROMPT }, { role: "user", content: "Hi" }]);
+  expect(mine[warm]?.messages).toEqual([{ role: "user", content: "Hi" }]);
   expect(mine[warm]?.model).toBe("qwen3.8-27b-fast");
-  expect(warm).toBeLessThan(mine.findIndex((b) => b.messages.at(-1)?.content === "hello there"));
+  expect(warm).toBeLessThan(mine.findIndex((b) => b.messages.at(-1)?.content.endsWith("hello there")));
   expect(await replyText(page, 1)).toBe("You said: hello there");
+  expect(await page.$eval('#thread > article[data-i="0"] .msg-note summary', (e) => e.textContent)).toBe("Voice mode note");
+  expect(await page.$eval('#thread > article[data-i="0"] .msg-note-text', (e) => e.checkVisibility())).toBe(false);   // closed until asked
+  await page.click('#thread > article[data-i="0"] .msg-note summary');
+  expect(await page.$eval('#thread > article[data-i="0"] .msg-note-text', (e) => [e.textContent, e.checkVisibility()])).toEqual([VOICE_NOTE, true]);
   const log = session(), says = log.filter((e) => e.type === "say"), id = says[0].id;
   expect(says.every((e) => e.id === id)).toBe(true);
   expect(says.map((e) => e.text).join("")).toBe("You said: hello there");
@@ -525,9 +534,56 @@ test("voice mode: a reply talked over before it made a sound is taken out, and t
   await page.waitForFunction(() => document.querySelector('#thread > article[data-i="0"] .bubble')?.textContent === "slow first second part", { timeout: 15_000 });
   await page.waitForFunction(() => /^w0 w1/.test(document.querySelector('#thread > article[data-i="1"] .markdown')?.textContent ?? ""), { timeout: 10_000 });
   expect(await page.$$eval("#thread > article.msg:not(.ghost)", (els) => els.length)).toBe(2);
-  expect(lastStream.messages.filter((m: any) => m.role !== "system")).toEqual([{ role: "user", content: "slow first second part" }]);
+  expect(lastStream.messages.filter((m: any) => m.role !== "system")).toEqual([{ role: "user", content: `[${VOICE_NOTE}]\n\nslow first second part` }]);
   await page.close();
 }, 30_000);
+
+test("voice mode's note goes before the first question said and again when it changes, the typing note after it, and the system prompt never changes", async () => {
+  const n0 = streams.length, CHANGED = "Speak like a pirate.";
+  const { page, session } = await voicePage("notes", { system: "Be brief.", first: (p) => send(p, "typed first") });
+  await page.waitForFunction(() => /^voice /.test(document.querySelector('#thread > article[data-i="5"] .stats')?.textContent ?? ""), { timeout: 15_000 });
+  await openSettings(page);
+  await page.$eval("#voice-prompt", (el, v) => { (el as HTMLTextAreaElement).value = v; el.dispatchEvent(new Event("input")); }, CHANGED);
+  await page.$eval("#knob-voice_speed", (el) => { (el as HTMLInputElement).value = "1.2"; el.dispatchEvent(new Event("change")); });   // the script's next line waits for a config
+  await page.waitForFunction(() => /^voice /.test(document.querySelector('#thread > article[data-i="7"] .stats')?.textContent ?? ""), { timeout: 15_000 });
+  await page.click("#voice-end");
+  await send(page, "typed again");
+  const asked = streams.slice(n0).filter((b) => b.max_tokens !== 1);   // not the warm-up when voice mode opened
+  expect(asked.map((b) => b.messages.at(-1).content)).toEqual(["typed first", `[${VOICE_NOTE}]\n\nfirst question`, "second question",
+    `[${CHANGED}]\n\nthird question`, "[The user is typing again and reads your replies.]\n\ntyped again"]);
+  expect(asked.every((b) => JSON.stringify(b.messages[0]) === JSON.stringify({ role: "system", content: "Be brief." }))).toBe(true);
+  expect(session().some((e) => e.type === "config")).toBe(true);
+  expect(await page.$$eval(".msg-note summary", (els) => els.map((e) => e.textContent))).toEqual(["Voice mode note", "Voice mode note", "Note to the model"]);
+  await page.close();
+}, 45_000);
+
+test("a tool's description edited in Settings is what kiln is sent, and ↺ brings back the server's own", async () => {
+  const page = await open();
+  await page.setViewport({ width: 1600, height: 900 });
+  await page.click("#tools-btn");
+  await page.waitForSelector(sw("mcp:fake"));
+  await page.click(sw("mcp:fake"));
+  await page.waitForFunction(() => document.querySelector('#tools-pop [data-src="mcp:fake"]')?.closest(".tp-src")?.querySelector(".tp-sub")?.textContent === "5 of 5 tools on",
+    { timeout: 20_000 });
+  await page.click(sw("fetch"));
+  await page.keyboard.press("Escape");
+  await page.click("#settings-toggle");
+  const echo = 'details.ts-tool[data-fn="fake__echo"]';
+  await page.waitForSelector(echo, { timeout: 10_000 });
+  await page.click(`${echo} summary`);
+  const own = await page.$eval(`${echo} textarea`, (t) => (t as HTMLTextAreaElement).value);
+  expect(own.length).toBeGreaterThan(0);
+  await page.$eval(`${echo} textarea`, (t) => { (t as HTMLTextAreaElement).value = "Echoes back exactly the text it is given."; t.dispatchEvent(new Event("input")); });
+  await send(page, "described");
+  const sent = () => Object.fromEntries(lastStream.tools.map((t: any) => [t.function.name, t.function.description]));
+  expect(sent().fake__echo).toBe("Echoes back exactly the text it is given.");
+  expect(sent().fetch_url).toBe(await page.$eval('details.ts-tool[data-fn="fetch_url"] textarea', (t) => (t as HTMLTextAreaElement).value));
+  expect(sent().fetch_url).toContain("Only fetch URLs that appeared in the conversation");
+  await page.click(`${echo} .knob-reset`);
+  await send(page, "described again");
+  expect(sent().fake__echo).toBe(own);
+  await page.close();
+}, 60_000);
 
 async function openSettings(page: Page) {
   await page.click("#settings-toggle");
@@ -546,7 +602,7 @@ test("voice picker: the voice models' voices by language and gender; a pick swit
   expect(rows.filter(([c]) => c.startsWith("voice-model"))).toEqual([["voice-model", "Fake TTS"], ["voice-model", "Other TTS"], ["voice-model missing", "Big TTStools/voice_setup.sh big-tts"]]);
   expect(rows.filter(([c]) => c === "voice-group").map(([, t]) => t)).toEqual(["American English · Female", "British English · Male", "Spanish · Female", "American English · Male"]);
   expect(await page.$$eval("#voice-pop .voice-item", (els) => els.map((e) => (e as HTMLElement).dataset.voice))).toEqual(
-    ["plain", "story", "merge", "silent", "pick", "echo"].map((v) => `fake-tts/${v}`).concat(["other-tts/ana", "other-tts/bob"]));
+    ["plain", "story", "merge", "silent", "pick", "notes", "echo"].map((v) => `fake-tts/${v}`).concat(["other-tts/ana", "other-tts/bob"]));
   expect(await page.$$eval('#voice-pop .voice-item[aria-selected="true"]', (els) => els.map((e) => (e as HTMLElement).dataset.voice))).toEqual(["fake-tts/pick"]);
   await page.click('#voice-pop [data-voice="other-tts/bob"]');
   const configs = () => session().filter((e) => e.type === "config").map(({ stack, voice, speed }) => ({ stack, voice, speed }));

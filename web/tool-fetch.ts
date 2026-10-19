@@ -210,9 +210,10 @@ export function fetchSource(cfg: Record<string, unknown>): Source {
   const policy: Policy = allow === true ? true : Array.isArray(allow) ? allow.map((c) => block(String(c))).filter((b): b is [bigint, number] => !!b) : [];
   const tool: Tool = {
     name: "fetch_url", title: "Fetch URL", readOnly: true,
-    description: "Fetch a web page or text file by its URL (http or https, public addresses) and return it as readable text: the "
-      + "page's title, headings, paragraphs, lists, links, tables and code, with the final URL and the HTTP status. A long "
-      + "page comes in parts: call again with `start` to read on.",
+    description: "Reads one web page or text file by its URL (http or https, public addresses) and returns it as readable text: the "
+      + "page's title, headings, paragraphs, lists, links, tables and code, with the final URL and the HTTP status. A long page "
+      + "comes in parts: call again with `start` to read on. Use it when the user gives or names a page, or to read a search "
+      + "result in full. Only fetch URLs that appeared in the conversation or in tool results.",
     parameters: { type: "object", properties: {
       url: { type: "string", description: "The http or https URL to fetch" },
       start: { type: "integer", description: "Where to start reading, in characters (for the rest of a long page)", minimum: 0 },

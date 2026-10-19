@@ -187,6 +187,11 @@ main { display: flex; flex-direction: column; min-height: 0; grid-column: 2; }
 .svg-zoom-paper > img { display: block; max-width: 92vw; max-height: 88vh; }
 .bubble { max-width: min(85%, 640px); padding: 10px 15px; border: 1px solid var(--line); border-radius: 18px 18px 6px 18px; background: var(--raised); white-space: pre-wrap; overflow-wrap: anywhere; }
 .msg-foot { display: flex; align-items: center; gap: 2px; min-height: 32px; margin-top: 4px; color: var(--faint); font-size: 12px; }
+.msg-note { max-width: min(85%, 640px); margin-bottom: 6px; color: var(--faint); font-size: 12px; text-align: right; }
+.msg-note summary { display: inline-block; padding: 2px 9px; border: 1px solid var(--line); border-radius: 999px; cursor: pointer; list-style: none; }
+.msg-note summary::-webkit-details-marker { display: none; }
+.msg-note summary:hover, .msg-note[open] summary { color: var(--muted); }
+.msg-note-text { margin-top: 6px; padding: 8px 11px; border: 1px dashed var(--line); border-radius: 10px; color: var(--muted); text-align: left; white-space: pre-wrap; }
 .msg.user .msg-foot > .act { opacity: 0; transition: opacity 0.15s; }   /* (the version pager stays in view) */
 .msg.user:hover .msg-foot > .act, .msg.user:focus-within .msg-foot > .act { opacity: 1; }
 .stats { flex: 1 1 auto; min-width: 0; margin-right: 6px; font: 11.5px var(--mono); }   /* pushes the actions to their fixed places */
@@ -673,6 +678,15 @@ main { position: relative; }
 /* Settings' Tools: the config file's servers, read-only */
 .tools-list { display: grid; gap: 8px; }
 .ts-row { display: grid; gap: 3px; }
+.ts-tool { margin-left: 16px; font-size: 12.5px; }
+.ts-tool summary { display: flex; align-items: baseline; gap: 8px; padding: 3px 0; color: var(--muted); cursor: pointer; }
+.ts-tool summary:hover, .ts-tool[open] summary { color: var(--text); }
+.ts-tool-fn { color: var(--faint); font: 11px var(--mono); }
+.ts-tool .prompt-field { margin-top: 4px; }
+.prompt-field { margin-bottom: 10px; }
+.prompt-head { display: flex; align-items: center; justify-content: space-between; gap: 8px; margin-bottom: 4px; }
+.prompt-label { color: var(--muted); font-size: 12.5px; }
+.prompt-field .prompt-input { margin-bottom: 0; }
 .ts-top { display: flex; align-items: center; gap: 8px; font-size: 13px; }
 .ts-name { flex: 1; font-weight: 600; }
 .ts-state { color: var(--muted); font-size: 12px; }

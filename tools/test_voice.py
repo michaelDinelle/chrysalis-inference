@@ -160,7 +160,7 @@ check("its first words show while it is spoken", first < 0.9, f"{first:.2f} s af
 check("its wait is the silence, turn model and flush", 200 <= t.get("wait_ms", -1) < 500, f"wait_ms {t.get('wait_ms')}")
 
 reply = ("Sure! Here's the **short** answer: it's about *eighteen degrees* in [Denver](https://example.com/w) right now.\n\n"
-         "```python\nprint_banana_value(42)\n```\n\n## Tomorrow\n- Warmer than today, so a light jacket is enough.\n"
+         "```python\nprint_banana_value(42)\n```\n\n| Day | High |\n|---|---|\n| Mango | 21 |\n\n## Tomorrow\n- Warmer than today, so a light jacket is enough.\n"
          "- Check https://weather.example.com before you go.\n")
 t0 = time.monotonic()
 for i in range(0, len(reply), 5):
@@ -172,7 +172,7 @@ pieces = [m[0] for m in got if kind(m) == "audio"]
 texts = [p["text"] for p in pieces]
 check("a reply: audio pieces in order, then said", [p["seq"] for p in pieces] == list(range(len(pieces))) and len(pieces) >= 3
       and kind(got[-1]) == "said", f"{len(pieces)} pieces, first after {first and round(first * 1000)} ms")
-check("no markup or code is read out", not any(re.search(r"[*#`\[\]()|]|https?:|banana|print_", s) for s in texts) and "a link" in " ".join(texts),
+check("no markup, code or table is read out", not any(re.search(r"[*#`\[\]()|]|https?:|banana|print_|mango", s, re.I) for s in texts) and "a link" in " ".join(texts),
       " | ".join(texts))
 check("the pieces' ranges cover the reply", [p["from"] for p in pieces[1:]] == [p["to"] for p in pieces[:-1]]
       and pieces and pieces[0]["from"] == 0 and pieces[-1]["to"] >= len(reply.rstrip()), str([(p["from"], p["to"]) for p in pieces]))

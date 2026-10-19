@@ -16,6 +16,7 @@ const SCRIPTS: Record<string, Line[]> = {
   merge: [{ text: "slow first", interruptOnSay: true }, { text: "second part" }],
   silent: [],
   pick: [{ text: "first" }, { text: "second", after: "config" }],
+  notes: [{ text: "first question" }, { text: "second question" }, { text: "third question", after: "config" }],
 };
 const voice = (id: string, lang: string, gender: string) => ({ id, label: id[0].toUpperCase() + id.slice(1), lang, gender });
 const CATALOG = {
@@ -34,8 +35,8 @@ const RATE = 24000, LOG = process.env.FAKE_VOICE_LOG;
 const log = (o: object) => { if (LOG) appendFileSync(LOG, `${JSON.stringify(o)}\n`); };
 
 interface Reply { text: string[]; told: number; seq: number; sent: number; ended: boolean; dropped: boolean }
-interface Session {
-  n: number; script: Line[]; at: number; line?: Line; listening: boolean; heard: number; frames: number; configs: number;
+interface Session {                               // n: pid.count, as a service started again counts from 1 and the log outlives it
+  n: string; script: Line[]; at: number; line?: Line; listening: boolean; heard: number; frames: number; configs: number;
   stack: Record<Part, string>; voice: string; speed: number;
   replies: Map<string, Reply>; playing: boolean; answer?: string; overtalk?: boolean;
 }
@@ -179,7 +180,7 @@ const server = Bun.serve<Session>({
   hostname: "127.0.0.1",
   port: 0,
   fetch(req, srv) {
-    return srv.upgrade(req, { data: { n: ++sessions, script: [], at: 0, listening: false, heard: 0, frames: 0, configs: 0, replies: new Map(), playing: false,
+    return srv.upgrade(req, { data: { n: `${process.pid}.${++sessions}`, script: [], at: 0, listening: false, heard: 0, frames: 0, configs: 0, replies: new Map(), playing: false,
       stack: { vad: "fake-vad", stt: "fake-stt", turn: "fake-turn", tts: "fake-tts" }, voice: "plain", speed: 1 } })
       ? undefined : new Response("a WebSocket only", { status: 426 });
   },

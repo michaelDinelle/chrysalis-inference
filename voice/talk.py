@@ -257,7 +257,7 @@ def abbrev(text, at):
 
 
 def speakable(s):
-    """What text-to-speech should read of markdown: the words and punctuation, without markup, code, links or emoji."""
+    """What text-to-speech should read of markdown: the words and punctuation, without markup, code, tables, links or emoji."""
     s = unicodedata.normalize("NFC", s)
     s = re.sub(r"```.*?(```|$)", " ", s, flags=re.S)
     s = re.sub(r"!?\[([^\]]*)\]\([^)]*\)", r"\1", s)
@@ -269,8 +269,8 @@ def speakable(s):
         line = line.strip()
         if re.fullmatch(r"[|:\-\s]*-{3,}[|:\-\s]*|[*_=-]{3,}", line):    # a table's rule line, a horizontal rule
             continue
-        if line.count("|") >= 2:
-            line = ", ".join(c.strip() for c in line.strip("|").split("|") if c.strip())
+        if line.count("|") >= 2:                    # a table is shown, not read: the reply says what it holds
+            continue
         if line := re.sub(r"^(#{1,6}\s+|>\s*|[-*+•]\s+|\d+[.)]\s+)+", "", line):
             lines.append(line)
     # a break the text shows (a list's items, a heading) is a pause when read: a period where the line had none
