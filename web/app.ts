@@ -13,7 +13,7 @@ import { type Part, type VoiceAsk, type VoiceInfo, type VoiceReady, VoiceClient 
 import { type Fix, applyFixes, fixedParts, readHeard } from "./heard";
 import { pointOf, shownWords, unitOf } from "./spoken";
 import { DESCRIPTIONS, type ToolChoice, type WireCall, assistantTurn, noted, toolTurn } from "./wire";
-import logo from "./logo.svg";
+import logoThin from "./logo-thin.svg";
 
 type Effort = "xhigh" | "medium" | "low" | "off";
 // prompt and cached: summed over a reply's rounds; ctx: the context its last round left (prompt + reply)
@@ -1076,7 +1076,7 @@ function paint(v: View, m: Message, live?: Live) {
 // A new chat: the logo, nothing else.
 function emptyState() {
   const e = h("div", "empty");
-  e.innerHTML = `<img class="logo" src="${logo}" alt="">`;
+  e.innerHTML = `<img class="logo" src="${logoThin}" alt="">`;
   return e;
 }
 

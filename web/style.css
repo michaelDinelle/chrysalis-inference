@@ -121,8 +121,7 @@ button { font: inherit; color: inherit; cursor: pointer; }
 .pane-rail.dragging::after { background: var(--accent); }
 .pane-resizing, .pane-resizing * { cursor: col-resize !important; user-select: none !important; }
 
-.brand { display: flex; align-items: center; gap: 8px; font-size: 17px; font-weight: 650; letter-spacing: 0.01em; }
-.brand .logo { display: block; height: 18px; }
+.brand { font-size: 16px; font-weight: 600; letter-spacing: 0.015em; white-space: nowrap; }
 .side-body { display: flex; flex: 1; flex-direction: column; gap: 6px; min-height: 0; padding: 10px; }
 #new-chat { justify-content: flex-start; }
 #conversations { flex: 1; min-height: 0; overflow-y: auto; margin: 4px -4px 0; padding: 0 4px; }
@@ -289,11 +288,14 @@ main { display: flex; flex-direction: column; min-height: 0; grid-column: 2; }
 .hljs-strong { font-weight: 700; }
 
 /* the logo alone, in the middle of the empty chat (a touch above it, which reads as centered over the message box),
-   with a slow glow in its own pink */
+   with a slow glow in its own pink. It fills most of the empty chat, sized by the room itself (container units) with
+   a margin left around it, and at that size it is drawn a weight lighter (logo-thin.svg): the original's strokes
+   read too heavy there */
 .thread:has(> .empty) { height: 100%; padding-top: 0; padding-bottom: 0; }
-.empty { display: grid; height: 100%; place-items: center; }
-.empty > .logo { width: 120px; translate: 0 -6%; filter: drop-shadow(0 0 18px rgb(226 77 133 / 0.28)); animation: glow 5s ease-in-out infinite; }
-@keyframes glow { 50% { filter: drop-shadow(0 0 30px rgb(226 77 133 / 0.42)); } }
+.empty { display: grid; height: 100%; place-items: center; container-type: size; }
+.empty > .logo { width: 90cqw; height: 75cqh; object-fit: contain; translate: 0 -3%; filter: drop-shadow(0 0 40px rgb(226 77 133 / 0.14));
+  animation: glow 5s ease-in-out infinite; }
+@keyframes glow { 50% { filter: drop-shadow(0 0 60px rgb(226 77 133 / 0.22)); } }
 @media (prefers-reduced-motion: reduce) { .empty > .logo { animation: none; } }
 
 /* thinking: an energy bar of four stops, Off to Max, in view in the message box. A 10px capsule and an 18px thumb on a
