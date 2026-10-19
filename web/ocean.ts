@@ -1,12 +1,13 @@
 // The chat's backdrop: an ocean of characters under everything below the top bar, the message box floating on it. In a
 // new chat it holds the butterfly, drawn in the same characters and shaded like a lit tube, its light tinting the water
 // near it, and a click sends ripples across it in a shape (heart, ring, butterfly, star, flower) that bend the current
-// as they pass. Once the chat has begun the butterfly fades and the sea lies dimmed behind the messages, dimmest under
-// their column. The sea is a slow current (domain-warped noise over a swell). All of it is two WebGL2 passes: one
+// as they pass. Once the chat has begun the butterfly sinks into the water, where its shape stays faintly, and the sea
+// lies dimmed behind the messages, dimmest under their column; a new chat raises it again. The sea is a slow current (domain-warped noise over a swell). All of it is two WebGL2 passes: one
 // fragment per character cell works out what that cell shows (pass 1, a cols x rows texture), then each screen pixel
 // draws its cell's glyph from an atlas rendered at the screen's own pixel size (pass 2), so the CPU only sets uniforms.
 // Without WebGL2 the page shows the logo as an image in a new chat instead (start() returns false).
 import logo from "./logo-thin.svg";
+import { isDark, onTheme } from "./theme";
 
 // Glyph rows of the atlas: the sea's (light to dense, none that join into lines across a row) and the butterfly's in
 // bold (edge to core). The orders follow measured ink in JetBrains Mono, so a gradient of values reads as an even
@@ -23,6 +24,9 @@ const VIEW_W = 660, VIEW_H = 473, HALF_STROKE = 11.26;
 // (WAKE), small swells WAKE_LIFE s long.
 const PATTERNS = [1, 0, 2, 3, 4];
 const WAKE = 9, MAX_RIPPLES = 16, WAVE_LIFE = 5, WAKE_LIFE = 2;
+// The butterfly sinks into the water as a chat begins and rises out of it in a new chat, quickest at first (out of the
+// way of the chat's first words) and settling: these are their time constants, s (most of the way in three).
+const SINK = 0.45, RISE = 0.35;
 
 const VERT = `#version 300 es
 void main() { vec2 p = vec2((gl_VertexID << 1) & 2, gl_VertexID & 2); gl_Position = vec4(p * 2.0 - 1.0, 0.0, 1.0); }`;
@@ -34,8 +38,8 @@ precision highp float;
 uniform vec2 uGrid, uCell;
 uniform vec4 uView;         // the part of the sea on screen: left, top, right, bottom, CSS px from the window's corner
 uniform vec4 uBox;          // the message box and the hint under it, likewise
-uniform vec2 uLane;         // the chat's column: left and right, likewise
-uniform float uFlyOn;       // the butterfly: 1 in a new chat, fading to 0 as the chat begins
+uniform vec2 uLane;         // the chat's column (the message box's): left and right, likewise
+uniform float uFlyOn;       // the butterfly: 1 in a new chat, 0 sunk into the water behind a chat
 uniform float uTime, uMotion;
 uniform vec4 uRip[${MAX_RIPPLES}];
 uniform vec2 uFly;          // the drawing's width and its strokes' half-width, CSS px
@@ -180,19 +184,26 @@ void main() {
   // what is seen through the water is bent by its slope: the current's ribbons, and the butterfly a little
   vec2 slope = vec2(waves(p + vec2(3.0, 0.0)) - w, waves(p + vec2(0.0, 3.0)) - w) / 3.0;
   float breathe = 1.0 + 0.018 * sin(t * 0.9) * uMotion;
-  vec2 q = uCenter + (p - uCenter) / vec2(breathe, 1.0) - slope * 30.0;
+  // sunk, the current pushes the butterfly's strokes about
+  float sunk = smoothstep(0.0, 1.0, 1.0 - uFlyOn);
+  vec2 drift = sunk * 6.0 * vec2(snoise(vec3(p * 0.011, t * 0.12)), snoise(vec3(p * 0.011 + 31.0, t * 0.12)));
+  vec2 q = uCenter + (p - uCenter) / vec2(breathe, 1.0) - slope * 30.0 + drift;
   float d = flyAt(q, uCenter, uFly.x);
+  // as it sinks its bold glyphs give way to the water's, unevenly (patches and single cells), and rise back the same way
+  float grain = 0.999 * (0.65 * (0.5 + 0.5 * snoise(vec3(p * 0.018, 5.0))) + 0.35 * fract(sin(dot(cell, vec2(12.9898, 78.233))) * 43758.5453));
   float edge = smoothstep(0.0, 28.0, min(min(p.x - uView.x, uView.z - p.x), min(p.y - uView.y, uView.w - p.y)));
   float hover = uPointer.z * exp(-dot2(p - uPointer.xy) / 3600.0);
   float lift = max(w, 0.0);
-  if (d < 0.5 && uFlyOn > 0.0) {
+  if (d < 0.5 && grain < uFlyOn) {
     float depth = clamp(-d / uFly.y, 0.0, 1.0);
     float prof = sqrt(max(0.0, 1.0 - (1.0 - depth) * (1.0 - depth)));
     float g = ${ROW}.0 + floor(clamp(1.0 + prof * ${TUBE.length - 2}.0 + 0.5 + lift * 0.5, 0.0, ${TUBE.length - 1}.0));
-    o = vec4(g / 255.0, (0.58 + 0.42 * prof) * uFlyOn, 1.0, clamp(max(0.0, prof - 0.55) * 1.4 + lift * 0.3, 0.0, 1.0));
+    o = vec4(g / 255.0, (0.58 + 0.42 * prof) * (0.4 + 0.6 * uFlyOn), 1.0, clamp(max(0.0, prof - 0.55) * 1.4 * uFlyOn + lift * 0.3, 0.0, 1.0));
     return;
   }
   float s = sea(p - slope * 90.0, t);
+  // the butterfly's shape in the water, where its glyphs have given way: denser water, faintly pink
+  float ghost = 1.0 - smoothstep(-2.0, 6.0, d);
   float gd = max(d, 0.0) / 30.0;
   float glow = exp(-gd * gd) * uFlyOn;
   // the water right around the butterfly lies still, so its outline stays clean (its light still tints it), and the
@@ -201,10 +212,11 @@ void main() {
   float calm = mix(1.0, mix(0.3, 1.0, smoothstep(3.0, 40.0, d)), uFlyOn);
   float quiet = mix(0.3, 1.0, smoothstep(0.0, 40.0, boxAt(p)));
   quiet *= mix(mix(0.3, 0.65, smoothstep(0.0, 72.0, max(uLane.x - p.x, p.x - uLane.y))), 1.0, uFlyOn);
-  float v = clamp(s * calm + lift * 0.55 + min(w, 0.0) * 0.15 + hover * 0.3, 0.0, 1.0);
+  float v = clamp(s * calm + ghost * 0.3 + lift * 0.55 + min(w, 0.0) * 0.15 + hover * 0.3, 0.0, 1.0);
   float g = floor(clamp(v * 3.9, 0.0, ${SEA.length - 1}.0));
-  float bright = (0.05 + 0.46 * v * v + 0.3 * glow + 0.3 * lift + 0.3 * hover) * edge * quiet;
-  o = vec4(g / 255.0, clamp(bright, 0.0, 1.0), clamp(glow * 0.85 + lift * 0.6 + hover * 0.5, 0.0, 1.0), 0.0);
+  // (the ghost only half as dimmed behind a chat: it stays in sight there, faintly)
+  float bright = ((0.05 + 0.46 * v * v + 0.3 * glow + 0.3 * lift + 0.3 * hover) * quiet + 0.2 * ghost * sqrt(quiet)) * edge;
+  o = vec4(g / 255.0, clamp(bright, 0.0, 1.0), clamp(glow * 0.85 + ghost * 0.7 + lift * 0.6 + hover * 0.5, 0.0, 1.0), 0.0);
 }`;
 
 // Pass 2: each screen pixel draws its cell's glyph.
@@ -289,10 +301,10 @@ function compile(gl: WebGL2RenderingContext, frag: string): WebGLProgram {
   return prog;
 }
 
+// A computed color ("rgb(156, 142, 146)"), 0..1 each.
 const rgb = (css: string) => {
-  const m = css.trim().match(/^#([0-9a-f]{6})$/i);
-  const n = m ? parseInt(m[1], 16) : 0x888888;
-  return [(n >> 16 & 255) / 255, (n >> 8 & 255) / 255, (n & 255) / 255];
+  const [r = 136, g = 136, b = 136] = css.match(/[\d.]+/g)?.map(Number) ?? [];
+  return [r / 255, g / 255, b / 255];
 };
 
 export class Ocean {
@@ -309,7 +321,6 @@ export class Ocean {
   private empty: HTMLElement | null = null;
   private shown = false;
   private fly = 0;
-  private drawnFor = "";
   private cols = 0;
   private rows = 0;
   private dpr = 0;
@@ -331,7 +342,6 @@ export class Ocean {
   private drawn = 0;
   private running = false;
   private still = matchMedia("(prefers-reduced-motion: reduce)");
-  private dark = matchMedia("(prefers-color-scheme: dark)");
   private resize = new ResizeObserver(() => this.layout());
 
   // `layer`: the room the sea fills (under the top bar, behind the message box), shown while a new chat is.
@@ -358,7 +368,7 @@ export class Ocean {
     c.addEventListener("pointerleave", () => { this.presence = 0; this.lastWake = null; });
     c.addEventListener("webglcontextlost", (e) => { e.preventDefault(); this.gl = null; this.running = false; });
     c.addEventListener("webglcontextrestored", () => { if (this.init()) this.layout(); });
-    this.dark.addEventListener("change", () => { this.readColors(); this.wake(); });
+    onTheme(() => { this.readColors(); this.wake(); });
     this.still.addEventListener("change", () => this.wake());
   }
 
@@ -386,17 +396,17 @@ export class Ocean {
     if (!this.init()) return false;
     this.layer.append(this.canvas);
     this.resize.observe(this.layer);
-    // the message box places the butterfly and the quiet water around it, the thread the dimmest water behind a chat
-    for (const sel of [".composer-box", "#thread"]) { const el = document.querySelector(sel); if (el) this.resize.observe(el); }
+    // the message box places the butterfly, the quiet water around it and the dimmest water behind a chat (its column)
+    const box = document.querySelector(".composer-box");
+    if (box) this.resize.observe(box);
     this.readColors();
     void drawingSdf(720).then((s) => { this.sdf = s; this.uploadSdf(); this.wake(); });
     return true;
   }
 
-  // A new chat's empty state: the butterfly shows at once while it is in the page, and fades once the chat has begun.
+  // A new chat's empty state: the butterfly rises while it is in the page and sinks once the chat has begun.
   butterfly(empty: HTMLElement) {
     this.empty = empty;
-    this.fly = 1;
     this.wake();
   }
 
@@ -404,10 +414,12 @@ export class Ocean {
   private now() { return performance.now() / 1000 - this.t0; }
 
   // The theme's colors: the sea in --muted, the butterfly in --accent, its light lighter in the dark, deeper in light.
+  // Read as an element's computed color: the variables themselves are light-dark() pairs.
   private readColors() {
-    const style = getComputedStyle(document.documentElement);
-    this.colors = { sea: rgb(style.getPropertyValue("--muted")), pink: rgb(style.getPropertyValue("--accent")),
-      hi: this.dark.matches ? [1.0, 0.86, 0.92] : rgb(style.getPropertyValue("--accent-hi")) };
+    const probe = document.body.appendChild(document.createElement("i"));
+    const read = (v: string) => { probe.style.color = `var(${v})`; return rgb(getComputedStyle(probe).color); };
+    this.colors = { sea: read("--muted"), pink: read("--accent"), hi: isDark() ? [1.0, 0.86, 0.92] : read("--accent-hi") };
+    probe.remove();
   }
 
   private splash(x: number, y: number, kind: number) {
@@ -459,14 +471,11 @@ export class Ocean {
     this.box = box && box.width > 0 ? [box.left, box.top, box.right, Math.max(box.bottom, hint?.height ? hint.bottom : 0)] : [-1e4, -1e4, -1e4, -1e4];
     this.center = [column.left + column.width / 2, r.top + (top - r.top) * 0.47];
     this.flyW = Math.min(column.width * 0.86, (top - r.top) * 0.74 * VIEW_W / VIEW_H, r.width * 0.92);
-    const lane = document.getElementById("thread")?.getBoundingClientRect();
-    this.lane = lane && lane.width > 0 ? [lane.left, lane.right] : [r.left, r.right];
-    // a reply being written grows the thread on every word: nothing here moves then, and the frame stands
-    if (!was) this.wake();
-    if (this.geometry() !== this.drawnFor || !was) this.draw();
+    this.lane = [column.left, column.right];
+    // the sea showing (again): the butterfly is where it belongs at once, as the sea is
+    if (!was) { this.fly = this.empty?.isConnected ? 1 : 0; this.wake(); }
+    this.draw();
   }
-
-  private geometry() { return JSON.stringify([this.cols, this.rows, this.view, this.box, this.lane, this.center]); }
 
   private buildAtlas(dpr: number, cw: number, ch: number) {
     const gl = this.gl!;
@@ -516,20 +525,16 @@ export class Ocean {
   }
 
   // Runs the loop while the sea is on screen: every frame while something moves fast (a wave, the pointer's light,
-  // the butterfly fading), 24 a second for the slow current alone in a new chat (on a 144 Hz screen every frame would
+  // the butterfly sinking or rising), 24 a second for the slow current alone in a new chat (on a 144 Hz screen every frame would
   // be six times the work for nothing to see) and 12 behind a chat, where it is dim and only drifts, once with reduced
   // motion. requestAnimationFrame stops by itself in a hidden tab.
   private wake() {
     if (this.running) return;
     this.running = true;
     const tick = () => {
-      if (!this.live() || !this.sdfTex) {
-        this.running = false;
-        if (!this.empty?.isConnected) this.fly = 0;           // hidden mid-fade: gone when it shows again
-        return;
-      }
+      if (!this.live() || !this.sdfTex) { this.running = false; return; }
       const t = this.now(), blank = !!this.empty?.isConnected;
-      const busy = this.presence > 0 || this.pointer[2] > 0.01 || (!blank && this.fly > 0)
+      const busy = this.presence > 0 || this.pointer[2] > 0.01 || this.fly !== (blank ? 1 : 0)
         || this.ripples.some((v, i) => i % 4 === 2 && v >= 0 && t - v < WAVE_LIFE);
       if (busy || t - this.drawn >= 1 / (blank ? 24 : 12)) this.draw();
       if (this.still.matches) { this.running = false; return; }
@@ -543,11 +548,11 @@ export class Ocean {
     const gl = this.gl;
     if (!gl || !this.cellTex || !this.atlas || !this.sdf || !this.sdfTex || this.seen[2] <= 0 || this.seen[3] <= 0) return;
     const t = this.now(), still = this.still.matches, [sx, sy, sw, sh] = this.seen;
-    // behind a chat the sea gets no pointer (the thread is over it): the butterfly fades over half a second
-    if (this.empty?.isConnected) this.fly = 1;
-    else { this.fly = still ? 0 : Math.max(0, this.fly - Math.min(0.1, t - this.drawn) / 0.5); this.presence = 0; }
+    const blank = !!this.empty?.isConnected, dt = Math.min(0.1, t - this.drawn);
+    this.fly = still ? Number(blank) : this.fly + (Number(blank) - this.fly) * (1 - Math.exp(-dt / (blank ? RISE : SINK)));
+    if (Math.abs(Number(blank) - this.fly) < 0.003) this.fly = Number(blank);
+    if (!blank) this.presence = 0;                          // behind a chat the thread has the pointer
     this.drawn = t;
-    this.drawnFor = this.geometry();
     this.pointer[2] += (this.presence - this.pointer[2]) * 0.12;
 
     gl.disable(gl.BLEND);

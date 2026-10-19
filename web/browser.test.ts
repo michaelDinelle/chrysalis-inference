@@ -646,6 +646,38 @@ test("What the model is sent shows the next request as Chrysalis gets it: the to
   await page.close();
 }, 60_000);
 
+test("the theme is the system's until Settings chooses one, which overrides it and is kept across a reload; System follows the system's scheme as it changes", async () => {
+  const page = await open();
+  // the page's background, by its luminance, once it has settled (a change of the system's scheme reaches the page on
+  // its next frame): dark under 60, light over 200
+  const bg = async (want: "dark" | "light") => {
+    const lum = () => page.evaluate(() => {
+      const [r, g, b] = getComputedStyle(document.body).backgroundColor.match(/[\d.]+/g)!.map(Number);
+      return 0.2126 * r + 0.7152 * g + 0.0722 * b;
+    });
+    let v = await lum();
+    for (const end = Date.now() + 2000; (want === "dark" ? v >= 60 : v <= 200) && Date.now() < end; await Bun.sleep(25)) v = await lum();
+    return v;
+  };
+  const scheme = (value: "dark" | "light") => page.emulateMediaFeatures([{ name: "prefers-color-scheme", value }]);
+  await scheme("dark");
+  expect(await bg("dark")).toBeLessThan(60);
+  await scheme("light");
+  expect(await bg("light")).toBeGreaterThan(200);
+  await openSettings(page);
+  await page.click('#theme-pick [data-theme="dark"]');
+  expect(await bg("dark")).toBeLessThan(60);                     // chosen over the system's light
+  await page.reload({ waitUntil: "networkidle0" });
+  expect(await bg("dark")).toBeLessThan(60);
+  expect(await page.$eval('#theme-pick [aria-checked="true"]', (b) => (b as HTMLElement).dataset.theme)).toBe("dark");
+  await openSettings(page);
+  await page.click('#theme-pick [data-theme="system"]');
+  expect(await bg("light")).toBeGreaterThan(200);
+  await scheme("dark");
+  expect(await bg("dark")).toBeLessThan(60);
+  await page.close();
+}, 30_000);
+
 async function openSettings(page: Page) {
   await page.click("#settings-toggle");
   await page.waitForFunction(() => { const r = document.querySelector("#voice-knobs")!.getBoundingClientRect(); return r.width > 0 && r.right <= innerWidth; });
@@ -890,13 +922,14 @@ test("voice mode: the thinking bar is the chat's, one setting for spoken and wri
   await page.close();
 }, 30_000);
 
-// A part of the page's screenshot, counted: its pink pixels (the butterfly is drawn in the accent, the sea in a grey), its
-// lit ones (anything drawn on the dark page) and those that differ from `before` (an earlier shot of the same part). The
-// PNGs are decoded by the page itself (an image drawn into a 2D canvas), so the test needs no image library.
-async function look(page: Page, clip: { x: number; y: number; width: number; height: number }, before = "") {
+// A part of the page's screenshot, counted: its pink pixels (the butterfly is drawn in the accent, the sea in a grey),
+// its faintly pink ones (any pink tint, however dim), its lit ones (anything drawn on the dark page), those close to
+// `like` (a CSS color) and those that differ from `before` (an earlier shot of the same part). The PNGs are decoded by
+// the page itself (an image drawn into a 2D canvas), so the test needs no image library.
+async function look(page: Page, clip: { x: number; y: number; width: number; height: number }, before = "", like = "") {
   // (not beyond the viewport: that resizes the window for the shot, which ends a panel's slide at once)
   const png = Buffer.from(await page.screenshot({ clip, encoding: "binary", captureBeyondViewport: false })).toString("base64");
-  const counts = await page.evaluate(async (src, prev) => {
+  const counts = await page.evaluate(async (src, prev, like) => {
     const read = async (s: string) => {
       const img = new Image();
       img.src = `data:image/png;base64,${s}`;
@@ -908,14 +941,20 @@ async function look(page: Page, clip: { x: number; y: number; width: number; hei
       return ctx.getImageData(0, 0, cv.width, cv.height).data;
     };
     const d = await read(src), b = prev ? await read(prev) : null;
-    let pink = 0, lit = 0, changed = 0;
+    const probe = document.body.appendChild(document.createElement("i"));
+    probe.style.color = like || "transparent";
+    const [lr, lg, lb] = getComputedStyle(probe).color.match(/[\d.]+/g)!.map(Number);
+    probe.remove();
+    let pink = 0, tint = 0, lit = 0, close = 0, changed = 0;
     for (let i = 0; i < d.length; i += 4) {
       if (d[i] > 90 && d[i] - d[i + 1] > 50) pink++;
+      if (d[i] - d[i + 1] > 12 && d[i] > d[i + 2]) tint++;
       if (d[i] + d[i + 1] + d[i + 2] > 100) lit++;                   // the page is #121010
+      if (like && Math.abs(d[i] - lr) + Math.abs(d[i + 1] - lg) + Math.abs(d[i + 2] - lb) < 60) close++;
       if (b && Math.abs(d[i] - b[i]) + Math.abs(d[i + 1] - b[i + 1]) + Math.abs(d[i + 2] - b[i + 2]) > 30) changed++;
     }
-    return { pink, lit, changed };
-  }, png, before);
+    return { pink, tint, lit, close, changed };
+  }, png, before, like);
   return { png, ...counts };
 }
 
@@ -979,7 +1018,7 @@ test("a new chat is the butterfly in a sea under the message box too, never blan
   }
 }, 90_000);
 
-test("the sea stays behind a chat, the butterfly gone and every click the chat's; Settings takes it away from chats (remembered) and leaves it in a new chat", async () => {
+test("the sea stays behind a chat, the butterfly sunk into it and every click the chat's, and a new chat raises it again; Settings takes the sea away from chats (remembered) and leaves it in a new chat; it follows the theme", async () => {
   const gl = await puppeteer.launch({ executablePath: process.env.CHROMIUM ?? "/usr/bin/chromium", headless: true, args: ["--no-sandbox", "--enable-unsafe-swiftshader"] });
   try {
     const page = await (await gl.createBrowserContext()).newPage();
@@ -991,30 +1030,49 @@ test("the sea stays behind a chat, the butterfly gone and every click the chat's
     const rect = async (sel: string) => (await (await page.$(sel))!.boundingBox())!;
     const sea = await rect(".sea"), box = await rect(".composer-box");
     const middle = { x: box.x + box.width / 2 - 150, y: (sea.y + box.y) / 2 - 100, width: 300, height: 200 };
-    let pink = 0;
-    for (const end = Date.now() + 5000; pink <= 800 && Date.now() < end; await Bun.sleep(100)) pink = (await look(page, middle)).pink;
-    expect(pink).toBeGreaterThan(800);
+    const risen = async (least = 800) => {
+      let pink = 0;
+      for (const end = Date.now() + 5000; pink <= least && Date.now() < end; await Bun.sleep(100)) pink = (await look(page, middle)).pink;
+      return pink;
+    };
+    const full = await risen();
+    expect(full).toBeGreaterThan(800);
 
     await send(page, "capital of France");
-    await Bun.sleep(800);                                          // the butterfly fades over half a second
+    await Bun.sleep(1500);                                         // the butterfly sinks into the water
     const column = await rect("#thread"), margin = { x: sea.x + 40, y: sea.y + 60, width: column.x - sea.x - 80, height: 300 };
-    expect((await look(page, middle)).pink).toBeLessThan(50);
+    const sunk = await look(page, middle);
+    expect(sunk.pink).toBeLessThan(50);                            // its bold glyphs gone,
+    expect(sunk.tint).toBeGreaterThan(300);                        // its shape faintly pink in the water
     expect((await look(page, margin)).lit).toBeGreaterThan(150);
     const hit = (x: number, y: number) => page.evaluate((x, y) => document.elementFromPoint(x, y)?.closest("#scroller, .sea")?.id, x, y);
     const reply = await rect(".msg.assistant .markdown");
     expect([await hit(reply.x + 5, reply.y + reply.height / 2), await hit(margin.x + 20, margin.y + 20)]).toEqual(["scroller", "scroller"]);
 
+    // a new chat raises it out of the water: part of the way in the first shot after the click, all of it soon after
+    await page.click("#new-chat");
+    const rising = (await look(page, middle)).pink;
+    expect([rising < 0.7 * full, await risen(0.9 * full) > 0.9 * full]).toEqual([true, true]);
+
+    await page.click(".conv");
     await page.click("#settings-toggle");                         // (the chat narrows while Settings is open)
     await page.click("#sea-switch");
     await page.click("#settings-toggle");
     await page.waitForFunction((x) => document.getElementById("thread")!.getBoundingClientRect().x === x, {}, column.x);
     expect((await look(page, margin)).lit).toBe(0);
     await page.click("#new-chat");
-    pink = 0;
-    for (const end = Date.now() + 5000; pink <= 800 && Date.now() < end; await Bun.sleep(100)) pink = (await look(page, middle)).pink;
-    expect(pink).toBeGreaterThan(800);
+    expect(await risen()).toBeGreaterThan(800);
     await page.reload({ waitUntil: "networkidle0" });
     expect(await page.$eval("#sea-switch", (b) => b.getAttribute("aria-checked"))).toBe("false");
+
+    // the light theme: the butterfly's bright cores in the light theme's own (a deep pink where the dark's is near white)
+    const cores = async () => (await look(page, middle, "", "var(--accent-hi)")).close;
+    await openSettings(page);
+    await page.click('#theme-pick [data-theme="light"]');
+    await page.click("#settings-toggle");
+    await Bun.sleep(600);
+    expect(await page.evaluate(() => document.documentElement.dataset.theme)).toBe("light");
+    expect(await cores()).toBeGreaterThan(100);
     await page.close();
   } finally {
     await gl.close();

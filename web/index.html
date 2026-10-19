@@ -65,7 +65,7 @@
           <g style="stroke: var(--aurora-star)" stroke-linecap="round" stroke-width="0.6" stroke-opacity="0.75">
             <path d="M197.5 10H200.5M199 8.5V11.5" /><path d="M420.5 19H423.5M422 17.5V20.5" />
           </g>
-          <g filter="url(#aurora-rays)" style="mix-blend-mode: var(--aurora-blend)">
+          <g filter="url(#aurora-rays)" style="mix-blend-mode: screen">
             <path d="M-30 40C60 29 150 42 230 33S390 24 470 35S600 42 680 31V-10H-30Z" fill="url(#aurora-violet)" />
             <path d="M160 34C210 26 260 34 300 28S380 24 430 31V-10H160Z" fill="url(#aurora-mint)" mask="url(#aurora-mint-ends)" />
             <path d="M96 38C140 29 170 38 206 31S270 24 344 33V-10H96Z" fill="url(#aurora-pink)" mask="url(#aurora-pink-ends)" />
@@ -184,6 +184,7 @@
             </section>
             <section class="set-sec">
               <div class="set-sec-head"><span class="set-title">Appearance</span></div>
+              <div class="set-switch"><span>Theme</span><div id="theme-pick" class="segmented" role="radiogroup" aria-label="Theme"></div></div>
               <label class="set-switch"><span>ASCII background behind chats</span><button id="sea-switch" class="switch" type="button" role="switch" aria-checked="false"></button></label>
               <p class="set-note">Kept on this device. Off, it shows in a new chat only.</p>
             </section>

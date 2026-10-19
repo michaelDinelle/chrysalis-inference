@@ -2,6 +2,7 @@
 // tool calls and are rendered as markdown with highlighted code; conversations (every version of them) live in this tab's
 // sessionStorage (a reload keeps them, closing the tab ends them). The settings (system prompt, sampling, reply length,
 // seed, tools that run without asking), kept the same way, apply to every conversation.
+import { type Theme, choose, chosen } from "./theme";              // first: the page's look before anything is drawn
 import DOMPurify from "dompurify";
 import hljs from "highlight.js/lib/common";
 import katex from "katex";
@@ -1095,6 +1096,20 @@ seaSwitch.onclick = () => {
   showSea(on);
 };
 showSea(pref("sea", "on") === "on");
+// The theme: the system's, light or dark (theme.ts), kept on this device too.
+const themePick = $("theme-pick");
+for (const [t, label] of [["system", "System"], ["light", "Light"], ["dark", "Dark"]] as [Theme, string][]) {
+  const b = h("button", "", label);
+  b.type = "button";
+  b.setAttribute("role", "radio");
+  b.dataset.theme = t;
+  b.onclick = () => { choose(t); markTheme(); };
+  themePick.append(b);
+}
+function markTheme() {
+  for (const b of themePick.querySelectorAll<HTMLElement>("button")) b.setAttribute("aria-checked", String(b.dataset.theme === chosen()));
+}
+markTheme();
 
 // A reply as its tokens, tinted by how unsure the model was of each; a click on one shows what else it could have
 // written there. Drawn incrementally while the reply streams.

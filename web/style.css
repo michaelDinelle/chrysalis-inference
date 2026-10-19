@@ -1,78 +1,51 @@
+/* The look: each color a light-dark() pair, light first. Before theme.ts runs they follow the system's scheme; then
+   <html data-theme> holds the one in use (the system's, or one chosen in Settings), and the few values that are not
+   colors follow it. */
 :root {
-  color-scheme: dark;
-  --bg: #121010;
-  --panel: #171413;
-  --raised: #171413;          /* #1f1b19 over a large area (the message box) made an LG monitor driven by a Mac
-                                 flicker and keep a ghost image; this color tested clean in the same place */
-  --hover: #292224;
-  --line: #2d2628;
-  --text: #efe4e7;
-  --muted: #9c8e92;
-  --faint: #6b5f62;
-  --accent: #e24d85;          /* the logo's pink */
-  --accent-hi: #f982a8;
-  --accent-soft: rgb(226 77 133 / 0.14);
-  --heat-1: #ea99b0;          /* the thinking levels, soft to vivid: Low, Medium, Max */
+  color-scheme: light dark;
+  --bg: light-dark(#fcf8f9, #121010);
+  --panel: light-dark(#f6eff0, #171413);
+  /* the dark #171413: #1f1b19 over a large area (the message box) made an LG monitor driven by a Mac flicker and keep a
+     ghost image; this color tested clean in the same place */
+  --raised: light-dark(#ffffff, #171413);
+  --hover: light-dark(#ede2e5, #292224);
+  --line: light-dark(#e5d6da, #2d2628);
+  --text: light-dark(#1d181a, #efe4e7);
+  --muted: light-dark(#6e6164, #9c8e92);
+  --faint: light-dark(#a39497, #6b5f62);
+  --accent: #e24d85;                               /* the logo's pink */
+  --accent-hi: light-dark(#b43366, #f982a8);
+  --accent-soft: light-dark(rgb(226 77 133 / 0.11), rgb(226 77 133 / 0.14));
+  --heat-1: light-dark(#a85771, #ea99b0);          /* the thinking levels, soft to vivid: Low, Medium, Max */
   --heat-2: #e24d85;
-  --heat-3: #ff619a;
+  --heat-3: light-dark(#bb1562, #ff619a);
   --ok: #6ccf8e;
   --warn: #e8b04a;
   --danger: #f2706b;
-  --code: #0d0b0b;
-  --paper: #f5eef0;           /* SVG figures: a light page, dimmed so it does not glare in the dark */
+  --code: light-dark(#faf3f4, #0d0b0b);
+  --paper: light-dark(#ffffff, #f5eef0);           /* SVG figures: a light page, dimmed so it does not glare in the dark */
   --shadow: 0 12px 40px rgb(0 0 0 / 0.38);
-  --t-keyword: #f982a8;
-  --t-string: #a9d37e;
-  --t-number: #e9b860;
-  --t-title: #82b8ff;
-  --t-type: #c9a2ff;
-  --t-attr: #e6c79c;
-  --t-meta: #8fbab2;
+  --t-keyword: light-dark(#bb1562, #f982a8);
+  --t-string: light-dark(#4d7c0f, #a9d37e);
+  --t-number: light-dark(#b45309, #e9b860);
+  --t-title: light-dark(#1d4ed8, #82b8ff);
+  --t-type: light-dark(#7c3aed, #c9a2ff);
+  --t-attr: light-dark(#92400e, #e6c79c);
+  --t-meta: light-dark(#0f766e, #8fbab2);
   --sans: ui-sans-serif, system-ui, -apple-system, "Segoe UI", "Noto Sans", sans-serif;
   --mono: "JetBrains Mono", "CaskaydiaMono Nerd Font", "Cascadia Code", ui-monospace, monospace;
-  --aurora-sky: #1f0f29;
+  --aurora-sky: #1f0f29;                           /* a night sky in either look, as T3 Code's nightly art is */
   --aurora-pink: #ff6aa2;
   --aurora-violet: #8e6bff;
   --aurora-mint: #57e0c8;
   --aurora-star: #f7e9f3;
-  --aurora-blend: screen;
 }
 
-@media (prefers-color-scheme: light) {
-  :root {
-    color-scheme: light;
-    --bg: #fcf8f9;
-    --panel: #f6eff0;
-    --raised: #ffffff;
-    --hover: #ede2e5;
-    --line: #e5d6da;
-    --text: #1d181a;
-    --muted: #6e6164;
-    --faint: #a39497;
-    --accent: #e24d85;
-    --accent-hi: #b43366;
-    --accent-soft: rgb(226 77 133 / 0.11);
-    --heat-1: #a85771;
-    --heat-2: #e24d85;
-    --heat-3: #bb1562;
-    --code: #faf3f4;
-    --paper: #ffffff;
-    --shadow: 0 12px 32px rgb(73 39 50 / 0.09);
-    --t-keyword: #bb1562;
-    --t-string: #4d7c0f;
-    --t-number: #b45309;
-    --t-title: #1d4ed8;
-    --t-type: #7c3aed;
-    --t-attr: #92400e;
-    --t-meta: #0f766e;
-    --aurora-sky: #f6e3ee;
-    --aurora-pink: #e24d85;
-    --aurora-violet: #8a63e6;
-    --aurora-mint: #3fb8a5;
-    --aurora-star: transparent;
-    --aurora-blend: multiply;
-  }
+:root[data-theme="light"] {
+  color-scheme: light;
+  --shadow: 0 12px 32px rgb(73 39 50 / 0.09);
 }
+:root[data-theme="dark"] { color-scheme: dark; }
 
 * { box-sizing: border-box; }
 html, body { height: 100%; }
@@ -134,11 +107,16 @@ button { font: inherit; color: inherit; cursor: pointer; }
 .pane-resizing, .pane-resizing * { cursor: col-resize !important; user-select: none !important; }
 
 .brand { font-size: 16px; font-weight: 600; letter-spacing: 0.015em; white-space: nowrap; }
-/* the panels' heads: an aurora behind the name, after T3 Code's nightly sidebar art (a sky, its light and a few stars,
-   fading into the panel); in the light, a dawn of the same colors */
+/* the panels' heads: an aurora behind the name, after T3 Code's nightly sidebar art (a night sky, its light and a few
+   stars, fading into the panel). In the light it stays night, ending at the line under the head (a dark sky fading
+   into a light panel turns grey), and the heads' text and their panels' toggles turn light over it. */
 .pane-head { position: relative; }
 .pane-head > :not(.aurora) { position: relative; text-shadow: 0 0 2px var(--panel), 0 0 10px var(--panel); }
 .aurora { position: absolute; inset: 0; width: 100%; height: 100%; mask-image: linear-gradient(#000 55%, transparent 92%); }
+:root[data-theme="light"] .pane-head { --panel: var(--aurora-sky); color: #f6edf1; }
+:root[data-theme="light"] .aurora { mask-image: none; }
+:root[data-theme="light"] .pane-toggle[aria-expanded="true"] { color: #e3d6dc; }
+:root[data-theme="light"] .pane-toggle[aria-expanded="true"]:hover { background: rgb(255 255 255 / 0.14); color: #fff; }
 .sprite { position: absolute; width: 0; height: 0; }
 .side-body { display: flex; flex: 1; flex-direction: column; gap: 6px; min-height: 0; padding: 10px; }
 #new-chat { justify-content: flex-start; }
@@ -415,6 +393,7 @@ dialog::backdrop { background: rgb(0 0 0 / 0.45); }
 
 #settings .pane-head h2 { margin: 0; font-size: 15px; font-weight: 600; }
 #settings .pane-head span { flex: 1; color: var(--muted); font-size: 12px; }
+:root[data-theme="light"] #settings .pane-head span { color: #cbb9c2; }
 .set-body { flex: 1; min-height: 0; overflow-y: auto; overscroll-behavior: contain; }
 .set-sec { padding: 14px 20px 16px; }
 .set-sec + .set-sec { border-top: 1px solid var(--line); }
@@ -737,7 +716,9 @@ main { position: relative; }
 .ts-detail { overflow: hidden; color: var(--muted); font: 11.5px var(--mono); white-space: nowrap; text-overflow: ellipsis; }
 .ts-err { color: var(--danger); font-size: 12px; overflow-wrap: anywhere; }
 .set-note { margin: 8px 0 0; color: var(--faint); font-size: 12px; line-height: 1.45; }
-.set-switch { display: flex; align-items: center; justify-content: space-between; gap: 12px; font-size: 13.5px; cursor: pointer; }
+.set-switch { display: flex; align-items: center; justify-content: space-between; gap: 12px; min-height: 30px; font-size: 13.5px; }
+label.set-switch { cursor: pointer; }
+.set-switch + .set-switch { margin-top: 8px; }
 #tools-knobs:not(:empty) { margin-top: 10px; }
 .allow-list { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; margin-top: 10px; }
 .allow-list[hidden] { display: none; }

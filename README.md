@@ -70,10 +70,12 @@ out what it shows, then each screen pixel draws its cell's glyph from an atlas a
 is fixed to the window, so a side panel slides over it without redrawing it at a new size). A new chat opens on the
 butterfly in it: the current drifts in ribbons, a click sends soft ripples across it in a shape (a heart, a ring, the
 butterfly, a star, a flower) that bend the current and the butterfly as they pass, and keeps the message box's focus,
-and a drag leaves a wake. Once the chat begins the butterfly fades and the sea stays behind the messages, dimmed and
-dimmest under their column, at 12 frames a second; Settings, Appearance turns that off ("ASCII background behind
-chats", kept on the device). With reduced motion it holds still; without WebGL2 a new chat shows the logo alone. Both
-side panels' heads have an aurora behind their names (one static SVG after T3 Code's nightly sidebar art). Conversations live in the tab's sessionStorage: a reload keeps
+and a drag leaves a wake. Once the chat begins the butterfly sinks into the water, where its shape stays faintly, and
+the sea stays behind the messages, dimmed and dimmest under their column, at 12 frames a second; a new chat raises the
+butterfly again. Settings, Appearance turns the sea behind chats off ("ASCII background behind chats") and picks the
+theme (the system's, light or dark; `theme.ts`, the stylesheet's colors being light-dark() pairs), both kept on the
+device. With reduced motion it holds still; without WebGL2 a new chat shows the logo alone. Both side panels' heads
+have an aurora behind their names (one static SVG after T3 Code's nightly sidebar art), a night sky in either theme. Conversations live in the tab's sessionStorage: a reload keeps
 them, closing the tab ends them, and nothing is stored on the server's disk. Export saves the open chat (Export all:
 every chat of the tab) as a JSON file, every version, tool round and attached file included, which Import adds back
 under new ids. A reply belongs to the web server while it is written (in RAM, until 15 minutes after it ends): opening
