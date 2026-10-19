@@ -14,6 +14,7 @@ import { type Fix, applyFixes, fixedParts, readHeard } from "./heard";
 import { pointOf, shownWords, unitOf } from "./spoken";
 import { DESCRIPTIONS, type ToolChoice, type WireCall, assistantTurn, noted, toolTurn } from "./wire";
 import logoThin from "./logo-thin.svg";
+import { Ocean } from "./ocean";
 
 type Effort = "xhigh" | "medium" | "low" | "off";
 // prompt and cached: summed over a reply's rounds; ctx: the context its last round left (prompt + reply)
@@ -1073,10 +1074,11 @@ function paint(v: View, m: Message, live?: Live) {
   v.foot.querySelector("[data-act=tokens]")?.classList.toggle("on", asTokens);
 }
 
-// A new chat: the logo, nothing else.
+// A new chat: the butterfly in its sea of characters (ocean.ts), or the logo alone where WebGL2 is missing.
+const ocean = new Ocean();
 function emptyState() {
   const e = h("div", "empty");
-  e.innerHTML = `<img class="logo" src="${logoThin}" alt="">`;
+  if (!ocean.attach(e)) e.innerHTML = `<img class="logo" src="${logoThin}" alt="">`;
   return e;
 }
 

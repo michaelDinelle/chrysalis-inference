@@ -64,7 +64,12 @@ refused. `previous_response_id` continues one of the last 256 responses (kept un
 
 `web/` is a small Bun app: `server.ts` serves the page, proxies Chrysalis's API on the same origin and runs the tools
 (`tools.ts`, with `tool-fetch.ts` and `tool-mcp.ts`); `app.ts` is plain TypeScript (marked, highlight.js, DOMPurify,
-KaTeX; Mermaid's own build loads with the first diagram). Conversations live in the tab's sessionStorage: a reload keeps
+KaTeX; Mermaid's own build loads with the first diagram). A new chat opens on the butterfly in a sea of characters
+(`ocean.ts`, two WebGL2 passes: one fragment per character cell works out what it shows, then each screen pixel draws
+its cell's glyph from an atlas at the screen's own pixel size): the current drifts in ribbons, a click sends a wave
+across it drawn in line glyphs (a heart, a ring, the butterfly, a star, a flower) and keeps the message box's focus, a
+drag leaves a wake, and the butterfly, shaded like a lit tube, breathes and brightens as waves pass. With reduced motion
+it holds still; without WebGL2 the logo stands alone. Conversations live in the tab's sessionStorage: a reload keeps
 them, closing the tab ends them, and nothing is stored on the server's disk. Export saves the open chat (Export all:
 every chat of the tab) as a JSON file, every version, tool round and attached file included, which Import adds back
 under new ids. A reply belongs to the web server while it is written (in RAM, until 15 minutes after it ends): opening
@@ -607,6 +612,7 @@ chrysalis/
           metrics.py __main__.py
 web/      server.ts app.ts files.ts sampler.ts wire.ts      Bun web UI; tools.ts tool-fetch.ts tool-mcp.ts its tools; tls.ts HTTPS (--lan)
           voice.ts voice-worklet.js                     voice mode's client: the microphone, playback, the protocol
+          ocean.ts logo.svg logo-thin.svg               a new chat's sea of characters and its butterfly (WebGL2)
           index.html style.css                          (make test_web: sampler.test.ts, server.test.ts with fake-mcp.ts
                                                         and fake-voice.ts, browser.test.ts: the page in headless Chromium;
                                                         bench-voice.ts: voice mode's latency end to end)

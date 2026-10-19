@@ -1,8 +1,8 @@
 // The page in a real browser (headless Chromium) against a fake Chrysalis that streams canned replies: TeX typeset and
 // prices left alone, Mermaid diagrams drawn, a reply's HTML page run in its sandbox where it reaches nothing, attached
 // files (pictures, PDFs, videos, texts) sent as Chrysalis expects them and kept across a reload, chats carried through
-// export and import, versions of messages and replies, tools (an MCP server, fake-mcp.ts, that server.ts runs), and
-// voice mode against a scripted speech service (fake-voice.ts) with Chromium's fake microphone.
+// export and import, versions of messages and replies, tools (an MCP server, fake-mcp.ts, that server.ts runs), voice
+// mode against a scripted speech service (fake-voice.ts) with Chromium's fake microphone, and a new chat's sea.
 import { afterAll, beforeAll, expect, test } from "bun:test";
 import { existsSync, mkdtempSync, readFileSync, readdirSync, unlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
@@ -889,3 +889,54 @@ test("voice mode: the thinking bar is the chat's, one setting for spoken and wri
   expect(await bar()).toEqual(["Medium", "Thinking: Medium"]);
   await page.close();
 }, 30_000);
+
+// Pink pixels in a part of the page's screenshot: the butterfly and a click's wave are drawn in the accent, the sea in a
+// grey. The PNG is decoded by the page itself (an image drawn into a 2D canvas), so the test needs no image library.
+async function pinkIn(page: Page, clip: { x: number; y: number; width: number; height: number }): Promise<number> {
+  const png = Buffer.from(await page.screenshot({ clip, encoding: "binary" })).toString("base64");
+  return page.evaluate(async (src) => {
+    const img = new Image();
+    img.src = `data:image/png;base64,${src}`;
+    await img.decode();
+    const cv = document.createElement("canvas");
+    cv.width = img.width; cv.height = img.height;
+    const ctx = cv.getContext("2d")!;
+    ctx.drawImage(img, 0, 0);
+    const d = ctx.getImageData(0, 0, cv.width, cv.height).data;
+    let n = 0;
+    for (let i = 0; i < d.length; i += 4) if (d[i] > 90 && d[i] - d[i + 1] > 50) n++;
+    return n;
+  }, png);
+}
+
+// The sea needs WebGL2, which headless Chromium here gets only from SwiftShader on request: a browser of its own, so the
+// other tests run without its frames (costly when rendered in software) and with the plain logo in a new chat.
+test("a new chat is the butterfly in its sea; a click on the water draws a wave and keeps the message box focused, and with reduced motion draws nothing", async () => {
+  const gl = await puppeteer.launch({ executablePath: process.env.CHROMIUM ?? "/usr/bin/chromium", headless: true, args: ["--no-sandbox", "--enable-unsafe-swiftshader"] });
+  try {
+    for (const motion of ["no-preference", "reduce"] as const) {
+      const page = await gl.newPage();
+      page.on("pageerror", (e) => { throw e; });
+      await page.emulateMediaFeatures([{ name: "prefers-color-scheme", value: "dark" }, { name: "prefers-reduced-motion", value: motion }]);
+      await page.setViewport({ width: 1200, height: 900 });
+      await page.goto(`${base}/`, { waitUntil: "networkidle0" });
+      await page.waitForSelector(".empty > canvas.ocean");
+      await Bun.sleep(1800);                                       // the butterfly appears from its middle out
+      const box = (await (await page.$(".empty"))!.boundingBox())!;
+      const middle = await pinkIn(page, { x: box.x + box.width / 2 - 150, y: box.y + box.height * 0.47 - 100, width: 300, height: 200 });
+      expect(middle).toBeGreaterThan(800);
+      await page.focus("#input");
+      const at = { x: box.x + 90, y: box.y + box.height / 2 }, around = { x: at.x - 80, y: at.y - 80, width: 160, height: 160 };
+      const before = await pinkIn(page, around);
+      await page.mouse.click(at.x, at.y);
+      await Bun.sleep(500);
+      const after = await pinkIn(page, around);
+      expect(await page.evaluate(() => document.activeElement?.id)).toBe("input");
+      if (motion === "reduce") expect(after).toBe(before);
+      else expect(after).toBeGreaterThan(before + 200);
+      await page.close();
+    }
+  } finally {
+    await gl.close();
+  }
+}, 60_000);

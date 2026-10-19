@@ -287,13 +287,13 @@ main { display: flex; flex-direction: column; min-height: 0; grid-column: 2; }
 .hljs-emphasis { font-style: italic; }
 .hljs-strong { font-weight: 700; }
 
-/* the logo alone, in the middle of the empty chat (a touch above it, which reads as centered over the message box),
-   with a slow glow in its own pink. It fills most of the empty chat, sized by the room itself (container units) with
-   a margin left around it, and at that size it is drawn a weight lighter (logo-thin.svg): the original's strokes
-   read too heavy there */
-.thread:has(> .empty) { height: 100%; padding-top: 0; padding-bottom: 0; }
-.empty { display: grid; height: 100%; place-items: center; container-type: size; }
-.empty > .logo { width: 90cqw; height: 75cqh; object-fit: contain; translate: 0 -3%; filter: drop-shadow(0 0 40px rgb(226 77 133 / 0.14));
+/* a new chat: the room under the top bar is the sea (ocean.ts, a canvas the size it sets), the butterfly over the
+   message box's column. Where WebGL2 is missing, the logo alone in the middle instead, as large as the room allows
+   with a margin, drawn a weight lighter (logo-thin.svg: the original's strokes read too heavy there) with a slow glow */
+.thread:has(> .empty) { max-width: none; height: 100%; margin: 0; padding: 0; }
+.empty { position: relative; display: grid; height: 100%; place-items: center; overflow: hidden; container-type: size; }
+.empty > .ocean { position: absolute; touch-action: manipulation; }
+.empty > .logo { width: min(90cqw, 680px); height: 75cqh; object-fit: contain; translate: 0 -3%; filter: drop-shadow(0 0 40px rgb(226 77 133 / 0.14));
   animation: glow 5s ease-in-out infinite; }
 @keyframes glow { 50% { filter: drop-shadow(0 0 60px rgb(226 77 133 / 0.22)); } }
 @media (prefers-reduced-motion: reduce) { .empty > .logo { animation: none; } }
