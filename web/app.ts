@@ -1074,13 +1074,27 @@ function paint(v: View, m: Message, live?: Live) {
   v.foot.querySelector("[data-act=tokens]")?.classList.toggle("on", asTokens);
 }
 
-// A new chat: the butterfly in its sea of characters (ocean.ts), or the logo alone where WebGL2 is missing.
-const ocean = new Ocean($("sea"));
+// A new chat: the butterfly in its sea of characters (ocean.ts), or the logo alone where WebGL2 is missing. The sea stays
+// behind the chat once it has begun, unless Settings turns that off (kept on this device, as the panels are).
+const ocean = new Ocean($("sea")), seaReady = ocean.start(), seaSwitch = $<HTMLButtonElement>("sea-switch");
 function emptyState() {
   const e = h("div", "empty");
-  if (!ocean.attach(e)) e.innerHTML = `<img class="logo" src="${logoThin}" alt="">`;
+  if (seaReady) ocean.butterfly(e);
+  else e.innerHTML = `<img class="logo" src="${logoThin}" alt="">`;
   return e;
 }
+function showSea(on: boolean) {
+  document.querySelector("main")!.toggleAttribute("data-sea", on && seaReady);
+  seaSwitch.setAttribute("aria-checked", String(on && seaReady));
+}
+seaSwitch.disabled = !seaReady;
+if (!seaReady) seaSwitch.title = "This browser has no WebGL2";
+seaSwitch.onclick = () => {
+  const on = seaSwitch.getAttribute("aria-checked") !== "true";
+  setPref("sea", on ? "on" : "off");
+  showSea(on);
+};
+showSea(pref("sea", "on") === "on");
 
 // A reply as its tokens, tinted by how unsure the model was of each; a click on one shows what else it could have
 // written there. Drawn incrementally while the reply streams.

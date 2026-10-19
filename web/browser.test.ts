@@ -978,3 +978,45 @@ test("a new chat is the butterfly in a sea under the message box too, never blan
     await gl.close();
   }
 }, 90_000);
+
+test("the sea stays behind a chat, the butterfly gone and every click the chat's; Settings takes it away from chats (remembered) and leaves it in a new chat", async () => {
+  const gl = await puppeteer.launch({ executablePath: process.env.CHROMIUM ?? "/usr/bin/chromium", headless: true, args: ["--no-sandbox", "--enable-unsafe-swiftshader"] });
+  try {
+    const page = await (await gl.createBrowserContext()).newPage();
+    page.on("pageerror", (e) => { throw e; });
+    await page.emulateMediaFeatures([{ name: "prefers-color-scheme", value: "dark" }]);
+    await page.setViewport({ width: 1600, height: 900 });
+    await page.goto(`${base}/`, { waitUntil: "networkidle0" });
+    await page.waitForSelector(".sea > canvas.ocean");
+    const rect = async (sel: string) => (await (await page.$(sel))!.boundingBox())!;
+    const sea = await rect(".sea"), box = await rect(".composer-box");
+    const middle = { x: box.x + box.width / 2 - 150, y: (sea.y + box.y) / 2 - 100, width: 300, height: 200 };
+    let pink = 0;
+    for (const end = Date.now() + 5000; pink <= 800 && Date.now() < end; await Bun.sleep(100)) pink = (await look(page, middle)).pink;
+    expect(pink).toBeGreaterThan(800);
+
+    await send(page, "capital of France");
+    await Bun.sleep(800);                                          // the butterfly fades over half a second
+    const column = await rect("#thread"), margin = { x: sea.x + 40, y: sea.y + 60, width: column.x - sea.x - 80, height: 300 };
+    expect((await look(page, middle)).pink).toBeLessThan(50);
+    expect((await look(page, margin)).lit).toBeGreaterThan(150);
+    const hit = (x: number, y: number) => page.evaluate((x, y) => document.elementFromPoint(x, y)?.closest("#scroller, .sea")?.id, x, y);
+    const reply = await rect(".msg.assistant .markdown");
+    expect([await hit(reply.x + 5, reply.y + reply.height / 2), await hit(margin.x + 20, margin.y + 20)]).toEqual(["scroller", "scroller"]);
+
+    await page.click("#settings-toggle");                         // (the chat narrows while Settings is open)
+    await page.click("#sea-switch");
+    await page.click("#settings-toggle");
+    await page.waitForFunction((x) => document.getElementById("thread")!.getBoundingClientRect().x === x, {}, column.x);
+    expect((await look(page, margin)).lit).toBe(0);
+    await page.click("#new-chat");
+    pink = 0;
+    for (const end = Date.now() + 5000; pink <= 800 && Date.now() < end; await Bun.sleep(100)) pink = (await look(page, middle)).pink;
+    expect(pink).toBeGreaterThan(800);
+    await page.reload({ waitUntil: "networkidle0" });
+    expect(await page.$eval("#sea-switch", (b) => b.getAttribute("aria-checked"))).toBe("false");
+    await page.close();
+  } finally {
+    await gl.close();
+  }
+}, 60_000);

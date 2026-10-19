@@ -30,6 +30,12 @@
   --t-meta: #8fbab2;
   --sans: ui-sans-serif, system-ui, -apple-system, "Segoe UI", "Noto Sans", sans-serif;
   --mono: "JetBrains Mono", "CaskaydiaMono Nerd Font", "Cascadia Code", ui-monospace, monospace;
+  --aurora-sky: #1f0f29;
+  --aurora-pink: #ff6aa2;
+  --aurora-violet: #8e6bff;
+  --aurora-mint: #57e0c8;
+  --aurora-star: #f7e9f3;
+  --aurora-blend: screen;
 }
 
 @media (prefers-color-scheme: light) {
@@ -59,6 +65,12 @@
     --t-type: #7c3aed;
     --t-attr: #92400e;
     --t-meta: #0f766e;
+    --aurora-sky: #f6e3ee;
+    --aurora-pink: #e24d85;
+    --aurora-violet: #8a63e6;
+    --aurora-mint: #3fb8a5;
+    --aurora-star: transparent;
+    --aurora-blend: multiply;
   }
 }
 
@@ -121,7 +133,12 @@ button { font: inherit; color: inherit; cursor: pointer; }
 .pane-rail.dragging::after { background: var(--accent); }
 .pane-resizing, .pane-resizing * { cursor: col-resize !important; user-select: none !important; }
 
-.brand { font-size: 16px; font-weight: 600; letter-spacing: 0.015em; white-space: nowrap; }
+.brand { position: relative; font-size: 16px; font-weight: 600; letter-spacing: 0.015em; white-space: nowrap; }
+/* the conversations' head: an aurora behind the name, after T3 Code's nightly sidebar art (a sky, its light and a few
+   stars, fading into the panel); in the light, a dawn of the same colors */
+#sidebar .pane-head { position: relative; }
+.aurora { position: absolute; inset: 0; width: 100%; height: 100%; mask-image: linear-gradient(#000 55%, transparent 92%); }
+.aurora .curtains { mix-blend-mode: var(--aurora-blend); }
 .side-body { display: flex; flex: 1; flex-direction: column; gap: 6px; min-height: 0; padding: 10px; }
 #new-chat { justify-content: flex-start; }
 #conversations { flex: 1; min-height: 0; overflow-y: auto; margin: 4px -4px 0; padding: 0 4px; }
@@ -287,16 +304,17 @@ main { display: flex; flex-direction: column; min-height: 0; grid-column: 2; }
 .hljs-emphasis { font-style: italic; }
 .hljs-strong { font-weight: 700; }
 
-/* a new chat: everything under the top bar is the sea (ocean.ts, its canvas placed by it), the message box floating on
-   it and a click anywhere around the box reaching the water: each is positioned, so each paints over the one before it
-   in the page (the empty thread, the sea, the message box). Where WebGL2 is missing, the logo alone in the middle
-   instead, as large as the room allows with a margin, drawn a weight lighter (logo-thin.svg: the original's strokes
-   read too heavy there) with a slow glow */
+/* the sea (ocean.ts, its canvas placed by it): everything under the top bar, the message box floating on it; the sea,
+   the thread and the message box are each positioned, so each paints over the one before it in the page. In a new chat
+   the thread and the message box's margins let clicks through to the water; behind a chat (main[data-sea], Settings)
+   the thread keeps them all. Where WebGL2 is missing, a new chat shows the logo alone in the middle instead, as large
+   as the room allows with a margin, drawn a weight lighter (logo-thin.svg: the original's strokes read too heavy there)
+   with a slow glow */
 .sea { position: absolute; inset: var(--bar-h) 0 0; display: none; overflow: hidden; }
-main:has(.thread > .empty) > .sea { display: block; }
+main[data-sea] > .sea, main:has(.thread > .empty) > .sea { display: block; }
 .sea > .ocean { position: absolute; touch-action: manipulation; }
-#composer { position: relative; }
-main:has(.thread > .empty) > #composer { pointer-events: none; }
+#scroller, #composer { position: relative; }
+main:has(.thread > .empty) > :is(#scroller, #composer) { pointer-events: none; }
 main:has(.thread > .empty) .composer-box { pointer-events: auto; }
 .thread:has(> .empty) { max-width: none; height: 100%; margin: 0; padding: 0; }
 .empty { position: relative; display: grid; height: 100%; place-items: center; overflow: hidden; container-type: size; }
@@ -718,6 +736,7 @@ main { position: relative; }
 .ts-detail { overflow: hidden; color: var(--muted); font: 11.5px var(--mono); white-space: nowrap; text-overflow: ellipsis; }
 .ts-err { color: var(--danger); font-size: 12px; overflow-wrap: anywhere; }
 .set-note { margin: 8px 0 0; color: var(--faint); font-size: 12px; line-height: 1.45; }
+.set-switch { display: flex; align-items: center; justify-content: space-between; gap: 12px; font-size: 13.5px; cursor: pointer; }
 #tools-knobs:not(:empty) { margin-top: 10px; }
 .allow-list { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; margin-top: 10px; }
 .allow-list[hidden] { display: none; }

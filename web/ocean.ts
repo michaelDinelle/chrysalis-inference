@@ -1,10 +1,11 @@
-// A new chat's backdrop: the butterfly in an ocean of characters under the whole chat, the message box floating on it.
-// The sea is a slow current (domain-warped noise over a swell), a click sends ripples across it in a shape (heart,
-// ring, butterfly, star, flower) that bend the current as they pass, and the butterfly is drawn in the same
-// characters, shaded like a lit tube, its light tinting the water near it. All of it is two WebGL2 passes: one fragment
-// per character cell works out what that cell shows (pass 1, a cols x rows texture), then each screen pixel draws its
-// cell's glyph from an atlas rendered at the screen's own pixel size (pass 2), so the CPU only sets uniforms. Without
-// WebGL2 the page shows the logo as an image instead (attach() returns false).
+// The chat's backdrop: an ocean of characters under everything below the top bar, the message box floating on it. In a
+// new chat it holds the butterfly, drawn in the same characters and shaded like a lit tube, its light tinting the water
+// near it, and a click sends ripples across it in a shape (heart, ring, butterfly, star, flower) that bend the current
+// as they pass. Once the chat has begun the butterfly fades and the sea lies dimmed behind the messages, dimmest under
+// their column. The sea is a slow current (domain-warped noise over a swell). All of it is two WebGL2 passes: one
+// fragment per character cell works out what that cell shows (pass 1, a cols x rows texture), then each screen pixel
+// draws its cell's glyph from an atlas rendered at the screen's own pixel size (pass 2), so the CPU only sets uniforms.
+// Without WebGL2 the page shows the logo as an image in a new chat instead (start() returns false).
 import logo from "./logo-thin.svg";
 
 // Glyph rows of the atlas: the sea's (light to dense, none that join into lines across a row) and the butterfly's in
@@ -33,6 +34,8 @@ precision highp float;
 uniform vec2 uGrid, uCell;
 uniform vec4 uView;         // the part of the sea on screen: left, top, right, bottom, CSS px from the window's corner
 uniform vec4 uBox;          // the message box and the hint under it, likewise
+uniform vec2 uLane;         // the chat's column: left and right, likewise
+uniform float uFlyOn;       // the butterfly: 1 in a new chat, fading to 0 as the chat begins
 uniform float uTime, uMotion;
 uniform vec4 uRip[${MAX_RIPPLES}];
 uniform vec2 uFly;          // the drawing's width and its strokes' half-width, CSS px
@@ -182,20 +185,22 @@ void main() {
   float edge = smoothstep(0.0, 28.0, min(min(p.x - uView.x, uView.z - p.x), min(p.y - uView.y, uView.w - p.y)));
   float hover = uPointer.z * exp(-dot2(p - uPointer.xy) / 3600.0);
   float lift = max(w, 0.0);
-  if (d < 0.5) {
+  if (d < 0.5 && uFlyOn > 0.0) {
     float depth = clamp(-d / uFly.y, 0.0, 1.0);
     float prof = sqrt(max(0.0, 1.0 - (1.0 - depth) * (1.0 - depth)));
     float g = ${ROW}.0 + floor(clamp(1.0 + prof * ${TUBE.length - 2}.0 + 0.5 + lift * 0.5, 0.0, ${TUBE.length - 1}.0));
-    o = vec4(g / 255.0, 0.58 + 0.42 * prof, 1.0, clamp(max(0.0, prof - 0.55) * 1.4 + lift * 0.3, 0.0, 1.0));
+    o = vec4(g / 255.0, (0.58 + 0.42 * prof) * uFlyOn, 1.0, clamp(max(0.0, prof - 0.55) * 1.4 + lift * 0.3, 0.0, 1.0));
     return;
   }
   float s = sea(p - slope * 90.0, t);
   float gd = max(d, 0.0) / 30.0;
-  float glow = exp(-gd * gd);
+  float glow = exp(-gd * gd) * uFlyOn;
   // the water right around the butterfly lies still, so its outline stays clean (its light still tints it), and the
-  // water around the message box is dimmer, so the box and the hint under it read as resting on it
-  float calm = mix(0.3, 1.0, smoothstep(3.0, 40.0, d));
+  // water around the message box is dimmer, so the box and the hint under it read as resting on it. Behind a chat the
+  // whole sea is dimmer, and dimmest under the column of text.
+  float calm = mix(1.0, mix(0.3, 1.0, smoothstep(3.0, 40.0, d)), uFlyOn);
   float quiet = mix(0.3, 1.0, smoothstep(0.0, 40.0, boxAt(p)));
+  quiet *= mix(mix(0.3, 0.65, smoothstep(0.0, 72.0, max(uLane.x - p.x, p.x - uLane.y))), 1.0, uFlyOn);
   float v = clamp(s * calm + lift * 0.55 + min(w, 0.0) * 0.15 + hover * 0.3, 0.0, 1.0);
   float g = floor(clamp(v * 3.9, 0.0, ${SEA.length - 1}.0));
   float bright = (0.05 + 0.46 * v * v + 0.3 * glow + 0.3 * lift + 0.3 * hover) * edge * quiet;
@@ -301,7 +306,10 @@ export class Ocean {
   private atlas: WebGLTexture | null = null;
   private sdfTex: WebGLTexture | null = null;
   private sdf: Sdf | null = null;
-  private chat: HTMLElement | null = null;
+  private empty: HTMLElement | null = null;
+  private shown = false;
+  private fly = 0;
+  private drawnFor = "";
   private cols = 0;
   private rows = 0;
   private dpr = 0;
@@ -309,6 +317,7 @@ export class Ocean {
   private view = [0, 0, 0, 0];
   private seen = [0, 0, 0, 0];                      // the cells the layer shows: column, row, columns, rows
   private box = [-1e4, -1e4, -1e4, -1e4];
+  private lane = [0, 0];
   private center = [0, 0];
   private flyW = 0;
   private ripples = new Float32Array(MAX_RIPPLES * 4).fill(-1);
@@ -372,24 +381,26 @@ export class Ocean {
     return true;
   }
 
-  // Runs the sea while `chat` (a new chat's empty state) is in the page; false without WebGL2, for the caller to show
-  // the plain logo.
-  attach(chat: HTMLElement): boolean {
-    if (!this.gl && !this.init()) return false;
-    this.chat = chat;
-    if (!this.canvas.isConnected) {
-      this.layer.append(this.canvas);
-      this.resize.observe(this.layer);
-      const box = document.querySelector(".composer-box");
-      if (box) this.resize.observe(box);
-    }
+  // Puts the sea in its layer, which the page shows and hides; false without WebGL2.
+  start(): boolean {
+    if (!this.init()) return false;
+    this.layer.append(this.canvas);
+    this.resize.observe(this.layer);
+    // the message box places the butterfly and the quiet water around it, the thread the dimmest water behind a chat
+    for (const sel of [".composer-box", "#thread"]) { const el = document.querySelector(sel); if (el) this.resize.observe(el); }
     this.readColors();
-    if (!this.sdf) void drawingSdf(720).then((s) => { this.sdf = s; this.uploadSdf(); this.wake(); });
-    this.wake();
+    void drawingSdf(720).then((s) => { this.sdf = s; this.uploadSdf(); this.wake(); });
     return true;
   }
 
-  private live() { return !!this.gl && !!this.chat?.isConnected; }
+  // A new chat's empty state: the butterfly shows at once while it is in the page, and fades once the chat has begun.
+  butterfly(empty: HTMLElement) {
+    this.empty = empty;
+    this.fly = 1;
+    this.wake();
+  }
+
+  private live() { return !!this.gl && this.shown; }
   private now() { return performance.now() / 1000 - this.t0; }
 
   // The theme's colors: the sea in --muted, the butterfly in --accent, its light lighter in the dark, deeper in light.
@@ -424,9 +435,10 @@ export class Ocean {
   // every frame of the slide). The frame is drawn here, before the browser paints the new layout.
   private layout() {
     const gl = this.gl;
-    if (!gl || !this.live()) return;
-    const r = this.layer.getBoundingClientRect();
-    if (r.width < 40 || r.height < 40) return;
+    if (!gl) return;
+    const r = this.layer.getBoundingClientRect(), was = this.shown;
+    this.shown = r.width >= 40 && r.height >= 40;
+    if (!this.shown) return;
     const dpr = devicePixelRatio || 1, cw = Math.max(1, Math.round(CELL_W * dpr)), ch = Math.max(1, Math.round(CELL_H * dpr));
     const cols = Math.ceil(innerWidth * dpr / cw), rows = Math.ceil(innerHeight * dpr / ch);
     if (dpr !== this.dpr || cw !== this.cellPx[0] || ch !== this.cellPx[1]) this.buildAtlas(dpr, cw, ch);
@@ -447,8 +459,14 @@ export class Ocean {
     this.box = box && box.width > 0 ? [box.left, box.top, box.right, Math.max(box.bottom, hint?.height ? hint.bottom : 0)] : [-1e4, -1e4, -1e4, -1e4];
     this.center = [column.left + column.width / 2, r.top + (top - r.top) * 0.47];
     this.flyW = Math.min(column.width * 0.86, (top - r.top) * 0.74 * VIEW_W / VIEW_H, r.width * 0.92);
-    this.draw();
+    const lane = document.getElementById("thread")?.getBoundingClientRect();
+    this.lane = lane && lane.width > 0 ? [lane.left, lane.right] : [r.left, r.right];
+    // a reply being written grows the thread on every word: nothing here moves then, and the frame stands
+    if (!was) this.wake();
+    if (this.geometry() !== this.drawnFor || !was) this.draw();
   }
+
+  private geometry() { return JSON.stringify([this.cols, this.rows, this.view, this.box, this.lane, this.center]); }
 
   private buildAtlas(dpr: number, cw: number, ch: number) {
     const gl = this.gl!;
@@ -497,17 +515,23 @@ export class Ocean {
     return this.u.get(key)!;
   }
 
-  // Runs the loop while the sea is on screen: every frame while something moves fast (a wave, the pointer's light),
-  // 24 a second for the slow current alone (on a 144 Hz screen every frame would be six times the work for nothing to
-  // see), once with reduced motion. requestAnimationFrame stops by itself in a hidden tab.
+  // Runs the loop while the sea is on screen: every frame while something moves fast (a wave, the pointer's light,
+  // the butterfly fading), 24 a second for the slow current alone in a new chat (on a 144 Hz screen every frame would
+  // be six times the work for nothing to see) and 12 behind a chat, where it is dim and only drifts, once with reduced
+  // motion. requestAnimationFrame stops by itself in a hidden tab.
   private wake() {
     if (this.running) return;
     this.running = true;
     const tick = () => {
-      if (!this.live() || !this.sdfTex) { this.running = false; return; }
-      const t = this.now();
-      const busy = this.presence > 0 || this.pointer[2] > 0.01 || this.ripples.some((v, i) => i % 4 === 2 && v >= 0 && t - v < WAVE_LIFE);
-      if (busy || t - this.drawn >= 1 / 24) this.draw();
+      if (!this.live() || !this.sdfTex) {
+        this.running = false;
+        if (!this.empty?.isConnected) this.fly = 0;           // hidden mid-fade: gone when it shows again
+        return;
+      }
+      const t = this.now(), blank = !!this.empty?.isConnected;
+      const busy = this.presence > 0 || this.pointer[2] > 0.01 || (!blank && this.fly > 0)
+        || this.ripples.some((v, i) => i % 4 === 2 && v >= 0 && t - v < WAVE_LIFE);
+      if (busy || t - this.drawn >= 1 / (blank ? 24 : 12)) this.draw();
       if (this.still.matches) { this.running = false; return; }
       requestAnimationFrame(tick);
     };
@@ -519,7 +543,11 @@ export class Ocean {
     const gl = this.gl;
     if (!gl || !this.cellTex || !this.atlas || !this.sdf || !this.sdfTex || this.seen[2] <= 0 || this.seen[3] <= 0) return;
     const t = this.now(), still = this.still.matches, [sx, sy, sw, sh] = this.seen;
+    // behind a chat the sea gets no pointer (the thread is over it): the butterfly fades over half a second
+    if (this.empty?.isConnected) this.fly = 1;
+    else { this.fly = still ? 0 : Math.max(0, this.fly - Math.min(0.1, t - this.drawn) / 0.5); this.presence = 0; }
     this.drawn = t;
+    this.drawnFor = this.geometry();
     this.pointer[2] += (this.presence - this.pointer[2]) * 0.12;
 
     gl.disable(gl.BLEND);
@@ -533,6 +561,8 @@ export class Ocean {
     gl.uniform2f(c("uCell"), this.cellPx[0] / this.dpr, this.cellPx[1] / this.dpr);
     gl.uniform4fv(c("uView"), this.view);
     gl.uniform4fv(c("uBox"), this.box);
+    gl.uniform2f(c("uLane"), this.lane[0], this.lane[1]);
+    gl.uniform1f(c("uFlyOn"), this.fly);
     gl.uniform1f(c("uTime"), still ? 12 : t);
     gl.uniform1f(c("uMotion"), still ? 0 : 1);
     gl.uniform4fv(c("uRip"), this.ripples);

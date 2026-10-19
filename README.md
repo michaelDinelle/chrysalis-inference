@@ -64,13 +64,16 @@ refused. `previous_response_id` continues one of the last 256 responses (kept un
 
 `web/` is a small Bun app: `server.ts` serves the page, proxies Chrysalis's API on the same origin and runs the tools
 (`tools.ts`, with `tool-fetch.ts` and `tool-mcp.ts`); `app.ts` is plain TypeScript (marked, highlight.js, DOMPurify,
-KaTeX; Mermaid's own build loads with the first diagram). A new chat opens on the butterfly in a sea of characters
-that fills everything under the top bar, the message box floating on it (`ocean.ts`, two WebGL2 passes: one fragment per
-character cell works out what it shows, then each screen pixel draws its cell's glyph from an atlas at the screen's own
-pixel size; the grid is fixed to the window, so a side panel slides over it without redrawing it at a new size): the
-current drifts in ribbons, a click sends soft ripples across it in a shape (a heart, a ring, the butterfly, a star, a
-flower) that bend the current and the butterfly as they pass, and keeps the message box's focus, and a drag leaves a
-wake. With reduced motion it holds still; without WebGL2 the logo stands alone. Conversations live in the tab's sessionStorage: a reload keeps
+KaTeX; Mermaid's own build loads with the first diagram). The chat lies on a sea of characters that fills everything
+under the top bar, the message box floating on it (`ocean.ts`, two WebGL2 passes: one fragment per character cell works
+out what it shows, then each screen pixel draws its cell's glyph from an atlas at the screen's own pixel size; the grid
+is fixed to the window, so a side panel slides over it without redrawing it at a new size). A new chat opens on the
+butterfly in it: the current drifts in ribbons, a click sends soft ripples across it in a shape (a heart, a ring, the
+butterfly, a star, a flower) that bend the current and the butterfly as they pass, and keeps the message box's focus,
+and a drag leaves a wake. Once the chat begins the butterfly fades and the sea stays behind the messages, dimmed and
+dimmest under their column, at 12 frames a second; Settings, Appearance turns that off ("ASCII background behind
+chats", kept on the device). With reduced motion it holds still; without WebGL2 a new chat shows the logo alone. The
+conversations panel's head has an aurora behind the name (a static SVG after T3 Code's nightly sidebar art). Conversations live in the tab's sessionStorage: a reload keeps
 them, closing the tab ends them, and nothing is stored on the server's disk. Export saves the open chat (Export all:
 every chat of the tab) as a JSON file, every version, tool round and attached file included, which Import adds back
 under new ids. A reply belongs to the web server while it is written (in RAM, until 15 minutes after it ends): opening
