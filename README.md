@@ -278,7 +278,9 @@ Kroko heard the speech):
 | each reply after its check | 1.50 s, 1.52 s (1.45, 1.46 outside) | 0.23-0.32 s | 1.04-1.30 s | 3.09 s, 2.62 s |
 
 Flash-Next's cold experts and the speech models share the CPU: its replies decode at 35-55 tok/s while speaking
-(95 alone) and Kokoro reads a piece ~1.4x slower. For scale, Artificial Analysis measures Grok Voice 3.0 at 0.81 s
+(95 alone) and Kokoro reads a piece ~1.4x slower. The service pinned to two cores of its own (`taskset` in
+`KILN_VOICE_CMD`) was no faster, 1.65 s and 1.42 s: kiln's eight cold-expert workers are not pinned and still run on
+those cores. For scale, Artificial Analysis measures Grok Voice 3.0 at 0.81 s
 (without saying whether that includes the end of the user's turn).
 
 ## Measured on this machine
