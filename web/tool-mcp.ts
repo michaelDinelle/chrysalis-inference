@@ -1,7 +1,9 @@
 // MCP servers as tool sources, through the official SDK: stdio ({command, args, env, cwd}) and Streamable HTTP
 // ({url, headers}), as Claude Desktop's and Claude Code's config files write them. A server starts the first time a
 // chat turns it on (or Retry, or a reply that needs it) and keeps running; when it fails or goes away it is started
-// again after 1, 2, 4 ... up to 60 s.
+// again after 1, 2, 4 ... up to 60 s. "tools": [names] keeps only those of a server's tools, whatever it lists (a
+// remote server can change its list at any time, and its own read-only marks decide what runs without asking). A
+// remote URL must be https, its headers often holding a key: plain http reaches only this machine.
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StdioClientTransport, getDefaultEnvironment } from "@modelcontextprotocol/sdk/client/stdio.js";
 import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/streamableHttp.js";
@@ -9,6 +11,7 @@ import { ToolListChangedNotificationSchema } from "@modelcontextprotocol/sdk/typ
 import { DEFAULT_MAX_CHARS, DEFAULT_TIMEOUT_S, type Source, type Tool } from "./tools";
 
 const CONNECT_MS = 30_000;                          // npx fetching a server's package the first time takes a while
+const LOOPBACK = /^(localhost|127(\.\d{1,3}){3}|\[::1\])$/i;
 const strings = (x: unknown) => (x && typeof x === "object" ? Object.fromEntries(Object.entries(x).filter(([, v]) => typeof v === "string")) as Record<string, string> : {});
 
 // An MCP result as text: the model gets text parts as they are; pictures and audio are named, not shown (a chat's
@@ -27,10 +30,16 @@ function text(r: any): string {
 export function mcpSource(name: string, spec: Record<string, unknown>): Source {
   const url = typeof spec.url === "string" ? spec.url : undefined, command = typeof spec.command === "string" ? spec.command : undefined;
   const args = Array.isArray(spec.args) ? spec.args.map(String) : [];
+  const only = Array.isArray(spec.tools) ? new Set(spec.tools.map(String)) : null;
   let detail = "", bad: string | undefined;
   if (spec.type === "sse") bad = "SSE servers are not supported: give the server's Streamable HTTP URL";
   else if (url) {
-    try { const u = new URL(url); detail = u.origin + u.pathname; } catch { bad = `"url" is not a URL`; }
+    try {
+      const u = new URL(url);
+      detail = u.origin + u.pathname;
+      if (u.protocol !== "https:" && !(u.protocol === "http:" && LOOPBACK.test(u.hostname)))
+        bad = `"url" must be https (plain http only to this machine)`;
+    } catch { bad = `"url" is not a URL`; }
   } else if (command) detail = [command, ...args].join(" ");
   else bad = `needs a "command" (stdio) or a "url" (Streamable HTTP)`;
 
@@ -71,7 +80,7 @@ export function mcpSource(name: string, spec: Record<string, unknown>): Source {
       all.push(...r.tools);
       cursor = r.nextCursor;
     } while (cursor);
-    s.tools = all.map((t): Tool => ({
+    s.tools = all.filter((t) => !only || only.has(t.name)).map((t): Tool => ({
       name: t.name, title: t.title ?? t.annotations?.title ?? t.name, description: t.description ?? "",
       parameters: t.inputSchema ?? { type: "object", properties: {} },
       readOnly: t.annotations?.readOnlyHint === true,

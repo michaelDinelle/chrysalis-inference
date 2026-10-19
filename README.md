@@ -82,87 +82,97 @@ that token on. The wand in the message box drafts the user's next message (or fi
 send: kiln is asked, as the assistant and without thinking, to write it (Qwen will not write a user turn: at one it ends
 it). Settings (Ctrl+,) sits beside the chat: with room it opens without moving the conversation, otherwise it slides the
 column over (never re-wrapping it) or, in narrow windows, slides over it. Every change applies from the next reply and
-can be undone, for every conversation in the tab (kept with them). It shows exactly what kiln is sent: - The system
-prompt, by default "There are no tools or files in this chat. Answer directly." It is an ordinary   prompt: edit or
-delete it. Without it, Flash-Next with thinking off takes asks like "design a cute SVG" for a   coding-agent task ("let
-me first explore the project structure", then calls to tools that do not exist), as the   Q8_0 original does too. In a
-chat with tools on, the default is sent as "The tools offered here are the only ones   in this chat, and there are no
-files or projects to explore. Use a tool when it helps; otherwise answer directly."   (a prompt of your own goes as
-written). - Sampling: top-k, temperature, top-p and min-p, one row each in the order the sampler applies them (drag a
-row by   its grip to reorder), one set with thinking and one without, starting from Qwen's recommended values. The
-thinking bar   in the message box is the one switch: the panel shows (and edits) the set its level selects. -
-Repetition: presence penalty and DRY (with its allowed run and growth). Each group sits under a chart of real odds run
-through kiln's whole sampler with the settings as they stand. Sampling: Qwen naming a cat (the first word, 2,000 draws),
-a row per name with a bar for its odds now and a tick where the model had them; min-p is a line across the bars, and a
-cut name is struck through with the stage that cut it. Repetition: Qwen listing cat names after it started repeating
-itself ("…Luna, Milo, Shadow, Luna, Milo,", its next token's 64 candidates): the reply line marks the names presence
-counts as used and the run DRY sees, and the rows show "Shadow" (91% from the model) pushed down, tagged used and
-repeats. Pointing at a row explains it in the line under the chart; explanations elsewhere are tooltips, so nothing in
-the panel changes size while it is used. - The reply's max length and the seed: random for every reply, or fixed.
-Clicking a reply's seed fixes it. - Tools: the config file's MCP servers as they stand (state, tools, the command or
-URL, read-only), Reload config,   Fetch URL's page length, and the tools allowed to run without asking (a click makes
-one ask again). A value that differs from the recommended one is marked; ↺ or a double click on its slider brings it
-back. The sidebar holds the conversations (sending a message starts the model too). It and Settings are side panels that
-work alike: a toggle fixed in the window's top corner (left: conversations, Ctrl+B; right: Settings, Ctrl+,), which
-never moves. With room, a panel sits beside the chat, dragging its inner edge resizes it (a double click gives it its
-default width back; the chat keeps at least 640 px), and it stays as it was left, width and all; in a narrower window it
-slides over the chat and a click outside it or Esc closes it. Assistant turns go back to kiln exactly as received, so
-every turn of a conversation is a cache hit. While a reply streams the page follows it, until you scroll up (wheel,
-touch, keys or the scrollbar); back at the end, or with the ↓ over the message box, it follows again, and it never
-scrolls up on its own. A figure being drawn is shown from its top, as large as what can be seen at once (the column's
-width or the visible height), and the page holds still while it draws. The thinking box follows its newest line the same
-way. Replies render block by block: while one streams, finished paragraphs, code blocks and tables keep their nodes and
-only the growing tail is rebuilt (on the next frame), and the tail shows settled text only: whole words, whole code
-lines and table rows, links once their address is in, no stray `**`. A code block holding an SVG document (whatever its
-label) becomes a figure that draws itself while it streams: it takes its final size from the `<svg>` tag, then each
-element fades in once its tag is complete. It sits on a light page sized to the drawing, with Code, Copy, Download and
-Expand; the markup is sanitized (no scripts, handlers, `foreignObject` or outside references) into a shadow root, and
-the page's Content-Security-Policy lets nothing load from anywhere else. A ```mermaid block becomes a diagram in the
-same figure; while it streams, each version that parses replaces the picture. TeX (`$…$`, `\(…\)`, `$$…$$`, `\[…\]`) is
-typeset by KaTeX; a `$` opens math only before a non-space and closes it only after one, not before a digit or across a
-backtick, so prices and shell variables stay text. A ```html block holding a whole document runs as a page once it is
-written (a fragment when its Preview is clicked), in an iframe on `/sandbox` behind two walls, each enough alone: the
-iframe's sandbox (an opaque origin: no cookies, storage or chat) and that route's policy, which lets the page's own code
-run but nothing load or connect anywhere, kiln included. Tools: the wrench beside the thinking bar (with how many tools
-are on) opens them for this chat: Fetch URL, then each MCP server with its state (not started, starting, running, failed
-with the error and Retry, disabled), a switch for the whole server, and under its arrow one per tool, marked read-only
-or asks first. The choice is the chat's, kept with it (export too); a new chat starts from the last one. A server starts
+can be undone, for every conversation in the tab (kept with them). It shows exactly what kiln is sent:
+- The system prompt, by default "There are no tools or files in this chat. Answer directly." It is an ordinary prompt:
+  edit or delete it. Without it, Flash-Next with thinking off takes asks like "design a cute SVG" for a coding-agent
+  task ("let me first explore the project structure", then calls to tools that do not exist), as the Q8_0 original does
+  too. In a chat with tools on, the default is sent as "The tools offered here are the only ones in this chat, and there
+  are no files or projects to explore. Use a tool when it helps; otherwise answer directly." (a prompt of your own goes
+  as written).
+- Sampling: top-k, temperature, top-p and min-p, one row each in the order the sampler applies them (drag a row by its
+  grip to reorder), one set with thinking and one without, starting from Qwen's recommended values. The thinking bar in
+  the message box is the one switch: the panel shows (and edits) the set its level selects.
+- Repetition: presence penalty and DRY (with its allowed run and growth).
+Each group sits under a chart of real odds run through kiln's whole sampler with the settings as they stand. Sampling:
+Qwen naming a cat (the first word, 2,000 draws), a row per name with a bar for its odds now and a tick where the model
+had them; min-p is a line across the bars, and a cut name is struck through with the stage that cut it. Repetition: Qwen
+listing cat names after it started repeating itself ("…Luna, Milo, Shadow, Luna, Milo,", its next token's 64
+candidates): the reply line marks the names presence counts as used and the run DRY sees, and the rows show "Shadow"
+(91% from the model) pushed down, tagged used and repeats. Pointing at a row explains it in the line under the chart;
+explanations elsewhere are tooltips, so nothing in the panel changes size while it is used.
+- The reply's max length and the seed: random for every reply, or fixed. Clicking a reply's seed fixes it.
+- Tools: the config file's MCP servers as they stand (state, tools, the command or URL, read-only), Reload config, Fetch
+  URL's page length, and the tools allowed to run without asking (a click makes one ask again).
+A value that differs from the recommended one is marked; ↺ or a double click on its slider brings it back. The sidebar
+holds the conversations (sending a message starts the model too). It and Settings are side panels that work alike: a
+toggle fixed in the window's top corner (left: conversations, Ctrl+B; right: Settings, Ctrl+,), which never moves. With
+room, a panel sits beside the chat, dragging its inner edge resizes it (a double click gives it its default width back;
+the chat keeps at least 640 px), and it stays as it was left, width and all; in a narrower window it slides over the
+chat and a click outside it or Esc closes it. Assistant turns go back to kiln exactly as received, so every turn of a
+conversation is a cache hit. While a reply streams the page follows it, until you scroll up (wheel, touch, keys or the
+scrollbar); back at the end, or with the ↓ over the message box, it follows again, and it never scrolls up on its own. A
+figure being drawn is shown from its top, as large as what can be seen at once (the column's width or the visible
+height), and the page holds still while it draws. The thinking box follows its newest line the same way. Replies render
+block by block: while one streams, finished paragraphs, code blocks and tables keep their nodes and only the growing
+tail is rebuilt (on the next frame), and the tail shows settled text only: whole words, whole code lines and table rows,
+links once their address is in, no stray `**`. A code block holding an SVG document (whatever its label) becomes a
+figure that draws itself while it streams: it takes its final size from the `<svg>` tag, then each element fades in once
+its tag is complete. It sits on a light page sized to the drawing, with Code, Copy, Download and Expand; the markup is
+sanitized (no scripts, handlers, `foreignObject` or outside references) into a shadow root, and the page's
+Content-Security-Policy lets nothing load from anywhere else. A ```mermaid block becomes a diagram in the same figure;
+while it streams, each version that parses replaces the picture. TeX (`$…$`, `\(…\)`, `$$…$$`, `\[…\]`) is typeset by
+KaTeX; a `$` opens math only before a non-space and closes it only after one, not before a digit or across a backtick,
+so prices and shell variables stay text. A ```html block holding a whole document runs as a page once it is written (a
+fragment when its Preview is clicked), in an iframe on `/sandbox` behind two walls, each enough alone: the iframe's
+sandbox (an opaque origin: no cookies, storage or chat) and that route's policy, which lets the page's own code run but
+nothing load or connect anywhere, kiln included. Tools: the wrench beside the thinking bar (with how many tools are on)
+opens them for this chat: Fetch URL, then each MCP server with its state (not started, starting, running, failed with
+the error and Retry, disabled), a switch for the whole server, and under its arrow one per tool, marked read-only or
+asks first. The choice is the chat's, kept with it (export too); a new chat starts from the last one. A server starts
 the first time a chat turns it on, keeps running, and after a failure starts again 1, 2, 4 ... 60 s later. The servers
 come from `~/.config/kiln/mcp.json` (`KILN_MCP_CONFIG` overrides the path), in Claude Desktop's and Claude Code's shape,
-so a config can be pasted: ```json { "mcpServers": {     "notes":  { "command": "npx", "args": ["-y",
-"@modelcontextprotocol/server-filesystem", "/home/me/notes"], "env": {}, "cwd": "/home/me" },     "remote": { "url":
-"https://example.com/mcp", "headers": { "Authorization": "Bearer ..." }, "timeout": 120 },     "old":    { "command":
-"old-server", "disabled": true } },   "fetch": { "allowPrivate": false } } ``` stdio (`command`, `args`, `env`, `cwd`)
-and Streamable HTTP (`url`, `headers`) servers, through the official SDK; SSE servers are refused. `timeout` is a call's
-limit in seconds (60 by default), `maxResultChars` a result's size (40,000; a longer one is cut, and says so). Tool
-names reach the model as `server__tool` (letters, digits, `_` and `-`, unique, sorted, so the prompt's tools block stays
-the same and cached), the page shows the servers' own. The page cannot add, edit or see a server's command line beyond
-what Settings shows, its environment or headers: with `--lan` and no logins, a page that could define a command would
-run anything on this machine. It can list, start, retry and reload, and every request that starts or allows a tool must
-come as JSON, which another site's form cannot send. Fetch URL (read-only) GETs http(s) pages (20 s, 5 redirects, 4 MB),
-gives HTML as compact markdown (title, headings, paragraphs, lists, links, tables, code; no scripts, styles, menus or
-footers; `<main>` alone when there is one), text and JSON as they are, and refuses other types; the result starts with
-the final URL and the HTTP status, and a long page comes in parts the model can ask for (`start`; 20,000 characters at a
-time, Settings changes that). It refuses addresses that are not public (loopback, private, link-local, shared,
-documentation, multicast, IPv6 unique-local and link-local, NAT64 and 6to4 of those), checked in the connection's own
-DNS lookup at every hop, so neither a redirect nor a name that answers differently the second time gets through;
-`"allowPrivate": true` (or a list of addresses and CIDR blocks) in the config file is the only way to allow them. The
-reply's tool loop runs in the web server: kiln's answer ends in calls, the server runs them (side by side), sends kiln
-the turn with its reasoning, the calls exactly as kiln wrote them and their results, and asks again, up to 24 rounds
-(then it stops and says so; Continue carries on). So a reply with tools goes on with the tab closed, and a page that
-comes back follows all of its rounds. A tool that is not read-only (MCP's `readOnlyHint`) asks first: the reply waits at
-the call, its card shows the arguments with Allow once, Always allow (that tool, from then on, in every chat of the tab)
-and Deny, and a denied call tells the model the user declined. A call to a tool the chat has not turned on gets an error
-result, not a crash. Stop ends a reply anywhere, a call too (MCP's cancellation reaches the server). Calls show where
-they happened among each round's thinking and text, as cards (the tool and its server, a line of its arguments, running
-with its time, asks to run, done in N s, failed, declined, stopped) that open to the arguments and the result (markdown
-through the same sanitizer; a long one folds). A reply's stats count its rounds as one: time to its first token, tokens
-over the time spent writing them (each round's first token to its last), prompts summed; the usage meter shows the
-context its last round left. Text files, pictures, PDFs and videos can be attached (the clip, a drop anywhere, a paste):
-kiln gets each file before the typed text, a text file as its name and a fenced block, a picture as an image, a PDF as a
-file (its pages as pictures and text) and a video as a video. Their contents live in the tab's IndexedDB (one screenshot
-is most of sessionStorage), and a closed tab's are deleted when a kiln page next loads. Development: `cd web && bun run
-dev` (hot reload), `bun run check`.
+so a config can be pasted:
+```json
+{ "mcpServers": { "notes":  { "command": "npx", "args": ["-y", "@modelcontextprotocol/server-filesystem",
+"/home/me/notes"], "env": {}, "cwd": "/home/me" }, "remote": { "url": "https://example.com/mcp", "headers": {
+"Authorization": "Bearer ..." }, "timeout": 120 }, "old":    { "command": "old-server", "disabled": true } }, "fetch": {
+"allowPrivate": false } }
+```
+stdio (`command`, `args`, `env`, `cwd`) and Streamable HTTP (`url`, `headers`) servers, through the official SDK; SSE
+servers are refused. A remote `url` must be https (its headers often hold a key; plain http only to this machine).
+`tools` lists the only tools of a server the chat sees, whatever the server lists: a remote server can change its list
+at any time, and its own read-only marks decide what runs without asking. Web search, as OpenCode does it: Exa's hosted
+server, no key, search alone (`"exa": { "url": "https://mcp.exa.ai/mcp?tools=web_search_exa", "tools":
+["web_search_exa"] }`; its `web_fetch_exa` would read pages through Exa, where Fetch URL reads them from here); the
+searches go to Exa. `timeout` is a call's limit in seconds (60 by default), `maxResultChars` a result's size (40,000; a
+longer one is cut, and says so). Tool names reach the model as `server__tool` (letters, digits, `_` and `-`, unique,
+sorted, so the prompt's tools block stays the same and cached), the page shows the servers' own. The page cannot add,
+edit or see a server's command line beyond what Settings shows, its environment or headers: with `--lan` and no logins,
+a page that could define a command would run anything on this machine. It can list, start, retry and reload, and every
+request that starts or allows a tool must come as JSON, which another site's form cannot send. Fetch URL (read-only)
+GETs http(s) pages (20 s, 5 redirects, 4 MB), gives HTML as compact markdown (title, headings, paragraphs, lists, links,
+tables, code; no scripts, styles, menus or footers; `<main>` alone when there is one), text and JSON as they are, and
+refuses other types; the result starts with the final URL and the HTTP status, and a long page comes in parts the model
+can ask for (`start`; 20,000 characters at a time, Settings changes that). It refuses addresses that are not public
+(loopback, private, link-local, shared, documentation, multicast, IPv6 unique-local and link-local, NAT64 and 6to4 of
+those), checked in the connection's own DNS lookup at every hop, so neither a redirect nor a name that answers
+differently the second time gets through; `"allowPrivate": true` (or a list of addresses and CIDR blocks) in the config
+file is the only way to allow them. The reply's tool loop runs in the web server: kiln's answer ends in calls, the
+server runs them (side by side), sends kiln the turn with its reasoning, the calls exactly as kiln wrote them and their
+results, and asks again, up to 24 rounds (then it stops and says so; Continue carries on). So a reply with tools goes on
+with the tab closed, and a page that comes back follows all of its rounds. A tool that is not read-only (MCP's
+`readOnlyHint`) asks first: the reply waits at the call, its card shows the arguments with Allow once, Always allow
+(that tool, from then on, in every chat of the tab) and Deny, and a denied call tells the model the user declined. A
+call to a tool the chat has not turned on gets an error result, not a crash. Stop ends a reply anywhere, a call too
+(MCP's cancellation reaches the server). Calls show where they happened among each round's thinking and text, as cards
+(the tool and its server, a line of its arguments, running with its time, asks to run, done in N s, failed, declined,
+stopped) that open to the arguments and the result (markdown through the same sanitizer; a long one folds). A reply's
+stats count its rounds as one: time to its first token, tokens over the time spent writing them (each round's first
+token to its last), prompts summed; the usage meter shows the context its last round left. Text files, pictures, PDFs
+and videos can be attached (the clip, a drop anywhere, a paste): kiln gets each file before the typed text, a text file
+as its name and a fenced block, a picture as an image, a PDF as a file (its pages as pictures and text) and a video as a
+video. Their contents live in the tab's IndexedDB (one screenshot is most of sessionStorage), and a closed tab's are
+deleted when a kiln page next loads. Development: `cd web && bun run dev` (hot reload), `bun run check`.
 
 ## Measured on this machine
 

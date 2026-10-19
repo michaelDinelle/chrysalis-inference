@@ -91,6 +91,7 @@ const dir = mkdtempSync(`${tmpdir()}/kiln-tools-`), CONFIG = `${dir}/mcp.json`, 
 const stdio = (timeout?: number) => ({ command: process.execPath, args: ["fake-mcp.ts"], cwd: import.meta.dir, env: { FAKE_MCP_LOG: LOG }, ...(timeout ? { timeout } : {}) });
 const config = (fetch: object = {}) => writeFileSync(CONFIG, JSON.stringify({
   mcpServers: { fake: stdio(3), "a.b": stdio(), a_b: stdio(), web: { url: `http://127.0.0.1:${mcpHttp.port}/mcp` },
+    narrow: { url: `http://localhost:${mcpHttp.port}/mcp`, tools: ["echo", "nonexistent"] }, plain: { url: "http://example.com/mcp" },
     broken: { command: "/nonexistent/kiln-test-mcp" }, off: { command: "true", disabled: true } },
   fetch,
 }));
@@ -363,7 +364,7 @@ test("a tool's result is cut to the server's limit, and says so; a call past its
 }, 30_000);
 
 test("tool names are valid, unique function names, prefixed by their server; the page sees each source's state", async () => {
-  await collect(await ask([{ text: "hi" }], { "mcp:a.b": {}, "mcp:a_b": {}, "mcp:web": {}, "mcp:broken": {}, "mcp:off": {} }).res);
+  await collect(await ask([{ text: "hi" }], { "mcp:a.b": {}, "mcp:a_b": {}, "mcp:web": {}, "mcp:narrow": {}, "mcp:plain": {}, "mcp:broken": {}, "mcp:off": {} }).res);
   const { sources } = await catalog(), by = Object.fromEntries(sources.map((s) => [s.id, s]));
   const fns = sources.flatMap((s) => s.tools.map((t: any) => t.fn));
   expect(new Set(fns).size).toBe(fns.length);
@@ -375,6 +376,8 @@ test("tool names are valid, unique function names, prefixed by their server; the
   expect(by["mcp:broken"].state).toBe("failed");
   expect(by["mcp:broken"].error).toMatch(/ENOENT|nonexistent|not found/i);
   expect(by["mcp:off"].state).toBe("disabled");
+  expect(by["mcp:narrow"].tools.map((t: any) => t.name)).toEqual(["echo"]);       // its config's "tools" only
+  expect(by["mcp:plain"]).toMatchObject({ state: "failed", error: '"url" must be https (plain http only to this machine)' });
   expect(by["mcp:fake"].detail).toBe(`${process.execPath} fake-mcp.ts`);
   expect(JSON.stringify(sources)).not.toContain(LOG);                  // a server's environment stays here
   // a Streamable HTTP server's tools run like the others
