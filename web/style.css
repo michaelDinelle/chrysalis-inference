@@ -133,12 +133,13 @@ button { font: inherit; color: inherit; cursor: pointer; }
 .pane-rail.dragging::after { background: var(--accent); }
 .pane-resizing, .pane-resizing * { cursor: col-resize !important; user-select: none !important; }
 
-.brand { position: relative; font-size: 16px; font-weight: 600; letter-spacing: 0.015em; white-space: nowrap; }
-/* the conversations' head: an aurora behind the name, after T3 Code's nightly sidebar art (a sky, its light and a few
-   stars, fading into the panel); in the light, a dawn of the same colors */
-#sidebar .pane-head { position: relative; }
+.brand { font-size: 16px; font-weight: 600; letter-spacing: 0.015em; white-space: nowrap; }
+/* the panels' heads: an aurora behind the name, after T3 Code's nightly sidebar art (a sky, its light and a few stars,
+   fading into the panel); in the light, a dawn of the same colors */
+.pane-head { position: relative; }
+.pane-head > :not(.aurora) { position: relative; text-shadow: 0 0 2px var(--panel), 0 0 10px var(--panel); }
 .aurora { position: absolute; inset: 0; width: 100%; height: 100%; mask-image: linear-gradient(#000 55%, transparent 92%); }
-.aurora .curtains { mix-blend-mode: var(--aurora-blend); }
+.sprite { position: absolute; width: 0; height: 0; }
 .side-body { display: flex; flex: 1; flex-direction: column; gap: 6px; min-height: 0; padding: 10px; }
 #new-chat { justify-content: flex-start; }
 #conversations { flex: 1; min-height: 0; overflow-y: auto; margin: 4px -4px 0; padding: 0 4px; }
@@ -413,7 +414,7 @@ dialog { padding: 20px; border: 1px solid var(--line); border-radius: 16px; back
 dialog::backdrop { background: rgb(0 0 0 / 0.45); }
 
 #settings .pane-head h2 { margin: 0; font-size: 15px; font-weight: 600; }
-#settings .pane-head span { flex: 1; color: var(--faint); font-size: 12px; }
+#settings .pane-head span { flex: 1; color: var(--muted); font-size: 12px; }
 .set-body { flex: 1; min-height: 0; overflow-y: auto; overscroll-behavior: contain; }
 .set-sec { padding: 14px 20px 16px; }
 .set-sec + .set-sec { border-top: 1px solid var(--line); }
