@@ -11,6 +11,7 @@ import { type Attachment, KINDS, attach, dataUrl, fmtBytes, get as getFile, put 
 import { type Cand, type Odds, type SamplerKey, type Stage, dryRuns, sample } from "./sampler";
 import { type Part, type VoiceAsk, type VoiceInfo, type VoiceReady, VoiceClient } from "./voice";
 import { type Fix, applyFixes, fixedParts, readHeard } from "./heard";
+import { pointOf, shownWords, unitOf } from "./spoken";
 import { DESCRIPTIONS, type ToolChoice, type WireCall, assistantTurn, noted, toolTurn } from "./wire";
 
 type Effort = "xhigh" | "medium" | "low" | "off";
@@ -133,15 +134,17 @@ const PLAIN_SYSTEM = "There are no tools or files in this chat. Answer directly.
 // What voice mode tells the model, in a note before the first question said aloud (and again when it changes): the
 // system prompt stays as it is, so a chat's history is never read again for voice mode and the chat's own prompt and
 // tools still hold (kiln's template allows a system message only first). What speech recognition misheard is fixed
-// before the reply, apart from it (heardFor), so the note only says how to talk. Told to write no code or markdown, the
+// before the reply, apart from it (checkOf); what is left the model takes as meant, without remarking on it ("I think
+// you meant 'wrote'"). "Briefly" alone cut an essay asked for to a sentence or two. Told to write no code or markdown, the
 // model wrote code as plain text, which was read out, and held back ("Let me write that for you", then nothing): so what
 // is shown (code blocks, tables) is apart from what is said. The sentence on reasoning lets it work out loud while it
 // already speaks: on Big Bench Audio (Flash-Next, thinking off, spoken questions through Parakeet, as the system prompt)
 // 92.5% of 200 with it, 77.7% of all 1,000 without, where thinking first would hold the first word back by seconds.
-const DEFAULT_VOICE_PROMPT = "The user is talking to you by voice; a word may still be misheard, so go by how it sounds and by the " +
-  "conversation. Your reply is read aloud, except code blocks and tables, which are shown and not read: speak briefly in plain " +
-  "sentences, put code and tables in markdown blocks and say what you put there, and start on what is asked rather than asking first. " +
-  "When a question needs counting or logic, work it out loud in a few short steps, then answer.";
+const DEFAULT_VOICE_PROMPT = "The user is talking to you by voice; a word may still be misheard, so take what they most likely meant, by " +
+  "how it sounds and by the conversation, without remarking on it. Your reply is read aloud, except code blocks and tables, which are " +
+  "shown and not read: speak briefly in plain sentences (but what they ask you to write, such as an essay or a story, in full), put code " +
+  "and tables in markdown blocks and say what you put there, and do what is asked rather than asking whether to. When a question needs " +
+  "counting or logic, work it out loud in a few short steps, then answer.";
 // The voice note's sentence for a chat with tools on: the server settles whether a voice reply runs a tool (route in
 // server.ts), this keeps the words around a call true to it. The note on the first typed message after voice mode:
 // replies are read again, so markdown is back.
@@ -149,17 +152,22 @@ const VOICE_TOOLS = "Only say you searched or did something once the tool call f
   "have not received from a tool. When results come back, give the key points briefly, and say the links are on screen rather than reading them.";
 // What speech recognition misheard of a question said aloud, and whether answering it needs a tool: asked at temperature
 // 0 before the reply, in a conversation of its own beside the chat (a voice session's: these instructions, then a turn
-// per question with what the assistant had just said), which kiln keeps cached, so a check reads ~40 tokens (~0.3 s on
-// Flash-Next). Nothing of it is part of the chat: asked inside the reply, the model copied the fixes into a later
+// per question with the one before it and what the assistant had just said), which kiln keeps cached, so a check reads
+// ~40 tokens (~0.3 s on Flash-Next). Nothing of it is part of the chat: asked inside the reply, the model copied the fixes into a later
 // reply's words, where they were shown and read out; told in the chat how to answer a check, it began replies with
 // one; asked beside the chat with all of it, a check took 0.7-1.2 s. Fixes are swaps of the transcript's own words
 // (asked to repeat the whole message, it dropped sentences), by sound (asked by meaning, it made "pie game" "Pong
-// game"); heard.ts makes only those that sound like what was heard.
+// game"); heard.ts makes only those that sound like what was heard. Words that do not fit what the user asks, everyday
+// ones too, and the question before: of 17 misheard transcripts (twice each) 29 came out right where 25 had ("read it"
+// for "write it" fixed), and none of 14 right ones was changed; an example such as "due to" for "do a" was copied into
+// right speech ("Do a the rain"), so the examples are words that are rarely right where they were heard.
 const CHECK = "You fix speech recognition errors in what a user says to {{MODEL}}, a voice assistant running locally in kiln{{TOOLS}}. " +
   "For each transcript, write one line per misheard word or phrase: the transcript's exact words => the words that sound like them " +
-  "which the user meant (names spelled right, numbers in digits; names of libraries, products and models are often heard as everyday " +
-  "words, as \"pie torch\" for \"PyTorch\"). Fix only what was misheard: never rephrase, censor, explain or expand, and keep names you " +
-  "have no reason to doubt. Write \"-\" when nothing was misheard.";
+  "which the user meant (names spelled right, numbers in digits). Read the transcript against the conversation: words that do not fit " +
+  "what the user is asking were misheard, names of libraries, products and models as everyday words (\"pie torch\" for \"PyTorch\") " +
+  "and everyday words as others that sound alike (\"read it\" for \"write it\", \"by\" for \"buy\"). Fix only what was misheard: " +
+  "never rephrase, censor, explain or expand, and keep words that fit and names you have no reason to doubt. Write \"-\" when nothing " +
+  "was misheard.";
 const CHECK_TOOLS = " Then a last line, \"tool: yes\" if answering needs a web search or a page (they ask to search, look up or check " +
   "something, or the answer depends on current facts such as news, weather, prices or schedules), else \"tool: no\".";
 const VOICE_OFF = "The user is typing again and reads your replies.";
@@ -1281,6 +1289,9 @@ function request(c: Conversation, upto: Message[], o: { effort?: Effort; samplin
   };
 }
 const ran = (c: Call) => c.result !== undefined;
+// The end of a reply talked over, as kiln is sent it: kept as it was heard, cut mid-sentence, it taught the model to
+// stop so itself (an essay asked for next came back as a sentence or two in 6 of 6 tries; with this, whole in 5 of 6).
+const TALKED_OVER = " — [cut off: the user talked over this reply]";
 // A message as kiln is sent it: a question as its files and text; a reply as each round's turn with the calls that
 // ran and their results, then its last text (none when it ended in calls). Calls that never ran are left out.
 function wire(m: Message): object[] {
@@ -1291,7 +1302,7 @@ function wire(m: Message): object[] {
     const done = r.calls.filter(ran);
     return [assistantTurn(r.content, r.reasoning, done), ...done.map((x) => toolTurn(x.id, x.result!))];
   });
-  if (!ended && (m.content || m.reasoning)) out.push(assistantTurn(m.content, m.reasoning));
+  if (!ended && (m.content || m.reasoning)) out.push(assistantTurn(m.interrupted ? m.content + TALKED_OVER : m.content, m.reasoning));
   return out;
 }
 const toolsOn = (c: Conversation) => !!c.tools && Object.keys(c.tools).length > 0;
@@ -1537,6 +1548,7 @@ function schedule(run: Run) {
     const v = views.get(run.m);
     if (!v) return;                                // its chat is not on screen
     paint(v, run.m, run.live);
+    if (voice?.reply?.m === run.m) paintSpoken(voice, performance.now(), true);   // its text's nodes are new
     keepUp();
   });
 }
@@ -1640,7 +1652,12 @@ function submit(text: string) {
 // the chat as ordinary messages. voice.ts carries the sound; here what the user said becomes a question, its reply's
 // text is spoken as it is written, and talking over a reply keeps only what was heard of it.
 type VoicePhase = "starting" | "listening" | "thinking" | "speaking" | "muted" | "error";
-interface VoiceReply { m: Message; sent: number; spoken: number; audible: boolean; ended?: boolean }   // ended: say_end sent
+// sent and spoken: code points of its spoken text (sayable) given to the service, and through the piece last heard to
+// begin; sounding: that piece, its text's range and its speech's time (VoiceHandlers.spoken); ended: say_end sent
+interface VoiceReply {
+  m: Message; sent: number; spoken: number; audible: boolean; ended?: boolean;
+  sounding?: { from: number; to: number; at: number; secs: number };
+}
 interface VoiceMode {
   client: VoiceClient; c: Conversation; ready?: VoiceReady; muted: boolean; partial: string; error?: string;
   reply?: VoiceReply;                               // being spoken, or about to be
@@ -1704,9 +1721,9 @@ async function openVoice() {
     pause: (text) => { if (mine()) pauseAhead(voice!, text); },
     turn: (text) => { if (mine()) void voiceTurn(voice!, text); },
     interrupt: () => { if (mine()) cutVoice(false); },
-    spoken: (id, to) => {
+    spoken: (id, from, to, at, secs) => {
       const r = mine() ? voice!.reply : undefined;
-      if (r?.m.id === id) Object.assign(r, { spoken: to, audible: true });
+      if (r?.m.id === id) Object.assign(r, { spoken: to, audible: true, sounding: { from, to, at, secs } });
     },
     audible: (id, ms) => {
       if (!mine() || ms === undefined) return;
@@ -1756,6 +1773,7 @@ function closeVoice() {
   dropAhead(v);
   voice = null;
   cancelAnimationFrame(v.frame);
+  (globalThis as any).CSS?.highlights?.delete("voice-unspoken");   // a reply still being written shows whole
   v.client.close();
   setVoicePop(false);
   paintGhost();
@@ -1792,8 +1810,9 @@ function checkOf(v: VoiceMode, text: string): Promise<Heard> {
   if (asked) return asked;
   const c = v.c, system = fill(CHECK.replace("{{TOOLS}}", toolsOn(c) ? ", with web search and page reading" : "")) + (toolsOn(c) ? CHECK_TOOLS : "");
   if (v.check[0]?.content !== system || v.check.length > 121) v.check = [{ role: "system", content: system }];
-  const last = c.messages.findLast((m) => m.role === "assistant")?.content.slice(0, 300) ?? "";
-  const turn = { role: "user", content: (last ? `The assistant said: ${last}\n` : "") + `Transcript: ${text}` };
+  const at = c.messages.findLastIndex((m) => m.role === "assistant"), last = c.messages[at]?.content.slice(0, 300) ?? "";
+  const before = at > 0 ? c.messages.slice(0, at).findLast((m) => m.role === "user")?.content.slice(0, 200) ?? "" : "";
+  const turn = { role: "user", content: (before ? `The user said before: ${before}\n` : "") + (last ? `The assistant said: ${last}\n` : "") + `Transcript: ${text}` };
   const p = (async (): Promise<Heard> => {
     try {
       const res = await fetch("/api/chat", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({
@@ -2046,7 +2065,7 @@ function cutVoice(here: boolean) {
   // taken out (and the next words joined to its question) only when nothing of it happened yet: a reply that ran tools
   // keeps them and their results, and what was heard of it
   const worked = !!(r.m.rounds?.length || r.m.calls?.length);
-  const keep = r.audible || worked ? r.spoken : null, run = running(v.c);
+  const keep = r.audible || worked ? heardTo(r) : null, run = running(v.c);
   if (keep === null) v.merge = v.c.messages[v.c.messages.indexOf(r.m) - 1];
   if (run?.m === r.m) {
     cuts.set(r.m, keep);
@@ -2055,6 +2074,66 @@ function cutVoice(here: boolean) {
   keepHeard(v.c, r.m, keep);
   save(v.c);
   if (v.c === conv) render();
+}
+// How far a reply has been heard, in code points of its spoken text: in the piece sounding, at its speech's pace (a
+// word takes about as long as its letters), to the end of the word it is on.
+function heardTo(r: VoiceReply, now = performance.now()): number {
+  const s = r.sounding;
+  if (!s) return r.spoken;
+  const text = sayable(r.m), f = Math.min(1, Math.max(0, (now - s.at) / (s.secs * 1000)));
+  const at = unitOf(text, s.from + Math.round(f * (s.to - s.from))), word = shownWords(text).findLast((w) => w.start < at);
+  return Math.min(s.to, Math.max(s.from, word ? pointOf(text, word.end) : 0));
+}
+// The words of a reply not yet heard, grey (the text being read, style.css ::highlight(voice-unspoken)): those after the
+// place heardTo finds, counted among its shown words as the page shows them (spoken.ts).
+const UNREAD_ELS = ".code, table, .katex, figure, svg, button";
+let spokenAt = 0;
+function paintSpoken(v: VoiceMode, now: number, painted = false) {
+  const reg = (globalThis as any).CSS?.highlights as Map<string, unknown> | undefined, r = v.reply, view = r && views.get(r.m);
+  if (!reg) return;
+  if (!r || !view || cuts.has(r.m)) return void reg.delete("voice-unspoken");
+  if (!painted && now - spokenAt < 80) return;
+  spokenAt = now;
+  const text = sayable(r.m), at = unitOf(text, r.sounding ? heardTo(r, now) : 0);
+  const n = shownWords(text).filter((w) => w.start < at).length;   // the word it is on is heard
+  const boxes = [...view.rounds.querySelectorAll<HTMLElement>(":scope > .round > .markdown"), view.body], from = afterWords(boxes, n);
+  if (!from) return void reg.delete("voice-unspoken");
+  const range = new Range();
+  range.setStart(from.node, from.offset);
+  range.setEnd(view.body, view.body.childNodes.length);
+  reg.set("voice-unspoken", new (globalThis as any).Highlight(range));
+}
+// The place after the first n words of these boxes' text as it is shown (runs with a letter or digit, across the
+// inline elements in a block; nothing of what is not read), or null when they hold no more.
+function afterWords(boxes: HTMLElement[], n: number): { node: Text; offset: number } | null {
+  let count = 0, inWord = false, wordy = false, block: Element | null = null, end: { node: Text; offset: number } | null = null;
+  const ended = () => {                             // the word under way ended at `end`
+    inWord = false;
+    return wordy && ++count === n ? end : null;
+  };
+  for (const box of boxes) {
+    const walk = document.createTreeWalker(box, NodeFilter.SHOW_TEXT,
+      { acceptNode: (t) => (t.parentElement?.closest(UNREAD_ELS) ? NodeFilter.FILTER_REJECT : NodeFilter.FILTER_ACCEPT) });
+    for (let t = walk.nextNode() as Text | null; t; t = walk.nextNode() as Text | null) {
+      if (n === 0) return { node: t, offset: 0 };
+      const b = t.parentElement?.closest("p, li, h1, h2, h3, h4, h5, h6, blockquote, td, th, div") ?? null;
+      if (b !== block && inWord && ended()) return end;
+      block = b;
+      for (let i = 0; i < t.data.length; i++) {
+        if (/\s/.test(t.data[i])) {
+          if (inWord) {
+            end = { node: t, offset: i };
+            if (ended()) return end;
+          }
+        } else {
+          if (!inWord) [inWord, wordy] = [true, false];
+          wordy ||= /[\p{L}\p{N}]/u.test(t.data[i]);
+        }
+      }
+      if (inWord) end = { node: t, offset: t.data.length };
+    }
+  }
+  return inWord && ended() ? end : null;
 }
 // `to` counts code points of the spoken text, as the service does.
 function keepHeard(c: Conversation, m: Message, to: number | null) {
@@ -2090,9 +2169,11 @@ function paintGhost() {
   keepUp();
 }
 
+// Listening once the microphone gives audio, whether or not the service has its models yet: it keeps what comes before
+// them, and what is said before the microphone opens (a phone's can take 3 s) is not heard at all.
 function voicePhase(v: VoiceMode): VoicePhase {
   if (v.error) return "error";
-  if (!v.ready) return "starting";
+  if (!v.client.hearing) return "starting";
   if (v.client.playing) return "speaking";
   if (v.reply) return "thinking";
   return v.muted ? "muted" : "listening";
@@ -2144,6 +2225,7 @@ function animateVoice(now: number) {
   if (!v) return;
   v.frame = requestAnimationFrame(animateVoice);
   paintVoice();
+  paintSpoken(v, now);
   const phase = voicePhase(v), still = reducedMotion.matches || phase === "muted" || phase === "error", t = now / 1000;
   const lv = v.client.levels(), target = still ? 0 : Math.min(1, (phase === "speaking" ? lv.out : phase === "listening" ? lv.mic : 0) * 6);
   v.level += (target - v.level) * (target > v.level ? 0.5 : 0.12);    // quick to rise, slower to fall: it follows syllables

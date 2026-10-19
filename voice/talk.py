@@ -450,7 +450,10 @@ class Talk:
 
     @staticmethod
     def piece(id, seq, text, frm, to, audio, rate):
-        head = json.dumps({"id": id, "seq": seq, "text": text, "from": frm, "to": to, "rate": rate}).encode()
+        """A piece of a reply's audio: its text and its range in the reply, and its speech's length (secs), apart from
+        the pause after it, over which the page shows its words as said."""
+        head = json.dumps({"id": id, "seq": seq, "text": text, "from": frm, "to": to, "rate": rate,
+                           "secs": round(len(audio) / rate, 3)}).encode()
         audio = np.concatenate([audio, np.zeros(int(pause(text) * rate), np.float32)])
         return struct.pack("<I", len(head)) + head + (np.clip(audio, -1, 1) * 32767).astype("<i2").tobytes()
 

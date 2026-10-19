@@ -16,6 +16,7 @@ const SCRIPTS: Record<string, Line[]> = {
   plain: [{ text: "hello there" }],
   pie: [{ text: "lets do a snake game in pie game" }],
   story: [{ text: "slow story", interruptAfter: 2 }, { text: "and then" }],
+  long: [{ text: "slow long" }],
   merge: [{ text: "slow first", interruptOnSay: true }, { text: "second part" }],
   join: [{ text: "wait lets do a snake game", goOn: true }, { text: "in pie game" }],
   ahead: [{ text: "what is the capital of France", pause: 60 }],

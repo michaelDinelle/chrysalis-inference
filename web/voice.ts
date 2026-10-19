@@ -19,14 +19,16 @@ export interface VoiceHandlers {
   pause?(text: string): void;                       // the turn waits for more: its words, which are its turn's if no more come
   turn?(text: string, waitMs: number): void;        // the user is done: the turn's words
   interrupt?(): void;                               // the user talks over the reply (its sound has already stopped)
-  spoken?(id: string, to: number): void;            // a chunk of reply `id` began to sound: its speech has reached `to`
+  // a chunk of reply `id` began to sound: its text is [from, to) of the reply (code points), its speech lasts `secs`
+  // from `at` (performance.now(), as it reaches the ear)
+  spoken?(id: string, from: number, to: number, at: number, secs: number): void;
   audible?(id: string, latencyMs?: number): void;   // the reply's first sound; with a turn before it, the time from the end of that speech
   played?(id: string): void;                        // the reply's last sound ended, or it had nothing to say
   playing?(on: boolean): void;
   error?(message: string): void;
   closed?(): void;                                  // the service's side went away
 }
-interface Chunk { id: string; seq: number; text: string; from: number; to: number; rate: number }
+interface Chunk { id: string; seq: number; text: string; from: number; to: number; rate: number; secs?: number }
 
 const LEAD = 0.03;                                  // s from a chunk's arrival to its start when nothing plays: the audio thread's room
 
@@ -54,6 +56,7 @@ export class VoiceClient {
   private told?: string;                          // the conversation as last given (context), sent again on open
   playing = false;
   muted = false;
+  hearing = false;                                  // the microphone gives audio: from now on what is said is heard
 
   constructor(private on: VoiceHandlers) {}
 
@@ -109,6 +112,7 @@ export class VoiceClient {
     // what is said before the socket opens goes once it does (the service keeps it while its models load), so the
     // first words are heard however soon they come
     node.port.onmessage = (e) => {
+      this.hearing = true;
       if (this.muted) return;
       if (this.ws?.readyState === WebSocket.OPEN) this.ws.send(e.data);
       else if (this.ws?.readyState === WebSocket.CONNECTING && this.early.length < 750) this.early.push(e.data);
@@ -237,7 +241,7 @@ export class VoiceClient {
         this.on.audible?.(h.id, a ? a.wait + audibleAt - a.t : undefined);
       }
       this.setPlaying(true);
-      this.on.spoken?.(h.id, h.to);
+      this.on.spoken?.(h.id, h.from, h.to, audibleAt, h.secs ?? ab.duration);
     }, delay);
     this.timers.add(timer);
   }

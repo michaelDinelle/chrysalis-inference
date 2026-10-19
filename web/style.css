@@ -583,6 +583,8 @@ main { position: relative; }
 /* a question said aloud is grey until its check is in, then its own color */
 .msg.user .bubble { transition: color 0.25s; }
 .msg.user.unsettled .bubble { color: var(--muted); }
+/* a spoken reply's words not heard yet (app.ts paintSpoken) */
+::highlight(voice-unspoken) { color: var(--muted); }
 .bubble .fixed { text-decoration: underline dotted color-mix(in srgb, var(--accent) 70%, transparent); text-underline-offset: 3px; cursor: help; }
 .msg.ghost .bubble::after { content: ""; display: inline-block; width: 6px; height: 6px; margin-left: 6px; border-radius: 50%; background: var(--accent); vertical-align: middle; animation: pulse 1.2s ease-in-out infinite; }
 .said { display: inline-grid; place-items: center; width: 22px; height: 28px; color: var(--faint); }

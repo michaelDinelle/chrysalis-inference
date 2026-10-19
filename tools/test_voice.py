@@ -180,6 +180,9 @@ check("no markup, code or table is read out", not any(re.search(r"[*#`\[\]()|]|h
 check("the pieces' ranges cover the reply", [p["from"] for p in pieces[1:]] == [p["to"] for p in pieces[:-1]]
       and pieces and pieces[0]["from"] == 0 and pieces[-1]["to"] >= len(reply.rstrip()), str([(p["from"], p["to"]) for p in pieces]))
 check("the first piece is short", pieces and len(pieces[0]["text"].split()) <= 3, repr(pieces and pieces[0]["text"]))
+audio = [m for m in got if kind(m) == "audio"]
+check("each piece says how long its speech is, apart from the pause after it", bool(audio) and all(
+    0 < m[0].get("secs", 0) < len(m[1]) / m[0]["rate"] for m in audio), str([(m[0].get("secs"), round(len(m[1]) / m[0]["rate"], 3)) for m in audio]))
 spoken = np.concatenate([to16k(m[1], m[0]["rate"]) for m in got if kind(m) == "audio"])
 want = speakable(reply.replace("```python\nprint_banana_value(42)\n```", ""))
 heard = hear(spoken)

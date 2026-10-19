@@ -550,11 +550,37 @@ test("voice mode: talking over a reply silences it, stops kiln's request, and th
   expect(kept.length).toBeGreaterThan(0);
   expect(kept.length).toBeLessThan(full.length);
   expect(full.startsWith(kept)).toBe(true);
-  expect(chunks.some((c) => chunks.filter((x) => x.to <= c.to).map((x) => x.text).join("").trimEnd() === kept)).toBe(true);
+  // cut at the word it was on (whole words), within the pieces sent before the user talked
+  const before = chunks.map((c) => c.text).join("").trimEnd(), ends = chunks.map((c) => chunks.filter((x) => x.to <= c.to).map((x) => x.text).join("").trimEnd());
+  expect([full[kept.length] === " ", kept.length <= before.length, ends.includes(kept)]).toEqual([true, true, false]);   // not at a piece's end
   await page.waitForFunction(() => document.querySelector('#thread > article[data-i="2"] .bubble')?.textContent === "and then", { timeout: 10_000 });
   await page.waitForFunction(() => /voice/.test(document.querySelector('#thread > article[data-i="3"] .stats')?.textContent ?? ""), { timeout: 10_000 });
   // the kept reply as kiln is sent it again: only what was heard
-  expect(sent(lastStream).filter((m: any) => m.role === "assistant").map((m: any) => m.content)).toEqual([kept]);
+  expect(sent(lastStream).filter((m: any) => m.role === "assistant").map((m: any) => m.content)).toEqual([`${kept} — [cut off: the user talked over this reply]`]);
+  // the next question's check has the one before it and what the reply said of it
+  expect(checks.findLast((b) => b.messages.at(-1).content.endsWith("Transcript: and then"))?.messages.at(-1).content)
+    .toBe(`The user said before: slow story\nThe assistant said: ${kept}\nTranscript: and then`);
+  await page.close();
+}, 30_000);
+
+test("voice mode: a reply's words not heard yet are grey, and turn their own color as they are spoken", async () => {
+  const { page } = await voicePage("long");
+  await page.waitForFunction(() => document.querySelector("#voice-status")?.textContent === "Speaking", { timeout: 10_000 });
+  const heard = () => page.evaluate(() => {
+    const all = document.querySelector('#thread > article[data-i="1"] .markdown')!.textContent!.trim();
+    const range = (CSS as any).highlights.get("voice-unspoken")?.values().next().value as Range | undefined;
+    const grey = range?.toString().trim() ?? null, mid = range && getComputedStyle(range.startContainer.parentElement!).color;
+    return { all, grey, said: grey === null ? null : all.slice(0, all.length - grey.length).trim(), mid };
+  });
+  await Bun.sleep(500);                                           // into its first pieces, past the output's latency
+  const a = await heard();
+  await Bun.sleep(700);
+  const b = await heard();
+  expect(a.grey && b.grey && a.said && b.said).toBeTruthy();
+  expect([b.all.startsWith(a.said!), b.all.startsWith(b.said!), b.said!.length > a.said!.length]).toEqual([true, true, true]);
+  expect(/^(w\d+ )*w\d+$/.test(b.said!)).toBe(true);                         // whole words
+  await page.waitForFunction(() => document.querySelector("#voice-status")?.textContent === "Listening", { timeout: 15_000 });
+  expect(await page.evaluate(() => (CSS as any).highlights.has("voice-unspoken"))).toBe(false);   // all of it heard
   await page.close();
 }, 30_000);
 
@@ -636,7 +662,7 @@ test("voice picker: the voice models' voices by language and gender; a pick swit
   expect(rows.filter(([c]) => c.startsWith("voice-model"))).toEqual([["voice-model", "Fake TTS"], ["voice-model", "Other TTS"], ["voice-model missing", "Big TTStools/voice_setup.sh big-tts"]]);
   expect(rows.filter(([c]) => c === "voice-group").map(([, t]) => t)).toEqual(["American English · Female", "British English · Male", "Spanish · Female", "American English · Male"]);
   expect(await page.$$eval("#voice-pop .voice-item", (els) => els.map((e) => (e as HTMLElement).dataset.voice))).toEqual(
-    ["plain", "pie", "story", "merge", "join", "ahead", "onward", "checking", "silent", "pick", "notes", "echo"].map((v) => `fake-tts/${v}`).concat(["other-tts/ana", "other-tts/bob"]));
+    ["plain", "pie", "story", "long", "merge", "join", "ahead", "onward", "checking", "silent", "pick", "notes", "echo"].map((v) => `fake-tts/${v}`).concat(["other-tts/ana", "other-tts/bob"]));
   expect(await page.$$eval('#voice-pop .voice-item[aria-selected="true"]', (els) => els.map((e) => (e as HTMLElement).dataset.voice))).toEqual(["fake-tts/pick"]);
   await page.click('#voice-pop [data-voice="other-tts/bob"]');
   const configs = () => session().filter((e) => e.type === "config").map(({ stack, voice, speed }) => ({ stack, voice, speed }));
@@ -829,6 +855,23 @@ test("voice mode: the words are checked while they are said: in a pause they tur
   expect(ghost).toEqual(["lets do a snake game in Pygame", await color("--text"), await color("--muted")]);
   await page.waitForFunction(() => /^voice /.test(document.querySelector('#thread > article[data-i="1"] .stats')?.textContent ?? ""), { timeout: 15_000 });
   expect(await replyText(page, 1)).toBe("You said: lets do a snake game in Pygame");
+  await page.close();
+}, 30_000);
+
+test("voice mode: it says it is listening once the microphone gives audio, not when the service is ready", async () => {
+  const page = await (await browser.createBrowserContext()).newPage();
+  await page.evaluateOnNewDocument(() => {
+    sessionStorage.setItem("settings2", JSON.stringify({ system: "", think: {}, fast: {}, voice: { name: "silent" } }));
+    const ask = navigator.mediaDevices.getUserMedia.bind(navigator.mediaDevices);   // a phone's microphone, slow to open
+    navigator.mediaDevices.getUserMedia = async (c) => { await new Promise((r) => setTimeout(r, 1500)); return ask(c); };
+  });
+  await page.goto(`${base}/`, { waitUntil: "networkidle0" });
+  const hellos = () => voiceLog().filter((e) => e.ev === "msg" && e.type === "hello").length, n0 = hellos();
+  await page.click("#voice");
+  for (const t = Date.now(); hellos() === n0 && Date.now() - t < 1000; ) await Bun.sleep(20);
+  await Bun.sleep(300);                                          // the service is ready (the fake loads nothing); the microphone is not
+  expect([hellos() > n0, await page.$eval("#voice-status", (e) => e.textContent)]).toEqual([true, "Starting voice…"]);
+  await page.waitForFunction(() => document.querySelector("#voice-status")?.textContent === "Listening", { timeout: 5000 });
   await page.close();
 }, 30_000);
 
