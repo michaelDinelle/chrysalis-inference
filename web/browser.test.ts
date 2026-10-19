@@ -890,53 +890,91 @@ test("voice mode: the thinking bar is the chat's, one setting for spoken and wri
   await page.close();
 }, 30_000);
 
-// Pink pixels in a part of the page's screenshot: the butterfly and a click's wave are drawn in the accent, the sea in a
-// grey. The PNG is decoded by the page itself (an image drawn into a 2D canvas), so the test needs no image library.
-async function pinkIn(page: Page, clip: { x: number; y: number; width: number; height: number }): Promise<number> {
-  const png = Buffer.from(await page.screenshot({ clip, encoding: "binary" })).toString("base64");
-  return page.evaluate(async (src) => {
-    const img = new Image();
-    img.src = `data:image/png;base64,${src}`;
-    await img.decode();
-    const cv = document.createElement("canvas");
-    cv.width = img.width; cv.height = img.height;
-    const ctx = cv.getContext("2d")!;
-    ctx.drawImage(img, 0, 0);
-    const d = ctx.getImageData(0, 0, cv.width, cv.height).data;
-    let n = 0;
-    for (let i = 0; i < d.length; i += 4) if (d[i] > 90 && d[i] - d[i + 1] > 50) n++;
-    return n;
-  }, png);
+// A part of the page's screenshot, counted: its pink pixels (the butterfly is drawn in the accent, the sea in a grey), its
+// lit ones (anything drawn on the dark page) and those that differ from `before` (an earlier shot of the same part). The
+// PNGs are decoded by the page itself (an image drawn into a 2D canvas), so the test needs no image library.
+async function look(page: Page, clip: { x: number; y: number; width: number; height: number }, before = "") {
+  // (not beyond the viewport: that resizes the window for the shot, which ends a panel's slide at once)
+  const png = Buffer.from(await page.screenshot({ clip, encoding: "binary", captureBeyondViewport: false })).toString("base64");
+  const counts = await page.evaluate(async (src, prev) => {
+    const read = async (s: string) => {
+      const img = new Image();
+      img.src = `data:image/png;base64,${s}`;
+      await img.decode();
+      const cv = document.createElement("canvas");
+      cv.width = img.width; cv.height = img.height;
+      const ctx = cv.getContext("2d")!;
+      ctx.drawImage(img, 0, 0);
+      return ctx.getImageData(0, 0, cv.width, cv.height).data;
+    };
+    const d = await read(src), b = prev ? await read(prev) : null;
+    let pink = 0, lit = 0, changed = 0;
+    for (let i = 0; i < d.length; i += 4) {
+      if (d[i] > 90 && d[i] - d[i + 1] > 50) pink++;
+      if (d[i] + d[i + 1] + d[i + 2] > 100) lit++;                   // the page is #121010
+      if (b && Math.abs(d[i] - b[i]) + Math.abs(d[i + 1] - b[i + 1]) + Math.abs(d[i + 2] - b[i + 2]) > 30) changed++;
+    }
+    return { pink, lit, changed };
+  }, png, before);
+  return { png, ...counts };
 }
 
 // The sea needs WebGL2, which headless Chromium here gets only from SwiftShader on request: a browser of its own, so the
 // other tests run without its frames (costly when rendered in software) and with the plain logo in a new chat.
-test("a new chat is the butterfly in its sea; a click on the water draws a wave and keeps the message box focused, and with reduced motion draws nothing", async () => {
+test("a new chat is the butterfly in a sea under the message box too, never blanked by a side panel sliding shut; a click on the water makes ripples and keeps the message box focused, and with reduced motion draws nothing", async () => {
   const gl = await puppeteer.launch({ executablePath: process.env.CHROMIUM ?? "/usr/bin/chromium", headless: true, args: ["--no-sandbox", "--enable-unsafe-swiftshader"] });
   try {
     for (const motion of ["no-preference", "reduce"] as const) {
-      const page = await gl.newPage();
+      const page = await (await gl.createBrowserContext()).newPage();     // its own storage: the panel starts open
       page.on("pageerror", (e) => { throw e; });
       await page.emulateMediaFeatures([{ name: "prefers-color-scheme", value: "dark" }, { name: "prefers-reduced-motion", value: motion }]);
       await page.setViewport({ width: 1200, height: 900 });
       await page.goto(`${base}/`, { waitUntil: "networkidle0" });
-      await page.waitForSelector(".empty > canvas.ocean");
-      await Bun.sleep(1800);                                       // the butterfly appears from its middle out
-      const box = (await (await page.$(".empty"))!.boundingBox())!;
-      const middle = await pinkIn(page, { x: box.x + box.width / 2 - 150, y: box.y + box.height * 0.47 - 100, width: 300, height: 200 });
-      expect(middle).toBeGreaterThan(800);
+      await page.waitForSelector(".sea > canvas.ocean");
+      const rect = async (sel: string) => (await (await page.$(sel))!.boundingBox())!;
+      let sea = await rect(".sea"), box = await rect(".composer-box");
+      const middle = { x: box.x + box.width / 2 - 150, y: (sea.y + box.y) / 2 - 100, width: 300, height: 200 };
+      let pink = 0;
+      for (const end = Date.now() + 5000; pink <= 800 && Date.now() < end; await Bun.sleep(100)) pink = (await look(page, middle)).pink;
+      expect(pink).toBeGreaterThan(800);
+
+      // the conversations panel closes: slowed down, so that shots land while the chat widens (reduced motion has no slide)
+      const open = sea.x, left = () => page.$eval(".sea", (e) => e.getBoundingClientRect().left);
+      if (motion !== "reduce") await page.addStyleTag({ content: ":root { --pane-ease: 4s linear !important; }" });
+      await page.click("#conversations-toggle");
+      if (motion !== "reduce") {
+        for (let k = 0; k < 2; k++) {
+          await Bun.sleep(400);
+          const from = await left(), { lit } = await look(page, { x: open + 20, y: sea.y + 40, width: 200, height: 200 }), to = await left();
+          expect([from > 0, to < open, to < from]).toEqual([true, true, true]);
+          expect(lit).toBeGreaterThan(500);
+        }
+      }
+      await page.waitForFunction(() => document.querySelector(".sea")!.getBoundingClientRect().left === 0);
+      sea = await rect(".sea"); box = await rect(".composer-box");
+      // the sea beside the message box, where a click reaches the water
+      const beside = { x: sea.x + 40, y: box.y, width: box.x - sea.x - 80, height: box.height };
+      expect((await look(page, beside)).lit).toBeGreaterThan(150);
+      expect(await page.evaluate((x, y) => document.elementFromPoint(x, y)?.className, beside.x + 20, box.y + box.height / 2)).toBe("ocean");
+
+      // a click in the open water left of the butterfly, against the same stretch of water on the right: the current
+      // drifts in both, the ripples only near the click. The pointer rests there first, so its light is already lit.
       await page.focus("#input");
-      const at = { x: box.x + 90, y: box.y + box.height / 2 }, around = { x: at.x - 80, y: at.y - 80, width: 160, height: 160 };
-      const before = await pinkIn(page, around);
-      await page.mouse.click(at.x, at.y);
-      await Bun.sleep(500);
-      const after = await pinkIn(page, around);
+      const at = { x: sea.x + 90, y: (sea.y + box.y) / 2 }, near = { x: at.x - 70, y: at.y - 80, width: 140, height: 160 };
+      const far = { ...near, x: sea.x + sea.width - 90 - 70 };
+      await page.mouse.move(at.x, at.y);
+      await Bun.sleep(1500);
+      const near0 = await look(page, near), far0 = await look(page, far);
+      await page.mouse.down();
+      await page.mouse.up();
+      await Bun.sleep(400);
+      const near1 = await look(page, near, near0.png), far1 = await look(page, far, far0.png);
       expect(await page.evaluate(() => document.activeElement?.id)).toBe("input");
-      if (motion === "reduce") expect(after).toBe(before);
-      else expect(after).toBeGreaterThan(before + 200);
+      if (motion === "reduce") expect([near1.changed, far1.changed]).toEqual([0, 0]);
+      else expect(near1.changed).toBeGreaterThan(2 * far1.changed + 500);
       await page.close();
     }
   } finally {
     await gl.close();
   }
-}, 60_000);
+}, 90_000);

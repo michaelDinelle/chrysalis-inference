@@ -287,12 +287,19 @@ main { display: flex; flex-direction: column; min-height: 0; grid-column: 2; }
 .hljs-emphasis { font-style: italic; }
 .hljs-strong { font-weight: 700; }
 
-/* a new chat: the room under the top bar is the sea (ocean.ts, a canvas the size it sets), the butterfly over the
-   message box's column. Where WebGL2 is missing, the logo alone in the middle instead, as large as the room allows
-   with a margin, drawn a weight lighter (logo-thin.svg: the original's strokes read too heavy there) with a slow glow */
+/* a new chat: everything under the top bar is the sea (ocean.ts, its canvas placed by it), the message box floating on
+   it and a click anywhere around the box reaching the water: each is positioned, so each paints over the one before it
+   in the page (the empty thread, the sea, the message box). Where WebGL2 is missing, the logo alone in the middle
+   instead, as large as the room allows with a margin, drawn a weight lighter (logo-thin.svg: the original's strokes
+   read too heavy there) with a slow glow */
+.sea { position: absolute; inset: var(--bar-h) 0 0; display: none; overflow: hidden; }
+main:has(.thread > .empty) > .sea { display: block; }
+.sea > .ocean { position: absolute; touch-action: manipulation; }
+#composer { position: relative; }
+main:has(.thread > .empty) > #composer { pointer-events: none; }
+main:has(.thread > .empty) .composer-box { pointer-events: auto; }
 .thread:has(> .empty) { max-width: none; height: 100%; margin: 0; padding: 0; }
 .empty { position: relative; display: grid; height: 100%; place-items: center; overflow: hidden; container-type: size; }
-.empty > .ocean { position: absolute; touch-action: manipulation; }
 .empty > .logo { width: min(90cqw, 680px); height: 75cqh; object-fit: contain; translate: 0 -3%; filter: drop-shadow(0 0 40px rgb(226 77 133 / 0.14));
   animation: glow 5s ease-in-out infinite; }
 @keyframes glow { 50% { filter: drop-shadow(0 0 60px rgb(226 77 133 / 0.22)); } }

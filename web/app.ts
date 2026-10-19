@@ -1075,7 +1075,7 @@ function paint(v: View, m: Message, live?: Live) {
 }
 
 // A new chat: the butterfly in its sea of characters (ocean.ts), or the logo alone where WebGL2 is missing.
-const ocean = new Ocean();
+const ocean = new Ocean($("sea"));
 function emptyState() {
   const e = h("div", "empty");
   if (!ocean.attach(e)) e.innerHTML = `<img class="logo" src="${logoThin}" alt="">`;
