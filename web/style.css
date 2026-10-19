@@ -380,7 +380,9 @@ main:has(.thread > .empty) .composer-box { pointer-events: auto; }
 .segmented button { padding: 3px 10px; border: 0; border-radius: 999px; background: none; color: var(--muted); }
 .segmented button:hover { color: var(--text); }
 .segmented button[aria-checked="true"] { background: var(--accent-soft); color: var(--accent-hi); }
-.meter { min-width: 0; margin-left: auto; overflow: hidden; color: var(--faint); font: 11.5px var(--mono); white-space: nowrap; text-overflow: ellipsis; }   /* gives way first in a narrow chat */
+.meter { display: flex; flex-wrap: wrap; justify-content: flex-end; min-width: 0; height: 1.5em; margin-left: auto; overflow: hidden; color: var(--faint); font: 11.5px/1.5 var(--mono); }   /* gives way first in a narrow chat: a part that does not fit wraps out of sight */
+.meter > span { min-width: 0; overflow: hidden; white-space: nowrap; text-overflow: ellipsis; }
+.meter > span + span::before { content: "·"; margin: 0 0.7ch; }
 .send { display: grid; place-items: center; width: 36px; height: 36px; flex: none; border: 0; border-radius: 50%; background: var(--accent); color: #fff; }
 .send:hover { background: var(--accent-hi); }
 .send.stop { background: var(--text); color: var(--bg); }

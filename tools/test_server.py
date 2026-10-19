@@ -497,6 +497,23 @@ except (ValueError, jsonschema.ValidationError) as e:
 check("Responses: text.format holds the answer", valid is True and fmt.text.format.type == "json_schema",
       repr(fmt.output_text[:50]) if valid is True else valid)
 
+# A streamed chat reply says its prompt's length once the prompt is read, before its first token (chrysalis_prompt: a
+# client's live count of the context), the count its usage gives at the end; OpenAI's SDK reads the stream as before.
+chunks = []
+with httpx.stream("POST", base + "/v1/chat/completions", json={"model": MODEL, "messages": ask, "max_tokens": 40, "stream": True},
+                  timeout=300) as r:
+    chunks = [json.loads(line[6:]) for line in r.iter_lines() if line.startswith("data: ") and line != "data: [DONE]"]
+at = next((i for i, c in enumerate(chunks) if "chrysalis_prompt" in c), None)
+said = next((i for i, c in enumerate(chunks) if c["choices"] and {"content", "reasoning_content"} & {k for k, v in c["choices"][0]["delta"].items() if v}), None)
+usage = next((c["usage"] for c in chunks if c.get("usage")), None)
+check("chat stream: the prompt's length first", at is not None and said is not None and at < said and usage is not None
+      and chunks[at]["chrysalis_prompt"]["prompt_tokens"] == usage["prompt_tokens"], f"at {at}, first token {said}, usage {usage}")
+try:
+    n = sum(1 for _ in oai.chat.completions.create(model=MODEL, messages=ask, max_tokens=40, stream=True))
+except Exception as e:
+    n = repr(e)[:80]
+check("chat stream: the SDK reads it", isinstance(n, int) and n > 2, str(n))
+
 # /metrics (chrysalis/metrics.py) as Prometheus's own parser reads it: a reply moves the counters by what its usage
 # says, a request Chrysalis refuses counts as an error. On Flash-Next the PCIe link Chrysalis reports
 # (chrysalis/link.py) bounds the DMA rate the engine measures, and the rate comes near it: a reading of the card's own

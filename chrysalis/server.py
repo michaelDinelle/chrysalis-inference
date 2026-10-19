@@ -1416,7 +1416,9 @@ def make_handler(state, ready):
                     self.chunk({**base, "choices": [{"index": 0, "delta": {"chrysalis_prefix": val}, "finish_reason": None}]})
                     ev = next(gen)
                     continue
-                if kind == "start":
+                if kind == "start":                       # the prompt read: its length, for a client's live count (Chrysalis extension)
+                    if usage:
+                        self.chunk({**base, "choices": [{"index": 0, "delta": {}, "finish_reason": None}], "chrysalis_prompt": val})
                     ev = next(gen)
                     continue
                 if kind == "done":

@@ -80,6 +80,7 @@ interface Run {
   at: number;                                       // events of the job seen so far
   stopping: boolean; gone?: boolean;                // Stop pressed; the chat was deleted
   usage?: { prompt_tokens: number; completion_tokens: number; cached: number }; last?: any;   // summed over rounds; the last round's
+  read?: number; written?: number;                  // the round's prompt, once Chrysalis has read it, and its tokens since
   seed?: number; timing?: { start: number; first?: number; answer?: number; last?: number; gen?: number };
   pick?: Tok;                                       // the alternative a rewrite starts from
   frame: number; saved: number;
@@ -1508,6 +1509,9 @@ function take(run: Run, ev: any) {
   }
   if (ev.stopped) m.stopped = true;
   if (ev.timing) run.timing = ev.timing;
+  // the context as it grows: each text event is a token (its exact count comes with the round's usage)
+  if (ev.chrysalis_prompt) { run.read = ev.chrysalis_prompt.prompt_tokens; run.written = 0; }
+  if (d.content || d.reasoning_content) run.written = (run.written ?? 0) + 1;
   if (ev.usage) {
     const u = run.usage ?? { prompt_tokens: 0, completion_tokens: 0, cached: 0 };
     run.usage = { prompt_tokens: u.prompt_tokens + ev.usage.prompt_tokens, completion_tokens: u.completion_tokens + ev.usage.completion_tokens,
@@ -1585,6 +1589,7 @@ function schedule(run: Run) {
     if (!v) return;                                // its chat is not on screen
     paint(v, run.m, run.live);
     if (voice?.reply?.m === run.m) paintSpoken(voice, performance.now(), true);   // its text's nodes are new
+    if (run.conv === conv) renderMeter();
     keepUp();
   });
 }
@@ -3310,6 +3315,19 @@ function buildTools() {
 }
 
 const shortName = (id: string) => modelName(id).replace(/^Qwen3\.8-/, "");
+// Usage, in view: this chat's length against the context (growing while a reply is written: the prompt once Chrysalis
+// has read it, and each token since), and how full Chrysalis's cache of conversations is. The two are spans, so where
+// the row is short the cache's drops out whole rather than cut mid-word (style.css); the title says both in full.
+function renderMeter() {
+  const online = status.state === "online" && !status.loading, ctx = status.context ?? 262144;
+  const used = status.kv_tokens && status.cache ? 1 - status.cache.free_kv_tokens / status.kv_tokens : 0;
+  const r = running(), s = conv.messages.findLast((m) => m.stats)?.stats;
+  const n = r?.read !== undefined ? r.read + (r.written ?? 0) : s ? s.ctx ?? s.prompt + s.tokens : undefined;
+  const meter = $("meter"), parts = [n !== undefined ? `${fmtK(n)} / ${fmtK(ctx)}` : online ? `${fmtK(ctx)} context` : "", online ? `cache ${Math.round(used * 100)}%` : ""];
+  meter.replaceChildren(...parts.filter(Boolean).map((t) => h("span", "", t)));
+  meter.title = [n !== undefined ? `This chat: ${n.toLocaleString("en-US")} of ${ctx.toLocaleString("en-US")} tokens of context` : "",
+    online ? `Cache: ${fmtK(status.cache?.free_kv_tokens ?? 0)} of ${fmtK(status.kv_tokens ?? 0)} KV tokens free (cached conversations are dropped as needed)` : ""].filter(Boolean).join("\n");
+}
 function renderControls() {
   renderTools();
   const effort = barEffort(), at = EFFORTS.indexOf(effort), energy = $("energy");
@@ -3329,12 +3347,7 @@ function renderControls() {
   btn.title = state === "online" ? `${name}: ready` : state === "loading" ? `Loading ${name}` : `${name}: stopped`;
   btn.setAttribute("aria-expanded", String(modelsOpen));
   btn.classList.toggle("open", modelsOpen);
-  // usage, in view: this chat's length against the context, and how full Chrysalis's cache of conversations is
-  const used = status.kv_tokens && status.cache ? 1 - status.cache.free_kv_tokens / status.kv_tokens : 0, ctx = fmtK(status.context ?? 262144);
-  const s = conv.messages.findLast((m) => m.stats)?.stats, meter = $("meter");
-  meter.textContent = [s ? `${fmtK(s.ctx ?? s.prompt + s.tokens)} / ${ctx} context` : state === "online" ? `${ctx} context` : "",
-    state === "online" ? `cache ${Math.round(used * 100)}%` : ""].filter(Boolean).join(" · ");
-  meter.title = state === "online" ? `${fmtK(status.cache?.free_kv_tokens ?? 0)} of ${fmtK(status.kv_tokens ?? 0)} KV tokens free (cached conversations are dropped as needed)` : "";
+  renderMeter();
   // power: unload the model, or load it when it is stopped
   const power = $<HTMLButtonElement>("power");
   power.innerHTML = icon("power");

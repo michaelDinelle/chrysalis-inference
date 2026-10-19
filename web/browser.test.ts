@@ -78,12 +78,13 @@ const fake = Bun.serve({
     const text = call ? "Let me check." : ask ? `The tool said: ${body.messages.at(-1).content}` : said.startsWith("slow")
       ? Array.from({ length: 40 }, (_, k) => `w${k} `).join("") : Object.entries(REPLIES).find(([k]) => said.includes(k))?.[1] ?? `You said: ${said}`;
     const step = said.startsWith("slow") ? 4 : 9, gap = said.startsWith("slow") ? 60 : 5;
-    let i = 0, restated = !prefix;
+    let i = 0, restated = !prefix, read = false;
     return new Response(new ReadableStream({
       async pull(ctl) {
         await Bun.sleep(gap);
-        // a continued reply restates itself first, as Chrysalis does
+        // a continued reply restates itself first, as Chrysalis does, and the prompt's length comes once it is read
         if (!restated) { restated = true; return ctl.enqueue(enc.encode(`data: ${JSON.stringify({ choices: [{ delta: { chrysalis_prefix: { content: prefix.content } } }] })}\n\n`)); }
+        if (!read) { read = true; return ctl.enqueue(enc.encode(`data: ${JSON.stringify({ choices: [{ delta: {} }], chrysalis_prompt: { prompt_tokens: 10, cached_tokens: 0 } })}\n\n`)); }
         if (i < text.length) { ctl.enqueue(enc.encode(`data: ${JSON.stringify({ choices: [{ delta: { content: text.slice(i, i + step) } }] })}\n\n`)); i += step; return; }
         if (call) {
           ctl.enqueue(enc.encode(`data: ${JSON.stringify({ choices: [{ delta: { tool_calls: [{ index: 0, id: `call_${++callIds}`, type: "function", function: { name: call.name, arguments: call.args } }] } }] })}\n\n`));
@@ -141,6 +142,21 @@ async function send(page: Page, text: string) {
   await page.keyboard.press("Enter");
   await page.waitForFunction((n) => document.querySelectorAll(".msg .stats").length > n, { timeout: 20_000 }, done);
 }
+
+test("the context in the message box counts up while a reply is written (the prompt once read, then each token) and ends at the reply's own count", async () => {
+  const page = await open();
+  const used = async () => parseInt(await page.$eval("#meter > span", (s) => s.textContent ?? ""));
+  await page.type("#input", "slow count");
+  await page.keyboard.press("Enter");
+  await page.waitForFunction(() => /w3 /.test(document.querySelector(".msg.assistant")?.textContent ?? ""));
+  const early = await used();
+  await page.waitForFunction(() => /w20 /.test(document.querySelector(".msg.assistant")?.textContent ?? ""));
+  const later = await used();
+  expect([early > 10, later > early]).toEqual([true, true]);    // the fake's prompt is 10 tokens
+  await page.waitForSelector(".msg.assistant .stats");
+  expect(await used()).toBe(30);                                // its usage: 10 read, 20 written
+  await page.close();
+}, 30_000);
 
 test("TeX is typeset; prices, escaped dollars and code stay text", async () => {
   const page = await open();
