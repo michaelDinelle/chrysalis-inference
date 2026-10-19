@@ -4,18 +4,23 @@
 // up to a clause's end), each lasting 0.12 s a word. "interruptAfter": the user talks over the reply once that many
 // chunks were sent and the page plays them; "interruptOnSay": as soon as the reply's first text arrives, before any
 // sound. "after": the line waits for the page's first config. "goOn": the next line is said straight after this one.
+// "pause": that many frames of silence after the words, which the turn waits out (a pause event at their start, as
+// the service sends when its turn model hears more to come), then the turn, or "more" words in the same turn.
 // Its catalog has a second speech-to-text and voice model to switch to and one of each not installed (refused, as the
 // real service refuses them); a preview speaks a voice's sample as chunks of the reply "preview". Every message, every chunk (with the voice that spoke it), the audio frames
 // counted and its own start and exit go to FAKE_VOICE_LOG as JSON lines.
 import { appendFileSync } from "node:fs";
 
-interface Line { text: string; interruptAfter?: number; interruptOnSay?: boolean; after?: "config"; goOn?: boolean }
+interface Line { text: string; interruptAfter?: number; interruptOnSay?: boolean; after?: "config"; goOn?: boolean; pause?: number; more?: string }
 const SCRIPTS: Record<string, Line[]> = {
   plain: [{ text: "hello there" }],
   pie: [{ text: "lets do a snake game in pie game" }],
   story: [{ text: "slow story", interruptAfter: 2 }, { text: "and then" }],
   merge: [{ text: "slow first", interruptOnSay: true }, { text: "second part" }],
   join: [{ text: "wait lets do a snake game", goOn: true }, { text: "in pie game" }],
+  ahead: [{ text: "what is the capital of France", pause: 60 }],
+  onward: [{ text: "slow what is the", pause: 20, more: "capital of France" }],
+  checking: [{ text: "lets do a snake game in pie game", pause: 75 }],
   silent: [],
   pick: [{ text: "first" }, { text: "second", after: "config" }],
   notes: [{ text: "first question" }, { text: "second question" }, { text: "third question", after: "config" }],
@@ -91,23 +96,36 @@ function interrupt(ws: Bun.ServerWebSocket<Session>) {
   log({ s: ws.data.n, ev: "interrupt" });
 }
 
-// One microphone frame: the next line of the script is said over the frames that follow.
+// One microphone frame: the next line of the script is said over the frames that follow, a word each 10 frames.
 function hear(ws: Bun.ServerWebSocket<Session>) {
   const d = ws.data;
   if (++d.frames % 10 === 0) log({ s: d.n, ev: "frames", n: d.frames });
   const line = d.script[d.at];
   if (!d.listening || !line || (line.after === "config" && !d.configs)) return;
-  const k = ++d.heard, words = line.text.split(" "), step = 10;
-  if (k === step) ws.send(JSON.stringify({ type: "speech", on: true }));
-  const w = k / step - 1;
-  if (k % step === 0 && w >= 0 && w < words.length) ws.send(JSON.stringify({ type: "partial", text: words.slice(0, w + 1).join(" ") }));
-  if (k === step * (words.length + 2)) {
-    ws.send(JSON.stringify({ type: "speech", on: false }));
-    ws.send(JSON.stringify({ type: "turn", text: line.text, wait_ms: 210 }));
+  const k = ++d.heard, step = 10, first = line.text.split(" "), more = line.more?.split(" ") ?? [];
+  const send = (o: object) => (ws.send(JSON.stringify(o)), log({ s: d.n, ev: "sent", t: Date.now(), ...o }));
+  // the words from frame `at` on, after `before` (already said in this turn): speech, a partial a word, its end
+  const say = (at: number, before: string[], words: string[]) => {
+    const w = (k - at) / step - 1;
+    if (k === at + step) send({ type: "speech", on: true });
+    if ((k - at) % step === 0 && w >= 0 && w < words.length) send({ type: "partial", text: [...before, ...words.slice(0, w + 1)].join(" ") });
+    return k === at + step * (words.length + 2);
+  };
+  const turn = (text: string) => {
+    send({ type: "turn", text, wait_ms: 210 });
     d.listening = !!line.goOn;
     d.heard = 0;
     d.line = line;
     d.at++;
+  };
+  const ended = say(0, [], first), back = step * (first.length + 2) + (line.pause ?? 0);
+  if (ended) send({ type: "speech", on: false });
+  if (!line.pause) return void (ended && turn(line.text));
+  if (ended) send({ type: "pause", text: line.text });
+  if (!more.length) return void (k === back && turn(line.text));
+  if (k > back && say(back, first, more)) {
+    send({ type: "speech", on: false });
+    turn([...first, ...more].join(" "));
   }
 }
 
@@ -168,6 +186,10 @@ function message(ws: Bun.ServerWebSocket<Session>, m: any) {
       ws.send(JSON.stringify({ type: "said", id: m.id }));
       if (!r.sent && d.answer === m.id) d.listening = true;
     }
+  } else if (m.type === "cancel" && m.id !== undefined) {          // one reply (one spoken ahead, not heard)
+    const r = d.replies.get(m.id) ?? { text: [], told: 0, seq: 0, sent: 0, ended: false, dropped: false };
+    d.replies.set(m.id, { ...r, dropped: true });
+    if (d.answer === m.id) d.answer = undefined;
   } else if (m.type === "cancel") {
     for (const r of d.replies.values()) r.dropped = true;
     Object.assign(d, { answer: undefined, listening: true, heard: 0 });

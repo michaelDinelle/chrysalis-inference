@@ -16,6 +16,7 @@ export interface VoiceHandlers {
   ready?(r: VoiceReady): void;
   speech?(on: boolean): void;                       // the user started or paused speaking
   partial?(text: string): void;                     // the turn's words so far
+  pause?(text: string): void;                       // the turn waits for more: its words, which are its turn's if no more come
   turn?(text: string, waitMs: number): void;        // the user is done: the turn's words
   interrupt?(): void;                               // the user talks over the reply (its sound has already stopped)
   spoken?(id: string, to: number): void;            // a chunk of reply `id` began to sound: its speech has reached `to`
@@ -49,6 +50,7 @@ export class VoiceClient {
   private answers = new Map<string, { t: number; wait: number }>();
   private shut = false;
   private early: ArrayBuffer[] = [];               // microphone frames from before the socket opened
+  private held = new Map<string, ArrayBuffer[]>(); // replies spoken ahead: their chunks, unplayed until let go
   playing = false;
   muted = false;
 
@@ -122,9 +124,25 @@ export class VoiceClient {
   }
 
   say(id: string, text: string) {
-    if (!this.sent.has(id) && this.turnAt) { this.answers.set(id, this.turnAt); this.turnAt = undefined; }
+    if (!this.sent.has(id) && this.turnAt && !this.held.has(id)) { this.answers.set(id, this.turnAt); this.turnAt = undefined; }
     this.sent.add(id);
     this.send({ type: "say", id, text });
+  }
+  // A reply spoken before it is known to stand (app.ts, Ahead): its audio is kept, not played, until go, and cancel
+  // drops it on both sides. Let go, it answers the last turn.
+  hold(id: string) { this.held.set(id, []); }
+  go(id: string) {
+    const kept = this.held.get(id);
+    if (!kept) return;
+    this.held.delete(id);
+    if (this.turnAt) { this.answers.set(id, this.turnAt); this.turnAt = undefined; }
+    for (const buf of kept) this.chunk(buf);
+    if (this.said.has(id) && ![...this.live.values()].includes(id)) this.on.played?.(id);
+  }
+  cancel(id: string) {
+    this.held.delete(id);
+    this.dropped.add(id);
+    this.send({ type: "cancel", id });
   }
   done(id: string) { this.send({ type: "say_end", id }); }
   config(ask: VoiceAsk) { this.send({ type: "config", ...ask }); }
@@ -165,6 +183,7 @@ export class VoiceClient {
     if (e.type === "ready") this.on.ready?.(e);
     else if (e.type === "speech") this.on.speech?.(!!e.on);
     else if (e.type === "partial") this.on.partial?.(String(e.text ?? ""));
+    else if (e.type === "pause") this.on.pause?.(String(e.text ?? ""));
     else if (e.type === "turn") {
       this.turnAt = { t: performance.now(), wait: Number(e.wait_ms) || 0 };
       this.on.turn?.(String(e.text ?? ""), Number(e.wait_ms) || 0);
@@ -173,7 +192,7 @@ export class VoiceClient {
       this.on.interrupt?.();
     } else if (e.type === "said") {
       this.said.add(e.id);
-      if (![...this.live.values()].includes(e.id) && !this.dropped.has(e.id)) this.on.played?.(e.id);
+      if (![...this.live.values()].includes(e.id) && !this.dropped.has(e.id) && !this.held.has(e.id)) this.on.played?.(e.id);
     } else if (e.type === "error") this.on.error?.(String(e.message ?? "The voice service failed"));
   }
 
@@ -183,6 +202,7 @@ export class VoiceClient {
     const n = new DataView(buf).getUint32(0, true), h: Chunk = JSON.parse(new TextDecoder().decode(new Uint8Array(buf, 4, n)));
     const ctx = this.out;
     if (!ctx || this.dropped.has(h.id)) return;
+    if (this.held.has(h.id)) return void this.held.get(h.id)!.push(buf);
     const pcm = new Int16Array(buf.slice(4 + n)), ab = ctx.createBuffer(1, Math.max(1, pcm.length), h.rate), ch = ab.getChannelData(0);
     for (let i = 0; i < pcm.length; i++) ch[i] = pcm[i] / 32768;
     const src = ctx.createBufferSource(), now = ctx.currentTime, start = Math.max(now + LEAD, this.end);

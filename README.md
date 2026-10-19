@@ -183,37 +183,41 @@ deleted when a kiln page next loads. Development: `cd web && bun run dev` (hot r
 
 ## Voice mode
 
-The wave beside Send talks with the chat's model. The message box stays (typing still works): its row gains a pill
-whose dots move with your voice and then kiln's (its mic mutes), the voice beside it opens the voices, and Send becomes
-■, which ends voice mode; the thinking bar sets voice mode's own thinking (Off by default). Your words show in the chat
-as you say them, grey; a pause ends your turn, and the question turns its own color once its check is in, with the
-words it fixed underlined (what was heard on hover). The reply is spoken as it is written, except code blocks
-and tables, which are shown and not read, and talking over it stops it. Both sides are ordinary messages (a question
-said aloud is marked so), and a reply talked over keeps only what was heard of it, which is also what the model is told
-it said.
+The wave beside Send talks with the chat's model. The message box stays (typing still works): its row gains a pill whose
+dots move with your voice and then kiln's (its mic mutes), the voice beside it opens the voices, and Send becomes ■,
+which ends voice mode; the thinking bar sets voice mode's own thinking (Off by default). Your words show in the chat as
+you say them, grey, and turn their own color as they are checked, with the misheard ones fixed and underlined (what was
+heard on hover); a pause ends your turn. The reply is spoken as it is written, except code blocks and tables, which are
+shown and not read, and talking over it stops it. Both sides are ordinary messages (a question said aloud is marked so),
+and a reply talked over keeps only what was heard of it, which is also what the model is told it said.
 
 The model is told about voice mode in a note on the first question said aloud (again when the note changes; another on
 the first typed message after it), never in the system prompt, so voice mode does not make a chat read its history
-again. Each question said aloud is first checked, by the same model in a conversation of its own beside the chat (one
-per voice session, so each check is an append to kiln's cache: ~0.3 s), at temperature 0: the check is given the
-transcript and the start of the reply before it, and writes what speech recognition misheard, as swaps of the
-transcript's own words (`quinn three point eight twenty seven B => Qwen3.8-27B`; asked to repeat the whole message
-instead, Flash-Next dropped sentences), each made only if it sounds like what was heard (`web/heard.ts`: "tail" =>
-"list" is a meaning, not a mishearing), then with tools whether answering needs one (`tool: yes`). The chat is sent the
-question fixed and nothing of the check, so the reply can neither speak nor copy it. Words said while a question is
-still being checked join it. A yes, or a user who asks for a search, gets a tool call held to the tools' grammar (~0.8 s
-on Flash-Next), after a spoken line the page writes ("Let me look that up."): a model with thinking off, told its reply
-is spoken, says "I'm searching for that now" and ends its turn often enough, and then copies that turn. A reply that
-announces a tool it did not call is made to call one; a reply that ran tools is kept when talked over, its results with
-it. What is said before the speech models have loaded (a first start: ~1.1 s) is kept and heard once they are in.
-Settings' "What the model is sent" shows a chat's next request as kiln gets it (built by the same code as a reply's: the
-tools as JSON, which kiln's template writes first in the system turn, every message with its note). It is a cascade, as
-Claude's voice mode is: speech-to-text, the model kiln already runs (so the reasoning costs no memory), text-to-speech,
-all on the CPU (no VRAM) in `voice/`, a Python service the web server starts with the first voice session and stops 60 s
-after the last (`KILN_VOICE_IDLE_MS`): closed, voice mode costs nothing. Open, it holds ~0.5 GB of RAM and 4 threads
-(`KILN_VOICE_THREADS`): at all 16 it took Flash-Next's decode from 95 to 3 tok/s, at 4 ~12%. `make voice` makes its venv
-(`data/voice-venv`) and fetches the default models into `data/voice/` (~250 MB); `tools/voice_setup.sh NAME...` fetches
-the others.
+again. What is said is checked as it is said, by the same model in a conversation of its own beside the chat (one per
+voice session, so each check is an append to kiln's cache: ~0.3 s), at temperature 0: the check is given the words so
+far and the start of the reply before them, and writes what speech recognition misheard, as swaps of the transcript's
+own words (`quinn three point eight twenty seven B => Qwen3.8-27B`; asked to repeat the whole message instead,
+Flash-Next dropped sentences), each made only if it sounds like what was heard (`web/heard.ts`: "tail" => "list" is a
+meaning, not a mishearing), then with tools whether answering needs one (`tool: yes`). The chat is sent the question
+fixed and nothing of the check, so the reply can neither speak nor copy it. The reply does not wait for its question to
+stand: it begins at the turn on the fixes known by then, beside the check of the turn's last words, and when the turn
+model hears more to come (a turn then waits up to 1.5 s of silence; 5 of 31 of the user's turns did), it begins at that
+pause on its words. kiln writes it and the service speaks it into the page's hold, its tools held by the server
+(`kiln_voice.ahead`, until `/go`): it is shown and heard once the turn ended with its words and the check found what it
+was sent with, and is otherwise dropped unheard (the user went on, or the check fixed more) and the question as it
+stands answered. Words said while a question is still being checked join it. A yes, or a user who asks for a search,
+gets a tool call held to the tools' grammar (~0.8 s on Flash-Next), after a spoken line the page writes ("Let me look
+that up."): a model with thinking off, told its reply is spoken, says "I'm searching for that now" and ends its turn
+often enough, and then copies that turn. A reply that announces a tool it did not call is made to call one; a reply that
+ran tools is kept when talked over, its results with it. What is said before the speech models have loaded (a first
+start: ~1.1 s) is kept and heard once they are in. Settings' "What the model is sent" shows a chat's next request as
+kiln gets it (built by the same code as a reply's: the tools as JSON, which kiln's template writes first in the system
+turn, every message with its note). It is a cascade, as Claude's voice mode is: speech-to-text, the model kiln already
+runs (so the reasoning costs no memory), text-to-speech, all on the CPU (no VRAM) in `voice/`, a Python service the web
+server starts with the first voice session and stops 60 s after the last (`KILN_VOICE_IDLE_MS`): closed, voice mode
+costs nothing. Open, it holds ~0.5 GB of RAM and 4 threads (`KILN_VOICE_THREADS`): at all 16 it took Flash-Next's decode
+from 95 to 3 tok/s, at 4 ~12%. `make voice` makes its venv (`data/voice-venv`) and fetches the default models into
+`data/voice/` (~250 MB); `tools/voice_setup.sh NAME...` fetches the others.
 
 What runs is a stack of four parts, each behind one small interface in `voice/parts.py` and picked by name: the VAD
 (Silero v6), speech-to-text (Kroko, a streaming zipformer; also Parakeet 110M, Parakeet v3, Nemotron streaming 0.6B,
@@ -254,14 +258,17 @@ How it behaves, and why:
 - Opening voice mode has kiln read the chat with the voice prompt (one token): the prompt replaces the system prompt,
   and Flash-Next's first request after a while idle took 1.7-3.3 s to its first token.
 
-Time from the end of a spoken question to the reply's first sound, five questions kiln had not seen each
-(`web/bench-voice.ts`: headless Chromium's microphone plays a WAV through the real service and the running kiln; the
-page's own figure, then one from outside, the WAV's end of speech to the first audio buffer's start):
+Time from the end of a spoken question to the reply's first sound, six questions kiln had not seen each, the last of
+which trails off ("... a fun fact about octopuses and"), so the turn model hears more to come and the turn waits out
+1.5 s of silence (`web/bench-voice.ts`: headless Chromium's microphone plays a WAV through the real service and the
+running kiln; the page's own figure, then one from outside, the WAV's end of speech to the first audio buffer's start):
 
-| model | median | wait after speech | first token | first audio | to the speaker |
-|---|---|---|---|---|---|
-| Qwen3.8-27B | **0.81 s** (0.71 outside) | 0.28-0.33 s | 0.09 s | 0.26-0.46 s | 0.06-0.09 s |
-| Qwen3.8-Flash-Next | **1.01 s** (0.97 outside) | 0.28-0.30 s | 0.14-0.18 s | 0.40-0.67 s | 0.06-0.09 s |
+| model | median | wait after speech | turn to first sound | the question that trails off |
+|---|---|---|---|---|
+| Qwen3.8-Flash-Next | **1.24 s** (1.21 outside) | 0.27-0.32 s | 0.87-1.23 s | 1.77 s: the 1.55 s wait, then 0.22 s |
+
+The same six on the page as it was before replies began ahead (each waited for its check): 1.98 s, and 2.68 s for the
+one that trails off.
 
 Flash-Next's cold experts and the speech models share the CPU: its replies decode at 35-55 tok/s while speaking
 (95 alone) and Kokoro reads a piece ~1.4x slower. For scale, Artificial Analysis measures Grok Voice 3.0 at 0.81 s

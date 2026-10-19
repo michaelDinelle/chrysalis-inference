@@ -1,6 +1,6 @@
 """The voice service (voice/) on the CPU: its Whisper features against transformers' (data/ref-venv), Smart Turn
 through them on a finished and an unfinished question, and sessions over its WebSocket. A spoken question in: speech
-on, partials, then its turn and transcript. A markdown reply in: audio pieces in order whose texts carry no markup or
+on, partials, then its turn and transcript; an unfinished one: a pause with its words, which are its turn's. A markdown reply in: audio pieces in order whose texts carry no markup or
 code and whose ranges cover the reply, a short first one, and speech the STT hears as the reply. While a reply plays,
 its own echo in the mic: nothing; another voice over it: an interrupt and that voice's turn. A preview, a reply with no
 text, a switch to another speech model mid-session (and to one that does not exist). Kokoro voices the questions
@@ -259,6 +259,26 @@ check("a quiet mic: talking over the reply stops it at once", stopped < 0.5, f"{
 ws.send(json.dumps({"type": "playback", "playing": False}))
 t = next((m for m in events(lambda m: kind(m) == "turn", 10) if kind(m) == "turn"), {})
 check("and the words are the turn", "coffee" in t.get("text", "").lower(), repr(t.get("text")))
+
+# A sentence the turn model hears as unfinished: the turn waits out the longest silence, its words go out at the pause
+# before it (a reply begins on them) and are the turn's, as sent; speech that goes on after the pause is one turn. A
+# session of its own: more turns in the one above would move where it looks at their words, and so its barge-in times
+ws = connect(url, compression=None, max_size=None)
+ws.send(json.dumps({"type": "hello"}))
+events(lambda m: kind(m) == "ready", 60)
+unfinished = "So I was wondering whether you could maybe help me with the"
+stream(say(unfinished), tail=2.0)
+got = events(lambda m: kind(m) == "turn")
+p, t = (next((m for m in got if kind(m) == k), {}) for k in ("pause", "turn"))
+check("an unfinished sentence: a pause, then its turn", [kind(m) for m in got if kind(m) in ("pause", "turn")] == ["pause", "turn"]
+      and wer(unfinished, p.get("text", "")) <= 0.15, repr(p.get("text")))
+check("and the turn's words are the pause's", bool(p.get("text")) and t.get("text") == p.get("text"), repr(t.get("text")))
+whole = unfinished + " weather report for tomorrow"
+stream(np.concatenate([say(unfinished), np.zeros(8000, np.float32), say("weather report for tomorrow")]), tail=2.0)
+got = events(lambda m: kind(m) == "turn")
+kinds, t = [kind(m) for m in got], next((m for m in got if kind(m) == "turn"), {})
+check("talking on after a pause: the same turn", "pause" in kinds and "speech" in kinds[kinds.index("pause"):] and kinds.count("turn") == 1
+      and wer(whole, t.get("text", "")) <= 0.15, f"{' '.join(dict.fromkeys(kinds))}: {t.get('text')!r}")
 
 svc.stdin.close()
 try:

@@ -121,6 +121,7 @@ class Listener:
             self.checked = True
             if self.turn.prob(np.concatenate(self.audio)) >= TURN_DONE:
                 return self.end(out)
+            self.pause(out)
         if self.quiet >= LONGEST_SILENCE:
             self.end(out)
 
@@ -182,6 +183,15 @@ class Listener:
             if mine != self.shown:
                 self.shown = mine
                 out.append({"type": "partial", "text": " ".join(mine)})
+
+    def pause(self, out):
+        """The turn model hears more to come, so the turn waits (up to LONGEST_SILENCE): its words so far, decoded whole
+        as its end will decode them if no more speech comes, go out now for the page to begin a reply ahead."""
+        if self.own is None:
+            return
+        text = " ".join(self.stream.peek().split()[self.own:])
+        if any(c.isalnum() for c in text):
+            out.append({"type": "pause", "text": text})
 
     def end(self, out):
         tokens, wait, echo = self.stream.finish().split(), time.monotonic() - self.last, self.own is None

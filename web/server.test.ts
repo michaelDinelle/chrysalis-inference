@@ -609,6 +609,27 @@ test("voice: a check that needs no tool lets the reply be as it is; one that onl
   expect(contents(got)).toEqual(["Let me check the forecast.", "Here."]);
 }, 30_000);
 
+test("voice: a reply begun ahead runs no tool until the page says it stands (go), and one stopped before then runs none", async () => {
+  const held = async (text: string) => {
+    const said = `run ${JSON.stringify([{ calls: [{ name: "fake__echo", args: JSON.stringify({ text }) }] }, { text: "Done." }])}\n${++asked}`;
+    const res = await fetch(`${base}/api/chat`, { method: "POST", headers: json, body: JSON.stringify({ stream: true, model: "m",
+      kiln_voice: { tool: false, ahead: true }, messages: [{ role: "user", content: NOTE + said }], kiln_web: { tools: { "mcp:fake": {} }, route: true } }) });
+    const got: Ev[] = [], done = (async () => { for await (const e of parsed(res)) got.push(e); })();
+    for (const t = Date.now(); !got.some((e) => e.choices?.[0]?.finish_reason === "tool_calls") && Date.now() - t < 5000; ) await Bun.sleep(10);
+    await Bun.sleep(300);                                           // the round's calls are in: held, nothing runs
+    expect([got.some((e) => e.choices?.[0]?.finish_reason === "tool_calls"), toolEvents(got)]).toEqual([true, []]);
+    return { job: res.headers.get("X-Kiln-Job")!, got, done };
+  };
+  const go = await held("a");
+  await fetch(`${base}/api/chat/${go.job}/go`, { method: "POST" });
+  await go.done;
+  expect([toolEvents(go.got).map((t) => t.state), contents(go.got).at(-1)]).toEqual([["running", "done"], "Done."]);
+  const stop = await held("b");
+  await fetch(`${base}/api/chat/${stop.job}/stop`, { method: "POST" });
+  await stop.done;
+  expect([toolEvents(stop.got), stop.got.some((e) => e.stopped)]).toEqual([[], true]);
+}, 30_000);
+
 test("voice: what was said decides an ask (\"search\"), not the note before it", async () => {
   const asked = voiceAsk([{ forced: [{ name: "fake__echo", args: '{"text": "y"}' }] }, { text: "Found." }], false, "search for it");
   const got = await collect(await asked.res);

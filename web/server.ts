@@ -55,11 +55,15 @@ interface Job {
   asks: Map<string, (d: Decision) => void>;         // tool calls waiting for the user, by call id
   t0: number; tFirst?: number; tAnswer?: number; tLast?: number;   // ms: start, first token, first answer token, last
   gen: number;                                      // ms between each round's first token and its last, summed
+  held?: Promise<void>; go?: () => void;            // a voice reply begun ahead (HELD_MS): it runs no tool until go
 }
 type Decision = "once" | "always" | "deny";
 const jobs = new Map<string, Job>();
 const KEEP_MS = 15 * 60_000;
 const MAX_ROUNDS = 24;
+// A voice reply begun before its question was settled (kiln_voice.ahead) runs no tool until the page says it stands
+// (/go): it may yet be dropped, and a tool can do things. One the page neither confirms nor stops is stopped.
+const HELD_MS = 60_000;
 // Fields of a request that only make sense for its first round (a continued or rewritten reply).
 const FIRST_ONLY = ["continue_final_message", "kiln_original", "kiln_append_token"];
 
@@ -72,7 +76,14 @@ function startJob(body: string): Job {
   };
   (async () => {
     try {
-      const { req, web, said, tool, tools, notes } = await asSent(JSON.parse(body));
+      const { req, web, said, tool, ahead, tools, notes } = await asSent(JSON.parse(body));
+      if (ahead) {
+        job.held = new Promise((go) => {
+          const timer = setTimeout(() => job.ctrl.abort(), HELD_MS);
+          job.go = () => (clearTimeout(timer), go());
+          job.ctrl.signal.addEventListener("abort", () => (clearTimeout(timer), go()));
+        });
+      }
       if (!web && !said) return void await round(job, JSON.stringify(req), push);
       for (const note of notes) push({ note });
       const allow = new Set(web?.allow ?? []);
@@ -96,6 +107,8 @@ function startJob(body: string): Job {
         force = false;
         called ||= !!out?.calls.length;
         if (!out || !out.calls.length || web?.loop === false || job.ctrl.signal.aborted) break;
+        await job.held;
+        if (job.ctrl.signal.aborted) throw new DOMException("stopped", "AbortError");
         const results = k + 1 < MAX_ROUNDS ? await Promise.all(out.calls.map((c) => call(job, c, tools, allow, web ?? { tools: {} }, push)))
           : out.calls.map((c) => {
             const result = `Not run: this reply reached its limit of ${MAX_ROUNDS} rounds of tool calls.`;
@@ -125,11 +138,12 @@ function startJob(body: string): Job {
 // what the model is sent (/api/preview) both build it here, so the view is what kiln gets.
 async function asSent(raw: any) {
   const req = { ...raw }, web: ToolChoice | undefined = req.kiln_web, said = !!req.kiln_voice, tool = req.kiln_voice?.tool === true;
+  const ahead = req.kiln_voice?.ahead === true;
   delete req.kiln_web;
   delete req.kiln_voice;
   const { tools, notes } = web ? await registry.select(web.tools ?? {}) : { tools: [] as registry.Named[], notes: [] as string[] };
   if (tools.length) req.tools = tools.map((n) => registry.openai(n, DESCRIPTIONS[n.tool.name]));
-  return { req, web, said, tool, tools, notes };
+  return { req, web, said, tool, ahead, tools, notes };
 }
 
 class KilnDown extends Error {}
@@ -409,6 +423,13 @@ const serve = (hostname: string, port: number, secure?: { cert: string; key: str
     "/api/chat/:id/stop": {
       POST: guarded((req) => {
         jobs.get((req as Request & { params: { id: string } }).params.id)?.ctrl.abort();
+        return new Response(null, { status: 204 });
+      }),
+    },
+    // a voice reply begun ahead stands: its tools may run
+    "/api/chat/:id/go": {
+      POST: guarded((req) => {
+        jobs.get((req as Request & { params: { id: string } }).params.id)?.go?.();
         return new Response(null, { status: 204 });
       }),
     },

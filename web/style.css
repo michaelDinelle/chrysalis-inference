@@ -577,9 +577,10 @@ main { position: relative; }
 .voice-play .i { width: 12px; height: 12px; }
 .voice-meta { padding: 5px 10px 3px; color: var(--faint); font: 11px var(--mono); }
 .voice-meta:empty { display: none; }
-/* the words being said, before the turn ends */
+/* the words being said, before the turn ends: grey, and in their own color once checked for what was misheard */
 .msg.ghost .bubble { border-style: dashed; color: var(--muted); }
-/* a question said aloud is grey until its reply's first step (what was misheard) is in, then its own color */
+.msg.ghost .bubble .checked { color: var(--text); transition: color 0.25s; }
+/* a question said aloud is grey until its check is in, then its own color */
 .msg.user .bubble { transition: color 0.25s; }
 .msg.user.unsettled .bubble { color: var(--muted); }
 .bubble .fixed { text-decoration: underline dotted color-mix(in srgb, var(--accent) 70%, transparent); text-underline-offset: 3px; cursor: help; }

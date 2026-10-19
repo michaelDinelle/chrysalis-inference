@@ -743,15 +743,13 @@ function messageView(m: Message, i: number): HTMLElement {
 }
 function heardBubble(m: Message): HTMLElement {
   const b = h("div", "bubble");
-  for (const p of m.heard?.length ? fixedParts(m.content, m.heard) : [m.content]) {
-    if (typeof p === "string") b.append(p);
-    else {
-      const f = h("span", "fixed", p.said);
-      f.title = `Speech recognition heard "${p.heard}"`;
-      b.append(f);
-    }
-  }
+  for (const p of m.heard?.length ? fixedParts(m.content, m.heard) : [m.content]) b.append(typeof p === "string" ? p : fixedSpan(p));
   return b;
+}
+function fixedSpan(p: Fix): HTMLElement {
+  const f = h("span", "fixed", p.said);
+  f.title = `Speech recognition heard "${p.heard}"`;
+  return f;
 }
 
 // A message edited in place: its text, and a reply's thinking. Save keeps the rest of the chat as it is; a question's
@@ -1582,10 +1580,7 @@ function finish(run: Run) {
   if (cut !== undefined) {
     cuts.delete(m);
     keepHeard(c, m, cut);
-  } else if (voice?.reply?.m === m) {
-    feedVoice(m);
-    voice.client.done(m.id!);
-  }
+  } else if (voice?.reply?.m === m) endSaying(voice.reply);
   const unrun = (m.calls ?? []).filter((x) => !x.state);
   if (unrun.length && !m.error && !m.stopped && !toolsOn(c))   // shown, not dropped: the reply would otherwise just stop
     m.error = `The model asked to run ${[...new Set(unrun.map((x) => x.name))].join(", ")}, but this chat has no tools on, so the reply ends here.`;
@@ -1644,7 +1639,7 @@ function submit(text: string) {
 // the chat as ordinary messages. voice.ts carries the sound; here what the user said becomes a question, its reply's
 // text is spoken as it is written, and talking over a reply keeps only what was heard of it.
 type VoicePhase = "starting" | "listening" | "thinking" | "speaking" | "muted" | "error";
-interface VoiceReply { m: Message; sent: number; spoken: number; audible: boolean }
+interface VoiceReply { m: Message; sent: number; spoken: number; audible: boolean; ended?: boolean }   // ended: say_end sent
 interface VoiceMode {
   client: VoiceClient; c: Conversation; ready?: VoiceReady; muted: boolean; partial: string; error?: string;
   reply?: VoiceReply;                               // being spoken, or about to be
@@ -1655,7 +1650,8 @@ interface VoiceMode {
   defaults: { stt?: string; tts?: string; voices: Record<string, string> };   // what it runs when not told (voices: by voice model)
   level: number; frame: number;                    // the pill's dots: the level they show, their animation frame
   check: { role: string; content: string }[];      // the session's check conversation (CHECK)
-  turns: number;                                    // turns heard, so a check that came back late knows it was overtaken
+  asking: Asking;                                   // the checks of the question being said
+  ahead?: Ahead;                                    // its reply, begun before the question stands
 }
 let voice: VoiceMode | null = null;
 // The service's models and voices as its last ready listed them, so Settings can offer them while voice mode is closed.
@@ -1692,7 +1688,14 @@ async function openVoice() {
       renderVoice();
       syncSettings();
     },
-    partial: (text) => { if (mine()) { voice!.partial = text; paintGhost(); } },
+    speech: (on) => { if (mine() && on && voice!.ahead && !voice!.ahead.said) dropAhead(voice!); },
+    partial: (text) => {
+      if (!mine()) return;
+      voice!.partial = text;
+      paintGhost();
+      checkSaying(voice!);
+    },
+    pause: (text) => { if (mine()) pauseAhead(voice!, text); },
     turn: (text) => { if (mine()) void voiceTurn(voice!, text); },
     interrupt: () => { if (mine()) cutVoice(false); },
     spoken: (id, to) => {
@@ -1720,7 +1723,7 @@ async function openVoice() {
     },
     closed: () => { if (mine()) { voice!.error ??= "The voice service stopped"; renderVoice(); } },
   });
-  voice = { client, c: conv, muted: false, partial: "", level: 0, frame: 0, check: [], turns: 0, now: {}, defaults: { voices: {} }, asked: voiceWant(null) };
+  voice = { client, c: conv, muted: false, partial: "", level: 0, frame: 0, check: [], asking: asking(), now: {}, defaults: { voices: {} }, asked: voiceWant(null) };
   renderVoice();
   if (status.state === "offline") void start().then(refreshStatus);   // the first question finds the model loaded
   // http://<this machine's address> is not a secure page, and there the browser has no microphone to give at all
@@ -1743,6 +1746,7 @@ async function openVoice() {
 function closeVoice() {
   const v = voice;
   if (!v) return;
+  dropAhead(v);
   voice = null;
   cancelAnimationFrame(v.frame);
   v.client.close();
@@ -1750,6 +1754,166 @@ function closeVoice() {
   paintGhost();
   renderVoice();
   input.focus();
+}
+
+// What a check found for a transcript, and the turn of the check conversation that asked it (kept once the question
+// it checked stands, so the next check is an append to kiln's cache).
+interface Heard { text: string; fixes: Fix[]; tool: boolean; asked?: { role: string; content: string }[] }
+// The checks of the question being said, by transcript: its words so far, a pause's, its turn's (each asked once).
+interface Asking { checks: Map<string, Promise<Heard>>; done: Map<string, Heard>; busy?: string }
+const asking = (): Asking => ({ checks: new Map(), done: new Map() });
+// A voice reply begun before its question stands: at a pause (the turn may yet go on), or at the turn while the turn's
+// own check is out. kiln writes it (its tools held: server.ts, HELD_MS) and the service speaks it into the client's
+// hold, so once the turn ended with its words and the check found what it was sent with, it shows and sounds at once.
+// Otherwise it is dropped, and begun again on the question as checked.
+interface Ahead {
+  text: string;                                     // the transcript it answers
+  q: Message;                                       // its question (in the chat from the turn on)
+  sent: string; tool: boolean;                      // the question's words as sent (the fixes known then made), and kiln_voice.tool
+  said?: Message;                                   // the question in the chat, once the turn ended with these words
+  check?: Heard;                                    // the check of exactly `text`
+  run: Run; reply: VoiceReply; ended: boolean; live: boolean;
+}
+const unsettled = new WeakSet<Message>();                // questions said aloud whose check is not in yet: grey
+const heardAs = new WeakMap<Message, string>();          // such a question's words as they were heard
+
+// CHECK of a transcript: a turn of the session's check conversation (begun again when its instructions change: the
+// model, tools on or off; and past 60 turns). A check that fails leaves the words as they were heard.
+function checkOf(v: VoiceMode, text: string): Promise<Heard> {
+  const mine = v.asking, asked = mine.checks.get(text);
+  if (asked) return asked;
+  const c = v.c, system = fill(CHECK.replace("{{TOOLS}}", toolsOn(c) ? ", with web search and page reading" : "")) + (toolsOn(c) ? CHECK_TOOLS : "");
+  if (v.check[0]?.content !== system || v.check.length > 121) v.check = [{ role: "system", content: system }];
+  const last = c.messages.findLast((m) => m.role === "assistant")?.content.slice(0, 300) ?? "";
+  const turn = { role: "user", content: (last ? `The assistant said: ${last}\n` : "") + `Transcript: ${text}` };
+  const p = (async (): Promise<Heard> => {
+    try {
+      const res = await fetch("/api/chat", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({
+        model: `${current()}-fast`, messages: [...v.check, turn], temperature: 0, presence_penalty: 0, max_tokens: 48 }) });
+      const answer: string = (await res.json())?.choices?.[0]?.message?.content ?? "";
+      if (!res.ok || !answer) return { text, fixes: [], tool: false };
+      return { text, ...readHeard(answer), asked: [turn, { role: "assistant", content: answer }] };
+    } catch {
+      return { text, fixes: [], tool: false };
+    }
+  })();
+  mine.checks.set(text, p);
+  void p.then((h) => mine.done.set(text, h));
+  return p;
+}
+// What is known of a transcript: the check of it, or else of the most of its first words.
+function knownFor(v: VoiceMode, text: string): Heard | undefined {
+  let best: Heard | undefined;
+  for (const h of v.asking.done.values())
+    if ((text === h.text || text.startsWith(`${h.text} `)) && (!best || h.text.length > best.text.length)) best = h;
+  return best;
+}
+// The words so far, checked as they come (one check at a time, the newest words next): they show fixed while the user
+// is still talking, and a reply begun at the turn already has their fixes.
+function checkSaying(v: VoiceMode) {
+  const mine = v.asking, text = v.partial;
+  if (mine.busy || !text.includes(" ") || mine.checks.has(text)) return;
+  mine.busy = text;
+  void checkOf(v, text).then(() => {
+    mine.busy = undefined;
+    if (voice !== v || v.asking !== mine) return;
+    paintGhost();
+    checkSaying(v);
+  });
+}
+
+// The question a turn (or a pause) would make: what was heard, joined to the question it goes on (one still being
+// checked, or one whose reply was talked over before it made a sound), if any.
+function questionFor(v: VoiceMode, text: string): { text: string; on?: Message } {
+  const last = v.c.messages.at(-1), on = last && (last === v.merge || last === v.ahead?.said) ? last : undefined;
+  return on ? { text: `${heardAs.get(on) ?? on.content} ${text}`, on } : { text };
+}
+
+function startAhead(v: VoiceMode, text: string, on?: Message): Ahead {
+  const c = v.c, known = knownFor(v, text), fixed = applyFixes(text, known?.fixes ?? []), tool = known?.tool ?? false;
+  const effort = voiceEffort(), mode: Mode = effort === "off" ? "fast" : "think";
+  const note = on ? undefined : noteFor(c, true);
+  const q: Message = on ?? { role: "user", content: fixed.text, voice: true, ...(note ? { note } : {}) };
+  const sent = { ...q, content: fixed.text }, upto = on ? c.messages.map((x) => (x === on ? sent : x)) : [...c.messages, sent];
+  const m: Message = { id: randomId(), role: "assistant", content: "", reasoning: "", effort, params: changed(mode) || undefined };
+  const run: Run = { conv: c, m, live: { phase: "waiting", since: performance.now(), note: "Reading the prompt" }, at: 0, stopping: false, frame: 0, saved: 0 };
+  const a: Ahead = { text, q, sent: fixed.text, tool, run, reply: { m, sent: 0, spoken: 0, audible: false }, ended: false, live: false };
+  if (!on) heardAs.set(q, text);
+  v.client.hold(m.id!);
+  void (async () => {
+    try {
+      await filesReady(upto);
+      const res = await fetch("/api/chat", { method: "POST", headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(request(c, upto, { effort, route: true, extra: { kiln_voice: { tool, ahead: true } } })) });
+      if (!res.ok || !res.body) throw new Error((await res.json().catch(() => null))?.error?.message ?? `HTTP ${res.status}`);
+      m.job = res.headers.get("X-Kiln-Job") ?? undefined;
+      if (run.stopping) stopRun(run, true);
+      else if (a.live) void fetch(`/api/chat/${m.job}/go`, { method: "POST" }).catch(() => {});
+      await stream(run, res.body);
+    } catch (e) {
+      if (run.stopping) m.stopped = true;
+      else m.error = e instanceof Error ? e.message : String(e);
+    }
+    a.ended = true;
+    if (a.live) finish(run);
+    else if (voice?.ahead === a) endSaying(a.reply);   // its last words are spoken into the hold too
+  })();
+  void checkOf(v, text).then((h) => {
+    a.check = h;
+    standAhead(v, a);
+  });
+  return a;
+}
+
+function dropAhead(v: VoiceMode) {
+  const a = v.ahead;
+  if (!a) return;
+  v.ahead = undefined;
+  stopRun(a.run, true);
+  v.client.cancel(a.run.m.id!);
+}
+
+// A pause: a reply on its words begins now, so a turn that ends with them is answered at once.
+function pauseAhead(v: VoiceMode, text: string) {
+  if (v.ahead?.said || running(v.c) || status.state !== "online" || status.loading) return;
+  const q = questionFor(v, text.trim());
+  if (v.ahead?.text === q.text) return;
+  dropAhead(v);
+  v.ahead = startAhead(v, q.text, q.on);
+}
+
+// The reply begun ahead stands once its words are the turn's and its check found what it was sent with: it joins the
+// chat as it is so far and is heard. Otherwise it goes, and the question as checked is answered.
+function standAhead(v: VoiceMode, a: Ahead) {
+  if (voice !== v || v.ahead !== a || !a.said || !a.check) return;
+  const c = v.c, said = a.said, fixed = applyFixes(a.text, a.check.fixes), m = a.run.m;
+  if (fixed.text !== a.sent || a.check.tool !== a.tool) {
+    dropAhead(v);
+    said.content = fixed.text;
+    const again = (v.ahead = startAhead(v, a.text, said));
+    again.said = said;
+    return;
+  }
+  v.ahead = undefined;
+  a.live = true;
+  const kept = (said.heard ?? []).filter((f) => fixed.text.includes(f.said)), heard = [...kept, ...fixed.made];
+  said.heard = heard.length ? heard : undefined;
+  unsettled.delete(said);
+  heardAs.delete(said);
+  if (a.check.asked) v.check.push(...a.check.asked);
+  v.asking = asking();
+  branch(c, c.messages.length, m);
+  runs.set(c.id, a.run);
+  v.reply = a.reply;
+  if (m.job) void fetch(`/api/chat/${m.job}/go`, { method: "POST" }).catch(() => {});
+  v.client.go(m.id!);
+  if (c === conv) {
+    follow = true;
+    render();
+  }
+  save(c);
+  renderVoice();
+  if (a.ended) finish(a.run);
 }
 
 async function voiceTurn(v: VoiceMode, text: string) {
@@ -1763,25 +1927,49 @@ async function voiceTurn(v: VoiceMode, text: string) {
     await sleep(20);
   }
   if (voice !== v || running(c)) return;
-  // a question still being checked takes in what is said next, as one talked over before its reply made a sound does
-  const last = c.messages.at(-1), merge = last && (last === v.merge || unsettled.has(last)) ? last : undefined;
+  const q = questionFor(v, text);
   v.merge = undefined;
-  if (merge) merge.content = merge.content ? `${merge.content} ${text}` : text;
-  else {
-    if (!c.messages.length) c.title = text.slice(0, 60);
-    const note = noteFor(c, true);
-    c.messages.push({ role: "user", content: text, voice: true, ...(note ? { note } : {}) });
+  let a = v.ahead;
+  if (a && (a.said || a.text !== q.text)) {
+    dropAhead(v);
+    a = undefined;
   }
-  const said = c.messages.at(-1)!, turn = ++v.turns;
+  if (status.state !== "online" || status.loading) return answerLater(v, q.text, q.on);
+  a ??= v.ahead = startAhead(v, q.text, q.on);
+  if (!q.on) {
+    if (!c.messages.length) c.title = q.text.slice(0, 60);
+    c.messages.push(a.q);
+  } else heardAs.set(q.on, q.text);
+  a.said = a.q;
+  a.q.content = a.sent;
+  if (!a.check) {
+    unsettled.add(a.q);
+    if (c === conv) render();
+  }
+  standAhead(v, a);
+}
+
+// With kiln still starting (or loading another model), a turn waits for its check and then for kiln, as a reply does.
+async function answerLater(v: VoiceMode, text: string, on?: Message) {
+  const c = v.c, note = on ? undefined : noteFor(c, true);
+  const said: Message = on ?? { role: "user", content: text, voice: true, ...(note ? { note } : {}) };
+  if (!on) {
+    if (!c.messages.length) c.title = text.slice(0, 60);
+    c.messages.push(said);
+  }
+  heardAs.set(said, text);
   unsettled.add(said);
   if (c === conv) render();
-  const heard = await heardFor(v, said);
-  if (v.turns !== turn) return;                    // the next turn took these words in, and its check answers for them
+  const mine = v.asking, heard = await checkOf(v, text);
+  if (v.asking !== mine || c.messages.at(-1) !== said) return;   // the user went on: the next turn answers for these words
   unsettled.delete(said);
-  const fixed = applyFixes(said.content, heard.fixes);
+  heardAs.delete(said);
+  const fixed = applyFixes(text, heard.fixes);
   said.content = fixed.text;
-  said.heard = [...(said.heard ?? []), ...fixed.made];
-  if (voice !== v || running(c) || c.messages.at(-1) !== said) {
+  said.heard = fixed.made.length ? fixed.made : undefined;
+  if (heard.asked) v.check.push(...heard.asked);
+  v.asking = asking();
+  if (voice !== v || running(c)) {
     persist(c);
     if (c === conv) render();
     return;
@@ -1792,26 +1980,6 @@ async function voiceTurn(v: VoiceMode, text: string) {
   branch(c, c.messages.length, m);
   v.reply = { m, sent: 0, spoken: 0, audible: false };
   await startRun(c, m, () => request(c, upto, { effort, route: true, extra: { kiln_voice: { tool: heard.tool } } }));
-}
-
-const unsettled = new WeakSet<Message>();                // questions said aloud whose check is not in yet: grey
-// CHECK for the question `said`: a turn of the session's check conversation (begun again when its instructions change: the
-// model, tools on or off; and past 60 turns). A check that fails leaves the words as they were heard.
-async function heardFor(v: VoiceMode, said: Message): Promise<{ fixes: Fix[]; tool: boolean }> {
-  const c = v.c, system = fill(CHECK.replace("{{TOOLS}}", toolsOn(c) ? ", with web search and page reading" : "")) + (toolsOn(c) ? CHECK_TOOLS : "");
-  if (v.check[0]?.content !== system || v.check.length > 121) v.check = [{ role: "system", content: system }];
-  const before = c.messages[c.messages.indexOf(said) - 1], last = before?.role === "assistant" ? before.content.slice(0, 300) : "";
-  const turn = { role: "user", content: (last ? `The assistant said: ${last}\n` : "") + `Transcript: ${said.content}` };
-  try {
-    const res = await fetch("/api/chat", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({
-      model: `${current()}-fast`, messages: [...v.check, turn], temperature: 0, presence_penalty: 0, max_tokens: 48 }) });
-    const answer: string = (await res.json())?.choices?.[0]?.message?.content ?? "";
-    if (!res.ok || !answer) return { fixes: [], tool: false };
-    v.check.push(turn, { role: "assistant", content: answer });   // as kiln wrote it: the next check is an append
-    return readHeard(answer);
-  } catch {
-    return { fixes: [], tool: false };
-  }
 }
 
 // The chat as the next voice turn will send it, read by kiln while the user starts talking: the voice prompt replaces
@@ -1833,13 +2001,20 @@ async function warmVoice(v: VoiceMode) {
 // end, so what was sent stays a prefix and the service's chunk offsets point into it.
 const sayable = (m: Message) => [...(m.rounds ?? []).map((r) => r.content), m.content].filter(Boolean).join("\n\n");
 function feedVoice(m: Message) {
-  const r = voice?.reply;
-  if (r?.m !== m || cuts.has(m)) return;
+  const r = voice?.reply?.m === m ? voice.reply : voice?.ahead?.reply.m === m ? voice.ahead.reply : undefined;
+  if (!r || cuts.has(m)) return;
   const text = sayable(m);
   if (text.length > r.sent) {
     voice!.client.say(m.id!, text.slice(r.sent));
     r.sent = text.length;
   }
+}
+
+function endSaying(r: VoiceReply) {
+  if (r.ended) return;
+  feedVoice(r.m);
+  r.ended = true;
+  voice!.client.done(r.m.id!);
 }
 
 // Talked over (the service heard the user, or the orb or Esc): silent at once, the reply stopped, and the chat keeps
@@ -1849,6 +2024,9 @@ function cutVoice(here: boolean) {
   const v = voice;
   if (!v) return;
   if (here) v.client.stop();
+  const a = v.ahead;                                // not heard yet: the next words join its question
+  dropAhead(v);
+  if (a?.said) v.merge = a.said;
   const r = v.reply;
   v.reply = undefined;
   renderVoice();
@@ -1879,18 +2057,24 @@ function keepHeard(c: Conversation, m: Message, to: number | null) {
   if (m.id) tokens.delete(m.id);                    // its token odds no longer match its text
 }
 
-// The user's words while they speak: a faint message at the end of the chat, until the turn makes it a real one.
+// The user's words while they speak: a faint message at the end of the chat, until the turn makes it a real one. The
+// words checked so far are in their own color, fixed.
 function paintGhost() {
   let g = thread.querySelector<HTMLElement>(".msg.ghost");
-  const text = voice && voice.c === conv ? voice.partial : "";
-  if (!text) return void g?.remove();
+  const v = voice, text = v && v.c === conv ? v.partial : "";
+  if (!v || !text) return void g?.remove();
   if (!g) {
     g = h("article", "msg user ghost");
     g.append(h("div", "bubble"));
     thread.querySelector(".empty")?.remove();
     thread.append(g);
   }
-  g.firstElementChild!.textContent = text;
+  const b = g.firstElementChild as HTMLElement, known = knownFor(v, text);
+  if (known) {
+    const fixed = applyFixes(known.text, known.fixes), checked = h("span", "checked");
+    for (const p of fixedParts(fixed.text, fixed.made)) checked.append(typeof p === "string" ? p : fixedSpan(p));
+    b.replaceChildren(checked, text.slice(known.text.length));
+  } else b.textContent = text;
   keepUp();
 }
 

@@ -1,7 +1,10 @@
 // Voice mode's latency end to end on this machine: questions spoken into headless Chromium's microphone (a WAV made by
 // the voice service's own TTS in another voice), through server.ts, the real voice service and the running kiln, to the
-// reply's first sound, step by step (the service's wait, the reply's first token, its first audio, scheduled to sound). Two clocks: the page's own figure (the service's wait after speech + turn to first sound), and an
-// outside one from where the speech ends in the WAV (capture start + its offset) to the first audio buffer's start.
+// reply's first sound: the service's wait after the speech, then the turn to the first sound (a reply begun ahead of
+// the turn, at a pause, has its audio in before it). Two clocks: the page's own figure (the service's wait after
+// speech + turn to first sound), and an outside one from where the speech ends in the WAV (capture start + its offset)
+// to the first reply buffer's start. The last question trails off, so the turn model waits for more and a reply begins
+// at the pause.
 //   cd web && bun bench-voice.ts [questions...]     (kiln running; voice mode's settings as a new tab has them)
 import { mkdtempSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
@@ -10,7 +13,8 @@ import puppeteer from "puppeteer-core";
 const ROOT = `${import.meta.dir}/..`, LEAD = 2.5, TAIL = 8;
 const QUESTIONS = process.argv.slice(2).length ? process.argv.slice(2) : [
   "What's the capital of France?", "How many legs does a spider have?", "Give me one quick tip for sleeping better.",
-  "What's the difference between a virus and a bacterium?", "Can you recommend a good sci-fi book?"];
+  "What's the difference between a virus and a bacterium?", "Can you recommend a good sci-fi book?",
+  "I was wondering if you could tell me a fun fact about octopuses and"];
 const dir = mkdtempSync(`${tmpdir()}/kiln-bench-voice-`);
 writeFileSync(`${dir}/q.json`, JSON.stringify(QUESTIONS));
 const synth = Bun.spawnSync([`${ROOT}/data/voice-venv/bin/python`, "-I", "-c", `
@@ -43,7 +47,7 @@ const base = out.match(/kiln web: (\S+)/)![1].replace(/\/$/, "");
 // reply buffer is due to sound, in performance.now() terms.
 const HOOKS = () => {
   const w = window as any;
-  w.__bench = { gum: 0, audible: 0, turn: 0, wait: 0, say: 0, audio: 0 };
+  w.__bench = { gum: 0, audible: 0, turn: 0, wait: 0, pause: 0 };
   const WS = window.WebSocket;
   window.WebSocket = class extends WS {
     constructor(...a: ConstructorParameters<typeof WebSocket>) {
@@ -53,13 +57,9 @@ const HOOKS = () => {
         if (typeof e.data === "string") {
           const m = JSON.parse(e.data);
           if (m.type === "turn" && !b.turn) Object.assign(b, { turn: performance.now(), wait: m.wait_ms });
-        } else if (b.turn && !b.audio) b.audio = performance.now();
+          if (m.type === "pause" && !b.turn) b.pause = performance.now();
+        }
       });
-    }
-    send(d: any) {
-      const b = w.__bench;
-      if (b.turn && !b.say && typeof d === "string" && d.includes('"say"')) b.say = performance.now();
-      return super.send(d);
     }
   } as typeof WebSocket;
   const gum = navigator.mediaDevices.getUserMedia.bind(navigator.mediaDevices);
@@ -67,7 +67,7 @@ const HOOKS = () => {
   const start = AudioBufferSourceNode.prototype.start;
   AudioBufferSourceNode.prototype.start = function (when = 0, ...rest: any[]) {
     const ctx = this.context as AudioContext;
-    if (!w.__bench.audible && ctx.sampleRate !== 16000)
+    if (!w.__bench.audible && ctx.sampleRate !== 16000 && !this.loop)          // not the output's keep-alive hush
       w.__bench.audible = performance.now() + Math.max(0, when - ctx.currentTime) * 1000 + (ctx.outputLatency || ctx.baseLatency || 0) * 1000;
     return start.call(this, when, ...rest);
   };
@@ -85,12 +85,12 @@ for (const [i, q] of QUESTIONS.entries()) {
   await page.click("#voice");
   await page.waitForFunction(() => /voice \d/.test(document.querySelector("#thread .msg:last-child .stats")?.textContent ?? ""), { timeout: 60_000 });
   const r = await page.evaluate(() => ({ b: (window as any).__bench, stats: document.querySelector("#thread .msg:last-child .stats")!.textContent!,
-    heard: document.querySelector("#thread .msg.user:not(.ghost) .bubble, #thread .msg.user:not(.ghost)")?.textContent?.trim() ?? "",
+    heard: document.querySelector("#thread .msg.user:not(.ghost) .bubble")?.textContent?.trim() ?? "",
     reply: document.querySelector("#thread .msg:last-child .markdown")?.textContent?.trim() ?? "" }));
   const page_s = Number(r.stats.match(/voice (\d+(?:\.\d+)?) s/)![1]), outside = (r.b.audible - (r.b.gum + (LEAD + speech[i]) * 1000)) / 1000;
   rows.push({ q, page: page_s, outside, heard: r.heard, reply: r.reply.slice(0, 70) });
   const b = r.b, ms = (x: number) => String(Math.round(x)).padStart(4);
-  console.log(`${page_s.toFixed(2)} s page  ${outside.toFixed(2)} s outside  = wait ${ms(b.wait)} + first token ${ms(b.say - b.turn)} + first audio ${ms(b.audio - b.say)} + to the ear ${ms(b.audible - b.audio)} ms | heard "${r.heard}" | ${r.reply.slice(0, 50)}`);
+  console.log(`${page_s.toFixed(2)} s page  ${outside.toFixed(2)} s outside  = wait ${ms(b.wait)} + turn to sound ${ms(b.audible - b.turn)} ms${b.pause ? ` (paused ${ms(b.turn - b.pause)} ms before the turn)` : ""} | heard "${r.heard}" | ${r.reply.slice(0, 50)}`);
   await browser.close();
 }
 const med = (a: number[]) => [...a].sort((x, y) => x - y)[a.length >> 1];

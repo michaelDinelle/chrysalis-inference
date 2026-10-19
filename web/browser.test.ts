@@ -11,6 +11,7 @@ import { lanAddresses } from "./tls";
 import { deflateSync } from "node:zlib";
 
 const REPLIES: Record<string, string> = {
+  "capital of France": "Paris.",
   math: "Solve $ax^2 + bx + c = 0$:\n\n$$\nx = \\frac{-b \\pm \\sqrt{b^2 - 4ac}}{2a}\n$$\n\nAlso \\(e^{i\\pi} + 1 = 0\\) and\n\n\\[\n\\int_0^1 x\\,dx\n\\]\n\n" +
     "It costs $5 and $10. Escaped: \\$x\\$. Code: `$HOME` stays.\n",
   diagram: "```mermaid\nflowchart LR\n  A[Ask] --> B{Cached?}\n  B -->|yes| C[Append]\n  B -->|no| D[Prefill]\n```\n\n" +
@@ -45,7 +46,7 @@ const TOOL_ASKS: Record<string, { name: string; args: string }> = {
   "tool note": { name: "fake__write_note", args: '{"text": "n1"}' },
 };
 let lastStream: any = null, probes = 0, callIds = 0, kilnStopped = 0;  // probes: requests a sandboxed page got through to a server
-const streams: any[] = [];                           // every streamed request kiln got
+const streams: any[] = [], streamAt: number[] = [];  // every streamed request kiln got, and when
 const checks: any[] = [];                            // every check of what speech recognition heard (app.ts CHECK)
 const fake = Bun.serve({
   hostname: "127.0.0.1",
@@ -59,14 +60,15 @@ const fake = Bun.serve({
     const prefix = body.continue_final_message ? body.messages.at(-1) : undefined;
     if (!body.stream && /^You fix speech recognition errors/.test(body.messages[0]?.content)) {
       checks.push(body);
-      // "pie game" was misheard; its check takes 0.4 s, and one of words that begin "wait" 2 s (the user goes on talking)
+      // "pie game" was misheard; its check takes 1 s (the turn ends first), and one of words that begin "wait" 2 s
       const heard = String(body.messages.at(-1).content).split("Transcript: ").at(-1)!;
-      await Bun.sleep(heard.startsWith("wait") ? 2000 : heard.includes("pie game") ? 400 : 0);
+      await Bun.sleep(heard.startsWith("wait") ? 2000 : heard.includes("pie game") ? 1000 : 0);
       return Response.json({ choices: [{ message: { content: heard.includes("pie game") ? "pie game => Pygame\ntool: no" : "-" }, finish_reason: "stop" }] });
     }
     if (!body.stream) return Response.json({ choices: [{ message: { content: "A title" } }] });
     lastStream = body;
     streams.push(body);
+    streamAt.push(Date.now());
     req.signal.addEventListener("abort", () => kilnStopped++);
     const at = body.messages.findLastIndex((m: any) => m.role === "user"), last = body.messages[at];
     // what the user said, without the app's note to the model before it (voice mode's)
@@ -627,7 +629,7 @@ test("voice picker: the voice models' voices by language and gender; a pick swit
   expect(rows.filter(([c]) => c.startsWith("voice-model"))).toEqual([["voice-model", "Fake TTS"], ["voice-model", "Other TTS"], ["voice-model missing", "Big TTStools/voice_setup.sh big-tts"]]);
   expect(rows.filter(([c]) => c === "voice-group").map(([, t]) => t)).toEqual(["American English · Female", "British English · Male", "Spanish · Female", "American English · Male"]);
   expect(await page.$$eval("#voice-pop .voice-item", (els) => els.map((e) => (e as HTMLElement).dataset.voice))).toEqual(
-    ["plain", "pie", "story", "merge", "join", "silent", "pick", "notes", "echo"].map((v) => `fake-tts/${v}`).concat(["other-tts/ana", "other-tts/bob"]));
+    ["plain", "pie", "story", "merge", "join", "ahead", "onward", "checking", "silent", "pick", "notes", "echo"].map((v) => `fake-tts/${v}`).concat(["other-tts/ana", "other-tts/bob"]));
   expect(await page.$$eval('#voice-pop .voice-item[aria-selected="true"]', (els) => els.map((e) => (e as HTMLElement).dataset.voice))).toEqual(["fake-tts/pick"]);
   await page.click('#voice-pop [data-voice="other-tts/bob"]');
   const configs = () => session().filter((e) => e.type === "config").map(({ stack, voice, speed }) => ({ stack, voice, speed }));
@@ -747,8 +749,16 @@ test("voice mode on a page that is not secure (plain HTTP at this machine's addr
   }
 });
 
-test("voice mode: a question shows grey as it was heard until its check is in, then white with the misheard words fixed (the heard ones on hover), and is sent and answered fixed", async () => {
-  const { page, session } = await voicePage("pie");
+// The service's log of a session: the replies the page asked it to speak (by id, their text) and the ones it cancelled.
+const spokenOf = (log: any[]) => {
+  const said = new Map<string, string>();
+  for (const e of log.filter((x) => x.type === "say")) said.set(e.id, (said.get(e.id) ?? "") + e.text);
+  return { said, cancelled: new Set(log.filter((x) => x.type === "cancel" && x.id !== undefined).map((x) => x.id)) };
+};
+const turnAt = (log: any[]) => log.find((e) => e.ev === "sent" && e.type === "turn")?.t;
+
+test("voice mode: a question shows grey as it was heard until its check is in, then white with the misheard words fixed (the heard ones on hover); the reply begun on the words as heard is dropped unheard, and the fixed question is answered", async () => {
+  const n0 = streams.length, { page, session } = await voicePage("pie");
   const q = '#thread > article[data-i="0"]';
   await page.waitForFunction((q) => document.querySelector(`${q} .bubble`)?.textContent === "lets do a snake game in pie game", { timeout: 10_000 }, q);
   expect(await page.$eval(q, (e) => [e.classList.contains("unsettled"), getComputedStyle(e.querySelector(".bubble")!).color]))
@@ -758,20 +768,75 @@ test("voice mode: a question shows grey as it was heard until its check is in, t
   expect(await page.$eval(`${q} .bubble`, (e) => e.textContent)).toBe("lets do a snake game in Pygame");
   expect(await page.$eval(`${q} .bubble .fixed`, (e) => [e.textContent, (e as HTMLElement).title])).toEqual(["Pygame", 'Speech recognition heard "pie game"']);
   expect(await page.$eval(q, (e) => e.classList.contains("unsettled"))).toBe(false);
+  expect(await page.$$eval("#thread > article.msg", (els) => els.length)).toBe(2);
   expect(sent(lastStream).at(-1).content).toMatch(/\n\nlets do a snake game in Pygame$/);
   expect(JSON.stringify(lastStream)).not.toMatch(/=>|pie game/);
   expect(await replyText(page, 1)).toBe("You said: lets do a snake game in Pygame");
-  expect(session().filter((e) => e.type === "say").map((e) => e.text).join("")).toBe("You said: lets do a snake game in Pygame");
+  // the reply begun at the turn, on the words as heard: its speech cancelled, unheard (the page held it)
+  const replies = streams.slice(n0).filter((b) => b.max_tokens !== 1).map((b) => sent(b).at(-1).content.split("\n\n").at(-1));
+  expect(replies).toEqual(["lets do a snake game in pie game", "lets do a snake game in Pygame"]);
+  const { said, cancelled } = spokenOf(session());
+  expect([...said].filter(([id]) => !cancelled.has(id)).map(([, t]) => t)).toEqual(["You said: lets do a snake game in Pygame"]);
+  expect([...said].filter(([id]) => cancelled.has(id)).map(([, t]) => t)).toEqual(["You said: lets do a snake game in pie game"]);
+  const log = session();
+  expect(log.findIndex((e) => e.type === "playback" && e.playing)).toBeGreaterThan(log.findIndex((e) => e.type === "cancel"));
   await page.close();
 }, 30_000);
 
 test("voice mode: words said while a question is still being checked join it, and the two are answered once", async () => {
-  const n0 = streams.length, { page } = await voicePage("join");
+  const n0 = streams.length, { page, session } = await voicePage("join");
   await page.waitForFunction(() => /^voice /.test(document.querySelector('#thread > article[data-i="1"] .stats')?.textContent ?? ""), { timeout: 20_000 });
   expect(await page.$eval('#thread > article[data-i="0"] .bubble', (e) => e.textContent)).toBe("wait lets do a snake game in Pygame");
   expect(await page.$$eval("#thread > article.msg:not(.ghost)", (els) => els.length)).toBe(2);
+  expect(await replyText(page, 1)).toBe("You said: wait lets do a snake game in Pygame");
+  // the replies begun before the question stood were cancelled unheard
   const replies = streams.slice(n0).filter((b) => b.max_tokens !== 1);
-  expect(replies.map((b) => sent(b).at(-1).content.split("\n\n").at(-1))).toEqual(["wait lets do a snake game in Pygame"]);
+  expect(sent(replies.at(-1)).at(-1).content.split("\n\n").at(-1)).toBe("wait lets do a snake game in Pygame");
+  const { said, cancelled } = spokenOf(session());
+  expect([...said].filter(([id]) => !cancelled.has(id)).map(([, t]) => t)).toEqual(["You said: wait lets do a snake game in Pygame"]);
+  await page.close();
+}, 30_000);
+
+test("voice mode: a reply begins at a pause the turn waits out, unseen and unheard until the turn ends with its words, and then is heard at once", async () => {
+  const n0 = streams.length, { page, session } = await voicePage("ahead");
+  await page.waitForFunction(() => /^voice /.test(document.querySelector('#thread > article[data-i="1"] .stats')?.textContent ?? ""), { timeout: 15_000 });
+  const log = session(), turned = turnAt(log), mine = streams.slice(n0).map((b, i) => [b, streamAt[n0 + i]]).filter(([b]) => b.max_tokens !== 1);
+  expect(mine.length).toBe(1);
+  expect(mine[0][1]).toBeLessThan(turned);                           // kiln was asked before the turn ended
+  // the reply was shown and heard only after: its first playback after the turn, and its text all spoken by then
+  const played = log.findIndex((e) => e.type === "playback" && e.playing), turnIx = log.findIndex((e) => e.ev === "sent" && e.type === "turn");
+  expect(played).toBeGreaterThan(turnIx);
+  expect(log.slice(0, turnIx).some((e) => e.ev === "chunk")).toBe(true);   // spoken ahead, held by the page
+  expect(await replyText(page, 1)).toBe("Paris.");
+  expect(await page.$$eval("#thread > article.msg", (els) => els.length)).toBe(2);
+  await page.close();
+}, 30_000);
+
+test("voice mode: a reply begun at a pause is dropped unheard when the user goes on, and the whole question is answered", async () => {
+  const n0 = streams.length, stopped = kilnStopped, { page, session } = await voicePage("onward");
+  await page.waitForFunction(() => /^voice /.test(document.querySelector('#thread > article[data-i="1"] .stats')?.textContent ?? ""), { timeout: 15_000 });
+  const replies = streams.slice(n0).filter((b) => b.max_tokens !== 1).map((b) => sent(b).at(-1).content.split("\n\n").at(-1));
+  expect(replies).toEqual(["slow what is the", "slow what is the capital of France"]);
+  expect(kilnStopped).toBe(stopped + 1);                            // still being written (slowly) when the user went on
+  expect(await page.$eval('#thread > article[data-i="0"] .bubble', (e) => e.textContent)).toBe("slow what is the capital of France");
+  expect(await page.$$eval("#thread > article.msg", (els) => els.length)).toBe(2);
+  // the pause's reply was spoken into the page's hold and cancelled there; the question's is the one heard
+  const log = session(), { said, cancelled } = spokenOf(log);
+  expect([...said.keys()].map((id) => cancelled.has(id))).toEqual([true, false]);
+  // dropped as the user went on, not at the turn
+  expect(log.findIndex((e) => e.type === "cancel")).toBeLessThan(log.findIndex((e) => e.ev === "sent" && e.type === "turn"));
+  await page.close();
+}, 30_000);
+
+test("voice mode: the words are checked while they are said: in a pause they turn their own color with the misheard ones fixed", async () => {
+  const { page } = await voicePage("checking");
+  await page.waitForFunction(() => document.querySelector(".msg.ghost .bubble .checked .fixed")?.textContent === "Pygame", { timeout: 10_000 });
+  const ghost = await page.$eval(".msg.ghost .bubble", (b) => [b.textContent, getComputedStyle(b.querySelector(".checked")!).color, getComputedStyle(b).color]);
+  const color = (v: string) => page.evaluate((v) => { const d = document.createElement("div"); d.style.color = `var(${v})`; document.body.append(d);
+    const c = getComputedStyle(d).color; d.remove(); return c; }, v);
+  expect(ghost).toEqual(["lets do a snake game in Pygame", await color("--text"), await color("--muted")]);
+  await page.waitForFunction(() => /^voice /.test(document.querySelector('#thread > article[data-i="1"] .stats')?.textContent ?? ""), { timeout: 15_000 });
+  expect(await replyText(page, 1)).toBe("You said: lets do a snake game in Pygame");
   await page.close();
 }, 30_000);
 
