@@ -779,13 +779,17 @@ class Server:
         return enc("\n\nConsidering the limited time by the user, I have to give the solution based on the thinking "
                    "directly now.\n") + [self.tok.id["</think>"]] + enc("\n\n")
 
-    def inject(self, slot, held, pending, toks):
+    def inject(self, slot, held, pending, toks, keep=False):
         """The reply goes on after tokens it did not draw: the engine reads its pending token (a list: none at the reply's
-        start) and them, and the next step draws from the logits after them."""
+        start) and them, and the next step draws from the logits after them. keep: the GPU stays taken until that step
+        (a held answer's, which draws from those logits as run() says)."""
         held.take()
         try:
             self.engine.prefill(slot.sid, pending + toks)
-        finally:
+        except BaseException:
+            held.drop()
+            raise
+        if not keep:
             held.drop()
 
     def read_documents(self, messages):
@@ -993,7 +997,11 @@ class Server:
         sp.halt = think_end if answer is not None and thinking else call_start if strict is not None else -1
         hsp = Sampling.from_buffer_copy(sp)
         hsp.halt = -1                                    # a held answer's steps end where its grammar says
-        held.drop()                                      # the prompt is read: the reply's steps share passes
+        # The prompt is read: the reply's steps share passes. A held answer's first token is drawn from the logits the
+        # prompt left in the engine's one buffer (Engine.masked_top), so it keeps the GPU until then: another reply's
+        # step in between writes over them, and the token drawn can be one its grammar refuses
+        if not holding:
+            held.drop()
         batched = not holding
         if batched:
             self.batcher.begin()
@@ -1011,7 +1019,7 @@ class Server:
                         self.batcher.end()
                         batched = False
                     try:
-                        self.inject(slot, held, out[-1:] if behind else [], close)
+                        self.inject(slot, held, out[-1:] if behind else [], close, keep=answer is not None)
                     except KVFull:
                         finish = "length"
                         break
