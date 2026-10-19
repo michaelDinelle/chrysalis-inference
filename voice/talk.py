@@ -5,7 +5,7 @@ import asyncio, collections, json, re, struct, sys, time, unicodedata
 
 import numpy as np
 
-from .parts import DEFAULTS, PARTS, RATE, Missing, trim
+from .parts import DEFAULTS, PARTS, RATE, Missing, terms, trim
 
 PRE_ROLL = int(0.4 * RATE)           # kept from before speech is detected: its first syllable, Smart Turn's lead-in
 START_FRAMES = 3                     # voiced frames in a row that start a turn (~96 ms: not a click)
@@ -15,9 +15,8 @@ ECHO_KEEP = 10.0                     # s a replaced reply's words still count as
 VAD_ON, TURN_DONE = 0.5, 0.5         # Silero's and Smart Turn's own thresholds
 SILENCE = int(0.2 * RATE)            # silence after speech at which the turn model is asked whether the turn is over
 LONGEST_SILENCE = int(1.5 * RATE)    # ... and after which it is over whatever the model said
-PEEK = int(0.3 * RATE)               # speech between two looks at its words (STT chunks can be longer: kroko's 1.28 s)
-WHOLE = 5 * RATE                     # a turn up to this long is decoded whole at each look (~0.1 s at 5 s)...
-WINDOW = 3.0                         # ... a longer one, its last seconds, joined to what the stream has (echo: these alone)
+PEEK = int(0.3 * RATE)               # speech between two looks at its words (the STT reads a piece only at its pause)
+WINDOW = 3.0                         # s of the piece under way a look at presumed echo reads
 CLEAN = 2 * RATE                     # reply heard without a turn starting: the mic does not carry it (headphones, AEC)...
 BARGE = 8                            # ... and then voiced frames over a reply that stop it (~0.26 s), words or not
 # Frames that come before the parts have loaded (the first session's models: ~1.1 s): kept, up to 15 s of 20 ms
@@ -32,18 +31,6 @@ def norm(token):
 
 def words(text):
     return {w for w in map(norm, text.split()) if w}
-
-
-def join(head, tail):
-    """The stream's text with a later look at the last seconds, joined where they overlap (the look's first word may be
-    a word cut in half): head alone when they do not."""
-    h, t = head.split(), tail.split()
-    hn, tn = [norm(w) for w in h], [norm(w) for w in t]
-    for k in range(min(8, len(h)), 0, -1):
-        for j in range(len(t) - k + 1):
-            if tn[j:j + k] == hn[-k:] and (k >= 2 or len(hn[-1]) >= 4):
-                return " ".join(h + t[j + k:])
-    return head
 
 
 def near(a, b):
@@ -104,7 +91,7 @@ class Listener:
                 else:
                     self.interrupt(out)
         if (text := self.stream.feed(f)) is not None:
-            self.heard(text, out)
+            self.heard(text, out, settled=True)
         elif self.since >= PEEK and voiced:          # a look (~0.08 s at 3 s) in the silence would hold up its turn
             self.look(out)
         if voiced:
@@ -131,11 +118,11 @@ class Listener:
         clean = over and not self.echoey and self.played >= CLEAN
         self.own = None if over and not clean else 0                      # where the user's own words begin
         self.broke, self.since, self.shown, self.barge = False, 0, [], 0 if clean else None
-        self.stream, self.audio = self.stt.stream(), collections.deque(self.before, maxlen=self.keep)
+        self.stream, self.audio = self.stt.stream(t.terms), collections.deque(self.before, maxlen=self.keep)
         self.last, self.quiet, self.checked, self.talking = time.monotonic(), 0, False, True
         self.emit(out, {"type": "speech", "on": True})
         if (text := self.stream.feed(np.concatenate(self.before))) is not None:
-            self.heard(text, out)
+            self.heard(text, out, settled=True)
 
     def emit(self, out, ev):
         if self.own is not None:
@@ -153,7 +140,7 @@ class Listener:
             out.append({"type": "interrupt"})
 
     def look(self, out):
-        """The turn's words now rather than at the STT's next chunk: live partials, and a barge-in heard in time."""
+        """The turn's words now rather than at the STT's next pause: live partials, and a barge-in heard in time."""
         self.since = 0
         if self.own is None:                        # still presumed echo: only whether the user's own words are in it
             # the window's edges cut words in half ("ridges" of the reply's "bridges"): only whole ones count
@@ -162,10 +149,11 @@ class Listener:
             if len(new) >= 2 or any(norm(recent[i]) in STOP_WORDS for i in new):
                 self.heard(self.stream.peek(), out)
             return
-        n = sum(map(len, self.audio))
-        self.heard(self.stream.peek() if n <= WHOLE else join(self.stream.text, self.stream.peek(WINDOW)), out)
+        self.heard(self.stream.peek(), out)
 
-    def heard(self, text, out):
+    def heard(self, text, out, settled=False):
+        """Words of the turn, from a look or (settled) as the STT read them at a pause, which only more speech changes:
+        a partial when they are news, and a settled one always."""
         tokens = text.split()
         if self.own is None:
             new = self.novel(tokens)
@@ -180,9 +168,9 @@ class Listener:
         mine = tokens[self.own:]
         # a look runs ahead of the stream: the stream's text catching up (a part of what was shown) is not news
         if mine and not (len(mine) < len(self.shown) and [norm(w) for w in mine] == [norm(w) for w in self.shown[:len(mine)]]):
-            if mine != self.shown:
+            if mine != self.shown or settled:
                 self.shown = mine
-                out.append({"type": "partial", "text": " ".join(mine)})
+                out.append({"type": "partial", "text": " ".join(mine), **({"settled": True} if settled else {})})
 
     def pause(self, out):
         """The turn model hears more to come, so the turn waits (up to LONGEST_SILENCE): its words so far, decoded whole
@@ -322,6 +310,7 @@ class Talk:
         self.lib, self.send, self.lp, self.sp = lib, send, listen_pool, speak_pool
         self.names, self.parts, self.voice, self.speed, self.preview = {}, {}, None, 1.0, 0
         self.playing, self.echo_until, self.awaiting, self.muted = False, 0.0, False, False
+        self.terms = ""                             # the conversation's, for the next turn's speech recognition
         self.reply, self.gone, self.dead = None, (frozenset(), 0.0), set()
         self.listener, self.audio = Listener(self), asyncio.Queue()
         self.listen_task = asyncio.create_task(self.listening())
@@ -386,6 +375,8 @@ class Talk:
                 self.awaiting = False
             else:
                 self.echo_until = time.monotonic() + ECHO_TAIL
+        elif t == "context":
+            self.terms = "/".join(terms(str(m.get("text", ""))))
         elif t == "mute":
             self.muted = bool(m.get("on"))
             self.audio.put_nowait(None)

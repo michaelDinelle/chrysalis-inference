@@ -4,7 +4,8 @@ on, partials, then its turn and transcript; an unfinished one: a pause with its 
 code and whose ranges cover the reply, a short first one, and speech the STT hears as the reply. While a reply plays,
 its own echo in the mic: nothing; another voice over it: an interrupt and that voice's turn. A preview, a reply with no
 text, a switch to another speech model mid-session (and to one that does not exist). Kokoro voices the questions
-(another voice than the replies'); the STT hears the replies.
+(another voice than the replies'); the STT hears the replies. The conversation's names, sent as context, are heard as
+written.
   data/voice-venv/bin/python tools/test_voice.py       (make test_voice)"""
 import json, os, re, struct, subprocess, sys, tempfile, threading, time, wave
 
@@ -13,7 +14,7 @@ import numpy as np
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, ROOT)
 from websockets.sync.client import connect
-from voice.parts import Kokoro, Kroko, SmartTurn, mel_filters, whisper_features
+from voice.parts import Kokoro, Parakeet, SmartTurn, mel_filters, whisper_features
 from voice.talk import speakable
 
 fails = 0
@@ -39,7 +40,7 @@ def to16k(a, rate):
     return np.interp(np.arange(0, len(a) / rate, 1 / 16000), np.arange(len(a)) / rate, a).astype(np.float32)
 
 
-tts, stt = Kokoro(4), Kroko(2)
+tts, stt = Kokoro(4), Parakeet(2)
 say = lambda text, voice="am_michael": to16k(tts.synth(text, voice, 1.0), tts.rate)
 
 
@@ -49,7 +50,7 @@ def hear(x):
     return s.finish()
 
 
-with wave.open(os.path.join(ROOT, "data/voice/kroko/test_wavs/0.wav")) as w:
+with wave.open(os.path.join(ROOT, "data/voice/parakeet-110m/test_wavs/0.wav")) as w:
     real = to16k(np.frombuffer(w.readframes(w.getnframes()), "<i2").astype(np.float32) / 32768, w.getframerate())
 x = np.pad(real[-128000:].astype(np.float64), (128000 - min(len(real), 128000), 0))
 mine = whisper_features(x, mel_filters())
@@ -73,15 +74,15 @@ cut = turn.prob(np.concatenate([gap, say("So I was wondering whether you could m
 check("Smart Turn: a finished question ends the turn", done > 0.5, f"P {done:.3f}")
 check("Smart Turn: a sentence cut off mid-clause does not", cut < 0.5, f"P {cut:.3f}")
 
-# A turn's stream starts with its pre-roll, wherever that falls among the STT's chunks, and is finished ~0.3 s after
-# the speech: its last word must come out whatever the alignment
+# A turn's stream starts with its pre-roll and is finished ~0.3 s after the speech, its last piece read 0.1 s into the
+# silence: its last word must come out, however the speech starts
 last = say("Name a fun weekend activity for two.")
 kept = 0
-for k in range(24):
+for k in range(8):
     s = stt.stream()
     s.feed(np.concatenate([np.zeros(int((0.4 + k * 0.053) * 16000), np.float32), last, np.zeros(4800, np.float32)]))
     kept += s.finish().lower().rstrip(".").endswith("two")
-check("a turn's last word, at any chunk alignment", kept == 24, f"{kept}/24")
+check("a turn's last word, however it starts", kept == 8, f"{kept}/8")
 
 svc = subprocess.Popen([sys.executable, "-m", "voice"], cwd=ROOT, stdin=subprocess.PIPE, stdout=subprocess.PIPE)
 url = svc.stdout.readline().decode().split()[-1]
@@ -141,11 +142,11 @@ def kind(m):
 ws.send(json.dumps({"type": "hello"}))
 ready = events(lambda m: kind(m) in ("ready", "error"), 120)[-1]
 heart = next((v for v in ready.get("voices", []) if v["id"] == "af_heart"), None)
-check("hello: ready with the default stack", ready.get("stack") == {"vad": "silero", "stt": "kroko", "turn": "smart-turn", "tts": "kokoro"}
+check("hello: ready with the default stack", ready.get("stack") == {"vad": "silero", "stt": "parakeet-110m", "turn": "smart-turn", "tts": "kokoro"}
       and ready.get("voice") == "af_heart" and ready.get("sample_rate") == 24000, f"{ready.get('stack')}, {ready.get('load_ms')} ms")
 check("its catalog: every part, installed or not, with voices", heart == {"id": "af_heart", "label": "Heart", "lang": "en-US", "gender": "female"}
       and {e["name"]: e["installed"] for e in ready.get("catalog", {}).get("tts", [])}.get("kokoro") is True
-      and {"kroko", "parakeet-110m"} <= {e["name"] for e in ready.get("catalog", {}).get("stt", [])}, str(heart))
+      and [e["name"] for e in ready.get("catalog", {}).get("stt", [])] == ["parakeet-110m"], str(heart))
 
 question = "What's the weather going to be like in Denver tomorrow?"
 spoke = stream(say(question), live=True)
@@ -155,6 +156,8 @@ t = next((m for m in got if kind(m) == "turn"), {})
 check("a question: speech on, partials, then its turn", kinds[:1] == ["speech"] and "partial" in kinds and kinds[-1] == "turn",
       " ".join(dict.fromkeys(kinds)))
 check("the turn's transcript is the question", wer(question, t.get("text", "")) <= 0.15, repr(t.get("text")))
+settled = [m["text"] for m in got if kind(m) == "partial" and m.get("settled")]
+check("its words settle as the speech stops: the turn's", bool(settled) and settled[-1] == t.get("text"), repr(settled[-1:]))
 first = next((arrived[id(m)] - spoke for m in got if kind(m) == "partial"), float("inf"))
 check("its first words show while it is spoken", first < 0.9, f"{first:.2f} s after the speech starts")
 check("its wait is the silence, turn model and flush", 200 <= t.get("wait_ms", -1) < 500, f"wait_ms {t.get('wait_ms')}")
@@ -232,6 +235,7 @@ got = [m for m in events(lambda m: kind(m) == "said", 30) if kind(m) == "audio"]
 heard = hear(np.concatenate([to16k(m[1], m[0]["rate"]) for m in got])) if got else ""
 check("and speaks with it", wer("This one comes from another model.", heard) <= 0.2, repr(heard))
 
+sending.join()
 ws.close()
 with open(f"/proc/{svc.pid}/status") as f:
     mem = {l.split(":")[0]: int(l.split()[1]) // 1024 for l in f if l.startswith(("VmRSS", "VmHWM"))}
@@ -263,6 +267,7 @@ check("and the words are the turn", "coffee" in t.get("text", "").lower(), repr(
 # A sentence the turn model hears as unfinished: the turn waits out the longest silence, its words go out at the pause
 # before it (a reply begins on them) and are the turn's, as sent; speech that goes on after the pause is one turn. A
 # session of its own: more turns in the one above would move where it looks at their words, and so its barge-in times
+sending.join()
 ws = connect(url, compression=None, max_size=None)
 ws.send(json.dumps({"type": "hello"}))
 events(lambda m: kind(m) == "ready", 60)
@@ -279,6 +284,20 @@ got = events(lambda m: kind(m) == "turn")
 kinds, t = [kind(m) for m in got], next((m for m in got if kind(m) == "turn"), {})
 check("talking on after a pause: the same turn", "pause" in kinds and "speech" in kinds[kinds.index("pause"):] and kinds.count("turn") == 1
       and wer(whole, t.get("text", "")) <= 0.15, f"{' '.join(dict.fromkeys(kinds))}: {t.get('text')!r}")
+
+# The conversation's names, sent as context, are heard as written: "Qwen" said as people say it ("kwen") is another
+# word without it and the model's name with it, and a sentence that does not say it does not get it
+sending.join()
+ws = connect(url, compression=None, max_size=None)
+ws.send(json.dumps({"type": "hello"}))
+events(lambda m: kind(m) == "ready", 60)
+asked = say("Is Kwen faster than Llama?")
+turn_of = lambda x: next((m for m in events(lambda m: kind(m) == "turn", 20) if kind(m) == "turn"), {}) if stream(x, tail=2.0) else {}
+before = turn_of(asked).get("text", "")
+ws.send(json.dumps({"type": "context", "text": "You are Qwen3.8-Flash-Next, running locally in kiln.\nIs Qwen3.8-27B or Llama better?"}))
+after, other = turn_of(asked).get("text", ""), turn_of(say("When will the game start tonight?")).get("text", "")
+check("a name from the conversation is heard as written", "Qwen" not in before and "Qwen faster than Llama" in after, f"{before!r}, then {after!r}")
+check("and is not heard where it was not said", "qwen" not in other.lower() and wer("When will the game start tonight?", other) <= 0.15, repr(other))
 
 svc.stdin.close()
 try:

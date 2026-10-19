@@ -6,9 +6,9 @@
 // sound. "after": the line waits for the page's first config. "goOn": the next line is said straight after this one.
 // "pause": that many frames of silence after the words, which the turn waits out (a pause event at their start, as
 // the service sends when its turn model hears more to come), then the turn, or "more" words in the same turn.
-// Its catalog has a second speech-to-text and voice model to switch to and one of each not installed (refused, as the
-// real service refuses them); a preview speaks a voice's sample as chunks of the reply "preview". Every message, every chunk (with the voice that spoke it), the audio frames
-// counted and its own start and exit go to FAKE_VOICE_LOG as JSON lines.
+// Its catalog has a second voice model to switch to and one not installed (refused, as the real service refuses it);
+// a preview speaks a voice's sample as chunks of the reply "preview". Every message, every chunk (with the voice that
+// spoke it), the audio frames counted and its own start and exit go to FAKE_VOICE_LOG as JSON lines.
 import { appendFileSync } from "node:fs";
 
 interface Line { text: string; interruptAfter?: number; interruptOnSay?: boolean; after?: "config"; goOn?: boolean; pause?: number; more?: string }
@@ -28,8 +28,7 @@ const SCRIPTS: Record<string, Line[]> = {
 const voice = (id: string, lang: string, gender: string) => ({ id, label: id[0].toUpperCase() + id.slice(1), lang, gender });
 const CATALOG = {
   vad: [{ name: "fake-vad", label: "Fake VAD", installed: true }],
-  stt: [{ name: "fake-stt", label: "Fake STT", installed: true }, { name: "fake-stt-big", label: "Fake STT Big", installed: true },
-    { name: "fake-stt-huge", label: "Fake STT Huge", installed: false }],
+  stt: [{ name: "fake-stt", label: "Fake STT", installed: true }],
   turn: [{ name: "fake-turn", label: "Fake Turn", installed: true }],
   tts: [
     { name: "fake-tts", label: "Fake TTS", installed: true, voices: [...Object.keys(SCRIPTS).map((k) => voice(k, "en-us", "female")), voice("echo", "en-gb", "male")] },
@@ -104,11 +103,13 @@ function hear(ws: Bun.ServerWebSocket<Session>) {
   if (!d.listening || !line || (line.after === "config" && !d.configs)) return;
   const k = ++d.heard, step = 10, first = line.text.split(" "), more = line.more?.split(" ") ?? [];
   const send = (o: object) => (ws.send(JSON.stringify(o)), log({ s: d.n, ev: "sent", t: Date.now(), ...o }));
-  // the words from frame `at` on, after `before` (already said in this turn): speech, a partial a word, its end
+  // the words from frame `at` on, after `before` (already said in this turn): speech, a partial a word (the last one
+  // settled, as the service reads the words once the speech stops), its end
   const say = (at: number, before: string[], words: string[]) => {
     const w = (k - at) / step - 1;
     if (k === at + step) send({ type: "speech", on: true });
-    if ((k - at) % step === 0 && w >= 0 && w < words.length) send({ type: "partial", text: [...before, ...words.slice(0, w + 1)].join(" ") });
+    if ((k - at) % step === 0 && w >= 0 && w < words.length)
+      send({ type: "partial", text: [...before, ...words.slice(0, w + 1)].join(" "), ...(w === words.length - 1 ? { settled: true } : {}) });
     return k === at + step * (words.length + 2);
   };
   const turn = (text: string) => {

@@ -50,10 +50,10 @@ interface Settings {
   v?: 4;                                            // the settings' shape (loadSettings brings older ones to it)
   system: string; think: Sampler; fast: Sampler; max_tokens?: number; seed?: number; allow?: string[]; fetchChars?: number; voice?: VoiceSettings;
 }
-// Voice mode's, every one of them (Settings and the dock's voice picker both show these): the speech-to-text and voice
-// models (names from the service's catalog), the voice (an id of that voice model's), its speed, what its replies are
-// told instead of the system prompt, and their thinking. Left unset: what the service runs when it is not told.
-interface VoiceSettings { stt?: string; tts?: string; name?: string; speed?: number; prompt?: string; effort?: Effort }
+// Voice mode's, every one of them (Settings and the dock's voice picker both show these): the voice model (a name from
+// the service's catalog), the voice (an id of that voice model's), its speed, what its replies are told instead of the
+// system prompt, and their thinking. Left unset: what the service runs when it is not told.
+interface VoiceSettings { tts?: string; name?: string; speed?: number; prompt?: string; effort?: Effort }
 // The tool sources server.ts offers (tools.ts catalog()).
 interface ToolInfo { fn: string; name: string; title: string; description: string; readOnly: boolean }
 interface SourceInfo { id: string; label: string; kind: "fetch" | "mcp"; detail: string; state: "idle" | "connecting" | "connected" | "failed" | "disabled"; error?: string; tools: ToolInfo[] }
@@ -1581,6 +1581,7 @@ function finish(run: Run) {
     cuts.delete(m);
     keepHeard(c, m, cut);
   } else if (voice?.reply?.m === m) endSaying(voice.reply);
+  if (voice?.c === c) tellVoice(voice);
   const unrun = (m.calls ?? []).filter((x) => !x.state);
   if (unrun.length && !m.error && !m.stopped && !toolsOn(c))   // shown, not dropped: the reply would otherwise just stop
     m.error = `The model asked to run ${[...new Set(unrun.map((x) => x.name))].join(", ")}, but this chat has no tools on, so the reply ends here.`;
@@ -1647,7 +1648,7 @@ interface VoiceMode {
   latency?: number;
   now: { voice?: string; speed?: number };          // what the service speaks with: its ready's, then what it was asked
   asked?: VoiceAsk; pushed?: string;                // the last hello or config; the last config (a refused one is not sent again as is)
-  defaults: { stt?: string; tts?: string; voices: Record<string, string> };   // what it runs when not told (voices: by voice model)
+  defaults: { tts?: string; voices: Record<string, string> };   // what it runs when not told (voices: by voice model)
   level: number; frame: number;                    // the pill's dots: the level they show, their animation frame
   check: { role: string; content: string }[];      // the session's check conversation (CHECK)
   asking: Asking;                                   // the checks of the question being said
@@ -1668,6 +1669,12 @@ function noteFor(c: Conversation, said: boolean): string | undefined {
   return note && (!prev?.voice || last !== note) ? note : undefined;
 }
 const voiceEffort = (): Effort => settings.voice?.effort ?? "off";
+// The conversation as speech recognition is told it, to listen for its names (voice/parts.py, terms): the model's name
+// (one the user says), the system prompt, and the chat's last few thousand characters.
+function tellVoice(v: VoiceMode) {
+  const chat = v.c.messages.map((m) => m.content).join("\n");
+  v.client.context(`${modelName(current())}\n${systemFor(v.c)}\n${chat.slice(-4000)}`);
+}
 
 async function openVoice() {
   if (voice) return;
@@ -1677,7 +1684,6 @@ async function openVoice() {
       if (!mine()) return;
       const v = voice!, asked = v.asked ?? {}, first = !v.ready;
       // what it chose for what it was not asked: the parts after the hello, a voice after a voice model's switch
-      if (first && !asked.stack?.stt) v.defaults.stt = r.stack.stt;
       if (first && !asked.stack?.tts) v.defaults.tts = r.stack.tts;
       if ((first || asked.stack?.tts) && !asked.voice && r.stack.tts) v.defaults.voices[r.stack.tts] = r.voice;
       v.ready = r;
@@ -1689,9 +1695,10 @@ async function openVoice() {
       syncSettings();
     },
     speech: (on) => { if (mine() && on && voice!.ahead && !voice!.ahead.said) dropAhead(voice!); },
-    partial: (text) => {
+    partial: (text, settled) => {
       if (!mine()) return;
       voice!.partial = text;
+      if (settled) voice!.asking.settled = text;
       paintGhost();
       checkSaying(voice!);
     },
@@ -1724,6 +1731,7 @@ async function openVoice() {
     closed: () => { if (mine()) { voice!.error ??= "The voice service stopped"; renderVoice(); } },
   });
   voice = { client, c: conv, muted: false, partial: "", level: 0, frame: 0, check: [], asking: asking(), now: {}, defaults: { voices: {} }, asked: voiceWant(null) };
+  tellVoice(voice);
   renderVoice();
   if (status.state === "offline") void start().then(refreshStatus);   // the first question finds the model loaded
   // http://<this machine's address> is not a secure page, and there the browser has no microphone to give at all
@@ -1759,8 +1767,9 @@ function closeVoice() {
 // What a check found for a transcript, and the turn of the check conversation that asked it (kept once the question
 // it checked stands, so the next check is an append to kiln's cache).
 interface Heard { text: string; fixes: Fix[]; tool: boolean; asked?: { role: string; content: string }[] }
-// The checks of the question being said, by transcript: its words so far, a pause's, its turn's (each asked once).
-interface Asking { checks: Map<string, Promise<Heard>>; done: Map<string, Heard>; busy?: string }
+// The checks of the question being said, by transcript: its words as they settle, a pause's, its turn's (each asked
+// once); settled: the newest words speech recognition settled.
+interface Asking { checks: Map<string, Promise<Heard>>; done: Map<string, Heard>; busy?: string; settled?: string }
 const asking = (): Asking => ({ checks: new Map(), done: new Map() });
 // A voice reply begun before its question stands: at a pause (the turn may yet go on), or at the turn while the turn's
 // own check is out. kiln writes it (its tools held: server.ts, HELD_MS) and the service speaks it into the client's
@@ -1808,11 +1817,13 @@ function knownFor(v: VoiceMode, text: string): Heard | undefined {
     if ((text === h.text || text.startsWith(`${h.text} `)) && (!best || h.text.length > best.text.length)) best = h;
   return best;
 }
-// The words so far, checked as they come (one check at a time, the newest words next): they show fixed while the user
-// is still talking, and a reply begun at the turn already has their fixes.
+// The words as speech recognition settles them, checked as they come (one check at a time, the newest words next): they
+// show fixed while the user is still talking, and the turn's own, settled as the speech stops, are checked before the
+// turn ends. Only settled ones: a check of each look's words (every 0.3 s of speech) kept kiln busy beside the reply
+// and its slots turning over, so a new chat's reply read its whole prompt again (Flash-Next: 1.1 s to its first token).
 function checkSaying(v: VoiceMode) {
-  const mine = v.asking, text = v.partial;
-  if (mine.busy || !text.includes(" ") || mine.checks.has(text)) return;
+  const mine = v.asking, text = mine.settled && questionFor(v, mine.settled).text;
+  if (mine.busy || !text || mine.checks.has(text)) return;
   mine.busy = text;
   void checkOf(v, text).then(() => {
     mine.busy = undefined;
@@ -1913,11 +1924,13 @@ function standAhead(v: VoiceMode, a: Ahead) {
   }
   save(c);
   renderVoice();
+  tellVoice(v);
   if (a.ended) finish(a.run);
 }
 
 async function voiceTurn(v: VoiceMode, text: string) {
   v.partial = "";
+  v.asking.settled = undefined;                     // the turn's own: what settles next is said after it
   paintGhost();
   text = text.trim();
   if (!text) return;
@@ -2154,8 +2167,8 @@ function setVoice(change: Partial<VoiceSettings>) {
 // What the settings ask the service for; with voice mode open, what is unset is filled in with what the service runs
 // when not told (so taking a choice back goes back to that).
 function voiceWant(v: VoiceMode | null): VoiceAsk {
-  const s = settings.voice ?? {}, d = v?.defaults, stt = s.stt ?? d?.stt, tts = s.tts ?? d?.tts, name = s.name ?? (tts ? d?.voices[tts] : undefined);
-  const stack: VoiceAsk["stack"] = { ...(stt ? { stt } : {}), ...(tts ? { tts } : {}) };
+  const s = settings.voice ?? {}, d = v?.defaults, tts = s.tts ?? d?.tts, name = s.name ?? (tts ? d?.voices[tts] : undefined);
+  const stack: VoiceAsk["stack"] = tts ? { tts } : {};
   return { ...(Object.keys(stack).length ? { stack } : {}), ...(name ? { voice: name } : {}), speed: s.speed ?? 1 };
 }
 // The settings to the service, as far as they differ from what it runs: a model switch it loads (and is ready again),
@@ -3609,18 +3622,6 @@ function buildSettings() {
     row.append(lab, select, back);
     return { row, select };
   };
-  const stt = choice("voice-stt", "Speech to text", "The model that writes down what you say (the voice service's; a dimmed one is not installed)",
-    (v) => setVoice({ stt: v || undefined }), () => setVoice({ stt: undefined }));
-  knobs.push(() => {
-    const now = settings.voice?.stt ?? "", list = voiceCatalog.stt ?? [], d = voice?.defaults.stt, key = JSON.stringify([list, now, d]);
-    stt.row.classList.toggle("custom", !!now);
-    if (stt.select.dataset.key === key) return;
-    stt.select.dataset.key = key;
-    const opts = list.map((m) => Object.assign(new Option(m.installed ? m.label : `${m.label} (not installed)`, m.name), { disabled: !m.installed, title: m.installed ? "" : setupHint("stt", m.name) }));
-    if (now && !list.some((m) => m.name === now)) opts.push(new Option(now, now));
-    stt.select.replaceChildren(new Option(`Default${d ? ` (${list.find((m) => m.name === d)?.label ?? d})` : ""}`, ""), ...opts);
-    stt.select.value = now;
-  });
   const pick = choice("voice-name", "Voice", "The voice replies are spoken in; one of another voice model switches to it (also in voice mode's dock)",
     (v) => { const [tts, name] = v ? JSON.parse(v) : []; setVoice({ tts, name }); }, () => setVoice({ tts: undefined, name: undefined }));
   knobs.push(() => {
@@ -3662,7 +3663,7 @@ function buildSettings() {
     think.classList.toggle("custom", settings.voice?.effort !== undefined);
     thinkModes.querySelectorAll("button").forEach((b, i) => b.setAttribute("aria-checked", String(EFFORTS[i] === voiceEffort())));
   });
-  $("voice-knobs").replaceChildren(stt.row, pick.row, speed, think);
+  $("voice-knobs").replaceChildren(pick.row, speed, think);
 
   $("tools-reload").onclick = () => void loadCatalog({ reload: true }).then(() => toast(catalog?.error ? "The config file has an error (shown under Tools)"
     : `Config read: ${catalog?.sources.filter((s) => s.kind === "mcp").length ?? 0} MCP server(s)`));

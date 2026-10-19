@@ -11,10 +11,16 @@ import { tmpdir } from "node:os";
 import puppeteer from "puppeteer-core";
 
 const ROOT = `${import.meta.dir}/..`, LEAD = 2.5, TAIL = 8;
+// The same six questions each run, their subjects drawn anew: kiln keeps a prompt's end with its first token's odds, so
+// a question asked again (its reply's prompt, its check's) would come back at once from the cache
+const any = (xs: string[]) => xs[Math.floor(Math.random() * xs.length)];
 const QUESTIONS = process.argv.slice(2).length ? process.argv.slice(2) : [
-  "What's the capital of France?", "How many legs does a spider have?", "Give me one quick tip for sleeping better.",
-  "What's the difference between a virus and a bacterium?", "Can you recommend a good sci-fi book?",
-  "I was wondering if you could tell me a fun fact about octopuses and"];
+  `What's the capital of ${any(["France", "Peru", "Kenya", "Norway", "Japan", "Chile", "Egypt", "Canada", "Poland", "Vietnam", "Ghana", "Spain"])}?`,
+  `How many legs does a ${any(["spider", "crab", "beetle", "lobster", "centipede", "ant", "scorpion", "shrimp", "starfish", "mosquito"])} have?`,
+  `Give me one quick tip for ${any(["sleeping better", "cooking rice", "learning guitar", "running faster", "saving money", "writing emails", "growing tomatoes"])}.`,
+  `What's the difference between a ${any(["virus and a bacterium", "lake and a pond", "frog and a toad", "comet and an asteroid", "violin and a viola", "hurricane and a tornado"])}?`,
+  `Can you recommend a good ${any(["sci-fi", "mystery", "fantasy", "history", "horror", "travel", "cooking", "poetry"])} book?`,
+  `I was wondering if you could tell me a fun fact about ${any(["octopuses", "penguins", "volcanoes", "honeybees", "glaciers", "owls", "deserts"])} and`];
 const dir = mkdtempSync(`${tmpdir()}/kiln-bench-voice-`);
 writeFileSync(`${dir}/q.json`, JSON.stringify(QUESTIONS));
 const synth = Bun.spawnSync([`${ROOT}/data/voice-venv/bin/python`, "-I", "-c", `

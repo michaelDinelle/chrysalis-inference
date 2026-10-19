@@ -15,7 +15,7 @@ export const PREVIEW = "preview";                   // the id of a voice's sampl
 export interface VoiceHandlers {
   ready?(r: VoiceReady): void;
   speech?(on: boolean): void;                       // the user started or paused speaking
-  partial?(text: string): void;                     // the turn's words so far
+  partial?(text: string, settled: boolean): void;   // the turn's words so far (settled: read at a pause, which only more speech changes)
   pause?(text: string): void;                       // the turn waits for more: its words, which are its turn's if no more come
   turn?(text: string, waitMs: number): void;        // the user is done: the turn's words
   interrupt?(): void;                               // the user talks over the reply (its sound has already stopped)
@@ -51,6 +51,7 @@ export class VoiceClient {
   private shut = false;
   private early: ArrayBuffer[] = [];               // microphone frames from before the socket opened
   private held = new Map<string, ArrayBuffer[]>(); // replies spoken ahead: their chunks, unplayed until let go
+  private told?: string;                          // the conversation as last given (context), sent again on open
   playing = false;
   muted = false;
 
@@ -78,6 +79,7 @@ export class VoiceClient {
     ws.binaryType = "arraybuffer";
     ws.onopen = () => {
       this.send({ type: "hello", ...ask });
+      if (this.told !== undefined) this.send({ type: "context", text: this.told });
       for (const f of this.early.splice(0)) ws.send(f);
     };
     ws.onmessage = (e) => (typeof e.data === "string" ? this.event(JSON.parse(e.data)) : this.chunk(e.data));
@@ -145,6 +147,12 @@ export class VoiceClient {
     this.send({ type: "cancel", id });
   }
   done(id: string) { this.send({ type: "say_end", id }); }
+  // The conversation's text, for the service to listen for its names and terms from the next turn on.
+  context(text: string) {
+    if (text === this.told) return;
+    this.told = text;
+    this.send({ type: "context", text });
+  }
   config(ask: VoiceAsk) { this.send({ type: "config", ...ask }); }
 
   // A voice's sample: a new one replaces the one playing; it is not a reply, so nothing waits for it.
@@ -182,7 +190,7 @@ export class VoiceClient {
   private event(e: any) {
     if (e.type === "ready") this.on.ready?.(e);
     else if (e.type === "speech") this.on.speech?.(!!e.on);
-    else if (e.type === "partial") this.on.partial?.(String(e.text ?? ""));
+    else if (e.type === "partial") this.on.partial?.(String(e.text ?? ""), e.settled === true);
     else if (e.type === "pause") this.on.pause?.(String(e.text ?? ""));
     else if (e.type === "turn") {
       this.turnAt = { t: performance.now(), wait: Number(e.wait_ms) || 0 };

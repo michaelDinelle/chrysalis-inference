@@ -215,37 +215,43 @@ kiln gets it (built by the same code as a reply's: the tools as JSON, which kiln
 turn, every message with its note). It is a cascade, as Claude's voice mode is: speech-to-text, the model kiln already
 runs (so the reasoning costs no memory), text-to-speech, all on the CPU (no VRAM) in `voice/`, a Python service the web
 server starts with the first voice session and stops 60 s after the last (`KILN_VOICE_IDLE_MS`): closed, voice mode
-costs nothing. Open, it holds ~0.5 GB of RAM and 4 threads (`KILN_VOICE_THREADS`): at all 16 it took Flash-Next's decode
+costs nothing. Open, it holds ~0.55 GB of RAM and 4 threads (`KILN_VOICE_THREADS`): at all 16 it took Flash-Next's decode
 from 95 to 3 tok/s, at 4 ~12%. `make voice` makes its venv (`data/voice-venv`) and fetches the default models into
-`data/voice/` (~250 MB); `tools/voice_setup.sh NAME...` fetches the others.
+`data/voice/` (~320 MB); `tools/voice_setup.sh NAME...` fetches the others.
 
-What runs is a stack of four parts, each behind one small interface in `voice/parts.py` and picked by name: the VAD
-(Silero v6), speech-to-text (Kroko, a streaming zipformer; also Parakeet 110M, Parakeet v3, Nemotron streaming 0.6B,
-Moonshine), the turn model (Smart Turn v3.2, its Whisper features in numpy) and text-to-speech (Kokoro 82M int8;
-also Kitten, Supertonic 3 in 31 languages, Pocket TTS with a cloned voice). The defaults are the small end of what was
-measured on this machine (200 Big Bench Audio questions, 23 voices, word error rate against the questions' text;
-Kokoro's naturalness by UTMOS): Kroko 7.8% WER in ~160 MB where Parakeet v3 is 7.3% in 1.35 GB, Kokoro UTMOS 4.48,
-the best of the small voices. Settings is the one place the choices live (speech-to-text, voice model, voice, speed,
-the voice prompt, thinking), and the voice picker in the dock is a view of the same values: it lists the service's
-models (those not installed dimmed, with how to fetch them) and their voices by language and gender, each with a play
-button for a sample; a pick applies from the next sentence. The service keeps no preferences: it lists what it has and
-loads what a session asks for, so a session switches parts mid-call.
+What runs is a stack of four parts, each behind one small interface in `voice/parts.py`: the VAD (Silero v6),
+speech-to-text (Parakeet 110M), the turn model (Smart Turn v3.2, its Whisper features in numpy) and text-to-speech
+(Kokoro 82M int8; also Kitten, Supertonic 3 in 31 languages, Pocket TTS with a cloned voice). Speech-to-text is the one
+model the service ships. On 200 Big Bench Audio questions (word error rate against their text) Parakeet 110M read 6.9%
+where Kroko, a streaming zipformer, read 7.8% and Parakeet v3 0.6B 7.3% in 1.35 GB; and its search takes the
+conversation's names and terms: the page sends the chat's text (`context`), and `terms()` picks from it the words with
+capitals inside or digits and the words the system's dictionary lacks, which the search then favors. On 124 sentences in
+4 Kokoro voices that say them as people do ("kwen"), it heard "Qwen" in 20 of 20 (0 without the conversation; Kroko's
+search, 8 at best) and the terms in 89% (45% without), and never heard a term that was not said beside its sound-alikes
+("When will the game", "My friend Jason"; at a higher score it heard "Qwen will the game"); Qwen3-ASR 0.6B, told the
+terms, heard 95% of them in 2.8 GB and 2 s chunks. Kokoro has UTMOS 4.48, the best of the small voices. Settings is the
+one place the choices live (voice model, voice, speed, the voice prompt, thinking), and the voice picker in the dock is
+a view of the same values: it lists the service's voice models (those not installed dimmed, with how to fetch them) and
+their voices by language and gender, each with a play button for a sample; a pick applies from the next sentence. The
+service keeps no preferences: it lists what it has and loads what a session asks for, so a session switches voices
+mid-call.
 
 The page and the service speak one protocol over a WebSocket (`/api/voice`, which the web server proxies as it is and
-refuses from any other origin: WebSockets skip CORS), so any other stack can stand in for this one
-(`KILN_VOICE_CMD`, a JSON argv of a program that prints `voice: ws://127.0.0.1:PORT`). The page sends 16 kHz int16
-audio in 20 ms frames and `hello`/`config` (the stack, voice and speed), `say`/`say_end` (the reply's text as it
-streams), `cancel`, `playback` (whether the reply is audible) and `preview`; the service sends `ready` (the stack, its
-catalog of models and voices), `speech`, `partial`, `turn` (the transcript, and `wait_ms` from the end of speech),
-`interrupt`, `said` and audio pieces (a header with the piece's text and its range in the reply, then int16 PCM).
+refuses from any other origin: WebSockets skip CORS), so any other stack can stand in for this one (`KILN_VOICE_CMD`, a
+JSON argv of a program that prints `voice: ws://127.0.0.1:PORT`). The page sends 16 kHz int16 audio in 20 ms frames and
+`hello`/`config` (the stack, voice and speed), `say`/`say_end` (the reply's text as it streams), `cancel`, `playback`
+(whether the reply is audible), `context` (the conversation's text, for its names) and `preview`; the service sends
+`ready` (the stack, its catalog of models and voices), `speech`, `partial`, `pause` (the words so far, when the turn
+waits for more), `turn` (the transcript, and `wait_ms` from the end of speech), `interrupt`, `said` and audio pieces (a
+header with the piece's text and its range in the reply, then int16 PCM).
 
 How it behaves, and why:
 - A turn ends at 0.2 s of silence if Smart Turn says the sentence is finished, else at 1.5 s; the wait after speech is
-  ~0.28 s (the silence, ~0.03 s for the VAD to let go, Smart Turn 25 ms, the transcript 22 ms).
-- Kroko decodes in 1.28 s chunks, so its words come out a chunk late, and the last chunk needs 1.5 s of silence after it
-  (sherpa's examples pad 0.66 s, which lost a turn's last word in most chunk alignments). While you talk the service
-  decodes the turn again in a stream of its own every 0.3 s of speech (the whole turn up to 5 s, ~0.08 s at 3 s), so
-  your first words show ~0.6 s after you start rather than 1.3.
+  ~0.26 s (the silence, ~0.03 s for the VAD to let go, Smart Turn 25 ms). Parakeet reads the speech in pieces that
+  Silero ends at pauses, each 0.1 s into its silence, so a turn's end has nothing left to read (read then, its last
+  piece made the wait 0.35 s).
+- While you talk the service reads the piece under way again every 0.3 s of speech (a piece ends at a pause or at 9 s),
+  so your first words show ~0.6 s after you start rather than at the first pause.
 - The reply is read in pieces that grow: the first ends at the first sentence or clause, or (no comma early) before a
   phrase's first word from the 5th word on ("The average distance from Earth | to the Moon ..."), since Kokoro reads 4
   words in ~0.2 s and a whole first sentence in up to twice that; later pieces are sentences, synthesized while the
@@ -258,17 +264,18 @@ How it behaves, and why:
 - Opening voice mode has kiln read the chat with the voice prompt (one token): the prompt replaces the system prompt,
   and Flash-Next's first request after a while idle took 1.7-3.3 s to its first token.
 
-Time from the end of a spoken question to the reply's first sound, six questions kiln had not seen each, the last of
-which trails off ("... a fun fact about octopuses and"), so the turn model hears more to come and the turn waits out
-1.5 s of silence (`web/bench-voice.ts`: headless Chromium's microphone plays a WAV through the real service and the
-running kiln; the page's own figure, then one from outside, the WAV's end of speech to the first audio buffer's start):
+Time from the end of a spoken question to the reply's first sound, six questions kiln had not seen each (their
+subjects drawn anew each run: kiln answers a prompt it has seen from its cache), the last of which trails off ("... a
+fun fact about owls and"), so the turn model hears more to come and the turn waits out 1.5 s of silence
+(`web/bench-voice.ts`: headless Chromium's microphone plays a WAV through the real service and the running kiln; the
+page's own figure, then one from outside, the WAV's end of speech to the first audio buffer's start). Two runs each,
+alternating with the page and service as they were before replies began ahead (each reply waited for its check, and
+Kroko heard the speech):
 
-| model | median | wait after speech | turn to first sound | the question that trails off |
+| Qwen3.8-Flash-Next | median | wait after speech | turn to first sound | the question that trails off |
 |---|---|---|---|---|
-| Qwen3.8-Flash-Next | **1.24 s** (1.21 outside) | 0.27-0.32 s | 0.87-1.23 s | 1.77 s: the 1.55 s wait, then 0.22 s |
-
-The same six on the page as it was before replies began ahead (each waited for its check): 1.98 s, and 2.68 s for the
-one that trails off.
+| replies begun ahead | **1.38 s, 1.35 s** (1.31, 1.33 outside) | 0.22-0.30 s | 0.96-1.43 s | 1.58 s, 1.92 s |
+| each reply after its check | 1.50 s, 1.52 s (1.45, 1.46 outside) | 0.23-0.32 s | 1.04-1.30 s | 3.09 s, 2.62 s |
 
 Flash-Next's cold experts and the speech models share the CPU: its replies decode at 35-55 tok/s while speaking
 (95 alone) and Kokoro reads a piece ~1.4x slower. For scale, Artificial Analysis measures Grok Voice 3.0 at 0.81 s

@@ -491,7 +491,7 @@ async function voicePage(script: string, o: { system?: string; first?: (page: Pa
 const replyText = (page: Page, i: number) => page.$eval(`#thread > article[data-i="${i}"] .markdown`, (el) => el.textContent?.trim() ?? "");
 
 test("voice mode: what is said shows as it is said, becomes the question, and the reply is spoken as it is written", async () => {
-  const n0 = streams.length;
+  const n0 = streams.length, c0 = checks.length;
   const { page, session } = await voicePage("plain");
   // the message box stays (it can still take typing), with the pill in its row and Send become "End voice mode"
   expect(await page.$eval(".composer-box", (el) => el.getBoundingClientRect().height > 0 && !!(el as HTMLElement).offsetParent)).toBe(true);
@@ -509,6 +509,8 @@ test("voice mode: what is said shows as it is said, becomes the question, and th
   expect(lastStream.continue_final_message).toBeUndefined();
   const check = checks.findLast((b) => b.messages.at(-1).content === "Transcript: hello there");
   expect([check?.temperature, check?.stream, check?.model, check?.messages.length]).toEqual([0, undefined, "qwen3.8-27b-fast", 2]);
+  // the words checked are those speech recognition settled ("hello" was a look's, as it was said)
+  expect(checks.slice(c0).map((b) => b.messages.at(-1).content)).toEqual(["Transcript: hello there"]);
   expect(lastStream.model).toBe("qwen3.8-27b-fast");
   expect(lastStream.reasoning_effort).toBeUndefined();
   // opening voice mode had kiln read the chat first (a new one's question stands in), so the first turn is an append
@@ -527,6 +529,10 @@ test("voice mode: what is said shows as it is said, becomes the question, and th
   expect(log.findIndex((e) => e.type === "say_end" && e.id === id)).toBeGreaterThan(log.findLastIndex((e) => e.type === "say"));
   await page.waitForFunction(() => document.querySelector("#voice-status")?.textContent === "Listening", { timeout: 10_000 });
   expect(session().filter((e) => e.type === "playback").map((e) => e.playing)).toEqual([true, false]);
+  // speech recognition is told the conversation, for its names: the model's, then the chat as it grows
+  const told = session().filter((e) => e.type === "context").map((e) => e.text);
+  expect(told[0]).toMatch(/^Qwen3\.8-27B\n/);
+  expect(told.at(-1)).toMatch(/hello there\nYou said: hello there$/);
   await page.close();
 }, 30_000);
 
@@ -677,22 +683,6 @@ test("voice picker: a voice's play button plays its sample, apart from any reply
   await page.close();
 }, 30_000);
 
-test("voice mode: a speech-to-text model chosen in Settings switches the service's; one not installed cannot be chosen", async () => {
-  const { page, session } = await voicePage("silent");
-  await openSettings(page);
-  await page.waitForSelector("#voice-stt option[value='fake-stt-big']");
-  expect(await page.$$eval("#voice-stt option", (os) => os.map((o) => [(o as HTMLOptionElement).value, (o as HTMLOptionElement).disabled]))).toEqual(
-    [["", false], ["fake-stt", false], ["fake-stt-big", false], ["fake-stt-huge", true]]);
-  await page.select("#voice-stt", "fake-stt-big");
-  await page.waitForFunction(() => /^Fake STT Big ·/.test(document.querySelector("#voice-meta")?.textContent ?? ""), { timeout: 5000 });
-  expect(await stored(page)).toEqual({ name: "silent", stt: "fake-stt-big" });
-  await page.click(".voice-choice:has(#voice-stt) .knob-reset");
-  await page.waitForFunction(() => /^Fake STT ·/.test(document.querySelector("#voice-meta")?.textContent ?? ""), { timeout: 5000 });
-  expect(session().filter((e) => e.type === "config").map((e) => e.stack)).toEqual([{ stt: "fake-stt-big" }, { stt: "fake-stt" }]);
-  expect(await stored(page)).toEqual({ name: "silent" });
-  await page.close();
-}, 30_000);
-
 test("voice mode: mute stops the microphone's audio; ending it closes the socket, and the service stops once idle", async () => {
   for (const p of voicePages.splice(0)) if (!p.isClosed()) await p.close();   // earlier tests' voice sockets, open if they failed
   const { page, session } = await voicePage("silent");
@@ -758,7 +748,7 @@ const spokenOf = (log: any[]) => {
 const turnAt = (log: any[]) => log.find((e) => e.ev === "sent" && e.type === "turn")?.t;
 
 test("voice mode: a question shows grey as it was heard until its check is in, then white with the misheard words fixed (the heard ones on hover); the reply begun on the words as heard is dropped unheard, and the fixed question is answered", async () => {
-  const n0 = streams.length, { page, session } = await voicePage("pie");
+  const n0 = streams.length, c0 = checks.length, { page, session } = await voicePage("pie");
   const q = '#thread > article[data-i="0"]';
   await page.waitForFunction((q) => document.querySelector(`${q} .bubble`)?.textContent === "lets do a snake game in pie game", { timeout: 10_000 }, q);
   expect(await page.$eval(q, (e) => [e.classList.contains("unsettled"), getComputedStyle(e.querySelector(".bubble")!).color]))
@@ -775,6 +765,7 @@ test("voice mode: a question shows grey as it was heard until its check is in, t
   // the reply begun at the turn, on the words as heard: its speech cancelled, unheard (the page held it)
   const replies = streams.slice(n0).filter((b) => b.max_tokens !== 1).map((b) => sent(b).at(-1).content.split("\n\n").at(-1));
   expect(replies).toEqual(["lets do a snake game in pie game", "lets do a snake game in Pygame"]);
+  expect(checks.slice(c0).map((b) => b.messages.at(-1).content)).toEqual(["Transcript: lets do a snake game in pie game"]);   // once
   const { said, cancelled } = spokenOf(session());
   expect([...said].filter(([id]) => !cancelled.has(id)).map(([, t]) => t)).toEqual(["You said: lets do a snake game in Pygame"]);
   expect([...said].filter(([id]) => cancelled.has(id)).map(([, t]) => t)).toEqual(["You said: lets do a snake game in pie game"]);

@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
 # kiln's voice service (voice/): its venv, data/voice-venv, and its models in data/voice/<name>/. What is there already
 # is kept, so running it again only fetches what is missing.
-#   tools/voice_setup.sh           the defaults: silero, kroko, smart-turn, kokoro
-#   tools/voice_setup.sh NAME...   others: parakeet-110m nemotron moonshine-base parakeet-v3 kitten supertonic pocket
+#   tools/voice_setup.sh           the defaults: silero, parakeet-110m, smart-turn, kokoro
+#   tools/voice_setup.sh NAME...   other voices: kitten supertonic pocket
 set -euo pipefail
 ROOT="$(dirname "$(dirname "$(readlink -f "$0")")")"
 V="$ROOT/data/voice"
@@ -34,15 +34,11 @@ file() {
 fetch() {
     case "$1" in
         silero) file silero https://github.com/snakers4/silero-vad/raw/v6.2.3/src/silero_vad/data/silero_vad_16k_op15.onnx silero_vad.onnx ;;
-        kroko) sherpa kroko asr-models sherpa-onnx-streaming-zipformer-en-kroko-2025-08-06 ;;
         smart-turn) file smart-turn https://huggingface.co/pipecat-ai/smart-turn-v3/resolve/main/smart-turn-v3.2-cpu.onnx smart-turn-v3.2-cpu.onnx ;;
         kokoro)
             file kokoro https://github.com/thewh1teagle/kokoro-onnx/releases/download/model-files-v1.0/kokoro-v1.0.int8.onnx kokoro-v1.0.int8.onnx
             file kokoro https://github.com/thewh1teagle/kokoro-onnx/releases/download/model-files-v1.0/voices-v1.0.bin voices-v1.0.bin ;;
         parakeet-110m) sherpa parakeet-110m asr-models sherpa-onnx-nemo-parakeet_tdt_transducer_110m-en-36000-int8 ;;
-        nemotron) sherpa nemotron asr-models sherpa-onnx-nemotron-speech-streaming-en-0.6b-560ms-int8-2026-04-25 ;;
-        moonshine-base) sherpa moonshine-base asr-models sherpa-onnx-moonshine-base-en-quantized-2026-02-27 ;;
-        parakeet-v3) sherpa parakeet-v3 asr-models sherpa-onnx-nemo-parakeet-tdt-0.6b-v3-int8 ;;
         kitten) sherpa kitten tts-models kitten-micro-en-v0_8 ;;
         supertonic) sherpa supertonic tts-models sherpa-onnx-supertonic-3-tts-int8-2026-05-11 ;;
         pocket) sherpa pocket tts-models sherpa-onnx-pocket-tts-int8-2026-01-26 ;;
@@ -50,5 +46,5 @@ fetch() {
     esac
 }
 
-if [ $# -eq 0 ]; then set -- silero kroko smart-turn kokoro; fi
+if [ $# -eq 0 ]; then set -- silero parakeet-110m smart-turn kokoro; fi
 for name in "$@"; do fetch "$name"; done

@@ -1,13 +1,14 @@
 """The voice service's parts, each kind behind one small interface and named in PARTS (a session picks them by name):
   vad   FRAME (samples at 16 kHz), state() -> a session's own state, prob(state, frame) -> P(speech)
-  stt   stream() -> a stream: feed(pcm) -> the whole text so far when it changed, else None; finish() -> final text;
-        peek(seconds=None) -> the text of the last seconds (or all) decoded now, apart from the stream
+  stt   stream(terms="") -> a stream: feed(pcm) -> the whole text so far when its reading at a pause changed it, else
+        None; finish() -> final text; peek(seconds=None) -> the text of the last seconds (or all) decoded now, apart from the stream. terms:
+        the conversation's words to listen for, "/" between them (terms())
   turn  prob(audio) -> P(the user's turn is over), given the turn's audio up to now
   tts   rate, voices() -> [{id, label, lang, gender}] (a classmethod: it loads nothing), VOICE (the default),
         synth(text, voice, speed) -> float32 mono at rate
 A loaded part is shared by the sessions using it; what a session changes lives in its own state or stream. A part's
 models are its FILES in data/voice/<DIR>/, fetched by `tools/voice_setup.sh DIR`."""
-import collections, ctypes, gc, os, threading, wave
+import collections, ctypes, gc, os, re, threading, wave
 
 import numpy as np
 import onnxruntime as ort
@@ -67,6 +68,47 @@ def trim():
         _malloc_trim(0)
 
 
+# A word the system's dictionary lacks, said in the conversation, is a name worth listening for ("Qwen", "Pygame")
+DICTS = ("/usr/share/dict/words", "/usr/share/dict/cracklib-small")
+_words = None
+
+
+def words():
+    global _words
+    if _words is None:
+        path = next((p for p in DICTS if os.path.exists(p)), None)
+        with open(path or os.devnull, errors="ignore") as f:
+            _words = {w.strip().lower() for w in f}
+    return _words
+
+
+def terms(text):
+    """The names and terms in conversation text that speech recognition should listen for, as written: words with
+    capitals inside or with digits (PyTorch, JSON, RS3; "Qwen3.8-27B" gives "Qwen"), words the dictionary lacks
+    (Pygame, Kokoro), and capitalized names joined by hyphens as a phrase ("Flash-Next": "Flash Next"). They come from
+    the chat, so there is no list to keep; without a dictionary only the first kind are found."""
+    known, out = words(), []
+    for tok in re.findall(r"[A-Za-z0-9][A-Za-z0-9.'+\-]*[A-Za-z0-9]|[A-Za-z]", text):
+        parts = [p for p in tok.strip(".'").split("-") if p]
+        for p in parts:
+            a = re.match(r"[A-Za-z]*", p).group(0)
+            digits, caps = bool(re.search(r"\d", p)), bool(re.search(r"[A-Z]", a[1:])) or (a.isupper() and len(a) >= 2)
+            unknown = bool(known) and len(a) >= 3 and a.lower() not in known
+            if a and (caps or unknown or (digits and len(a) >= 3) or (a.isupper() and digits)):
+                t = p if a.isupper() and digits and len(p) <= 5 else a
+                if t not in out:
+                    out.append(t)
+        run = []
+        for p in parts + [""]:
+            if re.fullmatch(r"[A-Z][a-z]+", p):
+                run.append(p)
+                continue
+            if len(run) >= 2 and " ".join(run) not in out:
+                out.append(" ".join(run))
+            run = []
+    return out
+
+
 @part("vad", "silero")
 class Silero:
     """Silero VAD v6, 16 kHz: each call sees 512 new samples after the previous call's last 64."""
@@ -86,114 +128,83 @@ class Silero:
         return float(p[0, 0])
 
 
-class Streaming:
-    """A sherpa-onnx streaming transducer: it decodes as the audio comes in, so a turn's end leaves one chunk to flush."""
+@part("stt", "parakeet-110m")
+class Parakeet:
+    """Parakeet 110M (a NeMo transducer, English), offline, fed as a stream: Silero splits the speech at pauses and each
+    finished piece is read while the user goes on, so a turn's end leaves only its last piece; the pieces so far are
+    the partial. Its search favors the conversation's terms (HOT): on 124 sentences in 4 voices, "Qwen" right in 20 of
+    20 (greedy: 0; Kroko, a streaming zipformer, at best 8 with any score that kept its other words), its terms in 89%
+    (greedy 45%), and no term heard in a sentence that did not say it ("When will the game", beside "Qwen"); at 2.0 it
+    heard 4 such."""
+    label, DIR = "Parakeet 110M (English)", "parakeet-110m"
+    FILES = ("encoder.int8.onnx", "decoder.int8.onnx", "joiner.int8.onnx", "tokens.txt")
+    HOT = 1.5
+    # A piece ends at 0.3 s of quiet, or at 9 s: a look (talk.py) reads the piece under way again, ~0.03 s a second
+    PAUSE, LONGEST = int(0.3 * RATE), 9 * RATE
+    # Quiet after which the piece is read, ahead of its pause: a turn ends at 0.2 s of silence (talk.py), and its last
+    # piece read only then made the wait after speech 349 ms (median of five questions), 264 read here
+    EARLY = int(0.1 * RATE)
 
     def __init__(self, threads):
         import sherpa_onnx
         enc, dec, join, tokens = files(type(self))
-        self.r = sherpa_onnx.OnlineRecognizer.from_transducer(encoder=enc, decoder=dec, joiner=join, tokens=tokens,
-                                                              num_threads=1)
+        # its pieces as sherpa splits the terms into them: each scored alike, so a term is spelled in the fewest
+        vocab = os.path.join(os.path.dirname(tokens), "terms.vocab")
+        if not os.path.exists(vocab):
+            with open(tokens) as f, open(vocab + ".tmp", "w") as out:
+                for line in f:
+                    tok = line.rsplit(" ", 1)[0]
+                    out.write(f"{tok}\t{0.0 if tok == '<unk>' else -1.0}\n")
+            os.replace(vocab + ".tmp", vocab)
+        self.r = sherpa_onnx.OfflineRecognizer.from_transducer(
+            encoder=enc, decoder=dec, joiner=join, tokens=tokens, num_threads=1, model_type="nemo_transducer",
+            decoding_method="modified_beam_search", max_active_paths=4, hotwords_score=self.HOT, modeling_unit="bpe",
+            bpe_vocab=vocab)
+        self.vad = Silero(1)
 
-    def stream(self):
-        return OnlineStream(self.r)
-
-
-class OnlineStream:
-    # The last chunk decodes only with silence after it, and as much as the encoder takes in: kroko's 1.28 s chunks plus
-    # 0.13 s of lookahead (T = 141 frames). sherpa's examples pad 0.66 s, which kept a turn's last word in 5 of 40 chunk
-    # alignments; 1.2 s in 38, 1.5 s in all 40
-    TAIL = np.zeros(int(1.5 * RATE), np.float32)
-
-    def __init__(self, r):
-        self.r, self.s, self.text, self.audio = r, r.create_stream(), "", []
-
-    def decode(self):
-        while self.r.is_ready(self.s):
-            self.r.decode_stream(self.s)
-        return self.r.get_result(self.s).strip()
-
-    def feed(self, pcm):
-        self.s.accept_waveform(RATE, pcm)
-        self.audio.append(pcm)
-        text = self.decode()
-        if text != self.text:
-            self.text = text
-            return text
-
-    def finish(self):
-        self.s.accept_waveform(RATE, self.TAIL)
-        self.s.input_finished()
-        return self.decode()
-
-    def peek(self, seconds=None):
-        """A chunk's words come out of the stream only once the chunk is whole (kroko: every 1.28 s): the audio decoded
-        again in a stream of its own, flushed at once, has them now."""
-        x = np.concatenate(self.audio) if self.audio else np.zeros(0, np.float32)
-        s = self.r.create_stream()
-        s.accept_waveform(RATE, x[-int(seconds * RATE):] if seconds else x)
-        s.accept_waveform(RATE, self.TAIL)
-        s.input_finished()
-        while self.r.is_ready(s):
-            self.r.decode_stream(s)
-        return self.r.get_result(s).strip()
+    def stream(self, terms=""):
+        return ParakeetStream(self, terms)
 
 
-@part("stt", "kroko")
-class Kroko(Streaming):
-    label, DIR, FILES = "Kroko streaming (English)", "kroko", ("encoder.onnx", "decoder.onnx", "joiner.onnx", "tokens.txt")
-
-
-@part("stt", "nemotron")
-class Nemotron(Streaming):
-    label, DIR = "Nemotron streaming 0.6B (English)", "nemotron"
-    FILES = ("encoder.int8.onnx", "decoder.int8.onnx", "joiner.int8.onnx", "tokens.txt")
-
-
-class Offline:
-    """An offline sherpa-onnx model fed as a stream: Silero splits the speech at pauses and each finished piece is
-    decoded while the user goes on, so a turn's end leaves only its last piece; the pieces so far are the partial."""
-    PAUSE, LONGEST = int(0.3 * RATE), 9 * RATE        # Moonshine returns nothing past ~15 s
-
-    def __init__(self, threads):
-        self.r, self.vad = self.load(files(type(self))), Silero(1)
-
-    def stream(self):
-        return OfflineStream(self)
-
-
-class OfflineStream:
-    def __init__(self, m):
+class ParakeetStream:
+    def __init__(self, m, terms=""):
         self.m, self.vst, self.done, self.piece, self.spare = m, m.vad.state(), [], [], np.zeros(0, np.float32)
-        self.voiced, self.quiet, self.n = False, 0, 0
+        self.voiced, self.quiet, self.n, self.terms = False, 0, 0, terms
+        self.early = None                               # the piece's text, read once its speech stopped (EARLY)
+        self.told = ""
 
-    def text(self, pcm):
-        s = self.m.r.create_stream()
+    def read(self, pcm):
+        s = self.m.r.create_stream(self.terms) if self.terms else self.m.r.create_stream()
         s.accept_waveform(RATE, pcm)
         self.m.r.decode_stream(s)
         return s.result.text.strip()
 
     def decode(self):
-        if self.voiced and self.piece and (text := self.text(np.concatenate(self.piece))):
+        text = self.early if self.early is not None else self.read(np.concatenate(self.piece)) if self.voiced and self.piece else ""
+        if self.voiced and text:
             self.done.append(text)
-        self.piece, self.voiced, self.quiet, self.n = [], False, 0, 0
+        self.piece, self.voiced, self.quiet, self.n, self.early = [], False, 0, 0, None
 
     def feed(self, pcm):
-        before, x = len(self.done), np.concatenate([self.spare, pcm])
+        x = np.concatenate([self.spare, pcm])
         F = Silero.FRAME
         for i in range(0, len(x) - F + 1, F):
             f = x[i:i + F]
             self.piece.append(f)
             self.n += F
             if self.m.vad.prob(self.vst, f) >= 0.5:
-                self.voiced, self.quiet = True, 0
+                self.voiced, self.quiet, self.early = True, 0, None
             else:
                 self.quiet += F
+            if self.voiced and self.early is None and self.quiet >= self.m.EARLY:
+                self.early = self.read(np.concatenate(self.piece))
             if (self.voiced and self.quiet >= self.m.PAUSE) or self.n >= self.m.LONGEST:
                 self.decode()
         self.spare = x[len(x) - len(x) % F:]
-        if len(self.done) > before:
-            return " ".join(self.done)
+        now = " ".join(self.done + ([self.early] if self.early else []))
+        if now != self.told:
+            self.told = now
+            return now
 
     def finish(self):
         if self.spare.size:
@@ -202,37 +213,14 @@ class OfflineStream:
         return " ".join(self.done)
 
     def peek(self, seconds=None):
-        """The piece under way decoded now (its words otherwise wait for the next pause), after the pieces so far."""
+        """The piece under way read now (its words otherwise wait for its pause), after the pieces so far; with
+        seconds, only that much of it."""
         x = np.concatenate(self.piece) if self.voiced and self.piece else np.zeros(0, np.float32)
-        now = self.text(x[-int(seconds * RATE):] if seconds else x) if x.size else ""
+        if self.early is not None and not seconds:
+            now = self.early
+        else:
+            now = self.read(x[-int(seconds * RATE):] if seconds else x) if x.size else ""
         return " ".join(([] if seconds else self.done) + ([now] if now else []))
-
-
-@part("stt", "parakeet-110m")
-class Parakeet110m(Offline):
-    label, DIR = "Parakeet 110M (English)", "parakeet-110m"
-    FILES = ("encoder.int8.onnx", "decoder.int8.onnx", "joiner.int8.onnx", "tokens.txt")
-
-    def load(self, paths):
-        import sherpa_onnx
-        enc, dec, join, tokens = paths
-        return sherpa_onnx.OfflineRecognizer.from_transducer(encoder=enc, decoder=dec, joiner=join, tokens=tokens,
-                                                             num_threads=1, model_type="nemo_transducer")
-
-
-@part("stt", "parakeet-v3")
-class ParakeetV3(Parakeet110m):
-    label, DIR = "Parakeet v3 0.6B (25 languages)", "parakeet-v3"
-
-
-@part("stt", "moonshine-base")
-class MoonshineBase(Offline):
-    label, DIR, FILES = "Moonshine base (English)", "moonshine-base", ("encoder_model.ort", "decoder_model_merged.ort", "tokens.txt")
-
-    def load(self, paths):
-        import sherpa_onnx
-        enc, dec, tokens = paths
-        return sherpa_onnx.OfflineRecognizer.from_moonshine_v2(encoder=enc, decoder=dec, tokens=tokens, num_threads=1)
 
 
 def mel_filters(n_mels=80, n_fft=400, sr=RATE):
@@ -385,7 +373,7 @@ class Pocket(SherpaTts):
         g.num_steps = self.STEPS
 
 
-DEFAULTS = {"vad": "silero", "stt": "kroko", "turn": "smart-turn", "tts": "kokoro"}
+DEFAULTS = {"vad": "silero", "stt": "parakeet-110m", "turn": "smart-turn", "tts": "kokoro"}
 
 
 class Library:
