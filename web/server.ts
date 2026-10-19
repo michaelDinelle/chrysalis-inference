@@ -122,7 +122,8 @@ function startJob(body: string): Job {
         messages = [...messages, assistantTurn(out.content, out.reasoning, out.calls), ...out.calls.map((c, i) => toolTurn(c.id, results[i]))];
       }
     } catch (e) {
-      push(job.ctrl.signal.aborted ? { stopped: true } : { error: { message: e instanceof KilnDown || !(e instanceof Error) ? "kiln is not running" : e.message } });
+      if (!job.ctrl.signal.aborted && !(e instanceof KilnDown)) console.error(`kiln web: reply ${job.id} failed:`, e);
+      push(job.ctrl.signal.aborted ? { stopped: true } : { error: { message: e instanceof KilnDown ? "kiln is not running" : e instanceof Error ? e.message : String(e) } });
     } finally {
       push({ timing: { start: job.t0, first: job.tFirst, answer: job.tAnswer, last: job.tLast, gen: job.gen } });
       push("[DONE]");
@@ -147,6 +148,8 @@ async function asSent(raw: any) {
 }
 
 class KilnDown extends Error {}
+// kiln took the request and its answer broke off (its log says why: an exception in kiln drops the connection)
+class KilnBroke extends Error { message = "kiln's reply broke off (kiln's log has why)"; }
 // One request to kiln, its events passed on as they come: what it wrote, and the tool calls it ended with.
 async function round(job: Job, body: string, push: (d: string | object) => void, signal = job.ctrl.signal) {
   const r = await fetch(`${KILN}/v1/chat/completions`, {
@@ -162,7 +165,7 @@ async function round(job: Job, body: string, push: (d: string | object) => void,
   let buf = "";
   try {
     for (;;) {
-      const { value, done } = await reader.read();
+      const { value, done } = await reader.read().catch((e) => { throw signal.aborted ? e : new KilnBroke(); });
       if (done) break;
       buf += decoder.decode(value, { stream: true });
       for (let end = buf.indexOf("\n\n"); end >= 0; end = buf.indexOf("\n\n")) {
@@ -191,8 +194,6 @@ async function round(job: Job, body: string, push: (d: string | object) => void,
         push(data);
       }
     }
-  } catch (e) {
-    throw signal.aborted ? e : new KilnDown();
   } finally {
     if (first && last) job.gen += last - first;
   }

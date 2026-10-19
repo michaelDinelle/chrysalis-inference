@@ -260,7 +260,8 @@ How it behaves, and why:
   it holds two whole words the reply did not say (or one like "wait" or "stop"): then it interrupts (~0.9 s after you
   start talking) and the turn is what you said. Once 2 s of a reply have played without the VAD hearing it
   (headphones, or the browser's echo cancellation), the mic is taken not to carry it, and 0.26 s of speech over a
-  reply stops it (~0.4 s), until an echo shows otherwise.
+  reply stops it (~0.4 s). Echo cancellation lets a reply through now and then (a Mac's speakers): a leak puts it
+  back on words only until 2 s of a reply play unheard again (~0.44 s after a leak, ~0.87 s when a leak was for good).
 - Opening voice mode has kiln read the chat with the voice prompt (one token): the prompt replaces the system prompt,
   and Flash-Next's first request after a while idle took 1.7-3.3 s to its first token.
 

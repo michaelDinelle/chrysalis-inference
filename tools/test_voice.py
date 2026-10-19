@@ -263,6 +263,23 @@ check("a quiet mic: talking over the reply stops it at once", stopped < 0.5, f"{
 ws.send(json.dumps({"type": "playback", "playing": False}))
 t = next((m for m in events(lambda m: kind(m) == "turn", 10) if kind(m) == "turn"), {})
 check("and the words are the turn", "coffee" in t.get("text", "").lower(), repr(t.get("text")))
+# Echo cancellation lets a reply through now and then: the leak puts barge-in back on words, and 2 s of a reply playing
+# unheard after it puts it back on the voice
+leak = "Coffee reached Europe through Venice, and coffee houses opened in Oxford and London soon after. "
+ws.send(json.dumps({"type": "say", "id": "q2", "text": leak}))
+ws.send(json.dumps({"type": "say_end", "id": "q2"}))
+echo = np.concatenate([to16k(m[1], m[0]["rate"]) for m in events(lambda m: kind(m) == "said", 30) if kind(m) == "audio"])
+ws.send(json.dumps({"type": "playback", "playing": True}))
+stream(0.5 * echo, tail=1.0, live=True)
+heard_leak = [kind(m) for m in events(lambda m: False, 1.5)]
+stream(np.zeros(int(2.5 * 16000), np.float32), tail=0.0, live=True)
+over_at = stream(say("Hold on, what about tea?", "bf_emma"), tail=1.0, live=True)
+got = events(lambda m: kind(m) == "interrupt", 10)
+stopped = next((arrived[id(m)] - over_at for m in got if kind(m) == "interrupt"), float("inf"))
+check("a leak of the reply, then 2 s unheard: talking over it stops it at once", "interrupt" not in heard_leak and stopped < 0.5,
+      f"{stopped:.2f} s after the voice starts")
+ws.send(json.dumps({"type": "playback", "playing": False}))
+events(lambda m: kind(m) == "turn", 10)
 
 # A sentence the turn model hears as unfinished: the turn waits out the longest silence, its words go out at the pause
 # before it (a reply begins on them) and are the turn's, as sent; speech that goes on after the pause is one turn. A

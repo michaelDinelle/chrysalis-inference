@@ -46,11 +46,13 @@ class Listener:
     turn model's yes at a pause (or LONGEST_SILENCE of it); the STT fed throughout. A turn that starts while a reply
     plays (or within ECHO_TAIL of it) is presumed to be the reply coming back through the speakers: it says nothing
     until it holds words that are not the reply's (two, or one of STOP_WORDS), and then it is the user talking over it.
-    Once CLEAN of a reply has played without the VAD hearing it, and until an echo turn shows otherwise, the mic is
-    taken not to carry the reply: speech over it is the user's, and stops it after BARGE frames."""
+    Once CLEAN of a reply has played without the VAD hearing it since the mic last carried the reply, the mic is taken
+    not to carry it: speech over it is the user's, and stops it after BARGE frames. Echo cancellation lets a reply
+    through now and then (a Mac's speakers), so a leak only puts barge-in back on words until CLEAN plays unheard again.
+    """
 
     def __init__(self, talk):
-        self.talk, self.played, self.echoey = talk, 0, False
+        self.talk, self.played = talk, 0         # samples of reply played unheard since the mic last carried one
 
     def use(self, vad, stt, turn):
         """New parts (a session's first, or a switch): the turn under way, if any, is dropped."""
@@ -87,9 +89,10 @@ class Listener:
             if self.barge >= BARGE:
                 self.barge, heard = None, self.stream.peek().split()
                 if heard and not self.novel(heard):         # the reply after all (louder than it was): the mic carries it
-                    self.echoey, self.own = True, None
+                    self.carries()
+                    self.own = None
                 else:
-                    self.interrupt(out)
+                    self.interrupt(out, "the mic clear of the reply: its voiced frames")
         if (text := self.stream.feed(f)) is not None:
             self.heard(text, out, settled=True)
         elif self.since >= PEEK and voiced:          # a look (~0.08 s at 3 s) in the silence would hold up its turn
@@ -115,7 +118,7 @@ class Listener:
     def start(self, out):
         t = self.talk
         over = t.playing or time.monotonic() < t.echo_until
-        clean = over and not self.echoey and self.played >= CLEAN
+        clean = over and self.played >= CLEAN
         self.own = None if over and not clean else 0                      # where the user's own words begin
         self.broke, self.since, self.shown, self.barge = False, 0, [], 0 if clean else None
         self.stream, self.audio = self.stt.stream(t.terms), collections.deque(self.before, maxlen=self.keep)
@@ -134,10 +137,18 @@ class Listener:
         return [i for i, w in enumerate(map(norm, tokens))
                 if w and w not in echo and not (len(w) >= 4 and any(near(w, e) for e in long))]
 
-    def interrupt(self, out):
+    def carries(self):
+        """The mic carries the reply: talking over it takes words of the user's own until CLEAN plays unheard."""
+        if self.played >= CLEAN:
+            print("voice: the mic carries the reply: talking over it takes words, until 2 s of a reply play unheard",
+                  file=sys.stderr, flush=True)
+        self.played = 0
+
+    def interrupt(self, out, how):
         if not self.broke:
             self.broke = True
             out.append({"type": "interrupt"})
+            print(f"voice: talked over the reply ({how})", file=sys.stderr, flush=True)
 
     def look(self, out):
         """The turn's words now rather than at the STT's next pause: live partials, and a barge-in heard in time."""
@@ -160,11 +171,11 @@ class Listener:
             if not (len(new) >= 2 or any(norm(tokens[i]) in STOP_WORDS for i in new)):
                 return
             self.own = new[0]
-            self.interrupt(out)
+            self.interrupt(out, "over its echo: words not the reply's")
             if self.talking:
                 out.append({"type": "speech", "on": True})
         elif self.talk.awaiting:                    # talking again before the reply to the last turn is heard
-            self.interrupt(out)
+            self.interrupt(out, "before it was heard")
         mine = tokens[self.own:]
         # a look runs ahead of the stream: the stream's text catching up (a part of what was shown) is not news
         if mine and not (len(mine) < len(self.shown) and [norm(w) for w in mine] == [norm(w) for w in self.shown[:len(mine)]]):
@@ -190,8 +201,12 @@ class Listener:
             # said something of their own (three letters at least: not a stray "a" the STT made of the room)
             own = [] if self.talk.playing else [i for i in self.novel(tokens) if len(norm(tokens[i])) >= 3]
             self.own = own[0] if own else len(tokens)
-            self.echoey |= not own and any(w for w in map(norm, tokens))
+            if not own and any(w for w in map(norm, tokens)):
+                self.carries()
         mine = " ".join(tokens[self.own:])
+        if not echo and not any(c.isalnum() for c in mine):   # speech the STT made nothing of: how loud it reached us
+            peak = float(np.abs(np.concatenate(self.audio)).max()) if self.audio else 0.0
+            print(f"voice: speech with no words in it, peak {20 * np.log10(max(peak, 1e-6)):.0f} dBFS", file=sys.stderr, flush=True)
         self.reset()
         if any(c.isalnum() for c in mine):
             out.append({"type": "turn", "text": mine, "wait_ms": round(wait * 1000)})
@@ -311,6 +326,7 @@ class Talk:
         self.names, self.parts, self.voice, self.speed, self.preview = {}, {}, None, 1.0, 0
         self.playing, self.echo_until, self.awaiting, self.muted = False, 0.0, False, False
         self.terms = ""                             # the conversation's, for the next turn's speech recognition
+        self.opened, self.heard_any = time.monotonic(), False
         self.reply, self.gone, self.dead = None, (frozenset(), 0.0), set()
         self.listener, self.audio = Listener(self), asyncio.Queue()
         self.listen_task = asyncio.create_task(self.listening())
@@ -350,6 +366,10 @@ class Talk:
                     trim()
 
     def hear(self, data):
+        if not self.heard_any:                      # a page whose microphone is held back (a suspended audio context) shows here
+            self.heard_any = True
+            print(f"voice: microphone audio {round((time.monotonic() - self.opened) * 1000)} ms after the page connected",
+                  file=sys.stderr, flush=True)
         if not self.muted:
             self.audio.put_nowait(np.frombuffer(data, "<i2").astype(np.float32) / 32768)
 

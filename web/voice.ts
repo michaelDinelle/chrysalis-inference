@@ -84,18 +84,22 @@ export class VoiceClient {
     };
     ws.onmessage = (e) => (typeof e.data === "string" ? this.event(JSON.parse(e.data)) : this.chunk(e.data));
     ws.onclose = () => { if (!this.shut) this.on.closed?.(); };
+    // The microphone's context is made now, in the click that opened voice mode: where audio starts only from a click
+    // (Safari) one made after the wait for the microphone may start suspended. Its worklet loads meanwhile.
+    let ctx = (this.mic = new AudioContext({ sampleRate: 16000, latencyHint: "interactive" })), src: MediaStreamAudioSourceNode;
+    let worklet = ctx.audioWorklet.addModule("/voice-worklet.js");
+    void ctx.resume();
     this.stream = await navigator.mediaDevices.getUserMedia({ audio: { echoCancellation: true, noiseSuppression: true, autoGainControl: true, channelCount: 1 } });
     if (this.shut) return this.release();
-    let ctx = new AudioContext({ sampleRate: 16000, latencyHint: "interactive" }), src: MediaStreamAudioSourceNode;
     try {
       src = ctx.createMediaStreamSource(this.stream);
     } catch {                                       // Firefox: the microphone only at the device's rate; the worklet resamples
       void ctx.close();
-      ctx = new AudioContext({ latencyHint: "interactive" });
+      ctx = this.mic = new AudioContext({ latencyHint: "interactive" });
+      worklet = ctx.audioWorklet.addModule("/voice-worklet.js");
       src = ctx.createMediaStreamSource(this.stream);
     }
-    this.mic = ctx;
-    await ctx.audioWorklet.addModule("/voice-worklet.js");
+    await worklet;
     const node = new AudioWorkletNode(ctx, "kiln-capture"), sink = ctx.createGain();
     sink.gain.value = 0;                            // a worklet runs only on a path to the destination; it is silent
     this.micLevel = ctx.createAnalyser();

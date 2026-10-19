@@ -18,7 +18,7 @@ let kilnAborted = 0;
 // a line that makes the message unique. Each round is told by the assistant turns the request already holds; every
 // request a script gets is kept.
 // A voice reply's rounds also say the calls kiln makes when held to the tools' grammar (forced).
-interface Round { calls?: { name: string; args: string }[]; text?: string; gap?: number; forced?: { name: string; args: string }[] }
+interface Round { calls?: { name: string; args: string }[]; text?: string; gap?: number; forced?: { name: string; args: string }[]; broken?: boolean }
 const seen = new Map<string, any[]>();
 const enc = new TextEncoder();
 const sse = (o: unknown) => enc.encode(`data: ${typeof o === "string" ? o : JSON.stringify(o)}\n\n`);
@@ -48,6 +48,7 @@ const fake = Bun.serve({
       return new Response(new ReadableStream({
         async pull(ctl) {
           await Bun.sleep(r.gap ?? 2);
+          if (r.broken && i === chunks.length - 1) return ctl.error(new Error("kiln dropped the connection"));   // as an exception in kiln does
           if (i < chunks.length) ctl.enqueue(sse({ choices: [chunks[i++]] }));
           else {
             ctl.enqueue(sse({ choices: [], usage: { prompt_tokens: 100 + k, completion_tokens: 10 } }));
@@ -572,6 +573,12 @@ test("on the network (KILN_HOST 0.0.0.0): this machine keeps plain HTTP; each ad
   } finally {
     proc.kill();
   }
+});
+
+test("a reply whose stream from kiln breaks off says so, rather than that kiln is not running", async () => {
+  const got = await collect(await ask([{ text: "Half of it", broken: true }]).res);
+  expect(contents(got)).toEqual(["Half of it"]);
+  expect(got.filter((e) => e.error).map((e) => e.error.message)).toEqual(["kiln's reply broke off (kiln's log has why)"]);
 });
 
 // Voice turns (kiln_voice): the page's check beside the chat says whether a tool is needed (kiln_voice.tool); the fake
