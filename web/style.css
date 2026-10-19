@@ -587,10 +587,9 @@ main { position: relative; }
 .msg.ghost .bubble::after { content: ""; display: inline-block; width: 6px; height: 6px; margin-left: 6px; border-radius: 50%; background: var(--accent); vertical-align: middle; animation: pulse 1.2s ease-in-out infinite; }
 .said { display: inline-grid; place-items: center; width: 22px; height: 28px; color: var(--faint); }
 .said .i { width: 13px; height: 13px; }
-.voice-choice, .voice-think { grid-template-columns: 84px minmax(0, 1fr) 22px; }
+.voice-choice { grid-template-columns: 84px minmax(0, 1fr) 22px; }
 .voice-select { min-width: 0; height: 26px; padding: 0 6px; border: 1px solid var(--line); border-radius: 7px; background: var(--bg); color: var(--text); font: 12.5px var(--sans); }
 .voice-choice.custom .voice-select { border-color: color-mix(in srgb, var(--accent) 45%, var(--line)); color: var(--accent-hi); }
-.voice-think .segmented { justify-self: start; }
 @media (max-width: 639px) { #composer.voicing .hint { display: block; } .voice-pick-model { display: none; } }
 @media (prefers-reduced-motion: reduce) { .msg.ghost .bubble::after { animation: none; } }
 

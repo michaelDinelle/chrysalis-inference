@@ -51,9 +51,9 @@ interface Settings {
   system: string; think: Sampler; fast: Sampler; max_tokens?: number; seed?: number; allow?: string[]; fetchChars?: number; voice?: VoiceSettings;
 }
 // Voice mode's, every one of them (Settings and the dock's voice picker both show these): the voice model (a name from
-// the service's catalog), the voice (an id of that voice model's), its speed, what its replies are told instead of the
-// system prompt, and their thinking. Left unset: what the service runs when it is not told.
-interface VoiceSettings { tts?: string; name?: string; speed?: number; prompt?: string; effort?: Effort }
+// the service's catalog), the voice (an id of that voice model's), its speed, and what its replies are told instead of
+// the system prompt. Left unset: what the service runs when it is not told. They think as the chat's bar says.
+interface VoiceSettings { tts?: string; name?: string; speed?: number; prompt?: string }
 // The tool sources server.ts offers (tools.ts catalog()).
 interface ToolInfo { fn: string; name: string; title: string; description: string; readOnly: boolean }
 interface SourceInfo { id: string; label: string; kind: "fetch" | "mcp"; detail: string; state: "idle" | "connecting" | "connected" | "failed" | "disabled"; error?: string; tools: ToolInfo[] }
@@ -1668,7 +1668,6 @@ function noteFor(c: Conversation, said: boolean): string | undefined {
   const last = users.findLast((m) => m.note && m.voice)?.note, note = voiceNote(c);
   return note && (!prev?.voice || last !== note) ? note : undefined;
 }
-const voiceEffort = (): Effort => settings.voice?.effort ?? "off";
 // The conversation as speech recognition is told it, to listen for its names (voice/parts.py, terms): the model's name
 // (one the user says), the system prompt, and the chat's last few thousand characters.
 function tellVoice(v: VoiceMode) {
@@ -1842,7 +1841,7 @@ function questionFor(v: VoiceMode, text: string): { text: string; on?: Message }
 
 function startAhead(v: VoiceMode, text: string, on?: Message): Ahead {
   const c = v.c, known = knownFor(v, text), fixed = applyFixes(text, known?.fixes ?? []), tool = known?.tool ?? false;
-  const effort = voiceEffort(), mode: Mode = effort === "off" ? "fast" : "think";
+  const effort = v.c.effort, mode: Mode = effort === "off" ? "fast" : "think";
   const note = on ? undefined : noteFor(c, true);
   const q: Message = on ?? { role: "user", content: fixed.text, voice: true, ...(note ? { note } : {}) };
   const sent = { ...q, content: fixed.text }, upto = on ? c.messages.map((x) => (x === on ? sent : x)) : [...c.messages, sent];
@@ -1987,7 +1986,7 @@ async function answerLater(v: VoiceMode, text: string, on?: Message) {
     if (c === conv) render();
     return;
   }
-  const effort = voiceEffort(), mode: Mode = effort === "off" ? "fast" : "think";
+  const effort = v.c.effort, mode: Mode = effort === "off" ? "fast" : "think";
   const m: Message = { id: randomId(), role: "assistant", content: "", reasoning: "", effort, params: changed(mode) || undefined };
   const upto = [...c.messages];
   branch(c, c.messages.length, m);
@@ -2000,7 +1999,7 @@ async function answerLater(v: VoiceMode, text: string, on?: Message) {
 // (Flash-Next: 1.7-3.3 s to the first token where 0.07-0.25 s warm), so the first turn would wait for both. One token,
 // through the same job path as a reply (tools and all, so the prompt is the turn's own), and nothing is kept of it.
 async function warmVoice(v: VoiceMode) {
-  const effort = voiceEffort();
+  const effort = v.c.effort;
   await ensureOnline({ stopping: false }).catch(() => {});
   if (voice !== v || running(v.c)) return;
   // kiln wants a question to answer: a new chat's stands in for the one to come (its snapshot ends with the prompt)
@@ -2891,17 +2890,11 @@ function buildControls() {
   });
 }
 
-// The thinking bar sets what the next reply thinks with: in voice mode, voice mode's own setting (Settings, Voice mode),
-// which its replies use whatever the chat's is.
-const barEffort = (): Effort => (voice ? voiceEffort() : conv.effort);
+// The thinking bar sets what the chat's next reply thinks with, spoken or written.
+const barEffort = (): Effort => conv.effort;
 function setEffort(i: number) {
   const e = EFFORTS[Math.min(3, Math.max(0, i))];
   if (e === barEffort()) return;
-  if (voice) {
-    setVoice({ effort: e === "off" ? undefined : e });
-    saveSettings();
-    return renderComposer();
-  }
   conv.effort = e;
   setPref("effort", e);
   renderComposer();
@@ -3199,7 +3192,7 @@ function renderControls() {
   energy.style.setProperty("--v", String(at));
   energy.setAttribute("aria-valuenow", String(at));
   energy.setAttribute("aria-valuetext", LEVEL[effort][0]);
-  energy.title = `${voice ? "Thinking in voice mode" : "Thinking"}: ${LEVEL[effort][0]}`;
+  energy.title = `Thinking: ${LEVEL[effort][0]}`;
   energy.querySelectorAll(".energy-dot").forEach((d, k) => d.classList.toggle("lit", at > 0 && k <= at));   // the stops inside the fill
   $("energy-stops").dataset.heat = HEAT[at];
   $("energy-stops").querySelectorAll("button").forEach((b, k) => b.classList.toggle("on", k === at));
@@ -3649,21 +3642,7 @@ function buildSettings() {
     fmt: (v) => `${v.toFixed(2)}×`, get: () => settings.voice?.speed ?? 1, rec: () => 1, custom: () => settings.voice?.speed !== undefined,
     set: (v) => setVoice({ speed: v }), pos: (v) => (v - 0.5) / 1.5, val: (p) => 0.5 + p * 1.5,
   });
-  const think = h("div", "knob voice-think"), thinkModes = h("div", "segmented");
-  think.title = "Thinking in voice mode: off speaks at once; any other level waits for the thinking before the first word.";
-  think.append(h("label", "", "Thinking"), thinkModes);
-  for (const e of EFFORTS) {
-    const b = h("button", "", LEVEL[e][0]);
-    b.type = "button";
-    b.setAttribute("role", "radio");
-    b.onclick = () => { setVoice({ effort: e === "off" ? undefined : e }); saveSettings(); renderComposer(); };   // the bar shows it in voice mode
-    thinkModes.append(b);
-  }
-  knobs.push(() => {
-    think.classList.toggle("custom", settings.voice?.effort !== undefined);
-    thinkModes.querySelectorAll("button").forEach((b, i) => b.setAttribute("aria-checked", String(EFFORTS[i] === voiceEffort())));
-  });
-  $("voice-knobs").replaceChildren(pick.row, speed, think);
+  $("voice-knobs").replaceChildren(pick.row, speed);
 
   $("tools-reload").onclick = () => void loadCatalog({ reload: true }).then(() => toast(catalog?.error ? "The config file has an error (shown under Tools)"
     : `Config read: ${catalog?.sources.filter((s) => s.kind === "mcp").length ?? 0} MCP server(s)`));
@@ -3712,7 +3691,7 @@ function buildSettings() {
 // system prompt after them, then every message as sent, notes included. A file shows as what it is and its size, not
 // its data.
 async function showSent() {
-  const c = conv, said = voice?.c === c, effort = said ? voiceEffort() : c.effort;
+  const c = conv, said = voice?.c === c, effort = c.effort;
   await filesReady(c.messages);
   const body = request(c, [...c.messages], { effort, ...(said ? { route: true, ...(effort === "off" ? { extra: { kiln_voice: true } } : {}) } : {}) });
   const res = await fetch("/api/preview", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body) }).catch(() => null);

@@ -511,12 +511,13 @@ test("voice mode: what is said shows as it is said, becomes the question, and th
   expect([check?.temperature, check?.stream, check?.model, check?.messages.length]).toEqual([0, undefined, "qwen3.8-27b-fast", 2]);
   // the words checked are those speech recognition settled ("hello" was a look's, as it was said)
   expect(checks.slice(c0).map((b) => b.messages.at(-1).content)).toEqual(["Transcript: hello there"]);
-  expect(lastStream.model).toBe("qwen3.8-27b-fast");
-  expect(lastStream.reasoning_effort).toBeUndefined();
+  // it thinks as the chat's bar says (a new chat's: Max)
+  expect(await page.$eval("#energy", (e) => e.getAttribute("aria-valuetext"))).toBe("Max");
+  expect([lastStream.model, lastStream.reasoning_effort]).toEqual(["qwen3.8-27b", "xhigh"]);
   // opening voice mode had kiln read the chat first (a new one's question stands in), so the first turn is an append
   const mine = streams.slice(n0), warm = mine.findIndex((b) => b.max_tokens === 1);
   expect(mine[warm]?.messages).toEqual([{ role: "user", content: "Hi" }]);
-  expect(mine[warm]?.model).toBe("qwen3.8-27b-fast");
+  expect(mine[warm]?.model).toBe(lastStream.model);                 // as the reply it reads ahead for
   expect(warm).toBeLessThan(mine.findIndex((b) => sent(b).at(-1)?.content.endsWith("hello there")));
   expect(await replyText(page, 1)).toBe("You said: hello there");
   expect(await page.$eval('#thread > article[data-i="0"] .msg-note summary', (e) => e.textContent)).toBe("Voice mode note");
@@ -831,19 +832,16 @@ test("voice mode: the words are checked while they are said: in a pause they tur
   await page.close();
 }, 30_000);
 
-test("voice mode: the thinking bar shows and sets voice mode's own thinking, and the chat's comes back when it ends", async () => {
+test("voice mode: the thinking bar is the chat's, one setting for spoken and written replies", async () => {
   const { page } = await voicePage("silent");
   const bar = () => page.$eval("#energy", (e) => [e.getAttribute("aria-valuetext"), (e as HTMLElement).title]);
-  expect(await bar()).toEqual(["Off", "Thinking in voice mode: Off"]);
+  expect(await bar()).toEqual(["Max", "Thinking: Max"]);
   await page.focus("#energy");
-  await page.keyboard.press("ArrowRight");
-  expect(await bar()).toEqual(["Low", "Thinking in voice mode: Low"]);
+  await page.keyboard.press("ArrowLeft");
+  expect(await bar()).toEqual(["Medium", "Thinking: Medium"]);
   await openSettings(page);
-  const checked = () => page.$eval('.voice-think [aria-checked="true"]', (e) => e.textContent);
-  expect(await checked()).toBe("Low");
-  await page.$$eval(".voice-think button", (bs) => (bs as HTMLButtonElement[]).find((b) => b.textContent === "Medium")!.click());
-  expect(await bar()).toEqual(["Medium", "Thinking in voice mode: Medium"]);
+  expect(await page.$(".voice-think")).toBeNull();                // no thinking of voice mode's own
   await page.click("#send");                                    // ■: ends voice mode
-  expect((await bar())[1]).toMatch(/^Thinking: /);
+  expect(await bar()).toEqual(["Medium", "Thinking: Medium"]);
   await page.close();
 }, 30_000);

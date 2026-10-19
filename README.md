@@ -185,11 +185,11 @@ deleted when a kiln page next loads. Development: `cd web && bun run dev` (hot r
 
 The wave beside Send talks with the chat's model. The message box stays (typing still works): its row gains a pill whose
 dots move with your voice and then kiln's (its mic mutes), the voice beside it opens the voices, and Send becomes ■,
-which ends voice mode; the thinking bar sets voice mode's own thinking (Off by default). Your words show in the chat as
-you say them, grey, and turn their own color as they are checked, with the misheard ones fixed and underlined (what was
-heard on hover); a pause ends your turn. The reply is spoken as it is written, except code blocks and tables, which are
-shown and not read, and talking over it stops it. Both sides are ordinary messages (a question said aloud is marked so),
-and a reply talked over keeps only what was heard of it, which is also what the model is told it said.
+which ends voice mode; voice replies think as the chat's thinking bar says (Off speaks at once). Your words show in the
+chat as you say them, grey, and turn their own color as they are checked, with the misheard ones fixed and underlined
+(what was heard on hover); a pause ends your turn. The reply is spoken as it is written, except code blocks and tables,
+which are shown and not read, and talking over it stops it. Both sides are ordinary messages (a question said aloud is
+marked so), and a reply talked over keeps only what was heard of it, which is also what the model is told it said.
 
 The model is told about voice mode in a note on the first question said aloud (again when the note changes; another on
 the first typed message after it), never in the system prompt, so voice mode does not make a chat read its history
@@ -230,11 +230,10 @@ capitals inside or digits and the words the system's dictionary lacks, which the
 search, 8 at best) and the terms in 89% (45% without), and never heard a term that was not said beside its sound-alikes
 ("When will the game", "My friend Jason"; at a higher score it heard "Qwen will the game"); Qwen3-ASR 0.6B, told the
 terms, heard 95% of them in 2.8 GB and 2 s chunks. Kokoro has UTMOS 4.48, the best of the small voices. Settings is the
-one place the choices live (voice model, voice, speed, the voice prompt, thinking), and the voice picker in the dock is
-a view of the same values: it lists the service's voice models (those not installed dimmed, with how to fetch them) and
-their voices by language and gender, each with a play button for a sample; a pick applies from the next sentence. The
-service keeps no preferences: it lists what it has and loads what a session asks for, so a session switches voices
-mid-call.
+one place the choices live (voice model, voice, speed, the voice prompt), and the voice picker in the dock is a view of
+the same values: it lists the service's voice models (those not installed dimmed, with how to fetch them) and their
+voices by language and gender, each with a play button for a sample; a pick applies from the next sentence. The service
+keeps no preferences: it lists what it has and loads what a session asks for, so a session switches voices mid-call.
 
 The page and the service speak one protocol over a WebSocket (`/api/voice`, which the web server proxies as it is and
 refuses from any other origin: WebSockets skip CORS), so any other stack can stand in for this one (`KILN_VOICE_CMD`, a
