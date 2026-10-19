@@ -3,7 +3,7 @@
 The two run different weights (kiln-fn.gguf: Q6_K/Q8_0 dense, IQ4_XS experts in VRAM, Q3_K / Q2_K in RAM; llama.cpp:
 Q8_0), so the numbers are kiln's quantization error plus any implementation error: decode, prefill and mixed paths must
 agree with each other, and the KL should match the prediction (~0.017): a path fails past its MAX_KL or under
-MIN_TOP1. The cold experts' CPU / GPU split is fixed here (all of a prefill's on the CPU, gfrac 0.3 at decode, the expert
+MIN_TOP1, a prefill path also past SELF_KL from the decode path at the same positions. The cold experts' CPU / GPU split is fixed here (all of a prefill's on the CPU, gfrac 0.3 at decode, the expert
 pool as loaded): the load-time calibration and the pool would otherwise move it, and with it the rounding, so every run
 gives the same numbers. Then the pool moves (engine_fn/experts.cpp) and the paths run again under the same limits: once
 after a prose reply has pushed the text's experts out of VRAM (the file's VRAM-tier ones then computed by the CPU from
@@ -27,10 +27,15 @@ from kiln.models import MODELS  # noqa: E402
 
 MODEL = os.path.join(ROOT, "data/models/flash-next/kiln-fn.gguf")
 REF = os.path.join(ROOT, "data/models/flash-next/src/Q8_0/Qwen3.8-Flash-Next-Q8_0-00001-of-00006.gguf")
-# mean KL with this split (2026-10-17, the same every run): decode 0.0155, prefill 0.0063, mixed 0.0113. Quantization
-# sets most of it, so a broken kernel moves it less than on the 27B: a decode step that forgets twice as fast gives
-# 0.0284 and 0.0218
-MAX_KL, MIN_TOP1 = {"decode": 0.021, "prefill": 0.009, "mixed": 0.016}, 0.92
+# mean KL with this split (2026-10-18, the same every run with the pool as loaded): decode 0.0155, prefill 0.0119,
+# mixed 0.0108. Quantization sets most of it, so a broken kernel moves it less than on the 27B: a decode step that
+# forgets twice as fast gives 0.0284 and 0.0218. Once the pool has moved, each run's pool differs (it follows a sampled
+# reply) and computes the experts on other devices, so the numbers do too, each pool's the same every run (bit for bit):
+# decode 0.0142-0.0165, prefill 0.0108-0.0171. Prefill is judged over 52 prompt lengths (over 4 it went from 0.002 to
+# 0.015 on one position's rounding) and against kiln's own decode path at the same positions, which no pool moves far:
+# 0.0046-0.0077 (SELF_KL).
+MAX_KL, MIN_TOP1 = {"decode": 0.021, "prefill": 0.021, "mixed": 0.016}, 0.92
+SELF_KL = 0.012
 TEXT = '''<|im_start|>user
 Write a Python function that merges overlapping intervals.<|im_end|>
 <|im_start|>assistant
@@ -61,6 +66,7 @@ if arg("--text"):                            # another evaluation text, with its
 tok = Tokenizer.from_file(os.path.join(ROOT, "data/models/tokenizer.json"))
 ids = tok.encode(TEXT, add_special_tokens=False).ids
 n = len(ids)
+CUTS = range(12, n + 1, 3)  # prompt lengths of the prefill path (each a pass of over 8 tokens)
 out_dir = os.path.join(ROOT, "build_fn/cmp" + ("_" + arg("--tag") if arg("--tag") else ""))
 os.makedirs(out_dir, exist_ok=True)
 np.array(ids, dtype=np.int32).tofile(os.path.join(out_dir, "tokens.bin"))
@@ -99,7 +105,17 @@ def stats(name, pairs, max_kl):
 eng = Engine(MODEL, max_seqs=2, umax=MODELS["qwen3.8-flash-next"]["chunk"], lib=os.path.join(ROOT, "build/libkiln_fn.so"))
 eng.lib.kiln_tune.restype, eng.lib.kiln_tune.argtypes = C.c_double, [C.c_char_p, C.c_double]
 eng.lib.kiln_tune(b"split", 1); eng.lib.kiln_tune(b"gfrac", 0.3); eng.lib.kiln_tune(b"experts", 0)
-eng.lib.kiln_expert_stats.argtypes = [C.c_void_p]
+
+
+def against(name, pairs, decoded):
+    """Mean KL of a prefill path from kiln's decode path at the same positions."""
+    kls = []
+    for i, ours in pairs:
+        lp, lq = logsoftmax(decoded[i]), logsoftmax(ours)
+        kls.append(float((np.exp(lp) * (lp - lq)).sum()))
+    ok = np.mean(kls) <= SELF_KL
+    print(f"{name:28s} positions {len(pairs):4d}  mean KL {np.mean(kls):.5f} from the decode path  {'ok' if ok else 'FAIL'}", flush=True)
+    return ok
 
 
 def paths(tag):
@@ -109,25 +125,28 @@ def paths(tag):
         eng.prefill(s, [t])
         pairs.append((i, eng.last_logits()))
     bad = not stats(f"decode (T=1 per token){tag}", pairs, MAX_KL["decode"])
+    decoded = dict(pairs)
     eng.free_seq(s)
 
     pairs = []
-    for cut in (16, 64, n // 2, n):         # prefill path
+    for cut in CUTS:                        # prefill path
         s = eng.new_seq()
         eng.prefill(s, ids[:cut])
         pairs.append((cut - 1, eng.last_logits()))
         eng.free_seq(s)
     bad += not stats(f"prefill (one chunk){tag}", pairs, MAX_KL["prefill"])
+    bad += not against(f"prefill = decode{tag}", pairs, decoded)
     if tag:                                 # the cold experts staged on the GPU instead (the file's through pinned memory)
         eng.lib.kiln_tune(b"split", 0)
         pairs = []
-        for cut in (16, 64, n // 2, n):
+        for cut in CUTS:
             s = eng.new_seq()
             eng.prefill(s, ids[:cut])
             pairs.append((cut - 1, eng.last_logits()))
             eng.free_seq(s)
         eng.lib.kiln_tune(b"split", 1)
         bad += not stats(f"prefill, cold on the GPU{tag}", pairs, MAX_KL["prefill"])
+        bad += not against(f"prefill, cold on the GPU = decode{tag}", pairs, decoded)
 
     s = eng.new_seq()
     eng.prefill(s, ids[:40])
@@ -141,9 +160,8 @@ def paths(tag):
 
 
 def placed():
-    st = (C.c_int64 * 4)()
-    eng.lib.kiln_expert_stats(st)
-    return st[0], st[1]
+    x = eng.expert_stats()
+    return x["placed"], x["placed_from_file"]
 
 
 def move_pool(prompt, steps):

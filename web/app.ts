@@ -1,7 +1,7 @@
-// kiln web UI: chat with kiln's local models (Qwen3.8-27B, Qwen3.8-Flash-Next). Replies stream in with their reasoning and are rendered
-// as markdown with highlighted code; conversations live in this tab's sessionStorage (a reload keeps them,
-// closing the tab ends them). The settings (system prompt, sampling, reply length, seed), kept the same way, apply to
-// every conversation.
+// kiln web UI: chat with kiln's local models (Qwen3.8-27B, Qwen3.8-Flash-Next). Replies stream in with their reasoning and
+// tool calls and are rendered as markdown with highlighted code; conversations (every version of them) live in this tab's
+// sessionStorage (a reload keeps them, closing the tab ends them). The settings (system prompt, sampling, reply length,
+// seed, tools that run without asking), kept the same way, apply to every conversation.
 import DOMPurify from "dompurify";
 import hljs from "highlight.js/lib/common";
 import katex from "katex";
@@ -9,25 +9,46 @@ import "katex/dist/katex.min.css";
 import { marked, type Links, type Token } from "marked";
 import { type Attachment, KINDS, attach, dataUrl, fmtBytes, get as getFile, put as putFile, textBlock } from "./files";
 import { type Cand, type Odds, type SamplerKey, type Stage, dryRuns, sample } from "./sampler";
+import { type ToolChoice, type WireCall, assistantTurn, toolTurn } from "./wire";
 
 type Effort = "xhigh" | "medium" | "low" | "off";
-interface Stats { ttft: number; tps: number; tokens: number; prompt: number; cached: number; thought?: number; seed?: number; model?: string }
+// prompt and cached: summed over a reply's rounds; ctx: the context its last round left (prompt + reply)
+interface Stats { ttft: number; tps: number; tokens: number; prompt: number; cached: number; thought?: number; seed?: number; model?: string; ctx?: number }
+// A tool call as kiln wrote it (WireCall: its id and argument string, kept byte for byte), and what became of it.
+type CallState = "approval" | "running" | "done" | "failed" | "declined" | "stopped";
+interface Call extends WireCall { title?: string; source?: string; readOnly?: boolean; state?: CallState; result?: string; ms?: number }
+// A reply with tools is rounds: each but the last ended in tool calls, whose results the next one read.
+interface Round { content: string; reasoning?: string; calls: Call[] }
+// A conversation is a tree, kept as the path on screen: the first message of a stretch that has other versions holds
+// them, each with the rest of the conversation that followed it (and their own versions further down).
+interface Versions { shown: number; others: Message[][] }
 interface Message {
   id?: string; role: "user" | "assistant"; content: string; reasoning?: string; stats?: Stats; error?: string; stopped?: boolean; job?: string;
   params?: string;                                  // the sampling values that differed from the recommended ones
   effort?: Effort;                                  // the thinking setting it was written with (Continue keeps it)
   finish?: string; edited?: boolean;
   files?: Attachment[];                             // a user message's attached files (their contents: files.ts)
+  rounds?: Round[];                                 // a reply's earlier rounds; content, reasoning and calls are its last
+  calls?: Call[];
+  base?: number;                                    // rounds it had before its job began (a reload replays the job's)
+  notes?: string[];                                 // what the web server said about the reply (a tool left out, a limit)
+  versions?: Versions;
 }
-interface Conversation { id: string; title: string; named?: boolean; updated: number; effort: Effort; messages: Message[] }
+interface Conversation { id: string; title: string; named?: boolean; updated: number; effort: Effort; messages: Message[]; tools?: ToolChoice["tools"] }
 type Sampler = Partial<Record<SamplerKey, number>> & { order?: Stage[] };
 type Mode = "think" | "fast";                       // thinking on (Max, Medium, Low) or off: Qwen recommends other values
-// Only what differs from the recommended values is kept, so whatever is left alone follows them.
-interface Settings { system: string; think: Sampler; fast: Sampler; max_tokens?: number; seed?: number }
+// Only what differs from the recommended values is kept, so whatever is left alone follows them. allow: tools that run
+// without asking (by function name); fetchChars: how much of a page Fetch URL gives the model at a time.
+interface Settings { system: string; think: Sampler; fast: Sampler; max_tokens?: number; seed?: number; allow?: string[]; fetchChars?: number }
+// The tool sources server.ts offers (tools.ts catalog()).
+interface ToolInfo { fn: string; name: string; title: string; description: string; readOnly: boolean }
+interface SourceInfo { id: string; label: string; kind: "fetch" | "mcp"; detail: string; state: "idle" | "connecting" | "connected" | "failed" | "disabled"; error?: string; tools: ToolInfo[] }
+interface Catalog { config: string; error?: string; sources: SourceInfo[] }
 interface Status { state: "online" | "loading" | "offline"; build?: string; model?: string; loading?: string; progress?: number; context?: number; kv_tokens?: number; cache?: { free_kv_tokens: number } }
 interface View {
   el: HTMLElement; think: HTMLDetailsElement; summary: HTMLElement; thought: HTMLElement; body: HTMLElement; foot: HTMLElement; shown?: string; blocks?: Blocks;
   tok?: { reasoning: number; content: number };     // tokens drawn so far, shown as tokens
+  rounds: HTMLElement; calls: HTMLElement; notes: HTMLElement; roundsShown?: number;   // a reply's earlier rounds, its last round's calls
 }
 // A token of a reply, with the model's probability for it and its likeliest alternatives (log probs from kiln).
 interface Alt { t: string; p: number; id: number }
@@ -40,8 +61,8 @@ interface Run {
   conv: Conversation; m: Message; live: Live;
   at: number;                                       // events of the job seen so far
   stopping: boolean; gone?: boolean;                // Stop pressed; the chat was deleted
-  usage?: any; seed?: number; timing?: { start: number; first?: number; answer?: number; last?: number };
-  calls: string[];                                  // tools the model asked for (this chat offers none)
+  usage?: { prompt_tokens: number; completion_tokens: number; cached: number }; last?: any;   // summed over rounds; the last round's
+  seed?: number; timing?: { start: number; first?: number; answer?: number; last?: number; gen?: number };
   pick?: Tok;                                       // the alternative a rewrite starts from
   frame: number; saved: number;
 }
@@ -89,6 +110,8 @@ const LOOP: { reply: [string, number][]; cands: [string, number, number][] } = {
 // project structure" and calls to list_files / read_file: 16 replies out of 16, and the Q8_0 original as well); with
 // it, 16 of 16 draw.
 const DEFAULT_SYSTEM = "There are no tools or files in this chat. Answer directly.";
+// What the default says instead in a chat with tools on (a prompt the user wrote goes as written).
+const DEFAULT_SYSTEM_TOOLS = "The tools offered here are the only ones in this chat, and there are no files or projects to explore. Use a tool when it helps; otherwise answer directly.";
 // Thinking, a slider in the message box: no thinking (the model's no-thinking mode), then Qwen's three efforts.
 const EFFORTS: Effort[] = ["off", "low", "medium", "xhigh"];
 const LEVEL: Record<Effort, [string]> = { off: ["Off"], low: ["Low"], medium: ["Medium"], xhigh: ["Max"] };
@@ -116,8 +139,12 @@ const ICONS = {
   grip: '<circle cx="9" cy="6" r="1.3" fill="currentColor" stroke="none"/><circle cx="15" cy="6" r="1.3" fill="currentColor" stroke="none"/><circle cx="9" cy="12" r="1.3" fill="currentColor" stroke="none"/><circle cx="15" cy="12" r="1.3" fill="currentColor" stroke="none"/><circle cx="9" cy="18" r="1.3" fill="currentColor" stroke="none"/><circle cx="15" cy="18" r="1.3" fill="currentColor" stroke="none"/>',
   power: '<path d="M12 3.5v8"/><path d="M6.6 6.8a7.5 7.5 0 1 0 10.8 0"/>',
   dice: '<rect x="4" y="4" width="16" height="16" rx="3.5"/><circle cx="9" cy="9" r="1.1" fill="currentColor"/><circle cx="15" cy="15" r="1.1" fill="currentColor"/><circle cx="15" cy="9" r="1.1" fill="currentColor"/><circle cx="9" cy="15" r="1.1" fill="currentColor"/>',
+  prev: '<path d="M14.5 6.5 9 12l5.5 5.5"/>',
+  next: '<path d="M9.5 6.5 15 12l-5.5 5.5"/>',
+  wrench: '<path d="M14.7 6.3a4 4 0 0 0 5 5L21 12.6a6 6 0 0 1-7.4 1.6L7 20.8a2.1 2.1 0 0 1-3-3l6.6-6.6A6 6 0 0 1 12.2 3.8l1.3 1.3a4 4 0 0 0 1.2 1.2z"/>',
+  globe: '<circle cx="12" cy="12" r="9"/><path d="M3 12h18M12 3c2.5 2.6 3.8 5.6 3.8 9s-1.3 6.4-3.8 9c-2.5-2.6-3.8-5.6-3.8-9S9.5 5.6 12 3z"/>',
 };
-const TITLES = { copy: "Copy", edit: "Edit", trash: "Delete", tokens: "Token odds", retry: "Regenerate" };
+const TITLES = { copy: "Copy", edit: "Edit", trash: "Delete", tokens: "Token odds", retry: "Regenerate (a new version)" };
 const icon = (name: keyof typeof ICONS) => `<svg class="i" viewBox="0 0 24 24" aria-hidden="true">${ICONS[name]}</svg>`;
 
 const $ = <T extends HTMLElement = HTMLElement>(id: string) => document.getElementById(id) as T;
@@ -136,7 +163,7 @@ const pane = (name: string, el: HTMLElement, key: string, besideFrom: number, wi
 };
 const panes = {
   conversations: pane("conversations", $("sidebar"), "b", 761, "--side-open", 208),
-  settings: pane("settings", panel, ",", 1460, "--panel-open", 340, () => { syncSettings(); growSystem(); }),
+  settings: pane("settings", panel, ",", 1460, "--panel-open", 340, () => { syncSettings(); growSystem(); void loadCatalog(); }),
 };
 const PANES = Object.values(panes);
 
@@ -235,7 +262,7 @@ function htmlNodes(t: Token, links: Links): Node[] {
   return [...tpl.content.childNodes];
 }
 
-function renderBlocks(v: View, src: string, live: boolean) {
+function renderBlocks(v: { body: HTMLElement; blocks?: Blocks }, src: string, live: boolean) {
   if (!v.blocks) { v.body.replaceChildren(); v.blocks = { raws: [], nodes: [] }; }
   const b = v.blocks, tokens = marked.lexer(live ? settle(src) : src), blocks = tokens.filter((t) => t.type !== "space");
   let k = 0;
@@ -613,8 +640,11 @@ function randomId() {
   return Array.from(crypto.getRandomValues(new Uint8Array(16)), (b) => b.toString(16).padStart(2, "0")).join("");
 }
 
+// A new chat starts with the thinking and the tools the last one was left with.
 function blank(): Conversation {
-  return { id: randomId(), title: "New chat", updated: Date.now(), effort: pref("effort", "xhigh") as Effort, messages: [] };
+  let tools: ToolChoice["tools"] | undefined;
+  try { tools = JSON.parse(pref("tools", "null")) ?? undefined; } catch { /* none */ }
+  return { id: randomId(), title: "New chat", updated: Date.now(), effort: pref("effort", "xhigh") as Effort, messages: [], ...(tools && Object.keys(tools).length ? { tools } : {}) };
 }
 
 function render() {
@@ -637,15 +667,16 @@ function messageView(m: Message, i: number): HTMLElement {
   }
   const el = h("article", "msg user"), foot = h("footer", "msg-foot");
   el.dataset.i = String(i);
-  foot.innerHTML = slots([["copy", true], ["edit", !running()], ["trash", !running()]]);
+  foot.innerHTML = pager(m) + slots([["copy", true], ["edit", !running()], ["trash", !running()]]);
   if (m.files?.length) el.append(filesView(m.files));
   if (m.content || !m.files?.length) el.append(h("div", "bubble", m.content));
   el.append(foot);
   return el;
 }
 
-// A message edited in place: its text, and a reply's thinking. Save keeps the rest of the chat; on the last user
-// message, Save & regenerate also draws a new reply. Ctrl+Enter takes the main action, Esc cancels.
+// A message edited in place: its text, and a reply's thinking. Save keeps the rest of the chat as it is; a question's
+// Send makes it a new version, with a new reply (the old one keeps what followed it). Ctrl+Enter takes the main
+// action, Esc cancels.
 function editorView(m: Message, i: number): HTMLElement {
   const el = h("article", `msg ${m.role} editing`), box = h("div", "editor"), acts = h("div", "editor-acts");
   el.dataset.i = String(i);
@@ -661,31 +692,35 @@ function editorView(m: Message, i: number): HTMLElement {
   const text = area(m.content, m.role === "user" ? "Message" : "Reply");
   if (think) box.append(h("div", "ed-label", "Thinking"), think, h("div", "ed-label", "Reply"));
   box.append(text, acts);
-  const again = m.role === "user" && i === conv.messages.findLastIndex((x) => x.role === "user");
-  const button = (label: string, cls: string, fn: () => void) => {
+  const again = m.role === "user";
+  const button = (label: string, cls: string, fn: () => void, title = "") => {
     const b = h("button", cls, label);
     b.type = "button";
+    b.title = title;
     b.onclick = fn;
     acts.append(b);
   };
-  const done = (keep: boolean, regenerate = false) => {
+  const done = (keep: boolean, send = false) => {
+    editing = null;
+    if (send) {
+      if (!text.value.trim() && !m.files?.length) return render();
+      branch(conv, i, { role: "user", content: text.value.trim(), ...(m.files?.length ? { files: m.files } : {}) });
+      void generate();
+      return save(conv);
+    }
     if (keep && (text.value !== m.content || (think && think.value !== m.reasoning))) {
       m.content = text.value;
       if (think) m.reasoning = think.value;
       m.edited = true;
       if (m.id) { tokens.delete(m.id); tokenView.delete(m.id); }
     }
-    editing = null;
-    if (regenerate) {
-      conv.messages.splice(i + 1);
-      void generate();
-    } else render();
+    render();
     save(conv);
   };
-  acts.append(h("span", "editor-hint", again ? "Ctrl+Enter regenerates · Esc cancels" : "Ctrl+Enter saves · Esc cancels"));
+  acts.append(h("span", "editor-hint", again ? "Ctrl+Enter sends · Esc cancels" : "Ctrl+Enter saves · Esc cancels"));
   button("Cancel", "btn", () => done(false));
-  button("Save", again ? "btn" : "btn primary", () => done(true));
-  if (again) button("Save & regenerate", "btn primary", () => done(true, true));
+  button("Save", again ? "btn" : "btn primary", () => done(true), "Change this message in place, keeping the rest of the chat");
+  if (again) button("Send", "btn primary", () => done(true, true), "Send it as a new version of this message, with a new reply (the old version stays a click away)");
   el.addEventListener("keydown", (e) => {
     if (e.key === "Escape") { e.preventDefault(); done(false); }
     else if (e.key === "Enter" && (e.ctrlKey || e.metaKey)) { e.preventDefault(); done(true, again); }
@@ -700,8 +735,62 @@ function editorView(m: Message, i: number): HTMLElement {
 }
 const fit = (t: HTMLTextAreaElement) => { t.style.height = "auto"; t.style.height = `${Math.min(t.scrollHeight + 2, innerHeight * 0.6)}px`; };
 
+// The versions of the conversation from message i on, the one on screen among them at its place.
+function versionsAt(c: Conversation, i: number): Message[][] {
+  const vs = c.messages[i].versions, all = [...(vs?.others ?? [])];
+  all.splice(vs?.shown ?? 0, 0, c.messages.slice(i));
+  return all;
+}
+// Puts version k of `all` (the versions from message i on) on screen; the others go with its first message.
+function showVersion(c: Conversation, i: number, all: Message[][], k: number) {
+  c.messages.splice(i);
+  for (const v of all) delete v[0].versions;
+  const others = all.filter((_, j) => j !== k);
+  if (others.length) all[k][0].versions = { shown: k, others };
+  c.messages.push(...all[k]);
+}
+// A new version from message i on, starting with `head`, made the one on screen (the others keep all that followed them).
+function branch(c: Conversation, i: number, head: Message) {
+  if (i >= c.messages.length) return void c.messages.push(head);
+  const all = versionsAt(c, i);
+  all.push([head]);
+  showVersion(c, i, all, all.length - 1);
+}
+function* walk(list: Message[]): Generator<Message> {
+  for (const m of list) {
+    yield m;
+    for (const v of m.versions?.others ?? []) yield* walk(v);
+  }
+}
+// "‹ 2 / 3 ›" under a message that has other versions; nothing under one that has none.
+function pager(m: Message) {
+  const vs = m.versions;
+  if (!vs) return "";
+  const n = vs.others.length + 1, k = vs.shown, b = (act: "prev" | "next", on: boolean, label: string) =>
+    `<button type="button" class="act" data-act="${act}" title="${label}" aria-label="${label}"${on ? "" : " disabled"}>${icon(act)}</button>`;
+  return `<span class="pager" role="group" aria-label="Version ${k + 1} of ${n}">${b("prev", k > 0, "Previous version")}` +
+    `<span class="pager-n" aria-hidden="true">${k + 1} / ${n}</span>${b("next", k < n - 1, "Next version")}</span>`;
+}
+
+// A message's delete. One with other versions takes this version with it (all that followed it), and the next
+// version shows; the rest just loses the message.
 function deleteMessage(i: number) {
-  const c = conv, [m] = c.messages.splice(i, 1);
+  const c = conv;
+  if (c.messages[i].versions) {
+    const all = versionsAt(c, i), k = c.messages[i].versions!.shown, [gone] = all.splice(k, 1), role = gone[0].role;
+    showVersion(c, i, all, Math.min(k, all.length - 1));
+    persist(c);
+    render();
+    return toast(role === "user" ? "This version of the message is deleted" : "This version of the reply is deleted", () => {
+      if (!c.messages[i]) return;
+      const back = versionsAt(c, i);
+      back.splice(k, 0, gone);
+      showVersion(c, i, back, k);
+      persist(c);
+      if (c === conv) render();
+    });
+  }
+  const [m] = c.messages.splice(i, 1);
   persist(c);
   render();
   toast(m.role === "user" ? "Message deleted" : "Reply deleted", () => {
@@ -713,16 +802,119 @@ function deleteMessage(i: number) {
 
 function assistantView(i: number): View {
   const el = h("article", "msg assistant"), think = h("details", "thinking"), summary = h("summary"), thought = h("div", "thought");
-  const body = h("div", "markdown"), foot = h("footer", "msg-foot");
+  const body = h("div", "markdown"), foot = h("footer", "msg-foot"), rounds = h("div", "rounds"), calls = h("div", "tool-cards"), notes = h("div", "notes");
   el.dataset.i = String(i);
   think.append(summary, thought);
-  el.append(think, body, foot);
+  el.append(rounds, think, body, calls, notes, foot);
   // while it streams the thinking box keeps its newest line in view, until it is scrolled up by hand (back at its end,
   // it follows again)
   thought.addEventListener("wheel", (e) => { if (e.deltaY < 0) thought.dataset.held = "1"; }, { passive: true });
   thought.addEventListener("scroll", () => { if (thought.scrollHeight - thought.scrollTop - thought.clientHeight < 4) delete thought.dataset.held; });
-  return { el, think, summary, thought, body, foot };
+  return { el, think, summary, thought, body, foot, rounds, calls, notes };
 }
+
+// A finished round of a reply with tools: its thinking (closed), its text and its calls, where they happened.
+function roundView(r: Round, m: Message): HTMLElement {
+  const el = h("div", "round"), body = h("div", "markdown"), calls = h("div", "tool-cards");
+  if (r.reasoning) {
+    const think = h("details", "thinking"), summary = h("summary", "", "Thoughts"), thought = h("div", "thought", r.reasoning);
+    think.append(summary, thought);
+    el.append(think);
+  }
+  if (r.content) renderBlocks({ body }, r.content, false);
+  syncCards(calls, r.calls, m, false);
+  el.append(body, calls);
+  return el;
+}
+
+// Tool calls as cards: what was called, on what (a line of its arguments), and how it went; a click shows the
+// arguments and the result. A call waiting for the user shows its arguments with Allow once, Always allow and Deny.
+// Cards are kept by call id and only their changed parts redrawn, so one stays open (and focused) while it runs.
+const openCards = new Set<string>();                // calls shown with their arguments and result
+const callSince = new Map<string, number>();        // when a call began running, as this page saw it
+const deciding = new Set<string>();                 // calls whose answer is on its way to the server
+const LONG_RESULT = 1200;
+function argLine(c: Call) {
+  let a: unknown;
+  try { a = c.args.trim() ? JSON.parse(c.args) : {}; } catch { return c.args; }
+  if (!a || typeof a !== "object" || Array.isArray(a)) return c.args;
+  const e = Object.entries(a);
+  if (e.length === 1 && typeof e[0][1] === "string") return e[0][1];
+  return e.map(([k, v]) => `${k}: ${typeof v === "string" ? v : JSON.stringify(v)}`).join(", ");
+}
+function stateText(c: Call, live: boolean) {
+  const s = c.state;
+  if (s === "running") return `running · ${fmtS((performance.now() - (callSince.get(c.id) ?? performance.now())) / 1000)}`;
+  if (s === "done") return c.ms !== undefined ? `done in ${fmtS(c.ms / 1000)}` : "done";
+  return s === "approval" ? "asks to run" : s === "failed" ? "failed" : s === "declined" ? "declined" : s === "stopped" ? "stopped" : live ? "asked for" : "not run";
+}
+function resultView(c: Call): HTMLElement {
+  const box = h("div", "tool-result"), text = c.result ?? "";
+  let pretty: string | undefined;
+  try { const j = JSON.parse(text); if (j && typeof j === "object") pretty = JSON.stringify(j, null, 2); } catch { /* not JSON: markdown */ }
+  if (pretty !== undefined) box.append(Object.assign(h("pre", "tool-pre"), { textContent: pretty }));
+  else {
+    const md = h("div", "markdown");
+    md.innerHTML = markdown(text);
+    typeset(md);
+    box.append(md);
+  }
+  if (text.length > LONG_RESULT || text.split("\n").length > 24) {
+    box.classList.add("long");
+    const more = h("button", "btn tool-more", "Show all");
+    more.type = "button";
+    more.dataset.act = "more";
+    box.append(more);
+  }
+  return box;
+}
+function syncCards(box: HTMLElement, calls: Call[], m: Message, live: boolean) {
+  const kept = new Map([...box.children].map((el) => [(el as HTMLElement).dataset.call!, el as HTMLElement]));
+  calls.forEach((c, k) => {
+    let el = kept.get(c.id);
+    if (!el) {
+      el = h("div", "tool-card");
+      el.dataset.call = c.id;
+      const id = `tc-${c.id.replace(/[^\w-]/g, "")}`;
+      el.innerHTML = `<button type="button" class="tool-head" data-act="card" aria-controls="${id}"><span class="tool-ico"></span>` +
+        `<span class="tool-name"></span><span class="tool-src"></span><span class="tool-args"></span><span class="tool-state"></span>${icon("chevron")}</button>` +
+        `<div class="tool-ask" hidden></div><div class="tool-body" id="${id}" hidden></div>`;
+    }
+    if (box.children[k] !== el) box.insertBefore(el, box.children[k] ?? null);
+    const open = openCards.has(c.id), fetchTool = c.name === "fetch_url";
+    el.dataset.state = c.state ?? (live ? "asked" : "none");
+    const head = el.querySelector<HTMLElement>(".tool-head")!;
+    head.setAttribute("aria-expanded", String(open));
+    const set = (sel: string, v: string) => { const x = el.querySelector(sel)!; if (x.textContent !== v) x.textContent = v; };
+    const ico = el.querySelector(".tool-ico")!, want = fetchTool ? "globe" : "wrench";
+    if (ico.getAttribute("data-i") !== want) { ico.setAttribute("data-i", want); ico.innerHTML = icon(want); }
+    set(".tool-name", c.title ?? c.name);
+    set(".tool-src", fetchTool ? "" : c.source ?? "");
+    set(".tool-args", argLine(c));
+    set(".tool-state", stateText(c, live));
+    const ask = el.querySelector<HTMLElement>(".tool-ask")!, asking = c.state === "approval" && live && !!m.job;
+    ask.hidden = !asking;
+    if (asking && ask.dataset.for !== `${c.id}:${deciding.has(c.id)}`) {
+      ask.dataset.for = `${c.id}:${deciding.has(c.id)}`;
+      const dis = deciding.has(c.id) ? " disabled" : "";
+      ask.innerHTML = `<pre class="tool-pre"></pre><div class="tool-ask-row"><span>Run this ${c.readOnly === false ? "tool, which can change things" : "tool"}?</span>` +
+        `<button type="button" class="btn" data-act="decide" data-decision="deny"${dis}>Deny</button>` +
+        `<button type="button" class="btn" data-act="decide" data-decision="always" title="Run ${escapeHtml(c.title ?? c.name)} without asking from now on (Settings lists it)"${dis}>Always allow</button>` +
+        `<button type="button" class="btn primary" data-act="decide" data-decision="once"${dis}>Allow once</button></div>`;
+      ask.querySelector("pre")!.textContent = prettyArgs(c.args);
+    }
+    const body = el.querySelector<HTMLElement>(".tool-body")!;
+    body.hidden = !open;
+    const key = `${c.state}:${c.result?.length ?? -1}`;
+    if (open && body.dataset.key !== key) {
+      body.dataset.key = key;
+      body.replaceChildren(h("div", "tool-label", "Arguments"), Object.assign(h("pre", "tool-pre"), { textContent: prettyArgs(c.args) }));
+      if (c.result !== undefined) body.append(h("div", "tool-label", "Result"), resultView(c));
+    }
+  });
+  for (const el of [...box.children].slice(calls.length)) el.remove();
+}
+const prettyArgs = (args: string) => { try { return JSON.stringify(JSON.parse(args), null, 2); } catch { return args; } };
 
 // Message actions in fixed places: from the right, delete, edit and copy on every message, then a reply's token odds,
 // regenerate and continue. An action that is not available keeps its place empty, so none ever moves.
@@ -733,6 +925,13 @@ const slots = (list: [Act, boolean, string?][]) => list.map(([a, on, html]) => !
 // Fill an assistant message's view; `live` while it streams (cheap to call repeatedly).
 function paint(v: View, m: Message, live?: Live) {
   const elapsed = live ? (performance.now() - live.since) / 1000 : 0;
+  if (v.roundsShown !== (m.rounds?.length ?? 0)) {
+    v.rounds.replaceChildren(...(m.rounds ?? []).map((r) => roundView(r, m)));
+    v.roundsShown = m.rounds?.length ?? 0;
+  }
+  syncCards(v.calls, m.calls ?? [], m, !!live);
+  if (v.notes.childElementCount !== (m.notes?.length ?? 0)) v.notes.replaceChildren(...(m.notes ?? []).map((n) => h("div", "note", n)));
+  if (live && v.foot.dataset.pager !== pager(m)) v.foot.innerHTML = v.foot.dataset.pager = pager(m);   // while it is written, only its versions
   v.think.hidden = !m.reasoning;
   v.think.classList.toggle("live", live?.phase === "thinking");
   if (m.reasoning) {
@@ -772,12 +971,15 @@ function paint(v: View, m: Message, live?: Live) {
   if (m.params) facts.push(m.params);
   if (m.edited) facts.push("edited");
   if (s?.seed !== undefined) facts.push(`<button type="button" class="seed" data-act="seed" data-seed="${s.seed}" title="Use this seed for the next replies">seed ${s.seed}</button>`);
-  const last = conv.messages.at(-1) === m, busy = !!running(), cut = m.finish === "length" || m.stopped;
-  // Continue is spelled out when the reply was cut short (its length limit, or Stop)
+  const last = conv.messages.at(-1) === m, busy = !!running();
+  // Continue is spelled out when the reply was cut short (its length limit, Stop, or the tool rounds' limit); after
+  // tool calls it carries on from their results
+  const cut = m.finish === "length" || m.stopped || (!!m.calls?.some((c) => c.result !== undefined) && !m.error);
   const cont = cut ? `<button type="button" class="btn" data-act="cont" title="Continue">${icon("cont")}Continue</button>`
     : `<button type="button" class="act" data-act="cont" title="Continue">${icon("cont")}</button>`;
-  v.foot.innerHTML = `<span class="stats">${facts.join(" · ")}</span>` + (last ? slots([["cont", !busy, cont], ["retry", !busy]]) : "")
+  v.foot.innerHTML = pager(m) + `<span class="stats">${facts.join(" · ")}</span>` + slots([["cont", last && !busy, cont], ["retry", !busy]])
     + slots([["tokens", !!m.id && tokens.has(m.id)], ["copy", true], ["edit", !busy], ["trash", !busy]]);
+  delete v.foot.dataset.pager;
   v.foot.querySelector("[data-act=tokens]")?.classList.toggle("on", asTokens);
 }
 
@@ -847,20 +1049,25 @@ function openTokPop(span: HTMLElement) {
   pop.style.top = `${r.bottom + 6 + ph > innerHeight - 8 ? r.top - ph - 6 : r.bottom + 6}px`;
 }
 
+// A picked token rewrites the reply from there as a new version of it (the one it was stays a click away).
 function pickToken(m: Message, ch: "reasoning" | "content", i: number, a: Alt) {
-  const td = tokens.get(m.id!)!, before = td[ch].slice(0, i).map((x) => x.t).join("");
+  const c = conv, at = c.messages.indexOf(m);
+  if (at < 0 || running(c)) return;
+  const td = structuredClone(tokens.get(m.id!)!), before = td[ch].slice(0, i).map((x) => x.t).join("");
+  const { versions, stats, edited, ...rest } = m, copy: Message = { ...structuredClone(rest), id: randomId() };
+  tokens.set(copy.id!, td);
+  if (tokenView.has(m.id!)) tokenView.add(copy.id!);
+  branch(c, at, copy);
   if (SPECIAL[a.t] === "end of reply") {            // nothing to write: the reply just ends there
-    const was = { ...m }, wasTok = structuredClone(td);
     td[ch] = td[ch].slice(0, i);
-    m[ch] = before;
-    if (ch === "reasoning") { td.content = []; m.content = ""; }
-    m.finish = "stop";
-    save(conv);
+    copy[ch] = before;
+    if (ch === "reasoning") { td.content = []; copy.content = ""; }
+    copy.finish = "stop";
+    save(c);
     render();
-    toast("The reply ends there now", () => { Object.assign(m, was); tokens.set(m.id!, wasTok); save(conv); render(); });
-    return;
+    return toast("The reply ends there now, as a new version");
   }
-  continueReply(m, { ch, i, alt: a, before });
+  continueReply(copy, { ch, i, alt: a, before });
 }
 
 
@@ -885,7 +1092,7 @@ function renderComposer() {
 
 // Anything differs from the recommended values (what Reset all settings would change).
 const customized = () => settings.system !== DEFAULT_SYSTEM || Object.keys(settings.think).length + Object.keys(settings.fast).length > 0
-  || !!settings.max_tokens || settings.seed !== undefined;
+  || !!settings.max_tokens || settings.seed !== undefined || !!settings.allow?.length || settings.fetchChars !== undefined;
 
 function renderList() {
   const nav = $("conversations"), today = new Date().setHours(0, 0, 0, 0);
@@ -970,23 +1177,41 @@ function save(c: Conversation) {
   renderList();
 }
 
-// The request body for a reply after the messages `upto`. Assistant turns go back exactly as kiln sent them: kiln then
-// replays its own tokens and every turn is a cache hit (only the new message is read). The reply's tokens come with
-// their odds (log probs, five alternatives each) for the token view. effort: the thinking setting (the chat's by
-// default); sampling: whose values (by default the effort's mode).
-function request(c: Conversation, upto: Message[], o: { effort?: Effort; sampling?: Mode; final?: object; extra?: Record<string, unknown> } = {}) {
+// The request body for a reply after the messages `upto`. Assistant turns go back exactly as kiln sent them, tool
+// rounds and all (wire.ts): kiln then replays its own tokens and every turn is a cache hit (only the new message is
+// read). The reply's tokens come with their odds (log probs, five alternatives each) for the token view. effort: the
+// thinking setting (the chat's by default); sampling: whose values (by default the effort's mode). With tools on,
+// kiln_web tells the web server which to offer (it runs them: server.ts); loop: false offers them without running any.
+function request(c: Conversation, upto: Message[], o: { effort?: Effort; sampling?: Mode; final?: object; extra?: Record<string, unknown>; loop?: boolean } = {}) {
   const effort = o.effort ?? c.effort, mode: Mode = effort === "off" ? "fast" : "think";
-  const messages: object[] = upto
-    .filter((m) => m.role === "user" || m.content || m.reasoning)
-    .map((m) => (m.reasoning ? { role: m.role, content: m.content, reasoning_content: m.reasoning } : { role: m.role, content: m.role === "user" ? userContent(m) : m.content }));
-  if (settings.system.trim()) messages.unshift({ role: "system", content: settings.system.trim() });
+  const messages: object[] = upto.flatMap(wire), system = systemFor(c);
+  if (system) messages.unshift({ role: "system", content: system });
   if (o.final) messages.push(o.final);
+  const web: ToolChoice | undefined = toolsOn(c)
+    ? { tools: c.tools!, allow: settings.allow, fetchChars: settings.fetchChars, ...(o.loop === false ? { loop: false } : {}) } : undefined;
   return {
     model: effort === "off" ? `${current()}-fast` : current(), reasoning_effort: effort === "off" ? undefined : effort,
     ...samplerFields(o.sampling ?? mode), max_tokens: settings.max_tokens, seed: settings.seed, logprobs: true, top_logprobs: 5,
-    messages, stream: true, stream_options: { include_usage: true }, ...o.extra,
+    messages, stream: true, stream_options: { include_usage: true }, ...(web ? { kiln_web: web } : {}), ...o.extra,
   };
 }
+const ran = (c: Call) => c.result !== undefined;
+// A message as kiln is sent it: a question as its files and text; a reply as each round's turn with the calls that
+// ran and their results, then its last text (none when it ended in calls). Calls that never ran are left out.
+function wire(m: Message): object[] {
+  if (m.role === "user") return [{ role: "user", content: userContent(m) }];
+  const ended = !!m.calls?.some(ran);
+  const rounds = [...(m.rounds ?? []), ...(ended ? [{ content: m.content, reasoning: m.reasoning, calls: m.calls! }] : [])];
+  const out = rounds.flatMap((r) => {
+    const done = r.calls.filter(ran);
+    return [assistantTurn(r.content, r.reasoning, done), ...done.map((x) => toolTurn(x.id, x.result!))];
+  });
+  if (!ended && (m.content || m.reasoning)) out.push(assistantTurn(m.content, m.reasoning));
+  return out;
+}
+const toolsOn = (c: Conversation) => !!c.tools && Object.keys(c.tools).length > 0;
+// The system prompt as sent: the user's as written; the default says what is true of the chat (no tools, or these).
+const systemFor = (c: Conversation) => (settings.system.trim() === DEFAULT_SYSTEM && toolsOn(c) ? DEFAULT_SYSTEM_TOOLS : settings.system.trim());
 
 // Server-sent events of a reply, as parsed JSON chunks, then DONE.
 const DONE = Symbol("done");
@@ -1017,28 +1242,39 @@ async function ensureOnline(run: Run) {
 
 const CUT_OFF = "The reply was cut off: the web server restarted while it was being written";
 
-async function generate(c: Conversation = conv) {
+// A new reply after the messages before `at`: at the end, or as a new version of the reply at `at` (Regenerate).
+async function generate(c: Conversation = conv, at = c.messages.length) {
   const m: Message = { id: randomId(), role: "assistant", content: "", reasoning: "", params: changed(modeOf(c)) || undefined, effort: c.effort };
-  const upto = c.messages.slice();
-  c.messages.push(m);
+  branch(c, at, m);
+  const upto = c.messages.slice(0, at);
   await startRun(c, m, () => request(c, upto));
 }
 
 // Writes on from the end of the last reply, or (pick) from one of its tokens replaced by an alternative. kiln is
 // given the reply as it generated it (kiln_original), finds the exact tokens to keep and serves them from its cache;
-// it restates the reply as it now stands before the new text.
+// it restates the reply as it now stands before the new text. A reply that ended in tool calls (stopped, or at the
+// rounds' limit) carries on from their results instead, in a new round. Both write into the same reply: it grows,
+// it is not another version (a picked token's rewrite is: pickToken).
 function continueReply(m: Message, pick?: { ch: "reasoning" | "content"; i: number; alt: Alt; before: string }) {
   const c = conv, at = c.messages.indexOf(m);
   if (at < 0 || running(c)) return;
-  const original = { role: "assistant", content: m.content, reasoning_content: m.reasoning ?? "" };
-  const final = !pick ? original : pick.ch === "content" ? { ...original, content: pick.before } : { role: "assistant", content: "", reasoning_content: pick.before };
   const effort = m.effort ?? c.effort;
   c.messages.splice(at + 1);
   m.error = m.finish = undefined;
   m.stopped = false;
   m.params = changed(effort === "off" ? "fast" : "think") || undefined;
+  if (!pick && m.calls?.some((x) => x.result !== undefined)) {
+    m.rounds = [...(m.rounds ?? []), { content: m.content, ...(m.reasoning ? { reasoning: m.reasoning } : {}), calls: m.calls }];
+    m.content = m.reasoning = "";
+    m.calls = undefined;
+    if (m.id) tokens.delete(m.id);
+    void startRun(c, m, () => request(c, c.messages.slice(0, at + 1), { effort }));
+    return;
+  }
+  const original = { role: "assistant", content: m.content, reasoning_content: m.reasoning ?? "" };
+  const final = !pick ? original : pick.ch === "content" ? { ...original, content: pick.before } : { role: "assistant", content: "", reasoning_content: pick.before };
   const extra = pick ? { continue_final_message: true, kiln_original: original, kiln_append_token: pick.alt.id } : { continue_final_message: true };
-  const upto = c.messages.slice(0, at);
+  const upto = [...c.messages.slice(0, at), { ...m, content: "", reasoning: "", calls: undefined }];   // with the reply's earlier rounds
   void startRun(c, m, () => request(c, upto, { effort, final, extra }),
     pick && { t: pick.alt.t, p: pick.alt.p, alts: tokens.get(m.id!)?.[pick.ch][pick.i]?.alts ?? [] });
 }
@@ -1046,7 +1282,9 @@ function continueReply(m: Message, pick?: { ch: "reasoning" | "content"; i: numb
 // body: the request, made once the conversation's files are read (a file that is gone ends the reply with an error)
 async function startRun(c: Conversation, m: Message, body: () => object, pick?: Tok) {
   const phase = m.content ? "writing" : m.reasoning ? "thinking" : "waiting";
-  const run: Run = { conv: c, m, live: { phase, since: performance.now(), note: "Reading the prompt" }, at: 0, stopping: false, frame: 0, saved: 0, calls: [], pick };
+  const run: Run = { conv: c, m, live: { phase, since: performance.now(), note: "Reading the prompt" }, at: 0, stopping: false, frame: 0, saved: 0, pick };
+  m.base = m.rounds?.length || undefined;
+  m.notes = undefined;
   runs.set(c.id, run);
   if (c === conv) {
     follow = true;
@@ -1076,14 +1314,17 @@ async function startRun(c: Conversation, m: Message, body: () => object, pick?: 
 }
 
 async function resume(c: Conversation, m: Message) {
-  const run: Run = { conv: c, m, live: { phase: "waiting", since: performance.now(), note: "Reading the prompt" }, at: 0, stopping: false, frame: 0, saved: 0, calls: [] };
+  const run: Run = { conv: c, m, live: { phase: "waiting", since: performance.now(), note: "Reading the prompt" }, at: 0, stopping: false, frame: 0, saved: 0 };
   runs.set(c.id, run);
   try {
     const res = await fetch(`/api/chat/${m.job}?from=0`);
     if (res.status === 404) throw new Error(CUT_OFF);
     if (!res.ok || !res.body) throw new Error(`HTTP ${res.status}`);
-    m.content = m.reasoning = "";
-    if (m.id) tokens.delete(m.id);                 // the job's events bring them back
+    m.content = m.reasoning = "";                   // the job's events bring them back, its rounds and calls too
+    m.rounds = m.rounds?.slice(0, m.base ?? 0);
+    if (!m.rounds?.length) delete m.rounds;
+    m.calls = m.notes = undefined;
+    if (m.id) tokens.delete(m.id);
     await stream(run, res.body);
   } catch (e) {
     if (run.stopping) m.stopped = true;
@@ -1136,9 +1377,39 @@ function take(run: Run, ev: any) {
   }
   if (ev.stopped) m.stopped = true;
   if (ev.timing) run.timing = ev.timing;
-  if (ev.usage) run.usage = ev.usage;
-  if (ev.seed !== undefined) run.seed = ev.seed;
-  for (const c of d.tool_calls ?? []) if (c.function?.name) run.calls.push(c.function.name);
+  if (ev.usage) {
+    const u = run.usage ?? { prompt_tokens: 0, completion_tokens: 0, cached: 0 };
+    run.usage = { prompt_tokens: u.prompt_tokens + ev.usage.prompt_tokens, completion_tokens: u.completion_tokens + ev.usage.completion_tokens,
+      cached: u.cached + (ev.usage.prompt_tokens_details?.cached_tokens ?? 0) };
+    run.last = ev.usage;
+  }
+  if (ev.seed !== undefined) run.seed ??= ev.seed;
+  // tool calls as kiln streams them (by index, their arguments possibly in pieces), the same way server.ts adds them up
+  for (const c of d.tool_calls ?? []) {
+    if (live.phase === "waiting") live.phase = "writing";
+    const calls = (m.calls ??= []), at = (calls[c.index ?? calls.length] ??= { id: "", name: "", args: "" });
+    if (c.id) at.id = c.id;
+    if (c.function?.name) at.name += c.function.name;
+    if (c.function?.arguments) at.args += c.function.arguments;
+  }
+  if (ev.tool) {
+    const c = m.calls?.find((x) => x.id === ev.tool.id);
+    if (c) {
+      for (const k of ["title", "source", "readOnly", "state", "result", "ms"] as const) if (ev.tool[k] !== undefined) (c as any)[k] = ev.tool[k];
+      if (c.state === "running") callSince.set(c.id, now);
+      if (c.state === "approval") openCards.delete(c.id);
+      deciding.delete(c.id);
+    }
+  }
+  if (ev.round) {                                  // the calls' results are in: kiln reads them in a new round
+    m.rounds = [...(m.rounds ?? []), { content: m.content, ...(m.reasoning ? { reasoning: m.reasoning } : {}), calls: m.calls ?? [] }];
+    m.content = m.reasoning = "";
+    m.calls = undefined;
+    if (m.id) tokens.delete(m.id);
+    if (v) v.tok = undefined;
+    Object.assign(live, { phase: "waiting", since: now, note: "Reading the results" });
+  }
+  if (ev.note) m.notes = [...(m.notes ?? []), ev.note];
   if (d.reasoning_content) {
     if (live.phase !== "thinking") {
       live.phase = "thinking";
@@ -1208,16 +1479,21 @@ setInterval(() => { for (const r of runs.values()) schedule(r); }, 250);   // th
 
 function finish(run: Run) {
   const { conv: c, m, usage, timing: t } = run;
+  // A reply with tool rounds counts as one: time to its first token, its tokens over the time spent writing them
+  // (each round's first token to its last: not the tools' time, nor reading their results), all its prompts.
   if (usage && t?.first && t.last) {
     m.stats = {
-      ttft: (t.first - t.start) / 1000, tps: usage.completion_tokens / Math.max((t.last - t.first) / 1000, 1e-3),
-      tokens: usage.completion_tokens, prompt: usage.prompt_tokens, cached: usage.prompt_tokens_details?.cached_tokens ?? 0,
-      thought: m.reasoning && t.answer ? (t.answer - t.first) / 1000 : undefined, seed: run.seed, model: current(),
+      ttft: (t.first - t.start) / 1000, tps: usage.completion_tokens / Math.max((t.gen || t.last - t.first) / 1000, 1e-3),
+      tokens: usage.completion_tokens, prompt: usage.prompt_tokens, cached: usage.cached,
+      thought: m.reasoning && t.answer && !m.rounds?.length ? (t.answer - t.first) / 1000 : undefined, seed: run.seed, model: current(),
+      ctx: run.last ? run.last.prompt_tokens + run.last.completion_tokens : undefined,
     };
   }
-  if (run.calls.length && !m.error)                // shown, not dropped: the reply would otherwise just stop
-    m.error = `The model asked to run ${[...new Set(run.calls)].join(", ")}, but this chat has no tools, so the reply ends here.`;
+  const unrun = (m.calls ?? []).filter((x) => !x.state);
+  if (unrun.length && !m.error && !m.stopped && !toolsOn(c))   // shown, not dropped: the reply would otherwise just stop
+    m.error = `The model asked to run ${[...new Set(unrun.map((x) => x.name))].join(", ")}, but this chat has no tools on, so the reply ends here.`;
   delete m.job;
+  delete m.base;
   cancelAnimationFrame(run.frame);
   if (runs.get(c.id) === run) runs.delete(c.id);
   if (run.gone) return;
@@ -1365,15 +1641,17 @@ function download(name: string, data: string, type: string) {
   setTimeout(() => URL.revokeObjectURL(a.href), 1000);
 }
 
-// Attached files go along: texts as they are, pictures as data URLs.
+// Attached files go along (every version's): texts as they are, pictures as data URLs.
 async function exportChats(list: Conversation[], name: string) {
   const files: Record<string, string> = {};
-  for (const a of list.flatMap((c) => c.messages.flatMap((m) => m.files ?? []))) {
+  for (const a of list.flatMap((c) => [...walk(c.messages)].flatMap((m) => m.files ?? []))) {
     const data = await getFile(a.id);
     if (data !== undefined) files[a.id] = typeof data === "string" ? data : await dataUrl(data);
   }
+  const bare = (ms: Message[]): Message[] => ms.map(({ job, base, versions, ...m }) =>
+    (versions ? { ...m, versions: { shown: versions.shown, others: versions.others.map(bare) } } : m));
   const file: ChatFile = { kiln: "chats", version: 1, exported: new Date().toISOString(),
-    conversations: list.map((c) => ({ ...structuredClone(c), messages: c.messages.map(({ job, ...m }) => m) })), files };
+    conversations: list.map((c) => ({ ...structuredClone(c), messages: bare(structuredClone(c.messages)) })), files };
   download(name, JSON.stringify(file, null, 1), "application/json");
 }
 
@@ -1383,20 +1661,37 @@ const blobOf = (url: string) => {                       // a data URL's bytes (f
 };
 const fileName = (title: string) => `${title.replace(/[^\p{L}\p{N}]+/gu, "-").replace(/^-+|-+$/g, "").slice(0, 60) || "chat"}.kiln.json`;
 
-// One chat from a file, or null if it is not one: roles and text only where kiln expects them.
-function importedChat(x: any): Conversation | null {
-  if (!x || typeof x !== "object" || !Array.isArray(x.messages)) return null;
+// One chat from a file, or null if it is not one: roles and text only where kiln expects them, tool rounds with their
+// calls as kiln wrote them, versions as the tree they were. Files from before versions and tools have neither.
+const isCall = (c: any) => typeof c?.id === "string" && typeof c.name === "string" && typeof c.args === "string" && (c.result === undefined || typeof c.result === "string");
+const isRound = (r: any) => typeof r?.content === "string" && (r.reasoning === undefined || typeof r.reasoning === "string") && Array.isArray(r.calls) && r.calls.every(isCall);
+function importedMessages(list: unknown, depth = 0): Message[] | null {
+  if (!Array.isArray(list) || !list.length || depth > 200) return null;
   const messages: Message[] = [];
-  for (const m of x.messages) {
+  for (const m of list) {
     if (!m || (m.role !== "user" && m.role !== "assistant") || typeof m.content !== "string") return null;
-    const { job, ...rest } = m;
+    const { job, base, versions, ...rest } = m;
     if (rest.files !== undefined && !(Array.isArray(rest.files) && rest.files.every((a: any) => typeof a?.id === "string"
       && typeof a.name === "string" && KINDS.includes(a.kind)))) return null;
+    if (rest.rounds !== undefined && !(Array.isArray(rest.rounds) && rest.rounds.every(isRound))) return null;
+    if (rest.calls !== undefined && !(Array.isArray(rest.calls) && rest.calls.every(isCall))) return null;
+    if (versions !== undefined) {
+      const others = Array.isArray(versions?.others) ? versions.others.map((v: unknown) => importedMessages(v, depth + 1)) : null;
+      if (!others?.length || others.some((v: Message[] | null) => !v) || !Number.isInteger(versions.shown) || versions.shown < 0 || versions.shown > others.length) return null;
+      rest.versions = { shown: versions.shown, others };
+    }
     messages.push(rest);
   }
-  if (!messages.length) return null;
+  return messages;
+}
+function importedChat(x: any): Conversation | null {
+  if (!x || typeof x !== "object") return null;
+  const messages = importedMessages(x.messages);
+  if (!messages) return null;
+  const tools = x.tools && typeof x.tools === "object" ? Object.fromEntries(Object.entries(x.tools).filter(([, v]: [string, any]) =>
+    v && typeof v === "object" && (v.off === undefined || (Array.isArray(v.off) && v.off.every((n: unknown) => typeof n === "string"))))) as ToolChoice["tools"] : undefined;
   return { id: randomId(), title: typeof x.title === "string" && x.title ? x.title.slice(0, 80) : "Imported chat", named: true,
-    updated: Date.now(), effort: EFFORTS.includes(x.effort) ? x.effort : "xhigh", messages };
+    updated: Date.now(), effort: EFFORTS.includes(x.effort) ? x.effort : "xhigh", messages, ...(tools && Object.keys(tools).length ? { tools } : {}) };
 }
 
 async function importFiles(files: FileList) {
@@ -1434,7 +1729,7 @@ async function draft() {
   const d: { job?: string; stop: boolean } = (drafting = { stop: false });
   try { await filesReady(c.messages); } catch (e) { drafting = null; return toast(`The draft failed: ${e instanceof Error ? e.message : e}`); }
   const body = request(c, c.messages, {
-    sampling: "fast", final: begin.trim() ? { role: "assistant", content: begin } : undefined,
+    sampling: "fast", final: begin.trim() ? { role: "assistant", content: begin } : undefined, loop: false,
     extra: { kiln_aside: true, max_tokens: 400, logprobs: false, seed: undefined, ...(begin.trim() ? { continue_final_message: true } : {}) },
   });
   (body.messages as object[]).splice(begin.trim() ? -1 : body.messages.length, 0, { role: "user", content: DRAFT_ASK });
@@ -1547,11 +1842,21 @@ thread.addEventListener("click", (e) => {
     if (!tokenView.delete(m.id)) tokenView.add(m.id);
     return render();
   }
+  // switching versions works while a reply is written (in any of them: it goes on, and shows again when its version does)
+  if ((act.dataset.act === "prev" || act.dataset.act === "next") && m.versions) {
+    const k = m.versions.shown + (act.dataset.act === "prev" ? -1 : 1);
+    editing = null;
+    showVersion(conv, i, versionsAt(conv, i), k);
+    save(conv);
+    render();
+    const again = thread.querySelector<HTMLButtonElement>(`article[data-i="${i}"] [data-act=${act.dataset.act}]`);
+    return void (again && !again.disabled ? again : thread.querySelector<HTMLElement>(`article[data-i="${i}"] .pager [data-act]:not(:disabled)`))?.focus();
+  }
+  if (act.dataset.act === "card" || act.dataset.act === "more") return toggleCard(act);
+  if (act.dataset.act === "decide") return void decide(act);
   if (running()) return;
-  if (act.dataset.act === "retry") {
-    conv.messages.splice(i);
-    void generate();
-  } else if (act.dataset.act === "cont") continueReply(m);
+  if (act.dataset.act === "retry") void generate(conv, i);
+  else if (act.dataset.act === "cont") continueReply(m);
   else if (act.dataset.act === "trash") deleteMessage(i);
   else if (act.dataset.act === "edit") {
     editing = m;
@@ -1561,6 +1866,34 @@ thread.addEventListener("click", (e) => {
 document.addEventListener("pointerdown", (e) => {
   if (!$("tokpop").hidden && !(e.target as Element).closest("#tokpop, .tok")) closeTokPop();
 });
+
+// A card's head opens and closes it in place (no redraw, so the focus stays); "Show all" opens a long result.
+function toggleCard(btn: HTMLElement) {
+  const card = btn.closest<HTMLElement>(".tool-card")!, id = card.dataset.call!;
+  if (btn.dataset.act === "more") return void btn.closest(".tool-result")!.classList.remove("long");
+  if (!openCards.delete(id)) openCards.add(id);
+  const m = conv.messages[Number(card.closest<HTMLElement>("article")?.dataset.i)], round = card.closest<HTMLElement>(".round");
+  const calls = round ? m.rounds?.[[...round.parentElement!.children].indexOf(round)]?.calls : m.calls;
+  syncCards(card.parentElement!, calls ?? [], m, running()?.m === m);
+}
+
+// The user's answer to a call that asks first, to the web server (whichever page answers, the reply goes on).
+// Always allow also lets the tool run without asking from now on, in every chat of the tab (Settings lists it).
+async function decide(btn: HTMLElement) {
+  const card = btn.closest<HTMLElement>(".tool-card")!, id = card.dataset.call!, decision = btn.dataset.decision!;
+  const m = conv.messages[Number(card.closest<HTMLElement>("article")?.dataset.i)], c = m?.calls?.find((x) => x.id === id);
+  if (!m?.job || !c) return;
+  if (decision === "always" && !settings.allow?.includes(c.name)) {
+    settings.allow = [...(settings.allow ?? []), c.name].sort();
+    saveSettings();
+  }
+  deciding.add(id);
+  const r = running();
+  if (r) schedule(r);
+  const res = await fetch(`/api/chat/${m.job}/tool/${encodeURIComponent(id)}`, { method: "POST", headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ decision }) }).catch(() => null);
+  if (!res?.ok && res?.status !== 409) { deciding.delete(id); toast("The answer did not reach the web server: try again"); }
+}
 scroller.addEventListener("scroll", () => { if (!$("tokpop").hidden) closeTokPop(); }, { passive: true });
 $("composer").addEventListener("submit", (e) => {
   e.preventDefault();
@@ -1585,6 +1918,7 @@ document.addEventListener("keydown", (e) => {
   }
   if (e.key !== "Escape" || e.defaultPrevented) return;
   if (!$("tokpop").hidden) return closeTokPop();
+  if (toolsOpen) return setToolsOpen(false, true);
   if (modelsOpen) return setModelsOpen(false, true);
   if (document.querySelector("dialog[open]")) return;
   const over = PANES.find((p) => isOpen(p) && !p.beside.matches);
@@ -1837,6 +2171,7 @@ function setEffort(i: number) {
 }
 
 function setModelsOpen(open: boolean, refocus = false) {
+  if (open && toolsOpen) setToolsOpen(false);
   modelsOpen = open;
   $("model-pop").hidden = !open;
   delete $("model-pop").dataset.key;
@@ -1845,8 +2180,260 @@ function setModelsOpen(open: boolean, refocus = false) {
   else if (refocus) $("model-btn").focus();
 }
 
+// Tools, beside the thinking bar: a wrench with how many tools this chat has on. It opens them by source: Fetch URL,
+// then each MCP server of the config file with its state, a switch for the whole server and, a click further, one for
+// each of its tools. The choice is the chat's (a new chat starts from the last one, as the thinking bar does) and goes
+// with each request; the web server starts a server the first time a chat turns it on. What a server runs is the
+// config file's alone: nothing here can change it (tools.ts).
+let catalog: Catalog | null = null, toolsOpen = false;
+const shownTools = new Set<string>();               // servers shown with their tools in the popover
+const JSON_POST = { method: "POST", headers: { "Content-Type": "application/json" } };
+const FETCH_CHARS = 20_000;                         // what Fetch URL gives at a time unless Settings says otherwise (tool-fetch.ts' default)
+const EXAMPLE = '{"mcpServers": {"notes": {"command": "npx", "args": ["-y", "@modelcontextprotocol/server-filesystem", "/home/me/notes"]}}}';
+
+async function loadCatalog(how: { reload?: boolean; connect?: string } = {}) {
+  try {
+    const r = how.reload ? await fetch("/api/tools/reload", JSON_POST)
+      : how.connect ? await fetch("/api/tools/connect", { ...JSON_POST, body: JSON.stringify({ source: how.connect }) }) : await fetch("/api/tools");
+    if (r.ok) catalog = await r.json();
+  } catch { /* the web server is restarting: keep what is shown */ }
+  renderTools();
+  void watchTools();
+}
+// While a server starts, its state (then its tools) twice a second.
+let watching = false;
+async function watchTools() {
+  if (watching) return;
+  watching = true;
+  try {
+    for (let k = 0; k < 120 && catalog?.sources.some((s) => s.state === "connecting"); k++) {
+      await sleep(500);
+      const r = await fetch("/api/tools").catch(() => null);
+      if (r?.ok) catalog = await r.json();
+      renderTools();
+    }
+  } finally { watching = false; }
+}
+
+const isOn = (id: string, c = conv) => !!c.tools?.[id];
+const toolOn = (id: string, name: string, c = conv) => isOn(id, c) && !c.tools![id].off?.includes(name);
+const onCount = (c = conv) => (catalog?.sources ?? []).reduce((n, s) => n + s.tools.filter((t) => toolOn(s.id, t.name, c)).length, 0);
+function setTools(next: NonNullable<Conversation["tools"]>) {
+  conv.tools = Object.keys(next).length ? next : undefined;
+  setPref("tools", JSON.stringify(conv.tools ?? {}));
+  save(conv);
+  renderTools();
+  if (isOpen(panes.settings)) syncSettings();
+}
+// A whole source on (all its tools; `only`: just that one) or off. One that is not running starts now.
+function setSource(id: string, on: boolean, only?: string) {
+  const next = { ...conv.tools }, s = catalog?.sources.find((x) => x.id === id);
+  if (!on) delete next[id];
+  else {
+    next[id] = only && s ? { off: s.tools.map((t) => t.name).filter((n) => n !== only).sort() } : {};
+    if (s && (s.state === "idle" || s.state === "failed")) void loadCatalog({ connect: id });
+  }
+  setTools(next);
+}
+function setTool(id: string, name: string, on: boolean) {
+  if (!isOn(id)) return void (on && setSource(id, true, name));
+  const off = new Set(conv.tools![id].off ?? []), s = catalog?.sources.find((x) => x.id === id);
+  if (on) off.delete(name); else off.add(name);
+  if (s && s.tools.every((t) => off.has(t.name))) return setSource(id, false);   // the last one off: the server is off
+  setTools({ ...conv.tools, [id]: off.size ? { off: [...off].sort() } : {} });
+}
+
+const dotOf = (s: SourceInfo) => (s.state === "connected" ? "online" : s.state === "connecting" ? "loading" : s.state === "failed" ? "failed" : "");
+function stateLine(s: SourceInfo) {
+  const n = s.tools.length, k = s.tools.filter((t) => toolOn(s.id, t.name)).length;
+  if (s.kind === "fetch") return "Reads web pages at public addresses";
+  return s.state === "connected" ? `${k} of ${n} tool${n === 1 ? "" : "s"} on` : s.state === "connecting" ? "Starting…"
+    : s.state === "failed" ? "Could not start" : s.state === "disabled" ? "Disabled in the config file" : isOn(s.id) ? "Starts with the next reply" : "Not started";
+}
+const toolTag = (t: ToolInfo) => (t.readOnly ? ["read-only", "Changes nothing: runs without asking"]
+  : settings.allow?.includes(t.fn) ? ["runs without asking", "You allowed it for good (Settings, Tools)"] : ["asks first", "Asks you before each run"]);
+// The popover's controls say what they do in data-do (and on which source and tool); data-k names each one, so it
+// keeps the focus across a redraw.
+function keyed<T extends HTMLElement>(el: T, what: string, src = "", tool = ""): T {
+  Object.assign(el.dataset, { do: what, src, tool, k: `${what}|${src}|${tool}` });
+  return el;
+}
+function toolSwitch(what: string, src: string, tool: string, on: boolean, label: string, disabled = false) {
+  const b = keyed(h("button", "switch"), what, src, tool);
+  b.type = "button";
+  b.setAttribute("role", "switch");
+  b.setAttribute("aria-checked", String(on));
+  b.setAttribute("aria-label", label);
+  b.disabled = disabled;
+  return b;
+}
+function sourceView(s: SourceInfo): HTMLElement {
+  const box = h("div", `tp-src${isOn(s.id) ? " on" : ""}`), row = h("div", "tp-row"), text = h("span", "tp-text");
+  const lead = s.kind === "fetch" ? h("span", "tp-ico") : h("span", `dot ${dotOf(s)}`);
+  if (s.kind === "fetch") lead.innerHTML = icon("globe");
+  else lead.title = s.state;
+  text.append(h("span", "tp-name", s.label), h("span", "tp-sub", stateLine(s)));
+  row.append(lead, text);
+  const open = shownTools.has(s.id) && s.kind === "mcp" && s.tools.length > 0;
+  if (s.kind === "mcp" && s.tools.length) {
+    const more = h("button", `act tp-more${open ? " open" : ""}`);
+    more.type = "button";
+    keyed(more, "more", s.id);
+    more.setAttribute("aria-expanded", String(open));
+    more.setAttribute("aria-label", `${open ? "Hide" : "Show"} the tools of ${s.label}`);
+    more.title = open ? "Hide its tools" : "Show its tools";
+    more.innerHTML = icon("chevron");
+    row.append(more);
+  }
+  row.append(toolSwitch("src", s.id, "", isOn(s.id), `${s.label} in this chat`, s.state === "disabled"));
+  box.append(row);
+  if (s.state === "failed" && s.error) {
+    const err = h("div", "tp-err"), retry = h("button", "btn small", "Retry");
+    retry.type = "button";
+    keyed(retry, "retry", s.id);
+    err.append(h("span", "", s.error), retry);
+    box.append(err);
+  }
+  if (open) {
+    const list = h("div", "tp-tools");
+    for (const t of s.tools) {
+      const r = h("div", "tp-tool"), [tag, why] = toolTag(t), label = h("span", "tp-tname", t.title), badge = h("span", `tp-tag${t.readOnly ? "" : " asks"}`, tag);
+      label.title = t.description || t.name;
+      badge.title = why;
+      r.append(label, badge, toolSwitch("tool", s.id, t.name, toolOn(s.id, t.name), `${t.title} (${s.label})`));
+      list.append(r);
+    }
+    box.append(list);
+  }
+  return box;
+}
+function renderTools() {
+  const btn = $("tools-btn"), n = onCount(), on = toolsOn(conv);
+  const starting = !!catalog?.sources.some((s) => isOn(s.id) && s.state === "connecting");
+  const label = on ? `Tools: ${n} on in this chat` : "Tools: off in this chat";
+  const html = `${icon("wrench")}${on ? `<span class="tools-n">${n || "…"}</span>` : ""}`;
+  if (btn.innerHTML !== html) btn.innerHTML = html;
+  btn.title = label;
+  btn.setAttribute("aria-label", label);
+  btn.setAttribute("aria-expanded", String(toolsOpen));
+  btn.classList.toggle("on", on);
+  btn.classList.toggle("open", toolsOpen);
+  btn.classList.toggle("pending", starting);
+  renderToolSettings();
+  if (!toolsOpen) return;
+  // redrawn only when something in it changed (a poll never takes the focus from it), and the focus is kept
+  const pop = $("tools-pop"), key = JSON.stringify([catalog, conv.tools, [...shownTools], settings.allow]);
+  if (pop.dataset.key === key) return;
+  pop.dataset.key = key;
+  const focus = (document.activeElement as HTMLElement | null)?.dataset?.k;
+  const head = h("div", "tp-head");
+  head.append(h("span", "tp-title", "Tools in this chat"), h("span", "tp-count", on ? `${n} on` : "off"));
+  const parts: HTMLElement[] = [head];
+  if (!catalog) parts.push(h("div", "tp-empty", "Asking the web server…"));
+  else {
+    if (catalog.error) parts.push(h("div", "tp-err", catalog.error));
+    const fetchSrc = catalog.sources.filter((s) => s.kind === "fetch"), mcp = catalog.sources.filter((s) => s.kind === "mcp");
+    parts.push(...fetchSrc.map(sourceView), h("div", "tp-group", "MCP servers"));
+    if (mcp.length) parts.push(...mcp.map(sourceView));
+    else {
+      const help = h("div", "tp-empty");
+      help.append("None yet. Add servers to ", h("code", "", catalog.config), " (the shape Claude Desktop and Claude Code use), for example:",
+        h("pre", "tp-code", EXAMPLE), "then Reload.");
+      parts.push(help);
+    }
+    const foot = h("div", "tp-foot"), reload = h("button", "btn small", "Reload config");
+    reload.type = "button";
+    keyed(reload, "reload");
+    reload.title = `Read ${catalog.config} again`;
+    foot.append(reload);
+    parts.push(foot);
+  }
+  pop.replaceChildren(...parts);
+  if (focus) pop.querySelector<HTMLElement>(`[data-k="${CSS.escape(focus)}"]`)?.focus();
+}
+// Settings' Tools: the config file's servers as they stand (what each runs or reaches, read-only), what Fetch URL
+// may reach, and the tools allowed to run without asking (a click makes one ask again).
+const STATE_WORD: Record<SourceInfo["state"], string> = { idle: "not started", connecting: "starting…", connected: "running", failed: "failed", disabled: "disabled" };
+function renderToolSettings() {
+  if (!isOpen(panes.settings)) return;
+  const list = $("tools-list"), key = JSON.stringify(catalog);
+  if (list.dataset.key !== key) {
+    list.dataset.key = key;
+    const rows: HTMLElement[] = [];
+    if (!catalog) rows.push(h("p", "set-note", "Asking the web server…"));
+    else {
+      if (catalog.error) rows.push(h("div", "tp-err", catalog.error));
+      const mcp = catalog.sources.filter((s) => s.kind === "mcp");
+      for (const s of mcp) {
+        const r = h("div", "ts-row"), top = h("div", "ts-top"), n = s.tools.length;
+        top.append(h("span", `dot ${dotOf(s)}`), h("span", "ts-name", s.label),
+          h("span", "ts-state", s.state === "connected" ? `${n} tool${n === 1 ? "" : "s"}` : STATE_WORD[s.state]));
+        const detail = h("code", "ts-detail", s.detail || "(no command or URL)");
+        detail.title = s.detail;
+        r.append(top, detail);
+        if (s.error) r.append(h("div", "ts-err", s.error));
+        rows.push(r);
+      }
+      if (!mcp.length) {
+        const help = h("p", "set-note");
+        help.append("No MCP servers. Add them to the config file, for example: ", h("code", "", EXAMPLE));
+        rows.push(help);
+      }
+      const f = catalog.sources.find((s) => s.kind === "fetch");
+      const note = h("p", "set-note");
+      note.append(`Fetch URL reaches ${f?.detail ?? "public addresses only"}. Config file: `, h("code", "", catalog.config));
+      rows.push(note);
+    }
+    list.replaceChildren(...rows);
+  }
+  const allow = $("allow-list"), akey = JSON.stringify(settings.allow ?? []);
+  if (allow.dataset.key === akey) return;
+  allow.dataset.key = akey;
+  allow.hidden = !settings.allow?.length;
+  allow.replaceChildren(h("span", "set-note", "Run without asking:"), ...(settings.allow ?? []).map((fn) => {
+    const b = h("button", "chip", fn);
+    b.type = "button";
+    b.dataset.allow = fn;
+    b.title = b.ariaLabel = `${fn}: ask first again`;
+    b.insertAdjacentHTML("beforeend", icon("x"));
+    return b;
+  }));
+}
+function setToolsOpen(open: boolean, refocus = false) {
+  toolsOpen = open;
+  const pop = $("tools-pop");
+  pop.hidden = !open;
+  delete pop.dataset.key;
+  if (open) {
+    setModelsOpen(false);
+    const btn = $("tools-btn"), room = pop.offsetParent?.clientWidth ?? innerWidth;
+    pop.style.left = `${Math.max(8, Math.min(btn.offsetLeft - 8, room - pop.offsetWidth - 8))}px`;
+    void loadCatalog();
+  }
+  renderTools();
+  if (open) pop.querySelector<HTMLElement>("[data-do]")?.focus();
+  else if (refocus) $("tools-btn").focus();
+}
+function buildTools() {
+  $("tools-btn").addEventListener("click", () => setToolsOpen(!toolsOpen));
+  $("tools-pop").addEventListener("click", (e) => {
+    const el = (e.target as Element).closest<HTMLElement>("[data-do]");
+    if (!el || (el as HTMLButtonElement).disabled) return;
+    const { do: what, src = "", tool = "" } = el.dataset;
+    if (what === "src") setSource(src, !isOn(src));
+    else if (what === "tool") setTool(src, tool, !toolOn(src, tool));
+    else if (what === "more") { if (!shownTools.delete(src)) shownTools.add(src); renderTools(); }
+    else if (what === "retry") void loadCatalog({ connect: src });
+    else if (what === "reload") void loadCatalog({ reload: true });
+  });
+  document.addEventListener("pointerdown", (e) => {
+    if (toolsOpen && !(e.target as Element).closest("#tools-pop, #tools-btn")) setToolsOpen(false);
+  });
+}
+
 const shortName = (id: string) => modelName(id).replace(/^Qwen3\.8-/, "");
 function renderControls() {
+  renderTools();
   const at = EFFORTS.indexOf(conv.effort), energy = $("energy");
   energy.dataset.heat = HEAT[at];
   energy.style.setProperty("--v", String(at));
@@ -1867,7 +2454,7 @@ function renderControls() {
   // usage, in view: this chat's length against the context, and how full kiln's cache of conversations is
   const used = status.kv_tokens && status.cache ? 1 - status.cache.free_kv_tokens / status.kv_tokens : 0, ctx = fmtK(status.context ?? 262144);
   const s = conv.messages.findLast((m) => m.stats)?.stats, meter = $("meter");
-  meter.textContent = [s ? `${fmtK(s.prompt + s.tokens)} / ${ctx} context` : state === "online" ? `${ctx} context` : "",
+  meter.textContent = [s ? `${fmtK(s.ctx ?? s.prompt + s.tokens)} / ${ctx} context` : state === "online" ? `${ctx} context` : "",
     state === "online" ? `cache ${Math.round(used * 100)}%` : ""].filter(Boolean).join(" · ");
   meter.title = state === "online" ? `${fmtK(status.cache?.free_kv_tokens ?? 0)} of ${fmtK(status.kv_tokens ?? 0)} KV tokens free (cached conversations are dropped as needed)` : "";
   // power: unload the model, or load it when it is stopped
@@ -2232,6 +2819,27 @@ function buildSettings() {
   });
   $("reply-knobs").replaceChildren(maxLen, seed);
 
+  // Fetch URL's page length: what is safe to change from here (the private-address rule is the config file's)
+  const FLO = 2000, FHI = 100_000;
+  $("tools-knobs").replaceChildren(knob({
+    id: "fetchChars", label: "Page length", min: FLO, max: FHI, step: 1000,
+    help: "Fetch URL: how much of a page the model gets at a time, in characters (it can ask for the rest).",
+    fmt: (v) => v.toLocaleString("en-US"), get: () => settings.fetchChars ?? FETCH_CHARS, rec: () => FETCH_CHARS,
+    custom: () => settings.fetchChars !== undefined, set: (v) => { settings.fetchChars = v; },
+    pos: (v) => Math.min(1, Math.max(0, Math.log(v / FLO) / Math.log(FHI / FLO))), val: (p) => Math.round(FLO * (FHI / FLO) ** p / 1000) * 1000,
+  }));
+  $("tools-reload").onclick = () => void loadCatalog({ reload: true }).then(() => toast(catalog?.error ? "The config file has an error (shown under Tools)"
+    : `Config read: ${catalog?.sources.filter((s) => s.kind === "mcp").length ?? 0} MCP server(s)`));
+  $("allow-list").addEventListener("click", (e) => {
+    const fn = (e.target as Element).closest<HTMLElement>("[data-allow]")?.dataset.allow;
+    if (!fn) return;
+    const before = settings.allow;
+    settings.allow = settings.allow?.filter((x) => x !== fn);
+    if (!settings.allow?.length) delete settings.allow;
+    saveSettings();
+    toast(`${fn} asks first again`, () => { settings.allow = before; saveSettings(); });
+  });
+
 
   systemInput.addEventListener("input", () => {
     settings.system = systemInput.value;
@@ -2295,6 +2903,10 @@ function syncSettings() {
   if (document.activeElement !== systemInput && systemInput.value !== settings.system) systemInput.value = settings.system;
   $("system-reset").classList.toggle("on", settings.system !== DEFAULT_SYSTEM);
 
+  const swapped = settings.system.trim() === DEFAULT_SYSTEM && toolsOn(conv);
+  $("system-note").hidden = !swapped;
+  $("system-note").textContent = swapped ? `This chat has tools on, so the default is sent as: “${DEFAULT_SYSTEM_TOOLS}”` : "";
+  renderToolSettings();
   $("mode-note").textContent = shownMode() === "think" ? "with thinking" : "thinking off";
   $("order-reset").classList.toggle("on", !!settings[shownMode()].order);
   placeStages();
@@ -2310,15 +2922,17 @@ $("export").innerHTML = icon("download");
 $("attach").innerHTML = icon("clip");
 $("draft").addEventListener("click", () => void draft());
 buildControls();
+buildTools();
+void loadCatalog();
 $("to-latest").innerHTML = icon("down");
 $("settings-reset").insertAdjacentHTML("afterbegin", icon("retry"));
 for (const id of ["system-reset", "order-reset"]) $(id).innerHTML = icon("retry");
 buildSettings();
 for (const p of PANES) restorePane(p);
 await refreshStatus();
-for (const c of Object.values(chats)) {
-  const m = c.messages.at(-1);
-  if (m?.role === "assistant" && m.job) void resume(c, m);
+for (const c of Object.values(chats)) {                // a reply being written may be in a version not on screen
+  const m = [...walk(c.messages)].find((x) => x.role === "assistant" && x.job);
+  if (m) void resume(c, m);
 }
 if (location.hash.length > 1) openConversation(location.hash.slice(1));
 else render();

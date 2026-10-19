@@ -76,6 +76,11 @@ int kiln_draft(int id, const Sampling *sp, const int *fixed, int nfixed, int max
 int kiln_generate_masked(int id, const Sampling *sp, const int *drafts, int k, const uint32_t *masks, int *out, int max_out) {
     try { return E->generate_masked(id, *sp, drafts, k, masks, out, max_out); } catch (const std::exception &) { return -1; }
 }
+// One step for several sequences in one pass (Engine::generate_batch): out holds max_out tokens per sequence, counts what
+// each emitted. -1: out of KV pages (the sequences left as they were).
+int kiln_generate_batch(int n, const int *ids, const Sampling *sps, int *out, int max_out, int *counts) {
+    try { E->generate_batch(n, ids, sps, out, max_out, counts); return 0; } catch (const std::exception &) { return -1; }
+}
 int kiln_snapshot(int id) { return E->snapshot(id); }
 int kiln_restore(int id, int snap) { try { E->restore(id, snap); return 0; } catch (const std::exception &) { return -1; } }
 int kiln_snap_free(int snap) { try { E->snap_free(snap); return 0; } catch (const std::exception &) { return -1; } }

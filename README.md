@@ -30,91 +30,139 @@ foreground instead of as a service (it takes `--port`, `--draft`, `--use`, ...: 
 `qwen3.8-27b` (thinking, reasoning effort `xhigh` by default; OpenCode variants pick `medium`/`low`)
 and `qwen3.8-27b-fast` (no thinking; also used for session titles), and the same pair for
 `qwen3.8-flash-next`. One model is on the GPU at a time: a request naming the other one switches
-(titles never do); `kiln status` says which is loaded. OpenCode reaches it as an OpenAI-compatible
-provider at `http://127.0.0.1:8080/v1`, set up in `~/.config/opencode/opencode.json`.
+(titles never do); `kiln status` says which is loaded (and the PCIe link, when it came up slow: see Notes). OpenCode
+reaches it as an OpenAI-compatible provider at `http://127.0.0.1:8080/v1`, set up in `~/.config/opencode/opencode.json`.
+
+`/metrics` on the API port is Prometheus's text format (`kiln/metrics.py`): counters of the replies by model and finish
+reason, their prompt, cached and written tokens, prefill and decode seconds and decode steps (tok/s and tokens per step
+are ratios of their rates), a time-to-first-token histogram, model loads and their seconds, error statuses; and gauges
+read at the scrape: the model loaded, replies being written, free KV tokens, snapshots, the PCIe link, and on
+Flash-Next the expert pool's decode picks (all, and in the pool) and the DMA rate.
 
 The same server also speaks Anthropic's Messages API (`/v1/messages`, with `count_tokens`; Claude Code with
 `ANTHROPIC_BASE_URL=http://127.0.0.1:8080`) and OpenAI's Responses API (`/v1/responses`; Codex), translated to the
 chat completions above (`kiln/apis.py`): text, pictures and PDFs, tool calls and results (`tool_choice`, `strict`),
 thinking (`thinking` blocks; `reasoning_text` items) and a budget as the reasoning effort and a hard limit, stop sequences,
 streaming. A PDF (a chat `file` part, Anthropic's `document` block, the Responses API's `input_file`) reaches the model as
-Anthropic's API gives it one: each page as a picture (the first 20, 1,024 pixels on the long side, ~800 tokens each) and
-as its text (`kiln/documents.py`, poppler's pdftotext and pdftoppm); another file as its text. A final assistant message is a
+Anthropic's API gives it one: each page as its text and as a picture (1,024 pixels on the long side, ~800 tokens each;
+`kiln/documents.py`, poppler's pdftotext and pdftoppm), the pictures going where the text cannot stand in for them: to
+every page without a text layer (a scan, a drawing), up to 120 wherever they are, then to the first 20 of the others.
+`page_pictures` on the file part (or the document block, or `input_file`) sets that 20, 0 for text alone; another file
+reaches the model as its text. A final assistant message is a
 prefill, as Anthropic's are. Only the client's own tools run: Anthropic's server tools and OpenAI's built-in ones are
 refused. `previous_response_id` continues one of the last 256 responses (kept until a restart).
 
 ## Web UI
 
-`web/` is a small Bun app: `server.ts` serves the page and proxies kiln's API on the same origin; `app.ts` is
-plain TypeScript (marked, highlight.js, DOMPurify, KaTeX; Mermaid's own build loads with the first diagram). Conversations
-live in the tab's sessionStorage: a reload keeps them, closing the tab ends them, and nothing is stored on the server's
-disk. Export saves the open chat (Export all: every chat of the tab) as a JSON file, attached files included, which
-Import adds back under new ids. A reply belongs to the web server
-while it is written (in RAM, until 15 minutes after it ends): opening another chat, reloading, closing the tab, a
-laptop asleep or a dropped connection leave it running, and the page follows it again from the last event it saw;
-only Stop (the button, or Esc when nothing else is open) or deleting the chat ends it early.
-Replies stream with their reasoning (collapsible), each one shows time to first token, tok/s, how much of the
-prompt came from cache, the sampling values that differed from the recommended ones and its seed. In the message box,
-an energy bar sets the thinking: Off (the no-thinking mode), Low, Medium or Max. It runs hotter to the right (Medium
-flows; Max is molten, with a sweeping shine and rising sparks), and dragging takes a stop a third of the way to it.
-The model's name beside the send button opens the models; it is the only place a model is chosen. Beside it are the
-engine's state (a dot: ready, loading with its progress, or stopped), a power button (unload, or load) and the usage:
-this chat against the context, and how full kiln's cache of conversations is.
-Message actions keep fixed places (from the right: delete, edit, copy on every message, then a reply's token odds,
-regenerate and continue), so none moves between messages. Every message can be edited in place (a reply's thinking too; on the last question, Save & regenerate draws a new
-reply) or deleted (with Undo). The last reply can be regenerated or continued (Continue is spelled out when the
-reply was cut short). Token odds shows a reply as its tokens, tinted by how unsure the model was of each; a click
-on one lists what else it could have written there, and picking one rewrites the reply from that token on. The
-wand in the message box drafts the user's next message (or finishes the one being typed) to edit and send: kiln is
-asked, as the assistant and without thinking, to write it (Qwen will not write a user turn: at one it ends it).
-Settings (Ctrl+,) sits beside the chat: with room it opens without moving the conversation, otherwise it slides the
-column over (never re-wrapping it) or, in narrow windows, slides over it. Every change applies from the next reply
-and can be undone, for every conversation in the tab (kept with them). It shows exactly what kiln is sent:
-- The system prompt, by default "There are no tools or files in this chat. Answer directly." It is an ordinary
-  prompt: edit or delete it. Without it, Flash-Next with thinking off takes asks like "design a cute SVG" for a
-  coding-agent task ("let me first explore the project structure", then calls to tools that do not exist), as the
-  Q8_0 original does too.
-- Sampling: top-k, temperature, top-p and min-p, one row each in the order the sampler applies them (drag a row by
-  its grip to reorder), one set with thinking and one without, starting from Qwen's recommended values. The thinking bar
-  in the message box is the one switch: the panel shows (and edits) the set its level selects.
-- Repetition: presence penalty and DRY (with its allowed run and growth).
-Each group sits under a chart of real odds run through kiln's whole sampler with the settings as they stand. Sampling:
-Qwen naming a cat (the first word, 2,000 draws), a row per name with a bar for its odds now and a tick where the model
-had them; min-p is a line across the bars, and a cut name is struck through with the stage that cut it. Repetition:
-Qwen listing cat names after it started repeating itself ("…Luna, Milo, Shadow, Luna, Milo,", its next token's 64
-candidates): the reply line marks the names presence counts as used and the run DRY sees, and the rows show "Shadow"
-(91% from the model) pushed down, tagged used and repeats. Pointing at a row explains it in the line under the chart;
-explanations elsewhere are tooltips, so nothing in the panel changes size while it is used.
-- The reply's max length and the seed: random for every reply, or fixed. Clicking a reply's seed fixes it.
-A value that differs from the recommended one is marked; ↺ or a double click on its slider brings it back. The
-sidebar holds the conversations (sending a message starts the model too). It and Settings are side panels that work
-alike: a toggle fixed in the window's top corner (left: conversations, Ctrl+B; right: Settings, Ctrl+,), which
+`web/` is a small Bun app: `server.ts` serves the page, proxies kiln's API on the same origin and runs the tools
+(`tools.ts`, with `tool-fetch.ts` and `tool-mcp.ts`); `app.ts` is plain TypeScript (marked, highlight.js, DOMPurify,
+KaTeX; Mermaid's own build loads with the first diagram). Conversations live in the tab's sessionStorage: a reload keeps
+them, closing the tab ends them, and nothing is stored on the server's disk. Export saves the open chat (Export all:
+every chat of the tab) as a JSON file, every version, tool round and attached file included, which Import adds back
+under new ids. A reply belongs to the web server while it is written (in RAM, until 15 minutes after it ends): opening
+another chat, reloading, closing the tab, a laptop asleep or a dropped connection leave it running, and the page follows
+it again from the last event it saw; only Stop (the button, or Esc when nothing else is open) or deleting the chat ends
+it early. Replies stream with their reasoning (collapsible), each one shows time to first token, tok/s, how much of the
+prompt came from cache, the sampling values that differed from the recommended ones and its seed. In the message box, an
+energy bar sets the thinking: Off (the no-thinking mode), Low, Medium or Max. It runs hotter to the right (Medium flows;
+Max is molten, with a sweeping shine and rising sparks), and dragging takes a stop a third of the way to it. The model's
+name beside the send button opens the models; it is the only place a model is chosen. Beside it are the engine's state
+(a dot: ready, loading with its progress, or stopped), a power button (unload, or load) and the usage: this chat against
+the context, and how full kiln's cache of conversations is. Message actions keep fixed places (from the right: delete,
+edit, copy on every message, then a reply's token odds, regenerate and continue), so none moves between messages. Every
+message can be edited in place (Save; a reply's thinking too) or deleted (with Undo). A conversation is a tree: sending
+an edited question (Send, Ctrl+Enter), regenerating any reply, or picking another token makes a new version beside the
+old one, and "‹ 2 / 3 ›" under a message with versions (buttons, keyboard too) switches between them, each with all that
+followed it. Deleting a message that has versions deletes that version. Only the path on screen goes to kiln, so
+switching back is a cache hit. A reply being written goes on in its version while another is shown, and shows where it
+got to when its version is back; a chat writes one reply at a time. The last reply can be continued (Continue is spelled
+out when the reply was cut short); it grows in place. Token odds shows a reply as its tokens, tinted by how unsure the
+model was of each; a click on one lists what else it could have written there, and picking one rewrites the reply from
+that token on. The wand in the message box drafts the user's next message (or finishes the one being typed) to edit and
+send: kiln is asked, as the assistant and without thinking, to write it (Qwen will not write a user turn: at one it ends
+it). Settings (Ctrl+,) sits beside the chat: with room it opens without moving the conversation, otherwise it slides the
+column over (never re-wrapping it) or, in narrow windows, slides over it. Every change applies from the next reply and
+can be undone, for every conversation in the tab (kept with them). It shows exactly what kiln is sent: - The system
+prompt, by default "There are no tools or files in this chat. Answer directly." It is an ordinary   prompt: edit or
+delete it. Without it, Flash-Next with thinking off takes asks like "design a cute SVG" for a   coding-agent task ("let
+me first explore the project structure", then calls to tools that do not exist), as the   Q8_0 original does too. In a
+chat with tools on, the default is sent as "The tools offered here are the only ones   in this chat, and there are no
+files or projects to explore. Use a tool when it helps; otherwise answer directly."   (a prompt of your own goes as
+written). - Sampling: top-k, temperature, top-p and min-p, one row each in the order the sampler applies them (drag a
+row by   its grip to reorder), one set with thinking and one without, starting from Qwen's recommended values. The
+thinking bar   in the message box is the one switch: the panel shows (and edits) the set its level selects. -
+Repetition: presence penalty and DRY (with its allowed run and growth). Each group sits under a chart of real odds run
+through kiln's whole sampler with the settings as they stand. Sampling: Qwen naming a cat (the first word, 2,000 draws),
+a row per name with a bar for its odds now and a tick where the model had them; min-p is a line across the bars, and a
+cut name is struck through with the stage that cut it. Repetition: Qwen listing cat names after it started repeating
+itself ("…Luna, Milo, Shadow, Luna, Milo,", its next token's 64 candidates): the reply line marks the names presence
+counts as used and the run DRY sees, and the rows show "Shadow" (91% from the model) pushed down, tagged used and
+repeats. Pointing at a row explains it in the line under the chart; explanations elsewhere are tooltips, so nothing in
+the panel changes size while it is used. - The reply's max length and the seed: random for every reply, or fixed.
+Clicking a reply's seed fixes it. - Tools: the config file's MCP servers as they stand (state, tools, the command or
+URL, read-only), Reload config,   Fetch URL's page length, and the tools allowed to run without asking (a click makes
+one ask again). A value that differs from the recommended one is marked; ↺ or a double click on its slider brings it
+back. The sidebar holds the conversations (sending a message starts the model too). It and Settings are side panels that
+work alike: a toggle fixed in the window's top corner (left: conversations, Ctrl+B; right: Settings, Ctrl+,), which
 never moves. With room, a panel sits beside the chat, dragging its inner edge resizes it (a double click gives it its
-default width back; the chat keeps at least 640 px), and it stays as it was left, width and all; in a narrower window
-it slides over the chat and a click outside it or Esc closes it. Assistant turns go back to kiln exactly as
-received, so every turn of a conversation is a cache hit.
-While a reply streams the page follows it, until you scroll up (wheel, touch, keys or the scrollbar); back at the
-end, or with the ↓ over the message box, it follows again, and it never scrolls up on its own. A figure being drawn
-is shown from its top, as large as what can be seen at once (the column's width or the visible height), and the page
-holds still while it draws. The thinking box follows its newest line the same way.
-Replies render block by block: while one streams, finished paragraphs, code blocks and tables keep their nodes
-and only the growing tail is rebuilt (on the next frame), and the tail shows settled text only: whole words, whole
-code lines and table rows, links once their address is in, no stray `**`. A code block holding an SVG document
-(whatever its label) becomes a figure that draws itself while it streams: it takes its final size from the
-`<svg>` tag, then each element fades in once its tag is complete. It sits on a light page sized to the drawing,
-with Code, Copy, Download and Expand; the markup is sanitized (no scripts, handlers, `foreignObject` or outside
-references) into a shadow root, and the page's Content-Security-Policy lets nothing load from anywhere else. A ```mermaid
-block becomes a diagram in the same figure; while it streams, each version that parses replaces the picture. TeX
-(`$…$`, `\(…\)`, `$$…$$`, `\[…\]`) is typeset by KaTeX; a `$` opens math only before a non-space and closes it only
-after one, not before a digit or across a backtick, so prices and shell variables stay text. A ```html block holding a
-whole document runs as a page once it is written (a fragment when its Preview is clicked), in an iframe on `/sandbox`
-behind two walls, each enough alone: the iframe's sandbox (an opaque origin: no cookies, storage or chat) and that
-route's policy, which lets the page's own code run but nothing load or connect anywhere, kiln included.
-Text files, pictures, PDFs and videos can be attached (the clip, a drop anywhere, a paste): kiln gets each file before the
-typed text, a text file as its name and a fenced block, a picture as an image, a PDF as a file (its pages as pictures and
-text) and a video as a video. Their contents live in the tab's IndexedDB (one
-screenshot is most of sessionStorage), and a closed tab's are deleted when a kiln page next loads.
-Development: `cd web && bun run dev` (hot reload), `bun run check`.
+default width back; the chat keeps at least 640 px), and it stays as it was left, width and all; in a narrower window it
+slides over the chat and a click outside it or Esc closes it. Assistant turns go back to kiln exactly as received, so
+every turn of a conversation is a cache hit. While a reply streams the page follows it, until you scroll up (wheel,
+touch, keys or the scrollbar); back at the end, or with the ↓ over the message box, it follows again, and it never
+scrolls up on its own. A figure being drawn is shown from its top, as large as what can be seen at once (the column's
+width or the visible height), and the page holds still while it draws. The thinking box follows its newest line the same
+way. Replies render block by block: while one streams, finished paragraphs, code blocks and tables keep their nodes and
+only the growing tail is rebuilt (on the next frame), and the tail shows settled text only: whole words, whole code
+lines and table rows, links once their address is in, no stray `**`. A code block holding an SVG document (whatever its
+label) becomes a figure that draws itself while it streams: it takes its final size from the `<svg>` tag, then each
+element fades in once its tag is complete. It sits on a light page sized to the drawing, with Code, Copy, Download and
+Expand; the markup is sanitized (no scripts, handlers, `foreignObject` or outside references) into a shadow root, and
+the page's Content-Security-Policy lets nothing load from anywhere else. A ```mermaid block becomes a diagram in the
+same figure; while it streams, each version that parses replaces the picture. TeX (`$…$`, `\(…\)`, `$$…$$`, `\[…\]`) is
+typeset by KaTeX; a `$` opens math only before a non-space and closes it only after one, not before a digit or across a
+backtick, so prices and shell variables stay text. A ```html block holding a whole document runs as a page once it is
+written (a fragment when its Preview is clicked), in an iframe on `/sandbox` behind two walls, each enough alone: the
+iframe's sandbox (an opaque origin: no cookies, storage or chat) and that route's policy, which lets the page's own code
+run but nothing load or connect anywhere, kiln included. Tools: the wrench beside the thinking bar (with how many tools
+are on) opens them for this chat: Fetch URL, then each MCP server with its state (not started, starting, running, failed
+with the error and Retry, disabled), a switch for the whole server, and under its arrow one per tool, marked read-only
+or asks first. The choice is the chat's, kept with it (export too); a new chat starts from the last one. A server starts
+the first time a chat turns it on, keeps running, and after a failure starts again 1, 2, 4 ... 60 s later. The servers
+come from `~/.config/kiln/mcp.json` (`KILN_MCP_CONFIG` overrides the path), in Claude Desktop's and Claude Code's shape,
+so a config can be pasted: ```json { "mcpServers": {     "notes":  { "command": "npx", "args": ["-y",
+"@modelcontextprotocol/server-filesystem", "/home/me/notes"], "env": {}, "cwd": "/home/me" },     "remote": { "url":
+"https://example.com/mcp", "headers": { "Authorization": "Bearer ..." }, "timeout": 120 },     "old":    { "command":
+"old-server", "disabled": true } },   "fetch": { "allowPrivate": false } } ``` stdio (`command`, `args`, `env`, `cwd`)
+and Streamable HTTP (`url`, `headers`) servers, through the official SDK; SSE servers are refused. `timeout` is a call's
+limit in seconds (60 by default), `maxResultChars` a result's size (40,000; a longer one is cut, and says so). Tool
+names reach the model as `server__tool` (letters, digits, `_` and `-`, unique, sorted, so the prompt's tools block stays
+the same and cached), the page shows the servers' own. The page cannot add, edit or see a server's command line beyond
+what Settings shows, its environment or headers: with `--lan` and no logins, a page that could define a command would
+run anything on this machine. It can list, start, retry and reload, and every request that starts or allows a tool must
+come as JSON, which another site's form cannot send. Fetch URL (read-only) GETs http(s) pages (20 s, 5 redirects, 4 MB),
+gives HTML as compact markdown (title, headings, paragraphs, lists, links, tables, code; no scripts, styles, menus or
+footers; `<main>` alone when there is one), text and JSON as they are, and refuses other types; the result starts with
+the final URL and the HTTP status, and a long page comes in parts the model can ask for (`start`; 20,000 characters at a
+time, Settings changes that). It refuses addresses that are not public (loopback, private, link-local, shared,
+documentation, multicast, IPv6 unique-local and link-local, NAT64 and 6to4 of those), checked in the connection's own
+DNS lookup at every hop, so neither a redirect nor a name that answers differently the second time gets through;
+`"allowPrivate": true` (or a list of addresses and CIDR blocks) in the config file is the only way to allow them. The
+reply's tool loop runs in the web server: kiln's answer ends in calls, the server runs them (side by side), sends kiln
+the turn with its reasoning, the calls exactly as kiln wrote them and their results, and asks again, up to 24 rounds
+(then it stops and says so; Continue carries on). So a reply with tools goes on with the tab closed, and a page that
+comes back follows all of its rounds. A tool that is not read-only (MCP's `readOnlyHint`) asks first: the reply waits at
+the call, its card shows the arguments with Allow once, Always allow (that tool, from then on, in every chat of the tab)
+and Deny, and a denied call tells the model the user declined. A call to a tool the chat has not turned on gets an error
+result, not a crash. Stop ends a reply anywhere, a call too (MCP's cancellation reaches the server). Calls show where
+they happened among each round's thinking and text, as cards (the tool and its server, a line of its arguments, running
+with its time, asks to run, done in N s, failed, declined, stopped) that open to the arguments and the result (markdown
+through the same sanitizer; a long one folds). A reply's stats count its rounds as one: time to its first token, tokens
+over the time spent writing them (each round's first token to its last), prompts summed; the usage meter shows the
+context its last round left. Text files, pictures, PDFs and videos can be attached (the clip, a drop anywhere, a paste):
+kiln gets each file before the typed text, a text file as its name and a fenced block, a picture as an image, a PDF as a
+file (its pages as pictures and text) and a video as a video. Their contents live in the tab's IndexedDB (one screenshot
+is most of sessionStorage), and a closed tab's are deleted when a kiln page next loads. Development: `cd web && bun run
+dev` (hot reload), `bun run check`.
 
 ## Measured on this machine
 
@@ -376,7 +424,8 @@ is as fast (frozen at any point between 1.5x and 2x the CPU estimate, within 2% 
 10% faster than its oscillation on long passes), so the split does not move results (the pool does, above).
 
 **Memory.** The model is sized to fit, so there is nothing to guard: kiln loads it and runs. Switching to
-the 27B frees all of it (no experts are kept in RAM), and switching back reloads in ~18 s. Pages of the
+the 27B frees all of it (no experts are kept in RAM), and switching back reads the file again: 7 s once the 27B has
+read 45 GB of it into the page cache (Notes), 17-19 s from the disk. Pages of the
 model file are dropped from the page cache once copied; an expert that leaves the pool for the file is read ahead
 into it again.
 
@@ -391,7 +440,7 @@ into it again.
 | at 260K context: decode, no drafts / 2 drafts | 57.7 / 65 tok/s (27B: 30.6 / 69 with 3 drafts) |
 | at 260K context: 1,024-token append | 0.91 s to the first token (27B: 2.38 s) |
 | filling 260K tokens from empty | 106 s, 2,450 tok/s (27B: 377 s) |
-| load / switch from the 27B | 18 s / 19 s |
+| load / switch from the 27B | 17-18 s / 7.0 s (19 s with nothing of the file cached) |
 | OpenCode (`tools/bench_opencode.py`): first request after a load / new session / new day or project | 5.9 / 0.14 / 0.5 s to the first token |
 
 Those rows are `tools_fn/bench_fn.py` in a session whose PCIe link ran at 8 GT/s. In one at 2.5 GT/s (above) prefill
@@ -426,13 +475,15 @@ engine/   common.h kernels.h gguf.h      constants, kernel entry points, GGUF re
           model.cpp model.h api.cpp      weights, sequences, snapshots, forward, MTP, C API
           vision.hip vision.h            the vision tower (both engines)
           sampler.h                      the host sampler (both engines): penalties, DRY, ordered stages
-kiln/     engine.py chat.py cache.py server.py apis.py structured.py vision.py sleep.py __main__.py
-web/      server.ts app.ts files.ts sampler.ts index.html style.css   Bun web UI (make test_web: sampler.test.ts, server.test.ts,
-          browser.test.ts: the page in headless Chromium)
-tools/    tests (make test: test_quant, test_attn, test_gdn, test_sampler, test_chat, test_cache, test_snapshot, test_server,
-          compare_ref.py: the next-token distributions against llama.cpp's; test_vision.py: preprocessing, the vision tower and
-          prompts with pictures against transformers and llama.cpp, with vision_ref.py, ref_logits_mm.cpp; test_vision.hip
-          runs the tower alone), benchmarks (bench_quant.hip, bench_opencode.py:
+kiln/     engine.py chat.py cache.py server.py apis.py structured.py vision.py documents.py sleep.py link.py warm.py
+          metrics.py __main__.py
+web/      server.ts app.ts files.ts sampler.ts wire.ts      Bun web UI; tools.ts tool-fetch.ts tool-mcp.ts its tools
+          index.html style.css                          (make test_web: sampler.test.ts, server.test.ts with fake-mcp.ts,
+                                                        browser.test.ts: the page in headless Chromium)
+tools/    tests (make test: test_quant, test_attn, test_gdn, test_sampler, test_chat, test_cache, test_documents, test_snapshot,
+          test_server, compare_ref.py: the next-token distributions against llama.cpp's; test_vision.py: preprocessing, the
+          vision tower and prompts with pictures against transformers and llama.cpp, with vision_ref.py, ref_logits_mm.cpp;
+          test_vision.hip runs the tower alone), benchmarks (bench_quant.hip, bench_opencode.py:
           OpenCode's real requests), agent_sim.py, lint_comments.py (make lint: the mechanical cases of AGENTS.md's comment rule)
 engine_fn/                               the Flash-Next engine (same C API): cpu_moe.cpp cpu_vnni.cpp for the
                                          experts in RAM, moe.hip routing, ple.hip n-gram block, ...
@@ -447,8 +498,8 @@ data/     (not code) rocm/ venv/ models/ llama.cpp/ (quantization tools + refere
 ## Rebuilding
 
 `make` builds `build/libkiln.so` against the ROCm 10.1 tarball in `data/rocm`. `data/venv` is the server's Python:
-numpy, tokenizers, Pillow and llguidance, and for the tests httpx, jsonschema and the anthropic and openai SDKs. The model
-file was made from bartowski's Q8_0 with llama.cpp's quantizer:
+numpy, tokenizers, Pillow and llguidance, and for the tests httpx, jsonschema, prometheus-client and the anthropic and openai
+SDKs. The model file was made from bartowski's Q8_0 with llama.cpp's quantizer:
 `llama-quantize --allow-requantize --imatrix Qwen3.8-27B-imatrix.gguf --tensor-type-file tools/quant-mix.txt
 --output-tensor-type q6_k --token-embedding-type iq4_xs Qwen3.8-27B-Q8_0.gguf kiln-mix.gguf IQ4_XS`.
 
@@ -477,9 +528,29 @@ in `tools/agent_sim.py` sessions (`--model=qwen3.8-flash-next`).
   sampler; 8 rows shared out as drafts). Two at once write 141 tok/s together in the engine where 107 in turn (115 / 91
   through the server), and the second reply starts when its prompt is read instead of after the first. Sampling stays
   exact: two replies (3 drafts each, as alone) draw for a seed the very tokens each would alone. A model switch or sleep
-  waits for the replies in flight. Flash-Next's replies take turns: a shared pass measured no faster there (two replies
-  45.9 tok/s together, 45.7 in turn), its decode being bound by the CPU reading each token's cold experts.
+  waits for the replies in flight. Flash-Next's replies share passes too, with one draft each (two rows a reply, up to
+  four replies; more take none): the projections, routers and experts once for all rows, the CPU's cold experts too.
+  With the expert pool warm, two replies write 120 tok/s together where 103 in turn with two drafts each, three 127
+  where 102 (`tools/bench_decode.py 512 2 --together N --use qwen3.8-flash-next`); a second draft each measured no
+  faster, the CPU reading more distinct cold experts per pass. Each row is computed as alone (the hyper-connection
+  mixers four rows at a time, the cold picks' GPU share counted per reply), so a reply draws for a seed what it draws
+  alone with one draft.
 - The GPU stays awake while the server runs (no wake-up latency) and suspends when it stops.
+- The PCIe link (`kiln/link.py`): the card trains it when it resumes from runtime suspend, and here it comes up at 2.5 or
+  at 8 GT/s from one resume to the next (both x16; 2 of 4 resumes in a row at each). At 2.5 GT/s DMA runs at ~3 GB/s
+  instead of ~12, prefill takes twice as long and Flash-Next's decode loses a quarter. kiln reads the link beside the
+  first load, once the GPU is awake (asleep it reads x1), and when it is slower than the fastest this machine has shown
+  (`data/cache/link.json`) the server restarts itself (exec) after the GPU has suspended, to have it trained again, up
+  to 4 times (`kiln serve --link-tries`): a start whose link came up at 2.5 GT/s was back at 8 GT/s after one restart,
+  serving 23 s after `kiln restart` where 17 s without. A link still slow then, or after a wake from sleep (a process
+  holding the GPU cannot let it suspend), is named in the log, `kiln status`, `/kiln/stats` and `/metrics`.
+- Switching to Flash-Next reads all of its file (63 GB, more than the RAM) at the disk's ~4 GB/s. While the 27B runs, it
+  leaves most of the RAM free, so 10 s after a load kiln reads Flash-Next's file into the page cache (`kiln/warm.py`),
+  pausing while requests run and stopping 10 GB short of filling the free memory; the 27B's own file leaves the cache
+  for it (its weights are on the GPU: a restart or wake then reads it from the disk, 3.9 s instead of 1.5). Measured:
+  45 GB read in 9 s, then the switch took 7.0 s where 19 s from nothing cached (9.8 s with 29 GB, the 27B's file still
+  cached). Flash-Next reads nothing for the 27B: its experts take 43 GB and its own working set (the n-gram table, the
+  file tier's experts) lives in the page cache. The switch back reads the 27B's 15 GB from the disk: 4.3 s.
 - Before the machine sleeps, kiln frees the GPU (`kiln/sleep.py`: a logind delay lock), so the model's VRAM is never
   evicted into RAM: a reply being written ends at its next step (cut short, as at its length limit), a prompt being read
   stops at its next 8K-token piece, and requests wait. After the wake the model loads again, its cache empty but for

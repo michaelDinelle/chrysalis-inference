@@ -1,6 +1,7 @@
 """Documents attached to a message: a PDF reaches the model as Anthropic's API gives it one, each page both as the vision
-tower sees it and as its text, here as text and picture parts of the message (pages past PAGES_SEEN as text alone); other
-files as their text. poppler's pdftotext and pdftoppm read the PDF, in a scratch directory, with a time limit."""
+tower sees it and as its text, here as text and picture parts of the message; other files as their text. A long PDF's
+pictures go where the text cannot stand in for them: to every page without text (a scan, a drawing; up to SCANNED), and
+the rest of the budget to its first pages. poppler's pdftotext and pdftoppm read the PDF, in a scratch directory, with a time limit."""
 import base64
 import hashlib
 import os
@@ -10,7 +11,9 @@ import tempfile
 import threading
 from collections import OrderedDict
 
-PAGES_SEEN = 20            # pages also given as pictures: ~800 tokens each at LONG_SIDE (a 10-page PDF ~10K with its text)
+PAGES_SEEN = 20            # pages with text also given as pictures: ~800 tokens each at LONG_SIDE (a 10-page PDF ~10K with its text)
+SCANNED = 120              # pages without text given as pictures, wherever they are: ~96K tokens, they have nothing else
+BARE = 32                  # characters under which a page's text layer counts as none (a page number, a running head)
 LONG_SIDE = 1024           # pixels along a page picture's longer side: 9-point text stays legible, and it has the text too
 MAX_PAGES = 1000
 TIMEOUT = 120              # seconds poppler may take over one PDF
@@ -41,15 +44,16 @@ class Documents:
     def __init__(self, keep=16):
         self.keep, self.done, self.lock = keep, OrderedDict(), threading.Lock()
 
-    def parts(self, data, media, name, pictures):
-        """A file's content parts: text and image_url parts (pictures: the model has a vision tower)."""
-        key = (hashlib.blake2b(data, digest_size=16).digest(), name, pictures)
+    def parts(self, data, media, name, pictures, seen=None):
+        """A file's content parts: text and image_url parts (pictures: the model has a vision tower). seen: a PDF's pages
+        with text also given as pictures (default PAGES_SEEN)."""
+        key = (hashlib.blake2b(data, digest_size=16).digest(), name, pictures, seen)
         with self.lock:
             if key in self.done:
                 self.done.move_to_end(key)
                 return self.done[key]
         if data[:5] == b"%PDF-" or media == "application/pdf":
-            out = pdf_parts(data, name, pictures)
+            out = pdf_parts(data, name, pictures, PAGES_SEEN if seen is None else seen)
         else:
             try:
                 text = data.decode("utf-8")
@@ -63,8 +67,8 @@ class Documents:
         return out
 
     def expand(self, messages, pictures):
-        """messages with each file part (OpenAI's chat completions: {"type": "file", "file": {"file_data", "filename"}})
-        replaced by its document's parts."""
+        """messages with each file part (OpenAI's chat completions: {"type": "file", "file": {"file_data", "filename"}};
+        kiln's "page_pictures": a PDF's pages with text also given as pictures) replaced by its document's parts."""
         out = []
         for m in messages:
             content = m.get("content")
@@ -75,7 +79,7 @@ class Documents:
                         f = p.get("file") or {}
                         if f.get("file_id"):
                             raise DocumentError("kiln has no file store: send files inline, as file_data")
-                        new += self.parts(*file_bytes(f.get("file_data")), f.get("filename"), pictures)
+                        new += self.parts(*file_bytes(f.get("file_data")), f.get("filename"), pictures, page_pictures(f))
                     else:
                         new.append(p)
                 m = {**m, "content": new}
@@ -83,7 +87,24 @@ class Documents:
         return out
 
 
-def pdf_parts(data, name, pictures):
+def page_pictures(f):
+    n = f.get("page_pictures")
+    if n is None:
+        return None
+    if isinstance(n, bool) or not isinstance(n, int) or n < 0:
+        raise DocumentError("page_pictures must be a whole number of pages, 0 or more")
+    return min(n, MAX_PAGES)
+
+
+def picked(texts, pages, seen):
+    """The pages (0-based, sorted) given as pictures: every one without text up to SCANNED, then the first of the others
+    up to `seen`."""
+    bare = [i for i in range(pages) if len("".join((texts[i] if i < len(texts) else "").split())) < BARE][:SCANNED]
+    rest = [i for i in range(pages) if i not in set(bare)][:seen]
+    return sorted(bare + rest)
+
+
+def pdf_parts(data, name, pictures, seen=PAGES_SEEN):
     with tempfile.TemporaryDirectory(prefix="kiln-pdf-") as tmp:
         src = os.path.join(tmp, "in.pdf")
         with open(src, "wb") as f:
@@ -96,21 +117,32 @@ def pdf_parts(data, name, pictures):
         if pages > MAX_PAGES:
             raise DocumentError(f"the PDF has {pages} pages; kiln reads at most {MAX_PAGES}")
         texts = poppler(["pdftotext", "-enc", "UTF-8", src, "-"]).decode("utf-8", "replace").split("\f")
-        seen = min(pages, PAGES_SEEN) if pictures else 0
-        images = []
-        if seen:
-            poppler(["pdftoppm", "-png", "-scale-to", str(LONG_SIDE), "-l", str(seen), src, os.path.join(tmp, "page")])
-            images = sorted(f for f in os.listdir(tmp) if f.startswith("page") and f.endswith(".png"))
-            if len(images) != seen:
+        drawn = {}
+        if pictures:
+            want = picked(texts, pages, seen)
+            runs = []                                    # pdftoppm draws a range of pages per run
+            for i in want:
+                if runs and runs[-1][1] == i - 1:
+                    runs[-1][1] = i
+                else:
+                    runs.append([i, i])
+            for a, b in runs:
+                poppler(["pdftoppm", "-png", "-scale-to", str(LONG_SIDE), "-f", str(a + 1), "-l", str(b + 1), src,
+                         os.path.join(tmp, f"run{a}")])
+            for f in os.listdir(tmp):
+                m = re.fullmatch(r"run\d+-0*(\d+)\.png", f)
+                if m:
+                    drawn[int(m.group(1)) - 1] = os.path.join(tmp, f)
+            if sorted(drawn) != want:
                 raise DocumentError("cannot read the PDF: poppler drew fewer pages than it has")
         out = [{"type": "text", "text": f'<document name="{name or "document.pdf"}" pages="{pages}">\n'}]
         for i in range(pages):
             out.append({"type": "text", "text": f'<page number="{i + 1}">\n'})
-            if i < seen:
-                with open(os.path.join(tmp, images[i]), "rb") as f:
+            if i in drawn:
+                with open(drawn[i], "rb") as f:
                     out.append({"type": "image_url", "image_url": {"url": "data:image/png;base64," + base64.b64encode(f.read()).decode()}})
             text = texts[i].strip() if i < len(texts) else ""
-            out.append({"type": "text", "text": (f"\n{text}" if i < seen and text else text) + "\n</page>\n"})
+            out.append({"type": "text", "text": (f"\n{text}" if i in drawn and text else text) + "\n</page>\n"})
         out.append({"type": "text", "text": "</document>"})
         return out
 

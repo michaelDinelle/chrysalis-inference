@@ -92,11 +92,12 @@ void route_dec(const float *logits, int T, const int *slot_of, int n_ram, int *i
 // expert, 16-byte weight loads), block 0 the shared expert gate, and each workgroup copies its share of the tokens' MoE
 // inputs to the host for the CPU; the last workgroup to finish (atomic counter) selects every token's top 10 at once (a
 // wave per token, 16 logits per lane; ties go to the lower expert id, as in k_route), computes the weights, splits the
-// cold picks between GPU and CPU (in pick order across the tokens) and publishes the CPU's share. Same outputs as
-// router_dec + route_dec.
+// cold picks between GPU and CPU (in pick order across the tokens of each sequence: bit t of starts marks a token that
+// begins one, so a sequence's split in a shared pass is the one it gets alone) and publishes the CPU's share. Same
+// outputs as router_dec + route_dec.
 __global__ __launch_bounds__(256) void k_router_route(const half *W, const float *wsg, const float *x, int T, float *logits,
         float *sg, const int *slot_of, int n_ram, int *ids, float *wts, int *hot_slot, MoeShared *sh, float gfrac, int layer,
-        uint32_t gen, unsigned *counter, unsigned *counts) {
+        uint32_t gen, unsigned *counter, unsigned *counts, unsigned starts) {
     __shared__ bool last;
     __shared__ int ram_n[8];
     const int tid = threadIdx.x, wave = tid / 32, lane = tid % 32;
@@ -168,7 +169,7 @@ __global__ __launch_bounds__(256) void k_router_route(const half *W, const float
     if (lane == 0) ram_n[wave] = __popc(bal);
     __syncthreads();
     int nc = 0;
-    for (int w = 0; w < wave; w++) nc += ram_n[w];
+    for (int w = wave; w > 0 && !(starts >> w & 1u); w--) nc += ram_n[w - 1];
     const int before = nc + __popc(bal & ((1u << lane) - 1u));
     const bool gpu = ram && floorf((before + 1) * gfrac) > floorf(before * gfrac);
     if (wave < T && lane < TOPK_E) {
@@ -190,9 +191,9 @@ __global__ __launch_bounds__(256) void k_router_route(const half *W, const float
 }
 void router_route_dec(const half *W, const float *wsg, const float *x, int T, float *logits, float *sg, const int *slot_of,
                       int n_ram, int *ids, float *wts, int *hot_slot, MoeShared *sh, float gfrac, int layer, uint32_t gen,
-                      unsigned *counter, hipStream_t st, unsigned *counts) {
+                      unsigned *counter, hipStream_t st, unsigned *counts, unsigned starts) {
     k_router_route<<<NE / 8, 256, 0, st>>>(W, wsg, x, T, logits, sg, slot_of, n_ram, ids, wts, hot_slot, sh, gfrac, layer, gen,
-                                           counter, counts);
+                                           counter, counts, starts);
 }
 
 // The end of a decode MoE block in one launch: wait for the CPU's answer (one thread per workgroup spins on the host

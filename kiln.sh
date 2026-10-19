@@ -66,8 +66,13 @@ ready() {
     echo "kiln is running ($(loaded))"; urls
 }
 
-# which model is on the GPU right now
-loaded() { curl -sf "$API/kiln/stats" | "$PY" -Ic 'import json, sys; print(json.load(sys.stdin)["model"], "loaded")' 2>/dev/null || echo loading; }
+# which model is on the GPU right now, and the PCIe link when it came up slower than this machine's best (kiln/link.py)
+loaded() { curl -sf "$API/kiln/stats" | "$PY" -Ic '
+import json, sys
+s = json.load(sys.stdin)
+l = s.get("link") or {}
+slow = "; PCIe link at %g GT/s x%d, slower than its best (%g GT/s): kiln restart" % (l["gts"], l["width"], l["best_gts"]) if l.get("slow") else ""
+print(s["model"], "loaded" + slow)' 2>/dev/null || echo loading; }
 
 case "${1:-help}" in
   start|restart)

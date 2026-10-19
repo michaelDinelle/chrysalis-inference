@@ -24,8 +24,9 @@ a stale comment steers people and agents wrong. `make lint` catches the mechanic
 ## Running them
 
 - CPU only: `make build/test_sampler && build/test_sampler`, `data/venv/bin/python tools/test_cache.py`,
-  `data/venv/bin/python tools/test_chat.py`, `make build_fn/test_cpujob_fn && build_fn/test_cpujob_fn`, `make test_web`
-  (the web UI's sampler against the engine's, its server against a fake kiln, the page in headless Chromium), `make lint`.
+  `data/venv/bin/python tools/test_chat.py`, `data/venv/bin/python tools/test_documents.py` (which PDF pages are
+  pictured), `make build_fn/test_cpujob_fn && build_fn/test_cpujob_fn`, `make test_web` (the web UI's sampler against
+  the engine's, its server against a fake kiln, the page in headless Chromium), `make lint`.
 - GPU, with kiln's model server stopped (`systemctl --user stop kiln`; the user runs kiln: check the GPU is idle, ask
   once per task, then just say when it stops and for how long): `make test` (test_web, the 27B kernels, then the model
   in-process: chat format, cache, snapshots and generation (held answers' masked steps too), the server (its Anthropic

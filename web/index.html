@@ -43,6 +43,7 @@
             <div id="attachments" class="attachments" hidden></div>
             <textarea id="input" rows="1" placeholder="Message kiln" autofocus></textarea>
             <div id="model-pop" class="model-pop" role="listbox" aria-label="Model" hidden></div>
+            <div id="tools-pop" class="tools-pop" role="dialog" aria-label="Tools in this chat" hidden></div>
             <div class="composer-row">
               <button id="attach" class="act attach" type="button" title="Attach text files or pictures (or drop or paste them)" aria-label="Attach files"></button>
               <input id="attach-file" type="file" multiple hidden />
@@ -50,6 +51,7 @@
                 <div id="energy" class="energy" role="slider" tabindex="0" aria-label="Thinking" aria-valuemin="0" aria-valuemax="3"></div>
                 <div id="energy-stops" class="energy-stops"></div>
               </div>
+              <button id="tools-btn" class="tools-btn" type="button" aria-haspopup="dialog" aria-expanded="false" aria-controls="tools-pop"></button>
               <span id="meter" class="meter"></span>
               <button id="model-btn" class="model-btn" type="button" aria-haspopup="listbox" aria-expanded="false" aria-controls="model-pop"></button>
               <button id="power" class="act power" type="button"></button>
@@ -74,6 +76,7 @@
             <section class="set-sec">
               <div class="set-sec-head"><label class="set-title" for="system-input">System prompt</label><button id="system-reset" class="act knob-reset" type="button" title="Back to the default system prompt" aria-label="Restore the default system prompt"></button></div>
               <textarea id="system-input" rows="2" placeholder="No system prompt" title="Sent as written; empty sends none. The default keeps the model from acting as a coding agent when it doesn't think. A change makes each chat read its history again once."></textarea>
+              <p id="system-note" class="set-note" hidden></p>
             </section>
             <section class="set-sec">
               <div class="set-sec-head"><span class="set-title">Sampling</span><span class="set-aside"><button id="order-reset" class="act knob-reset" type="button" title="Back to the default order" aria-label="Restore the default order"></button><span id="mode-note" title="Set by the thinking bar in the message box"></span></span></div>
@@ -88,6 +91,13 @@
             <section class="set-sec">
               <div class="set-sec-head"><span class="set-title">Reply</span></div>
               <div id="reply-knobs" class="knobs"></div>
+            </section>
+            <!-- what the config file sets up, read-only: the page can reload the file, never change what a server runs -->
+            <section class="set-sec">
+              <div class="set-sec-head"><span class="set-title">Tools</span><button id="tools-reload" class="btn small" type="button" title="Read the config file again (servers that changed restart)">Reload config</button></div>
+              <div id="tools-list" class="tools-list"></div>
+              <div id="tools-knobs" class="knobs"></div>
+              <div id="allow-list" class="allow-list"></div>
             </section>
           </div>
           <footer class="set-foot"><button id="settings-reset" class="btn" type="button"

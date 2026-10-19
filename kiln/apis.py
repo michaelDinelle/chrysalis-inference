@@ -51,6 +51,11 @@ def _parts(blocks, where):
     return parts
 
 
+def _kept(d, *keys):
+    """kiln's own fields of a part that it passes through (kiln/documents.py page_pictures)."""
+    return {k: d[k] for k in keys if k in d}
+
+
 def _document(b):
     """An Anthropic document block as chat parts: a PDF (base64) as a file part kiln/documents.py reads, plain text or
     content blocks as text, with its title and context."""
@@ -58,7 +63,7 @@ def _document(b):
     head = [{"type": "text", "text": f"{b['context']}\n"}] if b.get("context") else []
     if src.get("type") == "base64":
         return head + [{"type": "file", "file": {"file_data": f"data:{src.get('media_type') or 'application/pdf'};base64,{src.get('data') or ''}",
-                                                 "filename": title}}]
+                                                 "filename": title, **_kept(b, "page_pictures")}}]
     if src.get("type") == "text":
         return head + [{"type": "text", "text": f'<document name="{title}">\n{src.get("data") or ""}\n</document>'}]
     if src.get("type") == "content":
@@ -241,7 +246,7 @@ def _input_parts(content, role):
         elif kind == "input_file":
             if not p.get("file_data"):
                 raise ValueError("kiln reads files only as file_data (it has no file store)")
-            parts.append({"type": "file", "file": {"file_data": p["file_data"], "filename": p.get("filename")}})
+            parts.append({"type": "file", "file": {"file_data": p["file_data"], "filename": p.get("filename"), **_kept(p, "page_pictures")}})
         elif kind == "input_image":
             url = p.get("image_url")
             if not url:

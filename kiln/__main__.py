@@ -23,11 +23,29 @@ def main():
                    help="drafts copied from earlier in the conversation per step, at most (0 disables; default: the model's)")
     s.add_argument("--max-pixels", type=int, default=None,
                    help="the most pixels a picture is read at, fewer tokens for large ones (default: the official 16777216)")
+    s.add_argument("--link-tries", type=int, default=4,
+                   help="restarts to have a PCIe link that came up slower than this machine's best trained again (kiln/link.py)")
     a = ap.parse_args()
     if a.cmd == "serve":
         # Start what takes longest first: the GPU wakes and the weights load while the rest of Python starts up.
+        import threading
+        from . import link
         from .engine import load_async, wake_gpus
+        dev = link.device()
+        # a restart for the link: the GPU has to suspend to train it again; one kept awake (a display on it, another
+        # process) cannot be, so the check only says how it came up
+        if dev and os.environ.get(link.TRY) and not link.wait_suspended(dev):
+            os.environ[link.TRY] = str(a.link_tries)
         wake_gpus()
+        node = dev and link.render_node(dev)
+        if node:
+            def check():
+                try:
+                    os.close(os.open(node, os.O_RDWR))     # returns once the GPU is awake, its link trained
+                except OSError:
+                    return
+                link.check(dev, a.link_tries)
+            threading.Thread(target=check, daemon=True).start()
         spec = MODELS[a.use]
         path = a.model or os.path.join(ROOT, spec["path"])
         engine = load_async(path, max_seqs=a.slots, umax=a.chunk or spec["chunk"], warmup=False, lib=os.path.join(ROOT, spec["lib"]))

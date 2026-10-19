@@ -175,7 +175,7 @@ struct Engine {
     MoeShared *sh_pred = nullptr, *d_sh_pred = nullptr;
     struct { float *res, *lo, *inv, *mx, *logits, *sg, *wts; half *hh; QAct hq; int *ids, *hot; unsigned *counter; } la{};
     bool la_on = getenv("KILN_FN_NO_LOOKAHEAD") == nullptr;   // experiments: tune key "lookahead" (else Experts::CPU_HEAVY decides)
-    void lookahead(const Layer &w, int layer, int T, const float *res);
+    void lookahead(const Layer &w, int layer, int T, const float *res, unsigned starts = 1);
     hipEvent_t staged, copied, topk_ready, routed;
     hipEvent_t front_ready, front_copied;        // a sub-chunk's MoE inputs and picks are ready / on the host (prefill)
     PrefetchRange *pf_ranges = nullptr;          // per decoder layer: its dense weights, read into the Infinity Cache while
@@ -287,13 +287,15 @@ struct Engine {
     // tokens (host) at cells s.n..s.n+T-1, at M-RoPE positions pos3 (host [T][3], uploaded to b.rpos) or s.pos.. (text);
     // img: b.img holds the pass's picture rows
     void forward(Seq &s, const int *tokens, int T, bool verify, const int *pos3 = nullptr, bool img = false);
-    void ple_rows(const Seq &s, const int *tokens, int T);              // n-gram rows for these tokens -> b.ple_rows
+    void ple_rows(const Seq &s, const int *tokens, int T, int off = 0); // n-gram rows for these tokens -> b.ple_rows from row off
     void ple_ids(int h0, int h1, const int *tokens, int T, size_t *rows) const;   // their table rows (hash)
     void ple_prefetch(const size_t *rows, size_t n) const;              // start reading their pages (async)
+    // praw_off: the rows of the indexer's raw keys the MTP layer's go to (a sequence's rows in a shared pass, for its commit)
     void mtp_forward(Seq &s, int T, int pos0, const float *h_prev, const int *d_tokens, bool spec, int rope0, const int *rpos,
-                     Pos3 tail_pos, const half *const *img);
-    // spec: the pass may still be rejected (drafts); pos3 / img: the pass's, as forward's
-    void mtp_catch_up(Seq &s, int T, int pos0, bool spec, const int *pos3 = nullptr, bool img = false);
+                     Pos3 tail_pos, const half *const *img, int praw_off = 0);
+    // spec: the pass may still be rejected (drafts); pos3 / img: the pass's, as forward's; off: the sequence's first row of
+    // the pass (b.res, b.tokens)
+    void mtp_catch_up(Seq &s, int T, int pos0, bool spec, const int *pos3 = nullptr, bool img = false, int off = 0);
     void lm_head(const QAct &in, int T, int rows);
     void ensure_pages(Seq &s, int n_tokens, int from);
     int page_alloc();
@@ -302,12 +304,25 @@ struct Engine {
     void linear(const QTensor &W, int T, const QAct &qin, const half *hin, int ldin, void *out, int ldo, int mode, bool out_f16 = false);
     void gemm(const half *W, int N, int K, const half *x, int ldx, int T, void *y, int ldy, bool y_f16, bool accumulate);
     void gemm32(const half *W, int N, int K, const half *x, int ldx, int T, float *y, int ldy);
-    void hc_mix_block(const HcMix &m, int T, float *inject, bool want_f16);   // b.res -> b.mx (+ b.hq or b.hh), inject
     // res += output (HC); rotated at rope0.. or rpos (device), the incomplete block's first cell at tail_pos
     void attn_block(const Layer &w, int kvl, Seq &s, int T, int pos0, float *res, float *inject, bool spec, int rope0,
-                    const int *rpos, Pos3 tail_pos);
+                    const int *rpos, Pos3 tail_pos, int praw_off = 0);
+    // attention of one sequence's rows [off, off + T) of the projections (b.proj, b.kb, b.vb, b.qidx, b.kidx) -> b.mq (decode
+    // sizes) or b.att_h; its raw indexer keys to rows praw_off..
+    void attn_core(const Layer &w, int kvl, Seq &s, int T, int off, int praw_off, int pos0, bool spec, int rope0, const int *rpos,
+                   Pos3 tail_pos);
     void gdn_block(const Layer &w, int gl, Seq &s, int T, bool verify, float *res, float *inject);
-    void moe_block(const Layer &w, int layer, int T, bool cpu_cold, float *res, float *inject);   // res += its output (HC)
+    // res += its output (HC); starts: bit t marks a token that begins a sequence (router_route_dec)
+    void moe_block(const Layer &w, int layer, int T, bool cpu_cold, float *res, float *inject, unsigned starts = 1);
+    // One sequence's rows of a decode pass (8 rows at most in all): several sequences share a pass's projections, router and
+    // experts (generate_batch), each keeping its own attention, recurrent and n-gram state, and getting the numbers it gets
+    // alone (each row is computed on its own, the hyper-connection mixers in pieces of 4 rows as at decode).
+    struct Part { Seq *s; int T, off; bool verify; };
+    void attn_parts(const Layer &w, int kvl, const Part *p, int np, int T, float *res, float *inject);
+    void gdn_parts(const Layer &w, int gl, const Part *p, int np, int T, float *res, float *inject);
+    void ple_parts(const Part *p, int np, int T, float *res);
+    void forward_parts(const Part *p, int np, const int *tokens, int T);   // tokens: host, all rows in order
+    void generate_batch(int n, const int *ids, const Sampling *sps, int *out, int max_out, int *counts);
     void moe_front(const Layer &w, int n, int c0);   // a sub-chunk's router, shared expert, MoE inputs (passes of T > 8)
     void moe_back(const Layer &w, int layer, int T); // the pass's routed experts -> b.moe
     void ple_block_run(Seq &s, int c0, int n, bool verify, float *res);

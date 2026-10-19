@@ -30,12 +30,14 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 import numpy as np
 
-from . import apis, vision
+from . import apis, link, vision
 from .cache import Cache, Disk
 from .chat import Clip, Content, OutputParser, Renderer, StopText, Tokens, message_key, text_of
 from .documents import DocumentError, Documents
 from .structured import Grammars
+from .warm import Warmer
 from .engine import IMG_BASE, IMG_ROWS, STAGES, Engine, KVFull, Sampling, load_async, load_progress
+from .metrics import Metrics
 from .models import MODELS
 from .sleep import SleepGuard, vram_used, wait_vram_freed
 
@@ -480,10 +482,13 @@ class Server:
         self.replying = set()            # the sequences replies are being written in (a prompt being read makes way for them)
         self.pausing = threading.Event()  # the machine is about to sleep: GPU work ends at its next step (sleep())
         self.log = log
+        self.link_dev = link.device()
         spec = MODELS.get(model, MODELS[MODEL])
         self.n_draft = spec["draft"] if n_draft is None else n_draft
         self.lookup = spec.get("lookup", 0) if lookup is None else lookup
         self.recent = LRU(64)
+        self.metrics = Metrics()
+        self.warmer, self.warming = Warmer(log, lambda: self.lanes.used > 0), False   # serve() turns warming on
         self.engine = engine.result()
         self.capacity = min(MAX_CONTEXT, self.engine.capacity)
         self.cache = Cache(self.engine, slots, max_snapshots=MODELS.get(model, MODELS[MODEL])["snapshots"],
@@ -516,23 +521,36 @@ class Server:
         base = str(name or "").removesuffix("-fast")
         return base if base in MODELS else self.active
 
+    def rewarm(self):
+        """The other models' files into the page cache while this one runs, if it leaves the room (kiln/warm.py)."""
+        import os
+        if self.warming and MODELS[self.active].get("warm"):
+            self.warmer.start([os.path.join(_ROOT, spec["path"]) for name, spec in MODELS.items() if name != self.active],
+                              os.path.join(_ROOT, MODELS[self.active]["path"]))
+        else:
+            self.warmer.stop()
+
     def use(self, name):
         """Switch the GPU to another model (the caller holds the GPU). Cached conversations of the old model are
         dropped: they are that model's KV and states."""
         if name == self.active:
             return
         t0 = time.time()
+        self.warmer.stop()
         with self.state_lock:                         # waits for a stats() call that is reading the engine
             self.loading = name
         try:
             self.engine.shutdown()
             self.load_engine(name)
+            self.metrics.add("kiln_model_loads_total", model=name)
+            self.metrics.add("kiln_model_load_seconds_total", time.time() - t0, model=name)
             print(f"kiln: switched {self.active} -> {name} in {time.time() - t0:.1f} s (context {self.capacity} tokens)",
                   file=self.log, flush=True)
             self.active = name
         finally:
             with self.state_lock:
                 self.loading = None
+            self.rewarm()
 
     def load_engine(self, name):
         import os
@@ -549,6 +567,7 @@ class Server:
         """The machine is about to sleep (kiln/sleep.py): a reply being written ends at its next step, cut short as at
         max_tokens; a prompt being read stops at its next piece; then the GPU is freed. It stays taken until wake()."""
         t0 = time.time()
+        self.warmer.stop()
         self.pausing.set()
         self.lanes.hold()                                # the requests in flight end (pausing) and new ones wait
         self.gpu.acquire(main=True)
@@ -565,13 +584,20 @@ class Server:
         t0 = time.time()
         try:
             self.load_engine(self.active)
+            self.metrics.add("kiln_model_loads_total", model=self.active)
+            self.metrics.add("kiln_model_load_seconds_total", time.time() - t0, model=self.active)
             print(f"kiln: awake: {self.active} loaded in {time.time() - t0:.1f} s", file=self.log, flush=True)
+            now = link.status(self.link_dev)
+            if now and now["slow"]:                      # the resume trained it; only a restart trains it again
+                print(f"kiln: PCIe link at {now['gts']:g} GT/s x{now['width']} after the wake, slower than this machine's "
+                      f"best ({now['best_gts']:g} GT/s): `kiln restart` trains it again", file=self.log, flush=True)
         finally:
             with self.state_lock:
                 self.loading = None
             self.pausing.clear()
             self.gpu.release()
             self.lanes.release()
+            self.rewarm()
 
     def chat(self, body):
         """Runs one chat completion. Yields ("start", prompt info) once the prompt is read, ("reasoning"|"content",
@@ -1080,6 +1106,10 @@ class Server:
                 key = next(text_of(m.get("content")) for m in record["messages"] if m.get("role") == "user")
                 self.sessions.put(hashlib.sha1(key.encode()).hexdigest(), record)
             if not completed:
+                t1 = time.time()
+                self.metrics.reply(self.active, {"prompt_tokens": len(prompt), "cached_tokens": cached,
+                                                 "completion_tokens": min(len(out), max_tokens), "ttft": (t_first if steps else t1) - t0,
+                                                 "prefill_s": t_prefill - t0, "decode_s": t1 - t_prefill}, steps, "client")
                 print(f"kiln: prompt {len(prompt)} (cached {cached}) | stopped by the client after {len(out)} tokens "
                       f"| slot {slot.sid}", file=self.log, flush=True)
         if finish == "stop" and calls and not stop_text.hit:
@@ -1091,6 +1121,7 @@ class Server:
                 "decode_tps": n_gen / max(t1 - t_prefill, 1e-6), "tokens_per_step": n_gen / max(steps, 1), "seed": seed,
                 "stop_sequence": stop_text.matched}
         self.recent.put(time.time(), info)
+        self.metrics.reply(self.active, {**info, "decode_s": t1 - t_prefill}, steps, finish)
         print(f"kiln: prompt {len(prompt)} (cached {cached}){f' | {encoded} pictures encoded' if encoded else ''} ttft {info['ttft']:.2f}s | gen {n_gen} "
               f"{info['decode_tps']:.1f} tok/s {info['tokens_per_step']:.2f}/step | {finish} | slot {slot.sid}"
               + (" | " + ", ".join(f"{k} {v * 1000:.0f} ms" for k, v in trace) if trace else ""),
@@ -1101,8 +1132,40 @@ class Server:
         with self.state_lock:
             if self.loading:                          # the old engine is gone, the new one not ready
                 return {"model": self.active, "loading": self.loading, "progress": load_progress(), "models": list(MODELS)}
-            return {"model": self.active, "models": list(MODELS), "context": self.capacity, "kv_tokens": self.engine.capacity,
-                    "cache": self.cache.stats(), "recent": list(self.recent.values())[-16:]}
+            out = {"model": self.active, "models": list(MODELS), "context": self.capacity, "kv_tokens": self.engine.capacity,
+                   "cache": self.cache.stats(), "recent": list(self.recent.values())[-16:], "link": link.status(self.link_dev)}
+            experts = self.engine.expert_stats()
+            if experts:
+                out["experts"] = experts
+            return out
+
+    def gauges(self):
+        """kiln's state now, for /metrics (Metrics.render)."""
+        g = []
+        with self.state_lock:
+            g.append(("kiln_model_loaded", "1 for the model on the GPU", [({"model": m}, int(m == self.active and not self.loading)) for m in MODELS]))
+            g.append(("kiln_model_loading", "1 while a model loads (a switch, a wake)", [({}, int(bool(self.loading)))]))
+            g.append(("kiln_replies_writing", "Replies being written now", [({}, len(self.replying))]))
+            if not self.loading:
+                c = self.cache.stats()
+                g += [("kiln_context_tokens", "Context a request may use", [({}, self.capacity)]),
+                      ("kiln_kv_tokens", "Tokens the KV pool holds", [({}, self.engine.capacity)]),
+                      ("kiln_kv_free_tokens", "Tokens of the KV pool no sequence holds", [({}, c["free_kv_tokens"])]),
+                      ("kiln_snapshots", "Prompt-cache snapshots in RAM", [({}, c["snapshots"])])]
+                x = self.engine.expert_stats()
+                if x:                                    # Flash-Next: counted since the model loaded
+                    g += [("kiln_experts_decode_picks_total", "Experts routed to by decode steps", [({}, x["decode_picks"])]),
+                          ("kiln_experts_decode_picks_in_pool_total", "Of them, experts in the VRAM pool", [({}, x["decode_picks_in_pool"])]),
+                          ("kiln_experts_placed_total", "Experts copied into the pool", [({}, x["placed"])]),
+                          ("kiln_dma_bytes_per_second", "Host-to-GPU DMA rate the pool's copies measure", [({}, x["dma_bytes_per_s"])]),
+                          ("kiln_experts_gpu_share", "Share of the cold picks the GPU computes in decode", [({}, x["gpu_share"])])]
+        ln = link.status(self.link_dev)
+        if ln:
+            g += [("kiln_pcie_link_gts", "PCIe link speed now, GT/s (the slowest link to the GPU)", [({}, ln["gts"])]),
+                  ("kiln_pcie_link_width", "PCIe link width now, lanes", [({}, ln["width"])]),
+                  ("kiln_pcie_link_best_gts", "The fastest link speed seen on this machine, GT/s", [({}, ln["best_gts"])]),
+                  ("kiln_pcie_link_slow", "1 when the link is slower than this machine's best (kiln restart trains it again)", [({}, int(ln["slow"]))])]
+        return g
 
     def load(self, name):
         """Switch to a model now (the web chat's model picker), after the replies in flight, if any."""
@@ -1149,6 +1212,8 @@ def make_handler(state, ready):
             pass
 
         def send_json(self, code, obj):
+            if code >= 400 and state.get("srv"):
+                state["srv"].metrics.add("kiln_http_errors_total", status=code)
             data = json.dumps(obj).encode()
             self.send_response(code)
             self.send_header("Content-Type", "application/json")
@@ -1161,6 +1226,16 @@ def make_handler(state, ready):
                 return self.send_json(403, {"error": {"message": "unknown host", "type": "invalid_request_error"}})
             if not ready.is_set() and self.path.rstrip("/") in ("/health", "/v1/health", "/kiln/stats"):
                 return self.send_json(503, {"status": "loading", "model": state.get("loading"), "progress": load_progress()})
+            if self.path.split("?")[0].rstrip("/") == "/metrics":
+                srv = state.get("srv")
+                text = (srv.metrics.render(srv.gauges()) if srv else
+                        "# HELP kiln_model_loading 1 while a model loads (a switch, a wake)\n# TYPE kiln_model_loading gauge\nkiln_model_loading 1\n")
+                data = text.encode()
+                self.send_response(200)
+                self.send_header("Content-Type", "text/plain; version=0.0.4; charset=utf-8")
+                self.send_header("Content-Length", str(len(data)))
+                self.end_headers()
+                return self.wfile.write(data)
             ready.wait()
             srv = state["srv"]
             if self.path.rstrip("/") in ("/v1/models", "/models"):
@@ -1430,5 +1505,7 @@ def serve(make_server, host="127.0.0.1", port=8080, model=None):
     print(f"kiln: serving {srv.active} on http://{host}:{port}/v1 (context {srv.capacity} tokens)", file=srv.log, flush=True)
     srv.engine.warmup()
     srv.gpu.release()
+    srv.warming = True
+    srv.rewarm()
     SleepGuard(srv.sleep, srv.wake, srv.log).start()
     threading.Event().wait()

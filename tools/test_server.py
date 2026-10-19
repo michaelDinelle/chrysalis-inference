@@ -149,18 +149,22 @@ check("aside: the conversation stays cached", n["info"]["cached_tokens"] >= c["i
 
 
 # Parallel requests: two replies written at the same time share passes (kiln/server.py Batcher) and come out as each does
-# alone (greedy: as many drafts each as alone, the same logits). Flash-Next's engine has no shared pass: its replies take
-# turns, and must not disturb each other either.
+# alone (greedy: as many drafts each as alone, the same logits). Flash-Next gives a reply one draft in a shared pass, so
+# here its replies alone take one too.
 import threading
 asks = [[{"role": "user", "content": "Name three rivers in Europe and one fact about each."}],
         [{"role": "user", "content": "Explain in four sentences why the sky is blue."}]]
+drafts = srv.n_draft
+if "flash-next" in MODEL:
+    srv.n_draft = 1
 alone = [reply({"messages": q, "temperature": 0, "max_tokens": 120})[0] for q in asks]
 shared, both = srv.batcher.shared, [None, None]
 writers = [threading.Thread(target=lambda i=i: both.__setitem__(i, reply({"messages": asks[i], "temperature": 0, "max_tokens": 120})[0]))
            for i in range(2)]
 for w in writers: w.start()
 for w in writers: w.join()
-check("parallel requests: together = alone", both == alone and (srv.batcher.shared > shared or not srv.engine.batched),
+srv.n_draft = drafts
+check("parallel requests: together = alone", both == alone and srv.batcher.shared > shared,
       f"{srv.batcher.shared - shared} passes shared, {[len(x) for x in both]} chars")
 check("after them: cache matches engine", *consistent())
 
@@ -410,34 +414,8 @@ if srv.pictures:
 
     # A PDF (kiln/documents.py), its pages as pictures and as their text, through each API's way of attaching one. The code
     # is set in white (only the text layer has it), the vault number drawn as a picture (only the page's image has it).
-    import zlib
     from PIL import Image, ImageDraw, ImageFont
-
-    def pdf(pages):
-        """A PDF of letter-sized pages: ("text", str) set in white Helvetica, or ("image", PIL image) as the whole page."""
-        objs = {1: b"<< /Type /Catalog /Pages 2 0 R >>", 3: b"<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>"}
-        kids, n = [], 4
-        for kind, val in pages:
-            if kind == "text":
-                body, res = b"1 1 1 rg BT /F1 20 Tf 72 700 Td (" + val.encode("latin-1") + b") Tj ET", b"/Font << /F1 3 0 R >>"
-            else:
-                raw = zlib.compress(val.convert("RGB").tobytes())
-                objs[n + 2] = (b"<< /Type /XObject /Subtype /Image /Width %d /Height %d /ColorSpace /DeviceRGB /BitsPerComponent 8 "
-                               b"/Filter /FlateDecode /Length %d >>\nstream\n" % (val.width, val.height, len(raw)) + raw + b"\nendstream")
-                body, res = b"q 612 0 0 792 0 0 cm /Im1 Do Q", b"/XObject << /Im1 %d 0 R >>" % (n + 2)
-            objs[n] = b"<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] /Resources << %s >> /Contents %d 0 R >>" % (res, n + 1)
-            objs[n + 1] = b"<< /Length %d >>\nstream\n" % len(body) + body + b"\nendstream"
-            kids.append(n)
-            n += 3
-        objs[2] = b"<< /Type /Pages /Kids [%s] /Count %d >>" % (b" ".join(b"%d 0 R" % k for k in kids), len(kids))
-        out, offs = bytearray(b"%PDF-1.4\n"), {}
-        for i in sorted(objs):
-            offs[i] = len(out)
-            out += b"%d 0 obj\n" % i + objs[i] + b"\nendobj\n"
-        xref, size = len(out), max(objs) + 1
-        out += b"xref\n0 %d\n0000000000 65535 f \n" % size
-        out += b"".join(b"%010d 00000 n \n" % offs[i] if i in offs else b"0000000000 65535 f \n" for i in range(1, size))
-        return bytes(out + b"trailer\n<< /Size %d /Root 1 0 R >>\nstartxref\n%d\n%%%%EOF\n" % (size, xref))
+    from pdf_fixture import pdf
 
     page = Image.new("RGB", (1224, 1584), "white")
     ImageDraw.Draw(page).text((150, 600), "VAULT 9314", fill="black", font=ImageFont.load_default(size=120))
@@ -518,6 +496,34 @@ except (ValueError, jsonschema.ValidationError) as e:
     valid = str(e)[:60]
 check("Responses: text.format holds the answer", valid is True and fmt.text.format.type == "json_schema",
       repr(fmt.output_text[:50]) if valid is True else valid)
+
+# /metrics (kiln/metrics.py) as Prometheus's own parser reads it: a reply moves the counters by what its usage says, a
+# request kiln refuses counts as an error. On Flash-Next the PCIe link kiln reports (kiln/link.py) bounds the DMA rate
+# the engine measures, and the rate comes near it: a reading of the card's own switch (16 GT/s x16) would be twice too fast.
+from prometheus_client.parser import text_string_to_metric_families
+from kiln import link
+
+
+def scrape():
+    return {(s.name, tuple(sorted(s.labels.items()))): s.value
+            for f in text_string_to_metric_families(httpx.get(base + "/metrics").text) for s in f.samples}
+
+
+m0 = scrape()
+r = oai.chat.completions.create(model=MODEL + "-fast", messages=[{"role": "user", "content": "Name a colour."}], max_tokens=40)
+httpx.post(base + "/v1/chat/completions", json={"messages": []})
+m1 = scrape()
+moved = lambda name, **labels: m1.get((name, tuple(sorted(labels.items()))), 0) - m0.get((name, tuple(sorted(labels.items()))), 0)
+check("metrics: a reply's tokens", moved("kiln_completion_tokens_total", model=MODEL) == r.usage.completion_tokens
+      and moved("kiln_prompt_tokens_total", model=MODEL) == r.usage.prompt_tokens
+      and moved("kiln_replies_total", model=MODEL, finish=r.choices[0].finish_reason) == 1
+      and moved("kiln_time_to_first_token_seconds_count", model=MODEL) == 1, f"{r.usage.completion_tokens} tokens")
+check("metrics: a refused request", moved("kiln_http_errors_total", status="400") == 1)
+now, dma = link.status(srv.link_dev), m1.get(("kiln_dma_bytes_per_second", ()))
+if srv.engine.expert_stats():
+    lanes = now and now["gts"] * 1e9 * now["width"] * (0.8 if now["gts"] < 8 else 128 / 130) / 8   # bytes/s, line encoding
+    check("metrics: the PCIe link bounds the DMA rate", bool(now and dma and 0.25 * lanes < dma <= lanes),
+          f"link {now and now['gts']} GT/s x{now and now['width']} ({lanes and lanes / 1e9:.1f} GB/s), DMA {dma and dma / 1e9:.1f} GB/s")
 httpd.shutdown()
 
 

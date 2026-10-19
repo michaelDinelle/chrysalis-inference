@@ -91,10 +91,11 @@ void router_dec(const half *W, const float *wsg, const float *x, int T, float *l
 // router_dec + route_dec in one launch (counter: a zeroed device word the kernel resets itself); counts: if set, picks per
 // (layer, expert) are added to it ([NL][NE])
 // slot_of[e]: the expert's pool slot, or -1 - its RAM slot (ColdLayer's numbering); the GPU reads its share gfrac of the
-// cold picks from RAM itself, of those below n_ram (the rest are on the CPU's side only)
+// cold picks from RAM itself, of those below n_ram (the rest are on the CPU's side only), counted from the first token of
+// each sequence (bit t of starts: token t begins one)
 void router_route_dec(const half *W, const float *wsg, const float *x, int T, float *logits, float *sg, const int *slot_of,
                       int n_ram, int *ids, float *wts, int *hot_slot, MoeShared *sh, float gfrac, int layer, uint32_t gen,
-                      unsigned *counter, hipStream_t st, unsigned *counts = nullptr);
+                      unsigned *counter, hipStream_t st, unsigned *counts = nullptr, unsigned starts = 1);
 void route_dec(const float *logits, int T, const int *slot_of, int n_ram, int *ids, float *wts, int *hot_slot, MoeShared *sh,
                float gfrac, const float *x, int layer, uint32_t gen, hipStream_t st);
 // the GPU's routed picks (hot_slot >= 0) and, if sgate is set, each token's shared expert as pick T*TOPK_E + t (y rows

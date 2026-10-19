@@ -195,7 +195,7 @@ ok = r1 == r2; fails += not ok
 print(f"a seed redraws its reply in a new seq {'ok' if ok else 'FAIL'}  first difference at "
       f"{next((i for i in range(len(r1)) if r1[i] != r2[i]), None)}")
 # Steps of several sequences in one pass (parallel requests) draw what each draws alone with the same seed and as many
-# drafts: two sequences (3 drafts each, all 8 rows) and three (1 draft each), sampled.
+# drafts: two sequences (the 27B: 3 drafts each, all 8 rows; Flash-Next gives each one) and three (1 draft each), sampled.
 if getattr(eng, "batched", False):
     def alone(prompt, seed, sp, steps):
         s_ = eng.new_seq(); eng.prefill(s_, prompt); eng.begin(s_, seed)
@@ -216,9 +216,10 @@ if getattr(eng, "batched", False):
     p3 = [random.randrange(1000, 50000) for _ in range(77)]
     three = Sampling(temperature=1.0, top_p=0.95, min_p=0.0, presence_penalty=0.0, top_k=20, n_draft=spec["draft"])
     one = Sampling(temperature=1.0, top_p=0.95, min_p=0.0, presence_penalty=0.0, top_k=20, n_draft=1)
-    two = together([p1, p2], [21, 22], three, 15)
+    pair = one if "flash-next" in spec["path"] else three
+    two = together([p1, p2], [21, 22], pair, 15)
     many = together([p1, p2, p3], [23, 24, 25], one, 15)
-    ok = (two == [alone(p1, 21, three, 15), alone(p2, 22, three, 15)] and
+    ok = (two == [alone(p1, 21, pair, 15), alone(p2, 22, pair, 15)] and
           many == [alone(p1, 23, one, 15), alone(p2, 24, one, 15), alone(p3, 25, one, 15)] and min(map(len, two)) > 15)
     fails += not ok
     print(f"sequences stepped together = alone   {'ok' if ok else 'FAIL'}  two: {[len(t) for t in two]} tokens, three: {[len(t) for t in many]}")

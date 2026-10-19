@@ -31,6 +31,7 @@ test: test_web build/libkiln.so build/test_quant build/test_attn build/test_gdn 
 	./build/test_quant data/models/kiln-mix.gguf && ./build/test_attn && ./build/test_gdn && ./build/test_sampler
 	data/venv/bin/python tools/test_chat.py
 	data/venv/bin/python tools/test_cache.py
+	data/venv/bin/python tools/test_documents.py
 	data/venv/bin/python tools/test_snapshot.py
 	data/venv/bin/python tools/test_server.py
 	data/venv/bin/python tools/compare_ref.py

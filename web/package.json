@@ -8,6 +8,7 @@
     "check": "tsc --noEmit"
   },
   "dependencies": {
+    "@modelcontextprotocol/sdk": "^1.32.1",
     "dompurify": "^3.4.16",
     "highlight.js": "^11.12.0",
     "katex": "^0.19.0",
@@ -17,6 +18,7 @@
   "devDependencies": {
     "@types/bun": "^1.4.2",
     "puppeteer-core": "^25.14.0",
-    "typescript": "^7.0.2"
+    "typescript": "^7.0.2",
+    "zod": "^4.6.7"
   }
 }

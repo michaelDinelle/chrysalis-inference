@@ -9,6 +9,7 @@
 
 static const QAct NO_Q{nullptr, nullptr};
 static QAct qoff(QAct a, size_t elems) { return {a.q + elems, a.d + elems / 32}; }
+static Pos3 cell_pos(const Seq &s, int p0, const int *pos3, int cell);
 
 int Engine::seq_new() {
     for (size_t i = 0; i < seqs.size(); i++) {
@@ -326,11 +327,17 @@ void Engine::linear(const QTensor &W, int T, const QAct &qin, const half *hin, i
 }
 
 // hyper-connection mixer: residual res [T][HC][D] -> block input b.mx (fp32), b.hq (int8, decode) / b.hh (fp16),
-// and the stream weights `inject` [T][HC] when the mixer has them
-static void hc_mix_run(Engine &e, const HcMix &m, const float *res, int T, float *inject) {
+// and the stream weights `inject` [T][HC] when the mixer has them. pieces: a shared decode pass (Engine::Part) runs the
+// fused kernels on up to 4 rows at a time (their LDS holds 4), so each sequence's rows come out as alone.
+static void hc_mix_run(Engine &e, const HcMix &m, const float *res, int T, float *inject, bool pieces = false) {
     auto &b = e.b;
-    if (T <= 4) {                                 // decode: two fused kernels
-        hc_mix_fused(res, m.norm, m.down, m.up, inject ? &m.inject : nullptr, T, b.lo, inject, HC, b.inv, b.mx, b.hh, b.hq, e.st);
+    if (T <= 4 || (pieces && T <= 8)) {           // decode: two fused kernels
+        for (int t0 = 0; t0 < T; t0 += 4) {
+            const int n = std::min(4, T - t0);
+            hc_mix_fused(res + (size_t)t0 * HCD, m.norm, m.down, m.up, inject ? &m.inject : nullptr, n, b.lo + (size_t)t0 * HCR,
+                         inject ? inject + (size_t)t0 * HC : nullptr, HC, b.inv + t0 * HC, b.mx + (size_t)t0 * D,
+                         b.hh + (size_t)t0 * D, qoff(b.hq, (size_t)t0 * D), e.st);
+        }
         return;
     }
     if (T <= 8) {
@@ -351,7 +358,7 @@ static void hc_mix_run(Engine &e, const HcMix &m, const float *res, int T, float
 }
 
 void Engine::attn_block(const Layer &w, int kvl, Seq &s, int T, int pos0, float *res, float *inject, bool spec, int rope0,
-                        const int *rpos, Pos3 tail_pos) {
+                        const int *rpos, Pos3 tail_pos, int praw_off) {
     const bool small = T <= 8;
     if (small) {
         GemvArgs a;
@@ -368,24 +375,7 @@ void Engine::attn_block(const Layer &w, int kvl, Seq &s, int T, int pos0, float 
         linear(w.idx_q, T, NO_Q, b.hh, D, b.qidx, IDX_H * IDX_D, GEMV_STORE);
         linear(w.idx_k, T, NO_Q, b.hh, D, b.kidx, IDX_D, GEMV_STORE);
     }
-    idx_prep(b.kidx, b.qidx, w.idx_qn, w.idx_kn, T, pos0, rope0, rpos, tail_pos, kv(s), kvl, s.idx_tail + (size_t)kvl * IDX_TAIL,
-             b.idx_raw + (size_t)kvl * umax * IDX_D, !spec, b.qidx16, st);
-    attn_prep(b.proj, b.kb, b.vb, w.q_norm, w.k_norm, T, pos0, rope0, rpos, kv(s), kvl, b.Q16, st);
-    AttnArgs a;
-    a.Q16 = b.Q16; a.kv = kv(s); a.layer = kvl; a.T = T; a.pos0 = pos0; a.qg = b.proj;
-    a.part_o = b.part_o; a.part_ml = b.part_ml;
-    const int last_pos = pos0 + T - 1;
-    if ((last_pos + 1) / KPOOL <= SEL_BLOCKS) {            // every query sees at most SEL_BLOCKS complete blocks: dense
-        attention(a, small ? nullptr : b.att_h, small ? b.mq : NO_Q, st);
-    } else {
-        const int nblk = (last_pos + 1) / KPOOL;
-        for (int g0 = 0; g0 < T; g0 += SEL_G) {
-            const int G = std::min(SEL_G, T - g0);
-            idx_select(b.qidx16 + (size_t)g0 * IDX_H * IDX_D, pos0 + g0, G, nblk, kv(s), kvl, b.score, b.sel_hist,
-                       b.sel + (size_t)g0 * (SEL_BLOCKS + 1), st);
-        }
-        attention_sel(a, b.sel, small ? nullptr : b.att_h, small ? b.mq : NO_Q, st);
-    }
+    attn_core(w, kvl, s, T, 0, praw_off, pos0, spec, rope0, rpos, tail_pos);
     if (small) gemv_hc(w.o, b.mq, T, res, inject, st);
     else {
         linear(w.o, T, NO_Q, b.att_h, NH * HD, b.blk, D, GEMV_STORE);
@@ -393,21 +383,72 @@ void Engine::attn_block(const Layer &w, int kvl, Seq &s, int T, int pos0, float 
     }
 }
 
+void Engine::attn_core(const Layer &w, int kvl, Seq &s, int T, int off, int praw_off, int pos0, bool spec, int rope0,
+                       const int *rpos, Pos3 tail_pos) {
+    const bool small = T <= 8;
+    float *proj = b.proj + (size_t)off * 2 * NH * HD;
+    half *Q16 = b.Q16 + (size_t)off * NH * HD, *q16 = b.qidx16 + (size_t)off * IDX_H * IDX_D;
+    int *sel = b.sel + (size_t)off * (SEL_BLOCKS + 1);
+    const QAct mq = small ? qoff(b.mq, (size_t)off * NH * HD) : NO_Q;
+    idx_prep(b.kidx + (size_t)off * IDX_D, b.qidx + (size_t)off * IDX_H * IDX_D, w.idx_qn, w.idx_kn, T, pos0, rope0, rpos, tail_pos,
+             kv(s), kvl, s.idx_tail + (size_t)kvl * IDX_TAIL, b.idx_raw + ((size_t)kvl * umax + praw_off) * IDX_D, !spec, q16, st);
+    attn_prep(proj, b.kb + (size_t)off * NKV * HD, b.vb + (size_t)off * NKV * HD, w.q_norm, w.k_norm, T, pos0, rope0, rpos, kv(s),
+              kvl, Q16, st);
+    AttnArgs a;
+    a.Q16 = Q16; a.kv = kv(s); a.layer = kvl; a.T = T; a.pos0 = pos0; a.qg = proj;
+    a.part_o = b.part_o; a.part_ml = b.part_ml;
+    const int last_pos = pos0 + T - 1;
+    if ((last_pos + 1) / KPOOL <= SEL_BLOCKS) {            // every query sees at most SEL_BLOCKS complete blocks: dense
+        attention(a, small ? nullptr : b.att_h, mq, st);
+    } else {
+        const int nblk = (last_pos + 1) / KPOOL;
+        for (int g0 = 0; g0 < T; g0 += SEL_G) {
+            const int G = std::min(SEL_G, T - g0);
+            idx_select(q16 + (size_t)g0 * IDX_H * IDX_D, pos0 + g0, G, nblk, kv(s), kvl, b.score, b.sel_hist,
+                       sel + (size_t)g0 * (SEL_BLOCKS + 1), st);
+        }
+        attention_sel(a, sel, small ? nullptr : b.att_h, mq, st);
+    }
+}
+
+void Engine::attn_parts(const Layer &w, int kvl, const Part *p, int np, int T, float *res, float *inject) {
+    GemvArgs a;
+    a.seg[0] = {w.q, b.proj, 2 * NH * HD}; a.seg[1] = {w.k, b.kb, NKV * HD}; a.seg[2] = {w.v, b.vb, NKV * HD};
+    a.nseg = 3; a.x = b.hq; a.T = T;
+    gemv(a, st);
+    GemvArgs ix;
+    ix.seg[0] = {w.idx_q, b.qidx, IDX_H * IDX_D}; ix.seg[1] = {w.idx_k, b.kidx, IDX_D}; ix.nseg = 2; ix.x = b.hq; ix.T = T;
+    gemv(ix, st);
+    for (int i = 0; i < np; i++) {
+        Seq &s = *p[i].s;
+        attn_core(w, kvl, s, p[i].T, p[i].off, p[i].off, s.n, p[i].verify, s.pos, nullptr, cell_pos(s, s.n, nullptr, s.n / KPOOL * KPOOL));
+    }
+    gemv_hc(w.o, b.mq, T, res, inject, st);
+}
+
+void Engine::gdn_parts(const Layer &w, int gl, const Part *p, int np, int T, float *res, float *inject) {
+    float *raw = b.v_raw + (size_t)gl * 8 * QKV;
+    GemvArgs a;
+    a.seg[0] = {w.qkv, raw, QKV}; a.seg[1] = {w.z, b.zb, GV * GD}; a.nseg = 2; a.x = b.hq; a.T = T;
+    gemv(a, st);
+    for (int i = 0; i < np; i++) {
+        const Part &q = p[i];
+        GdnStepArgs g;
+        g.raw = raw + (size_t)q.off * QKV; g.z = b.zb + (size_t)q.off * GV * GD; g.hh = b.hh + (size_t)q.off * D; g.Wab = w.Wab;
+        g.conv_w = w.conv; g.A = gdn_A + gl * GV; g.dt = gdn_dt + gl * GV; g.norm_w = w.ssm_norm;
+        g.conv_state = q.s->conv + (size_t)gl * QKV * 3; g.S = q.s->ssm + (size_t)gl * GV * GD * GD;
+        g.T = q.T; g.verify = q.verify;
+        g.kn_out = b.v_kn + ((size_t)gl * 8 + q.off) * GK * GD; g.vc_out = b.v_vc + ((size_t)gl * 8 + q.off) * GV * GD;
+        g.ab_out = b.v_ab + ((size_t)gl * 8 + q.off) * 2 * GV; g.out = qoff(b.mq, (size_t)q.off * GV * GD);
+        gdn_step(g, st);
+    }
+    gemv_hc(w.ssm_out, b.mq, T, res, inject, st);
+}
+
 void Engine::gdn_block(const Layer &w, int gl, Seq &s, int T, bool verify, float *res, float *inject) {
     if (T <= 8) {
-        float *raw = b.v_raw + (size_t)gl * 8 * QKV;
-        GemvArgs a;
-        a.seg[0] = {w.qkv, raw, QKV}; a.seg[1] = {w.z, b.zb, GV * GD}; a.nseg = 2; a.x = b.hq; a.T = T;
-        gemv(a, st);
-        GdnStepArgs g;
-        g.raw = raw; g.z = b.zb; g.hh = b.hh; g.Wab = w.Wab;
-        g.conv_w = w.conv; g.A = gdn_A + gl * GV; g.dt = gdn_dt + gl * GV; g.norm_w = w.ssm_norm;
-        g.conv_state = s.conv + (size_t)gl * QKV * 3; g.S = s.ssm + (size_t)gl * GV * GD * GD;
-        g.T = T; g.verify = verify;
-        g.kn_out = b.v_kn + (size_t)gl * 8 * GK * GD; g.vc_out = b.v_vc + (size_t)gl * 8 * GV * GD;
-        g.ab_out = b.v_ab + (size_t)gl * 8 * 2 * GV; g.out = b.mq;
-        gdn_step(g, st);
-        gemv_hc(w.ssm_out, b.mq, T, res, inject, st);
+        const Part p{&s, T, 0, verify};
+        gdn_parts(w, gl, &p, 1, T, res, inject);
         return;
     }
     float *raw = b.proj, *z = b.zb, *ab = b.kb;
@@ -426,7 +467,7 @@ void Engine::gdn_block(const Layer &w, int gl, Seq &s, int T, bool verify, float
 
 // Routed experts + shared expert for T tokens of b.mx / b.hq, added into res: decode-sized passes (hot picks on the GPU,
 // cold picks on the CPU when cpu_cold) and the MTP block, whose catch-up passes (T > 8) go through moe_front / moe_back.
-void Engine::moe_block(const Layer &w, int layer, int T, bool cpu_cold, float *res, float *inject) {
+void Engine::moe_block(const Layer &w, int layer, int T, bool cpu_cold, float *res, float *inject, unsigned starts) {
     if (T > 8) {                                  // a pass of one sub-chunk (the MTP block's catch-up)
         moe_front(w, T, 0);
         moe_back(w, layer, T);
@@ -436,7 +477,7 @@ void Engine::moe_block(const Layer &w, int layer, int T, bool cpu_cold, float *r
     const float gf = cpu_cold && w.n_cold ? gfrac : 0.0f;
     const bool pooled = layer < NL;
     router_route_dec(w.router, w.sg_w, b.mx, T, b.logits_e, b.sg, w.slot_of, pooled ? cold[layer].n : 0, b.ids, b.wts, b.hot,
-                     cpu_cold ? d_sh : nullptr, gf, layer, gen + 1, b.rr_counter, st, pooled ? xc.d_counts : nullptr);
+                     cpu_cold ? d_sh : nullptr, gf, layer, gen + 1, b.rr_counter, st, pooled ? xc.d_counts : nullptr, starts);
     if (cpu_cold) gen++;
     if (cpu_cold && layer + 1 < NL && pf_on && xc.recent_hits < Experts::CPU_HEAVY) {   // the next layer's weights into the
                                                   // Infinity Cache while the CPU works (2-3x faster reads)
@@ -743,13 +784,14 @@ void Engine::ple_prefetch(const size_t *rows, size_t n) const {
     }
 }
 
-void Engine::ple_rows(const Seq &s, const int *tokens, int T) {
+void Engine::ple_rows(const Seq &s, const int *tokens, int T, int off) {
     constexpr size_t RB = PLE_DIM / 32 * 34;
     std::vector<size_t> rows((size_t)T * PLE_HEADS);
     ple_ids(s.hist[0], s.hist[1], tokens, T, rows.data());
+    uint8_t *dst = b.ple_rows + (size_t)off * PLE_HEADS * RB;
     auto copy = [&](size_t i0, size_t i1) {
         ple_prefetch(rows.data() + i0, i1 - i0);
-        for (size_t i = i0; i < i1; i++) memcpy(b.ple_rows + i * RB, ngram + rows[i] * RB, RB);
+        for (size_t i = i0; i < i1; i++) memcpy(dst + i * RB, ngram + rows[i] * RB, RB);
     };
     if (T <= 8) { copy(0, rows.size()); return; }
     // long passes: 4 threads, so the reads of rows that are not in the page cache overlap
@@ -778,14 +820,16 @@ void Engine::ple_block_run(Seq &s, int c0, int n, bool verify, float *res) {
 
 // The layer's MoE routing predicted from its input residual (see lst in model.h). la.res is a copy, so the token mixer may
 // write the residual meanwhile; the next layer's copy waits until this layer's lookahead has read it.
-void Engine::lookahead(const Layer &w, int layer, int T, const float *res) {
+void Engine::lookahead(const Layer &w, int layer, int T, const float *res, unsigned starts) {
     CK(hipStreamWaitEvent(st, la_done, 0));
     CK(hipMemcpyAsync(la.res, res, (size_t)T * HCD * 4, hipMemcpyDeviceToDevice, st));
     CK(hipEventRecord(la_ready, st));
     CK(hipStreamWaitEvent(lst, la_ready, 0));
-    hc_mix_fused(la.res, w.hcf.norm, w.hcf.down, w.hcf.up, nullptr, T, la.lo, nullptr, HC, la.inv, la.mx, la.hh, la.hq, lst);
+    for (int t0 = 0; t0 < T; t0 += 4)              // the fused kernels' LDS holds 4 rows
+        hc_mix_fused(la.res + (size_t)t0 * HCD, w.hcf.norm, w.hcf.down, w.hcf.up, nullptr, std::min(4, T - t0), la.lo + (size_t)t0 * HCR,
+                     nullptr, HC, la.inv + t0 * HC, la.mx + (size_t)t0 * D, la.hh + (size_t)t0 * D, qoff(la.hq, (size_t)t0 * D), lst);
     router_route_dec(w.router, w.sg_w, la.mx, T, la.logits, la.sg, w.slot_of, cold[layer].n, la.ids, la.wts, la.hot, d_sh_pred, gfrac,
-                     layer, gen + 1, la.counter, lst);
+                     layer, gen + 1, la.counter, lst, nullptr, starts);
     CK(hipEventRecord(la_done, lst));
 }
 
@@ -856,9 +900,55 @@ void Engine::forward(Seq &s, const int *tokens, int T, bool verify, const int *p
     experts_plan();
 }
 
-// final mixer + LM head for rows [r0, r0+T) of b.res -> b.logits [T][VOCAB] (rows: vocabulary prefix)
-static void head(Engine &e, const HcMix &hm, const float *res, int T, int rows) {
-    hc_mix_run(e, hm, res, T, nullptr);
+void Engine::ple_parts(const Part *p, int np, int T, float *res) {
+    const Layer &w = L[PLE_LAYER];
+    constexpr size_t RB = PLE_DIM / 32 * 34;
+    CK(hipMemcpyAsync(b.d_ple_rows, b.ple_rows, (size_t)T * PLE_HEADS * RB, hipMemcpyHostToDevice, st));
+    ple_embed(b.d_ple_rows, T, nullptr, nullptr, b.emb_q, st);
+    gemv(w.ple_key, b.emb_q, T, b.key, HCD, GEMV_STORE, st);
+    gemv(w.ple_value, b.emb_q, T, b.value, D, GEMV_STORE, st);
+    for (int i = 0; i < np; i++) {
+        const Part &q = p[i];
+        float *xconv = b.xconv + (size_t)q.off * HCD;
+        ple_block(b.key + (size_t)q.off * HCD, b.value + (size_t)q.off * D, res + (size_t)q.off * HCD, w.ple_nk, w.ple_nq, w.ple_nc,
+                  w.ple_conv, q.s->ple, xconv, q.T, st);
+        if (!q.verify) ple_commit(q.s->ple, xconv, q.T, st);
+    }
+}
+
+// A decode pass of several sequences' rows, as forward() runs one sequence's: the projections, routers and experts once for
+// all rows, attention and the recurrent and n-gram states per sequence. A verify part keeps its recurrent inputs for the
+// commit, the others advance their states here.
+void Engine::forward_parts(const Part *p, int np, const int *tokens, int T) {
+    unsigned starts = 0;
+    for (int i = 0; i < np; i++) {
+        ensure_pages(*p[i].s, p[i].s->n + p[i].T, p[i].s->n);
+        starts |= 1u << p[i].off;
+    }
+    experts_place(T);
+    for (int i = 0; i < np; i++) ple_rows(*p[i].s, tokens + p[i].off, p[i].T, p[i].off);
+    CK(hipMemcpyAsync(b.tokens, tokens, T * 4, hipMemcpyHostToDevice, st));
+    embed(embd, b.tokens, nullptr, T, b.x, st);
+    hc_init(b.x, b.res, T, st);
+    for (int l = 0, gl = 0; l < NL; l++) {
+        const Layer &w = L[l];
+        if (l == PLE_LAYER) ple_parts(p, np, T, b.res);
+        if (la_on && xc.recent_hits < Experts::CPU_HEAVY && w.n_cold) lookahead(w, l, T, b.res, starts);
+        hc_mix_run(*this, w.hca, b.res, T, b.inj_a, true);
+        if (is_attn_layer(l)) attn_parts(w, l / 4, p, np, T, b.res, b.inj_a);
+        else gdn_parts(w, gl++, p, np, T, b.res, b.inj_a);
+        hc_mix_run(*this, w.hcf, b.res, T, b.inj_f, true);
+        moe_block(w, l, T, true, b.res, b.inj_f, starts);
+    }
+    for (int i = 0; i < np; i++)
+        if (!p[i].verify) gdn_conv_commit(p[i].s->conv, b.v_raw + (size_t)p[i].off * QKV, p[i].T, 8 * QKV, NGDN, st);
+    experts_plan();
+}
+
+// final mixer + LM head for rows [r0, r0+T) of b.res -> b.logits [T][VOCAB] (rows: vocabulary prefix; pieces: as
+// hc_mix_run's)
+static void head(Engine &e, const HcMix &hm, const float *res, int T, int rows, bool pieces = false) {
+    hc_mix_run(e, hm, res, T, nullptr, pieces);
     if (T > 8) quant_act(e.b.mx, (int64_t)T * D, e.b.hq, e.st);
     QTensor w = e.out;
     w.rows = rows;
@@ -875,7 +965,7 @@ void Engine::lm_head(const QAct &in, int T, int rows) {
 // MTP block over pairs (token at pos0+t, residual of pos0+t-1): h_prev [T][HCD] -> b.mtp_res [T][HCD]; the draft
 // logits of the last row come from its head mixer (left in b.mx / b.hq).
 void Engine::mtp_forward(Seq &s, int T, int pos0, const float *h_prev, const int *d_tokens, bool spec, int rope0, const int *rpos,
-                         Pos3 tail_pos, const half *const *img) {
+                         Pos3 tail_pos, const half *const *img, int praw_off) {
     // eh_proj input per (token, stream): [rmsnorm(e) * enorm ; rmsnorm(h_s) * hnorm_s]
     embed(embd, d_tokens, img, T, b.mtp_e, st);
     rmsnorm(b.mtp_e, enorm, T, D, D, D, b.mtp_e, nullptr, NO_Q, st);
@@ -891,17 +981,17 @@ void Engine::mtp_forward(Seq &s, int T, int pos0, const float *h_prev, const int
     }
     const Layer &w = M;
     hc_mix_run(*this, w.hca, b.mtp_res, T, b.inj_a);
-    attn_block(w, NATT, s, T, pos0, b.mtp_res, b.inj_a, spec, rope0, rpos, tail_pos);
+    attn_block(w, NATT, s, T, pos0, b.mtp_res, b.inj_a, spec, rope0, rpos, tail_pos, praw_off);
     hc_mix_run(*this, w.hcf, b.mtp_res, T, b.inj_f);
     moe_block(w, NL, T, false, b.mtp_res, b.inj_f);
 }
 
 // Run the MTP block over the T tokens just processed at pos0.., pairing each with the previous position's residual,
 // so the MTP layer's KV cache tracks the sequence. b.res holds this pass's residuals.
-void Engine::mtp_catch_up(Seq &s, int T, int pos0, bool spec, const int *pos3, bool img) {
+void Engine::mtp_catch_up(Seq &s, int T, int pos0, bool spec, const int *pos3, bool img, int off) {
     // in pieces of MTP_CHUNK tokens, so the MTP buffers need not grow with the prefill chunk; h_prev rows (each token's
     // previous residual: h_last for the pass's first) staged in b.key, free here
-    const float *res = b.res;
+    const float *res = b.res + (size_t)off * HCD;
     for (int t0 = 0; t0 < T; t0 += MTP_CHUNK) {
         const int n = std::min(MTP_CHUNK, T - t0);
         float *h = b.key;
@@ -911,8 +1001,8 @@ void Engine::mtp_catch_up(Seq &s, int T, int pos0, bool spec, const int *pos3, b
         } else {
             CK(hipMemcpyAsync(h, res + (size_t)(t0 - 1) * HCD, (size_t)n * HCD * 4, hipMemcpyDeviceToDevice, st));
         }
-        mtp_forward(s, n, pos0 + t0, h, b.tokens + t0, spec, s.pos + t0, pos3 ? b.rpos + 3 * t0 : nullptr,
-                    cell_pos(s, pos0, pos3, (pos0 + t0) / KPOOL * KPOOL), img ? b.img + t0 : nullptr);
+        mtp_forward(s, n, pos0 + t0, h, b.tokens + off + t0, spec, s.pos + t0, pos3 ? b.rpos + 3 * t0 : nullptr,
+                    cell_pos(s, pos0, pos3, (pos0 + t0) / KPOOL * KPOOL), img ? b.img + t0 : nullptr, off);
     }
 }
 
@@ -1183,4 +1273,130 @@ int Engine::generate_masked(int id, const Sampling &sp, const int *drafts, int k
     CK(hipMemcpyAsync(mask_rows(), masks, (size_t)(k + 1) * (VOCAB / 32) * 4, hipMemcpyHostToDevice, st));
     cpu.arm();
     return verify(s, sp, toks, true, out, 0, nullptr, nullptr);
+}
+
+// One speculative step for several sequences at once (parallel requests), as the 27B's: their pending tokens and MTP drafts
+// go through the model in one pass (forward_parts), which reads the weights and computes the picks of every row once,
+// while each keeps its own attention, recurrent state, acceptance and commit, as in generate(). A sequence takes one
+// draft (two rows) while 8 rows hold them, none beyond: two replies wrote 115-128 tok/s together with one draft each,
+// 111-113 with two, 82-93 in turn with two (the expert pool warm; three replies: 115-125 with one, 92-110 with none).
+// Prompt lookup stays with steps of one sequence. out: max_out tokens per sequence, counts: how many each emitted. Out of
+// KV pages, it throws before drawing anything.
+void Engine::generate_batch(int n, const int *ids, const Sampling *sps, int *out, int max_out, int *counts) {
+    int need = 0;                                    // pages for 2 more tokens each, before anything is drawn
+    for (int i = 0; i < n; i++) {
+        const Seq &s = seqs.at(ids[i]);
+        const int last = (s.n + 2 + PAGE - 1) / PAGE;
+        need += std::max(0, last - (int)s.pages.size());
+        for (int pg = s.n / PAGE; pg < (int)s.pages.size() && pg < last; pg++) need += page_ref[s.pages[pg]] > 1;
+    }
+    if (need > (int)free_pages.size()) throw std::runtime_error("out of KV pages");
+    std::vector<int> act;                            // the sequences that go through the model
+    for (int i = 0; i < n; i++) {
+        Seq &s = seqs.at(ids[i]);
+        const Sampling &sp = sps[i];
+        int *o = out + (size_t)i * max_out;
+        counts[i] = 0;
+        if (max_out < 1) continue;
+        if (s.pending < 0) {
+            if (s.top_v.empty()) FAIL("generate: nothing to continue from");
+            s.pending = draw(make_dist(s.top_v.data(), s.top_i.data(), sp, s.seen, s.ctx), s.rng);
+            s.seen.push(s.pending);
+            o[counts[i]++] = s.pending;
+            if (sp.lookup > 0) s.look.push(s.pending);
+            if (is_eos(s.pending) || s.pending == sp.halt || counts[i] == max_out) continue;
+        }
+        act.push_back(i);
+    }
+    if (act.empty()) return;
+    if (act.size() > 8) FAIL("generate_batch: %zu sequences in one pass of 8 rows", act.size());
+    const int per = std::min(2, 8 / (int)act.size());
+    cpu.arm();
+    std::vector<Part> parts;
+    std::vector<int> k(n, 0), q(n, 0);
+    int T = 0;
+    for (int i : act) {                              // drafts with the MTP head into b.draft, each sequence its rows
+        Seq &s = seqs.at(ids[i]);
+        k[i] = std::max(0, std::min({sps[i].n_draft, per - 1, max_out - counts[i] - 1}));
+        q[i] = s.n;
+        ensure_pages(s, q[i] + k[i] + 1, q[i]);
+        CK(hipMemcpyAsync(b.draft + T, &s.pending, 4, hipMemcpyHostToDevice, st));
+        for (int d = 0; d < k[i]; d++) {
+            const Pos3 tail = cell_pos(s, q[i], nullptr, (q[i] + d) / KPOOL * KPOOL);
+            if (d == 0) mtp_forward(s, 1, q[i], s.h_last, b.draft + T, true, s.pos, nullptr, tail, nullptr);
+            else {
+                CK(hipMemcpyAsync(b.value, b.mtp_res, (size_t)HCD * 4, hipMemcpyDeviceToDevice, st));
+                mtp_forward(s, 1, q[i] + d, b.value, b.draft + T + d, true, s.pos + d, nullptr, tail, nullptr);
+            }
+            hc_mix_run(*this, mtp_head, b.mtp_res, 1, nullptr);
+            lm_head(b.hq, 1, DRAFT_VOCAB);
+            argmax(b.logits, 1, DRAFT_VOCAB, VOCAB, b.draft + T + d + 1, st);
+        }
+        parts.push_back({&s, k[i] + 1, T, k[i] > 0});
+        T += k[i] + 1;
+    }
+    std::vector<int> drafts(T);                      // the n-gram rows need them on the host
+    CK(hipMemcpyAsync(drafts.data(), b.draft, T * 4, hipMemcpyDeviceToHost, st));
+    CK(hipStreamSynchronize(st));
+    forward_parts(parts.data(), (int)parts.size(), drafts.data(), T);
+    head(*this, hc_head, b.res, T, VOCAB, true);
+    topk(b.logits, T, VOCAB, VOCAB, b.tsv, b.tsi, b.topv, b.topi, st);
+    CK(hipMemcpyAsync(b.h_topv, b.topv, T * TOPK * 4, hipMemcpyDeviceToHost, st));
+    CK(hipMemcpyAsync(b.h_topi, b.topi, T * TOPK * 4, hipMemcpyDeviceToHost, st));
+    CK(hipEventRecord(topk_ready, st));
+    for (const Part &p : parts) mtp_catch_up(*p.s, p.T, p.s->n, p.verify, nullptr, false, p.off);
+    CK(hipEventSynchronize(topk_ready));
+    cpu.disarm();
+    const float *tv = b.h_topv;
+    const int *ti = b.h_topi;
+    for (size_t j = 0; j < parts.size(); j++) {      // accept, draw the next token, commit: as verify() does
+        const int i = act[j];
+        const Part &p = parts[j];
+        Seq &s = *p.s;
+        const Sampling &sp = sps[i];
+        int *o = out + (size_t)i * max_out;
+        const int *dr = drafts.data() + p.off;
+        int a = 0, next = -1;
+        for (; a < k[i]; a++) {
+            const int r = p.off + a;
+            const Dist d = make_dist(&tv[r * TOPK], &ti[r * TOPK], sp, s.seen, s.ctx);
+            const int tok = dr[a + 1];
+            if (std::uniform_real_distribution<float>(0, 1)(s.rng) < prob(d, tok)) {
+                if (is_eos(tok) || tok == sp.halt) { next = tok; break; }
+                o[counts[i]++] = tok; s.seen.push(tok);
+                if (sp.lookup > 0) s.look.push(tok);
+                continue;
+            }
+            next = draw_without(d, tok, s.rng);
+            break;
+        }
+        if (next < 0) next = draw(make_dist(&tv[(p.off + a) * TOPK], &ti[(p.off + a) * TOPK], sp, s.seen, s.ctx), s.rng);
+        o[counts[i]++] = next;
+        s.seen.push(next);
+        if (sp.lookup > 0) s.look.push(next);
+        if (k[i] > 0) {
+            GdnScanArgs sa{};
+            sa.S = s.ssm; sa.S_layer = (size_t)GV * GD * GD;
+            sa.kn = b.v_kn + (size_t)p.off * GK * GD; sa.in_layer = (size_t)8 * GK * GD;
+            sa.vc = b.v_vc + (size_t)p.off * GV * GD; sa.v_layer = (size_t)8 * GV * GD;
+            sa.ab = b.v_ab + (size_t)p.off * 2 * GV; sa.ab_layer = (size_t)8 * 2 * GV;
+            sa.A = gdn_A; sa.dtb = gdn_dt; sa.T = a + 1; sa.write_state = 1; sa.out = nullptr;
+            gdn_scan(sa, NGDN, st);
+            gdn_conv_commit(s.conv, b.v_raw + (size_t)p.off * QKV, a + 1, 8 * QKV, NGDN, st);
+            ple_commit(s.ple, b.xconv + (size_t)p.off * HCD, a + 1, st);
+            idx_tail_commit(s.idx_tail, b.idx_raw + (size_t)p.off * IDX_D, (size_t)umax * IDX_D, NKVL, q[i], q[i] + a + 1, st);
+        }
+        CK(hipMemcpyAsync(s.h_last, b.res + (size_t)(p.off + a) * HCD, (size_t)HCD * 4, hipMemcpyDeviceToDevice, st));
+        if (a >= 1) { s.hist[0] = dr[a - 1]; s.hist[1] = dr[a]; }
+        else { s.hist[0] = s.hist[1]; s.hist[1] = dr[0]; }
+        const int end = q[i] + a + 1, blk = end / KPOOL * KPOOL;
+        if (end % KPOOL && blk >= q[i]) s.tail_pos = cell_pos(s, q[i], nullptr, blk);
+        s.pos += a + 1;
+        s.n = end;
+        s.pending = next;
+        size_t rows[PLE_HEADS];                      // the next step reads this token's n-gram rows first
+        ple_ids(s.hist[0], s.hist[1], &next, 1, rows);
+        ple_prefetch(rows, PLE_HEADS);
+    }
+    CK(hipStreamSynchronize(st));
 }
