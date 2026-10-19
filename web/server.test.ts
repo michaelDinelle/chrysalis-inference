@@ -606,9 +606,9 @@ test("voice: a \"yes\" makes the step a turn of its own, then a call held to the
   const { said, res } = voiceAsk([{ step: "</fixes>\n<tool>yes" }, { forced: [{ name: "fake__echo", args: '{"text": "x"}' }] }, { text: "Done." }]);
   const got = await collect(await res), [forced, after] = seen.get(said)!;
   expect([forced.tool_choice, forced.logprobs, forced.continue_final_message]).toEqual(["required", false, undefined]);
-  expect(forced.messages.at(-1)).toEqual({ role: "assistant", content: "<fixes></fixes>\n<tool>yes</tool>" });
+  expect(forced.messages.at(-1)).toEqual({ role: "assistant", content: "<fixes>\n</fixes>\n<tool>yes</tool>" });
   const [step, line, done] = contents(got);
-  expect([step, done, contents(got).length]).toEqual(["<fixes></fixes>\n<tool>yes</tool>", "Done.", 3]);
+  expect([step, done, contents(got).length]).toEqual(["<fixes>\n</fixes>\n<tool>yes</tool>", "Done.", 3]);
   expect(line).toMatch(/^\S.*\.$/);                             // the spoken line the server writes before the call
   expect(toolEvents(got).map((t) => t.state)).toEqual(["running", "done"]);
   expect(after.messages.slice(-2)).toEqual([
@@ -619,8 +619,8 @@ test("voice: a \"yes\" makes the step a turn of its own, then a call held to the
 test("voice: a step that is not fix lines is left out, and the reply goes on from an empty one", async () => {
   const { said, res } = voiceAsk([{ step: "The user wants two games.\nIt could mean</fixes>\n<tool>no", text: "Here." }]);
   const got = await collect(await res), [reply] = seen.get(said)!;
-  expect(got.find((e) => e.heard)?.heard).toBe("<fixes></fixes>");
-  expect(reply.messages.at(-1)).toEqual({ role: "assistant", content: "<fixes></fixes>" });
+  expect(got.find((e) => e.heard)?.heard).toBe("<fixes>\n</fixes>");
+  expect(reply.messages.at(-1)).toEqual({ role: "assistant", content: "<fixes>\n</fixes>" });
 }, 30_000);
 
 test("voice: what was said decides an ask (\"search\"), not the note before it", async () => {

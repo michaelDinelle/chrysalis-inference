@@ -235,7 +235,11 @@ async function spoken(job: Job, req: any, messages: object[], push: (d: string |
   // from an empty one
   const lines = (said ?? "").split("</fixes>")[0].split("\n").map((l) => l.trim()).filter(Boolean);
   const fine = said !== null && (!r || said.includes("</fixes>")) && lines.every((l) => /^\S.*\s=>\s.*\S$/.test(l) && l.length < 200);
-  const step = fine ? `<fixes>${said}${end}` : "<fixes></fixes>";
+  // The reply goes on from the step's own prompt, so the step starts as that prompt ended, at "<fixes>" (ended at a
+  // newline instead, Flash-Next closed the fixes at once, misheard words and all). One that goes on with punctuation
+  // gets a newline first: ">" and a "</" after it are one token, so "<fixes></fixes>" is not that prompt and more, and
+  // kiln read the turn's prompt again (~1 s)
+  const body = fine ? `${said}${end}` : "</fixes>", step = /^[^\p{L}\p{N}\s]/u.test(body) ? `<fixes>\n${body}` : `<fixes>${body}`;
   push({ heard: step });
   const tool = !!r && (r.asks.test(unnoted(textOf((messages.findLast((m: any) => m.role === "user") as any)?.content))) || fine && readStep(step).tool === true);
   if (tool) {

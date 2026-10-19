@@ -31,3 +31,9 @@ test("a reply's first step is set apart from what is shown and spoken, even whil
   expect(stepOf("<fixes>pie game =>")).toEqual({ step: "<fixes>pie game =>", rest: "" });
   expect(stepOf("A reply that never had one.")).toEqual({ step: "", rest: "A reply that never had one." });
 });
+
+test("a remark in brackets after a fix is not part of what was said", () => {
+  const { fixes } = readStep("<fixes>\nquinn three point eight twenty seven B => Qwen3.8-27B (likely; possibly Qwen3.5-27B)\nRS three => RS3 (RuneScape 3)</fixes>");
+  expect(fixes).toEqual([{ heard: "quinn three point eight twenty seven B", said: "Qwen3.8-27B" }, { heard: "RS three", said: "RS3" }]);
+  expect(applyFixes("What is quinn three point eight twenty seven B and RS three?", fixes).text).toBe("What is Qwen3.8-27B and RS3?");
+});

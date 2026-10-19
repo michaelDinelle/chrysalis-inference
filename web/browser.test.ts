@@ -504,7 +504,7 @@ test("voice mode: what is said shows as it is said, becomes the question, and th
   expect(sent(lastStream)).toEqual([{ role: "user", content: `[${note}]\n\nhello there` }]);   // the note, before what was said
   // the reply went on from its first step, which kiln wrote at temperature 0 from the reply's own prompt
   expect(lastStream.continue_final_message).toBe(true);
-  expect(lastStream.messages.at(-1)).toEqual({ role: "assistant", content: "<fixes></fixes>" });
+  expect(lastStream.messages.at(-1)).toEqual({ role: "assistant", content: "<fixes>\n</fixes>" });
   const step = steps.findLast((b) => JSON.stringify(sent(b)) === JSON.stringify(sent(lastStream)));
   expect([step?.temperature, step?.stop, step?.stream]).toEqual([0, ["</fixes>"], false]);
   expect(lastStream.model).toBe("qwen3.8-27b-fast");
@@ -545,7 +545,7 @@ test("voice mode: talking over a reply silences it, stops kiln's request, and th
   await page.waitForFunction(() => document.querySelector('#thread > article[data-i="2"] .bubble')?.textContent === "and then", { timeout: 10_000 });
   await page.waitForFunction(() => /voice/.test(document.querySelector('#thread > article[data-i="3"] .stats')?.textContent ?? ""), { timeout: 10_000 });
   // the kept reply as kiln is sent it again: its first step, then only what was heard
-  expect(sent(lastStream).filter((m: any) => m.role === "assistant").map((m: any) => m.content)).toEqual([`<fixes></fixes>${kept}`]);
+  expect(sent(lastStream).filter((m: any) => m.role === "assistant").map((m: any) => m.content)).toEqual([`<fixes>\n</fixes>${kept}`]);
   await page.close();
 }, 30_000);
 

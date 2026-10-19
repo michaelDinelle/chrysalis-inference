@@ -640,6 +640,10 @@ in `tools/agent_sim.py` sessions (`--model=qwen3.8-flash-next`).
   mixers four rows at a time, the cold picks' GPU share counted per reply), so a reply draws for a seed what it draws
   alone with one draft.
 - The GPU stays awake while the server runs (no wake-up latency) and suspends when it stops.
+- kiln's own memory never swaps (`MemorySwapMax=0` in kiln.service): with a zram setup's high swappiness (Omarchy's
+  150) the kernel moved Flash-Next's cold experts to swap under light pressure, before file cache, and every reply then
+  waited on swap-ins (12 s to a first token, 9 tok/s). On an installed unit: `systemctl --user set-property kiln
+  MemorySwapMax=0`.
 - The PCIe link (`kiln/link.py`): the card trains it when it resumes from runtime suspend, and here it comes up at 2.5 or
   at 8 GT/s from one resume to the next (both x16; 2 of 4 resumes in a row at each). At 2.5 GT/s DMA runs at ~3 GB/s
   instead of ~12, prefill takes twice as long and Flash-Next's decode loses a quarter. kiln reads the link beside the

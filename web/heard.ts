@@ -53,7 +53,8 @@ export function readStep(step: string): { fixes: Fix[]; tool?: boolean } {
   const body = step.match(/<fixes>([\s\S]*?)<\/fixes>/)?.[1] ?? "";
   const fixes = body.split("\n").flatMap((line) => {
     const m = line.match(/^\s*(.+?)\s*=>\s*(.+?)\s*$/);
-    return m ? [{ heard: m[1].replace(/^["']|["']$/g, ""), said: m[2].replace(/^["']|["']$/g, "") }] : [];
+    // a remark after what was said, in brackets ("Qwen3.8-27B (likely; or Qwen3.5-27B)"), is not part of it
+    return m ? [{ heard: m[1].replace(/^["']|["']$/g, ""), said: m[2].replace(/\s*\([^)]*\)\s*$/, "").replace(/^["']|["']$/g, "") }] : [];
   });
   const tool = step.match(/<tool>\s*(yes|no)\b/i)?.[1].toLowerCase();
   return { fixes, tool: tool === undefined ? undefined : tool === "yes" };
