@@ -26,7 +26,7 @@ const PATTERNS = [1, 0, 2, 3, 4];
 const WAKE = 9, MAX_RIPPLES = 16, WAVE_LIFE = 5, WAKE_LIFE = 2;
 // The butterfly sinks into the water as a chat begins and rises out of it in a new chat, quickest at first (out of the
 // way of the chat's first words) and settling: these are their time constants, s (most of the way in three).
-const SINK = 0.45, RISE = 0.35;
+const SINK = 0.34, RISE = 0.26;
 
 const VERT = `#version 300 es
 void main() { vec2 p = vec2((gl_VertexID << 1) & 2, gl_VertexID & 2); gl_Position = vec4(p * 2.0 - 1.0, 0.0, 1.0); }`;

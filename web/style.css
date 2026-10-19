@@ -392,8 +392,6 @@ dialog { padding: 20px; border: 1px solid var(--line); border-radius: 16px; back
 dialog::backdrop { background: rgb(0 0 0 / 0.45); }
 
 #settings .pane-head h2 { margin: 0; font-size: 15px; font-weight: 600; }
-#settings .pane-head span { flex: 1; color: var(--muted); font-size: 12px; }
-:root[data-theme="light"] #settings .pane-head span { color: #cbb9c2; }
 .set-body { flex: 1; min-height: 0; overflow-y: auto; overscroll-behavior: contain; }
 .set-sec { padding: 14px 20px 16px; }
 .set-sec + .set-sec { border-top: 1px solid var(--line); }
