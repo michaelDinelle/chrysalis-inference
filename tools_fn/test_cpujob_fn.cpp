@@ -1,7 +1,7 @@
 // The CPU prefill job (CpuMoe::submit/wait): its per-pick outputs against a float reference built from ggml's
-// dequantization, on 8 random cold experts in two gate/up format groups (Q3_K + Q2_K as in kiln-fn.gguf, and IQ4_XS),
-// for each path and group: ggml's dot products (experts with fewer than VNNI_MIN_TOKENS tokens) and the VNNI kernel.
-// Its speed is tools_fn/bench_cpujob_fn.cpp.
+// dequantization, on 8 random cold experts in two gate/up format groups (Q3_K + Q2_K as in chrysalis-fn.gguf, and
+// IQ4_XS), for each path and group: ggml's dot products (experts with fewer than VNNI_MIN_TOKENS tokens) and the VNNI
+// kernel. Its speed is tools_fn/bench_cpujob_fn.cpp.
 //   build_fn/test_cpujob_fn
 #include "../engine_fn/cpu_moe.h"
 #include "ggml.h"

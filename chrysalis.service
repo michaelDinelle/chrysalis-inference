@@ -1,8 +1,8 @@
 [Unit]
-Description=kiln - Qwen3.8-27B / Qwen3.8-Flash-Next inference server (OpenAI API, port 8080)
+Description=Chrysalis Inference - Qwen3.8-27B / Qwen3.8-Flash-Next inference server (OpenAI API, port 8080)
 
 [Service]
-ExecStart=@ROOT@/kiln.sh serve
+ExecStart=@ROOT@/chrysalis.sh serve
 Restart=on-failure
 RestartSec=3
 # Flash-Next's cold experts (~43 GB) live in this process's memory, and with the high swappiness of a zram setup

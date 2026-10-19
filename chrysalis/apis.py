@@ -6,7 +6,8 @@ import json
 import time
 import uuid
 
-# Anthropic's thinking budget as kiln's reasoning effort: under 2,048 tokens "low", under 8,192 "medium", else "xhigh"
+# Anthropic's thinking budget as Chrysalis's reasoning effort: under 2,048 tokens "low", under 8,192 "medium", else
+# "xhigh"
 BUDGET_EFFORT = ((2048, "low"), (8192, "medium"))
 
 
@@ -25,8 +26,8 @@ def _content(parts):
 
 
 def _image_url(source):
-    """An Anthropic image source as an image_url (base64 as a data URL; a URL as it is, which kiln refuses: it reads
-    only pictures sent inline)."""
+    """An Anthropic image source as an image_url (base64 as a data URL; a URL as it is, which Chrysalis refuses: it
+    reads only pictures sent inline)."""
     if source.get("type") == "base64":
         return f"data:{source.get('media_type') or 'image/png'};base64,{source.get('data') or ''}"
     return source.get("url") or ""
@@ -47,18 +48,18 @@ def _parts(blocks, where):
         elif kind == "document":
             parts += _document(b)
         else:
-            raise ValueError(f"kiln cannot read a {kind} block in {where}")
+            raise ValueError(f"Chrysalis cannot read a {kind} block in {where}")
     return parts
 
 
 def _kept(d, *keys):
-    """kiln's own fields of a part that it passes through (kiln/documents.py page_pictures)."""
+    """Chrysalis's own fields of a part that it passes through (chrysalis/documents.py page_pictures)."""
     return {k: d[k] for k in keys if k in d}
 
 
 def _document(b):
-    """An Anthropic document block as chat parts: a PDF (base64) as a file part kiln/documents.py reads, plain text or
-    content blocks as text, with its title and context."""
+    """An Anthropic document block as chat parts: a PDF (base64) as a file part chrysalis/documents.py reads, plain text
+    or content blocks as text, with its title and context."""
     src, title = b.get("source") or {}, b.get("title") or "document"
     head = [{"type": "text", "text": f"{b['context']}\n"}] if b.get("context") else []
     if src.get("type") == "base64":
@@ -69,7 +70,7 @@ def _document(b):
     if src.get("type") == "content":
         inner = _parts(_blocks(src.get("content")), "a document")
         return head + [{"type": "text", "text": f'<document name="{title}">\n'}] + inner + [{"type": "text", "text": "\n</document>"}]
-    raise ValueError("kiln reads documents sent inline (base64, text or content), not by URL or file id")
+    raise ValueError("Chrysalis reads documents sent inline (base64, text or content), not by URL or file id")
 
 
 def messages_body(req):
@@ -93,8 +94,8 @@ def messages_body(req):
                 elif kind == "tool_use":
                     calls.append({"id": b.get("id"), "type": "function",
                                   "function": {"name": b.get("name"), "arguments": json.dumps(b.get("input") or {}, ensure_ascii=False)}})
-                elif kind != "redacted_thinking":        # another model's encrypted reasoning: nothing kiln can read
-                    raise ValueError(f"kiln cannot read a {kind} block in an assistant message")
+                elif kind != "redacted_thinking":        # another model's encrypted reasoning: nothing Chrysalis can read
+                    raise ValueError(f"Chrysalis cannot read a {kind} block in an assistant message")
             msg = {"role": "assistant", "content": "".join(text)}
             if thinking:
                 msg["reasoning_content"] = "".join(thinking)
@@ -127,7 +128,7 @@ def messages_body(req):
     tools = []
     for t in req.get("tools") or []:
         if t.get("type") not in (None, "custom"):
-            raise ValueError(f"kiln runs only the client's own tools, not Anthropic's {t.get('type')}")
+            raise ValueError(f"Chrysalis runs only the client's own tools, not Anthropic's {t.get('type')}")
         tools.append({"type": "function", "function": {"name": t.get("name"), "description": t.get("description") or "",
                                                        "parameters": t.get("input_schema") or {"type": "object"},
                                                        **({"strict": True} if t.get("strict") is True else {})}})
@@ -245,16 +246,16 @@ def _input_parts(content, role):
             parts.append({"type": "text", "text": p.get("refusal") or ""})
         elif kind == "input_file":
             if not p.get("file_data"):
-                raise ValueError("kiln reads files only as file_data (it has no file store)")
+                raise ValueError("Chrysalis reads files only as file_data (it has no file store)")
             parts.append({"type": "file", "file": {"file_data": p["file_data"], "filename": p.get("filename"), **_kept(p, "page_pictures")}})
         elif kind == "input_image":
             url = p.get("image_url")
             if not url:
-                raise ValueError("kiln reads pictures only as image_url data URLs (it has no file store)")
+                raise ValueError("Chrysalis reads pictures only as image_url data URLs (it has no file store)")
             parts.append({"type": "image_url", "image_url": {"url": url if isinstance(url, str) else url.get("url"),
                                                              "detail": p.get("detail")}})
         else:
-            raise ValueError(f"kiln cannot read {kind} content in a {role} message")
+            raise ValueError(f"Chrysalis cannot read {kind} content in a {role} message")
     return _content(parts)
 
 
@@ -300,7 +301,7 @@ def responses_body(req, history=None):
             msgs.append({"role": "tool", "tool_call_id": it.get("call_id"),
                          "content": out if isinstance(out, str) else _input_parts(out, "tool")})
         else:
-            raise ValueError(f"kiln cannot take {kind} items (it keeps no item store)")
+            raise ValueError(f"Chrysalis cannot take {kind} items (it keeps no item store)")
     for m in msgs:
         if m["role"] == "assistant":
             for k in ("reasoning_content", "tool_calls"):
@@ -315,7 +316,7 @@ def responses_body(req, history=None):
     tools = []
     for t in req.get("tools") or []:
         if t.get("type") != "function":
-            raise ValueError(f"kiln runs only function tools, not {t.get('type')}")
+            raise ValueError(f"Chrysalis runs only function tools, not {t.get('type')}")
         tools.append({"type": "function", "function": {"name": t.get("name"), "description": t.get("description") or "",
                                                        "parameters": t.get("parameters") or {"type": "object"},
                                                        **({"strict": True} if t.get("strict") is True else {})}})

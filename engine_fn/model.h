@@ -90,7 +90,7 @@ struct Engine {
     uint8_t *d_fmt = nullptr;                    // [n_slots] each slot's gate / up format
     int file_fd = -1; const uint8_t *file_base = nullptr;   // the model file and its mapping (VRAM-tier experts out of the pool)
     struct Experts {
-        bool on = true;                          // experiments and tests (kiln_tune "experts"): false keeps the pool as it is
+        bool on = true;                          // experiments and tests (chrysalis_tune "experts"): false keeps the pool as it is
         double half_life = 256;                  // tokens over which an expert's picks count half (from a story to code:
                                                  // 81% of the picks in the pool after 320 steps, where 1,024 had 66%)
         std::vector<int> owner;                  // per slot: layer * NE + expert
@@ -98,7 +98,7 @@ struct Engine {
         std::vector<int> slot, home, type;       // per layer * NE + expert: pool slot (-1: none), RAM slot, gate / up format
         std::vector<float> score, mb;            // decayed picks; MB the CPU reads to compute it
         std::vector<uint32_t> fresh;             // picks not yet in the scores
-        std::vector<uint64_t> total;             // all decode picks (KILN_FN_DECODE_COUNTS)
+        std::vector<uint64_t> total;             // all decode picks (CHRYSALIS_FN_DECODE_COUNTS)
         std::vector<uint8_t> busy;               // per slot: an expert is on its way into it
         std::vector<uint8_t> coming;             // per layer * NE + expert: on its way into the pool
         double tokens = 0;                       // tokens passed since the scores last decayed
@@ -143,7 +143,7 @@ struct Engine {
     MoeShared *sh = nullptr, *d_sh = nullptr;
     CpuMoe cpu;
     float gfrac = 0.3f;                          // share of the decode cold picks the GPU reads over PCIe itself (calibrate(),
-                                                 // then the expert loads' measured copy rate, unless pinned by kiln_tune)
+                                                 // then the expert loads' measured copy rate, unless pinned by chrysalis_tune)
     bool gfrac_pinned = false;
     double cal_cpu_bw = 50e9, cal_cpu_mac = 150e9, cal_dma_bw = 25e9;   // measured at load: CPU read and VNNI rates, DMA
     double cpu_bias = 1.0;                       // learned correction of the CPU's estimated cost in the prefill split
@@ -153,12 +153,13 @@ struct Engine {
     int n_workers = 0;                           // CPU workers: one per physical core
     int split = -1;                              // experiments: prefill cold experts by the cost model (-1), all on the GPU (0), all on the CPU (1)
     bool adapt = true;                           // experiments: false freezes cpu_bias (no balance feedback)
-    // KILN_FN_PROF: time prefill phases (syncing the stream at each boundary, so phases do not overlap) and print them
-    bool prof = getenv("KILN_FN_PROF") != nullptr;
-    std::vector<int64_t> route_counts;           // picks per (layer, expert) in prefill passes, when enabled (kiln_route_counts)
-    // KILN_FN_DECODE_COUNTS=file: picks per (layer, expert) at decode (Experts::total) written to the file (int64 [NL][NE])
+    // CHRYSALIS_FN_PROF: time prefill phases (syncing the stream at each boundary, so phases do not overlap) and print
+    // them
+    bool prof = getenv("CHRYSALIS_FN_PROF") != nullptr;
+    std::vector<int64_t> route_counts;           // picks per (layer, expert) in prefill passes, when enabled (chrysalis_route_counts)
+    // CHRYSALIS_FN_DECODE_COUNTS=file: picks per (layer, expert) at decode (Experts::total) written to the file (int64 [NL][NE])
     // every 256 steps
-    const char *route_dec_file = getenv("KILN_FN_DECODE_COUNTS");
+    const char *route_dec_file = getenv("CHRYSALIS_FN_DECODE_COUNTS");
     int route_dec_steps = 0;
     double prof_t[12] = {}, prof_last = 0;
     void pmark(int phase);
@@ -174,14 +175,14 @@ struct Engine {
     hipEvent_t la_ready = nullptr, la_done = nullptr;
     MoeShared *sh_pred = nullptr, *d_sh_pred = nullptr;
     struct { float *res, *lo, *inv, *mx, *logits, *sg, *wts; half *hh; QAct hq; int *ids, *hot; unsigned *counter; } la{};
-    bool la_on = getenv("KILN_FN_NO_LOOKAHEAD") == nullptr;   // experiments: tune key "lookahead" (else Experts::CPU_HEAVY decides)
+    bool la_on = getenv("CHRYSALIS_FN_NO_LOOKAHEAD") == nullptr;   // experiments: tune key "lookahead" (else Experts::CPU_HEAVY decides)
     void lookahead(const Layer &w, int layer, int T, const float *res, unsigned starts = 1);
     hipEvent_t staged, copied, topk_ready, routed;
     hipEvent_t front_ready, front_copied;        // a sub-chunk's MoE inputs and picks are ready / on the host (prefill)
     PrefetchRange *pf_ranges = nullptr;          // per decoder layer: its dense weights, read into the Infinity Cache while
     std::vector<int> pf_off, pf_n;               // the CPU computes the previous layer's cold experts (decode)
     unsigned *pf_sink = nullptr;
-    bool pf_on = true;                           // experiments (kiln_tune "prefetch"; else Experts::CPU_HEAVY decides)
+    bool pf_on = true;                           // experiments (chrysalis_tune "prefetch"; else Experts::CPU_HEAVY decides)
     uint8_t *stage_state = nullptr;
     hipblasLtHandle_t lt = nullptr;
     void *lt_ws = nullptr;
@@ -241,7 +242,7 @@ struct Engine {
     // there samples at once
     struct Snap { bool used = false; int n = 0, pos = 0; Pos3 tail_pos{0, 0, 0}; int hist[2] = {-1, -1}; std::vector<int> pages;
                   void *host = nullptr; std::vector<float> top_v; std::vector<int> top_i; };
-    Vision vision;                               // opened by kiln_vision_open
+    Vision vision;                               // opened by chrysalis_vision_open
     struct Image { half *rows = nullptr; int n = 0; };   // a picture's embeddings [n][D] fp16, pinned host memory
     std::vector<Image> images;
     std::vector<Snap> snaps;

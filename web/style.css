@@ -67,7 +67,6 @@ html, body { height: 100%; }
 body { margin: 0; background: var(--bg); color: var(--text); font: 15px/1.6 var(--sans); -webkit-font-smoothing: antialiased; }
 button { font: inherit; color: inherit; cursor: pointer; }
 .i { width: 18px; height: 18px; flex: none; fill: none; stroke: currentColor; stroke-width: 2; stroke-linecap: round; stroke-linejoin: round; }
-.flame { color: var(--accent); }
 
 /* The side panels: the conversations (left) and Settings (right), one mechanism.
    Beside the chat a panel is a grid column whose width is an animated length, and the chat column reads the same
@@ -123,7 +122,7 @@ button { font: inherit; color: inherit; cursor: pointer; }
 .pane-resizing, .pane-resizing * { cursor: col-resize !important; user-select: none !important; }
 
 .brand { display: flex; align-items: center; gap: 8px; font-size: 17px; font-weight: 650; letter-spacing: 0.01em; }
-.brand svg { display: block; width: 20px; height: 20px; }
+.brand .logo { display: block; height: 18px; }
 .side-body { display: flex; flex: 1; flex-direction: column; gap: 6px; min-height: 0; padding: 10px; }
 #new-chat { justify-content: flex-start; }
 #conversations { flex: 1; min-height: 0; overflow-y: auto; margin: 4px -4px 0; padding: 0 4px; }
@@ -289,13 +288,13 @@ main { display: flex; flex-direction: column; min-height: 0; grid-column: 2; }
 .hljs-emphasis { font-style: italic; }
 .hljs-strong { font-weight: 700; }
 
-/* the flame alone, in the middle of the empty chat (a touch above it, which reads as centered over the message
-   box), with a slow ember glow */
+/* the logo alone, in the middle of the empty chat (a touch above it, which reads as centered over the message box),
+   with a slow glow in its own pink */
 .thread:has(> .empty) { height: 100%; padding-top: 0; padding-bottom: 0; }
 .empty { display: grid; height: 100%; place-items: center; }
-.empty > .flame { width: 96px; height: 96px; translate: 0 -6%; filter: drop-shadow(0 0 18px rgb(240 122 60 / 0.28)); animation: ember 5s ease-in-out infinite; }
-@keyframes ember { 50% { filter: drop-shadow(0 0 30px rgb(240 122 60 / 0.42)); } }
-@media (prefers-reduced-motion: reduce) { .empty > .flame { animation: none; } }
+.empty > .logo { width: 120px; translate: 0 -6%; filter: drop-shadow(0 0 18px rgb(226 77 133 / 0.28)); animation: glow 5s ease-in-out infinite; }
+@keyframes glow { 50% { filter: drop-shadow(0 0 30px rgb(226 77 133 / 0.42)); } }
+@media (prefers-reduced-motion: reduce) { .empty > .logo { animation: none; } }
 
 /* thinking: an energy bar of four stops, Off to Max, in view in the message box. A 10px capsule and an 18px thumb on a
    stop; filled to the thumb, and the fill runs hotter to the right: Low a warm amber, Medium an orange that flows,
@@ -695,7 +694,7 @@ main { position: relative; }
 .ts-tool summary:hover, .ts-tool[open] summary { color: var(--text); }
 .ts-tool-fn { color: var(--faint); font: 11px var(--mono); }
 .ts-tool-desc { margin: 2px 0 6px; color: var(--muted); line-height: 1.45; }
-/* What the model is sent: the next request as kiln gets it, read-only */
+/* What the model is sent: the next request as Chrysalis gets it, read-only */
 .sent-view { width: min(860px, 94vw); max-height: 88vh; padding: 16px 18px; }
 .sent-view[open] { display: grid; grid-template-rows: auto auto minmax(0, 1fr); gap: 8px; }
 .sent-view::backdrop { background: rgb(0 0 0 / 0.6); }

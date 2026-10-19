@@ -1,4 +1,4 @@
-// Loading kiln's Flash-Next file (tools_fn/fn_quantize.py): dense weights and hot experts to VRAM (relayout to
+// Loading Chrysalis's Flash-Next file (tools_fn/fn_quantize.py): dense weights and hot experts to VRAM (relayout to
 // structure-of-arrays), cold experts to system RAM in GGUF block order for the CPU workers, token embeddings to pinned
 // host memory, the n-gram table memory-mapped from the source file; then buffers, sequences and the KV pool.
 #include "model.h"
@@ -17,8 +17,8 @@
 
 namespace {
 double now() { return std::chrono::duration<double>(std::chrono::steady_clock::now().time_since_epoch()).count(); }
-// Load progress for kiln_load_progress (another thread polls it while kiln_init runs): bytes read from the model
-// file, then calibration (phase 1), warmup (2), done (3).
+// Load progress for chrysalis_load_progress (another thread polls it while chrysalis_init runs): bytes read from the
+// model file, then calibration (phase 1), warmup (2), done (3).
 std::atomic<size_t> load_read{0}, load_total{0};
 std::atomic<int> load_phase{0};
 // src (inside the file's mapping) -> dst, with pread on the file, in 64 MB pieces (counted for the progress)
@@ -126,7 +126,7 @@ void Engine::load(const std::string &path, int max_seqs, size_t reserve_bytes) {
     if (!g.base && !g.open(path.c_str())) FAIL("cannot open %s", path.c_str());
     for (Layer *w = L; w <= &M; w++) *w = Layer{};  // a reload (after shutdown) starts from clean pointers
     hc_head = HcMix{}; mtp_head = HcMix{};
-    if (g.strs["general.architecture"] != "kilnfn") FAIL("%s is not a kiln Flash-Next file (tools_fn/fn_quantize.py)", path.c_str());
+    if (g.strs["general.architecture"] != "chrysalisfn") FAIL("%s is not a Chrysalis Flash-Next file (tools_fn/fn_quantize.py)", path.c_str());
     auto get = [&](const std::string &name) {
         const GGUFTensor *t = g.get(name);
         if (!t) FAIL("missing tensor %s", name.c_str());
@@ -461,7 +461,7 @@ void Engine::load(const std::string &path, int max_seqs, size_t reserve_bytes) {
     }
     // The n-gram table: memory-map the source file.
     if (!ngram_map) {
-        std::string f = g.strs["kilnfn.ngram_file"];
+        std::string f = g.strs["chrysalisfn.ngram_file"];
         if (f.empty()) FAIL("no n-gram table path in %s", path.c_str());
         if (f[0] != '/') f = path.substr(0, path.find_last_of('/') + 1) + f;
         const int fd = ::open(f.c_str(), O_RDONLY);
@@ -472,8 +472,8 @@ void Engine::load(const std::string &path, int max_seqs, size_t reserve_bytes) {
         ::close(fd);
         if (ngram_map == MAP_FAILED) FAIL("cannot map %s", f.c_str());
         madvise(ngram_map, ngram_map_bytes, MADV_RANDOM);
-        ngram = ngram_map + g.ints["kilnfn.ngram_offset"];
-        const auto &m = g.arrs["kilnfn.ple.layer_multipliers"], &o = g.arrs["kilnfn.ple.head_offsets"], &v = g.arrs["kilnfn.ple.head_vocab_sizes"];
+        ngram = ngram_map + g.ints["chrysalisfn.ngram_offset"];
+        const auto &m = g.arrs["chrysalisfn.ple.layer_multipliers"], &o = g.arrs["chrysalisfn.ple.head_offsets"], &v = g.arrs["chrysalisfn.ple.head_vocab_sizes"];
         if (m.size() < 3 || o.size() < PLE_HEADS || v.size() < PLE_HEADS) FAIL("missing n-gram hash constants");
         for (int i = 0; i < 3; i++) ple_mult[i] = (uint64_t)m[i];
         for (int h = 0; h < PLE_HEADS; h++) { ple_off[h] = (uint32_t)o[h]; ple_voc[h] = (uint32_t)v[h]; }
@@ -508,9 +508,9 @@ void Engine::load(const std::string &path, int max_seqs, size_t reserve_bytes) {
     free_pages.clear();
     for (int p = n_pages - 1; p >= 0; p--) free_pages.push_back(p);
     page_ref.assign(n_pages, 0);
-    fprintf(stderr, "kiln-fn: CPU %d workers %.0f GB/s %.0f GMAC/s, DMA %.0f GB/s: decode GPU share of cold picks %.2f\n",
+    fprintf(stderr, "chrysalis-fn: CPU %d workers %.0f GB/s %.0f GMAC/s, DMA %.0f GB/s: decode GPU share of cold picks %.2f\n",
             n_workers, cal_cpu_bw / 1e9, cal_cpu_mac / 1e9, cal_dma_bw / 1e9, gfrac);
-    fprintf(stderr, "kiln-fn: weights %.2f GB VRAM (%.1f s), cold experts %.2f GB RAM (%.1f s), buffers %.2f GB (passes of %d tokens), "
+    fprintf(stderr, "chrysalis-fn: weights %.2f GB VRAM (%.1f s), cold experts %.2f GB RAM (%.1f s), buffers %.2f GB (passes of %d tokens), "
             "KV pool %d pages = %d tokens (%.2f GB), load %.1f s\n",
             warena.used / 1e9, t_vram - t0, cold_bytes / 1e9, t_cold - t_vram, barena.used / 1e9, smax, n_pages, n_pages * PAGE,
             (double)n_pages * KV_PAGE / 1e9, now() - t0);

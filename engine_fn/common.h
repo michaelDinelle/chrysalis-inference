@@ -6,8 +6,8 @@
 #include <cstdlib>
 
 #define CK(x) do { hipError_t e_ = (x); if (e_ != hipSuccess) { \
-    fprintf(stderr, "kiln: HIP error '%s' at %s:%d\n", hipGetErrorString(e_), __FILE__, __LINE__); abort(); } } while (0)
-#define FAIL(...) do { fprintf(stderr, "kiln: " __VA_ARGS__); fprintf(stderr, "\n"); abort(); } while (0)
+    fprintf(stderr, "chrysalis: HIP error '%s' at %s:%d\n", hipGetErrorString(e_), __FILE__, __LINE__); abort(); } } while (0)
+#define FAIL(...) do { fprintf(stderr, "chrysalis: " __VA_ARGS__); fprintf(stderr, "\n"); abort(); } while (0)
 
 // Qwen3.8-Flash-Next (GGUF architecture qwen4_exp)
 constexpr int D = 2560;            // hidden size (one hyper-connection stream)
@@ -41,7 +41,7 @@ constexpr int IMG_BASE = 1 << 30, IMG_ROWS = 1 << 14, IMAGE_PAD = 248056;
 struct Pos3 { int t, h, w; };      // an M-RoPE position (text: all three equal)
 inline bool is_attn_layer(int l) { return l % 4 == 3; }
 
-// KV cache: page -> layer (12 QSA layers + MTP) -> kv head -> block of PAGE tokens, kiln's format:
+// KV cache: page -> layer (12 QSA layers + MTP) -> kv head -> block of PAGE tokens, Chrysalis's format:
 //   K int8 [PAGE][HD] | K scales fp16 [PAGE][HD/32] |
 //   V 5-bit, transposed: low nibbles [HD][PAGE/2] | high bits [HD][PAGE/8] | V scales fp16 [HD/32][PAGE]
 // then, per layer, the QSA indexer cache: pooled keys fp16 [PAGE/KPOOL][IDX_D] (normed and rotated to the block's
@@ -148,10 +148,10 @@ __device__ __forceinline__ float warp_max(float v) {
 // Wave-wide (max value, lowest index among equals): every lane ends with the winner. Branch-free (a branchy compare
 // makes each step a cascade of exec-mask updates).
 __device__ __forceinline__ void wave_argmax(float &b, int &bi) {
-#define KILN_ARGMAX_STEP(M) { const float ov = lane_xor<M>(b); const int oi = lane_xor<M>(bi); \
+#define CHRYSALIS_ARGMAX_STEP(M) { const float ov = lane_xor<M>(b); const int oi = lane_xor<M>(bi); \
                               const bool tk = (ov > b) | ((ov == b) & (oi < bi)); b = tk ? ov : b; bi = tk ? oi : bi; }
-    KILN_ARGMAX_STEP(16) KILN_ARGMAX_STEP(8) KILN_ARGMAX_STEP(4) KILN_ARGMAX_STEP(2) KILN_ARGMAX_STEP(1)
-#undef KILN_ARGMAX_STEP
+    CHRYSALIS_ARGMAX_STEP(16) CHRYSALIS_ARGMAX_STEP(8) CHRYSALIS_ARGMAX_STEP(4) CHRYSALIS_ARGMAX_STEP(2) CHRYSALIS_ARGMAX_STEP(1)
+#undef CHRYSALIS_ARGMAX_STEP
 }
 __device__ __forceinline__ float silu(float x) { return x / (1.0f + __expf(-x)); }
 __device__ __forceinline__ float sigmoid(float x) { return 1.0f / (1.0f + __expf(-x)); }

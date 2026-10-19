@@ -1,9 +1,9 @@
-"""What OpenCode (2.0.25) feels on a running kiln server, replayed from its real requests (tools/opencode2.json):
+"""What OpenCode (2.0.25) feels on a running Chrysalis server, replayed from its real requests (tools/opencode2.json):
 each new session's title request and its first request go out 8 ms apart, as OpenCode sends them, and an agent
 session then appends tool output the way OpenCode does (~25 ms after each reply). Per request: time to first token
 seen by the client, the whole turn, and tok/s as OpenCode's footer counts it (tokens / whole turn).
   python tools/bench_opencode.py [--url http://127.0.0.1:8080] [--model qwen3.8-flash-next] [--steps 3] [--out FILE]
-Run it right after kiln (re)starts: the first scenario is the cold cache."""
+Run it right after Chrysalis (re)starts: the first scenario is the cold cache."""
 import argparse
 import json
 import os
@@ -79,7 +79,7 @@ def session_turn(url, model, messages, seed):
 
 
 def server_recent(url):
-    with urllib.request.urlopen(url + "/kiln/stats") as r:
+    with urllib.request.urlopen(url + "/chrysalis/stats") as r:
         return json.load(r).get("recent", [])
 
 
@@ -112,12 +112,12 @@ def main():
     home = system()
     turn("cold start: new session", [{"role": "system", "content": home}, {"role": "user", "content": "hello"}], 1)
     turn("new session, same project", [{"role": "system", "content": home}, {"role": "user", "content": "hey there"}], 2)
-    kiln = system(cwd="/home/omarchy/kiln", git=True)
-    first = [{"role": "system", "content": kiln}, {"role": "user", "content": "good morning"}]
+    chrysalis = system(cwd="/home/omarchy/chrysalis-inference", git=True)
+    first = [{"role": "system", "content": chrysalis}, {"role": "user", "content": "good morning"}]
     r = turn("new session, other project", first, 3)
     turn("new day", [{"role": "system", "content": system(date="Sun Oct 18 2026")}, {"role": "user", "content": "hi"}], 4)
-    # an agent session in the kiln project: each step appends ~1K tokens of tool output (OpenCode sends it ~25 ms
-    # after the reply) to the conversation kiln just generated
+    # an agent session in the Chrysalis project: each step appends ~1K tokens of tool output (OpenCode sends it ~25 ms
+    # after the reply) to the conversation Chrysalis just generated
     msgs = first + [r["msg"]]
     chunk = 4000
     for k in range(a.steps):

@@ -1,10 +1,10 @@
-// The web server (server.ts) against a fake kiln: a streamed reply is a job that runs to its end whatever its page
-// does, any page can follow it again from an event's position, only Stop ends it early (and stops kiln's request), and
-// a request addressed to another site's name is refused (DNS rebinding). With tools, a reply is rounds: the fake kiln
-// plays a script of tool calls, which server.ts runs on real MCP servers (fake-mcp.ts, over stdio and Streamable HTTP,
-// through the SDK) and on the built-in Fetch URL against local sites, and sends back. Voice mode's socket goes to a
-// speech service (fake-voice.ts) the server starts with the first socket and stops once idle. Nothing here reaches the
-// real kiln or systemd.
+// The web server (server.ts) against a fake Chrysalis: a streamed reply is a job that runs to its end whatever its page
+// does, any page can follow it again from an event's position, only Stop ends it early (and stops Chrysalis's request),
+// and a request addressed to another site's name is refused (DNS rebinding). With tools, a reply is rounds: the fake
+// Chrysalis plays a script of tool calls, which server.ts runs on real MCP servers (fake-mcp.ts, over stdio and
+// Streamable HTTP, through the SDK) and on the built-in Fetch URL against local sites, and sends back. Voice mode's
+// socket goes to a speech service (fake-voice.ts) the server starts with the first socket and stops once idle. Nothing
+// here reaches the real Chrysalis or systemd.
 import { afterAll, beforeAll, expect, test } from "bun:test";
 import { mkdtempSync, readFileSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
@@ -13,11 +13,11 @@ import { fakeMcp } from "./fake-mcp";
 import { lanAddresses } from "./tls";
 
 const CHUNKS = 12, GAP_MS = 20;
-let kilnAborted = 0;
-// A tool script, as the user's message: "run ", the rounds as JSON (each the calls kiln answers with, or its text), and
-// a line that makes the message unique. Each round is told by the assistant turns the request already holds; every
-// request a script gets is kept.
-// A voice reply's rounds also say the calls kiln makes when held to the tools' grammar (forced).
+let chrysalisAborted = 0;
+// A tool script, as the user's message: "run ", the rounds as JSON (each the calls Chrysalis answers with, or its
+// text), and a line that makes the message unique. Each round is told by the assistant turns the request already holds;
+// every request a script gets is kept.
+// A voice reply's rounds also say the calls Chrysalis makes when held to the tools' grammar (forced).
 interface Round { calls?: { name: string; args: string }[]; text?: string; gap?: number; forced?: { name: string; args: string }[]; broken?: boolean }
 const seen = new Map<string, any[]>();
 const enc = new TextEncoder();
@@ -27,7 +27,7 @@ const fake = Bun.serve({
   port: 0,
   async fetch(req) {
     const path = new URL(req.url).pathname;
-    if (path === "/kiln/stats") return Response.json({ model: "fake-model" });
+    if (path === "/chrysalis/stats") return Response.json({ model: "fake-model" });
     if (path !== "/v1/chat/completions") return new Response("not found", { status: 404 });
     const body = await req.json();
     // a continued reply's start is not one of its rounds; what was said, without a note before it
@@ -36,11 +36,11 @@ const fake = Bun.serve({
     const script: Round[] | undefined = said.startsWith("run ") ? JSON.parse(said.slice(4).split("\n")[0]) : undefined;
     const k = body.messages.filter((m: any) => m.role === "assistant" && m !== prefix).length, r = script?.[Math.min(k, script.length - 1)];
     if (!body.stream) return Response.json({ choices: [{ message: { content: "a title" } }] });
-    req.signal.addEventListener("abort", () => kilnAborted++);
+    req.signal.addEventListener("abort", () => chrysalisAborted++);
     if (r) {
       seen.set(said, [...(seen.get(said) ?? []), body]);
       const calls = body.tool_choice === "required" ? r.forced ?? [] : r.calls ?? [];
-      const chunks = [...(prefix ? [{ delta: { kiln_prefix: { content: prefix.content } } }] : []),
+      const chunks = [...(prefix ? [{ delta: { chrysalis_prefix: { content: prefix.content } } }] : []),
         ...(body.tool_choice === "required" ? [] : [{ delta: { role: "assistant", content: "" } }, { delta: { reasoning_content: `thinking ${k}` } }, { delta: { content: r.text ?? `Round ${k}.` } }]),
         ...calls.map((c, i) => ({ delta: { tool_calls: [{ index: i, id: `call_${k}_${i}`, type: "function", function: { name: c.name, arguments: c.args } }] } })),
         { delta: {}, finish_reason: calls.length ? "tool_calls" : "stop" }];
@@ -48,7 +48,7 @@ const fake = Bun.serve({
       return new Response(new ReadableStream({
         async pull(ctl) {
           await Bun.sleep(r.gap ?? 2);
-          if (r.broken && i === chunks.length - 1) return ctl.error(new Error("kiln dropped the connection"));   // as an exception in kiln does
+          if (r.broken && i === chunks.length - 1) return ctl.error(new Error("Chrysalis dropped the connection"));   // as an exception in Chrysalis does
           if (i < chunks.length) ctl.enqueue(sse({ choices: [chunks[i++]] }));
           else {
             ctl.enqueue(sse({ choices: [], usage: { prompt_tokens: 100 + k, completion_tokens: 10 } }));
@@ -70,7 +70,7 @@ const fake = Bun.serve({
 });
 
 // Sites for Fetch URL: one on 127.0.0.1, one on 127.0.0.2 (both this machine, both refused unless the config allows them).
-const PAGE = `<!doctype html><html><head><title>Kiln &amp; tools</title><script>alert("no")</script><style>p{}</style></head><body>
+const PAGE = `<!doctype html><html><head><title>Chrysalis &amp; tools</title><script>alert("no")</script><style>p{}</style></head><body>
 <nav><a href="/">Home</a></nav><main><h1>Fetched</h1><p>A <a href="/docs">link</a> and <code>code</code>.</p><ul><li>one</li><li>two</li></ul>
 <pre>let x = 1;</pre></main><footer>Copyright</footer></body></html>`;
 const site = Bun.serve({
@@ -95,12 +95,12 @@ const mcpHttp = Bun.serve({
   },
 });
 
-const dir = mkdtempSync(`${tmpdir()}/kiln-tools-`), CONFIG = `${dir}/mcp.json`, LOG = `${dir}/mcp.log`;
+const dir = mkdtempSync(`${tmpdir()}/chrysalis-tools-`), CONFIG = `${dir}/mcp.json`, LOG = `${dir}/mcp.log`;
 const stdio = (timeout?: number) => ({ command: process.execPath, args: ["fake-mcp.ts"], cwd: import.meta.dir, env: { FAKE_MCP_LOG: LOG }, ...(timeout ? { timeout } : {}) });
 const config = (fetch: object = {}) => writeFileSync(CONFIG, JSON.stringify({
   mcpServers: { fake: stdio(3), "a.b": stdio(), a_b: stdio(), web: { url: `http://127.0.0.1:${mcpHttp.port}/mcp` },
     narrow: { url: `http://localhost:${mcpHttp.port}/mcp`, tools: ["echo", "nonexistent"] }, plain: { url: "http://example.com/mcp" },
-    broken: { command: "/nonexistent/kiln-test-mcp" }, off: { command: "true", disabled: true } },
+    broken: { command: "/nonexistent/chrysalis-test-mcp" }, off: { command: "true", disabled: true } },
   fetch,
 }));
 writeFileSync(LOG, "");
@@ -110,16 +110,16 @@ let web: Bun.Subprocess<"ignore", "pipe", "inherit">, base = "", port = "";
 beforeAll(async () => {
   web = Bun.spawn([process.execPath, "server.ts"], {
     cwd: import.meta.dir, stdout: "pipe", stderr: "inherit",
-    env: { ...process.env, PORT: "0", KILN_URL: `http://127.0.0.1:${fake.port}`, KILN_HOST: "127.0.0.1", NODE_ENV: "production", KILN_MCP_CONFIG: CONFIG },
+    env: { ...process.env, PORT: "0", CHRYSALIS_URL: `http://127.0.0.1:${fake.port}`, CHRYSALIS_HOST: "127.0.0.1", NODE_ENV: "production", CHRYSALIS_MCP_CONFIG: CONFIG },
   });
   const reader = web.stdout.getReader(), dec = new TextDecoder();
   let out = "";
-  while (!/kiln web: \S+/.test(out)) {
+  while (!/chrysalis web: \S+/.test(out)) {
     const { value, done } = await reader.read();
     if (done) throw new Error(`server.ts exited: ${out}`);
     out += dec.decode(value);
   }
-  base = out.match(/kiln web: (\S+)/)![1].replace(/\/$/, "");
+  base = out.match(/chrysalis web: (\S+)/)![1].replace(/\/$/, "");
   port = new URL(base).port;
 });
 afterAll(() => { web.kill(); fake.stop(true); site.stop(true); inner.stop(true); mcpHttp.stop(true); });
@@ -144,9 +144,9 @@ const post = (signal?: AbortSignal) =>
   fetch(`${base}/api/chat`, { method: "POST", body: JSON.stringify({ stream: true, messages: [] }), headers: json, signal });
 const deltas = (got: (readonly [number, string])[]) => got.filter(([, d]) => d.includes('"delta"')).map(([, d]) => JSON.parse(d).choices[0].delta.content);
 
-test("a streamed reply is a job: kiln's events in order, then the timings, then [DONE]", async () => {
+test("a streamed reply is a job: Chrysalis's events in order, then the timings, then [DONE]", async () => {
   const res = await post();
-  expect(res.headers.get("X-Kiln-Job")).toBeTruthy();
+  expect(res.headers.get("X-Chrysalis-Job")).toBeTruthy();
   const got = await all(res);
   expect(got.map(([i]) => i)).toEqual(got.map((_, i) => i));
   expect(deltas(got)).toEqual(Array.from({ length: CHUNKS }, (_, i) => `t${i}`));
@@ -155,8 +155,8 @@ test("a streamed reply is a job: kiln's events in order, then the timings, then 
 });
 
 test("a page that goes away leaves the reply running; following from a position gives the rest", async () => {
-  const aborts = kilnAborted, ctrl = new AbortController();
-  const res = await post(ctrl.signal), job = res.headers.get("X-Kiln-Job")!;
+  const aborts = chrysalisAborted, ctrl = new AbortController();
+  const res = await post(ctrl.signal), job = res.headers.get("X-Chrysalis-Job")!;
   let seen = 0;
   for await (const _ of events(res)) if (++seen === 3) break;
   ctrl.abort();
@@ -165,12 +165,12 @@ test("a page that goes away leaves the reply running; following from a position 
   expect(rest[0][0]).toBe(3);
   expect(deltas(rest)).toEqual(Array.from({ length: CHUNKS - 3 }, (_, i) => `t${i + 3}`));
   expect(rest.at(-1)![1]).toBe("[DONE]");
-  expect(kilnAborted).toBe(aborts);
+  expect(chrysalisAborted).toBe(aborts);
 });
 
-test("Stop ends the reply early with a stopped event, and stops kiln's request", async () => {
-  const aborts = kilnAborted;
-  const res = await post(), job = res.headers.get("X-Kiln-Job")!;
+test("Stop ends the reply early with a stopped event, and stops Chrysalis's request", async () => {
+  const aborts = chrysalisAborted;
+  const res = await post(), job = res.headers.get("X-Chrysalis-Job")!;
   const got: (readonly [number, string])[] = [];
   for await (const e of events(res)) {
     got.push(e);
@@ -180,7 +180,7 @@ test("Stop ends the reply early with a stopped event, and stops kiln's request",
   expect(got.map(([, d]) => d)).toContain(JSON.stringify({ stopped: true }));
   expect(got.at(-1)![1]).toBe("[DONE]");
   await Bun.sleep(50);
-  expect(kilnAborted).toBe(aborts + 1);
+  expect(chrysalisAborted).toBe(aborts + 1);
 });
 
 test("a request addressed to another site's name is refused; this machine's names and addresses are not", async () => {
@@ -210,7 +210,7 @@ type Ev = Record<string, any>;
 let asked = 0;
 const ask = (script: Round[], tools: Record<string, { off?: string[] }> = { "mcp:fake": {} }, more: object = {}) => {
   const said = `run ${JSON.stringify(script)}\n${++asked}`;
-  const res = fetch(`${base}/api/chat`, { method: "POST", headers: json, body: JSON.stringify({ stream: true, model: "m", messages: [{ role: "user", content: said }], kiln_web: { tools, ...more } }) });
+  const res = fetch(`${base}/api/chat`, { method: "POST", headers: json, body: JSON.stringify({ stream: true, model: "m", messages: [{ role: "user", content: said }], chrysalis_web: { tools, ...more } }) });
   return { said, res };
 };
 async function* parsed(res: Response) { for await (const [, d] of events(res)) yield (d === "[DONE]" ? { done: true } : JSON.parse(d)) as Ev; }
@@ -222,14 +222,14 @@ const sourceOf = async (id: string) => (await catalog()).sources.find((s) => s.i
 const decide = (job: string, call: string, decision: string) =>
   fetch(`${base}/api/chat/${job}/tool/${call}`, { method: "POST", headers: json, body: JSON.stringify({ decision }) });
 
-test("an MCP server starts when a reply first needs it; its call and result go back to kiln exactly as kiln wrote them", async () => {
+test("an MCP server starts when a reply first needs it; its call and result go back to Chrysalis exactly as Chrysalis wrote them", async () => {
   expect((await sourceOf("mcp:fake")).state).toBe("idle");
   const args = '{"text":  "hi" }';                     // spaced as no serializer would: it must come back as it went
   const { said, res } = ask([{ calls: [{ name: "fake__echo", args }] }, { text: "Done." }], { "mcp:fake": {}, fetch: {} });
   const got = await collect(await res);
   const [first, second] = seen.get(said)!;
   expect(seen.get(said)!.length).toBe(2);
-  expect(first.kiln_web).toBeUndefined();
+  expect(first.chrysalis_web).toBeUndefined();
   const names = first.tools.map((t: any) => t.function.name);
   expect(names).toEqual(["fake__big", "fake__echo", "fake__get_weather", "fake__slow", "fake__write_note", "fetch_url"]);
   expect(JSON.stringify(second.messages.slice(0, first.messages.length))).toBe(JSON.stringify(first.messages));
@@ -257,7 +257,7 @@ test("several calls in a round run side by side, and their results go back in th
 test("a tool that is not read-only waits for the user: allow once runs it, deny does not, always stops asking", async () => {
   // once
   let { said, res } = ask([{ calls: [{ name: "fake__write_note", args: '{"text": "first"}' }] }, { text: "ok" }]);
-  let r = await res, job = r.headers.get("X-Kiln-Job")!, got: Ev[] = [];
+  let r = await res, job = r.headers.get("X-Chrysalis-Job")!, got: Ev[] = [];
   for await (const e of parsed(r)) {
     got.push(e);
     if (e.tool?.state === "approval") {
@@ -274,7 +274,7 @@ test("a tool that is not read-only waits for the user: allow once runs it, deny 
   // deny
   ({ said, res } = ask([{ calls: [{ name: "fake__write_note", args: '{"text": "second"}' }] }, { text: "ok" }]));
   r = await res;
-  job = r.headers.get("X-Kiln-Job")!;
+  job = r.headers.get("X-Chrysalis-Job")!;
   got = [];
   for await (const e of parsed(r)) { got.push(e); if (e.tool?.state === "approval") await decide(job, e.tool.id, "deny"); }
   expect(toolEvents(got).map((t) => t.state)).toEqual(["approval", "declined"]);
@@ -285,7 +285,7 @@ test("a tool that is not read-only waits for the user: allow once runs it, deny 
   const note = (t: string) => ({ calls: [{ name: "fake__write_note", args: JSON.stringify({ text: t }) }] });
   ({ said, res } = ask([note("third"), note("fourth"), { text: "ok" }]));
   r = await res;
-  job = r.headers.get("X-Kiln-Job")!;
+  job = r.headers.get("X-Chrysalis-Job")!;
   got = [];
   for await (const e of parsed(r)) { got.push(e); if (e.tool?.state === "approval") await decide(job, e.tool.id, "always"); }
   expect(toolEvents(got).map((t) => t.state)).toEqual(["approval", "running", "done", "running", "done"]);
@@ -299,7 +299,7 @@ test("a tool that is not read-only waits for the user: allow once runs it, deny 
 
 test("Stop during a tool call cancels the call on its server and ends the reply at once", async () => {
   const { said, res } = ask([{ calls: [{ name: "fake__slow", args: '{"ms": 2500}' }] }, { text: "never" }]);
-  const r = await res, job = r.headers.get("X-Kiln-Job")!, got: Ev[] = [];
+  const r = await res, job = r.headers.get("X-Chrysalis-Job")!, got: Ev[] = [];
   let stoppedAt = 0;
   for await (const e of parsed(r)) {
     got.push(e);
@@ -316,7 +316,7 @@ test("Stop during a tool call cancels the call on its server and ends the reply 
 
 test("Stop while a call waits for the user ends the reply, and the call never runs", async () => {
   const { said, res } = ask([{ calls: [{ name: "fake__write_note", args: '{"text": "unasked"}' }] }, { text: "never" }]);
-  const r = await res, job = r.headers.get("X-Kiln-Job")!, got: Ev[] = [];
+  const r = await res, job = r.headers.get("X-Chrysalis-Job")!, got: Ev[] = [];
   for await (const e of parsed(r)) { got.push(e); if (e.tool?.state === "approval") await fetch(`${base}/api/chat/${job}/stop`, { method: "POST" }); }
   expect(toolEvents(got).map((t) => t.state)).toEqual(["approval", "stopped"]);
   expect(got).toContainEqual({ stopped: true });
@@ -340,7 +340,7 @@ test("a call to a tool the chat has not turned on gets an error result, and the 
 test("a page that follows a reply with tools again from any event gets all the rest of it", async () => {
   const slow = (n: number) => ({ calls: [{ name: "fake__echo", args: `{"text": "${n}"}` }], gap: 30 });
   const { res } = ask([slow(1), slow(2), { text: "end", gap: 30 }]);
-  const r = await res, job = r.headers.get("X-Kiln-Job")!, early: (readonly [number, string])[] = [];
+  const r = await res, job = r.headers.get("X-Chrysalis-Job")!, early: (readonly [number, string])[] = [];
   for await (const e of events(r)) { early.push(e); if (early.length === 7) break; }   // gone in the middle of round 0
   await r.body!.cancel().catch(() => {});
   const rest = await all(await fetch(`${base}/api/chat/${job}?from=7`));
@@ -414,7 +414,7 @@ test("Fetch URL refuses this machine and private networks, by address, by name a
   try {
     const page = await fetched(`http://127.0.0.1:${sitePort}/page`);
     expect(page.state).toBe("done");
-    expect(page.result).toBe([`URL: http://127.0.0.1:${sitePort}/page`, "Status: 200 OK", "Content-Type: text/html", "Title: Kiln & tools", "",
+    expect(page.result).toBe([`URL: http://127.0.0.1:${sitePort}/page`, "Status: 200 OK", "Content-Type: text/html", "Title: Chrysalis & tools", "",
       "# Fetched", "", `A [link](http://127.0.0.1:${sitePort}/docs) and \`code\`.`, "", "- one", "- two", "", "```", "let x = 1;", "```"].join("\n"));
     const hop = await fetched(`http://127.0.0.1:${sitePort}/hop`);
     expect(hop.state).toBe("failed");
@@ -470,26 +470,26 @@ const Socket = WebSocket as unknown as new (url: string, o: { headers?: Record<s
 async function voiceServer(env: Record<string, string>) {
   const proc = Bun.spawn([process.execPath, "server.ts"], {
     cwd: import.meta.dir, stdout: "pipe", stderr: "inherit",
-    env: { ...process.env, PORT: "0", KILN_URL: `http://127.0.0.1:${fake.port}`, KILN_HOST: "127.0.0.1", NODE_ENV: "production", KILN_MCP_CONFIG: CONFIG, ...env },
+    env: { ...process.env, PORT: "0", CHRYSALIS_URL: `http://127.0.0.1:${fake.port}`, CHRYSALIS_HOST: "127.0.0.1", NODE_ENV: "production", CHRYSALIS_MCP_CONFIG: CONFIG, ...env },
   });
   const reader = proc.stdout.getReader(), dec = new TextDecoder();
   let out = "";
-  while (!/kiln web: \S+/.test(out)) {
+  while (!/chrysalis web: \S+/.test(out)) {
     const { value, done } = await reader.read();
     if (done) throw new Error(`server.ts exited: ${out}`);
     out += dec.decode(value);
   }
-  const url = out.match(/kiln web: (\S+)/)![1].replace(/\/$/, "");
+  const url = out.match(/chrysalis web: (\S+)/)![1].replace(/\/$/, "");
   return { proc, url, socket: (origin?: string) => new Socket(`${url.replace(/^http/, "ws")}/api/voice`, origin ? { headers: { Origin: origin } } : {}) };
 }
 const outcome = (s: WebSocket) => new Promise<string>((res) => { s.onopen = () => res("open"); s.onclose = () => res("closed"); });
 const until = async (ok: () => boolean, ms = 5000) => { for (const t = Date.now(); !ok() && Date.now() - t < ms; ) await Bun.sleep(25); return ok(); };
 
 test("voice: only this server's own pages get a socket; it starts the service, passes both sides' frames through as they are, and stops the service once idle", async () => {
-  const log = `${mkdtempSync(`${tmpdir()}/kiln-voice-`)}/voice.log`, events = () => {
+  const log = `${mkdtempSync(`${tmpdir()}/chrysalis-voice-`)}/voice.log`, events = () => {
     try { return readFileSync(log, "utf8").trim().split("\n").filter(Boolean).map((l) => JSON.parse(l)); } catch { return []; }
   };
-  const v = await voiceServer({ KILN_VOICE_CMD: JSON.stringify([process.execPath, `${import.meta.dir}/fake-voice.ts`]), FAKE_VOICE_LOG: log, KILN_VOICE_IDLE_MS: "300" });
+  const v = await voiceServer({ CHRYSALIS_VOICE_CMD: JSON.stringify([process.execPath, `${import.meta.dir}/fake-voice.ts`]), FAKE_VOICE_LOG: log, CHRYSALIS_VOICE_IDLE_MS: "300" });
   try {
     expect(await outcome(v.socket("http://evil.example"))).toBe("closed");
     expect(await outcome(v.socket())).toBe("closed");
@@ -520,7 +520,7 @@ test("voice: only this server's own pages get a socket; it starts the service, p
 }, 20_000);
 
 test("voice: a speech service that cannot start says how to install one", async () => {
-  const v = await voiceServer({ KILN_VOICE_CMD: JSON.stringify(["/nonexistent/kiln-voice"]) });
+  const v = await voiceServer({ CHRYSALIS_VOICE_CMD: JSON.stringify(["/nonexistent/chrysalis-voice"]) });
   try {
     const s = v.socket(v.url), got: string[] = [];
     s.onmessage = (e) => got.push(e.data);
@@ -533,25 +533,25 @@ test("voice: a speech service that cannot start says how to install one", async 
   }
 });
 
-test("on the network (KILN_HOST 0.0.0.0): this machine keeps plain HTTP; each address gets HTTPS whose certificate the server's own authority signs, and no plain HTTP; that authority vouches for nothing public", async () => {
-  const dir = mkdtempSync(`${tmpdir()}/kiln-tls-`), ips = lanAddresses();
+test("on the network (CHRYSALIS_HOST 0.0.0.0): this machine keeps plain HTTP; each address gets HTTPS whose certificate the server's own authority signs, and no plain HTTP; that authority vouches for nothing public", async () => {
+  const dir = mkdtempSync(`${tmpdir()}/chrysalis-tls-`), ips = lanAddresses();
   expect(ips.length).toBeGreaterThan(0);
   const proc = Bun.spawn([process.execPath, "server.ts"], {
     cwd: import.meta.dir, stdout: "pipe", stderr: "inherit",
-    env: { ...process.env, PORT: "0", KILN_URL: `http://127.0.0.1:${fake.port}`, KILN_HOST: "0.0.0.0", NODE_ENV: "production", KILN_MCP_CONFIG: CONFIG, KILN_TLS_DIR: dir },
+    env: { ...process.env, PORT: "0", CHRYSALIS_URL: `http://127.0.0.1:${fake.port}`, CHRYSALIS_HOST: "0.0.0.0", NODE_ENV: "production", CHRYSALIS_MCP_CONFIG: CONFIG, CHRYSALIS_TLS_DIR: dir },
   });
   try {
     const reader = proc.stdout.getReader(), dec = new TextDecoder();
     let out = "";
-    while ((out.match(/kiln web: \S+/g) ?? []).length < 1 + ips.length) {
+    while ((out.match(/chrysalis web: \S+/g) ?? []).length < 1 + ips.length) {
       const { value, done } = await reader.read();
       if (done) throw new Error(`server.ts exited: ${out}`);
       out += dec.decode(value);
     }
-    const urls = [...out.matchAll(/kiln web: (\S+)/g)].map((m) => m[1].replace(/\/$/, "")), port = new URL(urls[0]).port;
+    const urls = [...out.matchAll(/chrysalis web: (\S+)/g)].map((m) => m[1].replace(/\/$/, "")), port = new URL(urls[0]).port;
     expect(urls[0]).toBe(`http://127.0.0.1:${port}`);
     expect(urls.slice(1)).toEqual(ips.map((ip) => `https://${ip}:${port}`));
-    const ca = await (await fetch(`${urls[0]}/kiln-ca.crt`)).text();
+    const ca = await (await fetch(`${urls[0]}/chrysalis-ca.crt`)).text();
     writeFileSync(`${dir}/ca-served.pem`, ca);
     // openssl checks the chain: Bun's BoringSSL has no IP name constraints ("unsupported name constraint type"), the
     // browsers' verifiers do
@@ -575,20 +575,20 @@ test("on the network (KILN_HOST 0.0.0.0): this machine keeps plain HTTP; each ad
   }
 });
 
-test("a reply whose stream from kiln breaks off says so, rather than that kiln is not running", async () => {
+test("a reply whose stream from Chrysalis breaks off says so, rather than that Chrysalis is not running", async () => {
   const got = await collect(await ask([{ text: "Half of it", broken: true }]).res);
   expect(contents(got)).toEqual(["Half of it"]);
-  expect(got.filter((e) => e.error).map((e) => e.error.message)).toEqual(["kiln's reply broke off (kiln's log has why)"]);
+  expect(got.filter((e) => e.error).map((e) => e.error.message)).toEqual(["Chrysalis's reply broke off (Chrysalis's log has why)"]);
 });
 
-// Voice turns (kiln_voice): the page's check beside the chat says whether a tool is needed (kiln_voice.tool); the fake
-// kiln plays a script's text and the calls it makes when held to the tools' grammar. A note before what was said
-// speaks of searches itself.
+// Voice turns (chrysalis_voice): the page's check beside the chat says whether a tool is needed (chrysalis_voice.tool);
+// the fake Chrysalis plays a script's text and the calls it makes when held to the tools' grammar. A note before what
+// was said speaks of searches itself.
 const NOTE = "[The user is talking to you by voice. Only speak of a search once the call has returned.]\n\n";
 const voiceAsk = (script: Round[], tool: boolean, then = "") => {
   const said = `run ${JSON.stringify(script)}\n${++asked} ${then}`;
-  const res = fetch(`${base}/api/chat`, { method: "POST", headers: json, body: JSON.stringify({ stream: true, model: "m", kiln_voice: { tool },
-    messages: [{ role: "user", content: NOTE + said }], kiln_web: { tools: { "mcp:fake": {} }, route: true } }) });
+  const res = fetch(`${base}/api/chat`, { method: "POST", headers: json, body: JSON.stringify({ stream: true, model: "m", chrysalis_voice: { tool },
+    messages: [{ role: "user", content: NOTE + said }], chrysalis_web: { tools: { "mcp:fake": {} }, route: true } }) });
   return { said, res };
 };
 const contents = (got: Ev[]) => got.map((e) => e.choices?.[0]?.delta?.content).filter(Boolean);
@@ -596,7 +596,7 @@ const contents = (got: Ev[]) => got.map((e) => e.choices?.[0]?.delta?.content).f
 test("voice: a check that calls for a tool makes the reply start with a call held to the tools' grammar, after a spoken line", async () => {
   const { said, res } = voiceAsk([{ forced: [{ name: "fake__echo", args: '{"text": "x"}' }] }, { text: "Done." }], true);
   const got = await collect(await res), [forced, after] = seen.get(said)!;
-  expect([forced.tool_choice, forced.logprobs, forced.kiln_voice]).toEqual(["required", false, undefined]);
+  expect([forced.tool_choice, forced.logprobs, forced.chrysalis_voice]).toEqual(["required", false, undefined]);
   const [line, done] = contents(got);
   expect([done, contents(got).length]).toEqual(["Done.", 2]);
   expect(line).toMatch(/^\S.*\.$/);                             // the spoken line the server writes before the call
@@ -620,12 +620,12 @@ test("voice: a reply begun ahead runs no tool until the page says it stands (go)
   const held = async (text: string) => {
     const said = `run ${JSON.stringify([{ calls: [{ name: "fake__echo", args: JSON.stringify({ text }) }] }, { text: "Done." }])}\n${++asked}`;
     const res = await fetch(`${base}/api/chat`, { method: "POST", headers: json, body: JSON.stringify({ stream: true, model: "m",
-      kiln_voice: { tool: false, ahead: true }, messages: [{ role: "user", content: NOTE + said }], kiln_web: { tools: { "mcp:fake": {} }, route: true } }) });
+      chrysalis_voice: { tool: false, ahead: true }, messages: [{ role: "user", content: NOTE + said }], chrysalis_web: { tools: { "mcp:fake": {} }, route: true } }) });
     const got: Ev[] = [], done = (async () => { for await (const e of parsed(res)) got.push(e); })();
     for (const t = Date.now(); !got.some((e) => e.choices?.[0]?.finish_reason === "tool_calls") && Date.now() - t < 5000; ) await Bun.sleep(10);
     await Bun.sleep(300);                                           // the round's calls are in: held, nothing runs
     expect([got.some((e) => e.choices?.[0]?.finish_reason === "tool_calls"), toolEvents(got)]).toEqual([true, []]);
-    return { job: res.headers.get("X-Kiln-Job")!, got, done };
+    return { job: res.headers.get("X-Chrysalis-Job")!, got, done };
   };
   const go = await held("a");
   await fetch(`${base}/api/chat/${go.job}/go`, { method: "POST" });
@@ -647,14 +647,14 @@ test("voice: what was said decides an ask (\"search\"), not the note before it",
   expect(seen.get(other.said)!.map((b) => b.tool_choice)).toEqual([undefined]);
 }, 30_000);
 
-test("the preview of a reply's request is what kiln is then sent for it, tools and all; a voice one says so", async () => {
+test("the preview of a reply's request is what Chrysalis is then sent for it, tools and all; a voice one says so", async () => {
   const said = `run ${JSON.stringify([{ text: "Hi." }])}\n${++asked}`;
-  const body = { stream: true, model: "m", messages: [{ role: "system", content: "S" }, { role: "user", content: said }], kiln_web: { tools: { "mcp:fake": {}, fetch: {} } } };
+  const body = { stream: true, model: "m", messages: [{ role: "system", content: "S" }, { role: "user", content: said }], chrysalis_web: { tools: { "mcp:fake": {}, fetch: {} } } };
   const preview = await (await fetch(`${base}/api/preview`, { method: "POST", headers: json, body: JSON.stringify(body) })).json();
   await collect(await fetch(`${base}/api/chat`, { method: "POST", headers: json, body: JSON.stringify(body) }));
   expect(preview.body).toEqual(seen.get(said)![0]);
   expect(preview.body.tools.map((t: any) => t.function.name)).toEqual(["fake__big", "fake__echo", "fake__get_weather", "fake__slow", "fake__write_note", "fetch_url"]);
-  const voiced = await (await fetch(`${base}/api/preview`, { method: "POST", headers: json, body: JSON.stringify({ ...body, kiln_voice: { tool: false } }) })).json();
-  expect([voiced.voice, voiced.body.kiln_voice, preview.voice]).toEqual([true, undefined, false]);
+  const voiced = await (await fetch(`${base}/api/preview`, { method: "POST", headers: json, body: JSON.stringify({ ...body, chrysalis_voice: { tool: false } }) })).json();
+  expect([voiced.voice, voiced.body.chrysalis_voice, preview.voice]).toEqual([true, undefined, false]);
   expect((await fetch(`${base}/api/preview`, { method: "POST", body: JSON.stringify(body) })).status).toBe(415);   // JSON only, as /api/chat
 }, 30_000);

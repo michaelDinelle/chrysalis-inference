@@ -1,18 +1,18 @@
 // Voice mode's latency end to end on this machine: questions spoken into headless Chromium's microphone (a WAV made by
-// the voice service's own TTS in another voice), through server.ts, the real voice service and the running kiln, to the
-// reply's first sound: the service's wait after the speech, then the turn to the first sound (a reply begun ahead of
-// the turn, at a pause, has its audio in before it). Two clocks: the page's own figure (the service's wait after
-// speech + turn to first sound), and an outside one from where the speech ends in the WAV (capture start + its offset)
-// to the first reply buffer's start. The last question trails off, so the turn model waits for more and a reply begins
-// at the pause.
-//   cd web && bun bench-voice.ts [questions...]     (kiln running; voice mode's settings as a new tab has them)
+// the voice service's own TTS in another voice), through server.ts, the real voice service and the running Chrysalis,
+// to the reply's first sound: the service's wait after the speech, then the turn to the first sound (a reply begun
+// ahead of the turn, at a pause, has its audio in before it). Two clocks: the page's own figure (the service's wait
+// after speech + turn to first sound), and an outside one from where the speech ends in the WAV (capture start + its
+// offset) to the first reply buffer's start. The last question trails off, so the turn model waits for more and a reply
+// begins at the pause.
+//   cd web && bun bench-voice.ts [questions...]     (Chrysalis running; voice mode's settings as a new tab has them)
 import { mkdtempSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import puppeteer from "puppeteer-core";
 
 const ROOT = `${import.meta.dir}/..`, LEAD = 2.5, TAIL = 8;
-// The same six questions each run, their subjects drawn anew: kiln keeps a prompt's end with its first token's odds, so
-// a question asked again (its reply's prompt, its check's) would come back at once from the cache
+// The same six questions each run, their subjects drawn anew: Chrysalis keeps a prompt's end with its first token's
+// odds, so a question asked again (its reply's prompt, its check's) would come back at once from the cache
 const any = (xs: string[]) => xs[Math.floor(Math.random() * xs.length)];
 const QUESTIONS = process.argv.slice(2).length ? process.argv.slice(2) : [
   `What's the capital of ${any(["France", "Peru", "Kenya", "Norway", "Japan", "Chile", "Egypt", "Canada", "Poland", "Vietnam", "Ghana", "Spain"])}?`,
@@ -21,7 +21,7 @@ const QUESTIONS = process.argv.slice(2).length ? process.argv.slice(2) : [
   `What's the difference between a ${any(["virus and a bacterium", "lake and a pond", "frog and a toad", "comet and an asteroid", "violin and a viola", "hurricane and a tornado"])}?`,
   `Can you recommend a good ${any(["sci-fi", "mystery", "fantasy", "history", "horror", "travel", "cooking", "poetry"])} book?`,
   `I was wondering if you could tell me a fun fact about ${any(["octopuses", "penguins", "volcanoes", "honeybees", "glaciers", "owls", "deserts"])} and`];
-const dir = mkdtempSync(`${tmpdir()}/kiln-bench-voice-`);
+const dir = mkdtempSync(`${tmpdir()}/chrysalis-bench-voice-`);
 writeFileSync(`${dir}/q.json`, JSON.stringify(QUESTIONS));
 const synth = Bun.spawnSync([`${ROOT}/data/voice-venv/bin/python`, "-I", "-c", `
 import json, sys, wave, numpy as np
@@ -40,14 +40,14 @@ print(json.dumps(out))
 const speech: number[] = JSON.parse(synth.stdout.toString().trim().split("\n").at(-1)!);
 
 const web = Bun.spawn([process.execPath, "server.ts"], { cwd: import.meta.dir, stdout: "pipe", stderr: "inherit",
-  env: { ...process.env, PORT: "0", KILN_HOST: "127.0.0.1", NODE_ENV: "production" } });
+  env: { ...process.env, PORT: "0", CHRYSALIS_HOST: "127.0.0.1", NODE_ENV: "production" } });
 let out = "";
-for (const reader = web.stdout.getReader(), dec = new TextDecoder(); !/kiln web: \S+/.test(out); ) {
+for (const reader = web.stdout.getReader(), dec = new TextDecoder(); !/chrysalis web: \S+/.test(out); ) {
   const { value, done } = await reader.read();
   if (done) throw new Error(`server.ts exited: ${out}`);
   out += dec.decode(value);
 }
-const base = out.match(/kiln web: (\S+)/)![1].replace(/\/$/, "");
+const base = out.match(/chrysalis web: (\S+)/)![1].replace(/\/$/, "");
 
 // The outside clock: when the microphone's stream starts (the fake device starts its file there) and when the first
 // reply buffer is due to sound, in performance.now() terms.

@@ -1,6 +1,6 @@
-// The page in a real browser (headless Chromium) against a fake kiln that streams canned replies: TeX typeset and
+// The page in a real browser (headless Chromium) against a fake Chrysalis that streams canned replies: TeX typeset and
 // prices left alone, Mermaid diagrams drawn, a reply's HTML page run in its sandbox where it reaches nothing, attached
-// files (pictures, PDFs, videos, texts) sent as kiln expects them and kept across a reload, chats carried through
+// files (pictures, PDFs, videos, texts) sent as Chrysalis expects them and kept across a reload, chats carried through
 // export and import, versions of messages and replies, tools (an MCP server, fake-mcp.ts, that server.ts runs), and
 // voice mode against a scripted speech service (fake-voice.ts) with Chromium's fake microphone.
 import { afterAll, beforeAll, expect, test } from "bun:test";
@@ -15,7 +15,7 @@ const REPLIES: Record<string, string> = {
   math: "Solve $ax^2 + bx + c = 0$:\n\n$$\nx = \\frac{-b \\pm \\sqrt{b^2 - 4ac}}{2a}\n$$\n\nAlso \\(e^{i\\pi} + 1 = 0\\) and\n\n\\[\n\\int_0^1 x\\,dx\n\\]\n\n" +
     "It costs $5 and $10. Escaped: \\$x\\$. Code: `$HOME` stays.\n",
   diagram: "```mermaid\nflowchart LR\n  A[Ask] --> B{Cached?}\n  B -->|yes| C[Append]\n  B -->|no| D[Prefill]\n```\n\n" +
-    "```mermaid\nsequenceDiagram\n  User->>kiln: question\n  kiln-->>User: answer\n```\n\n```mermaid\nflowchart TD\n  A -->\n  not mermaid ((\n```\n",
+    "```mermaid\nsequenceDiagram\n  User->>Chrysalis: question\n  Chrysalis-->>User: answer\n```\n\n```mermaid\nflowchart TD\n  A -->\n  not mermaid ((\n```\n",
   page: "```html\n<!DOCTYPE html>\n<html><head><title>Probe</title></head><body>\n<button id=\"b\" onclick=\"this.textContent = Number(this.textContent) + 1\">0</button>\n" +
     "<pre id=\"out\">running</pre>\n<script>\nconst out = [];\ntry { out.push(\"parent \" + parent.document.title); } catch { out.push(\"parent blocked\"); }\n" +
     "try { localStorage.setItem(\"k\", \"1\"); out.push(\"storage open\"); } catch { out.push(\"storage blocked\"); }\n" +
@@ -40,13 +40,13 @@ const png = (() => {
   return Buffer.concat([Buffer.from([137, 80, 78, 71, 13, 10, 26, 10]), chunk("IHDR", ihdr), chunk("IDAT", deflateSync(rows)), chunk("IEND", new Uint8Array())]);
 })();
 
-// Questions that make the fake kiln call a tool (in its first round, then answer once the result is in), or write slowly.
+// Questions that make the fake Chrysalis call a tool (in its first round, then answer once the result is in), or write slowly.
 const TOOL_ASKS: Record<string, { name: string; args: string }> = {
   "tool echo": { name: "fake__echo", args: '{"text":  "hello"}' },
   "tool note": { name: "fake__write_note", args: '{"text": "n1"}' },
 };
-let lastStream: any = null, probes = 0, callIds = 0, kilnStopped = 0;  // probes: requests a sandboxed page got through to a server
-const streams: any[] = [], streamAt: number[] = [];  // every streamed request kiln got, and when
+let lastStream: any = null, probes = 0, callIds = 0, chrysalisStopped = 0;  // probes: requests a sandboxed page got through to a server
+const streams: any[] = [], streamAt: number[] = [];  // every streamed request Chrysalis got, and when
 const checks: any[] = [];                            // every check of what speech recognition heard (app.ts CHECK)
 const fake = Bun.serve({
   hostname: "127.0.0.1",
@@ -54,7 +54,7 @@ const fake = Bun.serve({
   async fetch(req) {
     const path = new URL(req.url).pathname;
     if (path.startsWith("/probe")) return (probes++, new Response(path.endsWith(".png") ? png : "", { headers: { "Content-Type": "image/png" } }));
-    if (path === "/kiln/stats") return Response.json({ model: "qwen3.8-27b", context: 262144, kv_tokens: 276000, cache: { free_kv_tokens: 270000 } });
+    if (path === "/chrysalis/stats") return Response.json({ model: "qwen3.8-27b", context: 262144, kv_tokens: 276000, cache: { free_kv_tokens: 270000 } });
     if (path !== "/v1/chat/completions") return new Response("not found", { status: 404 });
     const body = await req.json();
     const prefix = body.continue_final_message ? body.messages.at(-1) : undefined;
@@ -69,7 +69,7 @@ const fake = Bun.serve({
     lastStream = body;
     streams.push(body);
     streamAt.push(Date.now());
-    req.signal.addEventListener("abort", () => kilnStopped++);
+    req.signal.addEventListener("abort", () => chrysalisStopped++);
     const at = body.messages.findLastIndex((m: any) => m.role === "user"), last = body.messages[at];
     // what the user said, without the app's note to the model before it (voice mode's)
     const said = (typeof last.content === "string" ? last.content : last.content.map((p: any) => p.text ?? "").join("")).replace(/^\[[^\]]*\]\n\n/, "");
@@ -82,8 +82,8 @@ const fake = Bun.serve({
     return new Response(new ReadableStream({
       async pull(ctl) {
         await Bun.sleep(gap);
-        // a continued reply restates itself first, as kiln does
-        if (!restated) { restated = true; return ctl.enqueue(enc.encode(`data: ${JSON.stringify({ choices: [{ delta: { kiln_prefix: { content: prefix.content } } }] })}\n\n`)); }
+        // a continued reply restates itself first, as Chrysalis does
+        if (!restated) { restated = true; return ctl.enqueue(enc.encode(`data: ${JSON.stringify({ choices: [{ delta: { chrysalis_prefix: { content: prefix.content } } }] })}\n\n`)); }
         if (i < text.length) { ctl.enqueue(enc.encode(`data: ${JSON.stringify({ choices: [{ delta: { content: text.slice(i, i + step) } }] })}\n\n`)); i += step; return; }
         if (call) {
           ctl.enqueue(enc.encode(`data: ${JSON.stringify({ choices: [{ delta: { tool_calls: [{ index: 0, id: `call_${++callIds}`, type: "function", function: { name: call.name, arguments: call.args } }] } }] })}\n\n`));
@@ -102,25 +102,25 @@ const fake = Bun.serve({
 });
 
 let web: Bun.Subprocess<"ignore", "pipe", "inherit">, base = "", browser: Browser;
-const dir = mkdtempSync(`${tmpdir()}/kiln-web-`), LOG = `${dir}/mcp.log`, VOICE_LOG = `${dir}/voice.log`;
+const dir = mkdtempSync(`${tmpdir()}/chrysalis-web-`), LOG = `${dir}/mcp.log`, VOICE_LOG = `${dir}/voice.log`;
 writeFileSync(`${dir}/mcp.json`, JSON.stringify({ mcpServers: {
   fake: { command: process.execPath, args: ["fake-mcp.ts"], cwd: import.meta.dir, env: { FAKE_MCP_LOG: LOG } },
-  broken: { command: "/nonexistent/kiln-test-mcp" },
+  broken: { command: "/nonexistent/chrysalis-test-mcp" },
 } }));
 beforeAll(async () => {
   web = Bun.spawn([process.execPath, "server.ts"], {
     cwd: import.meta.dir, stdout: "pipe", stderr: "inherit",
-    env: { ...process.env, PORT: "0", KILN_URL: `http://127.0.0.1:${fake.port}`, KILN_HOST: "127.0.0.1", NODE_ENV: "production", KILN_MCP_CONFIG: `${dir}/mcp.json`,
-      KILN_VOICE_CMD: JSON.stringify([process.execPath, `${import.meta.dir}/fake-voice.ts`]), FAKE_VOICE_LOG: VOICE_LOG, KILN_VOICE_IDLE_MS: "1500" },
+    env: { ...process.env, PORT: "0", CHRYSALIS_URL: `http://127.0.0.1:${fake.port}`, CHRYSALIS_HOST: "127.0.0.1", NODE_ENV: "production", CHRYSALIS_MCP_CONFIG: `${dir}/mcp.json`,
+      CHRYSALIS_VOICE_CMD: JSON.stringify([process.execPath, `${import.meta.dir}/fake-voice.ts`]), FAKE_VOICE_LOG: VOICE_LOG, CHRYSALIS_VOICE_IDLE_MS: "1500" },
   });
   const reader = web.stdout.getReader(), dec = new TextDecoder();
   let out = "";
-  while (!/kiln web: \S+/.test(out)) {
+  while (!/chrysalis web: \S+/.test(out)) {
     const { value, done } = await reader.read();
     if (done) throw new Error(`server.ts exited: ${out}`);
     out += dec.decode(value);
   }
-  base = out.match(/kiln web: (\S+)/)![1].replace(/\/$/, "");
+  base = out.match(/chrysalis web: (\S+)/)![1].replace(/\/$/, "");
   REPLIES.page = REPLIES.page.replaceAll("PROBE_URL", `http://127.0.0.1:${fake.port}`);
   browser = await puppeteer.launch({ executablePath: process.env.CHROMIUM ?? "/usr/bin/chromium", headless: true,
     args: ["--no-sandbox", "--use-fake-ui-for-media-stream", "--use-fake-device-for-media-stream", "--autoplay-policy=no-user-gesture-required"] });
@@ -185,8 +185,8 @@ test("an HTML page runs in its sandbox and reaches nothing", async () => {
   await page.close();
 }, 30_000);
 
-test("attached files go to kiln as images, PDFs, videos and fenced text, stay after a reload, and travel in an export", async () => {
-  const pdf = Buffer.from("%PDF-1.4\n%kiln\n"), mp4 = Buffer.from([0, 0, 0, 24, 102, 116, 121, 112, 109, 112, 52, 50]);
+test("attached files go to Chrysalis as images, PDFs, videos and fenced text, stay after a reload, and travel in an export", async () => {
+  const pdf = Buffer.from("%PDF-1.4\n%chrysalis\n"), mp4 = Buffer.from([0, 0, 0, 24, 102, 116, 121, 112, 109, 112, 52, 50]);
   writeFileSync(`${dir}/dot.png`, png);
   writeFileSync(`${dir}/fence.md`, "Has ``` inside.\n");
   writeFileSync(`${dir}/blob.bin`, new Uint8Array([0, 159, 146, 150, 255]));
@@ -213,7 +213,7 @@ test("attached files go to kiln as images, PDFs, videos and fenced text, stay af
   await send(page, "again");
   expect(lastStream.messages.find((m: any) => m.role === "user").content).toEqual(content);
   await page.click("#export");
-  const file = await (async () => { for (let k = 0; k < 50; k++) { const f = readdirSync(dir).find((x) => x.endsWith(".kiln.json")); if (f) return f; await Bun.sleep(100); } })();
+  const file = await (async () => { for (let k = 0; k < 50; k++) { const f = readdirSync(dir).find((x) => x.endsWith(".chrysalis.json")); if (f) return f; await Bun.sleep(100); } })();
   const other = await open();                            // another tab: its own conversations and files
   await (await other.$("input#import-file"))!.uploadFile(`${dir}/${file}`);
   await other.waitForFunction(() => (document.querySelector(".msg-files img") as HTMLImageElement | null)?.naturalWidth === 2);
@@ -242,7 +242,7 @@ async function download(page: Page, into: string) {
   const cdp = await page.createCDPSession();
   await cdp.send("Browser.setDownloadBehavior", { behavior: "allow", downloadPath: into, browserContextId: page.browserContext().id });
   await page.click("#export");
-  for (let k = 0; k < 50; k++) { const f = readdirSync(into).find((x) => x.endsWith(".kiln.json")); if (f) return `${into}/${f}`; await Bun.sleep(100); }
+  for (let k = 0; k < 50; k++) { const f = readdirSync(into).find((x) => x.endsWith(".chrysalis.json")); if (f) return `${into}/${f}`; await Bun.sleep(100); }
   throw new Error("no export");
 }
 
@@ -275,7 +275,7 @@ test("the Tools popover turns servers and single tools on and off for this chat,
 
   await send(page, "hi");
   expect(lastStream.tools.map((t: any) => t.function.name)).toEqual(["fake__big", "fake__echo", "fake__get_weather", "fake__slow", "fetch_url"]);
-  expect(lastStream.messages[0].content).toBe("You are Qwen3.8-27B, running locally in kiln. The tools offered here are the only ones in this chat, " +
+  expect(lastStream.messages[0].content).toBe("You are Qwen3.8-27B, running locally in Chrysalis Inference. The tools offered here are the only ones in this chat, " +
     "and there are no files or projects to explore. Use a tool when it helps; otherwise answer directly.");
   const first = await page.evaluate(() => location.hash);
 
@@ -289,7 +289,7 @@ test("the Tools popover turns servers and single tools on and off for this chat,
   expect(await badge(page)).toEqual(["", "Tools: off in this chat"]);
   await send(page, "no tools");
   expect(lastStream.tools).toBeUndefined();
-  expect(lastStream.messages[0].content).toBe("You are Qwen3.8-27B, running locally in kiln. There are no tools or files in this chat. Answer directly.");
+  expect(lastStream.messages[0].content).toBe("You are Qwen3.8-27B, running locally in Chrysalis Inference. There are no tools or files in this chat. Answer directly.");
 
   await page.goto(`${base}/${first}`, { waitUntil: "networkidle0" });   // the first chat, after a reload: its own choice
   await page.waitForFunction(() => document.querySelector("#tools-btn .tools-n")?.textContent === "5", { timeout: 10_000 });
@@ -315,7 +315,7 @@ test("a tool call is a card where it happened; it opens to its arguments and res
   expect(body.text).toEqual(["Arguments", '{\n  "text": "hello"\n}', "Result", "echo: hello"]);
   expect(await page.$eval(".tool-card .tool-head", (b) => b.getAttribute("aria-expanded"))).toBe("true");
 
-  const round1 = streams.at(-1);                                          // what the tool's round sent kiln
+  const round1 = streams.at(-1);                                          // what the tool's round sent Chrysalis
   await send(page, "and then");
   const sent = lastStream.messages;
   expect(JSON.stringify(sent.slice(0, round1.messages.length))).toBe(JSON.stringify(round1.messages));
@@ -392,7 +392,7 @@ test("regenerate and edit make versions; the pager switches them and shows each 
 
   await page.reload({ waitUntil: "networkidle0" });                       // the tree and what is shown are kept
   expect(await articles(page)).toEqual(["one", "You said: one", "two", "You said: two"]);
-  await send(page, "three");                                              // only the path on screen goes to kiln
+  await send(page, "three");                                              // only the path on screen goes to Chrysalis
   expect(lastStream.messages.filter((m: any) => m.role !== "system").map((m: any) => m.content))
     .toEqual(["one", "You said: one", "two", "You said: two", "three"]);
 
@@ -454,14 +454,14 @@ test("export and import keep versions and tool rounds, and the imported chat res
   expect((await articles(other)).length).toBe(2);
 
   const old = `${into}/old.json`;                                         // from before versions and tools
-  writeFileSync(old, JSON.stringify({ kiln: "chats", version: 1, exported: "2026-01-01T00:00:00.000Z", conversations: [{ id: "x", title: "Old", updated: 1, effort: "low",
+  writeFileSync(old, JSON.stringify({ chrysalis: "chats", version: 1, exported: "2026-01-01T00:00:00.000Z", conversations: [{ id: "x", title: "Old", updated: 1, effort: "low",
     messages: [{ role: "user", content: "old q" }, { role: "assistant", content: "old a", reasoning: "hm", stats: { ttft: 1, tps: 2, tokens: 3, prompt: 4, cached: 0 } }] }] }));
   const third = await open();
   await (await third.$("input#import-file"))!.uploadFile(old);
   await third.waitForFunction(() => document.querySelectorAll("#thread > article").length === 2);
   expect(await third.$$eval(".pager", (p) => p.length)).toBe(0);
   await send(third, "next");
-  expect(lastStream.messages).toEqual([{ role: "system", content: "You are Qwen3.8-27B, running locally in kiln. There are no tools or files in this chat. Answer directly." }, { role: "user", content: "old q" },
+  expect(lastStream.messages).toEqual([{ role: "system", content: "You are Qwen3.8-27B, running locally in Chrysalis Inference. There are no tools or files in this chat. Answer directly." }, { role: "user", content: "old q" },
     { role: "assistant", content: "old a", reasoning_content: "hm" }, { role: "user", content: "next" }]);
   for (const p of [page, other, third]) await p.close();
 }, 90_000);
@@ -514,7 +514,8 @@ test("voice mode: what is said shows as it is said, becomes the question, and th
   // it thinks as the chat's bar says (a new chat's: Max)
   expect(await page.$eval("#energy", (e) => e.getAttribute("aria-valuetext"))).toBe("Max");
   expect([lastStream.model, lastStream.reasoning_effort]).toEqual(["qwen3.8-27b", "xhigh"]);
-  // opening voice mode had kiln read the chat first (a new one's question stands in), so the first turn is an append
+  // opening voice mode had Chrysalis read the chat first (a new one's question stands in), so the first turn is an
+  // append
   const mine = streams.slice(n0), warm = mine.findIndex((b) => b.max_tokens === 1);
   expect(mine[warm]?.messages).toEqual([{ role: "user", content: "Hi" }]);
   expect(mine[warm]?.model).toBe(lastStream.model);                 // as the reply it reads ahead for
@@ -537,13 +538,13 @@ test("voice mode: what is said shows as it is said, becomes the question, and th
   await page.close();
 }, 30_000);
 
-test("voice mode: talking over a reply silences it, stops kiln's request, and the chat keeps only what was heard", async () => {
-  const stopped = kilnStopped, { page, session } = await voicePage("story");
+test("voice mode: talking over a reply silences it, stops Chrysalis's request, and the chat keeps only what was heard", async () => {
+  const stopped = chrysalisStopped, { page, session } = await voicePage("story");
   await page.waitForFunction(() => document.querySelector('#thread > article[data-i="0"] .bubble')?.textContent === "slow story", { timeout: 10_000 });
   for (const t = Date.now(); !session().some((e) => e.ev === "interrupt") && Date.now() - t < 10_000; ) await Bun.sleep(10);
-  const talked = Date.now();                       // kiln's request stops with the speech, not when the next words come in
-  for (; kilnStopped === stopped && Date.now() - talked < 3000; ) await Bun.sleep(10);
-  expect(kilnStopped).toBe(stopped + 1);
+  const talked = Date.now();                       // Chrysalis's request stops with the speech, not when the next words come in
+  for (; chrysalisStopped === stopped && Date.now() - talked < 3000; ) await Bun.sleep(10);
+  expect(chrysalisStopped).toBe(stopped + 1);
   expect(Date.now() - talked).toBeLessThan(500);
   await page.waitForFunction(() => /interrupted/.test(document.querySelector('#thread > article[data-i="1"] .stats')?.textContent ?? ""), { timeout: 10_000 });
   const kept = await replyText(page, 1), chunks = session().filter((e) => e.ev === "chunk"), full = Array.from({ length: 40 }, (_, k) => `w${k}`).join(" ");
@@ -555,7 +556,7 @@ test("voice mode: talking over a reply silences it, stops kiln's request, and th
   expect([full[kept.length] === " ", kept.length <= before.length, ends.includes(kept)]).toEqual([true, true, false]);   // not at a piece's end
   await page.waitForFunction(() => document.querySelector('#thread > article[data-i="2"] .bubble')?.textContent === "and then", { timeout: 10_000 });
   await page.waitForFunction(() => /voice/.test(document.querySelector('#thread > article[data-i="3"] .stats')?.textContent ?? ""), { timeout: 10_000 });
-  // the kept reply as kiln is sent it again: only what was heard
+  // the kept reply as Chrysalis is sent it again: only what was heard
   expect(sent(lastStream).filter((m: any) => m.role === "assistant").map((m: any) => m.content)).toEqual([`${kept} — [cut off: the user talked over this reply]`]);
   // the next question's check has the one before it and what the reply said of it
   expect(checks.findLast((b) => b.messages.at(-1).content.endsWith("Transcript: and then"))?.messages.at(-1).content)
@@ -613,7 +614,7 @@ test("voice mode's note goes before the first question said and again when it ch
   await page.close();
 }, 45_000);
 
-test("What the model is sent shows the next request as kiln gets it: the tools as JSON, the one system prompt, every message; an edited prompt goes as written", async () => {
+test("What the model is sent shows the next request as Chrysalis gets it: the tools as JSON, the one system prompt, every message; an edited prompt goes as written", async () => {
   const page = await open();
   await page.setViewport({ width: 1600, height: 900 });
   await page.click("#tools-btn");
@@ -630,7 +631,7 @@ test("What the model is sent shows the next request as kiln gets it: the tools a
   const shown = await page.$eval("#sent-text", (e) => e.textContent!);
   await page.keyboard.press("Escape");
   await send(page, "second");
-  const next = lastStream;                                       // what kiln got next: all of the view, then the new question
+  const next = lastStream;                                       // what Chrysalis got next: all of the view, then the new question
   expect(shown).toContain(JSON.stringify(next.tools, null, 2));
   let at = 0;
   for (const m of next.messages.slice(0, -1)) {
@@ -741,17 +742,17 @@ test("voice mode on a page that is not secure (plain HTTP at this machine's addr
   expect(ip).toBeDefined();
   const insecure = Bun.spawn([process.execPath, "server.ts"], {
     cwd: import.meta.dir, stdout: "pipe", stderr: "inherit",
-    env: { ...process.env, PORT: "0", KILN_URL: `http://127.0.0.1:${fake.port}`, KILN_HOST: ip, NODE_ENV: "production", KILN_MCP_CONFIG: `${dir}/mcp.json`,
-      KILN_VOICE_CMD: JSON.stringify([process.execPath, `${import.meta.dir}/fake-voice.ts`]), FAKE_VOICE_LOG: log },
+    env: { ...process.env, PORT: "0", CHRYSALIS_URL: `http://127.0.0.1:${fake.port}`, CHRYSALIS_HOST: ip, NODE_ENV: "production", CHRYSALIS_MCP_CONFIG: `${dir}/mcp.json`,
+      CHRYSALIS_VOICE_CMD: JSON.stringify([process.execPath, `${import.meta.dir}/fake-voice.ts`]), FAKE_VOICE_LOG: log },
   });
   try {
     let out = "";
-    for (const reader = insecure.stdout.getReader(), dec = new TextDecoder(); !/kiln web: \S+/.test(out); ) {
+    for (const reader = insecure.stdout.getReader(), dec = new TextDecoder(); !/chrysalis web: \S+/.test(out); ) {
       const { value, done } = await reader.read();
       if (done) throw new Error(`server.ts exited: ${out}`);
       out += dec.decode(value);
     }
-    const url = out.match(/kiln web: (\S+)/)![1].replace(/\/$/, "");
+    const url = out.match(/chrysalis web: (\S+)/)![1].replace(/\/$/, "");
     const page = await (await browser.createBrowserContext()).newPage();
     await page.goto(`${url}/`, { waitUntil: "networkidle0" });
     expect(await page.evaluate(() => isSecureContext)).toBe(false);
@@ -820,7 +821,7 @@ test("voice mode: a reply begins at a pause the turn waits out, unseen and unhea
   await page.waitForFunction(() => /^voice /.test(document.querySelector('#thread > article[data-i="1"] .stats')?.textContent ?? ""), { timeout: 15_000 });
   const log = session(), turned = turnAt(log), mine = streams.slice(n0).map((b, i) => [b, streamAt[n0 + i]]).filter(([b]) => b.max_tokens !== 1);
   expect(mine.length).toBe(1);
-  expect(mine[0][1]).toBeLessThan(turned);                           // kiln was asked before the turn ended
+  expect(mine[0][1]).toBeLessThan(turned);                           // Chrysalis was asked before the turn ended
   // the reply was shown and heard only after: its first playback after the turn, and its text all spoken by then
   const played = log.findIndex((e) => e.type === "playback" && e.playing), turnIx = log.findIndex((e) => e.ev === "sent" && e.type === "turn");
   expect(played).toBeGreaterThan(turnIx);
@@ -831,11 +832,11 @@ test("voice mode: a reply begins at a pause the turn waits out, unseen and unhea
 }, 30_000);
 
 test("voice mode: a reply begun at a pause is dropped unheard when the user goes on, and the whole question is answered", async () => {
-  const n0 = streams.length, stopped = kilnStopped, { page, session } = await voicePage("onward");
+  const n0 = streams.length, stopped = chrysalisStopped, { page, session } = await voicePage("onward");
   await page.waitForFunction(() => /^voice /.test(document.querySelector('#thread > article[data-i="1"] .stats')?.textContent ?? ""), { timeout: 15_000 });
   const replies = streams.slice(n0).filter((b) => b.max_tokens !== 1).map((b) => sent(b).at(-1).content.split("\n\n").at(-1));
   expect(replies).toEqual(["slow what is the", "slow what is the capital of France"]);
-  expect(kilnStopped).toBe(stopped + 1);                            // still being written (slowly) when the user went on
+  expect(chrysalisStopped).toBe(stopped + 1);                            // still being written (slowly) when the user went on
   expect(await page.$eval('#thread > article[data-i="0"] .bubble', (e) => e.textContent)).toBe("slow what is the capital of France");
   expect(await page.$$eval("#thread > article.msg", (els) => els.length)).toBe(2);
   // the pause's reply was spoken into the page's hold and cancelled there; the question's is the one heard

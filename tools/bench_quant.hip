@@ -1,13 +1,13 @@
 // Speed of the 27B engine's quantized matmuls on real weights from the model file: the small-batch GEMM (gemm_q,
 // T = 16..256: time, GB/s of weight bytes, TFLOPS) and the decode GEMV (T = 1..8: GB/s of weight bytes streamed).
 // Their correctness is tools/test_quant.hip.
-//   build/bench_quant [data/models/kiln-mix.gguf]
+//   build/bench_quant [data/models/chrysalis-mix.gguf]
 #include "../engine/kernels.h"
 #include "../engine/gguf.h"
 #include <vector>
 
 int main(int argc, char **argv) {
-    GGUF g; if (!g.open(argc > 1 ? argv[1] : "data/models/kiln-mix.gguf")) FAIL("open gguf");
+    GGUF g; if (!g.open(argc > 1 ? argv[1] : "data/models/chrysalis-mix.gguf")) FAIL("open gguf");
     hipStream_t st; CK(hipStreamCreate(&st));
     Arena arena; arena.init(2ull << 30);
     const char *names[] = {"blk.0.ffn_up.weight", "blk.0.ssm_out.weight", "blk.3.attn_k.weight"};

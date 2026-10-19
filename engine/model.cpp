@@ -129,7 +129,7 @@ void Engine::restore(int id, int snap) {
     CK(hipMemcpyAsync(s.h_last, h + ssm + conv, D * 4, hipMemcpyHostToDevice, st));
 }
 
-// A snapshot as bytes, for a later run of the same model and build (kiln/cache.py keeps the prefixes every session shares
+// A snapshot as bytes, for a later run of the same model and build (chrysalis/cache.py keeps the prefixes every session shares
 // on disk): a header, the next token's candidates when it ends a prompt, the recurrent state, then its KV pages as they
 // sit in the pool. SNAP_MAGIC names this layout; a change to the KV or state layout needs a new one.
 struct SnapHeader { char magic[8]; uint64_t kv_page, state; int32_t n, pos, n_top, n_pages; };
@@ -682,7 +682,7 @@ uint32_t *Engine::mask_rows() {
     return d_mask;
 }
 
-// Drafts for a held answer's next step (kiln/server.py): `fixed` first, the tokens its grammar forces next, then the MTP
+// Drafts for a held answer's next step (chrysalis/server.py): `fixed` first, the tokens its grammar forces next, then the MTP
 // head's guesses going on after them; with none forced, a copy from earlier in the conversation where one matches (as
 // generate() drafts). At most max_k in all, into out; returns how many.
 int Engine::draft(int id, const Sampling &sp, const int *fixed, int nfixed, int max_k, int *out) {
@@ -713,9 +713,9 @@ int Engine::draft(int id, const Sampling &sp, const int *fixed, int nfixed, int 
 }
 
 // One step of a held answer: the pending token and drafts[0..k) verified with each position's logits masked to the tokens
-// its grammar allows there (masks: k + 1 rows of VOCAB / 32 words, as kiln_masked_top's), then accepted and drawn as
-// generate() does: the rejection sampling stays exact for the masked distribution, a draft the grammar refuses being one
-// it never accepts.
+// its grammar allows there (masks: k + 1 rows of VOCAB / 32 words, as chrysalis_masked_top's), then accepted and drawn
+// as generate() does: the rejection sampling stays exact for the masked distribution, a draft the grammar refuses being
+// one it never accepts.
 int Engine::generate_masked(int id, const Sampling &sp, const int *drafts, int k, const uint32_t *masks, int *out, int max_out) {
     if (max_out < 1) return 0;
     Seq &s = seqs.at(id);

@@ -1,5 +1,5 @@
 // hipBLASLt's first suggestion for a shape is often not its fastest on gfx1100, so a shape's first 64 suggestions are timed
-// once on the real buffers (plan) and the fastest kept, and the file KILN_LT_CACHE names (kiln/engine.py:
+// once on the real buffers (plan) and the fastest kept, and the file CHRYSALIS_LT_CACHE names (chrysalis/engine.py:
 // data/cache/hipblaslt.txt) remembers the choice by device, library version and shape: a machine times each shape once
 // (0.3-0.6 s a shape). Measured against the first suggestions, per pass: the 27B's 2048-token prefill chunks 1337 ms where
 // 1388, 1000 tokens 710 where 818; Flash-Next's 1000 tokens 620 where 714 (longer prompts wait on its CPU experts). Asking
@@ -7,8 +7,8 @@
 // splits K with atomics), so the choice changes speed, not repeatability; suggestions differ from each other by a rounding
 // here and there. The vision tower keeps the first suggestions (tune = false): tuned it was 1.5% faster (1080p: 245 ms
 // where 249, its attention taking 146), and those roundings carried through its 27 blocks moved its most sensitive tokens
-// further from transformers' on every test picture (the photo's relative error 1.14% where 0.80%). KILN_LT_TUNE=0 takes
-// the first suggestions everywhere, to measure.
+// further from transformers' on every test picture (the photo's relative error 1.14% where 0.80%). CHRYSALIS_LT_TUNE=0
+// takes the first suggestions everywhere, to measure.
 #pragma once
 #include <hip/hip_runtime.h>
 #include <hipblaslt/hipblaslt.h>
@@ -32,7 +32,7 @@ struct Known {
     std::mutex mu;
     std::map<std::string, int> pick;                 // key -> place in the heuristic's list, which is the same each time
     Known() {
-        if (const char *path = getenv("KILN_LT_CACHE"))
+        if (const char *path = getenv("CHRYSALIS_LT_CACHE"))
             if (FILE *f = fopen(path, "r")) {
                 char line[512];
                 while (fgets(line, sizeof line, f)) {
@@ -84,11 +84,11 @@ inline Plan plan(hipblasLtHandle_t lt, int N, int K, int T, int ldb, int ldd, bo
     char shape[128];
     snprintf(shape, sizeof shape, "%zu %d %d %d %d %d %d", ws_bytes, N, K, T, ldb, ldd, (int)d32);
     if (n < 1) {
-        fprintf(stderr, "kiln: hipBLASLt has no algorithm for %s\n", shape);
+        fprintf(stderr, "chrysalis: hipBLASLt has no algorithm for %s\n", shape);
         abort();
     }
     p.algo = res[0].algo;
-    const char *env = getenv("KILN_LT_TUNE");
+    const char *env = getenv("CHRYSALIS_LT_TUNE");
     if (!tune || n == 1 || (env && !strcmp(env, "0"))) return p;
     const std::string key = device(lt) + " " + shape;
     Known &kn = known();
@@ -142,7 +142,7 @@ inline Plan plan(hipblasLtHandle_t lt, int N, int K, int T, int ldb, int ldd, bo
     (void)hipEventDestroy(e0);
     (void)hipEventDestroy(e1);
     kn.pick[key] = pick;
-    if (const char *path = getenv("KILN_LT_CACHE"))
+    if (const char *path = getenv("CHRYSALIS_LT_CACHE"))
         if (FILE *f = fopen(path, "a")) {
             fprintf(f, "%s %d\n", key.c_str(), pick);
             fclose(f);

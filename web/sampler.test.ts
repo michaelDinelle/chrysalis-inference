@@ -1,6 +1,6 @@
 // The web UI's sampler (sampler.ts, which Settings' odds charts run) against the engine's (make_dist in
 // engine/sampler.h, through build/sampler_cases) on random candidates, replies and settings: every candidate's odds
-// must agree, so what the charts show is what kiln draws from.
+// must agree, so what the charts show is what Chrysalis draws from.
 import { expect, test } from "bun:test";
 import { type Cand, type SamplerKey, type Stage, sample } from "./sampler";
 

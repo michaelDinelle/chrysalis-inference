@@ -43,4 +43,4 @@ class Capture extends AudioWorkletProcessor {
   }
 }
 
-registerProcessor("kiln-capture", Capture);
+registerProcessor("chrysalis-capture", Capture);

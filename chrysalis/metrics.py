@@ -1,6 +1,6 @@
-"""Prometheus metrics (GET /metrics, text format 0.0.4): counters of the replies kiln wrote, and gauges of its state read
-when scraped. Rates come from the counters (decode tok/s: rate(kiln_completion_tokens_total) /
-rate(kiln_decode_seconds_total); tokens per step, the drafts' gain: completion tokens / decode steps)."""
+"""Prometheus metrics (GET /metrics, text format 0.0.4): counters of the replies Chrysalis wrote, and gauges of its state read
+when scraped. Rates come from the counters (decode tok/s: rate(chrysalis_completion_tokens_total) /
+rate(chrysalis_decode_seconds_total); tokens per step, the drafts' gain: completion tokens / decode steps)."""
 import threading
 
 TTFT_BUCKETS = (0.05, 0.1, 0.25, 0.5, 1, 2.5, 5, 10, 30, 60, 120, 300)
@@ -17,16 +17,16 @@ def _num(v):
 
 class Metrics:
     COUNTERS = {
-        "kiln_replies_total": "Replies written, by model and finish reason (stop, length, tool_calls, client: stopped by the client)",
-        "kiln_prompt_tokens_total": "Prompt tokens of the replies",
-        "kiln_prompt_cached_tokens_total": "Prompt tokens served from the prompt cache instead of read",
-        "kiln_completion_tokens_total": "Tokens written",
-        "kiln_decode_steps_total": "Decode steps (a step writes 1 token plus the drafts it accepts)",
-        "kiln_prefill_seconds_total": "Time from a request to its first decode step",
-        "kiln_decode_seconds_total": "Time spent writing replies after their prefill",
-        "kiln_model_loads_total": "Model loads and switches after the first, by the model loaded",
-        "kiln_model_load_seconds_total": "Time those loads took",
-        "kiln_http_errors_total": "Requests answered with an error status, by status",
+        "chrysalis_replies_total": "Replies written, by model and finish reason (stop, length, tool_calls, client: stopped by the client)",
+        "chrysalis_prompt_tokens_total": "Prompt tokens of the replies",
+        "chrysalis_prompt_cached_tokens_total": "Prompt tokens served from the prompt cache instead of read",
+        "chrysalis_completion_tokens_total": "Tokens written",
+        "chrysalis_decode_steps_total": "Decode steps (a step writes 1 token plus the drafts it accepts)",
+        "chrysalis_prefill_seconds_total": "Time from a request to its first decode step",
+        "chrysalis_decode_seconds_total": "Time spent writing replies after their prefill",
+        "chrysalis_model_loads_total": "Model loads and switches after the first, by the model loaded",
+        "chrysalis_model_load_seconds_total": "Time those loads took",
+        "chrysalis_http_errors_total": "Requests answered with an error status, by status",
     }
 
     def __init__(self):
@@ -41,13 +41,13 @@ class Metrics:
 
     def reply(self, model, info, steps, finish):
         """One reply's numbers (Server.run's info)."""
-        self.add("kiln_replies_total", model=model, finish=finish)
-        self.add("kiln_prompt_tokens_total", info["prompt_tokens"], model=model)
-        self.add("kiln_prompt_cached_tokens_total", info["cached_tokens"], model=model)
-        self.add("kiln_completion_tokens_total", info["completion_tokens"], model=model)
-        self.add("kiln_decode_steps_total", steps, model=model)
-        self.add("kiln_prefill_seconds_total", info["prefill_s"], model=model)
-        self.add("kiln_decode_seconds_total", info["decode_s"], model=model)
+        self.add("chrysalis_replies_total", model=model, finish=finish)
+        self.add("chrysalis_prompt_tokens_total", info["prompt_tokens"], model=model)
+        self.add("chrysalis_prompt_cached_tokens_total", info["cached_tokens"], model=model)
+        self.add("chrysalis_completion_tokens_total", info["completion_tokens"], model=model)
+        self.add("chrysalis_decode_steps_total", steps, model=model)
+        self.add("chrysalis_prefill_seconds_total", info["prefill_s"], model=model)
+        self.add("chrysalis_decode_seconds_total", info["decode_s"], model=model)
         with self.lock:
             h = self.ttft.setdefault(model, [0] * (len(TTFT_BUCKETS) + 2))
             for i, b in enumerate(TTFT_BUCKETS):
@@ -63,7 +63,7 @@ class Metrics:
         for name, help_ in self.COUNTERS.items():
             out += [f"# HELP {name} {help_}", f"# TYPE {name} counter"]
             out += [f"{name}{_labels(dict(k))} {_num(v)}" for (n, k), v in sorted(counts.items()) if n == name]
-        name = "kiln_time_to_first_token_seconds"
+        name = "chrysalis_time_to_first_token_seconds"
         out += [f"# HELP {name} Time from a request to its first token", f"# TYPE {name} histogram"]
         for model, h in sorted(ttft.items()):
             for i, b in enumerate(TTFT_BUCKETS):

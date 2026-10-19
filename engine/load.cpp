@@ -83,7 +83,7 @@ void Engine::add_kv_memory(uint8_t *p, size_t bytes) {
     const size_t first = p > base ? ((size_t)(p - base) + KV_PAGE - 1) / KV_PAGE : 0;
     const size_t last = (size_t)(p + bytes - base) / KV_PAGE;
     const size_t top = std::max(last, free_pages.empty() ? 0 : *std::max_element(free_pages.begin(), free_pages.end()) + 1 + shift);
-    if (top > (1u << 24)) { fprintf(stderr, "kiln: KV segment too far from the pool, not used\n"); return; }
+    if (top > (1u << 24)) { fprintf(stderr, "chrysalis: KV segment too far from the pool, not used\n"); return; }
     kv_pool = base;
     for (int &id : free_pages) id += (int)shift;
     for (size_t i = first; i < last; i++) free_pages.push_back((int)i);
@@ -92,8 +92,8 @@ void Engine::add_kv_memory(uint8_t *p, size_t bytes) {
     page_ref.assign(free_pages.empty() ? 0 : free_pages.front() + 1, 0);
 }
 
-// Load progress for kiln_load_progress (another thread polls it while kiln_init runs): weight bytes handed to the
-// GPU, then warmup (phase 2) and done (3).
+// Load progress for chrysalis_load_progress (another thread polls it while chrysalis_init runs): weight bytes handed to
+// the GPU, then warmup (phase 2) and done (3).
 static std::atomic<size_t> load_done{0}, load_total{0};
 static std::atomic<int> load_phase{0};
 float load_progress() {
@@ -363,9 +363,9 @@ void Engine::load(const std::string &path, int max_seqs, size_t reserve_bytes) {
         if (bytes && hipMalloc(&kv, bytes) == hipSuccess) add_kv_memory(kv, bytes);
     }
     const double t1 = now();
-    fprintf(stderr, "kiln: weights %.2f GB, buffers %.2f GB, KV pool %d pages = %d tokens (%.2f GB)\n",
+    fprintf(stderr, "chrysalis: weights %.2f GB, buffers %.2f GB, KV pool %d pages = %d tokens (%.2f GB)\n",
             weight_bytes / 1e9, barena.used / 1e9, n_pages, n_pages * PAGE, (double)n_pages * KV_PAGE / 1e9);
-    fprintf(stderr, "kiln: loaded in %.2f s: GPU ready after %.2f s, %.1f GB of weights at %.1f GB/s, %.1f GB read from disk\n",
+    fprintf(stderr, "chrysalis: loaded in %.2f s: GPU ready after %.2f s, %.1f GB of weights at %.1f GB/s, %.1f GB read from disk\n",
             t1 - t0, t_gpu - t0, total_bytes / 1e9, total_bytes / 1e9 / (t_weights - t_gpu), disk_bytes / 1e9);
 }
 
@@ -418,7 +418,7 @@ void Engine::warmup() {
     if (borrowed) seq_truncate(id, 0);
     else seq_free(id);
     CK(hipStreamSynchronize(st));
-    fprintf(stderr, "kiln: warmed up in %.2f s\n", now() - t0);
+    fprintf(stderr, "chrysalis: warmed up in %.2f s\n", now() - t0);
 }
 
 // Activation buffers (prefill chunks of umax tokens, decode batches of up to 8) and the sequence slots. GEMM tiles

@@ -8,10 +8,10 @@ ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, ROOT)
 # shared prefixes are kept on disk: from empty, on disk rather than in a RAM-backed /tmp (0.5 GB), gone afterwards
 os.makedirs(os.path.join(ROOT, "build"), exist_ok=True)
-os.environ["KILN_SNAPSHOTS"] = tempfile.mkdtemp(prefix="snapshots-", dir=os.path.join(ROOT, "build"))
-atexit.register(shutil.rmtree, os.environ["KILN_SNAPSHOTS"], True)
-from kiln.models import MODELS
-from kiln.server import Server
+os.environ["CHRYSALIS_SNAPSHOTS"] = tempfile.mkdtemp(prefix="snapshots-", dir=os.path.join(ROOT, "build"))
+atexit.register(shutil.rmtree, os.environ["CHRYSALIS_SNAPSHOTS"], True)
+from chrysalis.models import MODELS
+from chrysalis.server import Server
 
 MODEL = sys.argv[sys.argv.index("--use") + 1] if "--use" in sys.argv else "qwen3.8-27b"
 srv = Server(MODELS[MODEL]["path"], "data/models/tokenizer.json", model=MODEL)
@@ -22,13 +22,13 @@ def pin(engine):
     """Flash-Next's cold experts' CPU / GPU split held fixed, as tools_fn/compare_fn.py does: the same numbers on every
     load (its own split settles on timings and its expert pool follows the replies, so a seed would not redraw a reply
     across a reload)."""
-    if hasattr(engine.lib, "kiln_tune"):
+    if hasattr(engine.lib, "chrysalis_tune"):
         import ctypes as C
-        engine.lib.kiln_tune.restype, engine.lib.kiln_tune.argtypes = C.c_double, [C.c_char_p, C.c_double]
-        engine.lib.kiln_tune(b"adapt_left", 0)
-        engine.lib.kiln_tune(b"split", 1)
-        engine.lib.kiln_tune(b"gfrac", 0.3)
-        engine.lib.kiln_tune(b"experts", 0)
+        engine.lib.chrysalis_tune.restype, engine.lib.chrysalis_tune.argtypes = C.c_double, [C.c_char_p, C.c_double]
+        engine.lib.chrysalis_tune(b"adapt_left", 0)
+        engine.lib.chrysalis_tune(b"split", 1)
+        engine.lib.chrysalis_tune(b"gfrac", 0.3)
+        engine.lib.chrysalis_tune(b"experts", 0)
 
 
 pin(srv.engine)
@@ -81,7 +81,7 @@ def reply(body):
     return text, info
 
 
-poem = [{"role": "user", "content": "Write a four-line poem about a kiln."}]
+poem = [{"role": "user", "content": "Write a four-line poem about a chrysalis."}]
 a, ia = reply({"messages": poem, "seed": 7})
 b, ib = reply({"messages": poem, "seed": 7})
 check("same seed: same reply (served from cache)", a == b and ib["cached_tokens"] > 0, f"cached {ib['cached_tokens']}, seed {ib['seed']}")
@@ -99,7 +99,7 @@ check("unseeded reply reports a seed that redraws it", d == e, f"seed {idd['seed
 # then is served again from the snapshot taken at its prompt. The presence penalty (1.5 without thinking) must
 # count this reply's tokens only, or the two would differ.
 reply({"messages": poem, "seed": 7})
-turn2 = poem + [{"role": "assistant", "content": a}, {"role": "user", "content": "Now one about a forge."}]
+turn2 = poem + [{"role": "assistant", "content": a}, {"role": "user", "content": "Now one about a butterfly."}]
 f, i_live = reply({"messages": turn2, "seed": 9})
 g, i_snap = reply({"messages": turn2, "seed": 9})
 served = ia["prompt_tokens"] < i_live["cached_tokens"] < i_snap["cached_tokens"]   # past the first reply, then a later snapshot
@@ -128,7 +128,7 @@ r = run({"messages": names, "seed": 3, "max_tokens": 10, "logprobs": True, "top_
 alts = r["lp"][0]["top_logprobs"] if r["lp"] else []
 check("log probs: entries spell the reply", "".join(e["token"] for e in r["lp"]) == r["content"] and len(alts) == 4
       and all(alts[i]["logprob"] >= alts[i + 1]["logprob"] for i in range(3)), repr(r["content"][:40]))
-# Continue a reply cut at its length limit: kiln restates it and goes on from its exact tokens (a cache hit).
+# Continue a reply cut at its length limit: Chrysalis restates it and goes on from its exact tokens (a cache hit).
 cut = {"role": "assistant", "content": r["content"]}
 c = run({"messages": names + [cut], "continue_final_message": True, "seed": 4, "max_tokens": 40})
 check("continue: from the reply's own tokens", c["prefix"] == {"reasoning_content": "", "content": r["content"]}
@@ -136,19 +136,19 @@ check("continue: from the reply's own tokens", c["prefix"] == {"reasoning_conten
       f"cached {c['info']['cached_tokens']} of {c['info']['prompt_tokens']}, +{c['content'][:30]!r}")
 # Rewrite from the first token with its second alternative.
 alt = alts[1]
-w = run({"messages": names + [{"role": "assistant", "content": ""}], "continue_final_message": True, "kiln_original": cut,
-         "kiln_append_token": alt["id"], "seed": 4, "max_tokens": 20})
+w = run({"messages": names + [{"role": "assistant", "content": ""}], "continue_final_message": True, "chrysalis_original": cut,
+         "chrysalis_append_token": alt["id"], "seed": 4, "max_tokens": 20})
 check("rewrite from an alternative token", w["prefix"]["content"] == alt["token"].lstrip("\n") and len(w["content"]) > 0,
       f"{w['prefix']['content']!r} + {w['content'][:30]!r}")
 # An aside (the web UI's draft of the user's next message) leaves the conversation's cache as it was.
 convo = names + [{"role": "assistant", "content": r["content"] + c["content"]}]
-run({"messages": convo + [{"role": "user", "content": "Write my next message."}], "kiln_aside": True, "max_tokens": 20})
+run({"messages": convo + [{"role": "user", "content": "Write my next message."}], "chrysalis_aside": True, "max_tokens": 20})
 n = run({"messages": convo + [{"role": "user", "content": "Another one?"}], "max_tokens": 10})
 check("aside: the conversation stays cached", n["info"]["cached_tokens"] >= c["info"]["prompt_tokens"],
       f"cached {n['info']['cached_tokens']} of {n['info']['prompt_tokens']}")
 
 
-# Parallel requests: two replies written at the same time share passes (kiln/server.py Batcher) and come out as each does
+# Parallel requests: two replies written at the same time share passes (chrysalis/server.py Batcher) and come out as each does
 # alone (greedy: as many drafts each as alone, the same logits). Flash-Next gives a reply one draft in a shared pass, so
 # here its replies alone take one too.
 import threading
@@ -221,8 +221,8 @@ check("after it: cache matches engine", *consistent())
 
 
 # An answer held to a JSON schema (response_format): property names nobody would pick, a prompt that invites prose. What
-# comes back must parse and validate (jsonschema, not the grammar engine kiln uses), with or without reasoning first;
-# without the schema the same prompt gets prose.
+# comes back must parse and validate (jsonschema, not the grammar engine Chrysalis uses), with or without reasoning
+# first; without the schema the same prompt gets prose.
 import json, jsonschema
 shape = {"type": "object", "additionalProperties": False, "required": ["zq_city", "temp_c", "tags"],
          "properties": {"zq_city": {"type": "string"}, "temp_c": {"type": "number"},
@@ -255,11 +255,11 @@ check("response_format: steps of several tokens", steps >= 1.5, f"{steps:.2f} to
 check("after the held answers: cache matches engine", *consistent())
 
 
-# Tool calls held to their tool's schema (kiln/structured.py): a parameter name nobody would guess, an enum, a bounded
-# integer. Every call must parse and validate (jsonschema), whether tool_choice demands one on a prompt that asks for none
-# ("required"), names a tool the prompt does not want, or the strict tool is called in a free answer. The 27B writes that
-# last call right by itself (even asked for 30 days, or for a parameter of another name: measured), so there it is the held
-# path that is checked: a call that comes back whole, its values typed.
+# Tool calls held to their tool's schema (chrysalis/structured.py): a parameter name nobody would guess, an enum, a
+# bounded integer. Every call must parse and validate (jsonschema), whether tool_choice demands one on a prompt that
+# asks for none ("required"), names a tool the prompt does not want, or the strict tool is called in a free answer. The
+# 27B writes that last call right by itself (even asked for 30 days, or for a parameter of another name: measured), so
+# there it is the held path that is checked: a call that comes back whole, its values typed.
 odd = {"type": "function", "function": {"name": "zq_forecast", "description": "A weather forecast.", "strict": True,
        "parameters": {"type": "object", "additionalProperties": False, "required": ["zq_place", "units", "days"],
                       "properties": {"zq_place": {"type": "string"}, "units": {"enum": ["metric_si", "imperial_us"]},
@@ -315,15 +315,15 @@ check("thinking_budget: reasoning closed there, then the answer", n <= 200 + len
 import base64, json, threading, time
 import anthropic, httpx, openai
 from pydantic import TypeAdapter
-from kiln.server import HTTPServer, make_handler
+from chrysalis.server import HTTPServer, make_handler
 
 ready = threading.Event()
 ready.set()
 httpd = HTTPServer(("127.0.0.1", 0), make_handler({"srv": srv}, ready))
 threading.Thread(target=httpd.serve_forever, daemon=True).start()
 base = f"http://127.0.0.1:{httpd.server_port}"
-claude = anthropic.Anthropic(base_url=base, api_key="kiln", max_retries=0)
-oai = openai.OpenAI(base_url=base + "/v1", api_key="kiln", max_retries=0)
+claude = anthropic.Anthropic(base_url=base, api_key="chrysalis", max_retries=0)
+oai = openai.OpenAI(base_url=base + "/v1", api_key="chrysalis", max_retries=0)
 weather = {"name": "get_weather", "description": "The current weather in a city.",
            "input_schema": {"type": "object", "properties": {"city": {"type": "string"}}, "required": ["city"]}}
 ask = [{"role": "user", "content": "What is the weather in Paris right now? Use the tool."}]
@@ -412,14 +412,14 @@ if srv.pictures:
     check("a picture read at fewer pixels", full - low == 300 - 13 * 18 and asked == low and "moon" in said.lower(),
           f"prompt {full} tokens, {low} at detail low, {asked} at max_pixels 262144; {said[:40]!r}")
 
-    # A PDF (kiln/documents.py), its pages as pictures and as their text, through each API's way of attaching one. The code
+    # A PDF (chrysalis/documents.py), its pages as pictures and as their text, through each API's way of attaching one. The code
     # is set in white (only the text layer has it), the vault number drawn as a picture (only the page's image has it).
     from PIL import Image, ImageDraw, ImageFont
     from pdf_fixture import pdf
 
     page = Image.new("RGB", (1224, 1584), "white")
     ImageDraw.Draw(page).text((150, 600), "VAULT 9314", fill="black", font=ImageFont.load_default(size=120))
-    doc = base64.b64encode(pdf([("text", "The secret code is KILN-4217."), ("image", page)])).decode()
+    doc = base64.b64encode(pdf([("text", "The secret code is CHRYSALIS-4217."), ("image", page)])).decode()
     q = "What is the secret code in this document, and which vault number does it show? Answer in one short sentence."
     r = oai.chat.completions.create(model=MODEL, max_tokens=60, extra_body={"enable_thinking": False}, messages=[{"role": "user", "content": [
         {"type": "file", "file": {"file_data": "data:application/pdf;base64," + doc, "filename": "vault.pdf"}}, {"type": "text", "text": q}]}])
@@ -434,8 +434,8 @@ if srv.pictures:
         {"type": "input_file", "file_data": "data:application/pdf;base64," + doc, "filename": "vault.pdf"}, {"type": "input_text", "text": q}]}])
     check("Responses: a PDF file", "4217" in rr.output_text and "9314" in rr.output_text, repr(rr.output_text[:60]))
 
-    # A video (kiln/vision.py): frames taken 2 a second, each pair read as a picture with its time before it. A red circle
-    # for two seconds, then a blue square and "KILN 58": what came first, and what follows.
+    # A video (chrysalis/vision.py): frames taken 2 a second, each pair read as a picture with its time before it. A red circle
+    # for two seconds, then a blue square and "CHRYSALIS 58": what came first, and what follows.
     import subprocess
     enc = subprocess.Popen(["ffmpeg", "-v", "error", "-f", "rawvideo", "-pix_fmt", "rgb24", "-s", "640x360", "-r", "10", "-i", "-",
                             "-c:v", "libx264", "-pix_fmt", "yuv420p", "-f", "mp4", "-movflags", "frag_keyframe+empty_moov", "-"],
@@ -448,7 +448,7 @@ if srv.pictures:
             d.ellipse([200 + 4 * i, 100, 320 + 4 * i, 220], fill="red")
         else:
             d.rectangle([100, 120, 220, 240], fill="blue")
-            d.text((300, 150), "KILN 58", fill="black", font=font)
+            d.text((300, 150), "CHRYSALIS 58", fill="black", font=font)
         frames.append(img.tobytes())
     film, _ = enc.communicate(b"".join(frames))
     r = oai.chat.completions.create(model=MODEL, max_tokens=80, extra_body={"enable_thinking": False}, messages=[{"role": "user", "content": [
@@ -497,11 +497,12 @@ except (ValueError, jsonschema.ValidationError) as e:
 check("Responses: text.format holds the answer", valid is True and fmt.text.format.type == "json_schema",
       repr(fmt.output_text[:50]) if valid is True else valid)
 
-# /metrics (kiln/metrics.py) as Prometheus's own parser reads it: a reply moves the counters by what its usage says, a
-# request kiln refuses counts as an error. On Flash-Next the PCIe link kiln reports (kiln/link.py) bounds the DMA rate
-# the engine measures, and the rate comes near it: a reading of the card's own switch (16 GT/s x16) would be twice too fast.
+# /metrics (chrysalis/metrics.py) as Prometheus's own parser reads it: a reply moves the counters by what its usage
+# says, a request Chrysalis refuses counts as an error. On Flash-Next the PCIe link Chrysalis reports
+# (chrysalis/link.py) bounds the DMA rate the engine measures, and the rate comes near it: a reading of the card's own
+# switch (16 GT/s x16) would be twice too fast.
 from prometheus_client.parser import text_string_to_metric_families
-from kiln import link
+from chrysalis import link
 
 
 def scrape():
@@ -514,12 +515,12 @@ r = oai.chat.completions.create(model=MODEL + "-fast", messages=[{"role": "user"
 httpx.post(base + "/v1/chat/completions", json={"messages": []})
 m1 = scrape()
 moved = lambda name, **labels: m1.get((name, tuple(sorted(labels.items()))), 0) - m0.get((name, tuple(sorted(labels.items()))), 0)
-check("metrics: a reply's tokens", moved("kiln_completion_tokens_total", model=MODEL) == r.usage.completion_tokens
-      and moved("kiln_prompt_tokens_total", model=MODEL) == r.usage.prompt_tokens
-      and moved("kiln_replies_total", model=MODEL, finish=r.choices[0].finish_reason) == 1
-      and moved("kiln_time_to_first_token_seconds_count", model=MODEL) == 1, f"{r.usage.completion_tokens} tokens")
-check("metrics: a refused request", moved("kiln_http_errors_total", status="400") == 1)
-now, dma = link.status(srv.link_dev), m1.get(("kiln_dma_bytes_per_second", ()))
+check("metrics: a reply's tokens", moved("chrysalis_completion_tokens_total", model=MODEL) == r.usage.completion_tokens
+      and moved("chrysalis_prompt_tokens_total", model=MODEL) == r.usage.prompt_tokens
+      and moved("chrysalis_replies_total", model=MODEL, finish=r.choices[0].finish_reason) == 1
+      and moved("chrysalis_time_to_first_token_seconds_count", model=MODEL) == 1, f"{r.usage.completion_tokens} tokens")
+check("metrics: a refused request", moved("chrysalis_http_errors_total", status="400") == 1)
+now, dma = link.status(srv.link_dev), m1.get(("chrysalis_dma_bytes_per_second", ()))
 if srv.engine.expert_stats():
     lanes = now and now["gts"] * 1e9 * now["width"] * (0.8 if now["gts"] < 8 else 128 / 130) / 8   # bytes/s, line encoding
     check("metrics: the PCIe link bounds the DMA rate", bool(now and dma and 0.25 * lanes < dma <= lanes),
@@ -527,9 +528,9 @@ if srv.engine.expert_stats():
 httpd.shutdown()
 
 
-# Sleep, as kiln/sleep.py calls it on logind's signals: the reply being written ends at its next step, the GPU's memory
-# is freed, and after the wake the model is back (a seed draws the same reply from the empty cache).
-from kiln.sleep import vram_used
+# Sleep, as chrysalis/sleep.py calls it on logind's signals: the reply being written ends at its next step, the GPU's
+# memory is freed, and after the wake the model is back (a seed draws the same reply from the empty cache).
+from chrysalis.sleep import vram_used
 
 # A tool block is a prefix every session shares: kept on disk, the wake below reads it back instead of prefilling it.
 tooled = {"messages": [{"role": "user", "content": "What is the weather in Oslo? Answer in one word if you can."}], "seed": 5,

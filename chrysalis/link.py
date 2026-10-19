@@ -12,7 +12,7 @@ import time
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 BEST = os.path.join(ROOT, "data", "cache", "link.json")   # the fastest link seen on this machine
-TRY = "KILN_LINK_TRY"                                     # the restarts so far (set across exec)
+TRY = "CHRYSALIS_LINK_TRY"                                     # the restarts so far (set across exec)
 
 
 def device():
@@ -80,7 +80,7 @@ def remember(link):
 
 
 def status(dev):
-    """What /kiln/stats reports: the link now, the best seen, and whether it is slower."""
+    """What /chrysalis/stats reports: the link now, the best seen, and whether it is slower."""
     link, b = read(dev) if dev else None, best()
     return link and {**link, "best_gts": b and b["gts"], "best_width": b and b["width"], "slow": slower(link, b)}
 
@@ -109,14 +109,14 @@ def check(dev, tries, log=sys.stderr):
     done = int(os.environ.get(TRY, "0"))
     if not slower(link, b):
         if done:
-            print(f"kiln: PCIe link at {link['gts']:g} GT/s x{link['width']} after {done} "
+            print(f"chrysalis: PCIe link at {link['gts']:g} GT/s x{link['width']} after {done} "
                   f"{'restart' if done == 1 else 'restarts'}", file=log, flush=True)
         return link
     if done >= tries:
-        print(f"kiln: PCIe link at {link['gts']:g} GT/s x{link['width']}, slower than this machine's best "
-              f"({b['gts']:g} GT/s x{b['width']}): prefill and Flash-Next run slower until kiln restarts", file=log, flush=True)
+        print(f"chrysalis: PCIe link at {link['gts']:g} GT/s x{link['width']}, slower than this machine's best "
+              f"({b['gts']:g} GT/s x{b['width']}): prefill and Flash-Next run slower until Chrysalis restarts", file=log, flush=True)
         return link
-    print(f"kiln: PCIe link at {link['gts']:g} GT/s x{link['width']}, slower than this machine's best "
+    print(f"chrysalis: PCIe link at {link['gts']:g} GT/s x{link['width']}, slower than this machine's best "
           f"({b['gts']:g} GT/s x{b['width']}): restarting to train it again ({done + 1} of {tries})", file=log, flush=True)
     restart(done + 1)
 

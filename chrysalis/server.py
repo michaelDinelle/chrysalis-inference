@@ -1,8 +1,8 @@
-"""OpenAI-compatible HTTP server around the kiln engine, built for coding-agent loops (OpenCode); it also speaks
-Anthropic's Messages API and OpenAI's Responses API (kiln/apis.py).
+"""OpenAI-compatible HTTP server around the Chrysalis engine, built for coding-agent loops (OpenCode); it also speaks
+Anthropic's Messages API and OpenAI's Responses API (chrysalis/apis.py).
 
 What keeps time-to-first-token low:
-  * prompts render to token ids; assistant turns kiln generated are replayed as their exact ids, so each
+  * prompts render to token ids; assistant turns Chrysalis generated are replayed as their exact ids, so each
     agent step extends the cached sequence (only new tool output / user text is prefilled);
   * snapshots at the end of the tool block and the static system prompt (shared by all sessions), the system turn
     and every prompt (with the next token's distribution, so a resent prompt needs no prefill), so new sessions,
@@ -52,8 +52,8 @@ DEFAULTS = {True: dict(temperature=1.0, top_p=0.95, top_k=20, min_p=0.0, presenc
             False: dict(temperature=0.7, top_p=0.8, top_k=20, min_p=0.0, presence_penalty=1.5)}
 SIDE_PROMPTS = ("You are a title generator", "Summarize what was done in this conversation")
 COMPACT_PROMPT = "You are a context summarization agent"
-TRACE = bool(os.environ.get("KILN_TRACE"))     # log where each request's time to first token went
-SNAPSHOT_DIR = os.environ.get("KILN_SNAPSHOTS") or os.path.join(_ROOT, "data/cache")   # one directory per model
+TRACE = bool(os.environ.get("CHRYSALIS_TRACE"))     # log where each request's time to first token went
+SNAPSHOT_DIR = os.environ.get("CHRYSALIS_SNAPSHOTS") or os.path.join(_ROOT, "data/cache")   # one directory per model
 EFFORTS = {"xhigh": "xhigh", "high": "xhigh", "medium": "medium", "low": "low", "minimal": "low"}
 
 
@@ -113,7 +113,7 @@ DATE = re.compile(r"(Today's date: )([^\n]*)")
 
 
 class Pictures:
-    """The pictures and videos requests have sent, by content and how they are read (kiln/vision.py pixel_limit: a
+    """The pictures and videos requests have sent, by content and how they are read (chrysalis/vision.py pixel_limit: a
     picture's own max_pixels or detail, else its request's, at most the server's `cap`; a video's frames a second). Each
     picture, and each pair of a video's frames, keeps one image-token slot for the life of the engine, so its tokens are
     the same in every request and the prompt cache tells them apart by them (a slot is never given to another while cached
@@ -126,7 +126,7 @@ class Pictures:
         self.lock = threading.Lock()             # renders run on request threads, beside the request on the GPU
         self.by_digest, self.grid, self.limit = {}, {}, {}   # key -> slot; slot -> grid, how a picture is read
         self.pair = {}                           # slot -> which frame pair of its video
-        self.videos = OrderedDict()              # (digest, frames a second) -> kiln.vision.Video, the latest few
+        self.videos = OrderedDict()              # (digest, frames a second) -> chrysalis.vision.Video, the latest few
         self.encoded = OrderedDict()             # slot -> bytes held by the engine, least recently used first
 
     def slot(self, key, grid):
@@ -146,7 +146,7 @@ class Pictures:
 
     def tokens(self, item, seen, limit=None):
         """A picture's (chat.Picture) image token ids, or a video's (chat.Clip) (time, image token ids) for each frame pair;
-        seen (slot -> picture bytes or kiln.vision.Video) collects the request's for encoding. limit: the request's
+        seen (slot -> picture bytes or chrysalis.vision.Video) collects the request's for encoding. limit: the request's
         max_pixels."""
         if isinstance(item, Clip):
             return self.video_tokens(item, seen)
@@ -186,7 +186,7 @@ class Pictures:
         return out
 
     def positions(self, prompt):
-        """The prompt's M-RoPE positions (kiln/vision.py), or None when it has no pictures (text positions)."""
+        """The prompt's M-RoPE positions (chrysalis/vision.py), or None when it has no pictures (text positions)."""
         img = prompt >= IMG_BASE
         if not img.any():
             return None
@@ -229,7 +229,7 @@ class Pictures:
                     raise vision.ImageError("the picture's size reads differently from its header and its pixels")
                 ok = self.e.image_encode(slot, patches, grid)
             if not ok:
-                raise vision.ImageError("the picture is too large for the GPU memory kiln can lend the vision tower")
+                raise vision.ImageError("the picture is too large for the GPU memory Chrysalis can lend the vision tower")
             gh, gw = self.grid[slot]
             self.encoded[slot] = gh * gw // 4 * self.width * 2
             n += 1
@@ -498,7 +498,8 @@ class Server:
             self.engine.warmup()
 
     def snapshot_disk(self, name, model_path):
-        """Where the model's shared prefixes are kept on disk (kiln/cache.py Disk), if its engine can write them out."""
+        """Where the model's shared prefixes are kept on disk (chrysalis/cache.py Disk), if its engine can write them
+        out."""
         import os
         if not self.engine.persistent:
             return None
@@ -522,7 +523,8 @@ class Server:
         return base if base in MODELS else self.active
 
     def rewarm(self):
-        """The other models' files into the page cache while this one runs, if it leaves the room (kiln/warm.py)."""
+        """The other models' files into the page cache while this one runs, if it leaves the room
+        (chrysalis/warm.py)."""
         import os
         if self.warming and MODELS[self.active].get("warm"):
             self.warmer.start([os.path.join(_ROOT, spec["path"]) for name, spec in MODELS.items() if name != self.active],
@@ -542,9 +544,9 @@ class Server:
         try:
             self.engine.shutdown()
             self.load_engine(name)
-            self.metrics.add("kiln_model_loads_total", model=name)
-            self.metrics.add("kiln_model_load_seconds_total", time.time() - t0, model=name)
-            print(f"kiln: switched {self.active} -> {name} in {time.time() - t0:.1f} s (context {self.capacity} tokens)",
+            self.metrics.add("chrysalis_model_loads_total", model=name)
+            self.metrics.add("chrysalis_model_load_seconds_total", time.time() - t0, model=name)
+            print(f"chrysalis: switched {self.active} -> {name} in {time.time() - t0:.1f} s (context {self.capacity} tokens)",
                   file=self.log, flush=True)
             self.active = name
         finally:
@@ -564,8 +566,9 @@ class Server:
         self.n_draft, self.lookup = spec["draft"], spec.get("lookup", 0)
 
     def sleep(self):
-        """The machine is about to sleep (kiln/sleep.py): a reply being written ends at its next step, cut short as at
-        max_tokens; a prompt being read stops at its next piece; then the GPU is freed. It stays taken until wake()."""
+        """The machine is about to sleep (chrysalis/sleep.py): a reply being written ends at its next step, cut short as
+        at max_tokens; a prompt being read stops at its next piece; then the GPU is freed. It stays taken until
+        wake()."""
         t0 = time.time()
         self.warmer.stop()
         self.pausing.set()
@@ -576,7 +579,7 @@ class Server:
         held = vram_used()
         self.engine.shutdown()
         wait_vram_freed(held)
-        print(f"kiln: the machine is going to sleep: GPU freed in {time.time() - t0:.2f} s", file=self.log, flush=True)
+        print(f"chrysalis: the machine is going to sleep: GPU freed in {time.time() - t0:.2f} s", file=self.log, flush=True)
 
     def wake(self):
         """The machine woke up: the model it had loads again, its cache empty as after a restart (the shared prefixes on
@@ -584,13 +587,13 @@ class Server:
         t0 = time.time()
         try:
             self.load_engine(self.active)
-            self.metrics.add("kiln_model_loads_total", model=self.active)
-            self.metrics.add("kiln_model_load_seconds_total", time.time() - t0, model=self.active)
-            print(f"kiln: awake: {self.active} loaded in {time.time() - t0:.1f} s", file=self.log, flush=True)
+            self.metrics.add("chrysalis_model_loads_total", model=self.active)
+            self.metrics.add("chrysalis_model_load_seconds_total", time.time() - t0, model=self.active)
+            print(f"chrysalis: awake: {self.active} loaded in {time.time() - t0:.1f} s", file=self.log, flush=True)
             now = link.status(self.link_dev)
             if now and now["slow"]:                      # the resume trained it; only a restart trains it again
-                print(f"kiln: PCIe link at {now['gts']:g} GT/s x{now['width']} after the wake, slower than this machine's "
-                      f"best ({now['best_gts']:g} GT/s): `kiln restart` trains it again", file=self.log, flush=True)
+                print(f"chrysalis: PCIe link at {now['gts']:g} GT/s x{now['width']} after the wake, slower than this machine's "
+                      f"best ({now['best_gts']:g} GT/s): `chrysalis restart` trains it again", file=self.log, flush=True)
         finally:
             with self.state_lock:
                 self.loading = None
@@ -609,9 +612,9 @@ class Server:
         final = messages[-1] if body.get("continue_final_message") else None
         if final is not None and final.get("role") != "assistant":
             raise RequestError("continue_final_message needs a final assistant message")
-        # kiln_aside: a request beside the conversation (the web UI's draft of the user's next message): answered
+        # chrysalis_aside: a request beside the conversation (the web UI's draft of the user's next message): answered
         # without thinking, rendered so the conversation's cache still matches, and leaving that cache as it was
-        aside = bool(body.get("kiln_aside"))
+        aside = bool(body.get("chrysalis_aside"))
         seed = seed_of(body)
         tools = body.get("tools") if body.get("tool_choice") != "none" else None
         kw = body.get("chat_template_kwargs") or {}
@@ -634,17 +637,17 @@ class Server:
             try:
                 return self.renderer.render(messages if final is None else messages[:-1], tools, *style,
                                             think_reply=False if aside else None, images=images)
-            except ValueError as e:                      # a picture kiln cannot read, a malformed conversation
+            except ValueError as e:                      # a picture Chrysalis cannot read, a malformed conversation
                 raise RequestError(str(e)) from None
         cont, seen, pictures, prefix = None, {}, self.pictures, []
         prompt, marks = render(pictures, seen)
         if final is not None:
             reply_thinking = bool(thinking) and not aside
-            prefix = self.reply_prefix(final, body.get("kiln_original"), reply_thinking)
-            if body.get("kiln_append_token") is not None:        # a token picked among the reply's alternatives
-                t = int(body["kiln_append_token"])
+            prefix = self.reply_prefix(final, body.get("chrysalis_original"), reply_thinking)
+            if body.get("chrysalis_append_token") is not None:        # a token picked among the reply's alternatives
+                t = int(body["chrysalis_append_token"])
                 if t in self.tok.eos or not 0 <= t < self.tok.full.get_vocab_size():
-                    raise RequestError("kiln_append_token must be a token that continues the reply")
+                    raise RequestError("chrysalis_append_token must be a token that continues the reply")
                 prefix.append(t)
             parser = OutputParser(self.tok, reply_thinking)
             parser.feed(prefix)
@@ -701,7 +704,7 @@ class Server:
                     self.lanes.release()
             held.take()
             if self.pausing.is_set():
-                raise Asleep("the machine is going to sleep; kiln loads the model again when it wakes")
+                raise Asleep("the machine is going to sleep; Chrysalis loads the model again when it wakes")
             sp.n_draft, sp.lookup = self.n_draft, self.lookup
             if len(prompt) + 1 >= self.capacity:
                 raise ContextError(f"the request ({len(prompt)} tokens) exceeds the available context size "
@@ -720,7 +723,7 @@ class Server:
             self.lanes.leave()
 
     def constraints(self, body, tools, schemas):
-        """What a reply's answer is held to (kiln/structured.py): (answer, strict). answer: a Matcher for all of the answer
+        """What a reply's answer is held to (chrysalis/structured.py): (answer, strict). answer: a Matcher for all of the answer
         after any reasoning: tool calls when tool_choice is "required" or names a tool, else response_format's JSON (or a
         tool call instead, when tools are offered). strict: makes the Matcher for tool calls the model begins in an answer
         otherwise free, when a tool is marked strict."""
@@ -793,7 +796,7 @@ class Server:
             held.drop()
 
     def read_documents(self, messages):
-        """The messages with their attached files read (kiln/documents.py): a PDF's pages as text, and as pictures when the
+        """The messages with their attached files read (chrysalis/documents.py): a PDF's pages as text, and as pictures when the
         model has a vision tower."""
         try:
             return self.documents.expand(messages, self.pictures is not None)
@@ -820,7 +823,7 @@ class Server:
         return len(prompt)
 
     def reply_prefix(self, msg, original, thinking):
-        """Token ids of a partial reply to continue: as kiln generated them when it can (its replay; when `msg` is
+        """Token ids of a partial reply to continue: as Chrysalis generated them when it can (its replay; when `msg` is
         `original` shortened, cut where msg ends), else msg's text tokenized."""
         S = self.tok.id
         r, c = msg.get("reasoning_content") or "", text_of(msg.get("content"))
@@ -897,7 +900,7 @@ class Server:
         chunk = self.umax or MODELS[self.active]["chunk"]
         while a < b:
             if self.pausing.is_set():
-                raise Asleep("the machine is going to sleep; kiln loads the model again when it wakes")
+                raise Asleep("the machine is going to sleep; Chrysalis loads the model again when it wakes")
             t = time.time()
             try:
                 e = min(b, a + chunk)
@@ -933,9 +936,9 @@ class Server:
         part of the reply too). top_lp >= 0: text events carry log probs with that many alternatives. aside: keep
         the conversation it extends resumable (a snapshot of where it ended), and no replay of the reply. stops: the
         answer ends before the first of these strings (OpenAI's `stop`). seen: the request's pictures (slot -> bytes).
-        answer: a grammar (kiln/structured.py Matcher) the answer is held to, after any reasoning. strict: makes the
+        answer: a grammar (chrysalis/structured.py Matcher) the answer is held to, after any reasoning. strict: makes the
         grammar a tool call the model starts is held to, to the reply's end (strict tools). budget: the reasoning tokens
-        after which kiln closes the reasoning for the model (thinking_budget). held: the request's turn at the GPU (Held):
+        after which Chrysalis closes the reasoning for the model (thinking_budget). held: the request's turn at the GPU (Held):
         taken for the prompt, given back for the reply, whose steps share passes (Batcher)."""
         t0 = time.time()
         trace = [] if TRACE else None
@@ -1118,7 +1121,7 @@ class Server:
                 self.metrics.reply(self.active, {"prompt_tokens": len(prompt), "cached_tokens": cached,
                                                  "completion_tokens": min(len(out), max_tokens), "ttft": (t_first if steps else t1) - t0,
                                                  "prefill_s": t_prefill - t0, "decode_s": t1 - t_prefill}, steps, "client")
-                print(f"kiln: prompt {len(prompt)} (cached {cached}) | stopped by the client after {len(out)} tokens "
+                print(f"chrysalis: prompt {len(prompt)} (cached {cached}) | stopped by the client after {len(out)} tokens "
                       f"| slot {slot.sid}", file=self.log, flush=True)
         if finish == "stop" and calls and not stop_text.hit:
             finish = "tool_calls"
@@ -1130,7 +1133,7 @@ class Server:
                 "stop_sequence": stop_text.matched}
         self.recent.put(time.time(), info)
         self.metrics.reply(self.active, {**info, "decode_s": t1 - t_prefill}, steps, finish)
-        print(f"kiln: prompt {len(prompt)} (cached {cached}){f' | {encoded} pictures encoded' if encoded else ''} ttft {info['ttft']:.2f}s | gen {n_gen} "
+        print(f"chrysalis: prompt {len(prompt)} (cached {cached}){f' | {encoded} pictures encoded' if encoded else ''} ttft {info['ttft']:.2f}s | gen {n_gen} "
               f"{info['decode_tps']:.1f} tok/s {info['tokens_per_step']:.2f}/step | {finish} | slot {slot.sid}"
               + (" | " + ", ".join(f"{k} {v * 1000:.0f} ms" for k, v in trace) if trace else ""),
               file=self.log, flush=True)
@@ -1148,43 +1151,43 @@ class Server:
             return out
 
     def gauges(self):
-        """kiln's state now, for /metrics (Metrics.render)."""
+        """Chrysalis's state now, for /metrics (Metrics.render)."""
         g = []
         with self.state_lock:
-            g.append(("kiln_model_loaded", "1 for the model on the GPU", [({"model": m}, int(m == self.active and not self.loading)) for m in MODELS]))
-            g.append(("kiln_model_loading", "1 while a model loads (a switch, a wake)", [({}, int(bool(self.loading)))]))
-            g.append(("kiln_replies_writing", "Replies being written now", [({}, len(self.replying))]))
+            g.append(("chrysalis_model_loaded", "1 for the model on the GPU", [({"model": m}, int(m == self.active and not self.loading)) for m in MODELS]))
+            g.append(("chrysalis_model_loading", "1 while a model loads (a switch, a wake)", [({}, int(bool(self.loading)))]))
+            g.append(("chrysalis_replies_writing", "Replies being written now", [({}, len(self.replying))]))
             if not self.loading:
                 c = self.cache.stats()
-                g += [("kiln_context_tokens", "Context a request may use", [({}, self.capacity)]),
-                      ("kiln_kv_tokens", "Tokens the KV pool holds", [({}, self.engine.capacity)]),
-                      ("kiln_kv_free_tokens", "Tokens of the KV pool no sequence holds", [({}, c["free_kv_tokens"])]),
-                      ("kiln_snapshots", "Prompt-cache snapshots in RAM", [({}, c["snapshots"])])]
+                g += [("chrysalis_context_tokens", "Context a request may use", [({}, self.capacity)]),
+                      ("chrysalis_kv_tokens", "Tokens the KV pool holds", [({}, self.engine.capacity)]),
+                      ("chrysalis_kv_free_tokens", "Tokens of the KV pool no sequence holds", [({}, c["free_kv_tokens"])]),
+                      ("chrysalis_snapshots", "Prompt-cache snapshots in RAM", [({}, c["snapshots"])])]
                 x = self.engine.expert_stats()
                 if x:                                    # Flash-Next: counted since the model loaded
-                    g += [("kiln_experts_decode_picks_total", "Experts routed to by decode steps", [({}, x["decode_picks"])]),
-                          ("kiln_experts_decode_picks_in_pool_total", "Of them, experts in the VRAM pool", [({}, x["decode_picks_in_pool"])]),
-                          ("kiln_experts_placed_total", "Experts copied into the pool", [({}, x["placed"])]),
-                          ("kiln_dma_bytes_per_second", "Host-to-GPU DMA rate the pool's copies measure", [({}, x["dma_bytes_per_s"])]),
-                          ("kiln_experts_gpu_share", "Share of the cold picks the GPU computes in decode", [({}, x["gpu_share"])])]
+                    g += [("chrysalis_experts_decode_picks_total", "Experts routed to by decode steps", [({}, x["decode_picks"])]),
+                          ("chrysalis_experts_decode_picks_in_pool_total", "Of them, experts in the VRAM pool", [({}, x["decode_picks_in_pool"])]),
+                          ("chrysalis_experts_placed_total", "Experts copied into the pool", [({}, x["placed"])]),
+                          ("chrysalis_dma_bytes_per_second", "Host-to-GPU DMA rate the pool's copies measure", [({}, x["dma_bytes_per_s"])]),
+                          ("chrysalis_experts_gpu_share", "Share of the cold picks the GPU computes in decode", [({}, x["gpu_share"])])]
         ln = link.status(self.link_dev)
         if ln:
-            g += [("kiln_pcie_link_gts", "PCIe link speed now, GT/s (the slowest link to the GPU)", [({}, ln["gts"])]),
-                  ("kiln_pcie_link_width", "PCIe link width now, lanes", [({}, ln["width"])]),
-                  ("kiln_pcie_link_best_gts", "The fastest link speed seen on this machine, GT/s", [({}, ln["best_gts"])]),
-                  ("kiln_pcie_link_slow", "1 when the link is slower than this machine's best (kiln restart trains it again)", [({}, int(ln["slow"]))])]
+            g += [("chrysalis_pcie_link_gts", "PCIe link speed now, GT/s (the slowest link to the GPU)", [({}, ln["gts"])]),
+                  ("chrysalis_pcie_link_width", "PCIe link width now, lanes", [({}, ln["width"])]),
+                  ("chrysalis_pcie_link_best_gts", "The fastest link speed seen on this machine, GT/s", [({}, ln["best_gts"])]),
+                  ("chrysalis_pcie_link_slow", "1 when the link is slower than this machine's best (chrysalis restart trains it again)", [({}, int(ln["slow"]))])]
         return g
 
     def load(self, name):
         """Switch to a model now (the web chat's model picker), after the replies in flight, if any."""
         if name not in MODELS:
-            raise RequestError(f"unknown model {name!r}; kiln has {', '.join(MODELS)}")
+            raise RequestError(f"unknown model {name!r}; Chrysalis has {', '.join(MODELS)}")
         self.lanes.hold()
         try:
             self.gpu.acquire(main=True)
             try:
                 if self.pausing.is_set():
-                    raise Asleep("the machine is going to sleep; kiln loads the model again when it wakes")
+                    raise Asleep("the machine is going to sleep; Chrysalis loads the model again when it wakes")
                 self.use(name)
             finally:
                 self.gpu.release()
@@ -1210,18 +1213,18 @@ def host_ok(host):
 
 
 def make_handler(state, ready):
-    """state["srv"] is the Server once `ready` is set; until then /health and /kiln/stats answer 503 and the other
+    """state["srv"] is the Server once `ready` is set; until then /health and /chrysalis/stats answer 503 and the other
     requests wait."""
     class Handler(BaseHTTPRequestHandler):
         protocol_version = "HTTP/1.1"
-        server_version = "kiln"
+        server_version = "chrysalis"
 
         def log_message(self, *args):
             pass
 
         def send_json(self, code, obj):
             if code >= 400 and state.get("srv"):
-                state["srv"].metrics.add("kiln_http_errors_total", status=code)
+                state["srv"].metrics.add("chrysalis_http_errors_total", status=code)
             data = json.dumps(obj).encode()
             self.send_response(code)
             self.send_header("Content-Type", "application/json")
@@ -1232,12 +1235,12 @@ def make_handler(state, ready):
         def do_GET(self):
             if not host_ok(self.headers.get("Host")):
                 return self.send_json(403, {"error": {"message": "unknown host", "type": "invalid_request_error"}})
-            if not ready.is_set() and self.path.rstrip("/") in ("/health", "/v1/health", "/kiln/stats"):
+            if not ready.is_set() and self.path.rstrip("/") in ("/health", "/v1/health", "/chrysalis/stats"):
                 return self.send_json(503, {"status": "loading", "model": state.get("loading"), "progress": load_progress()})
             if self.path.split("?")[0].rstrip("/") == "/metrics":
                 srv = state.get("srv")
                 text = (srv.metrics.render(srv.gauges()) if srv else
-                        "# HELP kiln_model_loading 1 while a model loads (a switch, a wake)\n# TYPE kiln_model_loading gauge\nkiln_model_loading 1\n")
+                        "# HELP chrysalis_model_loading 1 while a model loads (a switch, a wake)\n# TYPE chrysalis_model_loading gauge\nchrysalis_model_loading 1\n")
                 data = text.encode()
                 self.send_response(200)
                 self.send_header("Content-Type", "text/plain; version=0.0.4; charset=utf-8")
@@ -1249,11 +1252,11 @@ def make_handler(state, ready):
             if self.path.rstrip("/") in ("/v1/models", "/models"):
                 now = int(time.time())
                 self.send_json(200, {"object": "list", "data": [
-                    {"id": m, "object": "model", "created": now, "owned_by": "kiln", "context_length": MAX_CONTEXT}
+                    {"id": m, "object": "model", "created": now, "owned_by": "chrysalis", "context_length": MAX_CONTEXT}
                     for name in MODELS for m in (name, name + "-fast")]})
             elif self.path.rstrip("/") in ("/health", "/v1/health"):
                 self.send_json(200, {"status": "ok"})
-            elif self.path.rstrip("/") == "/kiln/stats":
+            elif self.path.rstrip("/") == "/chrysalis/stats":
                 self.send_json(200, srv.stats())
             else:
                 self.send_json(404, {"error": {"message": "not found"}})
@@ -1261,7 +1264,7 @@ def make_handler(state, ready):
         def do_POST(self):
             if not host_ok(self.headers.get("Host")):
                 return self.send_json(403, {"error": {"message": "unknown host", "type": "invalid_request_error"}})
-            if self.path.rstrip("/") == "/kiln/load":
+            if self.path.rstrip("/") == "/chrysalis/load":
                 ready.wait()
                 srv = state["srv"]
                 try:
@@ -1292,7 +1295,7 @@ def make_handler(state, ready):
             except RequestError as e:
                 return self.send_json(e.status, {"error": {"message": str(e), "type": "invalid_request_error", "code": e.code}})
             except Exception as e:
-                print(f"kiln: request failed: {e!r}", file=srv.log, flush=True)
+                print(f"chrysalis: request failed: {e!r}", file=srv.log, flush=True)
                 return self.send_json(500, {"error": {"message": f"internal error: {e}", "type": "server_error"}})
             try:
                 if body.get("stream"):
@@ -1305,7 +1308,7 @@ def make_handler(state, ready):
                 gen.close()
 
         def messages_api(self, srv, req, count):
-            """Anthropic's Messages API (kiln/apis.py), and its token count."""
+            """Anthropic's Messages API (chrysalis/apis.py), and its token count."""
             def error(status, kind, message):
                 self.send_json(status, {"type": "error", "error": {"type": kind, "message": message}})
             try:
@@ -1320,7 +1323,7 @@ def make_handler(state, ready):
             except ValueError as e:
                 return error(400, "invalid_request_error", str(e))
             except Exception as e:
-                print(f"kiln: request failed: {e!r}", file=srv.log, flush=True)
+                print(f"chrysalis: request failed: {e!r}", file=srv.log, flush=True)
                 return error(500, "api_error", f"internal error: {e}")
             model = req.get("model") or srv.active
             events = itertools.chain([first], gen)
@@ -1336,13 +1339,13 @@ def make_handler(state, ready):
                 gen.close()
 
         def responses_api(self, srv, req):  # not "responses": BaseHTTPRequestHandler's status texts
-            """OpenAI's Responses API (kiln/apis.py); a stored response's conversation goes on with previous_response_id."""
+            """OpenAI's Responses API (chrysalis/apis.py); a stored response's conversation goes on with previous_response_id."""
             def error(status, message, code=None):
                 self.send_json(status, {"error": {"message": message, "type": "invalid_request_error", "param": None, "code": code}})
             prev = req.get("previous_response_id")
             history = srv.stored.get(prev) if prev else None
             if prev and history is None:
-                return error(404, f"no stored response {prev} (kiln keeps the last {srv.stored.limit}, until it restarts)",
+                return error(404, f"no stored response {prev} (Chrysalis keeps the last {srv.stored.limit}, until it restarts)",
                              "previous_response_not_found")
             try:
                 body = apis.responses_body(req, history)
@@ -1353,7 +1356,7 @@ def make_handler(state, ready):
             except ValueError as e:
                 return error(400, str(e))
             except Exception as e:
-                print(f"kiln: request failed: {e!r}", file=srv.log, flush=True)
+                print(f"chrysalis: request failed: {e!r}", file=srv.log, flush=True)
                 return self.send_json(500, {"error": {"message": f"internal error: {e}", "type": "server_error", "param": None, "code": None}})
             build = apis.ResponseBuilder(req, req.get("model") or srv.active, lambda text: len(srv.tok.full.encode(text).ids))
             events = itertools.chain([first], gen)
@@ -1409,8 +1412,8 @@ def make_handler(state, ready):
             n_calls, ev = 0, first
             while True:
                 kind, val = ev[0], ev[1]
-                if kind == "prefix":                      # a continued message as it now stands (kiln extension)
-                    self.chunk({**base, "choices": [{"index": 0, "delta": {"kiln_prefix": val}, "finish_reason": None}]})
+                if kind == "prefix":                      # a continued message as it now stands (Chrysalis extension)
+                    self.chunk({**base, "choices": [{"index": 0, "delta": {"chrysalis_prefix": val}, "finish_reason": None}]})
                     ev = next(gen)
                     continue
                 if kind == "start":
@@ -1510,7 +1513,7 @@ def serve(make_server, host="127.0.0.1", port=8080, model=None):
     srv.gpu.acquire(main=True)
     state["srv"] = srv
     ready.set()
-    print(f"kiln: serving {srv.active} on http://{host}:{port}/v1 (context {srv.capacity} tokens)", file=srv.log, flush=True)
+    print(f"chrysalis: serving {srv.active} on http://{host}:{port}/v1 (context {srv.capacity} tokens)", file=srv.log, flush=True)
     srv.engine.warmup()
     srv.gpu.release()
     srv.warming = True

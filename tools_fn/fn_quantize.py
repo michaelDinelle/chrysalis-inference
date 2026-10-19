@@ -1,6 +1,6 @@
-"""Build kiln's Qwen3.8-Flash-Next model file from Unsloth's Q8_0 GGUF (+ its shared MTP head and imatrix).
+"""Build Chrysalis's Qwen3.8-Flash-Next model file from Unsloth's Q8_0 GGUF (+ its shared MTP head and imatrix).
 
-Weights, by how kiln uses them:
+Weights, by how Chrysalis uses them:
   * always-active matrices on the GPU: the big projections (GDN qkv / z, attention q, shared expert gate / up) Q6_K,
     the LM head Q6_K, everything else Q8_0 (output projections, K / V, hyper-connections, PLE, embeddings);
     the QSA indexer projections Q8_0 (from BF16), GDN alpha | beta as one F16 matrix, the router F16;
@@ -8,9 +8,10 @@ Weights, by how kiln uses them:
     used IQ4_XS gate / up + IQ4_NL down for VRAM; the rest for system RAM (CPU and GPU both read them there) in two
     groups, Q3_K gate / up, and for the least used Q2_FRAC of all pairs Q2_K, both with IQ4_NL down (640-wide rows rule
     out 256-blocks). K-quants run at the CPU's full memory bandwidth (the IQ3 formats are compute-bound there). Use is
-    Unsloth's imatrix counts (845,728 tokens of calibration text), blended with routing counts measured by kiln on
+    Unsloth's imatrix counts (845,728 tokens of calibration text), blended with routing counts measured by Chrysalis on
     the work it does: prefill of code (tools_fn/route_stats.py) and, since decode reads every pick's expert per token
-    while a long prefill reads them all once per pass, decode in agent sessions (KILN_FN_DECODE_COUNTS), whose expert
+    while a long prefill reads them all once per pass, decode in agent sessions (CHRYSALIS_FN_DECODE_COUNTS), whose
+expert
     use correlates little with either.
     The sizes: hot experts + the rest of VRAM's contents fill a 24 GiB card with a 262K-token KV cache and 8K-token
     prefill passes; the RAM groups take ~42 GB;
@@ -236,18 +237,18 @@ def main():
     print(f"hot experts per layer {min(map(len, hot))}..{max(map(len, hot))}")
 
     W = Writer(out)
-    W.add_kv("general.architecture", "kilnfn")
-    W.add_kv("general.name", "Qwen3.8-Flash-Next (kiln: Q6_K/Q8_0 dense, IQ4_XS VRAM / Q3_K + Q2_K RAM experts)")
+    W.add_kv("general.architecture", "chrysalisfn")
+    W.add_kv("general.name", "Qwen3.8-Flash-Next (Chrysalis: Q6_K/Q8_0 dense, IQ4_XS VRAM / Q3_K + Q2_K RAM experts)")
     for k in ("ple.layer_multipliers", "ple.head_offsets", "ple.head_vocab_sizes"):
-        W.add_kv("kilnfn." + k, [int(x) for x in S.meta["qwen4exp." + k]])
+        W.add_kv("chrysalisfn." + k, [int(x) for x in S.meta["qwen4exp." + k]])
     ng = S.get("per_layer_token_embd.weight")
     ng_file = S.tensors["per_layer_token_embd.weight"][0]
-    W.add_kv("kilnfn.ngram_file", os.path.relpath(ng_file, os.path.dirname(os.path.abspath(out))))
-    W.add_kv("kilnfn.ngram_offset", int(ng.data_offset))
-    W.add_kv("kilnfn.ngram_rows", int(ng.shape[1]))
-    W.add_kv("kilnfn.n_hot", n_hot)
+    W.add_kv("chrysalisfn.ngram_file", os.path.relpath(ng_file, os.path.dirname(os.path.abspath(out))))
+    W.add_kv("chrysalisfn.ngram_offset", int(ng.data_offset))
+    W.add_kv("chrysalisfn.ngram_rows", int(ng.shape[1]))
+    W.add_kv("chrysalisfn.n_hot", n_hot)
     if routes:
-        W.add_kv("kilnfn.routes", ", ".join(f"{f}:{wt:g}" for f, _, wt in routes))
+        W.add_kv("chrysalisfn.routes", ", ".join(f"{f}:{wt:g}" for f, _, wt in routes))
 
     def keep(name, out_name=None, dims=None):                    # copy a tensor as it is
         t = S.get(name)

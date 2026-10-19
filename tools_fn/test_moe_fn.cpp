@@ -1,5 +1,5 @@
 // MoE checks on random experts: 18 experts, 8 hot in VRAM and 10 outside it, routing over them, against a float
-// reference built from ggml's dequantization. The RAM tier comes in two gate / up format groups as in kiln-fn.gguf (5 Q3_K,
+// reference built from ggml's dequantization. The RAM tier comes in two gate / up format groups as in chrysalis-fn.gguf (5 Q3_K,
 // then 3 Q2_K, down IQ4_NL for all), and 2 IQ4_XS experts stand for the file's VRAM-tier experts that the expert pool does
 // not hold (ColdLayer group 2, the CPU's only); the hot tier runs once per VRAM format (IQ4_XS as in the file, Q3_K as
 // the MTP experts, Q2_K and Q5_0 for completeness).

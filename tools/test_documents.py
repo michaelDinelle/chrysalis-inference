@@ -1,5 +1,5 @@
-"""Which pages of a PDF kiln gives as pictures (kiln/documents.py), checked on PDFs whose pages say what they are: each
-picture page a solid colour of its own, which the drawn page has to show. CPU only (poppler).
+"""Which pages of a PDF Chrysalis gives as pictures (chrysalis/documents.py), checked on PDFs whose pages say what they
+are: each picture page a solid colour of its own, which the drawn page has to show. CPU only (poppler).
 data/venv/bin/python tools/test_documents.py"""
 import base64
 import io
@@ -11,8 +11,8 @@ sys.path.insert(0, ROOT)
 
 from PIL import Image
 
-from kiln import apis, documents
-from kiln.documents import DocumentError, Documents
+from chrysalis import apis, documents
+from chrysalis.documents import DocumentError, Documents
 from pdf_fixture import pdf
 
 failed = 0

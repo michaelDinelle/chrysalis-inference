@@ -1,4 +1,4 @@
-// kiln web UI: chat with kiln's local models (Qwen3.8-27B, Qwen3.8-Flash-Next). Replies stream in with their reasoning and
+// Chrysalis web UI: chat with Chrysalis's local models (Qwen3.8-27B, Qwen3.8-Flash-Next). Replies stream in with their reasoning and
 // tool calls and are rendered as markdown with highlighted code; conversations (every version of them) live in this tab's
 // sessionStorage (a reload keeps them, closing the tab ends them). The settings (system prompt, sampling, reply length,
 // seed, tools that run without asking), kept the same way, apply to every conversation.
@@ -13,11 +13,12 @@ import { type Part, type VoiceAsk, type VoiceInfo, type VoiceReady, VoiceClient 
 import { type Fix, applyFixes, fixedParts, readHeard } from "./heard";
 import { pointOf, shownWords, unitOf } from "./spoken";
 import { DESCRIPTIONS, type ToolChoice, type WireCall, assistantTurn, noted, toolTurn } from "./wire";
+import logo from "./logo.svg";
 
 type Effort = "xhigh" | "medium" | "low" | "off";
 // prompt and cached: summed over a reply's rounds; ctx: the context its last round left (prompt + reply)
 interface Stats { ttft: number; tps: number; tokens: number; prompt: number; cached: number; thought?: number; seed?: number; model?: string; ctx?: number }
-// A tool call as kiln wrote it (WireCall: its id and argument string, kept byte for byte), and what became of it.
+// A tool call as Chrysalis wrote it (WireCall: its id and argument string, kept byte for byte), and what became of it.
 type CallState = "approval" | "running" | "done" | "failed" | "declined" | "stopped";
 interface Call extends WireCall { title?: string; source?: string; readOnly?: boolean; state?: CallState; result?: string; ms?: number }
 // A reply with tools is rounds: each but the last ended in tool calls, whose results the next one read.
@@ -65,7 +66,7 @@ interface View {
   tok?: { reasoning: number; content: number };     // tokens drawn so far, shown as tokens
   rounds: HTMLElement; calls: HTMLElement; notes: HTMLElement; roundsShown?: number;   // a reply's earlier rounds, its last round's calls
 }
-// A token of a reply, with the model's probability for it and its likeliest alternatives (log probs from kiln).
+// A token of a reply, with the model's probability for it and its likeliest alternatives (log probs from Chrysalis).
 interface Alt { t: string; p: number; id: number }
 interface Tok { t: string; p: number; alts: Alt[] }
 interface Live { phase: "waiting" | "thinking" | "writing"; since: number; note: string; loading?: boolean }
@@ -82,26 +83,27 @@ interface Run {
   frame: number; saved: number;
 }
 
-// kiln keeps one model on the GPU. The picker by Load / Unload chooses it (switching takes 5-20 s); every chat then
-// talks to the model that is loaded.
+// Chrysalis keeps one model on the GPU. The picker by Load / Unload chooses it (switching takes 5-20 s); every chat
+// then talks to the model that is loaded.
 const MODELS: [string, string, string][] = [
   ["qwen3.8-27b", "Qwen3.8-27B", "Quickest replies · 4 s to load"],
   ["qwen3.8-flash-next", "Qwen3.8-Flash-Next", "Fast at any length · 20 s to load"],
 ];
 const modelName = (id?: string) => MODELS.find(([m]) => m === id)?.[1] ?? id ?? "";
-// What kiln uses for a value it is not sent, with thinking on and off (DEFAULTS and MAX_OUTPUT in kiln/server.py:
-// Qwen's recommended values). Without a seed kiln draws a random one and reports it with the reply.
+// What Chrysalis uses for a value it is not sent, with thinking on and off (DEFAULTS and MAX_OUTPUT in
+// chrysalis/server.py: Qwen's recommended values). Without a seed Chrysalis draws a random one and reports it with the
+// reply.
 const RECOMMENDED: Record<Mode, Record<SamplerKey, number>> = {
   think: { temperature: 1, top_p: 0.95, top_k: 20, min_p: 0, presence_penalty: 0, dry_multiplier: 0, dry_allowed_length: 2, dry_base: 1.75 },
   fast: { temperature: 0.7, top_p: 0.8, top_k: 20, min_p: 0, presence_penalty: 1.5, dry_multiplier: 0, dry_allowed_length: 2, dry_base: 1.75 },
 };
 const MAX_REPLY = 131072;
-const STAGES: Stage[] = ["top_k", "temperature", "top_p", "min_p"];   // kiln's default order (engine/sampler.h)
+const STAGES: Stage[] = ["top_k", "temperature", "top_p", "min_p"];   // Chrysalis's default order (engine/sampler.h)
 // `slider` narrows the slider to the useful part of the range; typing still reaches all of it.
 const SAMPLERS: Record<SamplerKey, { label: string; short: string; min: number; max: number; step: number; slider?: [number, number]; help: string }> = {
   temperature: { label: "Temperature", short: "temp", min: 0, max: 2, step: 0.01, help: "Temperature: under 1 sharpens the odds, over 1 flattens them; 0 always takes the likeliest." },
   top_p: { label: "Top P", short: "top-p", min: 0, max: 1, step: 0.01, help: "Top P: keeps the likeliest tokens until together they reach this share." },
-  top_k: { label: "Top K", short: "top-k", min: 1, max: 64, step: 1, help: "Top K: keeps at most this many tokens (kiln looks at the 64 likeliest)." },
+  top_k: { label: "Top K", short: "top-k", min: 1, max: 64, step: 1, help: "Top K: keeps at most this many tokens (Chrysalis looks at the 64 likeliest)." },
   min_p: { label: "Min P", short: "min-p", min: 0, max: 1, step: 0.01, slider: [0, 0.5], help: "Min P: drops tokens less likely than this share of the likeliest." },
   presence_penalty: { label: "Presence", short: "presence", min: -2, max: 2, step: 0.05, slider: [0, 2], help: "Presence penalty: lowers every token the reply has already used." },
   dry_multiplier: { label: "DRY", short: "dry", min: 0, max: 5, step: 0.05, slider: [0, 2], help: "DRY: lowers a token that would repeat a run of text already in the chat. Off at 0." },
@@ -125,15 +127,15 @@ const LOOP: { reply: [string, number][]; cands: [string, number, number][] } = {
 // project structure" and calls to list_files / read_file: 16 replies out of 16, and the Q8_0 original as well); with
 // it, 16 of 16 draw.
 // {{MODEL}} is the chat's model by name: told nothing, the model does not know it is Qwen3.8 and says so when asked.
-const DEFAULT_SYSTEM = "You are {{MODEL}}, running locally in kiln. There are no tools or files in this chat. Answer directly.";
-// What the default says instead in a chat with tools on (a prompt the user wrote goes as written); kiln's template
+const DEFAULT_SYSTEM = "You are {{MODEL}}, running locally in Chrysalis Inference. There are no tools or files in this chat. Answer directly.";
+// What the default says instead in a chat with tools on (a prompt the user wrote goes as written); Chrysalis's template
 // writes the tools themselves before it in the system turn (What the model is sent, in Settings, shows them).
-const DEFAULT_SYSTEM_TOOLS = "You are {{MODEL}}, running locally in kiln. The tools offered here are the only ones in this chat, and there are no files or projects to explore. Use a tool when it helps; otherwise answer directly.";
+const DEFAULT_SYSTEM_TOOLS = "You are {{MODEL}}, running locally in Chrysalis Inference. The tools offered here are the only ones in this chat, and there are no files or projects to explore. Use a tool when it helps; otherwise answer directly.";
 // the default of builds before {{MODEL}}: settings that still hold it follow the default
 const PLAIN_SYSTEM = "There are no tools or files in this chat. Answer directly.";
 // What voice mode tells the model, in a note before the first question said aloud (and again when it changes): the
 // system prompt stays as it is, so a chat's history is never read again for voice mode and the chat's own prompt and
-// tools still hold (kiln's template allows a system message only first). What speech recognition misheard is fixed
+// tools still hold (Chrysalis's template allows a system message only first). What speech recognition misheard is fixed
 // before the reply, apart from it (checkOf); what is left the model takes as meant, without remarking on it ("I think
 // you meant 'wrote'"). "Briefly" alone cut an essay asked for to a sentence or two. Told to write no code or markdown, the
 // model wrote code as plain text, which was read out, and held back ("Let me write that for you", then nothing): so what
@@ -152,16 +154,17 @@ const VOICE_TOOLS = "Only say you searched or did something once the tool call f
   "have not received from a tool. When results come back, give the key points briefly, and say the links are on screen rather than reading them.";
 // What speech recognition misheard of a question said aloud, and whether answering it needs a tool: asked at temperature
 // 0 before the reply, in a conversation of its own beside the chat (a voice session's: these instructions, then a turn
-// per question with the one before it and what the assistant had just said), which kiln keeps cached, so a check reads
-// ~40 tokens (~0.3 s on Flash-Next). Nothing of it is part of the chat: asked inside the reply, the model copied the fixes into a later
-// reply's words, where they were shown and read out; told in the chat how to answer a check, it began replies with
-// one; asked beside the chat with all of it, a check took 0.7-1.2 s. Fixes are swaps of the transcript's own words
-// (asked to repeat the whole message, it dropped sentences), by sound (asked by meaning, it made "pie game" "Pong
-// game"); heard.ts makes only those that sound like what was heard. Words that do not fit what the user asks, everyday
-// ones too, and the question before: of 17 misheard transcripts (twice each) 29 came out right where 25 had ("read it"
-// for "write it" fixed), and none of 14 right ones was changed; an example such as "due to" for "do a" was copied into
-// right speech ("Do a the rain"), so the examples are words that are rarely right where they were heard.
-const CHECK = "You fix speech recognition errors in what a user says to {{MODEL}}, a voice assistant running locally in kiln{{TOOLS}}. " +
+// per question with the one before it and what the assistant had just said), which Chrysalis keeps cached, so a check
+// reads ~40 tokens (~0.3 s on Flash-Next). Nothing of it is part of the chat: asked inside the reply, the model copied
+// the fixes into a later reply's words, where they were shown and read out; told in the chat how to answer a check, it
+// began replies with one; asked beside the chat with all of it, a check took 0.7-1.2 s. Fixes are swaps of the
+// transcript's own words (asked to repeat the whole message, it dropped sentences), by sound (asked by meaning, it made
+// "pie game" "Pong game"); heard.ts makes only those that sound like what was heard. Words that do not fit what the
+// user asks, everyday ones too, and the question before: of 17 misheard transcripts (twice each) 29 came out right
+// where 25 had ("read it" for "write it" fixed), and none of 14 right ones was changed; an example such as "due to" for
+// "do a" was copied into right speech ("Do a the rain"), so the examples are words that are rarely right where they
+// were heard.
+const CHECK = "You fix speech recognition errors in what a user says to {{MODEL}}, a voice assistant running locally in Chrysalis Inference{{TOOLS}}. " +
   "For each transcript, write one line per misheard word or phrase: the transcript's exact words => the words that sound like them " +
   "which the user meant (names spelled right, numbers in digits). Read the transcript against the conversation: words that do not fit " +
   "what the user is asking were misheard, names of libraries, products and models as everyday words (\"pie torch\" for \"PyTorch\") " +
@@ -171,7 +174,7 @@ const CHECK = "You fix speech recognition errors in what a user says to {{MODEL}
 const CHECK_TOOLS = " Then a last line, \"tool: yes\" if answering needs a web search or a page (they ask to search, look up or check " +
   "something, or the answer depends on current facts such as news, weather, prices or schedules), else \"tool: no\".";
 const VOICE_OFF = "The user is typing again and reads your replies.";
-// kiln answers a prompt that starts "You are a title generator" as a side request (low priority, no thinking)
+// Chrysalis answers a prompt that starts "You are a title generator" as a side request (low priority, no thinking)
 const TITLE_PROMPT = "You are a title generator. Reply with a title of at most six words for the conversation that starts with the user's message below. Reply with the title only.";
 const DRAFT_PROMPT = "Write the next message I would send in this conversation, as me: same voice, same goals, natural and brief. Reply with only that message.";
 const fill = (text: string) => text.replaceAll("{{MODEL}}", modelName(current()) || "a Qwen model");
@@ -180,7 +183,6 @@ const EFFORTS: Effort[] = ["off", "low", "medium", "xhigh"];
 const LEVEL: Record<Effort, [string]> = { off: ["Off"], low: ["Low"], medium: ["Medium"], xhigh: ["Max"] };
 const HEAT = ["off", "low", "medium", "max"];      // each stop's look, cool to molten
 const ICONS = {
-  flame: '<path fill="currentColor" stroke="none" d="M12 1.5c.9 3.6-.9 5.9-2.6 7.9C7.8 11.2 6 13.1 6 15.9 6 19.3 8.7 22 12 22s6-2.6 6-6.2c0-2.7-1.4-4.7-2.6-6.1-.3 1.6-1.2 2.7-2.4 3.2 1-3.9-.2-8.1-1-11.4z"/>',
   plus: '<path d="M12 5v14M5 12h14"/>',
   paneLeft: '<rect x="3" y="3" width="18" height="18" rx="3"/><path d="M9 3v18"/><path class="chev" d="M15.5 9 12.5 12l3 3"/>',
   paneRight: '<rect x="3" y="3" width="18" height="18" rx="3"/><path d="M15 3v18"/><path class="chev" d="M8.5 9l3 3-3 3"/>',
@@ -575,7 +577,7 @@ async function drawMermaid(fig: HTMLElement, text: string, drawing: boolean) {
   fig.dataset.seq = seq;
   const m = await loadMermaid();
   let svg: string | undefined;
-  if (await m.parse(text, { suppressErrors: true })) svg = await m.render(`kiln-mermaid-${seq}`, text).then((r) => r.svg, () => undefined);
+  if (await m.parse(text, { suppressErrors: true })) svg = await m.render(`chrysalis-mermaid-${seq}`, text).then((r) => r.svg, () => undefined);
   if (fig.dataset.seq !== seq) return;                   // a later version is on its way
   if (svg) {
     pictures.set(fig, svg);
@@ -604,7 +606,7 @@ const PAGE_DOC = /^\s*(?:<!--[\s\S]*?-->\s*)*(?:<!doctype html|<html[\s>])/i;
 const previewed = new Set<string>();                  // fragments whose Preview was clicked
 const pageText = new WeakMap<HTMLIFrameElement, string>();
 // The root element's box: its content's height (scrollHeight would never report less than the frame already is).
-const REPORT = `<script>(() => { const html = document.documentElement, post = () => parent.postMessage({ kilnHeight: Math.ceil(html.getBoundingClientRect().height) }, "*");
+const REPORT = `<script>(() => { const html = document.documentElement, post = () => parent.postMessage({ chrysalisHeight: Math.ceil(html.getBoundingClientRect().height) }, "*");
   new ResizeObserver(post).observe(html); addEventListener("load", post); post(); })()</script>`;
 const pageRoom = () => Math.max(scroller.clientHeight - 74, 240);
 
@@ -637,9 +639,9 @@ function pageFigure(old: Node | undefined, text: string): HTMLElement {
 addEventListener("message", (e) => {
   const frame = [...document.querySelectorAll<HTMLIFrameElement>("iframe.page-frame")].find((f) => f.contentWindow === e.source);
   if (!frame) return;
-  if (e.data?.kilnReady) frame.contentWindow!.postMessage({ kilnPage: pageText.get(frame) + REPORT }, "*");
-  else if (typeof e.data?.kilnHeight === "number" && !frame.dataset.fixed) {
-    const px = `${Math.round(Math.min(Math.max(e.data.kilnHeight, 60), pageRoom()))}px`;
+  if (e.data?.chrysalisReady) frame.contentWindow!.postMessage({ chrysalisPage: pageText.get(frame) + REPORT }, "*");
+  else if (typeof e.data?.chrysalisHeight === "number" && !frame.dataset.fixed) {
+    const px = `${Math.round(Math.min(Math.max(e.data.chrysalisHeight, 60), pageRoom()))}px`;
     if (frame.style.height !== px) frame.style.height = px;
   }
 });
@@ -719,7 +721,7 @@ function render() {
   thread.replaceChildren(...(conv.messages.length ? conv.messages.map(messageView) : [emptyState()]));
   $("title").textContent = conv.title;
   $("export").hidden = !conv.messages.length;
-  document.title = conv.messages.length ? `${conv.title} · kiln` : "kiln";
+  document.title = conv.messages.length ? `${conv.title} · Chrysalis Inference` : "Chrysalis Inference";
   renderComposer();
   renderList();
   paintGhost();
@@ -1071,10 +1073,10 @@ function paint(v: View, m: Message, live?: Live) {
   v.foot.querySelector("[data-act=tokens]")?.classList.toggle("on", asTokens);
 }
 
-// A new chat: the flame, nothing else.
+// A new chat: the logo, nothing else.
 function emptyState() {
   const e = h("div", "empty");
-  e.innerHTML = `<svg class="flame" viewBox="0 0 24 24" aria-hidden="true">${ICONS.flame}</svg>`;
+  e.innerHTML = `<img class="logo" src="${logo}" alt="">`;
   return e;
 }
 
@@ -1210,23 +1212,23 @@ function renderList() {
   }
 }
 
-// The model picker: what kiln has loaded (or is loading); while kiln is stopped, what Load will start.
+// The model picker: what Chrysalis has loaded (or is loading); while Chrysalis is stopped, what Load will start.
 let picked = pref("model", MODELS[0][0]);
 const current = () => status.loading ?? (status.state === "online" ? status.model : undefined) ?? picked;
 
 async function start() {
-  await fetch("/api/kiln/start", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ model: picked }) });
+  await fetch("/api/chrysalis/start", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ model: picked }) });
 }
 
 async function pickModel(model: string) {
   picked = model;
   setPref("model", model);
   if (status.state !== "online" || status.model === model) return renderStatus();
-  status = { ...status, loading: model, progress: undefined };   // shown at once; the page polls while kiln switches
+  status = { ...status, loading: model, progress: undefined };   // shown at once; the page polls while Chrysalis switches
   renderStatus();
   if (!conv.messages.length) render();
   try {
-    const r = await fetch("/api/kiln/load", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ model }) });
+    const r = await fetch("/api/chrysalis/load", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ model }) });
     if (!r.ok) console.warn("model switch failed:", await r.text());
   } finally {
     await refreshStatus();
@@ -1243,7 +1245,7 @@ async function refreshStatus() {
   try { status = await (await fetch("/api/status")).json(); } catch { status = { state: "offline" }; }
   build ||= status.build ?? "";
   if (status.state === "online" && status.model && !status.loading && status.model !== picked) {
-    picked = status.model;                         // the picker follows kiln (another client may have switched it)
+    picked = status.model;                         // the picker follows Chrysalis (another client may have switched it)
     setPref("model", picked);
   }
   if (current() !== was && !conv.messages.length) render();
@@ -1269,11 +1271,12 @@ function save(c: Conversation) {
   renderList();
 }
 
-// The request body for a reply after the messages `upto`. Assistant turns go back exactly as kiln sent them, tool
-// rounds and all (wire.ts): kiln then replays its own tokens and every turn is a cache hit (only the new message is
-// read). The reply's tokens come with their odds (log probs, five alternatives each) for the token view. effort: the
+// The request body for a reply after the messages `upto`. Assistant turns go back exactly as Chrysalis sent them, tool
+// rounds and all (wire.ts): Chrysalis then replays its own tokens and every turn is a cache hit (only the new message
+// is read). The reply's tokens come with their odds (log probs, five alternatives each) for the token view. effort: the
 // thinking setting (the chat's by default); sampling: whose values (by default the effort's mode). With tools on,
-// kiln_web tells the web server which to offer (it runs them: server.ts); loop: false offers them without running any.
+// chrysalis_web tells the web server which to offer (it runs them: server.ts); loop: false offers them without running
+// any.
 function request(c: Conversation, upto: Message[], o: { effort?: Effort; sampling?: Mode; final?: object; extra?: Record<string, unknown>; loop?: boolean; route?: boolean } = {}) {
   const effort = o.effort ?? c.effort, mode: Mode = effort === "off" ? "fast" : "think";
   const messages: object[] = upto.flatMap(wire), system = systemFor(c);
@@ -1285,14 +1288,15 @@ function request(c: Conversation, upto: Message[], o: { effort?: Effort; samplin
   return {
     model: effort === "off" ? `${current()}-fast` : current(), reasoning_effort: effort === "off" ? undefined : effort,
     ...samplerFields(o.sampling ?? mode), max_tokens: settings.max_tokens, seed: settings.seed, logprobs: true, top_logprobs: 5,
-    messages, stream: true, stream_options: { include_usage: true }, ...(web ? { kiln_web: web } : {}), ...o.extra,
+    messages, stream: true, stream_options: { include_usage: true }, ...(web ? { chrysalis_web: web } : {}), ...o.extra,
   };
 }
 const ran = (c: Call) => c.result !== undefined;
-// The end of a reply talked over, as kiln is sent it: kept as it was heard, cut mid-sentence, it taught the model to
-// stop so itself (an essay asked for next came back as a sentence or two in 6 of 6 tries; with this, whole in 5 of 6).
+// The end of a reply talked over, as Chrysalis is sent it: kept as it was heard, cut mid-sentence, it taught the model
+// to stop so itself (an essay asked for next came back as a sentence or two in 6 of 6 tries; with this, whole in 5 of
+// 6).
 const TALKED_OVER = " — [cut off: the user talked over this reply]";
-// A message as kiln is sent it: a question as its files and text; a reply as each round's turn with the calls that
+// A message as Chrysalis is sent it: a question as its files and text; a reply as each round's turn with the calls that
 // ran and their results, then its last text (none when it ended in calls). Calls that never ran are left out.
 function wire(m: Message): object[] {
   if (m.role === "user") return [{ role: "user", content: userContent(m) }];
@@ -1331,7 +1335,7 @@ async function ensureOnline(run: { stopping: boolean }) {
   if (status.state === "offline") await start();
   for (const deadline = Date.now() + 180_000; status.state !== "online" || status.loading; await refreshStatus()) {
     if (run.stopping) throw new DOMException("stopped", "AbortError");
-    if (Date.now() > deadline) throw new Error("kiln did not start: see `kiln logs`");
+    if (Date.now() > deadline) throw new Error("Chrysalis did not start: see `chrysalis logs`");
     await sleep(100);
   }
 }
@@ -1346,10 +1350,10 @@ async function generate(c: Conversation = conv, at = c.messages.length) {
   await startRun(c, m, () => request(c, upto));
 }
 
-// Writes on from the end of the last reply, or (pick) from one of its tokens replaced by an alternative. kiln is
-// given the reply as it generated it (kiln_original), finds the exact tokens to keep and serves them from its cache;
-// it restates the reply as it now stands before the new text. A reply that ended in tool calls (stopped, or at the
-// rounds' limit) carries on from their results instead, in a new round. Both write into the same reply: it grows,
+// Writes on from the end of the last reply, or (pick) from one of its tokens replaced by an alternative. Chrysalis is
+// given the reply as it generated it (chrysalis_original), finds the exact tokens to keep and serves them from its
+// cache; it restates the reply as it now stands before the new text. A reply that ended in tool calls (stopped, or at
+// the rounds' limit) carries on from their results instead, in a new round. Both write into the same reply: it grows,
 // it is not another version (a picked token's rewrite is: pickToken).
 function continueReply(m: Message, pick?: { ch: "reasoning" | "content"; i: number; alt: Alt; before: string }) {
   const c = conv, at = c.messages.indexOf(m);
@@ -1369,7 +1373,7 @@ function continueReply(m: Message, pick?: { ch: "reasoning" | "content"; i: numb
   }
   const original = { role: "assistant", content: m.content, reasoning_content: m.reasoning ?? "" };
   const final = !pick ? original : pick.ch === "content" ? { ...original, content: pick.before } : { role: "assistant", content: "", reasoning_content: pick.before };
-  const extra = pick ? { continue_final_message: true, kiln_original: original, kiln_append_token: pick.alt.id } : { continue_final_message: true };
+  const extra = pick ? { continue_final_message: true, chrysalis_original: original, chrysalis_append_token: pick.alt.id } : { continue_final_message: true };
   const upto = [...c.messages.slice(0, at), { ...m, content: "", reasoning: "", calls: undefined }];   // with the reply's earlier rounds
   void startRun(c, m, () => request(c, upto, { effort, final, extra }),
     pick && { t: pick.alt.t, p: pick.alt.p, alts: tokens.get(m.id!)?.[pick.ch][pick.i]?.alts ?? [] });
@@ -1398,7 +1402,7 @@ async function startRun(c: Conversation, m: Message, body: () => object, pick?: 
     await filesReady(c.messages);
     const res = await fetch("/api/chat", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body()) });
     if (!res.ok || !res.body) throw new Error((await res.json().catch(() => null))?.error?.message ?? `HTTP ${res.status}`);
-    m.job = res.headers.get("X-Kiln-Job") ?? undefined;
+    m.job = res.headers.get("X-Chrysalis-Job") ?? undefined;
     save(c);                                       // a reload finds the reply and follows it again
     if (run.stopping) stopRun(run, true);
     await stream(run, res.body);
@@ -1458,9 +1462,9 @@ function take(run: Run, ev: any) {
   const { m, live } = run, choice = ev.choices?.[0], d = choice?.delta ?? {}, now = performance.now(), v = views.get(m);
   if (ev.error) m.error = ev.error.message;
   if (choice?.finish_reason) m.finish = choice.finish_reason;
-  if (d.kiln_prefix) {                             // a continued reply as it now stands
-    m.reasoning = d.kiln_prefix.reasoning_content ?? "";
-    m.content = d.kiln_prefix.content ?? "";
+  if (d.chrysalis_prefix) {                             // a continued reply as it now stands
+    m.reasoning = d.chrysalis_prefix.reasoning_content ?? "";
+    m.content = d.chrysalis_prefix.content ?? "";
     keepTokens(m, run.pick);
     if (v) v.tok = undefined;
   }
@@ -1480,7 +1484,8 @@ function take(run: Run, ev: any) {
     run.last = ev.usage;
   }
   if (ev.seed !== undefined) run.seed ??= ev.seed;
-  // tool calls as kiln streams them (by index, their arguments possibly in pieces), the same way server.ts adds them up
+  // tool calls as Chrysalis streams them (by index, their arguments possibly in pieces), the same way server.ts adds
+  // them up
   for (const c of d.tool_calls ?? []) {
     if (live.phase === "waiting") live.phase = "writing";
     const calls = (m.calls ??= []), at = (calls[c.index ?? calls.length] ??= { id: "", name: "", args: "" });
@@ -1497,7 +1502,7 @@ function take(run: Run, ev: any) {
       deciding.delete(c.id);
     }
   }
-  if (ev.round) {                                  // the calls' results are in: kiln reads them in a new round
+  if (ev.round) {                                  // the calls' results are in: Chrysalis reads them in a new round
     m.rounds = [...(m.rounds ?? []), { content: m.content, ...(m.reasoning ? { reasoning: m.reasoning } : {}), calls: m.calls ?? [] }];
     m.content = m.reasoning = "";
     m.calls = undefined;
@@ -1528,8 +1533,8 @@ function take(run: Run, ev: any) {
   schedule(run);
 }
 
-// After kiln restates a continued reply: keep the tokens it still starts with; the rest (a picked alternative) stands
-// in as one token.
+// After Chrysalis restates a continued reply: keep the tokens it still starts with; the rest (a picked alternative)
+// stands in as one token.
 function keepTokens(m: Message, pick?: Tok) {
   const td = m.id && tokens.get(m.id);
   if (!td) return;
@@ -1609,14 +1614,15 @@ function finish(run: Run) {
   if (!c.named && !m.error) void name(c);
 }
 
-// Stop: kiln stops and the reply ends with what it has. (Without a job yet, generate() sends this once it has one.)
+// Stop: Chrysalis stops and the reply ends with what it has. (Without a job yet, generate() sends this once it has
+// one.)
 function stopRun(run: Run, now = false) {
   if (run.stopping && !now) return;
   run.stopping = true;
   if (run.m.job) void fetch(`/api/chat/${run.m.job}/stop`, { method: "POST" }).catch(() => {});
 }
 
-// Titles come from the -fast model with a title-generator prompt, which kiln runs as a low-priority request.
+// Titles come from the -fast model with a title-generator prompt, which Chrysalis runs as a low-priority request.
 async function name(c: Conversation) {
   c.named = true;
   try {
@@ -1753,7 +1759,7 @@ async function openVoice() {
   // http://<this machine's address> is not a secure page, and there the browser has no microphone to give at all
   if (!navigator.mediaDevices?.getUserMedia) {
     voice.error = isSecureContext ? "This browser gives no page a microphone"
-      : `The microphone needs a secure page: open https://${location.host} (after kiln start --lan)`;
+      : `The microphone needs a secure page: open https://${location.host} (after chrysalis start --lan)`;
     return renderVoice();
   }
   void warmVoice(voice);
@@ -1782,20 +1788,20 @@ function closeVoice() {
 }
 
 // What a check found for a transcript, and the turn of the check conversation that asked it (kept once the question
-// it checked stands, so the next check is an append to kiln's cache).
+// it checked stands, so the next check is an append to Chrysalis's cache).
 interface Heard { text: string; fixes: Fix[]; tool: boolean; asked?: { role: string; content: string }[] }
 // The checks of the question being said, by transcript: its words as they settle, a pause's, its turn's (each asked
 // once); settled: the newest words speech recognition settled.
 interface Asking { checks: Map<string, Promise<Heard>>; done: Map<string, Heard>; busy?: string; settled?: string }
 const asking = (): Asking => ({ checks: new Map(), done: new Map() });
 // A voice reply begun before its question stands: at a pause (the turn may yet go on), or at the turn while the turn's
-// own check is out. kiln writes it (its tools held: server.ts, HELD_MS) and the service speaks it into the client's
-// hold, so once the turn ended with its words and the check found what it was sent with, it shows and sounds at once.
-// Otherwise it is dropped, and begun again on the question as checked.
+// own check is out. Chrysalis writes it (its tools held: server.ts, HELD_MS) and the service speaks it into the
+// client's hold, so once the turn ended with its words and the check found what it was sent with, it shows and sounds
+// at once. Otherwise it is dropped, and begun again on the question as checked.
 interface Ahead {
   text: string;                                     // the transcript it answers
   q: Message;                                       // its question (in the chat from the turn on)
-  sent: string; tool: boolean;                      // the question's words as sent (the fixes known then made), and kiln_voice.tool
+  sent: string; tool: boolean;                      // the question's words as sent (the fixes known then made), and chrysalis_voice.tool
   said?: Message;                                   // the question in the chat, once the turn ended with these words
   check?: Heard;                                    // the check of exactly `text`
   run: Run; reply: VoiceReply; ended: boolean; live: boolean;
@@ -1837,8 +1843,9 @@ function knownFor(v: VoiceMode, text: string): Heard | undefined {
 }
 // The words as speech recognition settles them, checked as they come (one check at a time, the newest words next): they
 // show fixed while the user is still talking, and the turn's own, settled as the speech stops, are checked before the
-// turn ends. Only settled ones: a check of each look's words (every 0.3 s of speech) kept kiln busy beside the reply
-// and its slots turning over, so a new chat's reply read its whole prompt again (Flash-Next: 1.1 s to its first token).
+// turn ends. Only settled ones: a check of each look's words (every 0.3 s of speech) kept Chrysalis busy beside the
+// reply and its slots turning over, so a new chat's reply read its whole prompt again (Flash-Next: 1.1 s to its first
+// token).
 function checkSaying(v: VoiceMode) {
   const mine = v.asking, text = mine.settled && questionFor(v, mine.settled).text;
   if (mine.busy || !text || mine.checks.has(text)) return;
@@ -1873,9 +1880,9 @@ function startAhead(v: VoiceMode, text: string, on?: Message): Ahead {
     try {
       await filesReady(upto);
       const res = await fetch("/api/chat", { method: "POST", headers: { "Content-Type": "application/json" },
-        body: JSON.stringify(request(c, upto, { effort, route: true, extra: { kiln_voice: { tool, ahead: true } } })) });
+        body: JSON.stringify(request(c, upto, { effort, route: true, extra: { chrysalis_voice: { tool, ahead: true } } })) });
       if (!res.ok || !res.body) throw new Error((await res.json().catch(() => null))?.error?.message ?? `HTTP ${res.status}`);
-      m.job = res.headers.get("X-Kiln-Job") ?? undefined;
+      m.job = res.headers.get("X-Chrysalis-Job") ?? undefined;
       if (run.stopping) stopRun(run, true);
       else if (a.live) void fetch(`/api/chat/${m.job}/go`, { method: "POST" }).catch(() => {});
       await stream(run, res.body);
@@ -1980,7 +1987,8 @@ async function voiceTurn(v: VoiceMode, text: string) {
   standAhead(v, a);
 }
 
-// With kiln still starting (or loading another model), a turn waits for its check and then for kiln, as a reply does.
+// With Chrysalis still starting (or loading another model), a turn waits for its check and then for Chrysalis, as a
+// reply does.
 async function answerLater(v: VoiceMode, text: string, on?: Message) {
   const c = v.c, note = on ? undefined : noteFor(c, true);
   const said: Message = on ?? { role: "user", content: text, voice: true, ...(note ? { note } : {}) };
@@ -2010,18 +2018,20 @@ async function answerLater(v: VoiceMode, text: string, on?: Message) {
   const upto = [...c.messages];
   branch(c, c.messages.length, m);
   v.reply = { m, sent: 0, spoken: 0, audible: false };
-  await startRun(c, m, () => request(c, upto, { effort, route: true, extra: { kiln_voice: { tool: heard.tool } } }));
+  await startRun(c, m, () => request(c, upto, { effort, route: true, extra: { chrysalis_voice: { tool: heard.tool } } }));
 }
 
-// The chat as the next voice turn will send it, read by kiln while the user starts talking: the voice prompt replaces
-// the system prompt (an open chat's whole history is read again) and the first request after a while idle is slow
-// (Flash-Next: 1.7-3.3 s to the first token where 0.07-0.25 s warm), so the first turn would wait for both. One token,
-// through the same job path as a reply (tools and all, so the prompt is the turn's own), and nothing is kept of it.
+// The chat as the next voice turn will send it, read by Chrysalis while the user starts talking: the voice prompt
+// replaces the system prompt (an open chat's whole history is read again) and the first request after a while idle is
+// slow (Flash-Next: 1.7-3.3 s to the first token where 0.07-0.25 s warm), so the first turn would wait for both. One
+// token, through the same job path as a reply (tools and all, so the prompt is the turn's own), and nothing is kept of
+// it.
 async function warmVoice(v: VoiceMode) {
   const effort = v.c.effort;
   await ensureOnline({ stopping: false }).catch(() => {});
   if (voice !== v || running(v.c)) return;
-  // kiln wants a question to answer: a new chat's stands in for the one to come (its snapshot ends with the prompt)
+  // Chrysalis wants a question to answer: a new chat's stands in for the one to come (its snapshot ends with the
+  // prompt)
   const upto: Message[] = v.c.messages.length ? [...v.c.messages] : [{ role: "user", content: "Hi" }];
   const body = { ...request(v.c, upto, { effort }), max_tokens: 1, logprobs: false, top_logprobs: undefined };
   const res = await fetch("/api/chat", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body) }).catch(() => null);
@@ -2343,7 +2353,7 @@ function renderVoicePop() {
 }
 
 // Picked with the clip, dropped anywhere on the page or pasted: shown as chips in the message box until it is sent,
-// then above the message (pictures as pictures). kiln is sent each file before the text that was typed.
+// then above the message (pictures as pictures). Chrysalis is sent each file before the text that was typed.
 let pending: Attachment[] = [];
 const bodies = new Map<string, string>();               // a file's text, or a picture's data URL, ready for requests
 const thumbs = new Map<string, Promise<string>>();      // a picture's object URL, for showing it
@@ -2414,7 +2424,7 @@ async function filesReady(msgs: Message[]) {
   }
 }
 
-// A user message as kiln gets it: its files (pictures as images, PDFs as files, videos as videos, texts as fenced
+// A user message as Chrysalis gets it: its files (pictures as images, PDFs as files, videos as videos, texts as fenced
 // blocks), then the text typed.
 function userContent(m: Message): string | object[] {
   const said = noted(m.note, m.content);
@@ -2433,7 +2443,7 @@ function userContent(m: Message): string | object[] {
 
 // Chats live and die with the tab; a file keeps one. Export writes the open chat (or all of them) as JSON, Import adds
 // chats from such files under new ids, so nothing already here is replaced. Token odds stay behind (this page only).
-interface ChatFile { kiln: "chats"; version: 1; exported: string; conversations: Conversation[]; files?: Record<string, string> }
+interface ChatFile { chrysalis: "chats"; version: 1; exported: string; conversations: Conversation[]; files?: Record<string, string> }
 
 function download(name: string, data: string, type: string) {
   const a = h("a");
@@ -2452,7 +2462,7 @@ async function exportChats(list: Conversation[], name: string) {
   }
   const bare = (ms: Message[]): Message[] => ms.map(({ job, base, versions, ...m }) =>
     (versions ? { ...m, versions: { shown: versions.shown, others: versions.others.map(bare) } } : m));
-  const file: ChatFile = { kiln: "chats", version: 1, exported: new Date().toISOString(),
+  const file: ChatFile = { chrysalis: "chats", version: 1, exported: new Date().toISOString(),
     conversations: list.map((c) => ({ ...structuredClone(c), messages: bare(structuredClone(c.messages)) })), files };
   download(name, JSON.stringify(file, null, 1), "application/json");
 }
@@ -2461,10 +2471,11 @@ const blobOf = (url: string) => {                       // a data URL's bytes (f
   const [head, b64] = url.split(",", 2), bytes = Uint8Array.from(atob(b64), (ch) => ch.charCodeAt(0));
   return new Blob([bytes], { type: head.slice(5).split(";")[0] });
 };
-const fileName = (title: string) => `${title.replace(/[^\p{L}\p{N}]+/gu, "-").replace(/^-+|-+$/g, "").slice(0, 60) || "chat"}.kiln.json`;
+const fileName = (title: string) => `${title.replace(/[^\p{L}\p{N}]+/gu, "-").replace(/^-+|-+$/g, "").slice(0, 60) || "chat"}.chrysalis.json`;
 
-// One chat from a file, or null if it is not one: roles and text only where kiln expects them, tool rounds with their
-// calls as kiln wrote them, versions as the tree they were. Files from before versions and tools have neither.
+// One chat from a file, or null if it is not one: roles and text only where Chrysalis expects them, tool rounds with
+// their calls as Chrysalis wrote them, versions as the tree they were. Files from before versions and tools have
+// neither.
 const isCall = (c: any) => typeof c?.id === "string" && typeof c.name === "string" && typeof c.args === "string" && (c.result === undefined || typeof c.result === "string");
 const isRound = (r: any) => typeof r?.content === "string" && (r.reasoning === undefined || typeof r.reasoning === "string") && Array.isArray(r.calls) && r.calls.every(isCall);
 function importedMessages(list: unknown, depth = 0): Message[] | null {
@@ -2506,20 +2517,21 @@ async function importFiles(files: FileList) {
       const data = JSON.parse(await f.text());
       for (const [id, body] of Object.entries(data?.files ?? {}))
         if (typeof body === "string") await putFile(id, body.startsWith("data:image/") ? blobOf(body) : body);
-      const list = (data?.kiln === "chats" && Array.isArray(data.conversations) ? data.conversations : [data]).map(importedChat);
+      const list = (data?.chrysalis === "chats" && Array.isArray(data.conversations) ? data.conversations : [data]).map(importedChat);
       bad += list.filter((c: Conversation | null) => !c).length;
       added = added.concat(list.filter(Boolean));
     } catch { bad++; }
   }
   for (const c of added) save(c);
   if (added.length) openConversation(added.at(-1)!.id);
-  toast(added.length ? `Imported ${added.length} chat${added.length > 1 ? "s" : ""}${bad ? ` (${bad} not a kiln chat)` : ""}`
-    : "Nothing to import: not a chat exported from kiln");
+  toast(added.length ? `Imported ${added.length} chat${added.length > 1 ? "s" : ""}${bad ? ` (${bad} not a Chrysalis chat)` : ""}`
+    : "Nothing to import: not a chat exported from Chrysalis");
 }
 
-// kiln writes the message the user would likely send next, into the composer to edit and send. It is asked as the
+// Chrysalis writes the message the user would likely send next, into the composer to edit and send. It is asked as the
 // assistant (Qwen will not write a user turn: at one it just ends it), without thinking, from the conversation
-// kiln has cached, which it leaves as it was (kiln_aside). Text already in the composer is how the draft begins.
+// Chrysalis has cached, which it leaves as it was (chrysalis_aside). Text already in the composer is how the draft
+// begins.
 let drafting: { job?: string; stop: boolean } | null = null;
 
 async function draft() {
@@ -2534,7 +2546,7 @@ async function draft() {
   try { await filesReady(c.messages); } catch (e) { drafting = null; return toast(`The draft failed: ${e instanceof Error ? e.message : e}`); }
   const body = request(c, c.messages, {
     sampling: "fast", final: begin.trim() ? { role: "assistant", content: begin } : undefined, loop: false,
-    extra: { kiln_aside: true, max_tokens: 400, logprobs: false, seed: undefined, ...(begin.trim() ? { continue_final_message: true } : {}) },
+    extra: { chrysalis_aside: true, max_tokens: 400, logprobs: false, seed: undefined, ...(begin.trim() ? { continue_final_message: true } : {}) },
   });
   (body.messages as object[]).splice(begin.trim() ? -1 : body.messages.length, 0, { role: "user", content: DRAFT_PROMPT });
   input.readOnly = true;
@@ -2542,14 +2554,14 @@ async function draft() {
   try {
     const res = await fetch("/api/chat", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body) });
     if (!res.ok || !res.body) throw new Error((await res.json().catch(() => null))?.error?.message ?? `HTTP ${res.status}`);
-    d.job = res.headers.get("X-Kiln-Job") ?? undefined;
+    d.job = res.headers.get("X-Chrysalis-Job") ?? undefined;
     if (d.stop && d.job) void fetch(`/api/chat/${d.job}/stop`, { method: "POST" }).catch(() => {});
     let text = begin;
     for await (const ev of events(res.body)) {
       if (ev === DONE) break;
       if (ev.error) throw new Error(ev.error.message);
       const delta = ev.choices?.[0]?.delta ?? {};
-      if (delta.kiln_prefix) text = delta.kiln_prefix.content ?? text;
+      if (delta.chrysalis_prefix) text = delta.chrysalis_prefix.content ?? text;
       if (delta.content) text += delta.content;
       input.value = text;
       grow();
@@ -2768,7 +2780,7 @@ $("new-chat").addEventListener("click", newChat);
 $("export").addEventListener("click", () => void exportChats([conv], fileName(conv.title)));
 $("export-all").addEventListener("click", () => {
   const all = Object.values(chats).sort((a, b) => b.updated - a.updated);
-  if (all.length) void exportChats(all, `kiln-chats-${new Date().toISOString().slice(0, 10)}.json`);
+  if (all.length) void exportChats(all, `chrysalis-chats-${new Date().toISOString().slice(0, 10)}.json`);
   else toast("No chats to export yet");
 });
 $("attach").addEventListener("click", () => $("attach-file").click());
@@ -2962,7 +2974,7 @@ function buildControls() {
   });
   $("model-btn").addEventListener("click", () => setModelsOpen(!modelsOpen));
   $("power").addEventListener("click", async () => {
-    if (status.state === "online") await fetch("/api/kiln/stop", { method: "POST" });
+    if (status.state === "online") await fetch("/api/chrysalis/stop", { method: "POST" });
     else await start();
     await refreshStatus();
   });
@@ -3166,8 +3178,8 @@ function renderTools() {
 // Settings' Tools: the config file's servers as they stand (what each runs or reaches, read-only), what Fetch URL
 // may reach, and the tools allowed to run without asking (a click makes one ask again).
 const STATE_WORD: Record<SourceInfo["state"], string> = { idle: "not started", connecting: "starting…", connected: "running", failed: "failed", disabled: "disabled" };
-// Each tool opens to its description as kiln is sent it: kiln's own for that tool where it has one (wire.ts), else its
-// server's. A description is what tells the model when to call the tool and when not.
+// Each tool opens to its description as Chrysalis is sent it: Chrysalis's own for that tool where it has one (wire.ts),
+// else its server's. A description is what tells the model when to call the tool and when not.
 function toolDescriptions(tools: ToolInfo[]): HTMLElement[] {
   return [...tools].sort((a, b) => (a.fn < b.fn ? -1 : 1)).map((t) => {
     const d = h("details", "ts-tool"), sum = h("summary");
@@ -3176,7 +3188,7 @@ function toolDescriptions(tools: ToolInfo[]): HTMLElement[] {
     d.append(sum, h("p", "ts-tool-desc", DESCRIPTIONS[t.name] ?? t.description));
     if (DESCRIPTIONS[t.name] && DESCRIPTIONS[t.name] !== t.description) {
       const own = h("p", "set-note");
-      own.append("kiln's description for it; the server's own: ", h("q", "", t.description));
+      own.append("Chrysalis's description for it; the server's own: ", h("q", "", t.description));
       d.append(own);
     }
     return d;
@@ -3286,7 +3298,7 @@ function renderControls() {
   btn.title = state === "online" ? `${name}: ready` : state === "loading" ? `Loading ${name}` : `${name}: stopped`;
   btn.setAttribute("aria-expanded", String(modelsOpen));
   btn.classList.toggle("open", modelsOpen);
-  // usage, in view: this chat's length against the context, and how full kiln's cache of conversations is
+  // usage, in view: this chat's length against the context, and how full Chrysalis's cache of conversations is
   const used = status.kv_tokens && status.cache ? 1 - status.cache.free_kv_tokens / status.kv_tokens : 0, ctx = fmtK(status.context ?? 262144);
   const s = conv.messages.findLast((m) => m.stats)?.stats, meter = $("meter");
   meter.textContent = [s ? `${fmtK(s.ctx ?? s.prompt + s.tokens)} / ${ctx} context` : state === "online" ? `${ctx} context` : "",
@@ -3322,7 +3334,7 @@ function renderControls() {
 }
 
 // A panel beside the chat (it opens without moving the chat when there is room). Every change applies to the next
-// reply and can be undone; each value shows what kiln is sent, marked where it differs from the recommended one.
+// reply and can be undone; each value shows what Chrysalis is sent, marked where it differs from the recommended one.
 
 const modeOf = (c: Conversation): Mode => (c.effort === "off" ? "fast" : "think");
 let chatMode: Mode | undefined;                     // the Think setting Settings last showed
@@ -3384,9 +3396,9 @@ function useSeed(seed: number) {
   toast(`Seed ${seed} is fixed for the next replies`, () => { settings.seed = before; saveSettings(); });
 }
 
-// Two real moments of Qwen3.8-Flash-Next run through kiln's sampler (make_dist in engine/sampler.h) with the settings
-// as they stand: the first name of a reply (what the stages do) and the next name of a list that has started to repeat
-// itself (what presence and DRY do). Each sits above the values it shows.
+// Two real moments of Qwen3.8-Flash-Next run through Chrysalis's sampler (make_dist in engine/sampler.h) with the
+// settings as they stand: the first name of a reply (what the stages do) and the next name of a list that has started
+// to repeat itself (what presence and DRY do). Each sits above the values it shows.
 
 const FIRST: Cand[] = ODDS.map(([word, c], i) => ({ word, logit: Math.log(c), id: -1 - i }));
 const NEXT: Cand[] = LOOP.cands.map(([t, lp, id]) => ({ word: t.trim(), logit: lp, id }));
@@ -3768,14 +3780,14 @@ function buildSettings() {
   addEventListener("resize", measureScrollbar);
 }
 
-// What the model is sent: the open chat's next request as the web server builds it for kiln (/api/preview, the same
-// code as a reply's), so it is exactly that: the tools, which kiln's chat template writes first in the system turn, the
-// system prompt after them, then every message as sent, notes included. A file shows as what it is and its size, not
-// its data.
+// What the model is sent: the open chat's next request as the web server builds it for Chrysalis (/api/preview, the
+// same code as a reply's), so it is exactly that: the tools, which Chrysalis's chat template writes first in the system
+// turn, the system prompt after them, then every message as sent, notes included. A file shows as what it is and its
+// size, not its data.
 async function showSent() {
   const c = conv, said = voice?.c === c, effort = c.effort;
   await filesReady(c.messages);
-  const body = request(c, [...c.messages], { effort, ...(said ? { route: true, ...(effort === "off" ? { extra: { kiln_voice: true } } : {}) } : {}) });
+  const body = request(c, [...c.messages], { effort, ...(said ? { route: true, ...(effort === "off" ? { extra: { chrysalis_voice: true } } : {}) } : {}) });
   const res = await fetch("/api/preview", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body) }).catch(() => null);
   const sent = res?.ok ? (await res.json()).body : null;
   if (!sent) return toast("The web server did not answer");
@@ -3792,7 +3804,7 @@ async function showSent() {
   }
   const note = said ? noteFor(c, true) : undefined;
   if (note) lines.push("", "── your next question said aloud, after this note:", `[${note}]`);
-  $("sent-about").textContent = (sent.tools?.length ? "kiln's chat template writes the tools first in the system turn (\"# Tools … <tools> … </tools>\"), " +
+  $("sent-about").textContent = (sent.tools?.length ? "Chrysalis's chat template writes the tools first in the system turn (\"# Tools … <tools> … </tools>\"), " +
     "with how to call them, and the system prompt after them. " : "") + "Your next message goes after these." +
     (said ? " Each spoken question is first checked, in a conversation of its own beside this one, for what speech recognition misheard (and with tools whether one is needed): the question is sent fixed." : "");
   $("sent-text").textContent = lines.join("\n");
@@ -3853,7 +3865,6 @@ function syncSettings() {
 
 document.addEventListener("visibilitychange", () => { if (!document.hidden) void refreshStatus(); });
 
-$("brand-mark").innerHTML = `<svg class="flame" viewBox="0 0 24 24">${ICONS.flame}</svg>`;
 $("new-chat").innerHTML = `${icon("plus")}New chat`;
 $("export").innerHTML = icon("download");
 $("attach").innerHTML = icon("clip");

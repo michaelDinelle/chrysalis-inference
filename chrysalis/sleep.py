@@ -14,7 +14,7 @@ LOGIND = ["--system", "--dest", "org.freedesktop.login1", "--object-path", "/org
 
 
 def vram_used():
-    """Bytes in use on the amdgpu device with the most VRAM (kiln's), or None without one."""
+    """Bytes in use on the amdgpu device with the most VRAM (Chrysalis's), or None without one."""
     cards = [(int(open(f).read()), f.replace("_total", "_used")) for f in glob.glob("/sys/class/drm/card*/device/mem_info_vram_total")]
     return int(open(max(cards)[1]).read()) if cards else None
 
@@ -40,7 +40,7 @@ class SleepGuard:
 
     def start(self):
         if not (shutil.which("systemd-inhibit") and shutil.which("gdbus")):
-            print("kiln: no systemd-inhibit or gdbus: the GPU is not freed before the machine sleeps", file=self.log, flush=True)
+            print("chrysalis: no systemd-inhibit or gdbus: the GPU is not freed before the machine sleeps", file=self.log, flush=True)
             return False
         self.hold()
         mon = subprocess.Popen(["gdbus", "monitor", *LOGIND], stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, text=True)
@@ -48,7 +48,7 @@ class SleepGuard:
         return True
 
     def hold(self):
-        self.inhibit = subprocess.Popen(["systemd-inhibit", "--what=sleep", "--mode=delay", "--who=kiln",
+        self.inhibit = subprocess.Popen(["systemd-inhibit", "--what=sleep", "--mode=delay", "--who=Chrysalis Inference",
                                          "--why=Frees the GPU before the machine sleeps", "cat"],
                                         stdin=subprocess.PIPE, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
 

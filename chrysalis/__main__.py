@@ -1,4 +1,4 @@
-"""kiln command line: `python -m kiln serve` starts the OpenAI-compatible server."""
+"""Chrysalis command line: `python -m chrysalis serve` starts the OpenAI-compatible server."""
 import argparse
 import os
 
@@ -8,7 +8,7 @@ ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
 
 def main():
-    ap = argparse.ArgumentParser(prog="kiln", description="Qwen3.8 inference server for one RX 7900 XTX (27B and Flash-Next)")
+    ap = argparse.ArgumentParser(prog="chrysalis", description="Qwen3.8 inference server for one RX 7900 XTX (27B and Flash-Next)")
     sub = ap.add_subparsers(dest="cmd", required=True)
     s = sub.add_parser("serve", help="run the OpenAI-compatible server")
     s.add_argument("--use", default=DEFAULT, choices=list(MODELS), help="model to load first (requests can switch)")
@@ -24,7 +24,7 @@ def main():
     s.add_argument("--max-pixels", type=int, default=None,
                    help="the most pixels a picture is read at, fewer tokens for large ones (default: the official 16777216)")
     s.add_argument("--link-tries", type=int, default=4,
-                   help="restarts to have a PCIe link that came up slower than this machine's best trained again (kiln/link.py)")
+                   help="restarts to have a PCIe link that came up slower than this machine's best trained again (chrysalis/link.py)")
     a = ap.parse_args()
     if a.cmd == "serve":
         # Start what takes longest first: the GPU wakes and the weights load while the rest of Python starts up.

@@ -1,59 +1,60 @@
-# kiln
+# <img src="web/logo.svg" alt="" height="32"> Chrysalis Inference
 
 An inference engine written for exactly one model on exactly one GPU: **Qwen3.8-27B** on a
 **Radeon RX 7900 XTX** (gfx1100, 24 GB). It serves an OpenAI-compatible API (and Anthropic's and OpenAI's newer
 ones) built for coding agents such as OpenCode: full 262K context, prompt caching that makes every agent turn an
 append, MTP speculative decoding, and pictures (the model's vision tower, without giving up any of
 that VRAM; see [Pictures](#pictures)). A second engine runs **Qwen3.8-Flash-Next** (a 48-layer,
-512-expert MoE) split between the GPU and system RAM; requests pick the model and kiln switches
+512-expert MoE) split between the GPU and system RAM; requests pick the model and Chrysalis switches
 (see [Qwen3.8-Flash-Next](#qwen38-flash-next)).
 
-About 6,100 lines: C++/HIP kernels and model code in `engine/` (3,500), the Python server in `kiln/` (2,600).
+About 6,100 lines: C++/HIP kernels and model code in `engine/` (3,500), the Python server in `chrysalis/` (2,600).
 
 ## Use it
 
 ```sh
-./kiln.sh install        # once: systemd user services + ~/.local/bin/kiln (does not enable autostart)
+./chrysalis.sh install        # once: systemd user services + ~/.local/bin/chrysalis (does not enable autostart)
 
-kiln start               # loads the model (~1.5 s), starts the web chat, prints both URLs:
-                         #   API http://127.0.0.1:8080/v1, web chat http://127.0.0.1:8081
-kiln start --lan         # the same, also on the local network: prints its URLs and a QR code for phones
-kiln stop                # stops both and frees the GPU (also: restart, status)
-kiln logs                # one line per request: prompt/cached tokens, TTFT, tok/s, draft acceptance
+chrysalis start               # loads the model (~1.5 s), starts the web chat, prints both URLs:
+                              #   API http://127.0.0.1:8080/v1, web chat http://127.0.0.1:8081
+chrysalis start --lan         # the same, also on the local network: prints its URLs and a QR code for phones
+chrysalis stop                # stops both and frees the GPU (also: restart, status)
+chrysalis logs                # one line per request: prompt/cached tokens, TTFT, tok/s, draft acceptance
 ```
 
 `--lan` is for a trusted home network, without logins; the firewall has to let other devices in (TCP 8080-8081), and
-a plain `kiln start` or `kiln restart` goes back to this machine only. The API stays plain HTTP; the web chat is HTTPS
-on the network (`https://<address>:8081`) and plain HTTP on this machine (`http://127.0.0.1:8081`), as browsers give
-the microphone (voice mode) only to secure pages, which localhost is and `http://<address>` is not. Its certificate
-comes from an authority of this machine's own (`~/.config/kiln/tls`, made by `web/tls.ts`) whose name constraints let
-it vouch only for private addresses and local names: a device warns about the certificate until it trusts
-`https://<address>:8081/kiln-ca.crt` (macOS: open it, then Always Trust in Keychain Access; iOS: install the profile,
-then turn it on in Settings > General > About > Certificate Trust Settings), and trusting it trusts nothing else. A new
-address (another network) gets a new certificate at the next start, from the same authority. Either way both servers
-answer only requests addressed to an IP address or to this machine's name, which keeps web pages from other sites
-out (DNS rebinding). `systemctl --user enable kiln kiln-web` starts both at login. `kiln serve` runs the server in the
-foreground instead of as a service (it takes `--port`, `--draft`, `--use`, ...: `kiln serve -h`). Models:
-`qwen3.8-27b` (thinking, reasoning effort `xhigh` by default; OpenCode variants pick `medium`/`low`)
-and `qwen3.8-27b-fast` (no thinking; also used for session titles), and the same pair for
+a plain `chrysalis start` or `chrysalis restart` goes back to this machine only. The API stays plain HTTP; the web chat
+is HTTPS on the network (`https://<address>:8081`) and plain HTTP on this machine (`http://127.0.0.1:8081`), as browsers
+give the microphone (voice mode) only to secure pages, which localhost is and `http://<address>` is not. Its certificate
+comes from an authority of this machine's own (`~/.config/chrysalis/tls`, made by `web/tls.ts`) whose name constraints
+let it vouch only for private addresses and local names: a device warns about the certificate until it trusts
+`https://<address>:8081/chrysalis-ca.crt` (macOS: open it, then Always Trust in Keychain Access; iOS: install the
+profile, then turn it on in Settings > General > About > Certificate Trust Settings), and trusting it trusts nothing
+else. A new address (another network) gets a new certificate at the next start, from the same authority. Either way both
+servers answer only requests addressed to an IP address or to this machine's name, which keeps web pages from other
+sites out (DNS rebinding). `systemctl --user enable chrysalis chrysalis-web` starts both at login. `chrysalis serve`
+runs the server in the foreground instead of as a service (it takes `--port`, `--draft`, `--use`, ...:
+`chrysalis serve -h`). Models: `qwen3.8-27b` (thinking, reasoning effort `xhigh` by default; OpenCode variants pick
+`medium`/`low`) and `qwen3.8-27b-fast` (no thinking; also used for session titles), and the same pair for
 `qwen3.8-flash-next`. One model is on the GPU at a time: a request naming the other one switches
-(titles never do); `kiln status` says which is loaded (and the PCIe link, when it came up slow: see Notes). OpenCode
-reaches it as an OpenAI-compatible provider at `http://127.0.0.1:8080/v1`, set up in `~/.config/opencode/opencode.json`.
+(titles never do); `chrysalis status` says which is loaded (and the PCIe link, when it came up slow: see Notes).
+OpenCode reaches it as an OpenAI-compatible provider at `http://127.0.0.1:8080/v1`, set up in
+`~/.config/opencode/opencode.json`.
 
-`/metrics` on the API port is Prometheus's text format (`kiln/metrics.py`): counters of the replies by model and finish
-reason, their prompt, cached and written tokens, prefill and decode seconds and decode steps (tok/s and tokens per step
-are ratios of their rates), a time-to-first-token histogram, model loads and their seconds, error statuses; and gauges
-read at the scrape: the model loaded, replies being written, free KV tokens, snapshots, the PCIe link, and on
+`/metrics` on the API port is Prometheus's text format (`chrysalis/metrics.py`): counters of the replies by model and
+finish reason, their prompt, cached and written tokens, prefill and decode seconds and decode steps (tok/s and tokens
+per step are ratios of their rates), a time-to-first-token histogram, model loads and their seconds, error statuses; and
+gauges read at the scrape: the model loaded, replies being written, free KV tokens, snapshots, the PCIe link, and on
 Flash-Next the expert pool's decode picks (all, and in the pool) and the DMA rate.
 
 The same server also speaks Anthropic's Messages API (`/v1/messages`, with `count_tokens`; Claude Code with
 `ANTHROPIC_BASE_URL=http://127.0.0.1:8080`) and OpenAI's Responses API (`/v1/responses`; Codex), translated to the
-chat completions above (`kiln/apis.py`): text, pictures and PDFs, tool calls and results (`tool_choice`, `strict`),
+chat completions above (`chrysalis/apis.py`): text, pictures and PDFs, tool calls and results (`tool_choice`, `strict`),
 thinking (`thinking` blocks; `reasoning_text` items) and a budget as the reasoning effort and a hard limit, stop sequences,
 streaming. A PDF (a chat `file` part, Anthropic's `document` block, the Responses API's `input_file`) reaches the model as
 Anthropic's API gives it one: each page as its text and as a picture (1,024 pixels on the long side, ~800 tokens each;
-`kiln/documents.py`, poppler's pdftotext and pdftoppm), the pictures going where the text cannot stand in for them: to
-every page without a text layer (a scan, a drawing), up to 120 wherever they are, then to the first 20 of the others.
+`chrysalis/documents.py`, poppler's pdftotext and pdftoppm), the pictures going where the text cannot stand in for them:
+to every page without a text layer (a scan, a drawing), up to 120 wherever they are, then to the first 20 of the others.
 `page_pictures` on the file part (or the document block, or `input_file`) sets that 20, 0 for text alone; another file
 reaches the model as its text. A final assistant message is a
 prefill, as Anthropic's are. Only the client's own tools run: Anthropic's server tools and OpenAI's built-in ones are
@@ -61,7 +62,7 @@ refused. `previous_response_id` continues one of the last 256 responses (kept un
 
 ## Web UI
 
-`web/` is a small Bun app: `server.ts` serves the page, proxies kiln's API on the same origin and runs the tools
+`web/` is a small Bun app: `server.ts` serves the page, proxies Chrysalis's API on the same origin and runs the tools
 (`tools.ts`, with `tool-fetch.ts` and `tool-mcp.ts`); `app.ts` is plain TypeScript (marked, highlight.js, DOMPurify,
 KaTeX; Mermaid's own build loads with the first diagram). Conversations live in the tab's sessionStorage: a reload keeps
 them, closing the tab ends them, and nothing is stored on the server's disk. Export saves the open chat (Export all:
@@ -75,21 +76,22 @@ energy bar sets the thinking: Off (the no-thinking mode), Low, Medium or Max. It
 Max is molten, with a sweeping shine and rising sparks), and dragging takes a stop a third of the way to it. The model's
 name beside the send button opens the models; it is the only place a model is chosen. Beside it are the engine's state
 (a dot: ready, loading with its progress, or stopped), a power button (unload, or load) and the usage: this chat against
-the context, and how full kiln's cache of conversations is. Message actions keep fixed places (from the right: delete,
-edit, copy on every message, then a reply's token odds, regenerate and continue), so none moves between messages. Every
-message can be edited in place (Save; a reply's thinking too) or deleted (with Undo). A conversation is a tree: sending
-an edited question (Send, Ctrl+Enter), regenerating any reply, or picking another token makes a new version beside the
-old one, and "‹ 2 / 3 ›" under a message with versions (buttons, keyboard too) switches between them, each with all that
-followed it. Deleting a message that has versions deletes that version. Only the path on screen goes to kiln, so
-switching back is a cache hit. A reply being written goes on in its version while another is shown, and shows where it
-got to when its version is back; a chat writes one reply at a time. The last reply can be continued (Continue is spelled
-out when the reply was cut short); it grows in place. Token odds shows a reply as its tokens, tinted by how unsure the
-model was of each; a click on one lists what else it could have written there, and picking one rewrites the reply from
-that token on. The wand in the message box drafts the user's next message (or finishes the one being typed) to edit and
-send: kiln is asked, as the assistant and without thinking, to write it (Qwen will not write a user turn: at one it ends
-it). Settings (Ctrl+,) sits beside the chat: with room it opens without moving the conversation, otherwise it slides the
-column over (never re-wrapping it) or, in narrow windows, slides over it. Every change applies from the next reply and
-can be undone, for every conversation in the tab (kept with them). It shows exactly what kiln is sent:
+the context, and how full Chrysalis's cache of conversations is. Message actions keep fixed places (from the right:
+delete, edit, copy on every message, then a reply's token odds, regenerate and continue), so none moves between
+messages. Every message can be edited in place (Save; a reply's thinking too) or deleted (with Undo). A conversation is
+a tree: sending an edited question (Send, Ctrl+Enter), regenerating any reply, or picking another token makes a new
+version beside the old one, and "‹ 2 / 3 ›" under a message with versions (buttons, keyboard too) switches between them,
+each with all that followed it. Deleting a message that has versions deletes that version. Only the path on screen goes
+to Chrysalis, so switching back is a cache hit. A reply being written goes on in its version while another is shown, and
+shows where it got to when its version is back; a chat writes one reply at a time. The last reply can be continued
+(Continue is spelled out when the reply was cut short); it grows in place. Token odds shows a reply as its tokens,
+tinted by how unsure the model was of each; a click on one lists what else it could have written there, and picking one
+rewrites the reply from that token on. The wand in the message box drafts the user's next message (or finishes the one
+being typed) to edit and send: Chrysalis is asked, as the assistant and without thinking, to write it (Qwen will not
+write a user turn: at one it ends it). Settings (Ctrl+,) sits beside the chat: with room it opens without moving the
+conversation, otherwise it slides the column over (never re-wrapping it) or, in narrow windows, slides over it. Every
+change applies from the next reply and can be undone, for every conversation in the tab (kept with them). It shows
+exactly what Chrysalis is sent:
 - The system prompt, by default "There are no tools or files in this chat. Answer directly." It is an ordinary prompt:
   edit or delete it. Without it, Flash-Next with thinking off takes asks like "design a cute SVG" for a coding-agent
   task ("let me first explore the project structure", then calls to tools that do not exist), as the Q8_0 original does
@@ -100,13 +102,13 @@ can be undone, for every conversation in the tab (kept with them). It shows exac
   grip to reorder), one set with thinking and one without, starting from Qwen's recommended values. The thinking bar in
   the message box is the one switch: the panel shows (and edits) the set its level selects.
 - Repetition: presence penalty and DRY (with its allowed run and growth).
-Each group sits under a chart of real odds run through kiln's whole sampler with the settings as they stand. Sampling:
-Qwen naming a cat (the first word, 2,000 draws), a row per name with a bar for its odds now and a tick where the model
-had them; min-p is a line across the bars, and a cut name is struck through with the stage that cut it. Repetition: Qwen
-listing cat names after it started repeating itself ("…Luna, Milo, Shadow, Luna, Milo,", its next token's 64
-candidates): the reply line marks the names presence counts as used and the run DRY sees, and the rows show "Shadow"
-(91% from the model) pushed down, tagged used and repeats. Pointing at a row explains it in the line under the chart;
-explanations elsewhere are tooltips, so nothing in the panel changes size while it is used.
+Each group sits under a chart of real odds run through Chrysalis's whole sampler with the settings as they stand.
+Sampling: Qwen naming a cat (the first word, 2,000 draws), a row per name with a bar for its odds now and a tick where
+the model had them; min-p is a line across the bars, and a cut name is struck through with the stage that cut it.
+Repetition: Qwen listing cat names after it started repeating itself ("…Luna, Milo, Shadow, Luna, Milo,", its next
+token's 64 candidates): the reply line marks the names presence counts as used and the run DRY sees, and the rows show
+"Shadow" (91% from the model) pushed down, tagged used and repeats. Pointing at a row explains it in the line under the
+chart; explanations elsewhere are tooltips, so nothing in the panel changes size while it is used.
 - The reply's max length and the seed: random for every reply, or fixed. Clicking a reply's seed fixes it.
 - Tools: the config file's MCP servers as they stand (state, tools, the command or URL, read-only), Reload config, Fetch
   URL's page length, and the tools allowed to run without asking (a click makes one ask again).
@@ -115,8 +117,8 @@ holds the conversations (sending a message starts the model too). It and Setting
 toggle fixed in the window's top corner (left: conversations, Ctrl+B; right: Settings, Ctrl+,), which never moves. With
 room, a panel sits beside the chat, dragging its inner edge resizes it (a double click gives it its default width back;
 the chat keeps at least 640 px), and it stays as it was left, width and all; in a narrower window it slides over the
-chat and a click outside it or Esc closes it. Assistant turns go back to kiln exactly as received, so every turn of a
-conversation is a cache hit. While a reply streams the page follows it, until you scroll up (wheel, touch, keys or the
+chat and a click outside it or Esc closes it. Assistant turns go back to Chrysalis exactly as received, so every turn of
+a conversation is a cache hit. While a reply streams the page follows it, until you scroll up (wheel, touch, keys or the
 scrollbar); back at the end, or with the ↓ over the message box, it follows again, and it never scrolls up on its own. A
 figure being drawn is shown from its top, as large as what can be seen at once (the column's width or the visible
 height), and the page holds still while it draws. The thinking box follows its newest line the same way. Replies render
@@ -132,13 +134,13 @@ KaTeX; a `$` opens math only before a non-space and closes it only after one, no
 so prices and shell variables stay text. A ```html block holding a whole document runs as a page once it is written (a
 fragment when its Preview is clicked), in an iframe on `/sandbox` behind two walls, each enough alone: the iframe's
 sandbox (an opaque origin: no cookies, storage or chat) and that route's policy, which lets the page's own code run but
-nothing load or connect anywhere, kiln included. Tools: the wrench beside the thinking bar (with how many tools are on)
-opens them for this chat: Fetch URL, then each MCP server with its state (not started, starting, running, failed with
-the error and Retry, disabled), a switch for the whole server, and under its arrow one per tool, marked read-only or
-asks first. The choice is the chat's, kept with it (export too); a new chat starts from the last one. A server starts
+nothing load or connect anywhere, Chrysalis included. Tools: the wrench beside the thinking bar (with how many tools are
+on) opens them for this chat: Fetch URL, then each MCP server with its state (not started, starting, running, failed
+with the error and Retry, disabled), a switch for the whole server, and under its arrow one per tool, marked read-only
+or asks first. The choice is the chat's, kept with it (export too); a new chat starts from the last one. A server starts
 the first time a chat turns it on, keeps running, and after a failure starts again 1, 2, 4 ... 60 s later. The servers
-come from `~/.config/kiln/mcp.json` (`KILN_MCP_CONFIG` overrides the path), in Claude Desktop's and Claude Code's shape,
-so a config can be pasted:
+come from `~/.config/chrysalis/mcp.json` (`CHRYSALIS_MCP_CONFIG` overrides the path), in Claude Desktop's and Claude
+Code's shape, so a config can be pasted:
 ```json
 { "mcpServers": { "notes":  { "command": "npx", "args": ["-y", "@modelcontextprotocol/server-filesystem",
 "/home/me/notes"], "env": {}, "cwd": "/home/me" }, "remote": { "url": "https://example.com/mcp", "headers": {
@@ -164,65 +166,65 @@ can ask for (`start`; 20,000 characters at a time, Settings changes that). It re
 (loopback, private, link-local, shared, documentation, multicast, IPv6 unique-local and link-local, NAT64 and 6to4 of
 those), checked in the connection's own DNS lookup at every hop, so neither a redirect nor a name that answers
 differently the second time gets through; `"allowPrivate": true` (or a list of addresses and CIDR blocks) in the config
-file is the only way to allow them. The reply's tool loop runs in the web server: kiln's answer ends in calls, the
-server runs them (side by side), sends kiln the turn with its reasoning, the calls exactly as kiln wrote them and their
-results, and asks again, up to 24 rounds (then it stops and says so; Continue carries on). So a reply with tools goes on
-with the tab closed, and a page that comes back follows all of its rounds. A tool that is not read-only (MCP's
-`readOnlyHint`) asks first: the reply waits at the call, its card shows the arguments with Allow once, Always allow
-(that tool, from then on, in every chat of the tab) and Deny, and a denied call tells the model the user declined. A
-call to a tool the chat has not turned on gets an error result, not a crash. Stop ends a reply anywhere, a call too
+file is the only way to allow them. The reply's tool loop runs in the web server: Chrysalis's answer ends in calls, the
+server runs them (side by side), sends Chrysalis the turn with its reasoning, the calls exactly as Chrysalis wrote them
+and their results, and asks again, up to 24 rounds (then it stops and says so; Continue carries on). So a reply with
+tools goes on with the tab closed, and a page that comes back follows all of its rounds. A tool that is not read-only
+(MCP's `readOnlyHint`) asks first: the reply waits at the call, its card shows the arguments with Allow once, Always
+allow (that tool, from then on, in every chat of the tab) and Deny, and a denied call tells the model the user declined.
+A call to a tool the chat has not turned on gets an error result, not a crash. Stop ends a reply anywhere, a call too
 (MCP's cancellation reaches the server). Calls show where they happened among each round's thinking and text, as cards
 (the tool and its server, a line of its arguments, running with its time, asks to run, done in N s, failed, declined,
 stopped) that open to the arguments and the result (markdown through the same sanitizer; a long one folds). A reply's
 stats count its rounds as one: time to its first token, tokens over the time spent writing them (each round's first
 token to its last), prompts summed; the usage meter shows the context its last round left. Text files, pictures, PDFs
-and videos can be attached (the clip, a drop anywhere, a paste): kiln gets each file before the typed text, a text file
-as its name and a fenced block, a picture as an image, a PDF as a file (its pages as pictures and text) and a video as a
-video. Their contents live in the tab's IndexedDB (one screenshot is most of sessionStorage), and a closed tab's are
-deleted when a kiln page next loads. Development: `cd web && bun run dev` (hot reload), `bun run check`.
+and videos can be attached (the clip, a drop anywhere, a paste): Chrysalis gets each file before the typed text, a text
+file as its name and a fenced block, a picture as an image, a PDF as a file (its pages as pictures and text) and a video
+as a video. Their contents live in the tab's IndexedDB (one screenshot is most of sessionStorage), and a closed tab's
+are deleted when a Chrysalis page next loads. Development: `cd web && bun run dev` (hot reload), `bun run check`.
 
 ## Voice mode
 
 The wave beside Send talks with the chat's model. The message box stays (typing still works): its row gains a pill whose
-dots move with your voice and then kiln's (its mic mutes), the voice beside it opens the voices, and Send becomes ■,
-which ends voice mode; voice replies think as the chat's thinking bar says (Off speaks at once). Your words show in the
-chat as you say them, grey, and turn their own color as they are checked, with the misheard ones fixed and underlined
-(what was heard on hover); a pause ends your turn. The pill says it is listening once the microphone gives audio (a
-phone's took 2.9 s to open): from then on what you say is heard, while the speech models still load too. The reply is
-spoken as it is written, except code blocks and tables, which are shown and not read: its words turn from grey to their
-own color as they are said, timed within each piece of speech. Talking over it stops it. Both sides are ordinary
-messages (a question said aloud is marked so), and a reply talked over keeps what was heard of it, to the word it was
-on, which is also what the model is told it said, with a mark where it was cut off: kept as it was heard, cut
+dots move with your voice and then Chrysalis's (its mic mutes), the voice beside it opens the voices, and Send becomes
+■, which ends voice mode; voice replies think as the chat's thinking bar says (Off speaks at once). Your words show in
+the chat as you say them, grey, and turn their own color as they are checked, with the misheard ones fixed and
+underlined (what was heard on hover); a pause ends your turn. The pill says it is listening once the microphone gives
+audio (a phone's took 2.9 s to open): from then on what you say is heard, while the speech models still load too. The
+reply is spoken as it is written, except code blocks and tables, which are shown and not read: its words turn from grey
+to their own color as they are said, timed within each piece of speech. Talking over it stops it. Both sides are
+ordinary messages (a question said aloud is marked so), and a reply talked over keeps what was heard of it, to the word
+it was on, which is also what the model is told it said, with a mark where it was cut off: kept as it was heard, cut
 mid-sentence, it taught the model to stop so itself (an essay asked for next came back as a sentence or two).
 
 The model is told about voice mode in a note on the first question said aloud (again when the note changes; another on
 the first typed message after it), never in the system prompt, so voice mode does not make a chat read its history
 again. What is said is checked as it is said, by the same model in a conversation of its own beside the chat (one per
-voice session, so each check is an append to kiln's cache: ~0.3 s), at temperature 0: the check is given the words so
-far, the question before them and the start of the reply to it, and writes what speech recognition misheard (everyday
+voice session, so each check is an append to Chrysalis's cache: ~0.3 s), at temperature 0: the check is given the words
+so far, the question before them and the start of the reply to it, and writes what speech recognition misheard (everyday
 words too: what does not fit what the user asks), as swaps of the transcript's own words (`quinn three point eight
 twenty seven B => Qwen3.8-27B`; asked to repeat the whole message instead, Flash-Next dropped sentences), each made only
 if it sounds like what was heard (`web/heard.ts`: "tail" => "list" is a meaning, not a mishearing), then with tools
 whether answering needs one (`tool: yes`). The chat is sent the question fixed and nothing of the check, so the reply
 can neither speak nor copy it. The reply does not wait for its question to stand: it begins at the turn on the fixes
 known by then, beside the check of the turn's last words, and when the turn model hears more to come (a turn then waits
-up to 1.5 s of silence; 5 of 31 of the user's turns did), it begins at that pause on its words. kiln writes it and the
-service speaks it into the page's hold, its tools held by the server (`kiln_voice.ahead`, until `/go`): it is shown and
-heard once the turn ended with its words and the check found what it was sent with, and is otherwise dropped unheard
-(the user went on, or the check fixed more) and the question as it stands answered. Words said while a question is still
-being checked join it. A yes, or a user who asks for a search, gets a tool call held to the tools' grammar (~0.8 s on
-Flash-Next), after a spoken line the page writes ("Let me look that up."): a model with thinking off, told its reply is
-spoken, says "I'm searching for that now" and ends its turn often enough, and then copies that turn. A reply that
-announces a tool it did not call is made to call one; a reply that ran tools is kept when talked over, its results with
-it. What is said before the speech models have loaded (a first start: ~1.1 s) is kept and heard once they are in.
-Settings' "What the model is sent" shows a chat's next request as kiln gets it (built by the same code as a reply's: the
-tools as JSON, which kiln's template writes first in the system turn, every message with its note). It is a cascade, as
-Claude's voice mode is: speech-to-text, the model kiln already runs (so the reasoning costs no memory), text-to-speech,
-all on the CPU (no VRAM) in `voice/`, a Python service the web server starts with the first voice session and stops 60 s
-after the last (`KILN_VOICE_IDLE_MS`): closed, voice mode costs nothing. Open, it holds ~0.55 GB of RAM and 4 threads
-(`KILN_VOICE_THREADS`): at all 16 it took Flash-Next's decode from 95 to 3 tok/s, at 4 ~12%. `make voice` makes its venv
-(`data/voice-venv`) and fetches the default models into `data/voice/` (~320 MB); `tools/voice_setup.sh NAME...` fetches
-the others.
+up to 1.5 s of silence; 5 of 31 of the user's turns did), it begins at that pause on its words. Chrysalis writes it and
+the service speaks it into the page's hold, its tools held by the server (`chrysalis_voice.ahead`, until `/go`): it is
+shown and heard once the turn ended with its words and the check found what it was sent with, and is otherwise dropped
+unheard (the user went on, or the check fixed more) and the question as it stands answered. Words said while a question
+is still being checked join it. A yes, or a user who asks for a search, gets a tool call held to the tools' grammar
+(~0.8 s on Flash-Next), after a spoken line the page writes ("Let me look that up."): a model with thinking off, told
+its reply is spoken, says "I'm searching for that now" and ends its turn often enough, and then copies that turn. A
+reply that announces a tool it did not call is made to call one; a reply that ran tools is kept when talked over, its
+results with it. What is said before the speech models have loaded (a first start: ~1.1 s) is kept and heard once they
+are in. Settings' "What the model is sent" shows a chat's next request as Chrysalis gets it (built by the same code as a
+reply's: the tools as JSON, which Chrysalis's template writes first in the system turn, every message with its note). It
+is a cascade, as Claude's voice mode is: speech-to-text, the model Chrysalis already runs (so the reasoning costs no
+memory), text-to-speech, all on the CPU (no VRAM) in `voice/`, a Python service the web server starts with the first
+voice session and stops 60 s after the last (`CHRYSALIS_VOICE_IDLE_MS`): closed, voice mode costs nothing. Open, it
+holds ~0.55 GB of RAM and 4 threads (`CHRYSALIS_VOICE_THREADS`): at all 16 it took Flash-Next's decode from 95 to 3
+tok/s, at 4 ~12%. `make voice` makes its venv (`data/voice-venv`) and fetches the default models into `data/voice/`
+(~320 MB); `tools/voice_setup.sh NAME...` fetches the others.
 
 What runs is a stack of four parts, each behind one small interface in `voice/parts.py`: the VAD (Silero v6),
 speech-to-text (Parakeet 110M), the turn model (Smart Turn v3.2, its Whisper features in numpy) and text-to-speech
@@ -241,14 +243,14 @@ voices by language and gender, each with a play button for a sample; a pick appl
 keeps no preferences: it lists what it has and loads what a session asks for, so a session switches voices mid-call.
 
 The page and the service speak one protocol over a WebSocket (`/api/voice`, which the web server proxies as it is and
-refuses from any other origin: WebSockets skip CORS), so any other stack can stand in for this one (`KILN_VOICE_CMD`, a
-JSON argv of a program that prints `voice: ws://127.0.0.1:PORT`). The page sends 16 kHz int16 audio in 20 ms frames and
-`hello`/`config` (the stack, voice and speed), `say`/`say_end` (the reply's text as it streams), `cancel`, `playback`
-(whether the reply is audible), `context` (the conversation's text, for its names) and `preview`; the service sends
-`ready` (the stack, its catalog of models and voices), `speech`, `partial` (`settled` once speech recognition read the
-words at a pause), `pause` (the words so far, when the turn waits for more), `turn` (the transcript, and `wait_ms` from
-the end of speech), `interrupt`, `said` and audio pieces (a header with the piece's text, its range in the reply and its
-speech's length, then int16 PCM).
+refuses from any other origin: WebSockets skip CORS), so any other stack can stand in for this one
+(`CHRYSALIS_VOICE_CMD`, a JSON argv of a program that prints `voice: ws://127.0.0.1:PORT`). The page sends 16 kHz int16
+audio in 20 ms frames and `hello`/`config` (the stack, voice and speed), `say`/`say_end` (the reply's text as it
+streams), `cancel`, `playback` (whether the reply is audible), `context` (the conversation's text, for its names) and
+`preview`; the service sends `ready` (the stack, its catalog of models and voices), `speech`, `partial` (`settled` once
+speech recognition read the words at a pause), `pause` (the words so far, when the turn waits for more), `turn` (the
+transcript, and `wait_ms` from the end of speech), `interrupt`, `said` and audio pieces (a header with the piece's text,
+its range in the reply and its speech's length, then int16 PCM).
 
 How it behaves, and why:
 - A turn ends at 0.2 s of silence if Smart Turn says the sentence is finished, else at 1.5 s; the wait after speech is
@@ -267,14 +269,14 @@ How it behaves, and why:
   (headphones, or the browser's echo cancellation), the mic is taken not to carry it, and 0.26 s of speech over a
   reply stops it (~0.4 s). Echo cancellation lets a reply through now and then (a Mac's speakers): a leak puts it
   back on words only until 2 s of a reply play unheard again (~0.44 s after a leak, ~0.87 s when a leak was for good).
-- Opening voice mode has kiln read the chat with the voice prompt (one token): the prompt replaces the system prompt,
-  and Flash-Next's first request after a while idle took 1.7-3.3 s to its first token.
+- Opening voice mode has Chrysalis read the chat with the voice prompt (one token): the prompt replaces the system
+  prompt, and Flash-Next's first request after a while idle took 1.7-3.3 s to its first token.
 
-Time from the end of a spoken question to the reply's first sound, six questions kiln had not seen each (their
-subjects drawn anew each run: kiln answers a prompt it has seen from its cache), the last of which trails off ("... a
-fun fact about owls and"), so the turn model hears more to come and the turn waits out 1.5 s of silence
-(`web/bench-voice.ts`: headless Chromium's microphone plays a WAV through the real service and the running kiln; the
-page's own figure, then one from outside, the WAV's end of speech to the first audio buffer's start). Two runs each,
+Time from the end of a spoken question to the reply's first sound, six questions Chrysalis had not seen each (their
+subjects drawn anew each run: Chrysalis answers a prompt it has seen from its cache), the last of which trails off ("...
+a fun fact about owls and"), so the turn model hears more to come and the turn waits out 1.5 s of silence
+(`web/bench-voice.ts`: headless Chromium's microphone plays a WAV through the real service and the running Chrysalis;
+the page's own figure, then one from outside, the WAV's end of speech to the first audio buffer's start). Two runs each,
 alternating with the page and service as they were before replies began ahead (each reply waited for its check, and
 Kroko heard the speech):
 
@@ -285,13 +287,13 @@ Kroko heard the speech):
 
 Flash-Next's cold experts and the speech models share the CPU: its replies decode at 35-55 tok/s while speaking
 (95 alone) and Kokoro reads a piece ~1.4x slower. The service pinned to two cores of its own (`taskset` in
-`KILN_VOICE_CMD`) was no faster, 1.65 s and 1.42 s: kiln's eight cold-expert workers are not pinned and still run on
-those cores. For scale, Artificial Analysis measures Grok Voice 3.0 at 0.81 s
+`CHRYSALIS_VOICE_CMD`) was no faster, 1.65 s and 1.42 s: Chrysalis's eight cold-expert workers are not pinned and still
+run on those cores. For scale, Artificial Analysis measures Grok Voice 3.0 at 0.81 s
 (without saying whether that includes the end of the user's turn).
 
 ## Measured on this machine
 
-| | kiln | llama.cpp (same GGUF, ROCm 10.1) |
+| | Chrysalis | llama.cpp (same GGUF, ROCm 10.1) |
 |---|---|---|
 | Context | **262,144** tokens (KV pool holds 276K) | 262K needs 3-bit weights or 4-bit KV |
 | Decode, coding prompt, thinking, Qwen sampling | **100–114 tok/s** (MTP, 3 drafts) | 39.8 tok/s |
@@ -319,8 +321,8 @@ Quality:
   token), against 0.0111 (97.74%) for llama.cpp's own IQ4_XS recipe with the same imatrix (`tools/quality.sh`).
 - Pictures (`tools/test_vision.py`): the vision tower against transformers' own in fp32 with Qwen's weights, worst token
   cosine 0.9993, relative error 0.45-1.2% (transformers in bf16, as usually served: 0.947 and 7.3%). As the answers see
-  it: llama.cpp's next-token distributions after a photo, fed kiln's embeddings rather than the official ones, move by
-  a median KL of 5e-5, about what rounding the official ones to fp16 does (4e-5; bf16's: 4.5e-4). The language model
+  it: llama.cpp's next-token distributions after a photo, fed Chrysalis's embeddings rather than the official ones, move
+  by a median KL of 5e-5, about what rounding the official ones to fp16 does (4e-5; bf16's: 4.5e-4). The language model
   after a picture against llama.cpp fed the same embeddings: mean KL 0.001-0.0011 (two positions on a knife's edge
   left out: 0.1% noise on the embeddings moves llama.cpp itself as much there).
 
@@ -367,7 +369,7 @@ tool calls are not searched. `response_format` (`json_schema`, `json_object`; th
 answer to a JSON schema, and tool calls can be held to their tools' schemas (a tool marked `strict`, or `tool_choice`
 `"required"` or naming a tool; Anthropic's `any` and `tool`; `parallel_tool_calls`): the right tool, the parameters its
 schema names in its order (the required ones always), one of an enum's values, any other type as its JSON
-(`kiln/structured.py`: llguidance makes them grammars over the model's tokens). A strict call in a free answer is held from
+(`chrysalis/structured.py`: llguidance makes them grammars over the model's tokens). A strict call in a free answer is held from
 its `<tool_call>` on; with `tool_choice` (or a schema) the whole answer after the reasoning is (and the step ends at
 `</think>`). A held answer's steps verify drafts as free text's do, the tokens the grammar forces and then the MTP head's
 guesses, with each position's logits masked on the GPU to what the grammar allows there, so the rejection sampling stays
@@ -375,10 +377,10 @@ exact for the masked distribution: 2.6 tokens a step where one at a time it was 
 55), no logprobs. `thinking_budget` (also in `chat_template_kwargs`; Anthropic's `budget_tokens`, OpenRouter's
 `reasoning.max_tokens`) ends the reasoning at that many tokens with the words Qwen3's technical report closes it with
 ("Considering the limited time by the user, I have to give the solution based on the thinking directly now." and
-`</think>`), and the model answers from there. `continue_final_message` (as in vLLM) writes on from the end of a final assistant message: kiln uses the
-reply's own tokens when it generated it, restates the reply as it now stands (a `kiln_prefix` delta), and serves the
-prompt from its cache. With `kiln_original` (the reply as generated) the final message may be a cut of it, and
-`kiln_append_token` adds a token after the cut: that rewrites a reply from a token's alternative. `kiln_aside`
+`</think>`), and the model answers from there. `continue_final_message` (as in vLLM) writes on from the end of a final assistant message: Chrysalis uses the
+reply's own tokens when it generated it, restates the reply as it now stands (a `chrysalis_prefix` delta), and serves
+the prompt from its cache. With `chrysalis_original` (the reply as generated) the final message may be a cut of it, and
+`chrysalis_append_token` adds a token after the cut: that rewrites a reply from a token's alternative. `chrysalis_aside`
 answers without thinking while rendering the conversation as it is cached, and keeps that cache as it was (the web
 UI's drafts).
 
@@ -408,8 +410,8 @@ are written in fp32: rounded to fp16 as the other projections are, they shift ev
 compounds over a long prompt (llama.cpp KL on prefill 0.0050 -> 0.0035; after a picture 0.19 -> 0.06 at its most
 sensitive position).
 
-**Caching (TTFT)** — `kiln/chat.py` renders the chat template straight to token ids, byte-identical
-to the official template, and replays assistant turns kiln generated as their exact ids (looked up by
+**Caching (TTFT)** — `chrysalis/chat.py` renders the chat template straight to token ids, byte-identical
+to the official template, and replays assistant turns Chrysalis generated as their exact ids (looked up by
 their text, tool calls and reasoning, so two turns that said the same "OK" stay apart), so each agent step
 only prefills the new tool output. Snapshots (recurrent state in RAM, KV pages shared copy-on-write) at
 the end of the tool block, of the static system prompt (cut before OpenCode's date and environment
@@ -431,24 +433,24 @@ reminders are kept where they first appeared, and its compaction request (normal
 older part of the conversation) is answered by appending the summary request to the cached conversation,
 rendered with that conversation's own settings. Extra system messages from plugins are merged into the
 first one. Special-token text inside files stays text. A request that offers no tools never draws `<tool_call>`: a model can call
-only the tools it was given. `KILN_TRACE=1` adds each request's time split
+only the tools it was given. `CHRYSALIS_TRACE=1` adds each request's time split
 (cache lookup, prefill pieces, snapshots, first step) to its log line; `tools/bench_opencode.py` replays
 OpenCode 2.0.25's real requests (`tools/opencode2.json`) against a running server.
 
 ## Pictures
 
-OpenAI `image_url` parts (data URLs; kiln fetches nothing from the network) in user and tool messages. `kiln/vision.py`
-preprocesses as the official processor does: the picture resized so its sides are whole 32-pixel blocks and its area
-between 65,536 and 16,777,216 pixels (Pillow's antialiased bicubic: within 2 steps of 255 on under 1% of the pixels of
-transformers' torchvision resize, identical when no resize is needed), normalized to [-1, 1], cut into 16-pixel patches.
-It renders as `<|vision_start|>`, one image token per merged 2 x 2 patch block, `<|vision_end|>`; the tokens name the
-picture (`IMG_BASE + slot * IMG_ROWS + row`), a slot per picture by its content, so the prompt cache tells pictures
-apart and a conversation that resends its pictures is still a pure append. Positions are M-RoPE: a picture of r x c
-tokens starting at position p puts its token (i, j) at (p, p + i, p + j), and the text after it goes on from
-p + max(r, c); the attention prep turns each of the 32 frequency pairs with the position its section names (interleaved
-[11, 11, 10]), so for text nothing changes. A picture can be read at fewer pixels, for fewer tokens: `max_pixels` on the
-image part (as qwen-vl-utils takes it) or on the request, OpenAI's `detail: "low"` (512 x 512), never more than
-`kiln serve --max-pixels` lets the server read.
+OpenAI `image_url` parts (data URLs; Chrysalis fetches nothing from the network) in user and tool messages.
+`chrysalis/vision.py` preprocesses as the official processor does: the picture resized so its sides are whole 32-pixel
+blocks and its area between 65,536 and 16,777,216 pixels (Pillow's antialiased bicubic: within 2 steps of 255 on under
+1% of the pixels of transformers' torchvision resize, identical when no resize is needed), normalized to [-1, 1], cut
+into 16-pixel patches. It renders as `<|vision_start|>`, one image token per merged 2 x 2 patch block, `<|vision_end|>`;
+the tokens name the picture (`IMG_BASE + slot * IMG_ROWS + row`), a slot per picture by its content, so the prompt cache
+tells pictures apart and a conversation that resends its pictures is still a pure append. Positions are M-RoPE: a
+picture of r x c tokens starting at position p puts its token (i, j) at (p, p + i, p + j), and the text after it goes on
+from p + max(r, c); the attention prep turns each of the 32 frequency pairs with the position its section names
+(interleaved [11, 11, 10]), so for text nothing changes. A picture can be read at fewer pixels, for fewer tokens:
+`max_pixels` on the image part (as qwen-vl-utils takes it) or on the request, OpenAI's `detail: "low"` (512 x 512),
+never more than `chrysalis serve --max-pixels` lets the server read.
 
 Videos (`video_url` parts, as vLLM takes them; data URLs) are read as Qwen's own processor reads them: frames taken 2 a
 second (4 to 768; `fps` on the part), sized within 24,576 tokens for the whole video and at most 768 a frame pair
@@ -456,7 +458,7 @@ second (4 to 768; `fps` on the part), sized within 24,576 tokens for the whole v
 it reads a picture (it attends within a pair; the patch embedding takes the two frames with their own weights instead of
 summed ones). In the prompt each pair follows its time ("<1.5 seconds>") between markers of its own, and sits in M-RoPE
 as a picture would: transformers' Qwen3VLProcessor and Qwen3.5's get_rope_index, which `tools/test_vision.py` checks the
-frames, pixels, layout, positions and tower against. ffmpeg decodes the frames kiln takes.
+frames, pixels, layout, positions and tower against. ffmpeg decodes the frames Chrysalis takes.
 
 **The vision tower** (`engine/vision.hip`, transformers' `Qwen3_5VisionModel`): 27 ViT blocks (1152 wide, 16 heads of
 72, 2D rotary embedding), a learned 48 x 48 position table resampled to the picture's grid, and a merger to the language
@@ -475,7 +477,7 @@ prefill reads them over PCIe as it reads the token embeddings; 2 GB of them are 
 
 48 layers (36 gated delta net, 12 sparse "QSA" attention), hidden size 2560 widened to 4 hyper-connection
 streams, 512 experts per layer (10 routed + a shared one), a 54 GB n-gram embedding table read at layer 1,
-and an MTP block with its own 512 experts. kiln runs one layout, sized so the model fits next to a desktop
+and an MTP block with its own 512 experts. Chrysalis runs one layout, sized so the model fits next to a desktop
 on 64 GB of RAM with no swapping:
 
 - **GPU (20.2 GB):** dense weights Q6_K / Q8_0, the LM head Q6_K, the MTP block (its experts Q3_K), and a pool of
@@ -488,7 +490,7 @@ on 64 GB of RAM with no swapping:
   together so the cold ones are read in parallel, and the next token's while the current step finishes.
 
 Which experts sit in VRAM comes from routing statistics, blended: what the model picks while decoding in
-OpenCode-style agent sessions (0.6; counted on the GPU with `KILN_FN_DECODE_COUNTS=file`, 69K tokens of
+OpenCode-style agent sessions (0.6; counted on the GPU with `CHRYSALIS_FN_DECODE_COUNTS=file`, 69K tokens of
 `tools/agent_sim.py` sessions over a dozen coding tasks), what it picks while reading code (0.25,
 `tools_fn/route_stats.py`) and Unsloth's imatrix counts (0.15). Decode routing correlates little with
 either: tuned on code prefill alone, the VRAM tier caught 41-45% of decode picks; this one catches ~59% on
@@ -507,8 +509,8 @@ goes back to its RAM copy, or for the file's own tier, which has none, to the mo
 RAM use is unchanged. Once it has followed a reply the pool serves 93-95% of a story's picks and 78-85% of code's
 (code spreads wider: even each window's own 5,600 most used serve 83%). Where an expert is computed changes its result
 by rounding, so results depend on what the pool holds: checks that need bit-identical repeats hold it still
-(`kiln_tune` "experts" 0), and `tools_fn/compare_fn.py` checks every path against llama.cpp after the pool has moved
-both ways.
+(`chrysalis_tune` "experts" 0), and `tools_fn/compare_fn.py` checks every path against llama.cpp after the pool has
+moved both ways.
 
 **Decode.** Per layer the GPU routes (one fused router + top-10 kernel) and hands the cold picks over
 through pinned coherent memory: the CPU workers (one per physical core) compute most of them with AVX-512
@@ -548,7 +550,7 @@ split that kept following timing made the same prompt prefill to different logit
 is as fast (frozen at any point between 1.5x and 2x the CPU estimate, within 2% of the adapting split, and up to
 10% faster than its oscillation on long passes), so the split does not move results (the pool does, above).
 
-**Memory.** The model is sized to fit, so there is nothing to guard: kiln loads it and runs. Switching to
+**Memory.** The model is sized to fit, so there is nothing to guard: Chrysalis loads it and runs. Switching to
 the 27B frees all of it (no experts are kept in RAM), and switching back reads the file again: 7 s once the 27B has
 read 45 GB of it into the page cache (Notes), 17-19 s from the disk. Pages of the
 model file are dropped from the page cache once copied; an expert that leaves the pool for the file is read ahead
@@ -577,18 +579,18 @@ layers read the whole cache for every token.
 
 **Quality.** Mean KL divergence against the Q8_0 original on llama.cpp (`tools_fn/compare_fn.py`): 0.011-0.016,
 top-1 agreement 96-99%. A long text that is mostly code pasted into a user turn scores ~0.06: the model's
-predictions inside user turns are chaotic (two kiln runs that differ only in rounding disagree by 0.025 there).
+predictions inside user turns are chaotic (two Chrysalis runs that differ only in rounding disagree by 0.025 there).
 
 **Pictures** go through the same tower with Flash-Next's own weights, to its 2,560-wide embeddings, which are read
 again for each request with new pictures (~0.35 s; the n-gram table's pages need the RAM). Against transformers in
 fp32 its median token is at cosine 0.99999 and its relative error 0.8-2.9%, but the tower is chaotic at a few tokens:
-two of the photo's 300 come out at 0.89 and 0.93, and emulating kiln's arithmetic one fp16 rounding at a time shows any
-of them can move those that far (transformers' own bf16 takes one to 0.08). The answers do not follow: fed kiln's
-embeddings instead of the official ones, llama.cpp's next-token distributions move by a median KL of 0.003, about what
-rounding the official ones to fp16 does (0.0015). After a picture, kiln against llama.cpp (fed the same embeddings) is
-at a mean KL of 0.04 where the same conversation with a description in the picture's place is at 0.015: a picture
-makes this model's predictions about three times as sensitive (two kiln runs that differ only in rounding: 0.0075 and
-0.0025), and its requantized weights are a larger change than rounding.
+two of the photo's 300 come out at 0.89 and 0.93, and emulating Chrysalis's arithmetic one fp16 rounding at a time shows
+any of them can move those that far (transformers' own bf16 takes one to 0.08). The answers do not follow: fed
+Chrysalis's embeddings instead of the official ones, llama.cpp's next-token distributions move by a median KL of 0.003,
+about what rounding the official ones to fp16 does (0.0015). After a picture, Chrysalis against llama.cpp (fed the same
+embeddings) is at a mean KL of 0.04 where the same conversation with a description in the picture's place is at 0.015: a
+picture makes this model's predictions about three times as sensitive (two Chrysalis runs that differ only in rounding:
+0.0075 and 0.0025), and its requantized weights are a larger change than rounding.
 
 ## Layout
 
@@ -600,7 +602,8 @@ engine/   common.h kernels.h gguf.h      constants, kernel entry points, GGUF re
           model.cpp model.h api.cpp      weights, sequences, snapshots, forward, MTP, C API
           vision.hip vision.h            the vision tower (both engines)
           sampler.h                      the host sampler (both engines): penalties, DRY, ordered stages
-kiln/     engine.py chat.py cache.py server.py apis.py structured.py vision.py documents.py sleep.py link.py warm.py
+chrysalis/
+          engine.py chat.py cache.py server.py apis.py structured.py vision.py documents.py sleep.py link.py warm.py
           metrics.py __main__.py
 web/      server.ts app.ts files.ts sampler.ts wire.ts      Bun web UI; tools.ts tool-fetch.ts tool-mcp.ts its tools; tls.ts HTTPS (--lan)
           voice.ts voice-worklet.js                     voice mode's client: the microphone, playback, the protocol
@@ -616,21 +619,21 @@ tools/    tests (make test: test_quant, test_attn, test_gdn, test_sampler, test_
           OpenCode's real requests), agent_sim.py, lint_comments.py (make lint: the mechanical cases of AGENTS.md's comment rule)
 engine_fn/                               the Flash-Next engine (same C API): cpu_moe.cpp cpu_vnni.cpp for the
                                          experts in RAM, moe.hip routing, ple.hip n-gram block, ...
-tools_fn/ fn_quantize.py (builds kiln-fn.gguf), route_stats.py (routing counts for it), test_*_fn.cpp (make test_fn),
-          compare_fn.py (make test_fn_model, with test_snapshot / test_server on Flash-Next), bench_fn.py,
-          bench_dec_fn.cpp / bench_moeg_fn.cpp / bench_cpudec_fn.cpp / bench_cpujob_fn.cpp (decode / prefill MoE kernels /
-          the CPU's decode handoff / the CPU's prefill job alone)
+tools_fn/ fn_quantize.py (builds chrysalis-fn.gguf), route_stats.py (routing counts for it), test_*_fn.cpp
+          (make test_fn), compare_fn.py (make test_fn_model, with test_snapshot / test_server on Flash-Next),
+          bench_fn.py, bench_dec_fn.cpp / bench_moeg_fn.cpp / bench_cpudec_fn.cpp / bench_cpujob_fn.cpp (decode / prefill
+          MoE kernels / the CPU's decode handoff / the CPU's prefill job alone)
 data/     (not code) rocm/ venv/ models/ llama.cpp/ (quantization tools + reference only), ref-venv/ (torch and transformers on
           the CPU: the vision references, Whisper's features), voice-venv/ voice/ (the voice service's venv and models)
 ```
 
 ## Rebuilding
 
-`make` builds `build/libkiln.so` against the ROCm 10.1 tarball in `data/rocm`. `data/venv` is the server's Python:
+`make` builds `build/libchrysalis.so` against the ROCm 10.1 tarball in `data/rocm`. `data/venv` is the server's Python:
 numpy, tokenizers, Pillow and llguidance, and for the tests httpx, jsonschema, prometheus-client and the anthropic and openai
 SDKs. The model file was made from bartowski's Q8_0 with llama.cpp's quantizer:
 `llama-quantize --allow-requantize --imatrix Qwen3.8-27B-imatrix.gguf --tensor-type-file tools/quant-mix.txt
---output-tensor-type q6_k --token-embedding-type iq4_xs Qwen3.8-27B-Q8_0.gguf kiln-mix.gguf IQ4_XS`.
+--output-tensor-type q6_k --token-embedding-type iq4_xs Qwen3.8-27B-Q8_0.gguf chrysalis-mix.gguf IQ4_XS`.
 
 The vision tower is Unsloth's `mmproj-BF16.gguf` (unsloth/Qwen3.8-27B-GGUF) as
 `data/models/vision/mmproj-27b-bf16.gguf`; its tensors are bit-identical to Qwen's own (`model.visual.*` in the first of
@@ -640,10 +643,10 @@ the 18 safetensors shards, `data/models/vision/qwen3.8-27b-shard1.safetensors`, 
 its `config.json` as `flash-next-config.json`). `data/ref-venv` is a venv with CPU torch, torchvision, transformers, Pillow and
 safetensors.
 
-`make fn` builds `build/libkiln_fn.so`. Its model file comes from Unsloth's Q8_0 split (plus the MTP file and
-imatrix) via `python tools_fn/fn_quantize.py SRC_DIR data/models/flash-next/kiln-fn.gguf --hot 5600 --q2 0.2
+`make fn` builds `build/libchrysalis_fn.so`. Its model file comes from Unsloth's Q8_0 split (plus the MTP file and
+imatrix) via `python tools_fn/fn_quantize.py SRC_DIR data/models/flash-next/chrysalis-fn.gguf --hot 5600 --q2 0.2
 --route data/models/flash-next/route_code.npy:0.25 --route data/models/flash-next/route_decode.npy:0.6` (~22 min);
-`tools_fn/route_stats.py` measured the code-prefill counts on local code, `KILN_FN_DECODE_COUNTS` the decode counts
+`tools_fn/route_stats.py` measured the code-prefill counts on local code, `CHRYSALIS_FN_DECODE_COUNTS` the decode counts
 in `tools/agent_sim.py` sessions (`--model=qwen3.8-flash-next`).
 
 ## Notes
@@ -665,26 +668,28 @@ in `tools/agent_sim.py` sessions (`--model=qwen3.8-flash-next`).
   mixers four rows at a time, the cold picks' GPU share counted per reply), so a reply draws for a seed what it draws
   alone with one draft.
 - The GPU stays awake while the server runs (no wake-up latency) and suspends when it stops.
-- kiln's own memory never swaps (`MemorySwapMax=0` in kiln.service): with a zram setup's high swappiness (Omarchy's
-  150) the kernel moved Flash-Next's cold experts to swap under light pressure, before file cache, and every reply then
-  waited on swap-ins (12 s to a first token, 9 tok/s). On an installed unit: `systemctl --user set-property kiln
-  MemorySwapMax=0`.
-- The PCIe link (`kiln/link.py`): the card trains it when it resumes from runtime suspend, and here it comes up at 2.5 or
+- Chrysalis's own memory never swaps (`MemorySwapMax=0` in chrysalis.service): with a zram setup's high swappiness
+  (Omarchy's 150) the kernel moved Flash-Next's cold experts to swap under light pressure, before file cache, and every
+  reply then waited on swap-ins (12 s to a first token, 9 tok/s). On an installed unit: `systemctl --user set-property
+  chrysalis MemorySwapMax=0`.
+- The PCIe link (`chrysalis/link.py`): the card trains it when it resumes from runtime suspend, and here it comes up at 2.5 or
   at 8 GT/s from one resume to the next (both x16; 2 of 4 resumes in a row at each). At 2.5 GT/s DMA runs at ~3 GB/s
-  instead of ~12, prefill takes twice as long and Flash-Next's decode loses a quarter. kiln reads the link beside the
-  first load, once the GPU is awake (asleep it reads x1), and when it is slower than the fastest this machine has shown
-  (`data/cache/link.json`) the server restarts itself (exec) after the GPU has suspended, to have it trained again, up
-  to 4 times (`kiln serve --link-tries`): a start whose link came up at 2.5 GT/s was back at 8 GT/s after one restart,
-  serving 23 s after `kiln restart` where 17 s without. A link still slow then, or after a wake from sleep (a process
-  holding the GPU cannot let it suspend), is named in the log, `kiln status`, `/kiln/stats` and `/metrics`.
+  instead of ~12, prefill takes twice as long and Flash-Next's decode loses a quarter. Chrysalis reads the link beside
+  the first load, once the GPU is awake (asleep it reads x1), and when it is slower than the fastest this machine has
+  shown (`data/cache/link.json`) the server restarts itself (exec) after the GPU has suspended, to have it trained
+  again, up to 4 times (`chrysalis serve --link-tries`): a start whose link came up at 2.5 GT/s was back at 8 GT/s after
+  one restart, serving 23 s after `chrysalis restart` where 17 s without. A link still slow then, or after a wake from
+  sleep (a process holding the GPU cannot let it suspend), is named in the log, `chrysalis status`, `/chrysalis/stats`
+  and `/metrics`.
 - Switching to Flash-Next reads all of its file (63 GB, more than the RAM) at the disk's ~4 GB/s. While the 27B runs, it
-  leaves most of the RAM free, so 10 s after a load kiln reads Flash-Next's file into the page cache (`kiln/warm.py`),
-  pausing while requests run and stopping 10 GB short of filling the free memory; the 27B's own file leaves the cache
-  for it (its weights are on the GPU: a restart or wake then reads it from the disk, 3.9 s instead of 1.5). Measured:
-  45 GB read in 9 s, then the switch took 7.0 s where 19 s from nothing cached (9.8 s with 29 GB, the 27B's file still
-  cached). Flash-Next reads nothing for the 27B: its experts take 43 GB and its own working set (the n-gram table, the
-  file tier's experts) lives in the page cache. The switch back reads the 27B's 15 GB from the disk: 4.3 s.
-- Before the machine sleeps, kiln frees the GPU (`kiln/sleep.py`: a logind delay lock), so the model's VRAM is never
-  evicted into RAM: a reply being written ends at its next step (cut short, as at its length limit), a prompt being read
-  stops at its next 8K-token piece, and requests wait. After the wake the model loads again, its cache empty but for
-  the shared prefixes kept on disk.
+  leaves most of the RAM free, so 10 s after a load Chrysalis reads Flash-Next's file into the page cache
+  (`chrysalis/warm.py`), pausing while requests run and stopping 10 GB short of filling the free memory; the 27B's own
+  file leaves the cache for it (its weights are on the GPU: a restart or wake then reads it from the disk, 3.9 s instead
+  of 1.5). Measured: 45 GB read in 9 s, then the switch took 7.0 s where 19 s from nothing cached (9.8 s with 29 GB, the
+  27B's file still cached). Flash-Next reads nothing for the 27B: its experts take 43 GB and its own working set (the
+  n-gram table, the file tier's experts) lives in the page cache. The switch back reads the 27B's 15 GB from the disk:
+  4.3 s.
+- Before the machine sleeps, Chrysalis frees the GPU (`chrysalis/sleep.py`: a logind delay lock), so the model's VRAM is
+  never evicted into RAM: a reply being written ends at its next step (cut short, as at its length limit), a prompt
+  being read stops at its next 8K-token piece, and requests wait. After the wake the model loads again, its cache empty
+  but for the shared prefixes kept on disk.

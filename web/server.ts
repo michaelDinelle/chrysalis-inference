@@ -1,6 +1,6 @@
-// kiln web UI: serves the chat app, proxies the kiln server's OpenAI API (same origin, so no CORS) and runs the tools
-// replies call (tools.ts). It stores nothing on disk: conversations stay in the browser tab, replies being written stay
-// in RAM (see Job). `bun server.ts` for development, NODE_ENV=production for a minified bundle.
+// Chrysalis web UI: serves the chat app, proxies the Chrysalis server's OpenAI API (same origin, so no CORS) and runs
+// the tools replies call (tools.ts). It stores nothing on disk: conversations stay in the browser tab, replies being
+// written stay in RAM (see Job). `bun server.ts` for development, NODE_ENV=production for a minified bundle.
 import { hostname } from "node:os";
 import type { Server, Subprocess } from "bun";
 import app from "./index.html";
@@ -8,7 +8,7 @@ import * as registry from "./tools";
 import { lanAddresses, lanTls } from "./tls";
 import { assistantTurn, DESCRIPTIONS, toolTurn, unnoted, type ToolChoice, type WireCall } from "./wire";
 
-const KILN = process.env.KILN_URL ?? "http://127.0.0.1:8080";
+const CHRYSALIS = process.env.CHRYSALIS_URL ?? "http://127.0.0.1:8080";
 // Changes with the page's code. Open tabs compare it on every status poll and reload to pick up an update
 // (their chats are in sessionStorage, so a reload keeps them).
 const BUILD = Bun.hash((await Promise.all(["index.html", "app.ts", "sampler.ts", "files.ts", "wire.ts", "voice.ts", "voice-worklet.js", "style.css"].map((f) => Bun.file(`${import.meta.dir}/${f}`).text()))).join("\0")).toString(36);
@@ -30,25 +30,26 @@ const guarded = (handler: (req: Request, srv: Srv) => Response | undefined | Pro
 const json = (handler: (req: Request, srv: Srv) => Response | Promise<Response>) => (req: Request, srv: Srv) =>
   (req.headers.get("content-type") ?? "").startsWith("application/json") ? handler(req, srv) : new Response("JSON only", { status: 415 });
 
-const unit = (...args: string[]) => Bun.spawnSync(["systemctl", "--user", ...args, "kiln"]).stdout.toString().trim();
-// The model picker's choice, kept in the systemd user environment: kiln.sh serve loads it when kiln (re)starts.
+const unit = (...args: string[]) => Bun.spawnSync(["systemctl", "--user", ...args, "chrysalis"]).stdout.toString().trim();
+// The model picker's choice, kept in the systemd user environment: chrysalis.sh serve loads it when Chrysalis
+// (re)starts.
 const MODELS = ["qwen3.8-27b", "qwen3.8-flash-next"];
 async function pickModel(req: Request): Promise<string | undefined> {
   const model = (await req.json().catch(() => ({})))?.model;
   if (!MODELS.includes(model)) return undefined;
-  Bun.spawnSync(["systemctl", "--user", "set-environment", `KILN_MODEL=${model}`]);
+  Bun.spawnSync(["systemctl", "--user", "set-environment", `CHRYSALIS_MODEL=${model}`]);
   return model;
 }
 
-// A reply belongs to this server, not to the page that asked for it: the request to kiln runs to its end whatever
+// A reply belongs to this server, not to the page that asked for it: the request to Chrysalis runs to its end whatever
 // the page does (reloads, closes, sleeps with the laptop, loses Wi-Fi, opens another chat), and any page can follow it
 // again from where it left off: every event has a position. Only an explicit stop ends a reply early. A reply stays
 // in RAM until 15 minutes after it ends, so a page that comes back in time collects the rest; nothing goes to disk.
-// With tools, a reply is rounds: kiln's answer ends in tool calls, this server runs them and asks kiln again with
-// their results, so a reply with tools goes on while no page is open, and its events are all of its rounds.
+// With tools, a reply is rounds: Chrysalis's answer ends in tool calls, this server runs them and asks Chrysalis again
+// with their results, so a reply with tools goes on while no page is open, and its events are all of its rounds.
 interface Job {
   id: string;
-  events: string[];                                 // kiln's SSE data payloads and the tool events, the timings, [DONE]
+  events: string[];                                 // Chrysalis's SSE data payloads and the tool events, the timings, [DONE]
   done: boolean;
   ctrl: AbortController;
   waiters: Set<() => void>;
@@ -61,11 +62,11 @@ type Decision = "once" | "always" | "deny";
 const jobs = new Map<string, Job>();
 const KEEP_MS = 15 * 60_000;
 const MAX_ROUNDS = 24;
-// A voice reply begun before its question was settled (kiln_voice.ahead) runs no tool until the page says it stands
-// (/go): it may yet be dropped, and a tool can do things. One the page neither confirms nor stops is stopped.
+// A voice reply begun before its question was settled (chrysalis_voice.ahead) runs no tool until the page says it
+// stands (/go): it may yet be dropped, and a tool can do things. One the page neither confirms nor stops is stopped.
 const HELD_MS = 60_000;
 // Fields of a request that only make sense for its first round (a continued or rewritten reply).
-const FIRST_ONLY = ["continue_final_message", "kiln_original", "kiln_append_token"];
+const FIRST_ONLY = ["continue_final_message", "chrysalis_original", "chrysalis_append_token"];
 
 function startJob(body: string): Job {
   const job: Job = { id: crypto.randomUUID(), events: [], done: false, ctrl: new AbortController(), waiters: new Set(), asks: new Map(), t0: Date.now(), gen: 0 };
@@ -122,8 +123,8 @@ function startJob(body: string): Job {
         messages = [...messages, assistantTurn(out.content, out.reasoning, out.calls), ...out.calls.map((c, i) => toolTurn(c.id, results[i]))];
       }
     } catch (e) {
-      if (!job.ctrl.signal.aborted && !(e instanceof KilnDown)) console.error(`kiln web: reply ${job.id} failed:`, e);
-      push(job.ctrl.signal.aborted ? { stopped: true } : { error: { message: e instanceof KilnDown ? "kiln is not running" : e instanceof Error ? e.message : String(e) } });
+      if (!job.ctrl.signal.aborted && !(e instanceof ChrysalisDown)) console.error(`chrysalis web: reply ${job.id} failed:`, e);
+      push(job.ctrl.signal.aborted ? { stopped: true } : { error: { message: e instanceof ChrysalisDown ? "Chrysalis is not running" : e instanceof Error ? e.message : String(e) } });
     } finally {
       push({ timing: { start: job.t0, first: job.tFirst, answer: job.tAnswer, last: job.tLast, gen: job.gen } });
       push("[DONE]");
@@ -134,29 +135,30 @@ function startJob(body: string): Job {
   return job;
 }
 
-// A reply's request as kiln is sent it: the page's own fields (kiln_web, kiln_voice) taken off, and the chat's tools
-// (kiln_web's choice), each with kiln's description where it has one (wire.ts). The reply's job and the page's view of
-// what the model is sent (/api/preview) both build it here, so the view is what kiln gets.
+// A reply's request as Chrysalis is sent it: the page's own fields (chrysalis_web, chrysalis_voice) taken off, and the
+// chat's tools (chrysalis_web's choice), each with Chrysalis's description where it has one (wire.ts). The reply's job
+// and the page's view of what the model is sent (/api/preview) both build it here, so the view is what Chrysalis gets.
 async function asSent(raw: any) {
-  const req = { ...raw }, web: ToolChoice | undefined = req.kiln_web, said = !!req.kiln_voice, tool = req.kiln_voice?.tool === true;
-  const ahead = req.kiln_voice?.ahead === true;
-  delete req.kiln_web;
-  delete req.kiln_voice;
+  const req = { ...raw }, web: ToolChoice | undefined = req.chrysalis_web, said = !!req.chrysalis_voice, tool = req.chrysalis_voice?.tool === true;
+  const ahead = req.chrysalis_voice?.ahead === true;
+  delete req.chrysalis_web;
+  delete req.chrysalis_voice;
   const { tools, notes } = web ? await registry.select(web.tools ?? {}) : { tools: [] as registry.Named[], notes: [] as string[] };
   if (tools.length) req.tools = tools.map((n) => registry.openai(n, DESCRIPTIONS[n.tool.name]));
   return { req, web, said, tool, ahead, tools, notes };
 }
 
-class KilnDown extends Error {}
-// kiln took the request and its answer broke off (its log says why: an exception in kiln drops the connection)
-class KilnBroke extends Error { message = "kiln's reply broke off (kiln's log has why)"; }
-// One request to kiln, its events passed on as they come: what it wrote, and the tool calls it ended with.
+class ChrysalisDown extends Error {}
+// Chrysalis took the request and its answer broke off (its log says why: an exception in Chrysalis drops the
+// connection)
+class ChrysalisBroke extends Error { message = "Chrysalis's reply broke off (Chrysalis's log has why)"; }
+// One request to Chrysalis, its events passed on as they come: what it wrote, and the tool calls it ended with.
 async function round(job: Job, body: string, push: (d: string | object) => void, signal = job.ctrl.signal) {
-  const r = await fetch(`${KILN}/v1/chat/completions`, {
+  const r = await fetch(`${CHRYSALIS}/v1/chat/completions`, {
     method: "POST", body, headers: { "Content-Type": "application/json" }, signal,
-  }).catch((e) => { throw signal.aborted ? e : new KilnDown(); });
+  }).catch((e) => { throw signal.aborted ? e : new ChrysalisDown(); });
   if (!r.ok || !r.body) {
-    push({ error: { message: (await r.json().catch(() => null))?.error?.message ?? `kiln answered ${r.status}` } });
+    push({ error: { message: (await r.json().catch(() => null))?.error?.message ?? `Chrysalis answered ${r.status}` } });
     return null;
   }
   const out = { content: "", reasoning: "", calls: [] as WireCall[] };
@@ -165,7 +167,7 @@ async function round(job: Job, body: string, push: (d: string | object) => void,
   let buf = "";
   try {
     for (;;) {
-      const { value, done } = await reader.read().catch((e) => { throw signal.aborted ? e : new KilnBroke(); });
+      const { value, done } = await reader.read().catch((e) => { throw signal.aborted ? e : new ChrysalisBroke(); });
       if (done) break;
       buf += decoder.decode(value, { stream: true });
       for (let end = buf.indexOf("\n\n"); end >= 0; end = buf.indexOf("\n\n")) {
@@ -179,9 +181,9 @@ async function round(job: Job, body: string, push: (d: string | object) => void,
           first ??= now;
           if (delta.content) job.tAnswer ??= now;
         }
-        if (delta?.kiln_prefix) {
-          out.content = delta.kiln_prefix.content ?? "";
-          out.reasoning = delta.kiln_prefix.reasoning_content ?? "";
+        if (delta?.chrysalis_prefix) {
+          out.content = delta.chrysalis_prefix.content ?? "";
+          out.reasoning = delta.chrysalis_prefix.reasoning_content ?? "";
         }
         out.content += delta?.content ?? "";
         out.reasoning += delta?.reasoning_content ?? "";
@@ -200,14 +202,14 @@ async function round(job: Job, body: string, push: (d: string | object) => void,
   return out;
 }
 
-// A voice turn (kiln_voice): whether its reply runs a tool is settled before the reply, not left to its words. The page
-// asks beside the conversation (app.ts, heardFor: with what speech recognition misheard, at temperature 0) and says so
-// here (kiln_voice.tool); a user who asks for a search (the route's asks) gets one whatever it said. A call is held to
-// the tools' grammar from its first token (tool_choice "required"), after the spoken line that says what is happening
-// (one of the route's preambles): a model with thinking off, told its reply is spoken, says "I'm searching for that
-// now" and ends its turn often enough (and then copies that turn: 1 call in 6 after one such turn in the history), and
-// may report results it never got. A reply that announces a tool it did not call (its announces, after "I'll", "let
-// me", ...) is made to call one.
+// A voice turn (chrysalis_voice): whether its reply runs a tool is settled before the reply, not left to its words. The
+// page asks beside the conversation (app.ts, heardFor: with what speech recognition misheard, at temperature 0) and
+// says so here (chrysalis_voice.tool); a user who asks for a search (the route's asks) gets one whatever it said. A
+// call is held to the tools' grammar from its first token (tool_choice "required"), after the spoken line that says
+// what is happening (one of the route's preambles): a model with thinking off, told its reply is spoken, says "I'm
+// searching for that now" and ends its turn often enough (and then copies that turn: 1 call in 6 after one such turn in
+// the history), and may report results it never got. A reply that announces a tool it did not call (its announces,
+// after "I'll", "let me", ...) is made to call one.
 type Out = NonNullable<Awaited<ReturnType<typeof round>>>;
 // A list of phrases as a pattern for whole words, whatever the spacing between them.
 function phrasePattern(phrases: string[], before = ""): RegExp {
@@ -224,7 +226,7 @@ const ROUTE: Routing = {
     "find a", "find some", "finding", "pull up", "pulling up", "browse", "browsing", "fetch", "fetching", "open the link",
     "open that link", "open the page", "opening"], "(I['’]?ll|I will|I['’]?m going to|I am going to|let me|I['’]?m|I am)\\s+(now\\s+|just\\s+|quickly\\s+)?"),
 };
-const FORCE = { tool_choice: "required", logprobs: false, top_logprobs: undefined };   // kiln holds no grammar with logprobs
+const FORCE = { tool_choice: "required", logprobs: false, top_logprobs: undefined };   // Chrysalis holds no grammar with logprobs
 const textOf = (c: unknown) => (typeof c === "string" ? c : Array.isArray(c) ? c.map((p: any) => p?.text ?? "").join(" ") : "");
 
 async function forced(job: Job, req: any, messages: object[], push: (d: string | object) => void, preamble?: string): Promise<Out | null> {
@@ -291,7 +293,7 @@ function follow(job: Job, from: number): Response {
     },
     cancel() { if (waiter) job.waiters.delete(waiter); },
   });
-  return new Response(stream, { headers: { "Content-Type": "text/event-stream", "Cache-Control": "no-cache", "X-Kiln-Job": job.id } });
+  return new Response(stream, { headers: { "Content-Type": "text/event-stream", "Cache-Control": "no-cache", "X-Chrysalis-Job": job.id } });
 }
 
 // Mermaid's ES module build (the page imports it the first time it draws a diagram): its entry and the chunks it
@@ -305,24 +307,25 @@ const vendor = (req: Request) => {
 
 // The frame an HTML page from a reply runs in. Two walls: the page's iframe is sandboxed (allow-scripts only: an opaque
 // origin, so no cookies, storage or access to the chat), and this policy lets its own inline code run but nothing
-// load from or talk to anywhere, kiln included. The chat posts the page in, which replaces this document.
+// load from or talk to anywhere, Chrysalis included. The chat posts the page in, which replaces this document.
 const SANDBOX = `<!doctype html><meta charset="utf-8"><script>
 addEventListener("message", (e) => {
-  if (e.source !== parent || typeof e.data?.kilnPage !== "string") return;
-  document.open(); document.write(e.data.kilnPage); document.close();
+  if (e.source !== parent || typeof e.data?.chrysalisPage !== "string") return;
+  document.open(); document.write(e.data.chrysalisPage); document.close();
 }, { once: true });
-parent.postMessage({ kilnReady: true }, "*");
+parent.postMessage({ chrysalisReady: true }, "*");
 </script>`;
 const SANDBOX_CSP = "default-src 'none'; script-src 'unsafe-inline' 'unsafe-eval'; style-src 'unsafe-inline'; img-src data: blob:; " +
   "font-src data:; media-src data: blob:; form-action 'none'; base-uri 'none'; frame-ancestors 'self'; sandbox allow-scripts allow-modals";
 
 // Voice mode's speech service: a process of its own (voice/ in data/voice-venv, or any stack that speaks the same
-// protocol: KILN_VOICE_CMD, a JSON argv), started by the first voice socket and stopped KILN_VOICE_IDLE_MS after the
-// last one closes, so voice mode holds no memory while nobody uses it. It prints `voice: ws://...` once it listens and
-// exits when its stdin closes (this server gone, or the idle time up). Each page's socket is proxied to it verbatim.
+// protocol: CHRYSALIS_VOICE_CMD, a JSON argv), started by the first voice socket and stopped CHRYSALIS_VOICE_IDLE_MS
+// after the last one closes, so voice mode holds no memory while nobody uses it. It prints `voice: ws://...` once it
+// listens and exits when its stdin closes (this server gone, or the idle time up). Each page's socket is proxied to it
+// verbatim.
 const ROOT = `${import.meta.dir}/..`;
-const VOICE_CMD: string[] = process.env.KILN_VOICE_CMD ? JSON.parse(process.env.KILN_VOICE_CMD) : [`${ROOT}/data/voice-venv/bin/python`, "-m", "voice"];
-const VOICE_IDLE_MS = Number(process.env.KILN_VOICE_IDLE_MS ?? 60_000);
+const VOICE_CMD: string[] = process.env.CHRYSALIS_VOICE_CMD ? JSON.parse(process.env.CHRYSALIS_VOICE_CMD) : [`${ROOT}/data/voice-venv/bin/python`, "-m", "voice"];
+const VOICE_IDLE_MS = Number(process.env.CHRYSALIS_VOICE_IDLE_MS ?? 60_000);
 interface VoiceSocket { up?: WebSocket; queue: (string | Buffer<ArrayBuffer>)[]; closed: boolean }
 let speech: { proc: Subprocess<"pipe", "pipe", "inherit">; url: Promise<string> } | undefined;
 let voiceSockets = 0, voiceIdle: Timer | undefined;
@@ -368,10 +371,10 @@ function voiceClosed() {
   }, VOICE_IDLE_MS);
 }
 
-// With `kiln start --lan` (KILN_HOST 0.0.0.0) this machine keeps plain HTTP on 127.0.0.1 and the network gets HTTPS on
-// the same port (each of this machine's addresses: ufw already lets the port in): browsers give the microphone only to
-// secure pages, which localhost is and http://<address> is not (tls.ts).
-const LAN = process.env.KILN_HOST === "0.0.0.0", tls = LAN ? lanTls() : undefined;
+// With `chrysalis start --lan` (CHRYSALIS_HOST 0.0.0.0) this machine keeps plain HTTP on 127.0.0.1 and the network gets
+// HTTPS on the same port (each of this machine's addresses: ufw already lets the port in): browsers give the microphone
+// only to secure pages, which localhost is and http://<address> is not (tls.ts).
+const LAN = process.env.CHRYSALIS_HOST === "0.0.0.0", tls = LAN ? lanTls() : undefined;
 const serve = (hostname: string, port: number, secure?: { cert: string; key: string }) => Bun.serve<VoiceSocket>({
   hostname,
   ...(secure ? { tls: secure } : {}),
@@ -381,12 +384,12 @@ const serve = (hostname: string, port: number, secure?: { cert: string; key: str
   routes: {
     "/": app,
     // the authority behind the network's certificate, for a device to install once and then trust the page
-    "/kiln-ca.crt": { GET: guarded(() => tls ? new Response(tls.ca, { headers: { "Content-Type": "application/x-x509-ca-cert" } })
-      : new Response("not on the network (kiln start --lan)", { status: 404 })) },
+    "/chrysalis-ca.crt": { GET: guarded(() => tls ? new Response(tls.ca, { headers: { "Content-Type": "application/x-x509-ca-cert" } })
+      : new Response("not on the network (chrysalis start --lan)", { status: 404 })) },
     "/vendor/mermaid/*": { GET: guarded(vendor) },
     "/sandbox": { GET: guarded(() => new Response(SANDBOX, { headers: { "Content-Type": "text/html; charset=utf-8", "Content-Security-Policy": SANDBOX_CSP } })) },
 
-    // A streamed reply starts a job and follows it (its id in X-Kiln-Job); other requests (session titles) pass
+    // A streamed reply starts a job and follows it (its id in X-Chrysalis-Job); other requests (session titles) pass
     // through. Nothing arrives before the first token, which takes a while for a long prompt: no idle timeout. JSON
     // only: a reply can run tools, which another site's page must not get to ask for.
     "/api/chat": {
@@ -395,17 +398,17 @@ const serve = (hostname: string, port: number, secure?: { cert: string; key: str
         const body = await req.text();
         if ((() => { try { return JSON.parse(body).stream; } catch { return false; } })()) return follow(startJob(body), 0);
         try {
-          const r = await fetch(`${KILN}/v1/chat/completions`, {
+          const r = await fetch(`${CHRYSALIS}/v1/chat/completions`, {
             method: "POST", body, headers: { "Content-Type": "application/json" }, signal: req.signal,
           });
           return new Response(r.body, { status: r.status, headers: { "Content-Type": r.headers.get("Content-Type") ?? "application/json" } });
         } catch {
-          return Response.json({ error: { message: "kiln is not running" } }, { status: 502 });
+          return Response.json({ error: { message: "Chrysalis is not running" } }, { status: 502 });
         }
       })),
     },
-    // What the model is sent (Settings): the next reply's request as kiln would get it, without asking kiln. JSON only,
-    // as /api/chat: it starts the chat's MCP servers to list their tools.
+    // What the model is sent (Settings): the next reply's request as Chrysalis would get it, without asking Chrysalis.
+    // JSON only, as /api/chat: it starts the chat's MCP servers to list their tools.
     "/api/preview": {
       POST: guarded(json(async (req) => {
         const { req: body, said } = await asSent(await req.json().catch(() => ({})));
@@ -420,7 +423,7 @@ const serve = (hostname: string, port: number, secure?: { cert: string; key: str
         return job ? follow(job, Number(new URL(req.url).searchParams.get("from") ?? 0)) : Response.json({ error: { message: "gone" } }, { status: 404 });
       }),
     },
-    // the Stop button: kiln stops, the reply ends with a "stopped" event
+    // the Stop button: Chrysalis stops, the reply ends with a "stopped" event
     "/api/chat/:id/stop": {
       POST: guarded((req) => {
         jobs.get((req as Request & { params: { id: string } }).params.id)?.ctrl.abort();
@@ -464,16 +467,16 @@ const serve = (hostname: string, port: number, secure?: { cert: string; key: str
     "/api/voice": guarded((req, srv) => {
       let same = false;
       try { same = new URL(req.headers.get("origin") ?? "").host === req.headers.get("host"); } catch { /* no origin, or "null" */ }
-      if (!same) return new Response("only kiln's own pages", { status: 403 });
+      if (!same) return new Response("only Chrysalis's own pages", { status: 403 });
       return srv.upgrade(req, { data: { queue: [], closed: false } }) ? undefined : new Response("a WebSocket only", { status: 426 });
     }),
     "/voice-worklet.js": { GET: guarded(() => new Response(Bun.file(`${import.meta.dir}/voice-worklet.js`), { headers: { "Content-Type": "text/javascript" } })) },
 
-    // online: serving; loading: the systemd unit runs but the model is still loading (kiln answers 503 until it has
-    // loaded, or does not listen yet); offline: stopped
+    // online: serving; loading: the systemd unit runs but the model is still loading (Chrysalis answers 503 until it
+    // has loaded, or does not listen yet); offline: stopped
     "/api/status": guarded(async () => {
       try {
-        const r = await fetch(`${KILN}/kiln/stats`);
+        const r = await fetch(`${CHRYSALIS}/chrysalis/stats`);
         if (r.status === 503) {                         // listening, still loading its first model
           const b = await r.json().catch(() => ({}));
           return Response.json({ state: "loading", build: BUILD, loading: b.model ?? undefined, progress: b.progress ?? undefined });
@@ -484,23 +487,23 @@ const serve = (hostname: string, port: number, secure?: { cert: string; key: str
         return Response.json({ state: unit("is-active") === "active" ? "loading" : "offline", build: BUILD });
       }
     }),
-    "/api/kiln/start": { POST: guarded(async (req) => (await pickModel(req), unit("start", "--no-block"), new Response(null, { status: 202 }))) },
-    // switch the running kiln to another model; answers once it has loaded (up to ~20 s), the page polls meanwhile
-    "/api/kiln/load": {
+    "/api/chrysalis/start": { POST: guarded(async (req) => (await pickModel(req), unit("start", "--no-block"), new Response(null, { status: 202 }))) },
+    // switch the running Chrysalis to another model; answers once it has loaded (up to ~20 s), the page polls meanwhile
+    "/api/chrysalis/load": {
       POST: guarded(async (req, srv) => {
         srv.timeout(req, 0);
         const model = await pickModel(req);
         if (!model) return Response.json({ error: { message: "unknown model" } }, { status: 400 });
         try {
-          const r = await fetch(`${KILN}/kiln/load`, { method: "POST", body: JSON.stringify({ model }), headers: { "Content-Type": "application/json" } });
+          const r = await fetch(`${CHRYSALIS}/chrysalis/load`, { method: "POST", body: JSON.stringify({ model }), headers: { "Content-Type": "application/json" } });
           return new Response(r.body, { status: r.status, headers: { "Content-Type": "application/json" } });
         } catch {
-          return Response.json({ error: { message: "kiln is not running" } }, { status: 502 });
+          return Response.json({ error: { message: "Chrysalis is not running" } }, { status: 502 });
         }
       }),
     },
     // stopping takes ~40 ms: wait for it, so the page can show the new state right away
-    "/api/kiln/stop": { POST: guarded(() => (unit("stop"), new Response(null, { status: 204 }))) },
+    "/api/chrysalis/stop": { POST: guarded(() => (unit("stop"), new Response(null, { status: 204 }))) },
   },
   // the page's frames go to the service as they come (queued until its socket opens), and its frames come back
   websocket: {
@@ -533,8 +536,8 @@ const serve = (hostname: string, port: number, secure?: { cert: string; key: str
   },
 });
 
-const server = serve(LAN ? "127.0.0.1" : process.env.KILN_HOST ?? "127.0.0.1", Number(process.env.PORT ?? 8081));
+const server = serve(LAN ? "127.0.0.1" : process.env.CHRYSALIS_HOST ?? "127.0.0.1", Number(process.env.PORT ?? 8081));
 // only the certificate and key: Bun takes a `ca` there as the authority clients must show certificates of
 const secure = tls ? lanAddresses().map((ip) => serve(ip, server.port!, { cert: tls.cert, key: tls.key })) : [];
-console.log(`kiln web: ${server.url}`);
-for (const s of secure) console.log(`kiln web: ${s.url}`);
+console.log(`chrysalis web: ${server.url}`);
+for (const s of secure) console.log(`chrysalis web: ${s.url}`);

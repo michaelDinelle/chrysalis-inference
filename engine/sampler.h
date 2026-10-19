@@ -10,7 +10,7 @@
 constexpr int SAMPLE_N = 64;                         // = TOPK of both engines: candidates per row
 enum Stage : int { STAGE_TOP_K, STAGE_TEMPERATURE, STAGE_TOP_P, STAGE_MIN_P, STAGES };
 
-// Also the C API's layout (ctypes mirrors it in kiln/engine.py): plain fields only, in this order.
+// Also the C API's layout (ctypes mirrors it in chrysalis/engine.py): plain fields only, in this order.
 struct Sampling {
     float temperature = 1.0f, top_p = 0.95f, min_p = 0.0f, presence_penalty = 0.0f;
     int top_k = 20, n_draft = 3;
@@ -20,7 +20,7 @@ struct Sampling {
     int order[STAGES] = {STAGE_TOP_K, STAGE_TEMPERATURE, STAGE_TOP_P, STAGE_MIN_P};
     int lookup = 0;                                  // drafts copied from earlier in the conversation, at most (0: off)
     int halt = -1;                                   // a token that ends a step once emitted, as an end of turn does (-1: none):
-                                                     // </think> before an answer kiln constrains token by token (kiln_draw)
+                                                     // </think> before an answer Chrysalis constrains token by token (chrysalis_draw)
 };
 
 // The current reply's tokens, in order (DRY) and as a set (presence penalty: a lookup, not a scan of the reply).

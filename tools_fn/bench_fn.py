@@ -9,8 +9,8 @@ import time
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, ROOT)
 from tokenizers import Tokenizer  # noqa: E402
-from kiln.engine import Engine, Sampling  # noqa: E402
-from kiln.models import MODELS  # noqa: E402
+from chrysalis.engine import Engine, Sampling  # noqa: E402
+from chrysalis.models import MODELS  # noqa: E402
 
 PROMPT = ("<|im_start|>user\nImplement an LRU cache in Python with O(1) get and put, using a dict and a "
           "doubly linked list. Include type hints, docstrings and a few unit tests with pytest.<|im_end|>\n"
@@ -18,8 +18,8 @@ PROMPT = ("<|im_start|>user\nImplement an LRU cache in Python with O(1) get and 
 tok = Tokenizer.from_file(os.path.join(ROOT, "data/models/tokenizer.json"))
 ids = tok.encode(PROMPT, add_special_tokens=False).ids
 n_tok = int(sys.argv[1]) if len(sys.argv) > 1 and sys.argv[1].isdigit() else 512
-# filler for the appends: real code (kiln's own sources), tokenized once
-code = "".join(open(os.path.join(ROOT, f)).read() for f in ("engine_fn/model.cpp", "engine_fn/load.cpp", "kiln/server.py"))
+# filler for the appends: real code (Chrysalis's own sources), tokenized once
+code = "".join(open(os.path.join(ROOT, f)).read() for f in ("engine_fn/model.cpp", "engine_fn/load.cpp", "chrysalis/server.py"))
 filler = tok.encode(code, add_special_tokens=False).ids
 while len(filler) < 16384 + 4096 + 64:
     filler += filler

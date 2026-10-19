@@ -1,11 +1,11 @@
-"""kiln's voice service: speech in and out for the web UI's voice mode, one WebSocket per session (talk.py). It keeps no
-preferences: each session names the parts it wants (parts.py), and the page's Settings are where they are chosen. The
-web server starts it when a voice session opens and stops it once the last one has been gone a while, so it takes no
-memory the rest of the time. It loads the default parts as it starts (the first session most likely wants them), and
-exits when its stdin ends (the web server is gone) or on SIGTERM.
+"""Chrysalis's voice service: speech in and out for the web UI's voice mode, one WebSocket per session (talk.py). It
+keeps no preferences: each session names the parts it wants (parts.py), and the page's Settings are where they are
+chosen. The web server starts it when a voice session opens and stops it once the last one has been gone a while, so it
+takes no memory the rest of the time. It loads the default parts as it starts (the first session most likely wants
+them), and exits when its stdin ends (the web server is gone) or on SIGTERM.
   data/voice-venv/bin/python -m voice [--port N] [--threads N]     prints "voice: ws://127.0.0.1:PORT" once it listens
-threads (KILN_VOICE_THREADS, 4) caps the CPU threads a model runs on: at 16 the speech models took the CPU Flash-Next's
-experts need (95 tok/s down to 3), at 4 they cost it 12%."""
+threads (CHRYSALIS_VOICE_THREADS, 4) caps the CPU threads a model runs on: at 16 the speech models took the CPU
+Flash-Next's experts need (95 tok/s down to 3), at 4 they cost it 12%."""
 import argparse, asyncio, json, os, signal, sys, threading, time
 from concurrent.futures import ThreadPoolExecutor
 
@@ -79,6 +79,6 @@ async def main(port, threads):
 if __name__ == "__main__":
     ap = argparse.ArgumentParser(prog="python -m voice")
     ap.add_argument("--port", type=int, default=0)
-    ap.add_argument("--threads", type=int, default=int(os.environ.get("KILN_VOICE_THREADS") or 4))
+    ap.add_argument("--threads", type=int, default=int(os.environ.get("CHRYSALIS_VOICE_THREADS") or 4))
     a = ap.parse_args()
     asyncio.run(main(a.port, max(1, a.threads)))

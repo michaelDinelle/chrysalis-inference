@@ -10,9 +10,9 @@ import time
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, ROOT)
-from kiln.chat import Tokens  # noqa: E402
-from kiln.engine import Engine, Sampling  # noqa: E402
-from kiln.models import MODELS  # noqa: E402
+from chrysalis.chat import Tokens  # noqa: E402
+from chrysalis.engine import Engine, Sampling  # noqa: E402
+from chrysalis.models import MODELS  # noqa: E402
 
 name = sys.argv[1]
 max_depth = int(sys.argv[2]) if len(sys.argv) > 2 else 260000

@@ -1,5 +1,5 @@
 """Answers held to a grammar over the model's tokens (llguidance): JSON for OpenAI's response_format (json_schema,
-json_object), and tool calls in Qwen's format (kiln/chat.py renders them) that name an offered tool and give the
+json_object), and tool calls in Qwen's format (chrysalis/chat.py renders them) that name an offered tool and give the
 parameters its schema asks for (strict tools, tool_choice "required" or a named tool). The answer is drawn from the logits
 the grammar allows by the engine's own sampler, with drafts: the tokens the grammar forces, then the MTP head's guesses,
 each position masked to what the grammar allows there (Matcher.masks, Engine.generate_masked)."""
@@ -24,7 +24,7 @@ def bounded(schema):
 
 class Grammars:
     def __init__(self, tok):
-        """tok: kiln.chat.Tokens. Building llguidance's view of the vocabulary takes ~0.9 s: one per server."""
+        """tok: chrysalis.chat.Tokens. Building llguidance's view of the vocabulary takes ~0.9 s: one per server."""
         import llguidance
         self.ll = llguidance
         self.tokenizer = llguidance.LLTokenizer(tok.full.to_str(), n_vocab=VOCAB, eos_token=tok.id["<|im_end|>"])

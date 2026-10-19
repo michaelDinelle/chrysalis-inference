@@ -8,7 +8,7 @@ REF=data/models/Qwen3.8-27B-Q8_0.gguf
 mkdir -p build
 if [ ! -f build/eval.txt ]; then
     # ~40K tokens: C++ and Python sources plus English documentation
-    cat data/llama.cpp/src/llama-sampler.cpp data/llama.cpp/tools/server/server-context.cpp kiln/*.py \
+    cat data/llama.cpp/src/llama-sampler.cpp data/llama.cpp/tools/server/server-context.cpp chrysalis/*.py \
         data/llama.cpp/docs/build.md data/llama.cpp/tools/server/README.md | head -c 160000 > build/eval.txt
 fi
 [ -f build/q8.kld ] || $B/llama-perplexity -m "$REF" -f build/eval.txt -c 4096 -ngl 40 --kl-divergence-base build/q8.kld > build/q8.log 2>&1

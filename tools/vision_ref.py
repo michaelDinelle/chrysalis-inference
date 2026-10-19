@@ -7,7 +7,7 @@
                                              Qwen3_5VisionModel for the 27B, Qwen4ExpVisionModel for Flash-Next, fn), on
                                              patches [n][768] and grid: the merged embeddings [n / 4][width]; a video's
                                              (patches [pairs * n][1536], grid (pairs, rows, columns)) likewise
-  vision_ref.py video IN.npz OUT.npz         transformers' Qwen3VLVideoProcessor with kiln's settings (kiln/vision.py) on
+  vision_ref.py video IN.npz OUT.npz         transformers' Qwen3VLVideoProcessor with Chrysalis's settings (chrysalis/vision.py) on
                                              all of a video's frames (IN: frames [n][h][w][3] uint8, fps): the frames it
                                              takes, pixel_values_videos and the grid, and Qwen3VLProcessor's expansion of
                                              <|video_pad|> (its timestamps)

@@ -1,15 +1,15 @@
-"""Compare kiln's next-token distributions with llama.cpp's on the same GGUF (KL divergence, top-1), on the decode,
-prefill and mixed paths. The weights are the same, so what differs is kiln's arithmetic (int8 activations, the 5-bit
-V cache): a path fails past its MAX_KL or under MIN_TOP1. The reference, build/cmp/ref.bin, is written by build/ref_logits
-(make build/ref_logits) when it is missing or with --fresh.
+"""Compare Chrysalis's next-token distributions with llama.cpp's on the same GGUF (KL divergence, top-1), on the decode,
+prefill and mixed paths. The weights are the same, so what differs is Chrysalis's arithmetic (int8 activations, the
+5-bit V cache): a path fails past its MAX_KL or under MIN_TOP1. The reference, build/cmp/ref.bin, is written by
+build/ref_logits (make build/ref_logits) when it is missing or with --fresh.
   data/venv/bin/python tools/compare_ref.py [--fresh]"""
 import os, subprocess, sys
 import numpy as np
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from tokenizers import Tokenizer
-from kiln.engine import Engine
+from chrysalis.engine import Engine
 
-MODEL = "data/models/kiln-mix.gguf"
+MODEL = "data/models/chrysalis-mix.gguf"
 # mean KL measured 2026-10-18 (deterministic): decode 0.0022, prefill 0.0035, mixed 0.0022; a decode step that forgets
 # twice as fast lands at 0.024
 MAX_KL, MIN_TOP1 = {"decode": 0.004, "prefill": 0.008, "mixed": 0.004}, 0.95

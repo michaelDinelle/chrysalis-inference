@@ -314,7 +314,7 @@ events(lambda m: kind(m) == "ready", 60)
 asked = say("Is Kwen faster than Llama?")
 turn_of = lambda x: next((m for m in events(lambda m: kind(m) == "turn", 20) if kind(m) == "turn"), {}) if stream(x, tail=2.0) else {}
 before = turn_of(asked).get("text", "")
-ws.send(json.dumps({"type": "context", "text": "You are Qwen3.8-Flash-Next, running locally in kiln.\nIs Qwen3.8-27B or Llama better?"}))
+ws.send(json.dumps({"type": "context", "text": "You are Qwen3.8-Flash-Next, running locally in Chrysalis Inference.\nIs Qwen3.8-27B or Llama better?"}))
 after, other = turn_of(asked).get("text", ""), turn_of(say("When will the game start tonight?")).get("text", "")
 check("a name from the conversation is heard as written", "Qwen" not in before and "Qwen faster than Llama" in after, f"{before!r}, then {after!r}")
 check("and is not heard where it was not said", "qwen" not in other.lower() and wer("When will the game start tonight?", other) <= 0.15, repr(other))

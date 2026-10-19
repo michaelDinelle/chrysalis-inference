@@ -1,4 +1,4 @@
-// kiln's sampler (make_dist and dry_runs in engine/sampler.h) as Settings' odds charts run it on named candidates.
+// Chrysalis's sampler (make_dist and dry_runs in engine/sampler.h) as Settings' odds charts run it on named candidates.
 // web/sampler.test.ts holds it to the C++ one.
 export type Stage = "top_k" | "temperature" | "top_p" | "min_p";
 export type SamplerKey = Stage | "presence_penalty" | "dry_multiplier" | "dry_allowed_length" | "dry_base";

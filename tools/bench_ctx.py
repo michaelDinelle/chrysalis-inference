@@ -1,9 +1,9 @@
 """Prefill throughput and decode speed as the context grows. usage: bench_ctx.py depth1 depth2 ..."""
 import os, sys, time, random
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-from kiln.engine import Engine, Sampling
+from chrysalis.engine import Engine, Sampling
 depths = [int(a) for a in sys.argv[1:]] or [0, 32768, 131072]
-eng = Engine("data/models/kiln-mix.gguf")
+eng = Engine("data/models/chrysalis-mix.gguf")
 s = eng.new_seq()
 random.seed(0)
 filled = 0

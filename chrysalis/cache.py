@@ -45,7 +45,7 @@ class Disk:
     Files are written by a thread and the least recently used dropped beyond `budget` bytes. The directory is the
     model's: files there of another build or model file (identity: the model file's and the engine library's names,
     sizes and modification times) can never be read again, and go when it opens, as do writes cut short."""
-    MAGIC = b"KILN-SNAPSHOT 1\n"
+    MAGIC = b"CHRYSALIS-SNAPSHOT 1\n"
 
     def __init__(self, directory, identity, budget=6 << 30):
         self.dir, self.identity, self.budget = directory, identity, budget

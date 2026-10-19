@@ -1,7 +1,7 @@
-// The web chat over HTTPS on the local network (`kiln start --lan`). Browsers give the microphone (voice mode) only to
-// secure pages, and http://<this machine's address> is not one (localhost is). A certificate authority of this
+// The web chat over HTTPS on the local network (`chrysalis start --lan`). Browsers give the microphone (voice mode)
+// only to secure pages, and http://<this machine's address> is not one (localhost is). A certificate authority of this
 // machine's own signs the server's certificate; its name constraints let it vouch only for private addresses and local
-// names, so a device that trusts it (kiln-ca.crt, installed once) trusts nothing else because of it.
+// names, so a device that trusts it (chrysalis-ca.crt, installed once) trusts nothing else because of it.
 import { chmodSync, existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { homedir, hostname, networkInterfaces } from "node:os";
 
@@ -17,7 +17,7 @@ function openssl(...args: string[]) {
   return { ok: r.exitCode === 0, err: r.stderr.toString().trim() };
 }
 
-export function lanTls(dir = process.env.KILN_TLS_DIR ?? `${homedir()}/.config/kiln/tls`) {
+export function lanTls(dir = process.env.CHRYSALIS_TLS_DIR ?? `${homedir()}/.config/chrysalis/tls`) {
   mkdirSync(dir, { recursive: true, mode: 0o700 });
   const host = hostname().toLowerCase(), ec = ["-newkey", "ec", "-pkeyopt", "ec_paramgen_curve:prime256v1", "-nodes"];
   const run = (...args: string[]) => {
@@ -26,7 +26,7 @@ export function lanTls(dir = process.env.KILN_TLS_DIR ?? `${homedir()}/.config/k
   };
   if (!existsSync(`${dir}/ca.pem`)) {
     const allow = [...PRIVATE.map((n) => `permitted;IP:${n}`), "permitted;DNS:local", "permitted;DNS:localhost", `permitted;DNS:${host}`];
-    run("req", "-x509", ...ec, "-keyout", `${dir}/ca.key`, "-out", `${dir}/ca.pem`, "-days", "3650", "-subj", `/CN=kiln on ${host}`,
+    run("req", "-x509", ...ec, "-keyout", `${dir}/ca.key`, "-out", `${dir}/ca.pem`, "-days", "3650", "-subj", `/CN=Chrysalis Inference on ${host}`,
       "-addext", "basicConstraints=critical,CA:TRUE,pathlen:0", "-addext", "keyUsage=critical,keyCertSign,cRLSign",
       "-addext", `nameConstraints=critical,${allow.join(",")}`);
   }

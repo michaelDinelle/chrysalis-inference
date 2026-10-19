@@ -56,7 +56,7 @@ type Policy = true | [bigint, number][];            // every address, or public 
 const allowed = (ip: string, policy: Policy) => policy === true || isPublic(ip) || (toBig(ip) !== null && policy.some((b) => inBlock(toBig(ip)!, b)));
 const refused = (host: string, ip: string) => Object.assign(new Error(
   `${host === ip ? ip : `${host} (${ip})`} is not a public address: Fetch URL reaches public addresses only (the config file's "fetch": {"allowPrivate": ...} can allow others)`),
-  { code: "KILN_PRIVATE" });
+  { code: "CHRYSALIS_PRIVATE" });
 
 interface Got { status: number; statusText: string; headers: http.IncomingHttpHeaders; body: Readable }
 function get(url: URL, policy: Policy, signal: AbortSignal): Promise<Got> {
@@ -65,7 +65,7 @@ function get(url: URL, policy: Policy, signal: AbortSignal): Promise<Got> {
   return new Promise((resolve, reject) => {
     const req = (url.protocol === "https:" ? https : http).request(url, {
       method: "GET", signal,
-      headers: { "User-Agent": "kiln-web (Fetch URL tool)", Accept: "text/html,application/xhtml+xml,text/plain,application/json;q=0.9,*/*;q=0.5",
+      headers: { "User-Agent": "chrysalis-web (Fetch URL tool)", Accept: "text/html,application/xhtml+xml,text/plain,application/json;q=0.9,*/*;q=0.5",
         "Accept-Encoding": "gzip, deflate, br" },
       lookup: (name: string, opts: any, cb: any) => dnsLookup(name, { all: true }, (err, addrs) => {
         if (err) return cb(err);

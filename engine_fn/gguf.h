@@ -91,7 +91,7 @@ struct GGUF {
         for (auto &[name, t] : tensors) {
             t.data = base + data_start + offsets[name];
             t.nbytes = type_bytes(t.type, t.ne[0] * t.ne[1] * t.ne[2] * t.ne[3]);
-            if (!t.nbytes) { fprintf(stderr, "kiln: tensor %s has a type this reader does not know (%d)\n", name.c_str(), t.type); return false; }
+            if (!t.nbytes) { fprintf(stderr, "chrysalis: tensor %s has a type this reader does not know (%d)\n", name.c_str(), t.type); return false; }
         }
         return true;
     }

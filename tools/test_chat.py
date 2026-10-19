@@ -1,8 +1,8 @@
-"""Checks kiln's token-level renderer against the official Jinja chat template, and the output parser."""
+"""Checks Chrysalis's token-level renderer against the official Jinja chat template, and the output parser."""
 import json, os, sys
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 import jinja2
-from kiln.chat import Tokens, Renderer, OutputParser, StopText, message_key
+from chrysalis.chat import Tokens, Renderer, OutputParser, StopText, message_key
 
 M = "data/models/"
 tok = Tokens(M + "tokenizer.json")
@@ -60,7 +60,7 @@ for name, msgs, tl, kw in cases:
         print("   first diff at", i, repr(tok.decode(got[max(0, i - 5):i + 5])), "vs", repr(tok.decode(want[max(0, i - 5):i + 5])))
 
 # pictures: placed, trimmed and tokenized as the template renders them, with <|image_pad|> expanded to the picture's tokens
-# as the official processor expands it (here, as kiln's image tokens would stand, the pad id itself)
+# as the official processor expands it (here, as Chrysalis's image tokens would stand, the pad id itself)
 pad = tok.full.token_to_id("<|image_pad|>")
 sizes = {"data:a": 6, "data:b": 4}
 ri = Renderer(tok, lambda key: None, images=lambda pic: [pad] * sizes[pic.url])

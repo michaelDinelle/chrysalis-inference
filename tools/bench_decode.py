@@ -5,15 +5,15 @@ usage: bench_decode.py [n_tokens] [drafts...] [--lookup N ...] [--together N] [-
 import os, sys, time
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from tokenizers import Tokenizer
-from kiln.engine import Engine, Sampling
-from kiln.models import MODELS
+from chrysalis.engine import Engine, Sampling
+from chrysalis.models import MODELS
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 NEW = ("<|im_start|>user\nImplement an LRU cache in Python with O(1) get and put, using a dict and a "
        "doubly linked list. Include type hints, docstrings and a few unit tests with pytest.<|im_end|>\n"
        "<|im_start|>assistant\n<think>\n")
 EDIT = ("<|im_start|>user\nRename the class `Cache` to `PromptCache` in this file and give me the whole file back, "
-        "nothing else.\n\n```python\n" + open(os.path.join(ROOT, "kiln/cache.py")).read() + "```<|im_end|>\n"
+        "nothing else.\n\n```python\n" + open(os.path.join(ROOT, "chrysalis/cache.py")).read() + "```<|im_end|>\n"
         "<|im_start|>assistant\n<think>\n\n</think>\n\n")
 args = sys.argv[1:]
 use = "qwen3.8-27b"

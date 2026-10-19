@@ -98,8 +98,8 @@ void *Engine::snap_buffer() {
     const auto t1 = std::chrono::steady_clock::now();
     CK(hipHostRegister(p, n, hipHostRegisterDefault));
     const auto t2 = std::chrono::steady_clock::now();
-    if (getenv("KILN_TRACE"))
-        fprintf(stderr, "kiln-fn: snapshot buffer %zu MB: fault-in %.0f ms, register %.0f ms\n", n >> 20,
+    if (getenv("CHRYSALIS_TRACE"))
+        fprintf(stderr, "chrysalis-fn: snapshot buffer %zu MB: fault-in %.0f ms, register %.0f ms\n", n >> 20,
                 std::chrono::duration<double, std::milli>(t1 - t0).count(), std::chrono::duration<double, std::milli>(t2 - t1).count());
     return p;
 }
@@ -145,8 +145,8 @@ void Engine::snap_reserve_finish() {
     const auto t2 = std::chrono::steady_clock::now();
     for (int i = 0; i < snap_pending_n; i++) snap_spare.push_back((char *)snap_pending + (size_t)i * one);
     snap_regions.push_back({snap_pending, all});
-    if (getenv("KILN_TRACE"))
-        fprintf(stderr, "kiln-fn: %d snapshot buffers (%zu MB): fault-in wait %.0f ms, register %.0f ms\n", snap_pending_n,
+    if (getenv("CHRYSALIS_TRACE"))
+        fprintf(stderr, "chrysalis-fn: %d snapshot buffers (%zu MB): fault-in wait %.0f ms, register %.0f ms\n", snap_pending_n,
                 all >> 20, std::chrono::duration<double, std::milli>(t1 - t0).count(), std::chrono::duration<double, std::milli>(t2 - t1).count());
     snap_pending = nullptr; snap_pending_n = 0;
 }
@@ -747,7 +747,7 @@ void Engine::moe_back(const Layer &w, int layer, int T) {
         // and the GPU round differently), and a settled bias is as fast (1.5-2x the estimate: within 2% everywhere).
         if (!gpu_cold.empty() && split < 0 && adapt && adapt_left > 0) {
             cpu_bias = std::clamp(cpu_bias * (hipEventQuery(moe_gpu_done) == hipSuccess ? 1.03 : 1 / 1.03), 0.1, 10.0);
-            if (--adapt_left == 0) fprintf(stderr, "kiln-fn: prefill split settled (CPU cost x%.2f)\n", cpu_bias);
+            if (--adapt_left == 0) fprintf(stderr, "chrysalis-fn: prefill split settled (CPU cost x%.2f)\n", cpu_bias);
         }
         pmark(6);
         CK(hipMemcpyAsync(b.Ys, b.h_cout, (size_t)(N - pc0) * D * 2, hipMemcpyHostToDevice, st));
@@ -1222,7 +1222,7 @@ uint32_t *Engine::mask_rows() {
     return d_mask;
 }
 
-// Drafts for a held answer's next step (kiln/server.py): `fixed` first, the tokens its grammar forces next, then the MTP
+// Drafts for a held answer's next step (chrysalis/server.py): `fixed` first, the tokens its grammar forces next, then the MTP
 // head's guesses going on after them; with none forced, a copy from earlier in the conversation where one matches (as
 // generate() drafts). At most max_k (and 3: a verify pass takes 4 tokens) in all, into out; returns how many.
 int Engine::draft(int id, const Sampling &sp, const int *fixed, int nfixed, int max_k, int *out) {

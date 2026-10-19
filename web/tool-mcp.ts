@@ -94,7 +94,7 @@ export function mcpSource(name: string, spec: Record<string, unknown>): Source {
     s.state = "connecting";
     s.error = undefined;
     stderr = "";
-    const c = new Client({ name: "kiln-web", version: "1.0.0" });
+    const c = new Client({ name: "chrysalis-web", version: "1.0.0" });
     const transport = url ? new StreamableHTTPClientTransport(new URL(url), { requestInit: { headers: strings(spec.headers) } })
       : new StdioClientTransport({ command: command!, args, env: { ...getDefaultEnvironment(), ...strings(spec.env) },
         cwd: typeof spec.cwd === "string" ? spec.cwd : undefined, stderr: "pipe" });

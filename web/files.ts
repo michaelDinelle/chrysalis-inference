@@ -1,9 +1,9 @@
-// Files attached to messages: text files (sent to the model as their text), pictures (sent as images), PDFs (kiln reads
-// their pages as pictures and text) and videos (frames kiln takes 2 a second). A
+// Files attached to messages: text files (sent to the model as their text), pictures (sent as images), PDFs (Chrysalis
+// reads their pages as pictures and text) and videos (frames Chrysalis takes 2 a second). A
 // conversation keeps each file's name, kind and size; what is in it lives in IndexedDB, which holds far more than
 // sessionStorage (one screenshot is most of sessionStorage's 5 MB). It belongs to this tab like the conversations do:
 // every record carries the tab's id (kept in sessionStorage, so a reload keeps it), the tab marks itself alive once a
-// minute, and records of tabs not seen for ten minutes are deleted whenever a kiln page loads.
+// minute, and records of tabs not seen for ten minutes are deleted whenever a Chrysalis page loads.
 export type Kind = "text" | "image" | "pdf" | "video";
 export const KINDS: Kind[] = ["text", "image", "pdf", "video"];
 export interface Attachment { id: string; name: string; type: string; size: number; kind: Kind }
@@ -11,7 +11,7 @@ interface Stored { id: string; tab: string; data: Blob | string }
 
 export const MAX_TEXT = 4 << 20, MAX_IMAGE = 24 << 20, MAX_PDF = 32 << 20, MAX_VIDEO = 64 << 20;
 const IMAGE_TYPES = new Set(["image/png", "image/jpeg", "image/webp", "image/gif", "image/bmp"]);
-const UNREADABLE = "kiln reads text files, PDFs, pictures (PNG, JPEG, WebP, GIF, BMP) and videos";
+const UNREADABLE = "Chrysalis reads text files, PDFs, pictures (PNG, JPEG, WebP, GIF, BMP) and videos";
 
 const randomId = () => Array.from(crypto.getRandomValues(new Uint8Array(16)), (b) => b.toString(16).padStart(2, "0")).join("");
 const tab = (() => {
@@ -25,7 +25,7 @@ const tab = (() => {
 const ask = <T>(r: IDBRequest<T>) => new Promise<T>((ok, fail) => { r.onsuccess = () => ok(r.result); r.onerror = () => fail(r.error); });
 const db: Promise<IDBDatabase | null> = new Promise((resolve) => {
   try {
-    const open = indexedDB.open("kiln", 1);
+    const open = indexedDB.open("chrysalis", 1);
     open.onupgradeneeded = () => {
       open.result.createObjectStore("files", { keyPath: "id" }).createIndex("tab", "tab");
       open.result.createObjectStore("tabs", { keyPath: "tab" });

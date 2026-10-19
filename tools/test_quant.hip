@@ -1,6 +1,6 @@
 // Checks the weight relayout, fp16 dequantization, int8 GEMVs and the small-batch GEMM against a plain
 // CPU reference decoded straight from the GGUF bytes, and the GEMVs of different pass sizes against each other. Their speed is tools/bench_quant.hip.
-//   build/test_quant data/models/kiln-mix.gguf
+//   build/test_quant data/models/chrysalis-mix.gguf
 #include "../engine/kernels.h"
 #include "../engine/gguf.h"
 #include <cmath>
@@ -44,7 +44,7 @@ static void cpu_dequant(int type, const uint8_t *raw, int64_t n, float *y) {
 }
 
 int main(int argc, char **argv) {
-    GGUF g; if (!g.open(argc > 1 ? argv[1] : "data/models/kiln-mix.gguf")) FAIL("open gguf");
+    GGUF g; if (!g.open(argc > 1 ? argv[1] : "data/models/chrysalis-mix.gguf")) FAIL("open gguf");
     hipStream_t st; CK(hipStreamCreate(&st));
     Arena arena; arena.init(2ull << 30);
     const char *names[] = {"blk.0.ffn_up.weight", "blk.0.ssm_out.weight", "blk.3.attn_k.weight", "blk.0.ffn_gate.weight"};

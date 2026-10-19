@@ -24,7 +24,7 @@ struct Vision {
     void open(const std::string &path, int out_dim);
     // Scratch bytes encode needs for a picture of n patches.
     size_t scratch_need(int n) const;
-    // One picture: patches float32 [gh * gw][768] (host memory, kiln/vision.py's layout), into out: fp16 [gh * gw / 4][out_dim]
+    // One picture: patches float32 [gh * gw][768] (host memory, chrysalis/vision.py's layout), into out: fp16 [gh * gw / 4][out_dim]
     // (host memory the GPU can write, i.e. pinned). frames 2: a video's frame pair, patches [gh * gw][1536] (each patch's two
     // frames, colour by colour, as transformers lays them out), whose tower is a picture's but for the patch embedding (the
     // tower attends within a frame pair). Runs on st; returns false if scratch is too small.

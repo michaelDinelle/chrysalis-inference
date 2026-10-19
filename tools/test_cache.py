@@ -1,10 +1,10 @@
 """The prompt cache's bookkeeping against a fake engine that rejects any use of a freed snapshot (no GPU needed).
-Usage: tools/test_cache.py [path/to/cache.py]   (default: kiln/cache.py)"""
+Usage: tools/test_cache.py [path/to/cache.py]   (default: chrysalis/cache.py)"""
 import importlib.util, itertools, os, sys, types
 import numpy as np
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-spec = importlib.util.spec_from_file_location("cache", sys.argv[1] if len(sys.argv) > 1 else os.path.join(ROOT, "kiln/cache.py"))
+spec = importlib.util.spec_from_file_location("cache", sys.argv[1] if len(sys.argv) > 1 else os.path.join(ROOT, "chrysalis/cache.py"))
 cache = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(cache)
 cache.time = types.SimpleNamespace(time=itertools.count(1).__next__)   # a clock that always moves: no ties in LRU order

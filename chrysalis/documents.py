@@ -20,11 +20,11 @@ TIMEOUT = 120              # seconds poppler may take over one PDF
 
 
 class DocumentError(ValueError):
-    """A document kiln cannot read."""
+    """A document Chrysalis cannot read."""
 
 
 def file_bytes(data):
-    """(bytes, media type) of a file part's data: a data URL or bare base64 (kiln has no file store to look ids up in)."""
+    """(bytes, media type) of a file part's data: a data URL or bare base64 (Chrysalis has no file store to look ids up in)."""
     if not isinstance(data, str) or not data:
         raise DocumentError("files must be sent inline, as file_data (a data: URL or base64)")
     media = None
@@ -58,7 +58,7 @@ class Documents:
             try:
                 text = data.decode("utf-8")
             except UnicodeDecodeError:
-                raise DocumentError(f"kiln reads PDFs and text files; {name or 'this file'} is neither") from None
+                raise DocumentError(f"Chrysalis reads PDFs and text files; {name or 'this file'} is neither") from None
             out = [{"type": "text", "text": f'<document name="{name or "file"}">\n{text}\n</document>'}]
         with self.lock:
             self.done[key] = out
@@ -68,7 +68,8 @@ class Documents:
 
     def expand(self, messages, pictures):
         """messages with each file part (OpenAI's chat completions: {"type": "file", "file": {"file_data", "filename"}};
-        kiln's "page_pictures": a PDF's pages with text also given as pictures) replaced by its document's parts."""
+        Chrysalis's "page_pictures": a PDF's pages with text also given as pictures) replaced by its document's
+        parts."""
         out = []
         for m in messages:
             content = m.get("content")
@@ -78,7 +79,7 @@ class Documents:
                     if isinstance(p, dict) and p.get("type") == "file":
                         f = p.get("file") or {}
                         if f.get("file_id"):
-                            raise DocumentError("kiln has no file store: send files inline, as file_data")
+                            raise DocumentError("Chrysalis has no file store: send files inline, as file_data")
                         new += self.parts(*file_bytes(f.get("file_data")), f.get("filename"), pictures, page_pictures(f))
                     else:
                         new.append(p)
@@ -105,7 +106,7 @@ def picked(texts, pages, seen):
 
 
 def pdf_parts(data, name, pictures, seen=PAGES_SEEN):
-    with tempfile.TemporaryDirectory(prefix="kiln-pdf-") as tmp:
+    with tempfile.TemporaryDirectory(prefix="chrysalis-pdf-") as tmp:
         src = os.path.join(tmp, "in.pdf")
         with open(src, "wb") as f:
             f.write(data)
@@ -115,7 +116,7 @@ def pdf_parts(data, name, pictures, seen=PAGES_SEEN):
             raise DocumentError("cannot read the PDF: it has no pages")
         pages = int(m.group(1))
         if pages > MAX_PAGES:
-            raise DocumentError(f"the PDF has {pages} pages; kiln reads at most {MAX_PAGES}")
+            raise DocumentError(f"the PDF has {pages} pages; Chrysalis reads at most {MAX_PAGES}")
         texts = poppler(["pdftotext", "-enc", "UTF-8", src, "-"]).decode("utf-8", "replace").split("\f")
         drawn = {}
         if pictures:
@@ -155,4 +156,4 @@ def poppler(cmd):
     except subprocess.TimeoutExpired:
         raise DocumentError(f"reading the PDF took over {TIMEOUT} s") from None
     except FileNotFoundError:
-        raise DocumentError(f"kiln needs poppler ({cmd[0]}) to read PDFs") from None
+        raise DocumentError(f"Chrysalis needs poppler ({cmd[0]}) to read PDFs") from None

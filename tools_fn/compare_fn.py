@@ -1,14 +1,15 @@
-"""Compare kiln's Flash-Next next-token distributions with llama.cpp's on the Q8_0 source (KL divergence, top-1).
+"""Compare Chrysalis's Flash-Next next-token distributions with llama.cpp's on the Q8_0 source (KL divergence, top-1).
 
-The two run different weights (kiln-fn.gguf: Q6_K/Q8_0 dense, IQ4_XS experts in VRAM, Q3_K / Q2_K in RAM; llama.cpp:
-Q8_0), so the numbers are kiln's quantization error plus any implementation error: decode, prefill and mixed paths must
-agree with each other, and the KL should match the prediction (~0.017): a path fails past its MAX_KL or under
-MIN_TOP1, a prefill path also past SELF_KL from the decode path at the same positions. The cold experts' CPU / GPU split is fixed here (all of a prefill's on the CPU, gfrac 0.3 at decode, the expert
-pool as loaded): the load-time calibration and the pool would otherwise move it, and with it the rounding, so every run
-gives the same numbers. Then the pool moves (engine_fn/experts.cpp) and the paths run again under the same limits: once
-after a prose reply has pushed the text's experts out of VRAM (the file's VRAM-tier ones then computed by the CPU from
-the model file), once after the text itself has pulled them back in (RAM-tier experts in their own formats in pool slots,
-VRAM-tier ones read back from the file into other slots).
+The two run different weights (chrysalis-fn.gguf: Q6_K/Q8_0 dense, IQ4_XS experts in VRAM, Q3_K / Q2_K in RAM;
+llama.cpp: Q8_0), so the numbers are Chrysalis's quantization error plus any implementation error: decode, prefill and
+mixed paths must agree with each other, and the KL should match the prediction (~0.017): a path fails past its MAX_KL or
+under MIN_TOP1, a prefill path also past SELF_KL from the decode path at the same positions. The cold experts' CPU / GPU
+split is fixed here (all of a prefill's on the CPU, gfrac 0.3 at decode, the expert pool as loaded): the load-time
+calibration and the pool would otherwise move it, and with it the rounding, so every run gives the same numbers. Then
+the pool moves (engine_fn/experts.cpp) and the paths run again under the same limits: once after a prose reply has
+pushed the text's experts out of VRAM (the file's VRAM-tier ones then computed by the CPU from the model file), once
+after the text itself has pulled them back in (RAM-tier experts in their own formats in pool slots, VRAM-tier ones read
+back from the file into other slots).
   python tools_fn/compare_fn.py [--fresh] [--ref-only] [--text FILE --tag NAME] [--model FILE]
 """
 import os
@@ -22,18 +23,18 @@ import numpy as np
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, ROOT)
 from tokenizers import Tokenizer  # noqa: E402
-from kiln.engine import Engine  # noqa: E402
-from kiln.models import MODELS  # noqa: E402
+from chrysalis.engine import Engine  # noqa: E402
+from chrysalis.models import MODELS  # noqa: E402
 
-MODEL = os.path.join(ROOT, "data/models/flash-next/kiln-fn.gguf")
+MODEL = os.path.join(ROOT, "data/models/flash-next/chrysalis-fn.gguf")
 REF = os.path.join(ROOT, "data/models/flash-next/src/Q8_0/Qwen3.8-Flash-Next-Q8_0-00001-of-00006.gguf")
 # mean KL with this split (2026-10-18, the same every run with the pool as loaded): decode 0.0155, prefill 0.0119,
 # mixed 0.0108. Quantization sets most of it, so a broken kernel moves it less than on the 27B: a decode step that
 # forgets twice as fast gives 0.0284 and 0.0218. Once the pool has moved, each run's pool differs (it follows a sampled
 # reply) and computes the experts on other devices, so the numbers do too, each pool's the same every run (bit for bit):
 # decode 0.0142-0.0165, prefill 0.0108-0.0171. Prefill is judged over 52 prompt lengths (over 4 it went from 0.002 to
-# 0.015 on one position's rounding) and against kiln's own decode path at the same positions, which no pool moves far:
-# 0.0046-0.0077 (SELF_KL).
+# 0.015 on one position's rounding) and against Chrysalis's own decode path at the same positions, which no pool moves
+# far: 0.0046-0.0077 (SELF_KL).
 MAX_KL, MIN_TOP1 = {"decode": 0.021, "prefill": 0.021, "mixed": 0.016}, 0.92
 SELF_KL = 0.012
 TEXT = '''<|im_start|>user
@@ -102,13 +103,13 @@ def stats(name, pairs, max_kl):
     return np.mean(kls) <= max_kl and top1 / len(pairs) >= MIN_TOP1
 
 
-eng = Engine(MODEL, max_seqs=2, umax=MODELS["qwen3.8-flash-next"]["chunk"], lib=os.path.join(ROOT, "build/libkiln_fn.so"))
-eng.lib.kiln_tune.restype, eng.lib.kiln_tune.argtypes = C.c_double, [C.c_char_p, C.c_double]
-eng.lib.kiln_tune(b"split", 1); eng.lib.kiln_tune(b"gfrac", 0.3); eng.lib.kiln_tune(b"experts", 0)
+eng = Engine(MODEL, max_seqs=2, umax=MODELS["qwen3.8-flash-next"]["chunk"], lib=os.path.join(ROOT, "build/libchrysalis_fn.so"))
+eng.lib.chrysalis_tune.restype, eng.lib.chrysalis_tune.argtypes = C.c_double, [C.c_char_p, C.c_double]
+eng.lib.chrysalis_tune(b"split", 1); eng.lib.chrysalis_tune(b"gfrac", 0.3); eng.lib.chrysalis_tune(b"experts", 0)
 
 
 def against(name, pairs, decoded):
-    """Mean KL of a prefill path from kiln's decode path at the same positions."""
+    """Mean KL of a prefill path from Chrysalis's decode path at the same positions."""
     kls = []
     for i, ours in pairs:
         lp, lq = logsoftmax(decoded[i]), logsoftmax(ours)
@@ -137,14 +138,14 @@ def paths(tag):
     bad += not stats(f"prefill (one chunk){tag}", pairs, MAX_KL["prefill"])
     bad += not against(f"prefill = decode{tag}", pairs, decoded)
     if tag:                                 # the cold experts staged on the GPU instead (the file's through pinned memory)
-        eng.lib.kiln_tune(b"split", 0)
+        eng.lib.chrysalis_tune(b"split", 0)
         pairs = []
         for cut in CUTS:
             s = eng.new_seq()
             eng.prefill(s, ids[:cut])
             pairs.append((cut - 1, eng.last_logits()))
             eng.free_seq(s)
-        eng.lib.kiln_tune(b"split", 1)
+        eng.lib.chrysalis_tune(b"split", 1)
         bad += not stats(f"prefill, cold on the GPU{tag}", pairs, MAX_KL["prefill"])
         bad += not against(f"prefill, cold on the GPU = decode{tag}", pairs, decoded)
 
@@ -166,8 +167,8 @@ def placed():
 
 def move_pool(prompt, steps):
     """The pool follows a reply to prompt (token ids) for steps decode steps, then holds still."""
-    from kiln.engine import Sampling
-    eng.lib.kiln_tune(b"experts", 1)
+    from chrysalis.engine import Sampling
+    eng.lib.chrysalis_tune(b"experts", 1)
     s = eng.new_seq()
     eng.prefill(s, prompt)
     eng.begin(s, 7)
@@ -175,7 +176,7 @@ def move_pool(prompt, steps):
     for _ in range(steps):
         eng.generate(s, sp, 16)
     eng.free_seq(s)
-    eng.lib.kiln_tune(b"experts", 0)
+    eng.lib.chrysalis_tune(b"experts", 0)
 
 
 fails = paths("")

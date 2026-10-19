@@ -3,7 +3,7 @@
 // several layers' states at once from inputs stored with 8-token strides and writes no outputs. Both engines' scans
 // share this shape; tools_fn/test_gdn_fn.cpp runs the same checks on engine_fn's.
 //   build/test_gdn
-#ifndef KILN_GDN_KERNELS
+#ifndef CHRYSALIS_GDN_KERNELS
 #include "../engine/kernels.h"
 #endif
 #include <cmath>

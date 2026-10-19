@@ -2,8 +2,8 @@
 answered with thinking at Qwen's sampling settings.  usage: bench_longctx.py [tokens=120000] [gen=512]"""
 import glob, os, sys, time
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-from kiln.chat import Renderer, Tokens
-from kiln.engine import Engine, Sampling
+from chrysalis.chat import Renderer, Tokens
+from chrysalis.engine import Engine, Sampling
 
 target = int(sys.argv[1]) if len(sys.argv) > 1 else 120000
 n_gen = int(sys.argv[2]) if len(sys.argv) > 2 else 512
@@ -19,7 +19,7 @@ for f in files:
     total += n
 question = "\n\nIn the code above, how does the server decide which slot handles a new request? Answer briefly."
 prompt, _ = Renderer(tok, lambda k: None).render([{"role": "user", "content": "".join(parts) + question}])
-eng = Engine("data/models/kiln-mix.gguf")
+eng = Engine("data/models/chrysalis-mix.gguf")
 s = eng.new_seq()
 t0 = time.time()
 eng.prefill(s, prompt)

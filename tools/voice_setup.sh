@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
-# kiln's voice service (voice/): its venv, data/voice-venv, and its models in data/voice/<name>/. What is there already
-# is kept, so running it again only fetches what is missing.
+# Chrysalis's voice service (voice/): its venv, data/voice-venv, and its models in data/voice/<name>/. What is there
+# already is kept, so running it again only fetches what is missing.
 #   tools/voice_setup.sh           the defaults: silero, parakeet-110m, smart-turn, kokoro
 #   tools/voice_setup.sh NAME...   other voices: kitten supertonic pocket
 set -euo pipefail

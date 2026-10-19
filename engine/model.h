@@ -12,8 +12,8 @@ static_assert(TOPK == SAMPLE_N, "the sampler takes the engine's rows as they are
 #include <vector>
 
 constexpr int EOS_IM_END = 248046, EOS_TEXT = 248044;   // <|im_end|>, <|endoftext|>
-// Image tokens: IMG_BASE + picture * IMG_ROWS + row names row `row` of a picture's embeddings (kiln_image_encode), so a
-// picture's tokens are its own wherever it appears and the prompt cache tells pictures apart by their tokens.
+// Image tokens: IMG_BASE + picture * IMG_ROWS + row names row `row` of a picture's embeddings (chrysalis_image_encode),
+// so a picture's tokens are its own wherever it appears and the prompt cache tells pictures apart by their tokens.
 constexpr int IMG_BASE = 1 << 30, IMG_ROWS = 1 << 14;
 inline size_t state_bytes() { return (size_t)48 * GV * GD * GD * 4 + (size_t)48 * QKV * 3 * 4 + D * 4; }   // one sequence
 inline bool is_eos(int t) { return t == EOS_IM_END || t == EOS_TEXT; }
@@ -40,7 +40,7 @@ struct Seq {
     std::vector<int> top_i;
     Seen seen;                       // tokens of the current reply (presence penalty, DRY)
     std::vector<int> ctx;            // the prompt's tail, for DRY (set per reply when DRY is on)
-    std::mt19937_64 rng;             // reseeded for every reply, see kiln_seq_begin
+    std::mt19937_64 rng;             // reseeded for every reply, see chrysalis_seq_begin
     Lookup look;                     // prompt lookup's view of the conversation (engine/lookup.h)
 };
 
@@ -91,7 +91,7 @@ struct Engine {
     std::vector<Snap> snaps;
     uint32_t *d_mask = nullptr;      // held answers' token bitmasks, a row per position of a step (mask_rows())
     float *ssm_pool = nullptr, *conv_pool = nullptr;
-    Vision vision;                   // opened by kiln_vision_open
+    Vision vision;                   // opened by chrysalis_vision_open
     struct Image { half *rows = nullptr; int n = 0; };   // a picture's embeddings [n][D] fp16, pinned host memory
     std::vector<Image> images;
 

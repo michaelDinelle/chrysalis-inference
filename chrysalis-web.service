@@ -1,5 +1,5 @@
 [Unit]
-Description=kiln web UI (port 8081)
+Description=Chrysalis Inference web UI (port 8081)
 
 [Service]
 WorkingDirectory=@ROOT@/web

@@ -75,5 +75,5 @@ class Warmer:
                 os.close(fd)
             self.cached[path] = done
             if not self.stopping.is_set() and done:
-                print(f"kiln: {done / 1e9:.1f} of {size / 1e9:.1f} GB of {os.path.basename(path)} read into the page cache in "
+                print(f"chrysalis: {done / 1e9:.1f} of {size / 1e9:.1f} GB of {os.path.basename(path)} read into the page cache in "
                       f"{time.time() - t0:.0f} s, for a switch to it", file=self.log, flush=True)

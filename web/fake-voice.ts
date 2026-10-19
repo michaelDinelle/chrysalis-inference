@@ -1,4 +1,4 @@
-// A speech service for the tests, through KILN_VOICE_CMD: voice mode's protocol, played from scripts instead of
+// A speech service for the tests, through CHRYSALIS_VOICE_CMD: voice mode's protocol, played from scripts instead of
 // models. The voice a page asks for picks its script: the user says each line once some microphone audio has come
 // (speech, partials word by word, then the turn), and the reply's text comes back as tone chunks of three words (or
 // up to a clause's end), each lasting 0.12 s a word. "interruptAfter": the user talks over the reply once that many

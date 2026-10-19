@@ -103,7 +103,7 @@ export class VoiceClient {
       src = ctx.createMediaStreamSource(this.stream);
     }
     await worklet;
-    const node = new AudioWorkletNode(ctx, "kiln-capture"), sink = ctx.createGain();
+    const node = new AudioWorkletNode(ctx, "chrysalis-capture"), sink = ctx.createGain();
     sink.gain.value = 0;                            // a worklet runs only on a path to the destination; it is silent
     this.micLevel = ctx.createAnalyser();
     this.micLevel.fftSize = 512;

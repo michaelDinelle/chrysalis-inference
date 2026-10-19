@@ -23,7 +23,7 @@ PATCH_DIM = 3 * PATCH * PATCH            # colour, row, column (the two identica
 
 
 class ImageError(ValueError):
-    """A picture kiln cannot read."""
+    """A picture Chrysalis cannot read."""
 
 
 def smart_resize(h, w, factor=FACTOR, min_pixels=MIN_PIXELS, max_pixels=MAX_PIXELS):
@@ -42,9 +42,9 @@ def smart_resize(h, w, factor=FACTOR, min_pixels=MIN_PIXELS, max_pixels=MAX_PIXE
 
 
 def image_bytes(url, what="images"):
-    """The bytes of an image_url (or video_url): a data URL (kiln fetches nothing from the network)."""
+    """The bytes of an image_url (or video_url): a data URL (Chrysalis fetches nothing from the network)."""
     if not isinstance(url, str) or not url.startswith("data:"):
-        raise ImageError(f"{what} must be sent inline, as data: URLs (kiln fetches nothing from the network)")
+        raise ImageError(f"{what} must be sent inline, as data: URLs (Chrysalis fetches nothing from the network)")
     head, _, data = url.partition(",")
     try:
         return base64.b64decode(data, validate=False) if head.endswith(";base64") else data.encode("latin-1")
@@ -122,14 +122,14 @@ def patches(data, max_pixels=MAX_PIXELS):
 # <|vision_end|> inside the video's own pair of them (transformers' Qwen3VLProcessor); in M-RoPE each pair sits as a
 # picture would (Qwen3.5's get_rope_index). Frames are taken 2 a second (4 to 768, transformers' sample_frames) and sized
 # within a budget of 24,576 tokens for the whole video, at most 768 a frame pair (transformers' Qwen3VLVideoProcessor with
-# cap_pixels_per_frame, qwen-vl-utils' reference behaviour). ffmpeg decodes the frames kiln takes, and Pillow resizes them
+# cap_pixels_per_frame, qwen-vl-utils' reference behaviour). ffmpeg decodes the frames Chrysalis takes, and Pillow resizes them
 # as it does a picture.
 VIDEO_FPS, VIDEO_MIN_FRAMES, VIDEO_MAX_FRAMES = 2.0, 4, 768
 VIDEO_MIN_PIXELS, VIDEO_MAX_PIXELS, VIDEO_FRAME_TOKENS = 4096, 24576 * FACTOR * FACTOR, 768
 
 
 class VideoError(ImageError):
-    """A video kiln cannot read."""
+    """A video Chrysalis cannot read."""
 
 
 def video_info(path):
@@ -141,7 +141,7 @@ def video_info(path):
                               "stream=width,height,avg_frame_rate,r_frame_rate,nb_read_packets:stream_side_data=rotation",
                               "-of", "json", path], capture_output=True, check=True, timeout=120).stdout
     except FileNotFoundError:
-        raise VideoError("kiln needs ffmpeg (ffprobe) to read videos") from None
+        raise VideoError("Chrysalis needs ffmpeg (ffprobe) to read videos") from None
     except (subprocess.CalledProcessError, subprocess.TimeoutExpired):
         raise VideoError("cannot read the video") from None
     streams = json.loads(out).get("streams") or []
@@ -162,7 +162,7 @@ def video_info(path):
 
 
 def video_indices(frames, fps, rate=VIDEO_FPS):
-    """The frames kiln takes: `rate` a second, evenly spread (transformers' sample_frames)."""
+    """The frames Chrysalis takes: `rate` a second, evenly spread (transformers' sample_frames)."""
     n = min(max(int(frames / fps * rate), VIDEO_MIN_FRAMES), VIDEO_MAX_FRAMES, frames)
     return np.linspace(0, frames - 1, n).round().astype(int)
 
@@ -200,7 +200,7 @@ class Video:
     def __init__(self, data, rate=VIDEO_FPS):
         import tempfile
         self.data = data
-        with tempfile.NamedTemporaryFile(prefix="kiln-video-") as f:
+        with tempfile.NamedTemporaryFile(prefix="chrysalis-video-") as f:
             f.write(data)
             f.flush()
             total, self.fps, self.shown = video_info(f.name)
@@ -218,7 +218,7 @@ class Video:
         import subprocess
         import tempfile
         from PIL import Image
-        with tempfile.NamedTemporaryFile(prefix="kiln-video-") as f:
+        with tempfile.NamedTemporaryFile(prefix="chrysalis-video-") as f:
             f.write(self.data)
             f.flush()
             pick = "+".join(f"eq(n,{i})" for i in self.indices)
@@ -230,7 +230,7 @@ class Video:
         h, w = self.shown
         n = len(raw) // (w * h * 3)
         if n != len(self.indices) or n * w * h * 3 != len(raw):
-            raise VideoError(f"the video decoded to {len(raw) / (w * h * 3):g} of the {len(self.indices)} frames kiln took")
+            raise VideoError(f"the video decoded to {len(raw) / (w * h * 3):g} of the {len(self.indices)} frames Chrysalis took")
         out = np.empty((n, self.size[0], self.size[1], 3), np.uint8)
         frames = np.frombuffer(raw, np.uint8).reshape(n, h, w, 3)
         for i in range(n):

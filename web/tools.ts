@@ -1,7 +1,7 @@
 // The tools a reply can call, whatever provides them: the built-in Fetch URL (tool-fetch.ts) and the MCP servers in
 // the config file (tool-mcp.ts). Each provider is a Source of Tools behind the interfaces below; server.ts only talks to
 // this file. The config file is the only place a server's command, URL or environment comes from: the page (no logins,
-// and on the LAN after `kiln start --lan`) can list sources, start, retry and reload them, never define one, or it
+// and on the LAN after `chrysalis start --lan`) can list sources, start, retry and reload them, never define one, or it
 // could run any command on this machine.
 import { readFileSync } from "node:fs";
 import { homedir } from "node:os";
@@ -33,7 +33,7 @@ export interface Source {
 // A tool as offered to the model, under a function name unique among every source's.
 export interface Named { fn: string; tool: Tool; source: Source }
 
-export const CONFIG = process.env.KILN_MCP_CONFIG ?? `${homedir()}/.config/kiln/mcp.json`;
+export const CONFIG = process.env.CHRYSALIS_MCP_CONFIG ?? `${homedir()}/.config/chrysalis/mcp.json`;
 export const DEFAULT_TIMEOUT_S = 60, DEFAULT_MAX_CHARS = 40_000;
 
 let sources: Source[] = [];
@@ -43,7 +43,7 @@ let names = new Map<string, Named>();
 // OpenAI's function names (and Qwen's tool format) take letters, digits, _ and -, up to 64.
 export const clean = (s: string) => s.replace(/[^A-Za-z0-9_-]+/g, "_").replace(/^_+|_+$/g, "") || "tool";
 // The function names, from scratch whenever a tool list changes: sources by id, tools by name, so the same tools get
-// the same names, in the same order (the order is the prompt's tools block, which kiln caches).
+// the same names, in the same order (the order is the prompt's tools block, which Chrysalis caches).
 function rename() {
   const next = new Map<string, Named>();
   for (const source of [...sources].sort((a, b) => (a.id < b.id ? -1 : a.id > b.id ? 1 : 0)))

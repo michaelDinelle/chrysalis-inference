@@ -31,7 +31,7 @@ int main(int argc, char **argv) {
     cp.n_ctx = n + 16;
     cp.n_batch = n;
     cp.n_ubatch = getenv("REF_UBATCH") ? atoi(getenv("REF_UBATCH")) : n;   // smaller: llama.cpp's own numerics, split otherwise
-    if (getenv("REF_KV_Q")) {                           // an 8-bit K, 5-bit V cache like kiln's (diagnostics)
+    if (getenv("REF_KV_Q")) {                           // an 8-bit K, 5-bit V cache like Chrysalis's (diagnostics)
         cp.type_k = GGML_TYPE_Q8_0;
         cp.type_v = GGML_TYPE_Q5_0;
         cp.flash_attn_type = LLAMA_FLASH_ATTN_TYPE_ENABLED;

@@ -29,7 +29,7 @@ void CpuMoe::start(MoeShared *shared, MoeShared *pred, const std::vector<ColdLay
     for (const ColdLayer &c : L) {
         bool same = !c.n || c.type_dn == c0->type_dn;
         for (int g = 0; g < 3; g++) same &= !c.gate[g] || c.type_gu[g] == t[g];
-        if (!same) fprintf(stderr, "kiln: cold expert formats differ between layers\n"), abort();
+        if (!same) fprintf(stderr, "chrysalis: cold expert formats differ between layers\n"), abort();
     }
     for (int g = 0; g < 3; g++) dot_gu[g] = ggml_get_type_traits_cpu((ggml_type)t[g])->vec_dot_type;
     dot_same = dot_gu[0] == dot_gu[1] && dot_gu[0] == dot_gu[2];

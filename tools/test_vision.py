@@ -1,15 +1,17 @@
-"""The picture path against independent references (GPU, kiln stopped; --use qwen3.8-flash-next: Flash-Next, ~47 GiB of
-RAM, llama.cpp's reference on the CPU from its Q8_0 source):
-  * preprocessing (kiln/vision.py) against the official transformers processor: the same grids, pixels within 2 steps
+"""The picture path against independent references (GPU, Chrysalis stopped; --use qwen3.8-flash-next: Flash-Next, ~47
+GiB of RAM, llama.cpp's reference on the CPU from its Q8_0 source):
+  * preprocessing (chrysalis/vision.py) against the official transformers processor: the same grids, pixels within 2
+steps
     of 255 on under 1% of them (its torchvision resize rounds differently from Pillow's; unresized pictures match exactly),
     at the official size limit and at smaller ones (max_pixels)
   * the vision tower (engine/vision.hip, through the engine) against transformers' Qwen3_5VisionModel in fp32 with Qwen's
     own weights, on the same patches: each token's cosine similarity and the relative error of all of them
-  * what the tower's error does to the language model: llama.cpp's next-token distributions after the photo fed kiln's
-    embeddings against fed the official ones, next to fed the official ones rounded to fp16 (as kiln stores them)
+  * what the tower's error does to the language model: llama.cpp's next-token distributions after the photo fed
+Chrysalis's
+    embeddings against fed the official ones, next to fed the official ones rounded to fp16 (as Chrysalis stores them)
   * the language model with a picture (image tokens, M-RoPE) against llama.cpp fed the same embeddings at the same
     positions: next-token KL divergence and top-1 agreement on the decode, prefill and mixed paths, as in compare_ref.py
-  * a video: the frames kiln takes, their pixels, the prompt's layout (each frame pair's time) and M-RoPE positions
+  * a video: the frames Chrysalis takes, their pixels, the prompt's layout (each frame pair's time) and M-RoPE positions
     against transformers' video processor and Qwen3.5's get_rope_index, its frame pairs through the tower against
     transformers' vision model
 The transformers references run in data/ref-venv (tools/vision_ref.py); they and llama.cpp's logits are kept in
@@ -19,19 +21,19 @@ import base64, hashlib, io, os, subprocess, sys
 import numpy as np
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from PIL import Image, ImageDraw, ImageFont
-from kiln import vision
-from kiln.chat import Renderer, Tokens
-from kiln.engine import IMG_BASE, IMG_ROWS, Engine
-from kiln.models import MODELS
-from kiln.server import Pictures
-from kiln.sleep import vram_used, wait_vram_freed
+from chrysalis import vision
+from chrysalis.chat import Renderer, Tokens
+from chrysalis.engine import IMG_BASE, IMG_ROWS, Engine
+from chrysalis.models import MODELS
+from chrysalis.server import Pictures
+from chrysalis.sleep import vram_used, wait_vram_freed
 
 USE = sys.argv[sys.argv.index("--use") + 1] if "--use" in sys.argv else "qwen3.8-27b"
 FN = USE == "qwen3.8-flash-next"
 MODEL, MMPROJ, LIB = MODELS[USE]["path"], MODELS[USE]["vision"], MODELS[USE]["lib"]
 D = 2560 if FN else 5120
-# llama.cpp: the 27B's own GGUF on the GPU; Flash-Next's Q8_0 source on the CPU (kiln-fn.gguf's weights are requantized,
-# so there its quantization sets most of the KL, as in tools_fn/compare_fn.py)
+# llama.cpp: the 27B's own GGUF on the GPU; Flash-Next's Q8_0 source on the CPU (chrysalis-fn.gguf's weights are
+# requantized, so there its quantization sets most of the KL, as in tools_fn/compare_fn.py)
 REF_LOGITS = (["build_fn/ref_logits_mm_fn", "data/models/flash-next/src/Q8_0/Qwen3.8-Flash-Next-Q8_0-00001-of-00006.gguf"] if FN
               else ["build/ref_logits_mm", MODEL])
 REF = "data/ref-venv/bin/python"
@@ -39,7 +41,7 @@ OUT = "build/vision" + ("/fn" if FN else "")
 # Mean KL after a picture (the two largest left out, see stats). The 27B: as text (compare_ref.py). Flash-Next, measured
 # 2026-10-18 (decode 0.044, prefill 0.018, mixed 0.038): its requantized weights set most of it, and the picture makes the
 # conversation three times as sensitive. Against llama.cpp the decode moves 0.044 here and 0.015 with a description in the
-# picture's place; two kiln runs that differ only in rounding (the cold experts' split) 0.0075 and 0.0025.
+# picture's place; two Chrysalis runs that differ only in rounding (the cold experts' split) 0.0075 and 0.0025.
 MAX_KL = {"decode": 0.06, "prefill": 0.03, "mixed": 0.05} if FN else {"decode": 0.004, "prefill": 0.004, "mixed": 0.004}
 # The largest KL of a path: the 27B's stay under 0.12; Flash-Next's reach 2.1 at the conversation's most sensitive position
 # (with the rows and columns of its M-RoPE swapped: 2.9, which its trimmed mean and top-1 then catch on the mixed path).
@@ -78,7 +80,7 @@ def picture(w, h, seed):
     for _ in range(6):
         x0, y0 = int(rng.integers(0, w - 10)), int(rng.integers(0, h - 10))
         d.ellipse([x0, y0, x0 + int(rng.integers(8, max(9, w // 3))), y0 + int(rng.integers(8, max(9, h // 3)))], fill=tuple(int(c) for c in rng.integers(0, 256, 3)))
-    d.text((w // 10, h // 2), f"KILN {seed * 7}", fill=(0, 0, 0))
+    d.text((w // 10, h // 2), f"CHRYSALIS {seed * 7}", fill=(0, 0, 0))
     b = io.BytesIO()
     img.save(b, "PNG")
     return b.getvalue()
@@ -91,16 +93,17 @@ def engine():
     e = Engine(MODEL, max_seqs=3, umax=MODELS[USE]["chunk"], lib=LIB)
     if FN:                       # the cold experts' CPU / GPU split fixed, so every run rounds alike (tools_fn/compare_fn.py)
         import ctypes as C
-        e.lib.kiln_tune.restype, e.lib.kiln_tune.argtypes = C.c_double, [C.c_char_p, C.c_double]
-        e.lib.kiln_tune(b"split", 1)
-        e.lib.kiln_tune(b"gfrac", 0.3)
-        e.lib.kiln_tune(b"experts", 0)
+        e.lib.chrysalis_tune.restype, e.lib.chrysalis_tune.argtypes = C.c_double, [C.c_char_p, C.c_double]
+        e.lib.chrysalis_tune(b"split", 1)
+        e.lib.chrysalis_tune(b"gfrac", 0.3)
+        e.lib.chrysalis_tune(b"experts", 0)
     e.vision_open(MMPROJ)
     return e
 
 
 def preprocessing(name, data, limit=None):
-    """kiln/vision.py's patches against the official processor's (given the same max_pixels); returns kiln's."""
+    """chrysalis/vision.py's patches against the official processor's (given the same max_pixels); returns
+    Chrysalis's."""
     key = hashlib.sha1(data).hexdigest()[:12]
     src, out = f"{OUT}/{key}.img", f"{OUT}/{key}.proc{limit or ''}.npz"
     open(src, "wb").write(data)
@@ -132,7 +135,7 @@ for slot, (name, data) in enumerate(pictures.items()):
 preprocessing("photo at detail low", pictures["photo 640x480 (no resize)"], vision.LOW_DETAIL)
 preprocessing("1000x700 at 300,000 pixels", pictures["1000x700 (resized)"], 300000)
 
-# The language model on a conversation about the photo: image tokens from slot 0, positions as kiln/vision.py lays them out.
+# The language model on a conversation about the photo: image tokens from slot 0, positions as chrysalis/vision.py lays them out.
 tok = Tokens("data/models/tokenizer.json")
 photo = pictures["photo 640x480 (no resize)"]
 gh, gw = vision.grid(photo)
@@ -179,11 +182,11 @@ def kl_rows(p_logits, q_logits):
     return (np.exp(lp) * (lp - lq)).sum(-1)
 
 
-ref = llama_logits(emb)                                  # made again whenever kiln's embeddings change
+ref = llama_logits(emb)                                  # made again whenever Chrysalis's embeddings change
 # The tower's error as the language model sees it, on the text after the photo. Its predictions at a few positions are
 # on a knife's edge (any change to the embeddings moves them: llama.cpp fed the official embeddings rounded to fp16
 # moves by KL 0.4 at one), so the median and the mean of the smallest 90% are compared with that rounding's own.
-# Measured 2026-10-18 (kiln's tower / transformers' in bf16 / a planted bug, the position table resampled without aligned
+# Measured 2026-10-18 (Chrysalis's tower / transformers' in bf16 / a planted bug, the position table resampled without aligned
 # corners, against the rounding): the 27B's median 1.2x / 10x / 13x and its mean 2.1x / 9x / 14x; Flash-Next's 2.0x / 1.6x
 # and 2.0x / 1.7x (its predictions there move with any rounding).
 official = np.load(f"{OUT}/{hashlib.sha1(photo).hexdigest()[:12]}.tower.npy")[:b - a]
@@ -200,7 +203,7 @@ check("the tower gives the same embeddings again", np.array_equal(eng.image_read
 
 
 # Two positions of this conversation are on a knife's edge: 0.1% noise on the picture's embeddings moves llama.cpp itself
-# by KL 0.05 at one of them (measured; kiln differs there by about as much), and the other is a near tie (0.57 / 0.43). So
+# by KL 0.05 at one of them (measured; Chrysalis differs there by about as much), and the other is a near tie (0.57 / 0.43). So
 # the mean leaves out a path's two largest KLs; a wrong position or embedding moves every position, and the largest
 # must stay under MAX_ONE. Measured 2026-10-18 without them (27B): decode 0.0011 (text, compare_ref.py: 0.0022 with all
 # positions).
@@ -244,12 +247,13 @@ eng.free_seq(s)
 stats("prefill split inside it, then decode", pairs, MAX_KL["mixed"])
 
 
-# A video (kiln/vision.py, kiln/server.py Pictures): the frames kiln takes, their size and pixels against transformers'
-# video processor sampling all of ffmpeg's frames itself (kiln's settings; cap_pixels_per_frame, as qwen-vl-utils reads
-# videos); the prompt's tokens against the processor's expansion of <|video_pad|> (each frame pair's time) and their M-RoPE
-# positions against Qwen3.5's get_rope_index; the frame pairs through the tower against transformers' vision model.
+# A video (chrysalis/vision.py, chrysalis/server.py Pictures): the frames Chrysalis takes, their size and pixels against
+# transformers' video processor sampling all of ffmpeg's frames itself (Chrysalis's settings; cap_pixels_per_frame, as
+# qwen-vl-utils reads videos); the prompt's tokens against the processor's expansion of <|video_pad|> (each frame pair's
+# time) and their M-RoPE positions against Qwen3.5's get_rope_index; the frame pairs through the tower against
+# transformers' vision model.
 def clip():
-    """Four seconds at 10 frames a second: a red circle moving, then a blue square and "KILN 58"."""
+    """Four seconds at 10 frames a second: a red circle moving, then a blue square and "CHRYSALIS 58"."""
     path = f"{OUT}/clip.mp4"
     if fresh or not os.path.exists(path):
         enc = subprocess.Popen(["ffmpeg", "-v", "error", "-y", "-f", "rawvideo", "-pix_fmt", "rgb24", "-s", "640x360", "-r", "10",
@@ -262,7 +266,7 @@ def clip():
                 d.ellipse([200 + 4 * i, 100, 320 + 4 * i, 220], fill="red")
             else:
                 d.rectangle([100, 120, 220, 240], fill="blue")
-                d.text((300, 150), "KILN 58", fill="black", font=font)
+                d.text((300, 150), "CHRYSALIS 58", fill="black", font=font)
             enc.stdin.write(img.tobytes())
         enc.stdin.close()
         enc.wait()

@@ -1,6 +1,6 @@
-# kiln: notes for coding agents
+# Chrysalis Inference: notes for coding agents
 
-README.md says what kiln is, how it is built and what it measures. This file is how to change it.
+README.md says what Chrysalis is, how it is built and what it measures. This file is how to change it.
 
 ## Comments
 
@@ -18,7 +18,7 @@ a stale comment steers people and agents wrong. `make lint` catches the mechanic
   nothing), and a case is named for what it exercises.
 - Prove a new or fixed check: break the product code on purpose, watch the check fail, revert.
 - Flash-Next's CPU / GPU split and its expert pool move with history and change results by rounding: a check that
-  needs bit-identical repeats pins them (`kiln_tune` "split", "gfrac", "experts"), as tools/test_snapshot.py does.
+  needs bit-identical repeats pins them (`chrysalis_tune` "split", "gfrac", "experts"), as tools/test_snapshot.py does.
 - Tests check, benchmarks measure: timings belong in the bench_* tools.
 
 ## Running them
@@ -27,15 +27,15 @@ a stale comment steers people and agents wrong. `make lint` catches the mechanic
   `data/venv/bin/python tools/test_chat.py`, `data/venv/bin/python tools/test_documents.py` (which PDF pages are
   pictured), `make build_fn/test_cpujob_fn && build_fn/test_cpujob_fn`, `make test_voice` (the voice service: its features against
   transformers', turns, echo and barge-in over its WebSocket; `make voice` first), `make test_web` (the web UI's sampler against
-  the engine's, its server against a fake kiln, the page in headless Chromium), `make lint`.
-- GPU, with kiln's model server stopped (`systemctl --user stop kiln`; the user runs kiln: check the GPU is idle, ask
-  once per task, then just say when it stops and for how long): `make test` (test_web, the 27B kernels, then the model
-  in-process: chat format, cache, snapshots and generation (held answers' masked steps too), the server (its Anthropic
-  and Responses APIs through those SDKs, which data/venv has; held answers and strict tool calls, thinking budgets, PDFs,
-  videos, a long prompt read beside a reply), its next-token distributions against llama.cpp's, and pictures and videos:
-  preprocessing, positions and the vision tower against transformers, prompts with pictures against llama.cpp; the
-  transformers references need data/ref-venv, see README Rebuilding), `make test_fn` (Flash-Next kernels) and
-  `make test_fn_model` (the Flash-Next model in-process: generation and snapshots, the server, llama.cpp's logits,
-  pictures and videos).
-- Flash-Next takes ~47 GiB of system RAM, in kiln or in-process. Check MemAvailable before loading it, and run it in
-  its own scope (`systemd-run --user --scope ...`): systemd-oomd kills whole terminal scopes under memory pressure.
+  the engine's, its server against a fake Chrysalis, the page in headless Chromium), `make lint`.
+- GPU, with Chrysalis's model server stopped (`systemctl --user stop chrysalis`; the user runs Chrysalis: check the GPU
+  is idle, ask once per task, then just say when it stops and for how long): `make test` (test_web, the 27B kernels,
+  then the model in-process: chat format, cache, snapshots and generation (held answers' masked steps too), the server
+  (its Anthropic and Responses APIs through those SDKs, which data/venv has; held answers and strict tool calls,
+  thinking budgets, PDFs, videos, a long prompt read beside a reply), its next-token distributions against llama.cpp's,
+  and pictures and videos: preprocessing, positions and the vision tower against transformers, prompts with pictures
+  against llama.cpp; the transformers references need data/ref-venv, see README Rebuilding), `make test_fn` (Flash-Next
+  kernels) and `make test_fn_model` (the Flash-Next model in-process: generation and snapshots, the server, llama.cpp's
+  logits, pictures and videos).
+- Flash-Next takes ~47 GiB of system RAM, in Chrysalis or in-process. Check MemAvailable before loading it, and run it
+  in its own scope (`systemd-run --user --scope ...`): systemd-oomd kills whole terminal scopes under memory pressure.

@@ -31,8 +31,8 @@
 #include <unistd.h>
 
 #define VCK(x) do { hipError_t e_ = (x); if (e_ != hipSuccess) { \
-    fprintf(stderr, "kiln vision: HIP error '%s' at %s:%d\n", hipGetErrorString(e_), __FILE__, __LINE__); abort(); } } while (0)
-#define VFAIL(...) do { fprintf(stderr, "kiln vision: " __VA_ARGS__); fprintf(stderr, "\n"); abort(); } while (0)
+    fprintf(stderr, "chrysalis vision: HIP error '%s' at %s:%d\n", hipGetErrorString(e_), __FILE__, __LINE__); abort(); } } while (0)
+#define VFAIL(...) do { fprintf(stderr, "chrysalis vision: " __VA_ARGS__); fprintf(stderr, "\n"); abort(); } while (0)
 
 namespace {
 

@@ -6,18 +6,18 @@ what the plain decode path gives.
 import os, sys, random
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 import numpy as np
-from kiln.engine import Engine, Sampling
-from kiln.structured import VOCAB
-from kiln.models import MODELS
+from chrysalis.engine import Engine, Sampling
+from chrysalis.structured import VOCAB
+from chrysalis.models import MODELS
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 spec = MODELS[sys.argv[sys.argv.index("--use") + 1] if "--use" in sys.argv else "qwen3.8-27b"]
 eng = Engine(os.path.join(ROOT, spec["path"]), max_seqs=8, umax=spec["chunk"], lib=os.path.join(ROOT, spec["lib"]))   # 7 sequences
-if hasattr(eng.lib, "kiln_tune"):        # Flash-Next: its prefill split stops adapting once settled; here it is fixed now
+if hasattr(eng.lib, "chrysalis_tune"):        # Flash-Next: its prefill split stops adapting once settled; here it is fixed now
     import ctypes as C
-    eng.lib.kiln_tune.restype, eng.lib.kiln_tune.argtypes = C.c_double, [C.c_char_p, C.c_double]
-    eng.lib.kiln_tune(b"adapt_left", 0)
-    eng.lib.kiln_tune(b"split", 1); eng.lib.kiln_tune(b"gfrac", 0.3)   # its CPU / GPU split fixed: the same numbers every run
-    eng.lib.kiln_tune(b"experts", 0)                                     # (the expert pool too: compare_fn checks it moving)
+    eng.lib.chrysalis_tune.restype, eng.lib.chrysalis_tune.argtypes = C.c_double, [C.c_char_p, C.c_double]
+    eng.lib.chrysalis_tune(b"adapt_left", 0)
+    eng.lib.chrysalis_tune(b"split", 1); eng.lib.chrysalis_tune(b"gfrac", 0.3)   # its CPU / GPU split fixed: the same numbers every run
+    eng.lib.chrysalis_tune(b"experts", 0)                                     # (the expert pool too: compare_fn checks it moving)
 random.seed(3)
 p1 = [random.randrange(1000, 50000) for _ in range(300)]
 p2 = [random.randrange(1000, 50000) for _ in range(130)]
@@ -44,7 +44,7 @@ print(f"restored logits identical            {'ok' if ok else 'FAIL'}  max diff 
 ok = out_a == out_b; fails += not ok
 print(f"continuations identical (with MTP)   {'ok' if ok else 'FAIL'}")
 # the same tokens in other passes round differently (more on Flash-Next, whose CPU and GPU share the cold experts by pass)
-tol = 1.0 if hasattr(eng.lib, "kiln_tune") else 0.5
+tol = 1.0 if hasattr(eng.lib, "chrysalis_tune") else 0.5
 ok = int(la.argmax()) == int(lc.argmax()) and np.abs(la - lc).max() < tol; fails += not ok
 print(f"one-shot prefill agrees              {'ok' if ok else 'FAIL'}  max diff {np.abs(la-lc).max():.3g}")
 eng.truncate(c, 0); eng.prefill(c, p1 + p2); lt = eng.last_logits()
@@ -82,7 +82,7 @@ f, g, h = eng.new_seq(), eng.new_seq(), eng.new_seq()
 # Per step, a pass of k + 1 tokens rounds differently from k + 1 single steps (2026-10-18, the same numbers every run):
 # the 27B's committed state differs by a median 0.15-0.19 (max 0.24), Flash-Next's by 0.9 (max 6.5: a routing near-tie
 # moves an expert somewhere in 48 layers at nearly every step). A commit one token short gave medians 1.47 and 5.6.
-SPEC_MAX, SPEC_MED = (10.0, 3.5) if hasattr(eng.lib, "kiln_tune") else (3.0, 0.6)
+SPEC_MAX, SPEC_MED = (10.0, 3.5) if hasattr(eng.lib, "chrysalis_tune") else (3.0, 0.6)
 
 
 def spec_steps(name, prompt, sp, min_len):
@@ -129,7 +129,7 @@ spec_steps("prompt-lookup steps = decode path", rep + rep + rep[:40],
            spec["draft"] + 2)
 
 
-# A held answer's steps (kiln/server.py: response_format, strict tools) verify drafts with each position's logits masked to
+# A held answer's steps (chrysalis/server.py: response_format, strict tools) verify drafts with each position's logits masked to
 # what its grammar allows there, the tokens it forces first among them. Against single decode steps from the step's start
 # with the same masks applied here: every token is allowed and greedy's best of those, a forced draft is taken, and steps
 # carry several tokens (on a prompt that repeats itself, so drafts land where the mask lets them).
@@ -172,7 +172,7 @@ if eng.masked:
     held_steps("held steps = masked decode path", rep + rep + rep[:40], greedy)
 else:
     fails += 1
-    print(f"{'held steps = masked decode path':36s} FAIL  this engine has no masked steps (kiln_generate_masked)")
+    print(f"{'held steps = masked decode path':36s} FAIL  this engine has no masked steps (chrysalis_generate_masked)")
 free0 = eng.free_tokens()
 for s_ in (a, b, c, d, e, f, g, h): eng.free_seq(s_)
 ok = eng.free_tokens() > free0; fails += not ok
@@ -223,7 +223,7 @@ if getattr(eng, "batched", False):
           many == [alone(p1, 23, one, 15), alone(p2, 24, one, 15), alone(p3, 25, one, 15)] and min(map(len, two)) > 15)
     fails += not ok
     print(f"sequences stepped together = alone   {'ok' if ok else 'FAIL'}  two: {[len(t) for t in two]} tokens, three: {[len(t) for t in many]}")
-# A snapshot written out and read back (kiln/cache.py keeps the prefixes sessions share on disk): what follows the
+# A snapshot written out and read back (chrysalis/cache.py keeps the prefixes sessions share on disk): what follows the
 # imported one is what follows the original, bit for bit, in pages of its own; bytes cut short or of another layout are
 # refused.
 if eng.persistent:

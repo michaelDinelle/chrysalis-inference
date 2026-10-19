@@ -3,7 +3,7 @@
 Rendering follows the model's chat_template.jinja exactly, with two deliberate differences:
   * message content is tokenized without matching special tokens, so a file that contains
     "<|im_end|>" stays text instead of ending the turn;
-  * assistant turns that kiln generated are replayed as the exact token ids it produced, so every
+  * assistant turns that Chrysalis generated are replayed as the exact token ids it produced, so every
     request in an agent loop extends the cached sequence instead of diverging from it.
 A picture renders as <|vision_start|>, its image tokens (one per merged 2 x 2 patch block, as the processor expands
 <|image_pad|>; ids naming the picture, engine/model.h) and <|vision_end|>; a video as the processor expands <|video_pad|>:
@@ -122,7 +122,7 @@ class Picture(NamedTuple):
 
 
 class Clip(NamedTuple):
-    """A video part: its URL and the frames a second to take of it (None: kiln/vision.py's)."""
+    """A video part: its URL and the frames a second to take of it (None: chrysalis/vision.py's)."""
     url: str
     fps: int | float | None = None
 
