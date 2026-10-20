@@ -15,19 +15,22 @@ usage: chrysalis <command>
 
   start     load the model, start the web chat, print their URLs
             (requests pick the model: qwen3.8-27b or qwen3.8-flash-next; Chrysalis switches between them)
-            --lan: also on the local network, with a QR code that connects a phone or another device
+            --lan: the web chat and the API also on the local network, for the devices let in: a QR code
+            connects a phone or another computer
   stop      stop both and free the GPU
   restart   stop, then start (after rebuilding or editing the code; takes --lan too)
   status    is it running, and where
   logs      follow the request log (prompt and cached tokens, TTFT, tok/s)
+  key       a key for an app on another computer to use the API with (--lan)
 
 one-time setup:
   install   install the systemd services and put 'chrysalis' on your PATH
 EOF
 }
 
-# Where both services listen: 127.0.0.1, or 0.0.0.0 after `chrysalis start --lan`. It lives in the systemd user
-# manager's environment (CHRYSALIS_HOST), so the web chat's Start button starts the model the same way. CHRYSALIS_MODEL
+# Where the web chat listens: 127.0.0.1, or the network too after `chrysalis start --lan`, for the devices it lets in, and
+# with Chrysalis's API behind the same keys (web/devices.ts): Chrysalis itself listens on 127.0.0.1 only. It lives in the
+# systemd user manager's environment (CHRYSALIS_HOST). CHRYSALIS_MODEL
 # there (set by the web chat's model picker) is the model Chrysalis loads at start.
 host() { systemctl --user show-environment | sed -n 's/^CHRYSALIS_HOST=//p'; }
 lan_ip() { ip -4 route show default | awk '{ for (i = 1; i < NF; i++) if ($i == "src") { print $(i + 1); exit } }'; }
@@ -39,33 +42,34 @@ lan_subnet() {
 }
 
 # A firewall that drops what comes in from the network (ufw, as Omarchy and others ship it) keeps other devices out of
-# Chrysalis's ports. On the way onto the network, let this network in (and nothing from outside it), asking for the
+# the web chat's ports (8081 the chat and the API, 8082 the setup page). On the way onto the network, let this network in (and nothing from outside it), asking for the
 # password once. ufw's rules may be root's to read: what was let in is noted in ~/.config/chrysalis/ufw too.
 UFW_NOTE=~/.config/chrysalis/ufw
 blocked() {
     systemctl is-active -q ufw 2>/dev/null || return 1
     local net; net=$(lan_subnet)
-    ! grep -qs "allow tcp 8080:8082 0.0.0.0/0 any $net in" /etc/ufw/user.rules && ! grep -qsx "$net" "$UFW_NOTE"
+    ! grep -qsE "allow tcp 808[01]:8082 0.0.0.0/0 any $net in" /etc/ufw/user.rules && ! grep -qsx "$net" "$UFW_NOTE"
 }
 let_in() {
     blocked || return 0
     local net; net=$(lan_subnet)
-    echo "ufw keeps other devices out: letting $net reach Chrysalis (TCP 8080-8082) takes your password, once"
-    if [ -t 0 ] && sudo ufw allow from "$net" to any port 8080:8082 proto tcp comment "Chrysalis Inference" >/dev/null; then
+    echo "ufw keeps other devices out: letting $net reach Chrysalis (TCP 8081-8082) takes your password, once"
+    if [ -t 0 ] && sudo ufw allow from "$net" to any port 8081:8082 proto tcp comment "Chrysalis Inference" >/dev/null; then
         mkdir -p "${UFW_NOTE%/*}" && echo "$net" >> "$UFW_NOTE"
     else
-        echo "  not changed: sudo ufw allow from $net to any port 8080:8082 proto tcp"
+        echo "  not changed: sudo ufw allow from $net to any port 8081:8082 proto tcp"
     fi
 }
 
 urls() {
     local at=127.0.0.1
     if [ "$(host)" = 0.0.0.0 ]; then at=$(lan_ip); fi
-    echo "  API       http://$at:8080/v1"
+    echo "  API       http://127.0.0.1:8080/v1"
     if [ -n "$WEB" ] && systemctl --user is-active -q chrysalis-web; then
         if [ "$at" = 127.0.0.1 ]; then
             echo "  web chat  http://$at:8081"
         else
+            echo "            https://$at:8081/v1 from the network, with a key ('chrysalis key')"
             # the network gets HTTPS (a browser gives the microphone, voice mode, only to secure pages); this machine
             # keeps plain HTTP on 127.0.0.1, which is one. A device starts at the setup page (plain HTTP, port 8082):
             # it trusts this machine's authority there, then the chat opens over HTTPS (web/setup.ts)
@@ -125,12 +129,15 @@ case "${1:-help}" in
             [ -f "$UNITS/chrysalis.service" ] || { echo "Chrysalis is not installed: run '$ROOT/chrysalis.sh install' first"; exit 1; }
             case "${2:-}" in --lan) to=0.0.0.0 ;; "") to=127.0.0.1 ;; *) usage; exit 1 ;; esac
             was=$(host)
-            if [ $to = 0.0.0.0 ]; then let_in; fi
+            if [ $to = 0.0.0.0 ]; then
+                [ -n "$WEB" ] || { echo "--lan is the web chat's (it lets devices in), and bun is not installed: see 'chrysalis install'"; exit 1; }
+                let_in
+            fi
             systemctl --user set-environment CHRYSALIS_HOST=$to
             if [ "$1" = restart ]; then
                 systemctl --user restart chrysalis $WEB
             else
-                if [ "${was:-127.0.0.1}" != $to ]; then systemctl --user try-restart chrysalis $WEB; fi   # move running ones
+                if [ "${was:-127.0.0.1}" != $to ] && [ -n "$WEB" ]; then systemctl --user try-restart $WEB; fi   # move a running one
                 systemctl --user start chrysalis $WEB
             fi
             ready ;;
@@ -139,6 +146,12 @@ case "${1:-help}" in
             elif systemctl --user is-active -q chrysalis; then echo "Chrysalis is loading the model ('chrysalis logs' to follow)"
             else echo "Chrysalis is stopped ('chrysalis start' starts it)"; fi ;;
   logs)     exec journalctl --user -u chrysalis -f -o cat ;;
+  key)      [ "$(host)" = 0.0.0.0 ] || { echo "Chrysalis is on this computer only: 'chrysalis start --lan' opens it to the network"; exit 1; }
+            k=$(curl -sf -X POST -H "Content-Type: application/json" -d "{\"name\": \"${2:-An app}\"}" http://127.0.0.1:8081/api/pair/key) \
+                || { echo "the web chat is not running: 'chrysalis start --lan'"; exit 1; }
+            echo "  key       $(printf %s "$k" | "$PY" -Ic 'import json, sys; print(json.load(sys.stdin)["key"])')"
+            echo "  API       https://$(lan_ip):8081/v1 (OpenAI's SDKs: Authorization: Bearer <key>; Anthropic's: x-api-key)"
+            echo "            shown once (Chrysalis keeps its hash); Connect a device in the web chat lists and removes it" ;;
   install)  mkdir -p "$UNITS" ~/.local/bin
             sed "s|@ROOT@|$ROOT|g" "$ROOT/chrysalis.service" > "$UNITS/chrysalis.service"
             if BUN="$(command -v bun)"; then
@@ -151,7 +164,8 @@ case "${1:-help}" in
             systemctl --user daemon-reload
             echo "installed: 'chrysalis start' loads the model and prints its URLs" ;;
   # not in the usage: the foreground server the service runs (takes --port, --draft, ...) and the raw stats
-  serve)    cd "$ROOT" && exec "$PY" -m chrysalis serve --host "${CHRYSALIS_HOST:-127.0.0.1}" ${CHRYSALIS_MODEL:+--use "$CHRYSALIS_MODEL"} "${@:2}" ;;
+  # (on this machine only: the network reaches the API through the web chat, with a key)
+  serve)    cd "$ROOT" && exec "$PY" -m chrysalis serve --host 127.0.0.1 ${CHRYSALIS_MODEL:+--use "$CHRYSALIS_MODEL"} "${@:2}" ;;
   stats)    exec curl -s "$API/chrysalis/stats" ;;
   help|-h|--help) usage ;;
   *)        usage; exit 1 ;;

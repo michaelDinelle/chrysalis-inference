@@ -709,6 +709,9 @@ label.set-switch { cursor: pointer; }
 .dev-item { display: flex; align-items: center; gap: 10px; min-height: 30px; font-size: 13px; }
 .dev-name { min-width: 0; overflow: hidden; white-space: nowrap; text-overflow: ellipsis; }
 .dev-when { flex: 1; color: var(--faint); font-size: 12px; white-space: nowrap; }
+.dev-api { flex: 1; min-width: 0; }
+.dev-key { display: flex; align-items: center; gap: 8px; }
+.dev-key code { flex: 1; min-width: 0; padding: 5px 8px; border-radius: 7px; background: var(--code); font: 12px var(--mono); overflow-wrap: anywhere; user-select: all; }
 .dev-fp { margin: 0; }
 .dev-fp code { font: 11px var(--mono); overflow-wrap: anywhere; }
 .set-switch + .set-switch { margin-top: 8px; }

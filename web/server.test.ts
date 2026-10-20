@@ -17,8 +17,9 @@ let chrysalisAborted = 0;
 // A tool script, as the user's message: "run ", the rounds as JSON (each the calls Chrysalis answers with, or its
 // text), and a line that makes the message unique. Each round is told by the assistant turns the request already holds;
 // every request a script gets is kept.
-// A voice reply's rounds also say the calls Chrysalis makes when held to the tools' grammar (forced).
-interface Round { calls?: { name: string; args: string }[]; text?: string; gap?: number; forced?: { name: string; args: string }[]; broken?: boolean }
+// A voice reply's rounds also say the calls Chrysalis makes when held to the tools' grammar (forced). wait: ms before
+// Chrysalis answers at all, as it reads a long prompt before its first event.
+interface Round { calls?: { name: string; args: string }[]; text?: string; gap?: number; forced?: { name: string; args: string }[]; broken?: boolean; wait?: number }
 const seen = new Map<string, any[]>();
 const enc = new TextEncoder();
 const sse = (o: unknown) => enc.encode(`data: ${typeof o === "string" ? o : JSON.stringify(o)}\n\n`);
@@ -37,6 +38,7 @@ const fake = Bun.serve({
     const k = body.messages.filter((m: any) => m.role === "assistant" && m !== prefix).length, r = script?.[Math.min(k, script.length - 1)];
     if (!body.stream) return Response.json({ choices: [{ message: { content: "a title" } }] });
     req.signal.addEventListener("abort", () => chrysalisAborted++);
+    if (r?.wait) await Bun.sleep(r.wait);
     if (r) {
       seen.set(said, [...(seen.get(said) ?? []), body]);
       const calls = body.tool_choice === "required" ? r.forced ?? [] : r.calls ?? [];
@@ -616,7 +618,7 @@ test("on the network (CHRYSALIS_HOST 0.0.0.0): this machine keeps plain HTTP; ea
   }
 });
 
-test("on the network only the devices this computer let in get past the pages: its code works once for a key that the device's requests carry, wrong codes void the live ones, and a device removed is out again", async () => {
+test("on the network only the devices this computer let in get past the pages: its code works once for a key that the device's requests carry, wrong codes void the live ones, Chrysalis's API takes an app's key as OpenAI's and Anthropic's SDKs send it, and a device or key removed is out again", async () => {
   const { proc, dir, urls, setups } = await onNetwork();
   try {
     const [here, net] = urls, insecure = { tls: { rejectUnauthorized: false } };
@@ -652,15 +654,43 @@ test("on the network only the devices this computer let in get past the pages: i
     expect((await asked("/api/pair", { method: "POST", body: "{}", headers: { ...json, cookie } })).status).toBe(403);   // only this computer lets devices in
     expect(readFileSync(`${dir}/devices.json`, "utf8")).not.toContain(key);
 
+    // Chrysalis's API, behind the same keys: an app's, made on this computer only; a reply streams through, and an app that
+    // hangs up stops Chrysalis's
+    const completion = (headers: Record<string, string> = {}, signal?: AbortSignal, messages: object[] = []) => asked("/v1/chat/completions",
+      { method: "POST", body: JSON.stringify({ stream: true, messages }), headers: { ...json, ...headers }, signal });
+    expect((await completion()).status).toBe(401);
+    expect((await asked("/api/pair/key", { method: "POST", body: "{}", headers: { ...json, cookie } })).status).toBe(403);
+    const { key: appKey } = await (await fetch(`${here}/api/pair/key`, { method: "POST", body: JSON.stringify({ name: "Test app" }), headers: json })).json();
+    const streamed = await completion({ authorization: `Bearer ${appKey}` });
+    expect([streamed.status, (await streamed.text()).trim().endsWith("data: [DONE]")]).toEqual([200, true]);
+    const anthropic = await completion({ "x-api-key": appKey });
+    expect([anthropic.status, (await anthropic.text()).trim().endsWith("data: [DONE]")]).toEqual([200, true]);
+    const local = await fetch(`${here}/v1/chat/completions`, { method: "POST", body: JSON.stringify({ stream: true, messages: [] }), headers: json });
+    expect([local.status, (await local.text()).trim().endsWith("data: [DONE]")]).toEqual([200, true]);   // this machine needs none
+    const aborts = chrysalisAborted, ctrl = new AbortController(), live = await completion({ authorization: `Bearer ${appKey}` }, ctrl.signal);
+    await live.body!.getReader().read();
+    ctrl.abort();
+    for (let t = Date.now(); chrysalisAborted === aborts && Date.now() - t < 3000; ) await Bun.sleep(50);
+    expect(chrysalisAborted).toBe(aborts + 1);
+    // and one that hangs up while Chrysalis is still reading the prompt, before it has answered at all (3 s here)
+    const early = new AbortController(), asking = completion({ authorization: `Bearer ${appKey}` }, early.signal,
+      [{ role: "user", content: 'run [{"wait": 3000}]\nhangs up early' }]).catch(() => undefined);
+    await Bun.sleep(300);
+    early.abort();
+    await asking;
+    for (let t = Date.now(); chrysalisAborted === aborts + 1 && Date.now() - t < 1500; ) await Bun.sleep(50);
+    expect(chrysalisAborted).toBe(aborts + 2);
+    expect(readFileSync(`${dir}/devices.json`, "utf8")).not.toContain(appKey);
+
     // 20 wrong codes, and a live one no longer works
     const { code: next } = await mint();
     for (let i = 0; i < 20; i++) expect((await redeem("WRONG-OOO")).status).toBe(403);
     expect((await redeem(next)).status).toBe(403);
 
     const listed = await (await fetch(`${here}/api/pair`)).json();
-    expect(listed.devices.map((d: { name: string }) => d.name)).toEqual(["Test phone"]);
-    expect((await fetch(`${here}/api/pair/${listed.devices[0].id}`, { method: "DELETE" })).status).toBe(204);
-    expect((await asked("/api/status", { headers: { cookie } })).status).toBe(401);
+    expect(listed.devices.map((d: { name: string }) => d.name)).toEqual(["Test phone", "Test app"]);
+    for (const d of listed.devices) expect((await fetch(`${here}/api/pair/${d.id}`, { method: "DELETE" })).status).toBe(204);
+    expect([(await asked("/api/status", { headers: { cookie } })).status, (await completion({ authorization: `Bearer ${appKey}` })).status]).toEqual([401, 401]);
   } finally {
     proc.kill();
   }

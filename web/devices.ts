@@ -1,7 +1,8 @@
-// Who may use the web chat from the network (`chrysalis start --lan`): the devices this computer's own screen let in.
-// Its QR code carries a pairing code (or the code is typed, where there is no camera), and a device that brings one gets
-// a key of its own, kept by its browser as a cookie that only the chat's HTTPS gets. This machine needs no key: what
-// runs here can reach Chrysalis anyway.
+// Who may use the web chat and Chrysalis's API from the network (`chrysalis start --lan`): the devices this computer's own
+// screen let in. Its QR code carries a pairing code (or the code is typed, where there is no camera), and a device that
+// brings one gets a key of its own, kept by its browser as a cookie that only the chat's HTTPS gets. An app on another
+// computer gets a key made here (Connect a device, `chrysalis key`) and sends it as OpenAI's and Anthropic's SDKs send
+// theirs. This machine needs no key: what runs here can reach Chrysalis anyway.
 //
 // A pairing code is 8 characters (40 bits), short enough to type, since it is only ever tried against this server and
 // never offline: it works once, for 10 minutes, and 20 wrong codes void every live one, so each code shown gives a
@@ -16,7 +17,9 @@ const ALPHABET = "23456789ABCDEFGHJKLMNPQRSTUVWXYZ";       // no 0, O, 1 or I: r
 const CODE_MS = 10 * 60_000, MAX_FAILS = 20, MAX_CODES = 8;
 const COOKIE = "chrysalis-device", YEAR = 400 * 86400;    // 400 days: the longest browsers keep a cookie
 const sha = (s: string) => createHash("sha256").update(s).digest("hex");
-const cookie = (req: Request) => req.headers.get("cookie")?.split(/;\s*/).find((c) => c.startsWith(`${COOKIE}=`))?.slice(COOKIE.length + 1);
+// a browser's cookie, or an app's key as OpenAI's SDKs send it (Authorization: Bearer) or Anthropic's (x-api-key)
+const keyOf = (req: Request) => req.headers.get("cookie")?.split(/;\s*/).find((c) => c.startsWith(`${COOKIE}=`))?.slice(COOKIE.length + 1)
+  ?? req.headers.get("authorization")?.match(/^Bearer\s+(\S+)$/i)?.[1] ?? req.headers.get("x-api-key") ?? undefined;
 // Secure: never over plain HTTP; HttpOnly: no script reads it; Strict: no other site's page sends it
 export const keyCookie = (key: string) => `${COOKIE}=${key}; Path=/; Max-Age=${YEAR}; Secure; HttpOnly; SameSite=Strict`;
 
@@ -48,15 +51,20 @@ export class Devices {
       return undefined;
     }
     this.codes.delete(code);
-    const key = randomBytes(32).toString("base64url"), now = Date.now();
-    this.list.push({ id: randomBytes(6).toString("hex"), name: name.slice(0, 40) || "A device", hash: sha(key), added: now, seen: now });
+    return this.add(name || "A device").key;
+  }
+
+  // a key for an app on another computer, made on this one
+  add(name: string): { key: string; id: string } {
+    const key = randomBytes(32).toString("base64url"), now = Date.now(), id = randomBytes(6).toString("hex");
+    this.list.push({ id, name: name.slice(0, 40), hash: sha(key), added: now, seen: now });
     this.save();
-    return key;
+    return { key, id };
   }
 
   // the device whose key a request brings, and the key, to set again (its 400 days count from the last visit)
   find(req: Request): { device: Device; key: string } | undefined {
-    const key = cookie(req), hash = key && sha(key), device = hash ? this.list.find((d) => d.hash === hash) : undefined;
+    const key = keyOf(req), hash = key && sha(key), device = hash ? this.list.find((d) => d.hash === hash) : undefined;
     if (!device) return undefined;
     if (Date.now() - device.seen > 60_000) { device.seen = Date.now(); this.save(); }
     return { device, key: key! };

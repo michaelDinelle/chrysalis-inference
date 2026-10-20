@@ -18,14 +18,20 @@ About 6,100 lines: C++/HIP kernels and model code in `engine/` (3,500), the Pyth
 chrysalis start               # loads the model (~1.5 s), starts the web chat, prints both URLs:
                               #   API http://127.0.0.1:8080/v1, web chat http://127.0.0.1:8081
 chrysalis start --lan         # the same, also on the local network: prints its URLs and a QR code that connects a phone
+chrysalis key                 # (with --lan) a key for an app on another computer to use the API with
 chrysalis stop                # stops both and frees the GPU (also: restart, status)
 chrysalis logs                # one line per request: prompt/cached tokens, TTFT, tok/s, draft acceptance
 ```
 
-`--lan` puts both on the local network, and asks for the password once to let that network (and nothing outside it)
-through ufw, when ufw is on (TCP 8080-8082; another firewall needs the same); a plain `chrysalis start` or `chrysalis
-restart` goes back to this machine only. The API stays plain HTTP, with no key: anything on the network can use the
-model through it. The web chat is HTTPS on the network (`https://<address>:8081`) and plain HTTP on this machine
+`--lan` puts the web chat and the API on the local network, for the devices it lets in, and asks for the password once
+to let that network (and nothing outside it) through ufw, when ufw is on (TCP 8081-8082; another firewall needs the
+same); a plain `chrysalis start` or `chrysalis restart` goes back to this machine only. Chrysalis itself
+(`127.0.0.1:8080`) listens on this machine only: the network reaches its API through the web chat, over HTTPS at
+`https://<address>:8081/v1`, behind the same keys as the chat. A browser let in has its own; an app on another computer
+sends a key made here (Connect a device, or `chrysalis key`, shown once) as OpenAI's SDKs send theirs
+(`Authorization: Bearer`) or Anthropic's (`x-api-key`), and trusts this machine's authority (its setup page, or
+`chrysalis-ca.crt` as `NODE_EXTRA_CA_CERTS` or `SSL_CERT_FILE`). A reply streams through as it comes, and an app that
+hangs up stops it. The web chat is HTTPS on the network (`https://<address>:8081`) and plain HTTP on this machine
 (`http://127.0.0.1:8081`), as browsers give the microphone (voice mode) only to secure pages, which localhost is and
 `http://<address>` is not. Its certificate comes from an authority of this machine's own (`~/.config/chrysalis/tls`,
 made by `web/tls.ts`) whose name constraints let it vouch only for private addresses and local names, so trusting it

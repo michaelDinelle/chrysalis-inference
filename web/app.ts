@@ -1202,10 +1202,11 @@ for (const [t, label] of [["system", "System"], ["light", "Light"], ["dark", "Da
 }
 // Connect a device (the top bar, on this computer only: from the network the chat is HTTPS, here plain HTTP): a QR code
 // that sets a phone up and lets it in (setup.ts, devices.ts), the code to type where there is no camera, the devices let
-// in, and the authority's fingerprint, which a device's certificate details show too when it trusts this computer and not
-// an impostor's. A code works once: the one shown is replaced as soon as a device has used it or its 10 minutes are up.
+// in, a key for an app on another computer (shown once: it is kept only as its hash), and the authority's fingerprint,
+// which a device's certificate details show too when it trusts this computer and not an impostor's. A code works once:
+// the one shown is replaced as soon as a device has used it or its 10 minutes are up.
 const connectView = $<HTMLDialogElement>("connect-view");
-let pairing: { code: string; url: string; qr?: string } | undefined, known: Set<string> | undefined, joined = "", connectTimer = 0;
+let pairing: { code: string; url: string; qr?: string } | undefined, known: Set<string> | undefined, joined = "", connectTimer = 0, appKey = "";
 interface Paired { id: string; name: string; added: number; seen: number }
 const since = (t: number) => {
   const m = Math.round((Date.now() - t) / 60_000);
@@ -1230,7 +1231,7 @@ async function renderConnect() {
   if (!pairing || !p.live.includes(pairing.code)) {
     pairing = await fetch("/api/pair", { method: "POST", headers: { "Content-Type": "application/json" }, body: "{}" }).then((r) => r.json()).catch(() => undefined);
   }
-  const key = JSON.stringify([pairing, joined, list.map((d) => [d.id, since(d.seen)]), p.setup]);
+  const key = JSON.stringify([pairing, joined, list.map((d) => [d.id, since(d.seen)]), p.setup, appKey]);
   if (!pairing || !connectView.open || box.dataset.key === key) return;
   box.dataset.key = key;
   const code = `${pairing.code.slice(0, 4)}-${pairing.code.slice(4)}`, row = h("div", "dev-row"), text = h("div", "dev-text");
@@ -1246,7 +1247,7 @@ async function renderConnect() {
     h("p", "set-note", `The code works once, for 10 minutes.${pairing.qr ? "" : " With qrencode installed, a QR code shows here for phones to scan."}`));
   row.append(text);
   const devs = h("div", "dev-list");
-  devs.append(h("div", "set-title", "Devices let in"));
+  devs.append(h("div", "set-title", "Let in"));
   if (!list.length) devs.append(h("p", "set-note", "None yet."));
   for (const d of list) {
     const item = h("div", "dev-item"), remove = h("button", "btn small", "Remove");
@@ -1255,16 +1256,36 @@ async function renderConnect() {
     item.append(h("span", "dev-name", d.name), h("span", "dev-when", `added ${day(d.added)} · used ${since(d.seen)}`), remove);
     devs.append(item);
   }
+  const apps = h("div", "dev-list"), apiRow = h("div", "dev-item"), api = h("span", "dev-api"), make = h("button", "btn small", "New key");
+  make.type = "button";
+  make.onclick = async () => {
+    const r = await fetch("/api/pair/key", { method: "POST", headers: { "Content-Type": "application/json" }, body: "{}" }).then((x) => x.json()).catch(() => null);
+    if (!r?.key) return;
+    appKey = r.key;
+    known?.add(r.id);                              // made here: not a device joining
+    void renderConnect();
+  };
+  api.append("Chrysalis's API on the network: ", h("code", "dev-url", p.api[0]), ", with a key");
+  apiRow.append(api, make);
+  apps.append(h("div", "set-title", "Apps on other computers"), apiRow);
+  if (appKey) {
+    const shown = h("div", "dev-key"), copyKey = h("button", "btn small", "Copy");
+    copyKey.type = "button";
+    copyKey.onclick = () => copy(appKey, copyKey);
+    shown.append(h("code", "", appKey), copyKey);
+    apps.append(shown, h("p", "set-note", "Shown this once: Chrysalis keeps only its hash. Apps send it as OpenAI's and Anthropic's SDKs send "
+      + "theirs, over HTTPS, so that computer trusts this one's authority (its setup page, or the app pointed at chrysalis-ca.crt)."));
+  }
   const fp = h("p", "set-note dev-fp");
   fp.append(`To be sure a device trusts this computer and not an impostor on the network, its certificate details show the same SHA-256 fingerprint for ${p.name}: `,
     h("code", "", p.fingerprint));
   const done = h("p", "dev-joined");
   done.innerHTML = icon("check");
   done.append(`${joined} is connected.`);
-  box.replaceChildren(...(joined ? [done] : []), row, devs, fp);
+  box.replaceChildren(...(joined ? [done] : []), row, devs, apps, fp);
 }
 function openConnect() {
-  joined = "";
+  joined = appKey = "";
   known = undefined;
   connectView.showModal();
   void renderConnect();

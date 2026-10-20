@@ -30,7 +30,8 @@ type Srv = Server<VoiceSocket>;
 type Handler = (req: Request, srv: Srv) => Response | undefined | Promise<Response>;
 const open = (handler: Handler) => (req: Request, srv: Srv) => (hostOk(req) ? handler(req, srv) : new Response("unknown host", { status: 403 }));
 // From the network (its HTTPS: this machine's own chat is plain HTTP on 127.0.0.1) only the devices this computer let in
-// (devices.ts) get the API, the tools and voice; the pages are anyone's, and send a device without a key to /pair.
+// (devices.ts) get Chrysalis's API, the chat's, the tools and voice; the pages are anyone's, and send a device without a
+// key to /pair.
 const fromNetwork = (req: Request) => req.url.startsWith("https:");
 const guarded = (handler: Handler) => open((req, srv) => !fromNetwork(req) || devices?.find(req) ? handler(req, srv)
   : Response.json({ error: { message: "this device is not connected to Chrysalis: /pair connects it" } }, { status: 401 }));
@@ -477,15 +478,24 @@ const serve = (hostname: string, port: number, secure?: { cert: string; key: str
     // Connect a device (the page here, chrysalis.sh): where devices are set up, the devices let in, and a new code for
     // each POST, with its QR code (when qrencode is installed) of the setup page's address
     "/api/pair": {
-      GET: here(async () => Response.json(tls ? { lan: true, setup: await setupUrls(), devices: devices!.all(), live: devices!.live(), name: tls.caName,
-        fingerprint: tls.fingerprint } : { lan: false })),
+      GET: here(async () => Response.json(tls ? { lan: true, setup: await setupUrls(), api: (await setupUrls()).map((u) => apiUrl(new URL(u).hostname)),
+        devices: devices!.all(), live: devices!.live(), name: tls.caName, fingerprint: tls.fingerprint } : { lan: false })),
       POST: here(json(async () => {
         if (!devices) return Response.json({ error: { message: "not on the network (chrysalis start --lan)" } }, { status: 409 });
         const { code, expires } = devices.code(), url = `${(await setupUrls())[0]}#${code}`;
         return Response.json({ code, expires, url, qr: qrSvg(url) });
       })),
     },
+    // a key for an app on another computer (Connect a device, `chrysalis key`), shown once
+    "/api/pair/key": {
+      POST: here(json(async (req) => {
+        if (!devices) return Response.json({ error: { message: "not on the network (chrysalis start --lan)" } }, { status: 409 });
+        const name = String((await req.json().catch(() => ({})))?.name ?? "").trim();
+        return Response.json(devices.add(name || "An app"));
+      })),
+    },
     "/api/pair/:id": { DELETE: here((req) => new Response(null, { status: devices?.remove((req as Request & { params: { id: string } }).params.id) ? 204 : 404 })) },
+    "/v1/*": guarded(proxy),
     "/vendor/mermaid/*": { GET: open(vendor) },
     "/sandbox": { GET: open(() => new Response(SANDBOX, { headers: { "Content-Type": "text/html; charset=utf-8", "Content-Security-Policy": SANDBOX_CSP } })) },
 
@@ -680,6 +690,25 @@ function setupFetch(req: Request): Response {
     default: return new Response(null, { status: 302, headers: { Location: "/" } });
   }
 }
+
+// Chrysalis's API (OpenAI's, Anthropic's, the Responses API) for the network: Chrysalis itself listens on this machine
+// only, so a device reaches it here, over HTTPS, with its key (guarded). A reply streams through as it comes, and an app
+// that hangs up stops it (its request's signal ends Chrysalis's).
+async function proxy(req: Request, srv: Srv): Promise<Response> {
+  srv.timeout(req, 0);                                            // a long prompt is read before anything comes back
+  const url = new URL(req.url), headers = new Headers(req.headers);
+  for (const h of ["host", "cookie", "authorization", "x-api-key", "connection", "content-length"]) headers.delete(h);
+  try {
+    const r = await fetch(`${CHRYSALIS}${url.pathname}${url.search}`, { method: req.method, headers, signal: req.signal,
+      body: req.method === "GET" || req.method === "HEAD" ? undefined : await req.arrayBuffer() });
+    const back = new Headers(r.headers);
+    for (const h of ["content-encoding", "content-length", "transfer-encoding", "connection"]) back.delete(h);   // fetch undid them
+    return new Response(r.body, { status: r.status, headers: back });
+  } catch {
+    return Response.json({ error: { message: "Chrysalis is not running" } }, { status: 502 });
+  }
+}
+const apiUrl = (host: string): string => `https://${host}:${server.port}/v1`;
 
 // Each address's setup page, the one other devices reach this machine at first
 async function setupUrls() {
