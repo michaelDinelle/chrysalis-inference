@@ -73,7 +73,7 @@ const $ = (id) => document.getElementById(id);`;
 
 // The pages' look is the chat's (tokens.css): its sea of characters fills the window (device.ts, whose built script each
 // page carries: `sea`), and the page is a card floating on it, as the message box does, with the butterfly above it and
-// the aurora on its head, as the chat's panels have. The butterfly is the page's one color: the card's own is neutral.
+// the aurora on its head, as the chat's panels have.
 const page = (body: string, script: string, sea: string) => `<!doctype html>
 <html lang="en">
 <head>
@@ -106,35 +106,35 @@ ${TOKENS}
   .status::before { content: ""; flex: none; width: 8px; height: 8px; border-radius: 50%; background: var(--faint); animation: pulse 1.4s ease-in-out infinite; }
   .status.ok { color: var(--text); border-color: color-mix(in srgb, var(--ok) 50%, var(--line)); }
   .status.ok::before { background: var(--ok); animation: none; }
-  .status.bad { color: var(--text); border-color: color-mix(in srgb, var(--danger) 45%, var(--line)); }
-  .status.bad::before { background: var(--danger); animation: none; }
+  .status.bad { color: var(--text); border-color: color-mix(in srgb, var(--accent) 50%, var(--line)); }
+  .status.bad::before { background: var(--accent); animation: none; }
   .status[hidden] { display: none; }
   @keyframes pulse { 50% { opacity: 0.35; } }
   @media (prefers-reduced-motion: reduce) { .status::before { animation: none; } }
-  .go { display: block; width: 100%; padding: 14px 18px; border: 0; border-radius: 12px; background: var(--text); color: var(--bg); font-family: inherit;
-    font-size: 16px; font-weight: 600; line-height: 1.2; text-align: center; text-decoration: none; cursor: pointer; }
-  .go:hover { opacity: 0.9; }
-  .go:active { opacity: 0.8; }
+  .go { display: block; width: 100%; padding: 14px 18px; border: 0; border-radius: 12px; background: var(--accent); color: #fff; font-family: inherit;
+    font-size: 16.5px; font-weight: 600; line-height: 1.2; text-align: center; text-decoration: none; cursor: pointer; }
+  .go:hover { filter: brightness(1.06); }
+  .go:active { filter: brightness(0.92); }
   .code { display: block; width: 100%; margin: 0 0 12px; padding: 13px 14px; border: 1px solid var(--line); border-radius: 12px; background: var(--bg);
     color: var(--text); font: 600 22px/1.2 var(--mono); letter-spacing: 0.12em; text-align: center; text-transform: uppercase; }
   .code::placeholder { color: var(--faint); }
-  .code:focus { border-color: var(--faint); outline: 0; }
+  .code:focus { border-color: color-mix(in srgb, var(--accent) 45%, var(--line)); outline: 0; }
   ol { margin: 20px 0 0; padding: 0; list-style: none; counter-reset: step; }
   li { position: relative; margin: 0 0 14px; padding-left: 38px; counter-increment: step; }
   li::before { content: counter(step); position: absolute; left: 0; top: 0; display: grid; place-items: center; width: 26px; height: 26px; border-radius: 50%;
-    border: 1px solid var(--line); color: var(--muted); font-size: 13px; font-weight: 600; }
+    background: var(--panel); border: 1px solid var(--line); color: var(--accent); font-size: 13.5px; font-weight: 650; }
   li:has(.aside) { counter-increment: none; }
   li:has(.aside)::before { content: none; }
   .aside { color: var(--muted); font-size: 14px; }
   p.aside { margin: 16px 0 0; text-align: center; }
   code { padding: 1px 5px; border-radius: 6px; background: var(--code); font: 13px var(--mono); overflow-wrap: anywhere; }
-  .warn { margin: 0 0 16px; padding: 12px 14px; border: 1px solid var(--line); border-radius: 12px; background: var(--panel); font-size: 15px; }
+  .warn { margin: 0 0 16px; padding: 12px 14px; border-radius: 12px; background: var(--accent-soft); font-size: 15px; }
   .warn button { margin-top: 8px; padding: 8px 12px; border: 1px solid var(--line); border-radius: 9px; background: var(--raised); color: var(--text); font: inherit; }
   details { margin-top: 20px; border-top: 1px solid var(--line); padding-top: 14px; color: var(--muted); font-size: 14.5px; }
   summary { cursor: pointer; }
   .others { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 12px; }
   .others button { padding: 6px 12px; border: 1px solid var(--line); border-radius: 999px; background: var(--raised); color: var(--text); font: inherit; font-size: 14px; cursor: pointer; }
-  .others button[aria-pressed="true"] { border-color: var(--faint); background: var(--panel); }
+  .others button[aria-pressed="true"] { border-color: var(--accent); color: var(--accent-hi); background: var(--accent-soft); }
   .about { margin: 12px 0 0; }
 </style>
 </head>
