@@ -1,10 +1,11 @@
 // Chrysalis web UI: serves the chat app, proxies the Chrysalis server's OpenAI API (same origin, so no CORS) and runs
-// the tools replies call (tools.ts). It stores nothing on disk: conversations stay in the browser tab, replies being
-// written stay in RAM (see Job). `bun server.ts` for development, NODE_ENV=production for a minified bundle.
+// the tools replies call (tools.ts). Conversations stay in the browser tab, replies being written stay in RAM (see
+// Job): on disk are only, with --lan, the network's certificates (tls.ts) and the devices let in (devices.ts). `bun server.ts` for development, NODE_ENV=production for a minified bundle.
 import { hostname } from "node:os";
 import type { Server, Subprocess } from "bun";
 import app from "./index.html";
-import { appleProfile, setupPage, TRUSTED_GIF } from "./setup";
+import { Devices, keyCookie } from "./devices";
+import { appleProfile, deviceScript, pairPage, setupPage, TRUSTED_GIF } from "./setup";
 import { SUBAGENT_SYSTEM } from "./tool-agent";
 import * as registry from "./tools";
 import { lanAddresses, lanTls, routeAddress } from "./tls";
@@ -14,7 +15,7 @@ const CHRYSALIS = process.env.CHRYSALIS_URL ?? "http://127.0.0.1:8080";
 // Changes with the page's code. Open tabs compare it on every status poll and reload to pick up an update
 // (their chats are in sessionStorage, so a reload keeps them).
 const BUILD = Bun.hash((await Promise.all(["index.html", "app.ts", "sampler.ts", "files.ts", "wire.ts", "voice.ts", "voice-worklet.js", "heard.ts", "spoken.ts", "ocean.ts", "theme.ts",
-  "logo.svg", "logo-thin.svg", "style.css"].map((f) => Bun.file(`${import.meta.dir}/${f}`).text()))).join("\0")).toString(36);
+  "logo.svg", "logo-thin.svg", "style.css", "tokens.css"].map((f) => Bun.file(`${import.meta.dir}/${f}`).text()))).join("\0")).toString(36);
 await registry.reload();
 for (const sig of ["SIGINT", "SIGTERM"] as const) process.on(sig, () => void registry.closeAll().finally(() => process.exit(0)));   // MCP servers' processes go too
 
@@ -26,8 +27,16 @@ const hostOk = (req: Request) => {
   return host.startsWith("[") || /^\d{1,3}(\.\d{1,3}){3}(:\d+)?$/.test(host) || NAMES.has(host.replace(/:\d+$/, ""));
 };
 type Srv = Server<VoiceSocket>;
-const guarded = (handler: (req: Request, srv: Srv) => Response | undefined | Promise<Response>) =>
-  (req: Request, srv: Srv) => (hostOk(req) ? handler(req, srv) : new Response("unknown host", { status: 403 }));
+type Handler = (req: Request, srv: Srv) => Response | undefined | Promise<Response>;
+const open = (handler: Handler) => (req: Request, srv: Srv) => (hostOk(req) ? handler(req, srv) : new Response("unknown host", { status: 403 }));
+// From the network (its HTTPS: this machine's own chat is plain HTTP on 127.0.0.1) only the devices this computer let in
+// (devices.ts) get the API, the tools and voice; the pages are anyone's, and send a device without a key to /pair.
+const fromNetwork = (req: Request) => req.url.startsWith("https:");
+const guarded = (handler: Handler) => open((req, srv) => !fromNetwork(req) || devices?.find(req) ? handler(req, srv)
+  : Response.json({ error: { message: "this device is not connected to Chrysalis: /pair connects it" } }, { status: 401 }));
+// what only this computer's own screen does: let devices in
+const here = (handler: Handler) => guarded((req, srv) => fromNetwork(req)
+  ? Response.json({ error: { message: "only on the computer Chrysalis runs on" } }, { status: 403 }) : handler(req, srv));
 // A form on another site can post to this server's address, but not as JSON without asking first (CORS), which it is
 // never allowed: so what starts tools or lets one run takes JSON only.
 const json = (handler: (req: Request, srv: Srv) => Response | Promise<Response>) => (req: Request, srv: Srv) =>
@@ -437,6 +446,8 @@ function voiceClosed() {
 // HTTPS on the same port (each of this machine's addresses: ufw already lets the port in): browsers give the microphone
 // only to secure pages, which localhost is and http://<address> is not (tls.ts).
 const LAN = process.env.CHRYSALIS_HOST === "0.0.0.0", tls = LAN ? lanTls() : undefined;
+const devices = tls && new Devices(`${tls.dir}/devices.json`), sea = tls ? await deviceScript() : "";
+const PAGE = { "Content-Type": "text/html; charset=utf-8", "Cache-Control": "no-store" };
 const serve = (hostname: string, port: number, secure?: { cert: string; key: string }) => Bun.serve<VoiceSocket>({
   hostname,
   ...(secure ? { tls: secure } : {}),
@@ -446,19 +457,37 @@ const serve = (hostname: string, port: number, secure?: { cert: string; key: str
   routes: {
     "/": app,
     // the authority behind the network's certificate, for a device to install once and then trust the page
-    "/chrysalis-ca.crt": { GET: guarded(() => tls ? new Response(tls.ca, { headers: { "Content-Type": "application/x-x509-ca-cert" } })
+    "/chrysalis-ca.crt": { GET: open(() => tls ? new Response(tls.ca, { headers: { "Content-Type": "application/x-x509-ca-cert" } })
       : new Response("not on the network (chrysalis start --lan)", { status: 404 })) },
     // the image a device's setup page loads from here: it loads once the device trusts the certificate (setup.ts)
-    "/trusted.gif": { GET: guarded(() => new Response(TRUSTED_GIF, { headers: { "Content-Type": "image/gif", "Cache-Control": "no-store" } })) },
-    // Settings' Other devices: where a device is set up (a QR code of it, when qrencode is installed) and the authority
-    "/api/pair": { GET: guarded(async () => {
-      if (!tls) return Response.json({ lan: false });
-      const first = await routeAddress(), ips = lanAddresses().sort((a, b) => Number(b === first) - Number(a === first));
-      const urls = ips.map((ip) => `http://${ip}:${setupPort}/`);
-      return Response.json({ lan: true, urls, qr: urls[0] && qrSvg(urls[0]), name: tls.caName, fingerprint: tls.fingerprint });
-    }) },
-    "/vendor/mermaid/*": { GET: guarded(vendor) },
-    "/sandbox": { GET: guarded(() => new Response(SANDBOX, { headers: { "Content-Type": "text/html; charset=utf-8", "Content-Security-Policy": SANDBOX_CSP } })) },
+    "/trusted.gif": { GET: open(() => new Response(TRUSTED_GIF, { headers: { "Content-Type": "image/gif", "Cache-Control": "no-store" } })) },
+    // A device the network's chat has not let in: the page that takes its code (setup.ts), and the code for its key. One
+    // it has, and this machine, go on to the chat.
+    "/pair": {
+      GET: open((req) => fromNetwork(req) && !devices?.find(req) ? new Response(pairPage(sea), { headers: { ...PAGE, "Content-Security-Policy":
+        "default-src 'none'; script-src 'unsafe-inline'; style-src 'unsafe-inline'; img-src data:; connect-src 'self'; base-uri 'none'; form-action 'none'; " +
+        "frame-ancestors 'none'" } })
+        : new Response(null, { status: 302, headers: { Location: "/" } })),
+      POST: open(json(async (req) => {
+        const b = await req.json().catch(() => ({})), key = fromNetwork(req) && devices?.redeem(String(b?.code ?? ""), String(b?.name ?? ""));
+        return key ? new Response(null, { status: 204, headers: { "Set-Cookie": keyCookie(key) } })
+          : Response.json({ error: { message: "that code is wrong, used or out of time" } }, { status: 403 });
+      })),
+    },
+    // Connect a device (the page here, chrysalis.sh): where devices are set up, the devices let in, and a new code for
+    // each POST, with its QR code (when qrencode is installed) of the setup page's address
+    "/api/pair": {
+      GET: here(async () => Response.json(tls ? { lan: true, setup: await setupUrls(), devices: devices!.all(), live: devices!.live(), name: tls.caName,
+        fingerprint: tls.fingerprint } : { lan: false })),
+      POST: here(json(async () => {
+        if (!devices) return Response.json({ error: { message: "not on the network (chrysalis start --lan)" } }, { status: 409 });
+        const { code, expires } = devices.code(), url = `${(await setupUrls())[0]}#${code}`;
+        return Response.json({ code, expires, url, qr: qrSvg(url) });
+      })),
+    },
+    "/api/pair/:id": { DELETE: here((req) => new Response(null, { status: devices?.remove((req as Request & { params: { id: string } }).params.id) ? 204 : 404 })) },
+    "/vendor/mermaid/*": { GET: open(vendor) },
+    "/sandbox": { GET: open(() => new Response(SANDBOX, { headers: { "Content-Type": "text/html; charset=utf-8", "Content-Security-Policy": SANDBOX_CSP } })) },
 
     // A streamed reply starts a job and follows it (its id in X-Chrysalis-Job); other requests (session titles) pass
     // through. Nothing arrives before the first token, which takes a while for a long prompt: no idle timeout. JSON
@@ -549,22 +578,27 @@ const serve = (hostname: string, port: number, secure?: { cert: string; key: str
       if (!same) return new Response("only Chrysalis's own pages", { status: 403 });
       return srv.upgrade(req, { data: { queue: [], closed: false } }) ? undefined : new Response("a WebSocket only", { status: 426 });
     }),
-    "/voice-worklet.js": { GET: guarded(() => new Response(Bun.file(`${import.meta.dir}/voice-worklet.js`), { headers: { "Content-Type": "text/javascript" } })) },
+    "/voice-worklet.js": { GET: open(() => new Response(Bun.file(`${import.meta.dir}/voice-worklet.js`), { headers: { "Content-Type": "text/javascript" } })) },
 
     // online: serving; loading: the systemd unit runs but the model is still loading (Chrysalis answers 503 until it
     // has loaded, or does not listen yet); offline: stopped
-    "/api/status": guarded(async () => {
-      try {
-        const r = await fetch(`${CHRYSALIS}/chrysalis/stats`);
-        if (r.status === 503) {                         // listening, still loading its first model
-          const b = await r.json().catch(() => ({}));
-          return Response.json({ state: "loading", build: BUILD, loading: b.model ?? undefined, progress: b.progress ?? undefined });
+    // A device's key is set again here, which every open page polls: its 400 days count from its last visit.
+    "/api/status": guarded(async (req) => {
+      const res = await (async () => {
+        try {
+          const r = await fetch(`${CHRYSALIS}/chrysalis/stats`);
+          if (r.status === 503) {                       // listening, still loading its first model
+            const b = await r.json().catch(() => ({}));
+            return Response.json({ state: "loading", build: BUILD, loading: b.model ?? undefined, progress: b.progress ?? undefined });
+          }
+          if (!r.ok) throw new Error("loading");
+          return Response.json({ state: "online", build: BUILD, ...(await r.json()) });
+        } catch {
+          return Response.json({ state: unit("is-active") === "active" ? "loading" : "offline", build: BUILD });
         }
-        if (!r.ok) throw new Error("loading");
-        return Response.json({ state: "online", build: BUILD, ...(await r.json()) });
-      } catch {
-        return Response.json({ state: unit("is-active") === "active" ? "loading" : "offline", build: BUILD });
-      }
+      })(), found = fromNetwork(req) && devices?.find(req);
+      if (found) res.headers.append("Set-Cookie", keyCookie(found.key));
+      return res;
     }),
     "/api/chrysalis/start": { POST: guarded(async (req) => (await pickModel(req), unit("start", "--no-block"), new Response(null, { status: 202 }))) },
     // switch the running Chrysalis to another model; answers once it has loaded (up to ~20 s), the page polls meanwhile
@@ -637,14 +671,20 @@ function setupFetch(req: Request): Response {
   const file = (body: Uint8Array<ArrayBuffer> | string, type: string, name?: string) => new Response(body, { headers: { "Content-Type": type,
     "Cache-Control": "no-store", ...(name ? { "Content-Disposition": `attachment; filename="${name}"` } : {}) } });
   switch (url.pathname) {
-    case "/": return new Response(setupPage(tls!, chat), { headers: { "Content-Type": "text/html; charset=utf-8", "Cache-Control": "no-store",
-      "Content-Security-Policy": `default-src 'none'; script-src 'unsafe-inline'; style-src 'unsafe-inline'; img-src ${new URL(chat).origin}; ` +
+    case "/": return new Response(setupPage(tls!, chat, sea), { headers: { ...PAGE,
+      "Content-Security-Policy": `default-src 'none'; script-src 'unsafe-inline'; style-src 'unsafe-inline'; img-src ${new URL(chat).origin} data:; ` +
         "base-uri 'none'; form-action 'none'; frame-ancestors 'none'" } });
     case "/chrysalis.mobileconfig": return file(appleProfile(tls!), "application/x-apple-aspen-config", "chrysalis.mobileconfig");
     case "/chrysalis-ca.crt": return file(tls!.caDer, "application/octet-stream", "chrysalis-ca.crt");
     case "/chrysalis-ca-firefox.crt": return file(tls!.caDer, "application/x-x509-ca-cert");   // Firefox asks to trust it
     default: return new Response(null, { status: 302, headers: { Location: "/" } });
   }
+}
+
+// Each address's setup page, the one other devices reach this machine at first
+async function setupUrls() {
+  const first = await routeAddress();
+  return lanAddresses().sort((a, b) => Number(b === first) - Number(a === first)).map((ip) => `http://${ip}:${setupPort}/`);
 }
 
 // A QR code of a URL as SVG, by qrencode where it is installed

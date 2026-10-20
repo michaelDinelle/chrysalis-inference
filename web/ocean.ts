@@ -5,7 +5,8 @@
 // lies dimmed behind the messages, dimmest under their column; a new chat raises it again. The sea is a slow current (domain-warped noise over a swell). All of it is two WebGL2 passes: one
 // fragment per character cell works out what that cell shows (pass 1, a cols x rows texture), then each screen pixel
 // draws its cell's glyph from an atlas rendered at the screen's own pixel size (pass 2), so the CPU only sets uniforms.
-// Without WebGL2 the page shows the logo as an image in a new chat instead (start() returns false).
+// Where WebGL2 is missing (a browser without a GPU, or with WebGL off) the same two passes run on the CPU instead, into a
+// 2D canvas: the same sea in any browser, drawn less often (Cpu below).
 import logo from "./logo-thin.svg";
 import { isDark, onTheme } from "./theme";
 
@@ -20,6 +21,8 @@ const CELL_W = 6, CELL_H = 11, FONT_PX = 10;
 // The drawing's viewBox (logo.svg's), and its stroke half-width in those units (logo-thin.svg's strokes: 70% of
 // logo.svg's 32.18).
 const VIEW_W = 660, VIEW_H = 473, HALF_STROKE = 11.26;
+// A small butterfly (a phone's) keeps its strokes about two glyphs wide, CSS px: thinner, they break into scattered marks.
+const MIN_HALF_STROKE = 6.5;
 // Click waves, in the order clicks cycle through them (the shader's kinds), each WAVE_LIFE s long; a drag leaves a wake
 // (WAKE), small swells WAKE_LIFE s long.
 const PATTERNS = [1, 0, 2, 3, 4];
@@ -31,8 +34,10 @@ const SINK = 0.34, RISE = 0.26;
 const VERT = `#version 300 es
 void main() { vec2 p = vec2((gl_VertexID << 1) & 2, gl_VertexID & 2); gl_Position = vec4(p * 2.0 - 1.0, 0.0, 1.0); }`;
 
-// Pass 1. Simplex noise: Ian McEwan and Stefan Gustavson's (Ashima Arts, MIT). Shapes: Inigo Quilez's 2D distance
-// functions (heart, five-point star), MIT.
+// Pass 1. Simplex noise: Ian McEwan and Stefan Gustavson's (Ashima Arts, MIT), its permutations and its choice of each
+// corner's gradient in integers: in floats, rounding decided the 7 of 49 gradients on the fold (|x| + |y| = 1) one way
+// on one GPU and the other way on another, and so the sea differed between machines and from the CPU's port. Shapes:
+// Inigo Quilez's 2D distance functions (heart, five-point star), MIT.
 const CELLS = `#version 300 es
 precision highp float;
 uniform vec2 uGrid, uCell;
@@ -49,11 +54,10 @@ uniform vec2 uSdfSize;
 uniform vec3 uPointer;      // x, y (CSS px), presence 0..1
 out vec4 o;
 
-vec4 permute(vec4 x) { return mod(((x * 34.0) + 1.0) * x, 289.0); }
+ivec4 permute(ivec4 x) { return ((x * 34 + 1) * x) % 289; }   // under 2^31 for x below 578: no wrap
 vec4 taylorInvSqrt(vec4 r) { return 1.79284291400159 - 0.85373472095314 * r; }
 float snoise(vec3 v) {
   const vec2 C = vec2(1.0 / 6.0, 1.0 / 3.0);
-  const vec4 D = vec4(0.0, 0.5, 1.0, 2.0);
   vec3 i = floor(v + dot(v, C.yyy));
   vec3 x0 = v - i + dot(i, C.xxx);
   vec3 g = step(x0.yzx, x0.xyz);
@@ -63,21 +67,19 @@ float snoise(vec3 v) {
   vec3 x1 = x0 - i1 + C.xxx;
   vec3 x2 = x0 - i2 + 2.0 * C.xxx;
   vec3 x3 = x0 - 1.0 + 3.0 * C.xxx;
-  i = mod(i, 289.0);
-  vec4 p = permute(permute(permute(i.z + vec4(0.0, i1.z, i2.z, 1.0)) + i.y + vec4(0.0, i1.y, i2.y, 1.0)) + i.x + vec4(0.0, i1.x, i2.x, 1.0));
-  float n_ = 1.0 / 7.0;
-  vec3 ns = n_ * D.wyz - D.xzx;
-  vec4 j = p - 49.0 * floor(p * ns.z * ns.z);
-  vec4 x_ = floor(j * ns.z);
-  vec4 y_ = floor(j - 7.0 * x_);
-  vec4 x = x_ * ns.x + ns.yyyy;
-  vec4 y = y_ * ns.x + ns.yyyy;
+  ivec3 n = ivec3(mod(i, 289.0)), n1 = ivec3(i1), n2 = ivec3(i2);
+  ivec4 p = permute(permute(permute(n.z + ivec4(0, n1.z, n2.z, 1)) + n.y + ivec4(0, n1.y, n2.y, 1)) + n.x + ivec4(0, n1.x, n2.x, 1));
+  // the gradient: a point of a 7 x 7 grid over the square (x, y = (4k - 13) / 14), folded in where it is outside the
+  // diamond |x| + |y| < 1
+  ivec4 j = p % 49, xi = 4 * (j / 7) - 13, yi = 4 * (j % 7) - 13;
+  vec4 x = vec4(xi) / 14.0;
+  vec4 y = vec4(yi) / 14.0;
   vec4 h = 1.0 - abs(x) - abs(y);
   vec4 b0 = vec4(x.xy, y.xy);
   vec4 b1 = vec4(x.zw, y.zw);
   vec4 s0 = floor(b0) * 2.0 + 1.0;
   vec4 s1 = floor(b1) * 2.0 + 1.0;
-  vec4 sh = -step(h, vec4(0.0));
+  vec4 sh = -vec4(greaterThanEqual(abs(xi) + abs(yi), ivec4(14)));
   vec4 a0 = b0.xzyw + s0.xzyw * sh.xxyy;
   vec4 a1 = b1.xzyw + s1.xzyw * sh.zzww;
   vec3 p0 = vec3(a0.xy, h.x);
@@ -287,6 +289,80 @@ async function drawingSdf(width: number): Promise<Sdf> {
   return { data, w, h };
 }
 
+// The CPU's passes: CELLS line for line (its names and its order), and GLYPHS into the canvas's pixels. Kept in step
+// with the shaders; the browser test holds the two drawings to each other.
+const fract = (x: number) => x - Math.floor(x);
+const clamp = (x: number, a: number, b: number) => Math.min(Math.max(x, a), b);
+const smoothstep = (a: number, b: number, x: number) => { const k = clamp((x - a) / (b - a), 0, 1); return k * k * (3 - 2 * k); };
+const mod289 = (x: number) => x - Math.floor(x / 289) * 289;
+const permute = (x: number) => ((x * 34 + 1) * x) % 289;
+// one corner of a simplex: its gradient from the permutation p (GLSL's j, xi, yi, h, sh, a0/a1) and its falloff
+function corner(p: number, x: number, y: number, z: number): number {
+  let m = 0.6 - (x * x + y * y + z * z);
+  if (m <= 0) return 0;
+  const j = p % 49, xi = 4 * Math.floor(j / 7) - 13, yi = 4 * (j % 7) - 13;
+  let gx = xi / 14, gy = yi / 14;
+  const h = 1 - Math.abs(gx) - Math.abs(gy);
+  if (Math.abs(xi) + Math.abs(yi) >= 14) { gx -= Math.floor(gx) * 2 + 1; gy -= Math.floor(gy) * 2 + 1; }
+  const r = gx * gx + gy * gy + h * h, norm = 1.79284291400159 - 0.85373472095314 * r;
+  m *= m;
+  return m * m * norm * (gx * x + gy * y + h * z);
+}
+function snoise(vx: number, vy: number, vz: number): number {
+  const s = (vx + vy + vz) / 3;
+  let ix = Math.floor(vx + s), iy = Math.floor(vy + s), iz = Math.floor(vz + s);
+  const u = (ix + iy + iz) / 6, x0 = vx - ix + u, y0 = vy - iy + u, z0 = vz - iz + u;
+  const gx = x0 >= y0 ? 1 : 0, gy = y0 >= z0 ? 1 : 0, gz = z0 >= x0 ? 1 : 0;
+  const i1x = Math.min(gx, 1 - gz), i1y = Math.min(gy, 1 - gx), i1z = Math.min(gz, 1 - gy);
+  const i2x = Math.max(gx, 1 - gz), i2y = Math.max(gy, 1 - gx), i2z = Math.max(gz, 1 - gy);
+  ix = mod289(ix); iy = mod289(iy); iz = mod289(iz);
+  const c = 1 / 6;
+  return 42 * (corner(permute(permute(permute(iz) + iy) + ix), x0, y0, z0)
+    + corner(permute(permute(permute(iz + i1z) + iy + i1y) + ix + i1x), x0 - i1x + c, y0 - i1y + c, z0 - i1z + c)
+    + corner(permute(permute(permute(iz + i2z) + iy + i2y) + ix + i2x), x0 - i2x + 2 * c, y0 - i2y + 2 * c, z0 - i2z + 2 * c)
+    + corner(permute(permute(permute(iz + 1) + iy + 1) + ix + 1), x0 - 0.5, y0 - 0.5, z0 - 0.5));
+}
+const fbm = (x: number, y: number, z: number) =>
+  0.6 * snoise(x, y, z) + 0.28 * snoise(x * 2.03 + 17, y * 2.03 + 17, z * 2.03 + 17) + 0.12 * snoise(x * 4.1 + 41, y * 4.1 + 41, z * 4.1 + 41);
+function sea(px: number, py: number, t: number): number {
+  const sx = px * 0.0038, sy = py * 0.0038;
+  const qx = fbm(sx, sy, t * 0.04), qy = fbm(sx + 5.2, sy + 1.3, t * 0.04);
+  const n = fbm(sx * 1.6 + 1.8 * qx, sy * 1.6 + 1.8 * qy, t * 0.06);
+  let ribbon = 1 - Math.abs(n);
+  ribbon *= ribbon;
+  ribbon *= ribbon * ribbon;
+  const swell = 0.5 + 0.5 * Math.sin(px * 0.011 + py * 0.019 - t * 0.5 + 2.4 * qx);
+  return clamp(0.06 + 0.7 * ribbon + 0.16 * swell * ribbon + 0.08 * swell, 0, 1);
+}
+function sdHeart(x: number, y: number): number {
+  x = Math.abs(x);
+  if (y + x > 1) return Math.hypot(x - 0.25, y - 0.75) - Math.SQRT2 / 4;
+  const k = 0.5 * Math.max(x + y, 0);
+  return Math.sqrt(Math.min(x * x + (y - 1) * (y - 1), (x - k) * (x - k) + (y - k) * (y - k))) * Math.sign(x - y);
+}
+function sdStar5(x: number, y: number, r: number, rf: number): number {
+  const k1x = 0.809016994375, k1y = -0.587785252292, k2x = -k1x, k2y = k1y;
+  x = Math.abs(x);
+  let d = 2 * Math.max(k1x * x + k1y * y, 0);
+  x -= d * k1x; y -= d * k1y;
+  d = 2 * Math.max(k2x * x + k2y * y, 0);
+  x -= d * k2x; y -= d * k2y;
+  x = Math.abs(x);
+  y -= r;
+  const bax = rf * -k1y, bay = rf * k1x - 1, h = clamp((x * bax + y * bay) / (bax * bax + bay * bay), 0, r);
+  return Math.hypot(x - bax * h, y - bay * h) * Math.sign(y * bax - x * bay);
+}
+type Wave = { x: number; y: number; kind: number; amp: number; size: number; len: number };
+
+// The canvas and its 2D context, the cells (pass 1's texture, as bytes) and the glyph atlas's ink (alpha)
+class Cpu {
+  cells = new Uint8ClampedArray(0);
+  ink = new Uint8ClampedArray(0);
+  inkW = 0;
+  pixels: ImageData | null = null;
+  constructor(readonly ctx: CanvasRenderingContext2D) {}
+}
+
 function compile(gl: WebGL2RenderingContext, frag: string): WebGLProgram {
   const prog = gl.createProgram()!;
   for (const [type, src] of [[gl.VERTEX_SHADER, VERT], [gl.FRAGMENT_SHADER, frag]] as const) {
@@ -308,8 +384,10 @@ const rgb = (css: string) => {
 };
 
 export class Ocean {
-  readonly canvas = document.createElement("canvas");
+  canvas = document.createElement("canvas");
   private gl: WebGL2RenderingContext | null = null;
+  private cpu: Cpu | null = null;
+  private cost = 0;                                 // the CPU's last frame, s
   private cellsProg!: WebGLProgram;
   private glyphProg!: WebGLProgram;
   private u = new Map<string, WebGLUniformLocation | null>();
@@ -344,9 +422,17 @@ export class Ocean {
   private still = matchMedia("(prefers-reduced-motion: reduce)");
   private resize = new ResizeObserver(() => this.layout());
 
-  // `layer`: the room the sea fills (under the top bar, behind the message box), shown while a new chat is.
-  constructor(private layer: HTMLElement) {
-    const c = this.canvas;
+  // `layer`: the room the sea fills (under the top bar, behind the message box), shown while a new chat is. `box`: what
+  // the butterfly floats above and the water is quiet around, and `hint` the line under it (the message box; a device
+  // setup page's card, setup.ts).
+  constructor(private layer: HTMLElement, private boxAt = ".composer-box", private hintAt = "#composer .hint") {
+    this.dress(this.canvas);
+    onTheme(() => { this.readColors(); this.wake(); });
+    this.still.addEventListener("change", () => this.wake());
+    addEventListener("scroll", () => this.layout(), { passive: true });   // a setup page scrolls its card; the chat's window never scrolls
+  }
+
+  private dress(c: HTMLCanvasElement) {
     c.className = "ocean";
     c.setAttribute("aria-hidden", "true");
     // a click on the water keeps the message box's focus: typing goes on where it was. The canvas sits at the
@@ -368,21 +454,28 @@ export class Ocean {
     c.addEventListener("pointerleave", () => { this.presence = 0; this.lastWake = null; });
     c.addEventListener("webglcontextlost", (e) => { e.preventDefault(); this.gl = null; this.running = false; });
     c.addEventListener("webglcontextrestored", () => { if (this.init()) this.layout(); });
-    onTheme(() => { this.readColors(); this.wake(); });
-    this.still.addEventListener("change", () => this.wake());
   }
 
+  // WebGL2, else the CPU: a canvas that has had a WebGL context gives no 2D one, so that one is replaced
   private init(): boolean {
-    const gl = this.canvas.getContext("webgl2", { premultipliedAlpha: true, antialias: false, alpha: true });
-    if (!gl) return false;
-    this.gl = gl;
+    const gl = this.cpu ? null : this.canvas.getContext("webgl2", { premultipliedAlpha: true, antialias: false, alpha: true });
     try {
-      this.cellsProg = compile(gl, CELLS);
-      this.glyphProg = compile(gl, GLYPHS);
+      if (gl) {
+        this.cellsProg = compile(gl, CELLS);
+        this.glyphProg = compile(gl, GLYPHS);
+      }
     } catch (e) {
       console.error(e);
-      this.gl = null;
-      return false;
+      const fresh = document.createElement("canvas");
+      this.dress(fresh);
+      this.canvas.replaceWith(fresh);
+      this.canvas = fresh;
+    }
+    this.gl = gl && this.cellsProg ? gl : null;
+    if (!this.gl) {
+      const ctx = this.canvas.getContext("2d");
+      if (!ctx) return false;
+      this.cpu = new Cpu(ctx);
     }
     this.u.clear();
     this.cellTex = this.fbo = this.atlas = this.sdfTex = null;
@@ -391,13 +484,13 @@ export class Ocean {
     return true;
   }
 
-  // Puts the sea in its layer, which the page shows and hides; false without WebGL2.
+  // Puts the sea in its layer, which the page shows and hides; false where a canvas cannot be drawn on at all.
   start(): boolean {
     if (!this.init()) return false;
     this.layer.append(this.canvas);
     this.resize.observe(this.layer);
     // the message box places the butterfly, the quiet water around it and the dimmest water behind a chat (its column)
-    const box = document.querySelector(".composer-box");
+    const box = document.querySelector(this.boxAt);
     if (box) this.resize.observe(box);
     this.readColors();
     void drawingSdf(720).then((s) => { this.sdf = s; this.uploadSdf(); this.wake(); });
@@ -410,7 +503,7 @@ export class Ocean {
     this.wake();
   }
 
-  private live() { return !!this.gl && this.shown; }
+  private live() { return !!(this.gl || this.cpu) && this.shown; }
   private now() { return performance.now() / 1000 - this.t0; }
 
   // The theme's colors: the sea in --muted, the butterfly in --accent, its light lighter in the dark, deeper in light.
@@ -446,15 +539,17 @@ export class Ocean {
   // screen, and the canvas keeps its size (resizing it would blank it until the next frame is drawn: a flicker on
   // every frame of the slide). The frame is drawn here, before the browser paints the new layout.
   private layout() {
-    const gl = this.gl;
-    if (!gl) return;
+    if (!this.gl && !this.cpu) return;
     const r = this.layer.getBoundingClientRect(), was = this.shown;
     this.shown = r.width >= 40 && r.height >= 40;
     if (!this.shown) return;
-    const dpr = devicePixelRatio || 1, cw = Math.max(1, Math.round(CELL_W * dpr)), ch = Math.max(1, Math.round(CELL_H * dpr));
+    // the CPU writes every pixel: no more than about 2.5 million of them (a 1440 x 900 window at 2x), scaled up beyond
+    const dpr = this.cpu ? Math.max(1, Math.min(devicePixelRatio || 1, Math.sqrt(2.5e6 / (innerWidth * innerHeight)))) : devicePixelRatio || 1;
+    const cw = Math.max(1, Math.round(CELL_W * dpr)), ch = Math.max(1, Math.round(CELL_H * dpr));
     const cols = Math.ceil(innerWidth * dpr / cw), rows = Math.ceil(innerHeight * dpr / ch);
     if (dpr !== this.dpr || cw !== this.cellPx[0] || ch !== this.cellPx[1]) this.buildAtlas(dpr, cw, ch);
-    if (cols !== this.cols || rows !== this.rows || !this.cellTex) {
+    const resized = cols !== this.cols || rows !== this.rows || (this.gl && !this.cellTex);
+    if (resized) {
       this.buildCells(cols, rows);
       this.canvas.width = cols * cw;
       this.canvas.height = rows * ch;
@@ -465,20 +560,24 @@ export class Ocean {
     const x0 = Math.max(0, Math.floor(r.left * dpr / cw)), y0 = Math.max(0, Math.floor(r.top * dpr / ch));
     this.seen = [x0, y0, Math.min(cols, Math.ceil(r.right * dpr / cw)) - x0, Math.min(rows, Math.ceil(r.bottom * dpr / ch)) - y0];
     // the butterfly over the message box, in the middle of the room above it
-    const box = document.querySelector(".composer-box")?.getBoundingClientRect();
-    const hint = document.querySelector("#composer .hint")?.getBoundingClientRect();
+    const box = document.querySelector(this.boxAt)?.getBoundingClientRect();
+    const hint = this.hintAt ? document.querySelector(this.hintAt)?.getBoundingClientRect() : undefined;
     const column = box && box.width > 0 ? box : r, top = box && box.width > 0 ? box.top : r.bottom;
     this.box = box && box.width > 0 ? [box.left, box.top, box.right, Math.max(box.bottom, hint?.height ? hint.bottom : 0)] : [-1e4, -1e4, -1e4, -1e4];
-    this.center = [column.left + column.width / 2, r.top + (top - r.top) * 0.47];
-    this.flyW = Math.min(column.width * 0.86, (top - r.top) * 0.74 * VIEW_W / VIEW_H, r.width * 0.92);
+    // (the room measured from the page's top: a setup page scrolls the butterfly away with its card, at its size)
+    const roomTop = r.top - scrollY;
+    this.center = [column.left + column.width / 2, roomTop + (top - roomTop) * 0.47];
+    this.flyW = Math.min(column.width * 0.86, (top - roomTop) * 0.74 * VIEW_W / VIEW_H, r.width * 0.92);
     this.lane = [column.left, column.right];
     // the sea showing (again): the butterfly is where it belongs at once, as the sea is
     if (!was) { this.fly = this.empty?.isConnected ? 1 : 0; this.wake(); }
-    this.draw();
+    // (a resized canvas is blank until drawn; else the CPU leaves it to its loop: a page's scroll would draw every event)
+    if (resized || !this.cpu) this.draw();
+    else this.wake();
   }
 
   private buildAtlas(dpr: number, cw: number, ch: number) {
-    const gl = this.gl!;
+    const gl = this.gl;
     this.dpr = dpr;
     this.cellPx = [cw, ch];
     const cv = document.createElement("canvas");
@@ -495,6 +594,14 @@ export class Ocean {
       if (!ctx.font.includes(`${FONT_PX * dpr}px`)) ctx.font = `${weight} ${FONT_PX * dpr}px monospace`;
       [...set].forEach((g, i) => { if (g !== " ") ctx.fillText(g, (i + 0.5) * cw, (row + 0.5) * ch); });
     }
+    if (this.cpu) {
+      const px = ctx.getImageData(0, 0, cv.width, cv.height).data;
+      this.cpu.ink = new Uint8ClampedArray(cv.width * cv.height);
+      for (let i = 0; i < this.cpu.ink.length; i++) this.cpu.ink[i] = px[i * 4 + 3];
+      this.cpu.inkW = cv.width;
+      return;
+    }
+    if (!gl) return;
     if (!this.atlas) this.atlas = gl.createTexture();
     gl.bindTexture(gl.TEXTURE_2D, this.atlas);
     gl.pixelStorei(gl.UNPACK_PREMULTIPLY_ALPHA_WEBGL, false);
@@ -504,9 +611,11 @@ export class Ocean {
   }
 
   private buildCells(cols: number, rows: number) {
-    const gl = this.gl!;
+    const gl = this.gl;
     this.cols = cols;
     this.rows = rows;
+    if (this.cpu) return void (this.cpu.cells = new Uint8ClampedArray(cols * rows * 4));
+    if (!gl) return;
     if (!this.cellTex) this.cellTex = gl.createTexture();
     gl.bindTexture(gl.TEXTURE_2D, this.cellTex);
     gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA8, cols, rows, 0, gl.RGBA, gl.UNSIGNED_BYTE, null);
@@ -532,11 +641,13 @@ export class Ocean {
     if (this.running) return;
     this.running = true;
     const tick = () => {
-      if (!this.live() || !this.sdfTex) { this.running = false; return; }
+      if (!this.live() || !(this.gl ? this.sdfTex : this.sdf)) { this.running = false; return; }
       const t = this.now(), blank = !!this.empty?.isConnected;
       const busy = this.presence > 0 || this.pointer[2] > 0.01 || this.fly !== (blank ? 1 : 0)
         || this.ripples.some((v, i) => i % 4 === 2 && v >= 0 && t - v < WAVE_LIFE);
-      if (busy || t - this.drawn >= 1 / (blank ? 24 : 12)) this.draw();
+      // the CPU keeps its frames to a quarter of the time (half while something moves fast)
+      // (with reduced motion the one frame drawn now is the frame that stays)
+      if (this.still.matches || t - this.drawn >= Math.max(busy ? 0 : 1 / (blank ? 24 : 12), this.cpu ? this.cost * (busy ? 2 : 4) : 0)) this.draw();
       if (this.still.matches) { this.running = false; return; }
       requestAnimationFrame(tick);
     };
@@ -546,7 +657,7 @@ export class Ocean {
   // Both passes only over the cells the layer shows: the rest of the window's grid is under the side panels.
   private draw() {
     const gl = this.gl;
-    if (!gl || !this.cellTex || !this.atlas || !this.sdf || !this.sdfTex || this.seen[2] <= 0 || this.seen[3] <= 0) return;
+    if (!this.sdf || this.seen[2] <= 0 || this.seen[3] <= 0 || (gl ? !this.cellTex || !this.atlas || !this.sdfTex : !this.cpu?.ink.length)) return;
     const t = this.now(), still = this.still.matches, [sx, sy, sw, sh] = this.seen;
     const blank = !!this.empty?.isConnected, dt = Math.min(0.1, t - this.drawn);
     this.fly = still ? Number(blank) : this.fly + (Number(blank) - this.fly) * (1 - Math.exp(-dt / (blank ? RISE : SINK)));
@@ -554,6 +665,13 @@ export class Ocean {
     if (!blank) this.presence = 0;                          // behind a chat the thread has the pointer
     this.drawn = t;
     this.pointer[2] += (this.presence - this.pointer[2]) * 0.12;
+    if (!gl) {
+      const t0 = performance.now();
+      this.cellsCpu(still ? 12 : t, still ? 0 : 1);
+      this.glyphsCpu();
+      this.cost = (performance.now() - t0) / 1000;
+      return;
+    }
 
     gl.disable(gl.BLEND);
     gl.enable(gl.SCISSOR_TEST);
@@ -571,7 +689,7 @@ export class Ocean {
     gl.uniform1f(c("uTime"), still ? 12 : t);
     gl.uniform1f(c("uMotion"), still ? 0 : 1);
     gl.uniform4fv(c("uRip"), this.ripples);
-    gl.uniform2f(c("uFly"), this.flyW, HALF_STROKE * this.flyW / VIEW_W);
+    gl.uniform2f(c("uFly"), this.flyW, Math.max(HALF_STROKE * this.flyW / VIEW_W, MIN_HALF_STROKE));
     gl.uniform2f(c("uCenter"), this.center[0], this.center[1]);
     gl.uniform3f(c("uPointer"), this.pointer[0], this.pointer[1], still ? 0 : this.pointer[2]);
     gl.uniform2f(c("uSdfSize"), this.sdf.w, this.sdf.h);
@@ -601,5 +719,114 @@ export class Ocean {
     gl.uniform3fv(g("uPink"), this.colors.pink);
     gl.uniform3fv(g("uHi"), this.colors.hi);
     gl.drawArrays(gl.TRIANGLES, 0, 3);
+  }
+
+  // Pass 1 on the CPU (CELLS' main, its uniforms the fields they are set from), over the cells the layer shows
+  private cellsCpu(uTime: number, uMotion: number) {
+    const cpu = this.cpu!, sdf = this.sdf!, out = cpu.cells, [sx, sy, sw, sh] = this.seen;
+    const uCellX = this.cellPx[0] / this.dpr, uCellY = this.cellPx[1] / this.dpr, uFlyOn = this.fly;
+    const uFlyW = this.flyW, uFlyHalf = Math.max(HALF_STROKE * this.flyW / VIEW_W, MIN_HALF_STROKE);
+    const [cx0, cy0] = this.center, [vl, vt, vr, vb] = this.view, [bl, bt, br, bb] = this.box, [lane0, lane1] = this.lane;
+    const [px0, py0, pz] = [this.pointer[0], this.pointer[1], uMotion ? this.pointer[2] : 0];
+    const waves: Wave[] = [];
+    for (let i = 0; i < MAX_RIPPLES; i++) {
+      const [x, y, at, kind] = this.ripples.subarray(i * 4, i * 4 + 4);
+      if (kind < 0) continue;
+      const age = uTime - at, wake = kind > 8.5, life = wake ? WAKE_LIFE : WAVE_LIFE;
+      if (age < 0 || age > life) continue;
+      const k = 1 - age / life, size = 8 + (wake ? 90 : 320) * (1 - Math.exp(-0.8 * age));
+      waves.push({ x, y, kind, amp: (wake ? 0.5 : 1) * k ** 1.6 * smoothstep(0, 0.3, age), size, len: wake ? 30 : 44 + 0.06 * size });
+    }
+    const flyAt = (x: number, y: number, c0: number, c1: number, w: number) => {
+      const h = w * VIEW_H / VIEW_W, u = (x - c0) / w + 0.5, v = (y - c1) / h + 0.5;
+      if (u < 0 || u > 1 || v < 0 || v > 1) return 1e4;
+      // linear filtering, clamped to the edge, as the texture is sampled
+      const fx = u * sdf.w - 0.5, fy = v * sdf.h - 0.5, x0 = Math.floor(fx), y0 = Math.floor(fy), ax = fx - x0, ay = fy - y0;
+      const at = (i: number, j: number) => sdf.data[clamp(j, 0, sdf.h - 1) * sdf.w + clamp(i, 0, sdf.w - 1)];
+      const d = (at(x0, y0) * (1 - ax) + at(x0 + 1, y0) * ax) * (1 - ay) + (at(x0, y0 + 1) * (1 - ax) + at(x0 + 1, y0 + 1) * ax) * ay;
+      return d * (w / sdf.w);
+    };
+    const shapeAt = (kind: number, dx: number, dy: number, r: number) => {
+      if (kind < 0.5 || kind > 8.5) return Math.hypot(dx, dy) - r;
+      if (kind < 1.5) return sdHeart(dx / r * 0.8, -dy / r * 0.8 + 0.55) * r / 0.8;
+      if (kind < 2.5) return flyAt(dx, dy, 0, 0, r * 2.2);
+      if (kind < 3.5) return sdStar5(dx / r, -dy / r, 1, 0.45) * r;
+      return Math.hypot(dx, dy) - r * (0.78 + 0.22 * Math.cos(6 * Math.atan2(dy, dx)));
+    };
+    const height = (x: number, y: number) => {
+      let sum = 0;
+      for (const v of waves) {
+        const d = shapeAt(v.kind, x - v.x, y - v.y, v.size) / v.len;
+        sum += v.amp * Math.cos(6.2832 * d) * Math.exp(-0.9 * (d + 0.6) * (d + 0.6));
+      }
+      return sum;
+    };
+    const boxAt = (x: number, y: number) => {
+      const qx = Math.abs(x - 0.5 * (bl + br)) - 0.5 * (br - bl) + 20, qy = Math.abs(y - 0.5 * (bt + bb)) - 0.5 * (bb - bt) + 20;
+      return Math.hypot(Math.max(qx, 0), Math.max(qy, 0)) + Math.min(Math.max(qx, qy), 0) - 20;
+    };
+    const t = uTime * uMotion, breathe = 1 + 0.018 * Math.sin(t * 0.9) * uMotion, sunk = smoothstep(0, 1, 1 - uFlyOn);
+    const tube = TUBE.length, seaTop = SEA.length - 1;
+    for (let cy = sy; cy < sy + sh; cy++) {
+      for (let cx = sx; cx < sx + sw; cx++) {
+        const px = (cx + 0.5) * uCellX, py = (cy + 0.5) * uCellY, o = (cy * this.cols + cx) * 4;
+        const w = waves.length ? height(px, py) : 0;
+        const slopeX = waves.length ? (height(px + 3, py) - w) / 3 : 0, slopeY = waves.length ? (height(px, py + 3) - w) / 3 : 0;
+        const driftX = sunk ? sunk * 6 * snoise(px * 0.011, py * 0.011, t * 0.12) : 0, driftY = sunk ? sunk * 6 * snoise(px * 0.011 + 31, py * 0.011 + 31, t * 0.12) : 0;
+        const qx = cx0 + (px - cx0) / breathe - slopeX * 30 + driftX, qy = cy0 + (py - cy0) - slopeY * 30 + driftY;
+        const d = flyAt(qx, qy, cx0, cy0, uFlyW);
+        const lift = Math.max(w, 0);
+        if (d < 0.5 && uFlyOn > 0 && (uFlyOn >= 1 || 0.999 * (0.65 * (0.5 + 0.5 * snoise(px * 0.018, py * 0.018, 5))
+          + 0.35 * fract(Math.sin(cx * 12.9898 + cy * 78.233) * 43758.5453)) < uFlyOn)) {
+          const depth = clamp(-d / uFlyHalf, 0, 1), prof = Math.sqrt(Math.max(0, 1 - (1 - depth) * (1 - depth)));
+          out[o] = ROW + Math.floor(clamp(1 + prof * (tube - 2) + 0.5 + lift * 0.5, 0, tube - 1));
+          out[o + 1] = 255 * (0.58 + 0.42 * prof) * (0.4 + 0.6 * uFlyOn);
+          out[o + 2] = 255;
+          out[o + 3] = 255 * clamp(Math.max(0, prof - 0.55) * 1.4 * uFlyOn + lift * 0.3, 0, 1);
+          continue;
+        }
+        const s = sea(px - slopeX * 90, py - slopeY * 90, t);
+        const edge = smoothstep(0, 28, Math.min(Math.min(px - vl, vr - px), Math.min(py - vt, vb - py)));
+        const hover = pz * Math.exp(-((px - px0) ** 2 + (py - py0) ** 2) / 3600);
+        const ghost = 1 - smoothstep(-2, 6, d), gd = Math.max(d, 0) / 30, glow = Math.exp(-gd * gd) * uFlyOn;
+        const calm = 1 + (0.3 + 0.7 * smoothstep(3, 40, d) - 1) * uFlyOn;
+        const behind = 0.3 + 0.35 * smoothstep(0, 72, Math.max(lane0 - px, px - lane1));
+        const quiet = (0.3 + 0.7 * smoothstep(0, 40, boxAt(px, py))) * (behind + (1 - behind) * uFlyOn);
+        const v = clamp(s * calm + ghost * 0.3 + lift * 0.55 + Math.min(w, 0) * 0.15 + hover * 0.3, 0, 1);
+        const bright = ((0.05 + 0.46 * v * v + 0.3 * glow + 0.3 * lift + 0.3 * hover) * quiet + 0.2 * ghost * Math.sqrt(quiet)) * edge;
+        out[o] = Math.floor(clamp(v * 3.9, 0, seaTop));
+        out[o + 1] = 255 * clamp(bright, 0, 1);
+        out[o + 2] = 255 * clamp(glow * 0.85 + ghost * 0.7 + lift * 0.6 + hover * 0.5, 0, 1);
+        out[o + 3] = 0;
+      }
+    }
+  }
+
+  // Pass 2 on the CPU (GLYPHS): each shown cell's glyph from the atlas's ink, in its color, into the canvas's pixels
+  private glyphsCpu() {
+    const cpu = this.cpu!, [sx, sy, sw, sh] = this.seen, [cw, ch] = this.cellPx, W = sw * cw, H = sh * ch;
+    if (!cpu.pixels || cpu.pixels.width !== W || cpu.pixels.height !== H) cpu.pixels = new ImageData(W, H);
+    const px = cpu.pixels.data, { sea: c0, pink: c1, hi: c2 } = this.colors;
+    px.fill(0);
+    for (let cy = 0; cy < sh; cy++) {
+      for (let cx = 0; cx < sw; cx++) {
+        const o = ((cy + sy) * this.cols + cx + sx) * 4, g = cpu.cells[o];
+        if (!g) continue;
+        const b = cpu.cells[o + 2] / 255, a = cpu.cells[o + 3] / 255, bright = cpu.cells[o + 1] / 255;
+        const r = 255 * ((c0[0] + (c1[0] - c0[0]) * b) * (1 - a) + c2[0] * a);
+        const gg = 255 * ((c0[1] + (c1[1] - c0[1]) * b) * (1 - a) + c2[1] * a);
+        const bb = 255 * ((c0[2] + (c1[2] - c0[2]) * b) * (1 - a) + c2[2] * a);
+        const ax = (g % ROW) * cw, ay = Math.floor(g / ROW) * ch;
+        for (let ly = 0; ly < ch; ly++) {
+          let i = ((cy * ch + ly) * W + cx * cw) * 4, k = (ay + ly) * cpu.inkW + ax;
+          for (let lx = 0; lx < cw; lx++, i += 4, k++) {
+            const ink = cpu.ink[k];
+            if (!ink) continue;
+            px[i] = r; px[i + 1] = gg; px[i + 2] = bb; px[i + 3] = ink * bright;
+          }
+        }
+      }
+    }
+    cpu.ctx.putImageData(cpu.pixels, sx * cw, sy * ch);
   }
 }

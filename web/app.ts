@@ -218,6 +218,7 @@ const ICONS = {
   wave: '<path d="M4 10v4M8 7v10M12 4v16M16 8v8M20 11v2"/>',
   play: '<path fill="currentColor" stroke="none" d="M8 5.8v12.4a.8.8 0 0 0 1.2.7l10-6.2a.8.8 0 0 0 0-1.4l-10-6.2a.8.8 0 0 0-1.2.7z"/>',
   mic: '<rect x="9" y="3" width="6" height="11" rx="3"/><path d="M5.5 11a6.5 6.5 0 0 0 13 0M12 17.5V21"/>',
+  phone: '<rect x="6.5" y="2.5" width="11" height="19" rx="2.5"/><path d="M10.5 18.5h3"/>',
   micOff: '<path d="M15 9.4V6a3 3 0 0 0-5.7-1.3M9 9v2a3 3 0 0 0 4.9 2.3M18.5 11a6.5 6.5 0 0 1-1 3.4M5.5 11a6.5 6.5 0 0 0 10.4 5.2M12 17.5V21M4 4l16 16"/>',
 };
 const TITLES = { copy: "Copy", edit: "Edit", trash: "Delete", tokens: "Token odds", retry: "Regenerate (a new version)" };
@@ -239,7 +240,7 @@ const pane = (name: string, el: HTMLElement, key: string, besideFrom: number, wi
 };
 const panes = {
   conversations: pane("conversations", $("sidebar"), "b", 761, "--side-open", 208),
-  settings: pane("settings", panel, ",", 1460, "--panel-open", 340, () => { syncSettings(); growSystem(); void loadCatalog(); void renderDevices(); }),
+  settings: pane("settings", panel, ",", 1460, "--panel-open", 340, () => { syncSettings(); growSystem(); void loadCatalog(); }),
 };
 const PANES = Object.values(panes);
 
@@ -1168,7 +1169,7 @@ function paint(v: View, m: Message, live?: Live) {
   v.foot.querySelector("[data-act=tokens]")?.classList.toggle("on", asTokens);
 }
 
-// A new chat: the butterfly in its sea of characters (ocean.ts), or the logo alone where WebGL2 is missing. The sea stays
+// A new chat: the butterfly in its sea of characters (ocean.ts), or the logo alone where no canvas can be drawn on. The sea stays
 // behind the chat once it has begun, unless Settings turns that off (kept on this device, as the panels are).
 const ocean = new Ocean($("sea")), seaReady = ocean.start(), seaSwitch = $<HTMLButtonElement>("sea-switch");
 function emptyState() {
@@ -1182,7 +1183,7 @@ function showSea(on: boolean) {
   seaSwitch.setAttribute("aria-checked", String(on && seaReady));
 }
 seaSwitch.disabled = !seaReady;
-if (!seaReady) seaSwitch.title = "This browser has no WebGL2";
+if (!seaReady) seaSwitch.title = "This browser cannot draw it";
 seaSwitch.onclick = () => {
   const on = seaSwitch.getAttribute("aria-checked") !== "true";
   setPref("sea", on ? "on" : "off");
@@ -1199,32 +1200,74 @@ for (const [t, label] of [["system", "System"], ["light", "Light"], ["dark", "Da
   b.onclick = () => { choose(t); markTheme(); };
   themePick.append(b);
 }
-// Settings' Other devices: on the network (chrysalis start --lan), a QR code of the page that sets a device up (server.ts
-// /api/pair, setup.ts), which a phone's camera opens: the device trusts this computer's authority, and then the chat opens
-// there over HTTPS. Off the network, how to get there.
-async function renderDevices() {
-  const box = $("devices"), p = await fetch("/api/pair").then((r) => r.json()).catch(() => null);
-  const key = JSON.stringify(p);
-  if (box.dataset.key === key) return;
-  box.dataset.key = key;
+// Connect a device (the top bar, on this computer only: from the network the chat is HTTPS, here plain HTTP): a QR code
+// that sets a phone up and lets it in (setup.ts, devices.ts), the code to type where there is no camera, the devices let
+// in, and the authority's fingerprint, which a device's certificate details show too when it trusts this computer and not
+// an impostor's. A code works once: the one shown is replaced as soon as a device has used it or its 10 minutes are up.
+const connectView = $<HTMLDialogElement>("connect-view");
+let pairing: { code: string; url: string; qr?: string } | undefined, known: Set<string> | undefined, joined = "", connectTimer = 0;
+interface Paired { id: string; name: string; added: number; seen: number }
+const since = (t: number) => {
+  const m = Math.round((Date.now() - t) / 60_000);
+  return m < 1 ? "just now" : m < 60 ? `${m} min ago` : m < 1440 ? `${Math.round(m / 60)} h ago` : day(t);
+};
+const day = (t: number) => new Date(t).toLocaleDateString(undefined, { month: "short", day: "numeric" });
+async function renderConnect() {
+  const p = await fetch("/api/pair").then((r) => r.json()).catch(() => null);
+  if (!connectView.open) return;
+  clearTimeout(connectTimer);
+  connectTimer = window.setTimeout(renderConnect, 2000);
+  const box = $("connect-body");
   if (!p?.lan) {
     const note = h("p", "set-note");
-    note.append("Chrysalis is on this computer only. ", h("code", "", "chrysalis start --lan"), " opens it to your network, and a code that sets up a phone or another computer shows here.");
+    note.append("Chrysalis is on this computer only. Run ", h("code", "", "chrysalis start --lan"), " in a terminal to let your phone and other devices on this network in.");
+    box.dataset.key = "";
     return void box.replaceChildren(note);
   }
-  const row = h("div", "dev-row"), text = h("div", "dev-text"), url = h("code", "dev-url", p.urls[0] ?? "");
-  if (p.qr) {
-    const qr = h("img", "dev-qr") as HTMLImageElement;
-    qr.src = `data:image/svg+xml;base64,${btoa(p.qr)}`;
-    qr.alt = `QR code of ${p.urls[0]}`;
+  const list: Paired[] = p.devices, fresh = known && list.find((d) => !known!.has(d.id));
+  if (fresh) joined = fresh.name;
+  known = new Set(list.map((d) => d.id));
+  if (!pairing || !p.live.includes(pairing.code)) {
+    pairing = await fetch("/api/pair", { method: "POST", headers: { "Content-Type": "application/json" }, body: "{}" }).then((r) => r.json()).catch(() => undefined);
+  }
+  const key = JSON.stringify([pairing, joined, list.map((d) => [d.id, since(d.seen)]), p.setup]);
+  if (!pairing || !connectView.open || box.dataset.key === key) return;
+  box.dataset.key = key;
+  const code = `${pairing.code.slice(0, 4)}-${pairing.code.slice(4)}`, row = h("div", "dev-row"), text = h("div", "dev-text");
+  if (pairing.qr) {
+    const qr = h("img", "dev-qr");
+    qr.src = `data:image/svg+xml;base64,${btoa(pairing.qr)}`;
+    qr.alt = "QR code that connects a device";
     row.append(qr);
   }
-  text.append(h("p", "", p.qr ? "Scan it with a phone's camera, or open this on another device here:" : "Open this on the device:"), url,
-    h("p", "set-note", "It sets the device up to trust this computer once, then opens Chrysalis there securely."));
+  const typed = h("p");
+  typed.append(pairing.qr ? "No camera? On the device, open " : "On the device, open ", h("code", "dev-url", p.setup[0].replace(/\/$/, "")), " and enter ", h("code", "dev-code", code), ".");
+  text.append(...(pairing.qr ? [h("p", "dev-lead", "Scan this with your phone's camera. It sets the phone up, then opens Chrysalis on it.")] : []), typed,
+    h("p", "set-note", `The code works once, for 10 minutes.${pairing.qr ? "" : " With qrencode installed, a QR code shows here for phones to scan."}`));
   row.append(text);
+  const devs = h("div", "dev-list");
+  devs.append(h("div", "set-title", "Devices let in"));
+  if (!list.length) devs.append(h("p", "set-note", "None yet."));
+  for (const d of list) {
+    const item = h("div", "dev-item"), remove = h("button", "btn small", "Remove");
+    remove.type = "button";
+    remove.onclick = async () => { await fetch(`/api/pair/${d.id}`, { method: "DELETE" }); box.dataset.key = ""; void renderConnect(); };
+    item.append(h("span", "dev-name", d.name), h("span", "dev-when", `added ${day(d.added)} · used ${since(d.seen)}`), remove);
+    devs.append(item);
+  }
   const fp = h("p", "set-note dev-fp");
-  fp.append(`${p.name}, SHA-256: `, h("code", "", p.fingerprint));
-  box.replaceChildren(row, ...(p.urls.length > 1 ? [h("p", "set-note", `Also at ${p.urls.slice(1).join(", ")}`)] : []), fp);
+  fp.append(`To be sure a device trusts this computer and not an impostor on the network, its certificate details show the same SHA-256 fingerprint for ${p.name}: `,
+    h("code", "", p.fingerprint));
+  const done = h("p", "dev-joined");
+  done.innerHTML = icon("check");
+  done.append(`${joined} is connected.`);
+  box.replaceChildren(...(joined ? [done] : []), row, devs, fp);
+}
+function openConnect() {
+  joined = "";
+  known = undefined;
+  connectView.showModal();
+  void renderConnect();
 }
 function markTheme() {
   for (const b of themePick.querySelectorAll<HTMLElement>("button")) b.setAttribute("aria-checked", String(b.dataset.theme === chosen()));
@@ -1393,7 +1436,11 @@ function renderStatus() {
 
 async function refreshStatus() {
   const was = current();
-  try { status = await (await fetch("/api/status")).json(); } catch { status = { state: "offline" }; }
+  try {
+    const r = await fetch("/api/status");
+    if (r.status === 401) return location.replace("/pair");   // a device on the network this computer has not let in
+    status = await r.json();
+  } catch { status = { state: "offline" }; }
   build ||= status.build ?? "";
   if (status.state === "online" && status.model && !status.loading && status.model !== picked) {
     picked = status.model;                         // the picker follows Chrysalis (another client may have switched it)
@@ -4076,6 +4123,12 @@ document.addEventListener("visibilitychange", () => { if (!document.hidden) void
 
 $("new-chat").innerHTML = `${icon("plus")}New chat`;
 $("export").innerHTML = icon("download");
+$("connect").innerHTML = icon("phone");
+$("connect").hidden = location.protocol === "https:";
+$("connect").onclick = openConnect;
+$("connect-close").innerHTML = icon("x");
+$("connect-close").onclick = () => connectView.close();
+connectView.addEventListener("click", (e) => { if (e.target === connectView) connectView.close(); });
 $("attach").innerHTML = icon("clip");
 $("draft").addEventListener("click", () => void draft());
 $("voice").innerHTML = icon("wave");

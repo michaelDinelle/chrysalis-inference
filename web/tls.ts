@@ -57,6 +57,6 @@ export function lanTls(dir = process.env.CHRYSALIS_TLS_DIR ?? `${homedir()}/.con
   const ca = readFileSync(`${dir}/ca.pem`, "utf8"), x = new X509Certificate(ca);
   // the authority as devices take it (DER: Apple's profiles, Android's installer), its name and its SHA-256 fingerprint
   // as their certificate details show it
-  return { cert: readFileSync(`${dir}/server.pem`, "utf8"), key: readFileSync(`${dir}/server.key`, "utf8"), ca, caDer: Uint8Array.from(x.raw),
+  return { dir, cert: readFileSync(`${dir}/server.pem`, "utf8"), key: readFileSync(`${dir}/server.key`, "utf8"), ca, caDer: Uint8Array.from(x.raw),
     caName: x.subject.replace(/^CN=/, ""), fingerprint: x.fingerprint256 };
 }

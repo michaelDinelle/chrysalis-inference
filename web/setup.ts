@@ -1,16 +1,22 @@
 // Setting a device up for the web chat on the network (`chrysalis start --lan`). The chat is HTTPS there (tls.ts), and a
 // device warns about its certificate until it trusts this machine's authority, so a device starts at plain HTTP on a
-// port of its own (the QR code chrysalis.sh prints, Settings' Other devices): a page that offers the authority as the
+// port of its own (the QR code of Connect a device and `chrysalis status`): a page that offers the authority as the
 // device's system takes it (a profile on Apple's, the certificate elsewhere, Firefox's own prompt), the taps that
-// trust it there, and opens the chat itself once the device trusts it (it keeps loading an image from the chat's HTTPS
-// address: the load succeeds only then). The page serves the authority's certificate and nothing else. Over plain HTTP
-// it can be swapped by someone on the network at that moment: the authority's fingerprint is on this page and in
-// `chrysalis status`, and a device's certificate details show it, for anyone who wants to compare.
+// trust it there, and goes on to the chat itself once the device trusts it (it keeps loading an image from the chat's
+// HTTPS address: the load succeeds only then). There the device is let in (pairPage, devices.ts) with the code the QR
+// code's address carries after "#", which a browser never sends, so it crosses the network over HTTPS only.
+//
+// Over plain HTTP, someone on the network at that moment could serve a page and an authority of their own, so nothing
+// this page says can vouch for it: the check is the device's own certificate details against the computer's screen.
 import { readFileSync } from "node:fs";
 
 export interface Authority { caDer: Uint8Array; caName: string; fingerprint: string }
 
-const LOGO = readFileSync(`${import.meta.dir}/logo-thin.svg`, "utf8").replace(/<!--[\s\S]*?-->/g, "");
+const TOKENS = readFileSync(`${import.meta.dir}/tokens.css`, "utf8");
+// the aurora the chat's panels wear on their heads (index.html's sprite), for the card's
+const INDEX = readFileSync(`${import.meta.dir}/index.html`, "utf8"), SPRITE_AT = INDEX.indexOf('<svg class="sprite"');
+const AURORA = INDEX.slice(SPRITE_AT, INDEX.indexOf("</svg>", SPRITE_AT) + "</svg>".length);
+if (SPRITE_AT < 0 || !AURORA.includes('id="aurora"')) throw new Error("index.html has no aurora sprite for the setup pages");
 const esc = (s: string) => s.replace(/[&<>"']/g, (c) => `&#${c.charCodeAt(0)};`);
 const b64 = (b: Uint8Array) => Buffer.from(b).toString("base64");
 // a profile's identifiers from the authority's fingerprint: the same authority is the same profile, so setting a device
@@ -56,9 +62,120 @@ export function appleProfile(a: Authority): string {
 // A 1x1 transparent GIF: the image the setup page loads from the chat's HTTPS address to see whether the device trusts it
 export const TRUSTED_GIF = Uint8Array.from(atob("R0lGODlhAQABAIAAAAAAAP///yH5BAEAAAAALAAAAAABAAEAAAIBRAA7"), (c) => c.charCodeAt(0));
 
-// The page: the guide for the device it detects (any other one a tap away), its download, and the check that opens the
-// chat. chat: the chat's HTTPS address at the name or address the device used.
-export function setupPage(a: Authority, chat: string): string {
+// The device as both pages tell it: its system (the guide it gets) and, for the list of devices let in, a name
+const DETECT = `const ua = navigator.userAgent, touchMac = /Macintosh/.test(ua) && navigator.maxTouchPoints > 1;
+const os = /iPhone|iPad|iPod/.test(ua) || touchMac ? "ios" : /Android/.test(ua) ? "android" : /CrOS/.test(ua) ? "chromeos"
+  : /Macintosh/.test(ua) ? "mac" : /Windows/.test(ua) ? "windows" : "linux";
+const browser = /Edg/.test(ua) ? "Edge" : /Firefox\\/|FxiOS/.test(ua) ? "Firefox" : /CriOS|Chrome\\//.test(ua) ? "Chrome" : /Safari\\//.test(ua) ? "Safari" : "";
+const NAME = { ios: /iPad/.test(ua) || touchMac ? "iPad" : "iPhone", android: "Android", chromeos: "Chromebook", mac: "Mac", windows: "Windows", linux: "Linux" }[os]
+  + (browser ? " · " + browser : "");
+const $ = (id) => document.getElementById(id);`;
+
+// The pages' look is the chat's (tokens.css): its sea of characters fills the window (device.ts, whose built script each
+// page carries: `sea`), and the page is a card floating on it, as the message box does, with the butterfly above it and
+// the aurora on its head, as the chat's panels have.
+const page = (body: string, script: string, sea: string) => `<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta name="color-scheme" content="light dark">
+<title>Connect to Chrysalis</title>
+<style>
+${TOKENS}
+  * { box-sizing: border-box; }
+  body { margin: 0; background: var(--bg); color: var(--text); font: 16px/1.55 var(--sans); -webkit-font-smoothing: antialiased; }
+  .sea { position: fixed; inset: 0; overflow: hidden; }
+  .sea > .ocean { position: absolute; touch-action: manipulation; }
+  main { position: relative; display: flex; flex-direction: column; align-items: center; min-height: 100dvh;
+    padding: env(safe-area-inset-top) 16px max(28px, env(safe-area-inset-bottom)); pointer-events: none; }
+  .stage { display: grid; flex: none; place-items: center; width: 100%; height: clamp(200px, 40vh, 440px); }
+  .stage > .logo { width: min(78%, 320px); filter: drop-shadow(0 0 40px rgb(226 77 133 / 0.14)); }
+  .card { width: 100%; max-width: 520px; overflow: hidden; border: 1px solid var(--line); border-radius: 20px; background: var(--raised);
+    box-shadow: var(--shadow); pointer-events: auto; }
+  .sprite { position: absolute; width: 0; height: 0; }
+  .card-head { position: relative; display: grid; place-items: center; height: 60px; border-bottom: 1px solid var(--line); --glow: var(--raised); }
+  .card-head > h1 { position: relative; margin: 0; font-size: 17px; font-weight: 600; letter-spacing: 0.015em; text-shadow: 0 0 2px var(--glow), 0 0 10px var(--glow); }
+  .aurora { position: absolute; inset: 0; width: 100%; height: 100%; mask-image: linear-gradient(#000 55%, transparent 92%); }
+  :root[data-theme="light"] .card-head { --glow: var(--aurora-sky); color: #f6edf1; }
+  :root[data-theme="light"] .aurora { mask-image: none; }
+  .card-body { padding: 18px 20px 18px; }
+  .sub { margin: 0 0 18px; color: var(--muted); font-size: 15px; text-align: center; }
+  .status { display: flex; align-items: center; justify-content: center; gap: 10px; margin: 0 0 18px; padding: 10px 14px; border: 1px solid var(--line);
+    border-radius: 12px; background: var(--panel); color: var(--muted); font-size: 14.5px; }
+  .status::before { content: ""; flex: none; width: 8px; height: 8px; border-radius: 50%; background: var(--faint); animation: pulse 1.4s ease-in-out infinite; }
+  .status.ok { color: var(--text); border-color: color-mix(in srgb, var(--ok) 50%, var(--line)); }
+  .status.ok::before { background: var(--ok); animation: none; }
+  .status.bad { color: var(--text); border-color: color-mix(in srgb, var(--accent) 50%, var(--line)); }
+  .status.bad::before { background: var(--accent); animation: none; }
+  .status[hidden] { display: none; }
+  @keyframes pulse { 50% { opacity: 0.35; } }
+  @media (prefers-reduced-motion: reduce) { .status::before { animation: none; } }
+  .go { display: block; width: 100%; padding: 14px 18px; border: 0; border-radius: 12px; background: var(--accent); color: #fff; font-family: inherit;
+    font-size: 16.5px; font-weight: 600; line-height: 1.2; text-align: center; text-decoration: none; cursor: pointer; }
+  .go:hover { filter: brightness(1.06); }
+  .go:active { filter: brightness(0.92); }
+  .code { display: block; width: 100%; margin: 0 0 12px; padding: 13px 14px; border: 1px solid var(--line); border-radius: 12px; background: var(--bg);
+    color: var(--text); font: 600 22px/1.2 var(--mono); letter-spacing: 0.12em; text-align: center; text-transform: uppercase; }
+  .code::placeholder { color: var(--faint); }
+  .code:focus { border-color: color-mix(in srgb, var(--accent) 45%, var(--line)); outline: 0; }
+  ol { margin: 20px 0 0; padding: 0; list-style: none; counter-reset: step; }
+  li { position: relative; margin: 0 0 14px; padding-left: 38px; counter-increment: step; }
+  li::before { content: counter(step); position: absolute; left: 0; top: 0; display: grid; place-items: center; width: 26px; height: 26px; border-radius: 50%;
+    background: var(--panel); border: 1px solid var(--line); color: var(--accent); font-size: 13.5px; font-weight: 650; }
+  li:has(.aside) { counter-increment: none; }
+  li:has(.aside)::before { content: none; }
+  .aside { color: var(--muted); font-size: 14px; }
+  p.aside { margin: 16px 0 0; text-align: center; }
+  code { padding: 1px 5px; border-radius: 6px; background: var(--code); font: 13px var(--mono); overflow-wrap: anywhere; }
+  .warn { margin: 0 0 16px; padding: 12px 14px; border-radius: 12px; background: var(--accent-soft); font-size: 15px; }
+  .warn button { margin-top: 8px; padding: 8px 12px; border: 1px solid var(--line); border-radius: 9px; background: var(--raised); color: var(--text); font: inherit; }
+  details { margin-top: 20px; border-top: 1px solid var(--line); padding-top: 14px; color: var(--muted); font-size: 14.5px; }
+  summary { cursor: pointer; }
+  .others { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 12px; }
+  .others button { padding: 6px 12px; border: 1px solid var(--line); border-radius: 999px; background: var(--raised); color: var(--text); font: inherit; font-size: 14px; cursor: pointer; }
+  .others button[aria-pressed="true"] { border-color: var(--accent); color: var(--accent-hi); background: var(--accent-soft); }
+  .about { margin: 12px 0 0; }
+</style>
+</head>
+<body>
+${AURORA}
+<div id="sea" class="sea"></div>
+<main>
+  <div class="stage" id="stage"></div>
+  <section class="card">
+    <header class="card-head">
+      <svg class="aurora" aria-hidden="true" viewBox="0 0 640 51" preserveAspectRatio="xMinYMin slice"><use href="#aurora" /></svg>
+      <h1>Connect to Chrysalis</h1>
+    </header>
+    <div class="card-body">
+${body}
+    </div>
+  </section>
+</main>
+<script>
+${DETECT}
+${script}
+</script>
+<script type="module">${sea}</script>
+</body>
+</html>
+`;
+
+// device.ts as a script of its own, its drawing in it as a data: URL: the pages are served whole, from a port of their own
+export async function deviceScript(): Promise<string> {
+  const built = await Bun.build({ entrypoints: [`${import.meta.dir}/device.ts`], target: "browser", minify: true, plugins: [{ name: "svg as a data: URL",
+    setup(b) {
+      b.onLoad({ filter: /\.svg$/ }, async (f) => ({ loader: "js",
+        contents: `export default ${JSON.stringify(`data:image/svg+xml;base64,${Buffer.from(await Bun.file(f.path).arrayBuffer()).toString("base64")}`)};` }));
+    } }] });
+  if (!built.success) throw new AggregateError(built.logs, "device.ts did not build");
+  return (await built.outputs[0].text()).replaceAll("</script", "<\\/script");
+}
+
+// The page: the guide for the device it detects (any other one a tap away), its download, and the check that goes on
+// to the chat. chat: the chat's HTTPS address at the name or address the device used.
+export function setupPage(a: Authority, chat: string, sea: string): string {
   const name = esc(a.caName), guides = {
     ios: { title: "iPhone and iPad", button: ["Download the profile", "/chrysalis.mobileconfig"], steps: [
       "Tap <b>Download the profile</b>, then <b>Allow</b>.",
@@ -94,73 +211,19 @@ export function setupPage(a: Authority, chat: string): string {
       "Tick <b>Trust this CA to identify websites</b>, then <b>OK</b>.",
       "Chrysalis opens by itself."] },
   };
-  return `<!doctype html>
-<html lang="en">
-<head>
-<meta charset="utf-8">
-<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
-<meta name="color-scheme" content="light dark">
-<title>Connect to Chrysalis</title>
-<style>
-  :root { --bg: #121010; --panel: #1a1617; --line: #2d2628; --text: #efe4e7; --muted: #9c8e92; --faint: #6b5f62; --accent: #e24d85; --ok: #6ccf8e; }
-  @media (prefers-color-scheme: light) { :root { --bg: #fcf8f9; --panel: #ffffff; --line: #e5d6da; --text: #1d181a; --muted: #6e6164; --faint: #a39497; --ok: #2f9e5b; } }
-  * { box-sizing: border-box; }
-  body { margin: 0; background: var(--bg); color: var(--text); font: 16px/1.55 ui-sans-serif, system-ui, -apple-system, "Segoe UI", sans-serif; -webkit-font-smoothing: antialiased; }
-  main { max-width: 520px; margin: 0 auto; padding: max(28px, env(safe-area-inset-top)) 20px 40px; }
-  .logo { display: block; width: 112px; height: auto; margin: 0 auto 14px; }
-  h1 { margin: 0; font-size: 24px; font-weight: 650; text-align: center; letter-spacing: -0.01em; }
-  .sub { margin: 4px 0 22px; color: var(--muted); text-align: center; }
-  .status { display: flex; align-items: center; justify-content: center; gap: 10px; margin: 0 0 22px; padding: 10px 14px; border: 1px solid var(--line);
-    border-radius: 12px; background: var(--panel); color: var(--muted); font-size: 14.5px; }
-  .status::before { content: ""; flex: none; width: 8px; height: 8px; border-radius: 50%; background: var(--faint); animation: pulse 1.4s ease-in-out infinite; }
-  .status.ok { color: var(--text); border-color: color-mix(in srgb, var(--ok) 50%, var(--line)); }
-  .status.ok::before { background: var(--ok); animation: none; }
-  @keyframes pulse { 50% { opacity: 0.35; } }
-  .go { display: block; width: 100%; padding: 15px 18px; border: 0; border-radius: 14px; background: var(--accent); color: #fff; font: 600 17px/1.2 inherit;
-    text-align: center; text-decoration: none; }
-  .go:active { filter: brightness(0.92); }
-  ol { margin: 22px 0 0; padding: 0; list-style: none; counter-reset: step; }
-  li { position: relative; margin: 0 0 14px; padding-left: 38px; counter-increment: step; }
-  li::before { content: counter(step); position: absolute; left: 0; top: 0; display: grid; place-items: center; width: 26px; height: 26px; border-radius: 50%;
-    background: var(--panel); border: 1px solid var(--line); color: var(--accent); font-size: 13.5px; font-weight: 650; }
-  li:has(.aside) { counter-increment: none; padding-left: 38px; }
-  li:has(.aside)::before { content: none; }
-  .aside { color: var(--muted); font-size: 14px; }
-  code { padding: 1px 5px; border-radius: 6px; background: var(--panel); font: 13.5px ui-monospace, monospace; overflow-wrap: anywhere; }
-  .warn { margin: 0 0 18px; padding: 12px 14px; border-radius: 12px; background: color-mix(in srgb, var(--accent) 14%, transparent); font-size: 15px; }
-  .warn button { margin-top: 8px; padding: 8px 12px; border: 1px solid var(--line); border-radius: 10px; background: var(--panel); color: var(--text); font: inherit; }
-  details { margin-top: 26px; border-top: 1px solid var(--line); padding-top: 14px; color: var(--muted); font-size: 14.5px; }
-  summary { cursor: pointer; }
-  .others { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 12px; }
-  .others button { padding: 7px 12px; border: 1px solid var(--line); border-radius: 999px; background: var(--panel); color: var(--text); font: inherit; font-size: 14px; }
-  .others button[aria-pressed="true"] { border-color: var(--accent); color: var(--accent); }
-  .about { margin: 12px 0 0; }
-  .fp { display: block; margin-top: 6px; color: var(--faint); font: 12px/1.5 ui-monospace, monospace; overflow-wrap: anywhere; }
-</style>
-</head>
-<body>
-<main>
-  ${LOGO.replace("<svg ", '<svg class="logo" aria-hidden="true" ')}
-  <h1>Connect to Chrysalis</h1>
-  <p class="sub">Set this device up once, and Chrysalis opens securely on it from then on.</p>
+  return page(`  <p class="sub">Set this device up once, and Chrysalis opens securely on it from then on.</p>
   <div class="status" id="status" role="status" aria-live="polite">Checking the secure connection…</div>
   <div id="guide"></div>
   <details>
     <summary>Another device, or what this does</summary>
     <div class="others" id="others"></div>
     <p class="about">This device will trust <b>${name}</b>, an authority this computer made for its own web chat. It can only vouch
-      for private addresses and local names, so it changes nothing for any other site. To compare it with the one the
-      computer shows (<code>chrysalis status</code>), its SHA-256 fingerprint:<span class="fp" id="fp">${esc(a.fingerprint)}</span></p>
-  </details>
-</main>
-<script>
-const CHAT = ${JSON.stringify(chat)}, GUIDES = ${JSON.stringify(guides)};
-const ua = navigator.userAgent, touchMac = /Macintosh/.test(ua) && navigator.maxTouchPoints > 1;
-const os = /iPhone|iPad|iPod/.test(ua) || touchMac ? "ios" : /Android/.test(ua) ? "android" : /CrOS/.test(ua) ? "chromeos"
-  : /Macintosh/.test(ua) ? "mac" : /Windows/.test(ua) ? "windows" : "linux";
+      for private addresses and local names, so it changes nothing for any other site. This page came over plain HTTP, so
+      someone else on the network could have sent one of their own: to be sure, compare the SHA-256 fingerprint this device
+      shows for <b>${name}</b> in its certificate details with the one under <b>Connect a device</b> on the computer.</p>
+  </details>`, `const CHAT = ${JSON.stringify(chat)}, GUIDES = ${JSON.stringify(guides)};
 // desktop Firefox keeps an authority list of its own, and asks itself; on phones it goes by the system's
 const detected = /Firefox\\//.test(ua) && os !== "ios" && os !== "android" ? "firefox" : os;
-const $ = (id) => document.getElementById(id);
 function show(key) {
   const g = GUIDES[key], guide = $("guide");
   guide.innerHTML = "";
@@ -190,8 +253,8 @@ for (const [key, g] of Object.entries(GUIDES)) {
   $("others").append(b);
 }
 show(detected);
-// The device trusts the chat once an image from its HTTPS address loads: then the chat opens. Checked again at once when
-// the page comes back into view (after Settings).
+// The device trusts the chat once an image from its HTTPS address loads: then the chat's page that lets it in opens, with
+// the code this page's address carries. Checked again at once when the page comes back into view (after Settings).
 let checking = false, timer = 0;
 function probe() {
   return new Promise((done) => {
@@ -211,16 +274,46 @@ async function check() {
   if (ok) {
     status.classList.add("ok");
     status.textContent = "Trusted. Opening Chrysalis…";
-    setTimeout(() => location.replace(CHAT), 700);
+    document.dispatchEvent(new Event("chrysalis-opening"));
+    setTimeout(() => location.replace(CHAT + "pair" + location.hash), 900);
     return;
   }
   status.textContent = "Waiting for this device to trust Chrysalis…";
   timer = setTimeout(check, 1500);
 }
 document.addEventListener("visibilitychange", () => { if (!document.hidden) check(); });
-check();
-</script>
-</body>
-</html>
-`;
+check();`, sea);
+}
+
+// The chat's page for a device it has not let in (server.ts /pair, over HTTPS): the code from the setup page, or typed,
+// sent once for the device's key. The code leaves the address at once, so it stays out of the browser's history.
+export function pairPage(sea: string): string {
+  return page(`  <p class="sub">Enter the code Chrysalis shows on the computer it runs on.</p>
+  <div class="status" id="status" role="status" aria-live="polite" hidden></div>
+  <form id="form">
+    <input id="code" class="code" autocomplete="one-time-code" autocapitalize="characters" spellcheck="false" maxlength="9" placeholder="XXXX-XXXX" aria-label="Code" required>
+    <button class="go" type="submit">Connect</button>
+  </form>
+  <p class="aside">It is under <b>Connect a device</b> at the top of Chrysalis there, and <code>chrysalis status</code> prints it.</p>`, `
+const status = $("status");
+function say(text, kind) {
+  status.hidden = false;
+  status.className = "status" + (kind ? " " + kind : "");
+  status.textContent = text;
+}
+async function send(code) {
+  say("Connecting…");
+  const r = await fetch("/pair", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ code, name: NAME }) }).catch(() => null);
+  if (r?.ok) {
+    say("Connected. Opening Chrysalis…", "ok");
+    document.dispatchEvent(new Event("chrysalis-opening"));
+    return void setTimeout(() => location.replace("/"), 900);
+  }
+  say(r ? "That code did not work. Each one works once, for 10 minutes: Connect a device shows a new one." : "Chrysalis did not answer. Try again in a moment.", "bad");
+  $("code").select();
+}
+const given = decodeURIComponent(location.hash.slice(1));
+history.replaceState(null, "", location.pathname);
+$("form").onsubmit = (e) => { e.preventDefault(); send($("code").value); };
+if (given) { $("code").value = given; send(given); }`, sea);
 }

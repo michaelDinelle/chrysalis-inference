@@ -1,51 +1,4 @@
-/* The look: each color a light-dark() pair, light first. Before theme.ts runs they follow the system's scheme; then
-   <html data-theme> holds the one in use (the system's, or one chosen in Settings), and the few values that are not
-   colors follow it. */
-:root {
-  color-scheme: light dark;
-  --bg: light-dark(#fcf8f9, #121010);
-  --panel: light-dark(#f6eff0, #171413);
-  /* the dark #171413: #1f1b19 over a large area (the message box) made an LG monitor driven by a Mac flicker and keep a
-     ghost image; this color tested clean in the same place */
-  --raised: light-dark(#ffffff, #171413);
-  --hover: light-dark(#ede2e5, #292224);
-  --line: light-dark(#e5d6da, #2d2628);
-  --text: light-dark(#1d181a, #efe4e7);
-  --muted: light-dark(#6e6164, #9c8e92);
-  --faint: light-dark(#a39497, #6b5f62);
-  --accent: #e24d85;                               /* the logo's pink */
-  --accent-hi: light-dark(#b43366, #f982a8);
-  --accent-soft: light-dark(rgb(226 77 133 / 0.11), rgb(226 77 133 / 0.14));
-  --heat-1: light-dark(#a85771, #ea99b0);          /* the thinking levels, soft to vivid: Low, Medium, Max */
-  --heat-2: #e24d85;
-  --heat-3: light-dark(#bb1562, #ff619a);
-  --ok: #6ccf8e;
-  --warn: #e8b04a;
-  --danger: #f2706b;
-  --code: light-dark(#faf3f4, #0d0b0b);
-  --paper: light-dark(#ffffff, #f5eef0);           /* SVG figures: a light page, dimmed so it does not glare in the dark */
-  --shadow: 0 12px 40px rgb(0 0 0 / 0.38);
-  --t-keyword: light-dark(#bb1562, #f982a8);
-  --t-string: light-dark(#4d7c0f, #a9d37e);
-  --t-number: light-dark(#b45309, #e9b860);
-  --t-title: light-dark(#1d4ed8, #82b8ff);
-  --t-type: light-dark(#7c3aed, #c9a2ff);
-  --t-attr: light-dark(#92400e, #e6c79c);
-  --t-meta: light-dark(#0f766e, #8fbab2);
-  --sans: ui-sans-serif, system-ui, -apple-system, "Segoe UI", "Noto Sans", sans-serif;
-  --mono: "JetBrains Mono", "CaskaydiaMono Nerd Font", "Cascadia Code", ui-monospace, monospace;
-  --aurora-sky: #1f0f29;                           /* a night sky in either look, as T3 Code's nightly art is */
-  --aurora-pink: #ff6aa2;
-  --aurora-violet: #8e6bff;
-  --aurora-mint: #57e0c8;
-  --aurora-star: #f7e9f3;
-}
-
-:root[data-theme="light"] {
-  color-scheme: light;
-  --shadow: 0 12px 32px rgb(73 39 50 / 0.09);
-}
-:root[data-theme="dark"] { color-scheme: dark; }
+@import "./tokens.css";
 
 * { box-sizing: border-box; }
 html, body { height: 100%; }
@@ -286,7 +239,7 @@ main { display: flex; flex-direction: column; min-height: 0; grid-column: 2; }
 /* the sea (ocean.ts, its canvas placed by it): everything under the top bar, the message box floating on it; the sea,
    the thread and the message box are each positioned, so each paints over the one before it in the page. In a new chat
    the thread and the message box's margins let clicks through to the water; behind a chat (main[data-sea], Settings)
-   the thread keeps them all. Where WebGL2 is missing, a new chat shows the logo alone in the middle instead, as large
+   the thread keeps them all. Where no canvas can be drawn on, a new chat shows the logo alone in the middle instead, as large
    as the room allows with a margin, drawn a weight lighter (logo-thin.svg: the original's strokes read too heavy there)
    with a slow glow */
 .sea { position: absolute; inset: var(--bar-h) 0 0; display: none; overflow: hidden; }
@@ -738,11 +691,25 @@ main { position: relative; }
 .set-note { margin: 8px 0 0; color: var(--faint); font-size: 12px; line-height: 1.45; }
 .set-switch { display: flex; align-items: center; justify-content: space-between; gap: 12px; min-height: 30px; font-size: 13.5px; }
 label.set-switch { cursor: pointer; }
-.dev-row { display: flex; align-items: center; gap: 14px; }
-.dev-qr { flex: none; width: 132px; height: 132px; border-radius: 10px; background: #fff; image-rendering: pixelated; }
-.dev-text { min-width: 0; font-size: 13px; }
-.dev-text > p { margin: 0 0 6px; }
-.dev-url { display: inline-block; padding: 2px 7px; border-radius: 6px; background: var(--code); font: 12.5px var(--mono); overflow-wrap: anywhere; user-select: all; }
+/* Connect a device: the QR code a phone scans, the code to type, the devices let in */
+.connect-view { width: min(560px, 94vw); padding: 16px 18px 18px; }
+.connect-view::backdrop { background: rgb(0 0 0 / 0.6); }
+.connect-body { display: grid; gap: 16px; margin-top: 12px; }
+.dev-row { display: flex; align-items: center; gap: 16px; }
+.dev-qr { flex: none; width: 168px; height: 168px; border: 1px solid var(--line); border-radius: 12px; background: #fff; image-rendering: pixelated; }
+.dev-text { min-width: 0; font-size: 13px; line-height: 1.5; }
+.dev-text > p { margin: 0 0 8px; }
+.dev-text > .dev-lead { font-size: 14px; color: var(--text); }
+.dev-url, .dev-code { padding: 1px 6px; border-radius: 6px; background: var(--code); font: 12.5px var(--mono); overflow-wrap: anywhere; user-select: all; }
+.dev-code { font-weight: 600; letter-spacing: 0.06em; white-space: nowrap; }
+.dev-joined { display: flex; align-items: center; gap: 8px; margin: 0; padding: 8px 12px; border: 1px solid color-mix(in srgb, var(--ok) 45%, var(--line));
+  border-radius: 9px; font-size: 13px; }
+.dev-joined .i { flex: none; width: 16px; height: 16px; color: var(--ok); }
+.dev-list { display: grid; gap: 6px; }
+.dev-item { display: flex; align-items: center; gap: 10px; min-height: 30px; font-size: 13px; }
+.dev-name { min-width: 0; overflow: hidden; white-space: nowrap; text-overflow: ellipsis; }
+.dev-when { flex: 1; color: var(--faint); font-size: 12px; white-space: nowrap; }
+.dev-fp { margin: 0; }
 .dev-fp code { font: 11px var(--mono); overflow-wrap: anywhere; }
 .set-switch + .set-switch { margin-top: 8px; }
 #tools-knobs:not(:empty) { margin-top: 10px; }

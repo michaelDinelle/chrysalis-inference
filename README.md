@@ -17,26 +17,33 @@ About 6,100 lines: C++/HIP kernels and model code in `engine/` (3,500), the Pyth
 
 chrysalis start               # loads the model (~1.5 s), starts the web chat, prints both URLs:
                               #   API http://127.0.0.1:8080/v1, web chat http://127.0.0.1:8081
-chrysalis start --lan         # the same, also on the local network: prints its URLs and a QR code that sets devices up
+chrysalis start --lan         # the same, also on the local network: prints its URLs and a QR code that connects a phone
 chrysalis stop                # stops both and frees the GPU (also: restart, status)
 chrysalis logs                # one line per request: prompt/cached tokens, TTFT, tok/s, draft acceptance
 ```
 
-`--lan` is for a trusted home network, without logins; the firewall has to let other devices in (TCP 8080-8082; with
-ufw, `chrysalis status` prints the rule), and a plain `chrysalis start` or `chrysalis restart` goes back to this machine
-only. The API stays plain HTTP; the web chat is HTTPS on the network (`https://<address>:8081`) and plain HTTP on this
-machine (`http://127.0.0.1:8081`), as browsers give the microphone (voice mode) only to secure pages, which localhost
-is and `http://<address>` is not. Its certificate comes from an authority of this machine's own (`~/.config/chrysalis/tls`,
+`--lan` puts both on the local network, and asks for the password once to let that network (and nothing outside it)
+through ufw, when ufw is on (TCP 8080-8082; another firewall needs the same); a plain `chrysalis start` or `chrysalis
+restart` goes back to this machine only. The API stays plain HTTP, with no key: anything on the network can use the
+model through it. The web chat is HTTPS on the network (`https://<address>:8081`) and plain HTTP on this machine
+(`http://127.0.0.1:8081`), as browsers give the microphone (voice mode) only to secure pages, which localhost is and
+`http://<address>` is not. Its certificate comes from an authority of this machine's own (`~/.config/chrysalis/tls`,
 made by `web/tls.ts`) whose name constraints let it vouch only for private addresses and local names, so trusting it
-trusts nothing else. A device is set up once, from the QR code `chrysalis start --lan` and `chrysalis status` print (and
-Settings' Other devices shows): it opens a setup page over plain HTTP (`http://<address>:8082`, `CHRYSALIS_SETUP_PORT`;
-the HTTPS chat would warn first), which offers the authority the way the device's system trusts one (a configuration
+trusts nothing else. From the network, only the devices this computer let in get past the chat's pages to its replies,
+tools and voice (`web/devices.ts`). Connect a device (the phone at the top of the chat here) and `chrysalis status` show
+a QR code; a phone's camera opens a setup page over plain HTTP (`http://<address>:8082`, `CHRYSALIS_SETUP_PORT`; the
+HTTPS chat would warn first; it floats on the chat's sea, the butterfly above it and the aurora on its head), which offers the authority the way the device's system trusts one (a configuration
 profile on iPhone, iPad and Mac, the certificate on Android, Windows, Linux and ChromeOS, Firefox's own prompt in
-Firefox), says the few taps that trust it there, and opens the chat over HTTPS by itself as soon as the device does
-(it keeps loading an image from the chat's address, which loads only then; `web/setup.ts`). The setup port serves the
-authority's certificate and nothing else. Over plain HTTP someone on the network at that moment could swap it: the page,
-`chrysalis status` and the device's own certificate details show its SHA-256 fingerprint to compare. A new address
-(another network) gets a new certificate at the next start, from the same authority, which devices keep trusting. Either way both
+Firefox), says the few taps that trust it there, and goes on to the chat by itself as soon as the device does (it keeps
+loading an image from the chat's address, which loads only then; `web/setup.ts`). There the device is let in with the
+pairing code the QR code's address carries after `#`, which browsers never send, so it crosses the network over HTTPS
+only; a device without a camera opens the setup address and types the code. A code works once, for 10 minutes, and 20
+wrong codes void every live one. The device gets a 256-bit key of its own as a cookie (Secure, HttpOnly,
+SameSite=Strict, 400 days from its last visit), kept here as its SHA-256 only (`devices.json` beside the certificates);
+Connect a device lists the devices and removes one. Over plain HTTP someone on the network at that moment could send a
+page and an authority of their own: to be sure, a device's certificate details show the SHA-256 fingerprint that
+Connect a device and `chrysalis status` show. A new address (another network) gets a new certificate at the next
+start, from the same authority, which devices keep trusting. Either way both
 servers answer only requests addressed to an IP address or to this machine's name, which keeps web pages from other
 sites out (DNS rebinding). `systemctl --user enable chrysalis chrysalis-web` starts both at login. `chrysalis serve`
 runs the server in the foreground instead of as a service (it takes `--port`, `--draft`, `--use`, ...:
@@ -73,14 +80,17 @@ refused. `previous_response_id` continues one of the last 256 responses (kept un
 KaTeX; Mermaid's own build loads with the first diagram). The chat lies on a sea of characters that fills everything
 under the top bar, the message box floating on it (`ocean.ts`, two WebGL2 passes: one fragment per character cell works
 out what it shows, then each screen pixel draws its cell's glyph from an atlas at the screen's own pixel size; the grid
-is fixed to the window, so a side panel slides over it without redrawing it at a new size). A new chat opens on the
+is fixed to the window, so a side panel slides over it without redrawing it at a new size). Without WebGL2 (no GPU, or
+WebGL turned off) the CPU runs the same two passes into a 2D canvas, a quarter of the time at most, and draws the same
+picture: the noise's permutations and gradient choices are integers in the shader, so every GPU and the CPU make the
+same ones, and the browser test holds the two drawings to each other. A new chat opens on the
 butterfly in it: the current drifts in ribbons, a click sends soft ripples across it in a shape (a heart, a ring, the
 butterfly, a star, a flower) that bend the current and the butterfly as they pass, and keeps the message box's focus,
 and a drag leaves a wake. Once the chat begins the butterfly sinks into the water, where its shape stays faintly, and
 the sea stays behind the messages, dimmed and dimmest under their column, at 12 frames a second; a new chat raises the
 butterfly again. Settings, Appearance turns the sea behind chats off ("ASCII background behind chats") and picks the
 theme (the system's, light or dark; `theme.ts`, the stylesheet's colors being light-dark() pairs), both kept on the
-device. With reduced motion it holds still; without WebGL2 a new chat shows the logo alone. Both side panels' heads
+device. With reduced motion it holds still. Both side panels' heads
 have an aurora behind their names (one static SVG after T3 Code's nightly sidebar art), a night sky in either theme. Conversations live in the tab's sessionStorage: a reload keeps
 them, closing the tab ends them, and nothing is stored on the server's disk. Export saves the open chat (Export all:
 every chat of the tab) as a JSON file, every version, tool round and attached file included, which Import adds back
@@ -173,8 +183,8 @@ server, no key, search alone (`"exa": { "url": "https://mcp.exa.ai/mcp?tools=web
 searches go to Exa. `timeout` is a call's limit in seconds (60 by default), `maxResultChars` a result's size (40,000; a
 longer one is cut, and says so). Tool names reach the model as `server__tool` (letters, digits, `_` and `-`, unique,
 sorted, so the prompt's tools block stays the same and cached), the page shows the servers' own. The page cannot add,
-edit or see a server's command line beyond what Settings shows, its environment or headers: with `--lan` and no logins,
-a page that could define a command would run anything on this machine. It can list, start, retry and reload, and every
+edit or see a server's command line beyond what Settings shows, its environment or headers: a page that could define
+one (here, or on a device let in from the network) would run anything on this machine. It can list, start, retry and reload, and every
 request that starts or allows a tool must come as JSON, which another site's form cannot send. Fetch URL (read-only)
 GETs http(s) pages (20 s, 5 redirects, 4 MB), gives HTML as compact markdown (title, headings, paragraphs, lists, links,
 tables, code; no scripts, styles, menus or footers; `<main>` alone when there is one), text and JSON as they are, and
@@ -635,9 +645,10 @@ chrysalis/
           metrics.py __main__.py
 web/      server.ts app.ts files.ts sampler.ts wire.ts      Bun web UI; tools.ts tool-fetch.ts tool-agent.ts tool-mcp.ts its tools; tls.ts HTTPS (--lan)
           voice.ts voice-worklet.js                     voice mode's client: the microphone, playback, the protocol
-          ocean.ts logo.svg logo-thin.svg               a new chat's sea of characters and its butterfly (WebGL2)
-          setup.ts                                      a device's setup page for the HTTPS chat on the network
-          index.html style.css                          (make test_web: sampler.test.ts, server.test.ts with fake-mcp.ts
+          ocean.ts logo.svg logo-thin.svg               a new chat's sea of characters and its butterfly (WebGL2, else the CPU)
+          setup.ts device.ts devices.ts                 the HTTPS chat on the network: a device's setup and pairing pages (on
+                                                        the sea, under the aurora), the devices let in
+          index.html style.css tokens.css               (make test_web: sampler.test.ts, server.test.ts with fake-mcp.ts
                                                         and fake-voice.ts, browser.test.ts: the page in headless Chromium;
                                                         bench-voice.ts: voice mode's latency end to end)
 voice/    __main__.py talk.py parts.py                  the voice service: its WebSocket, a session's turns and replies,

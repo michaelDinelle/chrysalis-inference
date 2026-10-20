@@ -15,7 +15,7 @@ usage: chrysalis <command>
 
   start     load the model, start the web chat, print their URLs
             (requests pick the model: qwen3.8-27b or qwen3.8-flash-next; Chrysalis switches between them)
-            --lan: also on the local network, with a QR code that sets phones and computers up
+            --lan: also on the local network, with a QR code that connects a phone or another device
   stop      stop both and free the GPU
   restart   stop, then start (after rebuilding or editing the code; takes --lan too)
   status    is it running, and where
@@ -38,6 +38,26 @@ lan_subnet() {
     ip -4 route show dev "$dev" scope link proto kernel | awk 'NR == 1 { print $1 }'
 }
 
+# A firewall that drops what comes in from the network (ufw, as Omarchy and others ship it) keeps other devices out of
+# Chrysalis's ports. On the way onto the network, let this network in (and nothing from outside it), asking for the
+# password once. ufw's rules may be root's to read: what was let in is noted in ~/.config/chrysalis/ufw too.
+UFW_NOTE=~/.config/chrysalis/ufw
+blocked() {
+    systemctl is-active -q ufw 2>/dev/null || return 1
+    local net; net=$(lan_subnet)
+    ! grep -qs "allow tcp 8080:8082 0.0.0.0/0 any $net in" /etc/ufw/user.rules && ! grep -qsx "$net" "$UFW_NOTE"
+}
+let_in() {
+    blocked || return 0
+    local net; net=$(lan_subnet)
+    echo "ufw keeps other devices out: letting $net reach Chrysalis (TCP 8080-8082) takes your password, once"
+    if [ -t 0 ] && sudo ufw allow from "$net" to any port 8080:8082 proto tcp comment "Chrysalis Inference" >/dev/null; then
+        mkdir -p "${UFW_NOTE%/*}" && echo "$net" >> "$UFW_NOTE"
+    else
+        echo "  not changed: sudo ufw allow from $net to any port 8080:8082 proto tcp"
+    fi
+}
+
 urls() {
     local at=127.0.0.1
     if [ "$(host)" = 0.0.0.0 ]; then at=$(lan_ip); fi
@@ -50,16 +70,24 @@ urls() {
             # keeps plain HTTP on 127.0.0.1, which is one. A device starts at the setup page (plain HTTP, port 8082):
             # it trusts this machine's authority there, then the chat opens over HTTPS (web/setup.ts)
             echo "  web chat  https://$at:8081   (here: http://127.0.0.1:8081)"
-            echo "  devices   http://$at:8082    sets a phone or another computer up, then opens the chat: scan it"
-            if command -v qrencode >/dev/null; then qrencode -t ANSIUTF8 -m 2 "http://$at:8082"; fi
+            # a code that lets one device in (web/devices.ts), from the web server, which may still be starting
+            local pair="" i
+            for i in $(seq 30); do
+                pair=$(curl -sf -X POST -H "Content-Type: application/json" -d "{}" http://127.0.0.1:8081/api/pair) && break
+                sleep 0.1
+            done
+            read -r link code < <(printf %s "$pair" | "$PY" -Ic 'import json, sys; p = json.load(sys.stdin); print(p["url"], p["code"][:4] + "-" + p["code"][4:])' 2>/dev/null) || true
+            if [ -n "${link:-}" ]; then
+                echo "  devices   scan this with a phone's camera to connect it; elsewhere open ${link%%#*} and enter $code"
+                if command -v qrencode >/dev/null; then qrencode -t ANSIUTF8 -m 2 "$link"; fi
+                echo "            the code works once, for 10 minutes ('chrysalis status' prints a new one)"
+            fi
             local ca="${CHRYSALIS_TLS_DIR:-$HOME/.config/chrysalis/tls}/ca.pem"
             if [ -f "$ca" ]; then
                 echo "  authority SHA-256 $(openssl x509 -in "$ca" -noout -fingerprint -sha256 | cut -d= -f2)"
+                echo "            a device that trusts this computer shows the same in its certificate details"
             fi
-            if systemctl is-active -q ufw && ! grep -qs "8080:8082" /etc/ufw/user.rules; then
-                echo "  ufw may keep other devices out: they need TCP 8080-8082 from this network, for example"
-                echo "    sudo ufw allow from $(lan_subnet) to any port 8080:8082 proto tcp"
-            fi
+            if blocked; then echo "  ufw keeps other devices out: 'chrysalis start --lan' lets this network in"; fi
         fi
     fi
 }
@@ -97,6 +125,7 @@ case "${1:-help}" in
             [ -f "$UNITS/chrysalis.service" ] || { echo "Chrysalis is not installed: run '$ROOT/chrysalis.sh install' first"; exit 1; }
             case "${2:-}" in --lan) to=0.0.0.0 ;; "") to=127.0.0.1 ;; *) usage; exit 1 ;; esac
             was=$(host)
+            if [ $to = 0.0.0.0 ]; then let_in; fi
             systemctl --user set-environment CHRYSALIS_HOST=$to
             if [ "$1" = restart ]; then
                 systemctl --user restart chrysalis $WEB
