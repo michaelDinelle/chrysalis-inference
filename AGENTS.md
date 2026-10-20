@@ -28,7 +28,8 @@ a stale comment steers people and agents wrong. `make lint` catches the mechanic
   `data/venv/bin/python tools/test_chat.py`, `data/venv/bin/python tools/test_documents.py` (which PDF pages are
   pictured), `make build_fn/test_cpujob_fn && build_fn/test_cpujob_fn`, `make test_voice` (the voice service: its features against
   transformers', turns, echo and barge-in over its WebSocket; `make voice` first), `make test_web` (the web UI's sampler against
-  the engine's, its server against a fake Chrysalis, the page in headless Chromium), `make lint`.
+  the engine's, its server against a fake Chrysalis, the page in headless Chromium, and Firefox past and trusting the network's
+  certificate; certutil makes their trust), `make lint`.
 - GPU, with Chrysalis's model server stopped (`systemctl --user stop chrysalis`; the user runs Chrysalis: check the GPU
   is idle, ask once per task, then just say when it stops and for how long): `make test` (test_web, the 27B kernels,
   then the model in-process: chat format, cache, snapshots and generation (held answers' masked steps too), the server

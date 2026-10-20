@@ -4,7 +4,7 @@
 // export and import, versions of messages and replies, tools (an MCP server, fake-mcp.ts, that server.ts runs), voice
 // mode against a scripted speech service (fake-voice.ts) with Chromium's fake microphone, and a new chat's sea.
 import { afterAll, beforeAll, expect, test } from "bun:test";
-import { existsSync, mkdtempSync, readFileSync, readdirSync, unlinkSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, unlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import puppeteer, { type Browser, type Page } from "puppeteer-core";
 import { lanAddresses } from "./tls";
@@ -895,20 +895,50 @@ test("voice mode on a page that is not secure (plain HTTP at this machine's addr
   }
 });
 
-test("a device's setup page (plain HTTP on the network) offers each kind of device the way its system trusts the authority, and once the device trusts it lets the device in with the QR code's code and opens the chat; this computer's Connect a device shows it joined and a new code", async () => {
-  const lan = Bun.spawn([process.execPath, "server.ts"], {
-    cwd: import.meta.dir, stdout: "pipe", stderr: "inherit",
-    env: { ...process.env, PORT: "0", CHRYSALIS_SETUP_PORT: "0", CHRYSALIS_URL: `http://127.0.0.1:${fake.port}`, CHRYSALIS_HOST: "0.0.0.0", NODE_ENV: "production",
-      CHRYSALIS_MCP_CONFIG: `${dir}/mcp.json`, CHRYSALIS_TLS_DIR: mkdtempSync(`${tmpdir()}/chrysalis-tls-`) },
-  });
-  let trusting: Browser | undefined;
-  try {
+// A browser past the warning, as a person clicks it: Chromium's interstitial, and Firefox's (its buttons in a shadow root,
+// the second one live after a moment)
+async function pastWarning(page: Page, firefox: boolean) {
+  if (firefox) {
+    await page.waitForSelector("net-error-card >>> #advanced-button", { timeout: 10_000 });
+    await Bun.sleep(1000);
+    await page.click("net-error-card >>> #advanced-button");
+    await Bun.sleep(1500);
+    await page.click("net-error-card >>> #exception-button");
+  } else {
+    await page.waitForSelector("#details-button", { timeout: 10_000 });
+    await page.click("#details-button");
+    await page.click("#proceed-link");
+  }
+}
+// an NSS certificate database that trusts `ca` for websites: Chromium's on Linux ($HOME/.pki/nssdb), and a Firefox profile
+function trustingDb(dir: string, ca: string) {
+  mkdirSync(dir, { recursive: true });
+  for (const args of [["-N", "--empty-password"], ["-A", "-n", "chrysalis", "-t", "C,,", "-i", ca]]) {
+    expect(Bun.spawnSync(["certutil", "-d", `sql:${dir}`, ...args], { stderr: "pipe" }).exitCode).toBe(0);
+  }
+  return dir;
+}
+
+test("a device's setup page (plain HTTP on the network) offers each kind of device the way its system trusts the authority; past the chat's warning, Chromium and Firefox get nowhere but to set the device up; trusting the authority, each shows its own code, which this computer's Connect a device allows, and opens the chat", async () => {
+  const tlsDir = mkdtempSync(`${tmpdir()}/chrysalis-tls-`);
+  // the server on the network, on the ports given (0: any), and what it printed once its trust check listens
+  const start = async (ports = { PORT: "0", CHRYSALIS_SETUP_PORT: "0", CHRYSALIS_CHECK_PORT: "0" }) => {
+    const proc = Bun.spawn([process.execPath, "server.ts"], {
+      cwd: import.meta.dir, stdout: "pipe", stderr: "inherit",
+      env: { ...process.env, ...ports, CHRYSALIS_URL: `http://127.0.0.1:${fake.port}`, CHRYSALIS_HOST: "0.0.0.0", NODE_ENV: "production",
+        CHRYSALIS_MCP_CONFIG: `${dir}/mcp.json`, CHRYSALIS_TLS_DIR: tlsDir },
+    });
     let out = "";
-    for (const reader = lan.stdout.getReader(), dec = new TextDecoder(); !/chrysalis setup: \S+/.test(out); ) {
+    for (const reader = proc.stdout.getReader(), dec = new TextDecoder(); !/chrysalis check: \S+/.test(out); ) {
       const { value, done } = await reader.read();
       if (done) throw new Error(`server.ts exited: ${out}`);
       out += dec.decode(value);
     }
+    return { proc, out };
+  };
+  let { proc: lan, out } = await start();
+  const others: Browser[] = [];
+  try {
     const setup = out.match(/chrysalis setup: (\S+)/)![1], here = out.match(/chrysalis web: (\S+)/)![1], chat = `https://${new URL(setup).hostname}:${new URL(here).port}/`;
     const UA = {
       iphone: "Mozilla/5.0 (iPhone; CPU iPhone OS 18_0 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/18.0 Mobile/15E148 Safari/604.1",
@@ -935,45 +965,75 @@ test("a device's setup page (plain HTTP on the network) offers each kind of devi
     }
     expect(offered).toEqual({ iphone: "/chrysalis.mobileconfig", android: "/chrysalis-ca.crt", firefox: "/chrysalis-ca-firefox.crt",
       mac: "/chrysalis.mobileconfig", windows: "/chrysalis-ca.crt" });
-    // One that trusts the chat's certificate goes on to it: without a code, to the page that asks for one; with the QR
-    // code's, into the chat, let in
-    // (a browser without WebGL, 3D or a GPU at all: the sea is drawn by the CPU there)
-    trusting = await puppeteer.launch({ executablePath: process.env.CHROMIUM ?? "/usr/bin/chromium", headless: true,
-      args: ["--no-sandbox", "--ignore-certificate-errors", "--disable-3d-apis"] });
-    const asks = await (await trusting.createBrowserContext()).newPage();
-    await asks.goto(setup, { waitUntil: "load" });
-    await asks.waitForFunction((c) => location.href === `${c}pair`, { timeout: 10_000 }, chat);
-    await asks.waitForSelector("#code");
-    expect(await asks.evaluate(() => !!document.createElement("canvas").getContext("webgl2"))).toBe(false);
-    await Bun.sleep(1500);
-    const stage = await asks.$eval("#stage", (e) => { const b = e.getBoundingClientRect(); return { x: b.x, y: b.y, width: b.width, height: b.height }; });
-    expect([(await look(asks, stage)).pink > 1500, await asks.$eval("#stage", (e) => e.childElementCount)]).toEqual([true, 0]);
-    const mint = async () => (await fetch(`${here}api/pair`, { method: "POST", body: "{}", headers: { "Content-Type": "application/json" } })).json();
-    const page = await trusting.newPage();
-    await page.goto((await mint()).url, { waitUntil: "load" });
-    await page.waitForFunction((c) => location.href === c, { timeout: 10_000 }, chat);
-    await page.waitForSelector("#input");
-    await Bun.sleep(1000);
-    expect([page.url(), await page.$eval("#connect", (b) => (b as HTMLElement).hidden)]).toEqual([chat, true]);   // only this computer lets devices in
+    const waiting = async () => (await (await fetch(`${here}api/pair`)).json()).waiting;
 
-    // Connect a device, here: its code, then the device that used it, and the next code
+    // Past the chat's warning, without trusting the authority: the chat sends the browser to its pairing page, whose trust
+    // check fails, and nothing reaches the server (Chromium without WebGL, 3D or a GPU: its sea is drawn by the CPU)
+    const launch = (firefox: boolean, home = "", args: string[] = []) => puppeteer.launch(firefox
+      ? { browser: "firefox", executablePath: process.env.FIREFOX ?? "/usr/bin/firefox", headless: true, userDataDir: home || mkdtempSync(`${tmpdir()}/chrysalis-fx-`) }
+      : { executablePath: process.env.CHROMIUM ?? "/usr/bin/chromium", headless: true, args: ["--no-sandbox", ...args], ...(home ? { env: { ...process.env, HOME: home } } : {}) });
+    for (const firefox of [false, true]) {
+      const b = await launch(firefox, "", ["--disable-3d-apis"]);
+      others.push(b);
+      const page = await b.newPage();
+      await page.goto(chat).catch(() => {});
+      await pastWarning(page, firefox);
+      await page.waitForFunction(() => location.pathname === "/pair" && /Not secure/.test(document.getElementById("status")?.textContent ?? ""), { timeout: 15_000 });
+      expect(await page.$eval("#next .go", (a) => a.getAttribute("href"))).toBe(setup);
+      if (!firefox) {
+        await Bun.sleep(1500);
+        const stage = await page.$eval("#stage", (e) => { const b = e.getBoundingClientRect(); return { x: b.x, y: b.y, width: b.width, height: b.height }; });
+        expect([(await look(page, stage)).pink > 1500, await page.$eval("#stage", (e) => e.childElementCount)]).toEqual([true, 0]);
+      }
+      expect(await waiting()).toEqual([]);
+    }
+
+    // Trusting the authority (their own certificate stores): from the setup page to the pairing page, which shows the
+    // device's code; Connect a device here shows the same code, Allow lets that device in, and the chat opens there
     const local = await (await browser.createBrowserContext()).newPage();
     await local.goto(here, { waitUntil: "load" });
     await local.click("#connect");
-    await local.waitForSelector("#connect-view .dev-code");
-    const shown = (await local.$eval("#connect-view .dev-code", (e) => e.textContent!)).replace("-", "");
+    await local.waitForSelector("#connect-view .dev-qr");
     expect(await local.$eval("#connect-view .dev-qr", (img) => (img as HTMLImageElement).naturalWidth > 0)).toBe(true);
-    const used = await fetch(`${chat}pair`, { method: "POST", body: JSON.stringify({ code: shown, name: "Test phone" }), headers: { "Content-Type": "application/json" },
-      tls: { rejectUnauthorized: false } });
-    expect(used.status).toBe(204);
-    await local.waitForFunction(() => /Test phone is connected/.test(document.querySelector("#connect-view .dev-joined")?.textContent ?? ""), { timeout: 5000 });
-    expect((await local.$eval("#connect-view .dev-code", (e) => e.textContent!)).replace("-", "")).not.toBe(shown);
-    expect(await local.$$eval("#connect-view .dev-name", (n) => n.map((e) => e.textContent))).toEqual(["Linux · Chrome", "Test phone"]);
+    let chrome: Page | undefined;
+    for (const [firefox, name] of [[false, "Linux · Chrome"], [true, "Linux · Firefox"]] as const) {
+      const home = mkdtempSync(`${tmpdir()}/chrysalis-trusts-`);
+      const b = await launch(firefox, firefox ? trustingDb(home, `${tlsDir}/ca.pem`) : (trustingDb(`${home}/.pki/nssdb`, `${tlsDir}/ca.pem`), home));
+      others.push(b);
+      const page = await b.newPage();
+      await page.goto(setup, { waitUntil: "load" });
+      await page.waitForFunction((c) => location.href === `${c}pair`, { timeout: 15_000 }, chat);
+      await page.waitForFunction(() => !(document.getElementById("code") as HTMLElement).hidden, { timeout: 10_000 });
+      const code = await page.$eval("#code", (e) => e.textContent!);
+      expect(code).toMatch(/^\d{3} \d{3}$/);
+      await local.waitForFunction((c) => [...document.querySelectorAll("#connect-view .dev-ask-code")].some((e) => e.textContent === c), { timeout: 5000 }, code);
+      expect(await local.$$eval("#connect-view .dev-ask .dev-name", (n) => n.map((e) => e.textContent))).toEqual([name]);
+      await local.evaluate((c) => [...document.querySelectorAll("#connect-view .dev-ask")]
+        .find((e) => e.querySelector(".dev-ask-code")!.textContent === c)!.querySelector<HTMLButtonElement>(".btn.primary")!.click(), code);
+      await page.waitForFunction((c) => location.href === c, { timeout: 15_000 }, chat);
+      await page.waitForSelector("#input");
+      await Bun.sleep(1000);
+      expect([page.url(), await page.$eval("#connect", (e) => (e as HTMLElement).hidden)]).toEqual([chat, true]);   // only this computer lets devices in
+      await local.waitForFunction((n) => (document.querySelector("#connect-view .dev-joined")?.textContent ?? "").includes(`${n} is connected`), { timeout: 5000 }, name);
+      if (!firefox) chrome = page;
+    }
+    expect(await local.$$eval("#connect-view .dev-item .dev-name", (n) => n.map((e) => e.textContent))).toEqual(["Linux · Chrome", "Linux · Firefox"]);
+
+    // A restart (every deploy) forgets each browser's check: an open chat checks again by itself and carries on, with no
+    // trip through the pairing page (which would reload it)
+    await chrome!.evaluate(() => { (window as any).stayed = true; });
+    const port = (re: RegExp) => new URL(out.match(re)![1]).port;
+    const ports = { PORT: port(/chrysalis web: (\S+)/), CHRYSALIS_SETUP_PORT: port(/chrysalis setup: (\S+)/), CHRYSALIS_CHECK_PORT: port(/chrysalis check: (\S+)/) };
+    lan.kill();
+    await lan.exited;
+    ({ proc: lan, out } = await start(ports));
+    await Bun.sleep(9000);                                        // the page's status poll (every 4 s) finds the gate asking
+    expect(await chrome!.evaluate(async () => [(window as any).stayed, location.pathname, (await fetch("/api/status")).status])).toEqual([true, "/", 200]);
   } finally {
-    await trusting?.close();
+    for (const b of others) await b.close().catch(() => {});
     lan.kill();
   }
-}, 60_000);
+}, 120_000);
 
 // The service's log of a session: the replies the page asked it to speak (by id, their text) and the ones it cancelled.
 const spokenOf = (log: any[]) => {

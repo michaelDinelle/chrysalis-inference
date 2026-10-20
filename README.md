@@ -24,7 +24,7 @@ chrysalis logs                # one line per request: prompt/cached tokens, TTFT
 ```
 
 `--lan` puts the web chat and the API on the local network, for the devices it lets in, and asks for the password once
-to let that network (and nothing outside it) through ufw, when ufw is on (TCP 8081-8082; another firewall needs the
+to let that network (and nothing outside it) through ufw, when ufw is on (TCP 8081-8083; another firewall needs the
 same); a plain `chrysalis start` or `chrysalis restart` goes back to this machine only. Chrysalis itself
 (`127.0.0.1:8080`) listens on this machine only: the network reaches its API through the web chat, over HTTPS at
 `https://<address>:8081/v1`, behind the same keys as the chat. A browser let in has its own; an app on another computer
@@ -36,17 +36,24 @@ hangs up stops it. The web chat is HTTPS on the network (`https://<address>:8081
 `http://<address>` is not. Its certificate comes from an authority of this machine's own (`~/.config/chrysalis/tls`,
 made by `web/tls.ts`) whose name constraints let it vouch only for private addresses and local names, so trusting it
 trusts nothing else. From the network, only the devices this computer let in get past the chat's pages to its replies,
-tools and voice (`web/devices.ts`). Connect a device (the phone at the top of the chat here) and `chrysalis status` show
-a QR code; a phone's camera opens a setup page over plain HTTP (`http://<address>:8082`, `CHRYSALIS_SETUP_PORT`; the
-HTTPS chat would warn first; a card on the chat's sea, the butterfly above it and the aurora's night sky over the page), which offers the authority the way the device's system trusts one (a configuration
-profile on iPhone, iPad and Mac, the certificate on Android, Windows, Linux and ChromeOS, Firefox's own prompt in
-Firefox), says the few taps that trust it there, and goes on to the chat by itself as soon as the device does (it keeps
-loading an image from the chat's address, which loads only then; `web/setup.ts`). There the device is let in with the
-pairing code the QR code's address carries after `#`, which browsers never send, so it crosses the network over HTTPS
-only; a device without a camera opens the setup address and types the code. A code works once, for 10 minutes, and 20
-wrong codes void every live one. The device gets a 256-bit key of its own as a cookie (Secure, HttpOnly,
-SameSite=Strict, 400 days from its last visit), kept here as its SHA-256 only (`devices.json` beside the certificates);
-Connect a device lists the devices and removes one. Over plain HTTP someone on the network at that moment could send a
+tools and voice (`web/devices.ts`), and a browser only while it shows it trusts that authority. No server can see
+whether a browser checked the certificate it was shown, and a page loads all the same past a warning clicked through.
+So a trust check listens on a port of its own (`https://<address>:8083`, `CHRYSALIS_CHECK_PORT`) with a certificate of
+its own, from the same authority and made anew at each start: a browser's request reaches it only where the browser
+trusts the authority itself, since a warning clicked past covers the one certificate it was shown (per certificate in
+Chromium, per port too in Firefox), and an image cannot show a warning. A browser has to come through it to ask to
+join, and again every few minutes and after each restart (its chat does so by itself); past the warning, Chromium and
+Firefox get nowhere but to the setup page (`browser.test.ts`, which drives both). Connect a device (the phone at the
+top of the chat here) and `chrysalis status` show a QR code of the setup page, with no secret in it; a phone's camera
+opens it over plain HTTP (`http://<address>:8082`, `CHRYSALIS_SETUP_PORT`; the HTTPS chat would warn first; a card on
+the chat's sea, the butterfly above it and the aurora's night sky over the page), and it offers the authority the way
+the device's system trusts one (a configuration profile on iPhone, iPad and Mac, the certificate on Android, Windows,
+Linux and ChromeOS, Firefox's own prompt in Firefox), says the few taps that trust it there, and goes on to the chat by
+itself once the trust check's image loads (`web/setup.ts`). There the device asks to join and shows a code of its
+own, one per device; Connect a device shows the same code beside Allow and Deny (`chrysalis allow <code>` in a
+terminal), and an ask lasts 10 minutes. Allowed, the device gets a 256-bit key of its own as a cookie (Secure,
+HttpOnly, SameSite=Strict, 400 days from its last visit), kept here as its SHA-256 only (`devices.json` beside the
+certificates); Connect a device lists the devices and removes one. Nothing secret crosses plain HTTP. Over plain HTTP someone on the network at that moment could send a
 page and an authority of their own: to be sure, a device's certificate details show the SHA-256 fingerprint that
 Connect a device and `chrysalis status` show. A new address (another network) gets a new certificate at the next
 start, from the same authority, which devices keep trusting. Either way both
@@ -656,7 +663,8 @@ web/      server.ts app.ts files.ts sampler.ts wire.ts      Bun web UI; tools.ts
           setup.ts device.ts devices.ts                 the HTTPS chat on the network: a device's setup and pairing pages (on
                                                         the sea, under the aurora), the devices let in
           index.html style.css tokens.css               (make test_web: sampler.test.ts, server.test.ts with fake-mcp.ts
-                                                        and fake-voice.ts, browser.test.ts: the page in headless Chromium;
+                                                        and fake-voice.ts, browser.test.ts: the page in headless Chromium,
+                                                        and Firefox for the network's trust check;
                                                         bench-voice.ts: voice mode's latency end to end)
 voice/    __main__.py talk.py parts.py                  the voice service: its WebSocket, a session's turns and replies,
                                                         the parts (make voice / tools/voice_setup.sh; make test_voice)

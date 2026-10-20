@@ -30,11 +30,17 @@ type Srv = Server<VoiceSocket>;
 type Handler = (req: Request, srv: Srv) => Response | undefined | Promise<Response>;
 const open = (handler: Handler) => (req: Request, srv: Srv) => (hostOk(req) ? handler(req, srv) : new Response("unknown host", { status: 403 }));
 // From the network (its HTTPS: this machine's own chat is plain HTTP on 127.0.0.1) only the devices this computer let in
-// (devices.ts) get Chrysalis's API, the chat's, the tools and voice; the pages are anyone's, and send a device without a
-// key to /pair.
+// (devices.ts) get Chrysalis's API, the chat's, the tools and voice, and a browser only while it shows it trusts
+// Chrysalis (the trust check). The pages are anyone's: they send a device without a key to /pair, and check again for
+// one that has not shown it lately (check: true).
 const fromNetwork = (req: Request) => req.url.startsWith("https:");
-const guarded = (handler: Handler) => open((req, srv) => !fromNetwork(req) || devices?.find(req) ? handler(req, srv)
-  : Response.json({ error: { message: "this device is not connected to Chrysalis: /pair connects it" } }, { status: 401 }));
+const guarded = (handler: Handler) => open((req, srv) => {
+  if (!fromNetwork(req)) return handler(req, srv);
+  const found = devices?.find(req);
+  if (found && devices!.trusted(found.device)) return handler(req, srv);
+  return Response.json(found ? { error: { message: "this browser has not shown lately that it trusts Chrysalis: its page checks again" }, check: true }
+    : { error: { message: "this device is not connected to Chrysalis: /pair connects it" } }, { status: 401 });
+});
 // what only this computer's own screen does: let devices in
 const here = (handler: Handler) => guarded((req, srv) => fromNetwork(req)
   ? Response.json({ error: { message: "only on the computer Chrysalis runs on" } }, { status: 403 }) : handler(req, srv));
@@ -460,38 +466,73 @@ const serve = (hostname: string, port: number, secure?: { cert: string; key: str
     // the authority behind the network's certificate, for a device to install once and then trust the page
     "/chrysalis-ca.crt": { GET: open(() => tls ? new Response(tls.ca, { headers: { "Content-Type": "application/x-x509-ca-cert" } })
       : new Response("not on the network (chrysalis start --lan)", { status: 404 })) },
-    // the image a device's setup page loads from here: it loads once the device trusts the certificate (setup.ts)
-    "/trusted.gif": { GET: open(() => new Response(TRUSTED_GIF, { headers: { "Content-Type": "image/gif", "Cache-Control": "no-store" } })) },
-    // A device the network's chat has not let in: the page that takes its code (setup.ts), and the code for its key. One
-    // it has, and this machine, go on to the chat.
+    // A device the network's chat has not let in, or that has not shown lately it trusts Chrysalis: the page that checks
+    // it, asks to join and shows the device's code (setup.ts). One let in and checked, and this machine, go on to the chat.
     "/pair": {
-      GET: open((req) => fromNetwork(req) && !devices?.find(req) ? new Response(pairPage(sea), { headers: { ...PAGE, "Content-Security-Policy":
-        "default-src 'none'; script-src 'unsafe-inline'; style-src 'unsafe-inline'; img-src data:; connect-src 'self'; base-uri 'none'; form-action 'none'; " +
-        "frame-ancestors 'none'" } })
-        : new Response(null, { status: 302, headers: { Location: "/" } })),
+      GET: open((req) => {
+        const found = fromNetwork(req) && devices?.find(req);
+        if (!fromNetwork(req) || (found && devices!.trusted(found.device))) return new Response(null, { status: 302, headers: { Location: "/" } });
+        const host = new URL(req.url).hostname, check = checkUrl(req);
+        return new Response(pairPage(sea, check, `http://${host}:${setupPort}/`), { headers: { ...PAGE, "Content-Security-Policy":
+          `default-src 'none'; script-src 'unsafe-inline'; style-src 'unsafe-inline'; img-src ${new URL(check).origin} data:; connect-src 'self'; ` +
+          "base-uri 'none'; form-action 'none'; frame-ancestors 'none'" } });
+      }),
+    },
+    // the pairing page asks, once its nonce came through the trust check: the code it shows, and the secret it waits with
+    // (a browser let in that has just shown it trusts Chrysalis again goes in)
+    "/pair/ask": {
       POST: open(json(async (req) => {
-        const b = await req.json().catch(() => ({})), key = fromNetwork(req) && devices?.redeem(String(b?.code ?? ""), String(b?.name ?? ""));
-        return key ? new Response(null, { status: 204, headers: { "Set-Cookie": keyCookie(key) } })
-          : Response.json({ error: { message: "that code is wrong, used or out of time" } }, { status: 403 });
+        if (!fromNetwork(req) || !devices) return Response.json({ error: { message: "only from the network" } }, { status: 404 });
+        const found = devices.find(req);
+        if (found && devices.trusted(found.device)) return Response.json({ in: true });
+        const b = await req.json().catch(() => ({})), ask = devices.ask(String(b?.nonce ?? ""), String(b?.name ?? ""));
+        return ask ? Response.json(ask) : Response.json({ error: { message: "this browser has not shown that it trusts Chrysalis" } }, { status: 403 });
       })),
     },
-    // Connect a device (the page here, chrysalis.sh): where devices are set up, the devices let in, and a new code for
-    // each POST, with its QR code (when qrencode is installed) of the setup page's address
+    // the asking page's answer: waiting, or allowed (its key, once), or gone (denied, or out of time)
+    "/pair/ask/:secret": {
+      GET: open((req) => {
+        const got = fromNetwork(req) ? devices?.collect((req as Request & { params: { secret: string } }).params.secret) : undefined;
+        if (!got) return Response.json({ state: "gone" }, { status: 404 });
+        return got.state === "allowed" ? Response.json({ state: "allowed" }, { headers: { "Set-Cookie": keyCookie(got.key) } }) : Response.json(got);
+      }),
+    },
+    // The chat page's own trust check: its policy lets images in from itself only (a reply's markdown must not reach
+    // anywhere), so it checks in a frame of its own whose policy lets the check's image in, and is told how it went.
+    "/check-frame": {
+      GET: open((req) => new Response(`<!doctype html><meta charset="utf-8"><script>
+const img = new Image();
+img.onload = () => parent.postMessage({ chrysalisCheck: true }, location.origin);
+img.onerror = () => parent.postMessage({ chrysalisCheck: false }, location.origin);
+img.src = ${JSON.stringify(checkUrl(req))} + "?t=" + Date.now();
+</script>`, { headers: { ...PAGE, "Content-Security-Policy": `default-src 'none'; script-src 'unsafe-inline'; img-src ${new URL(checkUrl(req)).origin}; ` +
+        "frame-ancestors 'self'" } })),
+    },
+    // Connect a device (the page here, chrysalis.sh): where devices are set up (a QR code of it, when qrencode is
+    // installed), the devices asking to join and those let in, and allowing or denying one by its code
     "/api/pair": {
-      GET: here(async () => Response.json(tls ? { lan: true, setup: await setupUrls(), api: (await setupUrls()).map((u) => apiUrl(new URL(u).hostname)),
-        devices: devices!.all(), live: devices!.live(), name: tls.caName, fingerprint: tls.fingerprint } : { lan: false })),
-      POST: here(json(async () => {
-        if (!devices) return Response.json({ error: { message: "not on the network (chrysalis start --lan)" } }, { status: 409 });
-        const { code, expires } = devices.code(), url = `${(await setupUrls())[0]}#${code}`;
-        return Response.json({ code, expires, url, qr: qrSvg(url) });
+      GET: here(async () => {
+        if (!tls || !devices) return Response.json({ lan: false });
+        const setup = await setupUrls();
+        return Response.json({ lan: true, setup, qr: qrSvg(setup[0]), api: setup.map((u) => apiUrl(new URL(u).hostname)), waiting: devices.waiting(),
+          devices: devices.all(), name: tls.caName, fingerprint: tls.fingerprint });
+      }),
+    },
+    "/api/pair/allow": {
+      POST: here(json(async (req) => {
+        const name = devices?.allow(String((await req.json().catch(() => ({})))?.code ?? ""));
+        return name ? Response.json({ name }) : Response.json({ error: { message: "no device is asking with that code" } }, { status: 404 });
       })),
+    },
+    "/api/pair/deny": {
+      POST: here(json(async (req) => new Response(null, { status: devices?.deny(String((await req.json().catch(() => ({})))?.code ?? "")) ? 204 : 404 }))),
     },
     // a key for an app on another computer (Connect a device, `chrysalis key`), shown once
     "/api/pair/key": {
       POST: here(json(async (req) => {
         if (!devices) return Response.json({ error: { message: "not on the network (chrysalis start --lan)" } }, { status: 409 });
         const name = String((await req.json().catch(() => ({})))?.name ?? "").trim();
-        return Response.json(devices.add(name || "An app"));
+        return Response.json(devices.add(name || "An app", "app"));
       })),
     },
     "/api/pair/:id": { DELETE: here((req) => new Response(null, { status: devices?.remove((req as Request & { params: { id: string } }).params.id) ? 204 : 404 })) },
@@ -592,21 +633,25 @@ const serve = (hostname: string, port: number, secure?: { cert: string; key: str
 
     // online: serving; loading: the systemd unit runs but the model is still loading (Chrysalis answers 503 until it
     // has loaded, or does not listen yet); offline: stopped
-    // A device's key is set again here, which every open page polls: its 400 days count from its last visit.
+    // A device's key is set again here, which every open page polls: its 400 days count from its last visit. A browser
+    // past half its time since its trust check is told to check again (check), before the gate has to; this machine's
+    // page hears how many devices are asking to join (waiting).
     "/api/status": guarded(async (req) => {
-      const res = await (async () => {
+      const state = await (async () => {
         try {
           const r = await fetch(`${CHRYSALIS}/chrysalis/stats`);
           if (r.status === 503) {                       // listening, still loading its first model
             const b = await r.json().catch(() => ({}));
-            return Response.json({ state: "loading", build: BUILD, loading: b.model ?? undefined, progress: b.progress ?? undefined });
+            return { state: "loading", build: BUILD, loading: b.model ?? undefined, progress: b.progress ?? undefined };
           }
           if (!r.ok) throw new Error("loading");
-          return Response.json({ state: "online", build: BUILD, ...(await r.json()) });
+          return { state: "online", build: BUILD, ...(await r.json()) };
         } catch {
-          return Response.json({ state: unit("is-active") === "active" ? "loading" : "offline", build: BUILD });
+          return { state: unit("is-active") === "active" ? "loading" : "offline", build: BUILD };
         }
       })(), found = fromNetwork(req) && devices?.find(req);
+      const res = Response.json({ ...state, ...(found && devices!.stale(found.device) ? { check: true } : {}),
+        ...(devices && !fromNetwork(req) ? { waiting: devices.waiting().length } : {}) });
       if (found) res.headers.append("Set-Cookie", keyCookie(found.key));
       return res;
     }),
@@ -670,19 +715,38 @@ const setup = tls ? lanAddresses().map((ip) => {
   setupPort = s.port!;
   return s;
 }) : [];
+// The trust check (devices.ts): HTTPS on a port of its own at each address, with a certificate of its own made at this
+// start. Only a browser that trusts the authority gets a request through: the image marks its key, and a pairing page's
+// nonce, as having come through.
+let checkPort = Number(process.env.CHRYSALIS_CHECK_PORT ?? 8083);
+const checks = tls ? lanAddresses().map((ip) => {
+  const s = Bun.serve({ hostname: ip, port: checkPort, tls: tls.check, fetch: checkFetch });
+  checkPort = s.port!;
+  return s;
+}) : [];
+const checkUrl = (req: Request) => `https://${new URL(req.url).hostname}:${checkPort}/check.gif`;
 console.log(`chrysalis web: ${server.url}`);
 for (const s of secure) console.log(`chrysalis web: ${s.url}`);
 for (const s of setup) console.log(`chrysalis setup: ${s.url}`);
+for (const s of checks) console.log(`chrysalis check: ${s.url}`);
+
+function checkFetch(req: Request): Response {
+  if (!hostOk(req)) return new Response("unknown host", { status: 403 });
+  const url = new URL(req.url);
+  if (url.pathname !== "/check.gif") return new Response("not found", { status: 404 });
+  devices!.check(req, url.searchParams.get("n"));
+  return new Response(TRUSTED_GIF, { headers: { "Content-Type": "image/gif", "Cache-Control": "no-store" } });
+}
 
 function setupFetch(req: Request): Response {
   if (!hostOk(req)) return new Response("unknown host", { status: 403 });
   if (req.method !== "GET" && req.method !== "HEAD") return new Response(null, { status: 405 });
-  const url = new URL(req.url), chat = `https://${url.host.replace(/:\d+$/, "")}:${server.port}/`;
+  const url = new URL(req.url), chat = `https://${url.hostname}:${server.port}/`, check = checkUrl(req);
   const file = (body: Uint8Array<ArrayBuffer> | string, type: string, name?: string) => new Response(body, { headers: { "Content-Type": type,
     "Cache-Control": "no-store", ...(name ? { "Content-Disposition": `attachment; filename="${name}"` } : {}) } });
   switch (url.pathname) {
-    case "/": return new Response(setupPage(tls!, chat, sea), { headers: { ...PAGE,
-      "Content-Security-Policy": `default-src 'none'; script-src 'unsafe-inline'; style-src 'unsafe-inline'; img-src ${new URL(chat).origin} data:; ` +
+    case "/": return new Response(setupPage(tls!, chat, check, sea), { headers: { ...PAGE,
+      "Content-Security-Policy": `default-src 'none'; script-src 'unsafe-inline'; style-src 'unsafe-inline'; img-src ${new URL(check).origin} data:; ` +
         "base-uri 'none'; form-action 'none'; frame-ancestors 'none'" } });
     case "/chrysalis.mobileconfig": return file(appleProfile(tls!), "application/x-apple-aspen-config", "chrysalis.mobileconfig");
     case "/chrysalis-ca.crt": return file(tls!.caDer, "application/octet-stream", "chrysalis-ca.crt");
@@ -716,11 +780,14 @@ async function setupUrls() {
   return lanAddresses().sort((a, b) => Number(b === first) - Number(a === first)).map((ip) => `http://${ip}:${setupPort}/`);
 }
 
-// A QR code of a URL as SVG, by qrencode where it is installed
+// A QR code of a URL as SVG, by qrencode where it is installed (once per URL: the dialog asks every 2 s)
+const qrs = new Map<string, string | undefined>();
 function qrSvg(url: string): string | undefined {
+  if (qrs.has(url)) return qrs.get(url);
   try {
     const r = Bun.spawnSync(["qrencode", "-t", "SVG", "-m", "2", "-o", "-", url], { stdout: "pipe", stderr: "ignore" });
-    return r.exitCode === 0 ? r.stdout.toString() : undefined;
+    qrs.set(url, r.exitCode === 0 ? r.stdout.toString() : undefined);
+    return qrs.get(url);
   } catch {
     return undefined;
   }

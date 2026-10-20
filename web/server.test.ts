@@ -535,30 +535,37 @@ test("voice: a speech service that cannot start says how to install one", async 
   }
 });
 
-// The web server on the network (CHRYSALIS_HOST 0.0.0.0): its chat's URLs (this machine's first, then each address's)
-// and its setup pages'
-async function onNetwork() {
-  const dir = mkdtempSync(`${tmpdir()}/chrysalis-tls-`), ips = lanAddresses();
+// The web server on the network (CHRYSALIS_HOST 0.0.0.0), with its certificates and devices in `dir`: its chat's URLs
+// (this machine's first, then each address's), its setup pages' and its trust checks'
+async function onNetwork(dir = mkdtempSync(`${tmpdir()}/chrysalis-tls-`)) {
+  const ips = lanAddresses();
   expect(ips.length).toBeGreaterThan(0);
   const proc = Bun.spawn([process.execPath, "server.ts"], {
     cwd: import.meta.dir, stdout: "pipe", stderr: "inherit",
     env: { ...process.env, PORT: "0", CHRYSALIS_URL: `http://127.0.0.1:${fake.port}`, CHRYSALIS_HOST: "0.0.0.0", NODE_ENV: "production", CHRYSALIS_MCP_CONFIG: CONFIG,
-      CHRYSALIS_TLS_DIR: dir, CHRYSALIS_SETUP_PORT: "0", CHRYSALIS_VOICE_CMD: JSON.stringify([process.execPath, `${import.meta.dir}/fake-voice.ts`]),
+      CHRYSALIS_TLS_DIR: dir, CHRYSALIS_SETUP_PORT: "0", CHRYSALIS_CHECK_PORT: "0", CHRYSALIS_VOICE_CMD: JSON.stringify([process.execPath, `${import.meta.dir}/fake-voice.ts`]),
       FAKE_VOICE_LOG: `${dir}/voice.log` },
   });
   const reader = proc.stdout.getReader(), dec = new TextDecoder();
   let out = "";
-  while ((out.match(/chrysalis (web|setup): \S+/g) ?? []).length < 1 + 2 * ips.length) {
+  while ((out.match(/chrysalis (web|setup|check): \S+/g) ?? []).length < 1 + 3 * ips.length) {
     const { value, done } = await reader.read();
     if (done) throw new Error(`server.ts exited: ${out}`);
     out += dec.decode(value);
   }
   const strip = (m: RegExpExecArray) => m[1].replace(/\/$/, "");
-  return { proc, dir, ips, urls: [...out.matchAll(/chrysalis web: (\S+)/g)].map(strip), setups: [...out.matchAll(/chrysalis setup: (\S+)/g)].map(strip) };
+  return { proc, dir, ips, urls: [...out.matchAll(/chrysalis web: (\S+)/g)].map(strip), setups: [...out.matchAll(/chrysalis setup: (\S+)/g)].map(strip),
+    checks: [...out.matchAll(/chrysalis check: (\S+)/g)].map(strip) };
+}
+// the certificate a TLS server at ip:port shows, and openssl's verdict on it against the authority in `ca`
+function shown(ip: string, port: string, ca: string) {
+  const out = Bun.spawnSync(["openssl", "s_client", "-connect", `${ip}:${port}`, "-verify_return_error", "-verify_ip", ip, "-CAfile", ca],
+    { stdin: new Uint8Array(), stdout: "pipe", stderr: "pipe" }).stdout.toString();
+  return { cert: out.match(/-----BEGIN CERTIFICATE-----[\s\S]*?-----END CERTIFICATE-----/)?.[0], ok: out.includes("Verify return code: 0 (ok)") };
 }
 
-test("on the network (CHRYSALIS_HOST 0.0.0.0): this machine keeps plain HTTP; each address gets HTTPS whose certificate the server's own authority signs, and no plain HTTP; that authority vouches for nothing public; a setup port of plain HTTP serves the authority for devices to trust, and nothing else", async () => {
-  const { proc, dir, ips, urls, setups } = await onNetwork();
+test("on the network (CHRYSALIS_HOST 0.0.0.0): this machine keeps plain HTTP; each address gets HTTPS whose certificate the server's own authority signs, and no plain HTTP; that authority vouches for nothing public; a setup port of plain HTTP serves the authority for devices to trust, and nothing else; the trust check has a certificate of its own from the same authority", async () => {
+  const { proc, dir, ips, urls, setups, checks } = await onNetwork();
   try {
     const port = new URL(urls[0]).port;
     expect(urls[0]).toBe(`http://127.0.0.1:${port}`);
@@ -608,8 +615,11 @@ test("on the network (CHRYSALIS_HOST 0.0.0.0): this machine keeps plain HTTP; ea
       expect([other.status, other.headers.get("location")]).toEqual([302, "/"]);
       expect((await fetch(`${s}/api/chat`, { method: "POST", body: "{}", headers: { "Content-Type": "application/json" } })).status).toBe(405);
       expect(await fetch(s.replace("http:", "https:"), { tls: { rejectUnauthorized: false } }).then(() => "https", () => "refused")).toBe("refused");
-      const gif = await fetch(`${urls[k + 1]}/trusted.gif`, { tls: { rejectUnauthorized: false } });
+      const gif = await fetch(`${checks[k]}/check.gif`, { tls: { rejectUnauthorized: false } });
       expect([gif.status, gif.headers.get("content-type")]).toEqual([200, "image/gif"]);
+      // the trust check's certificate: the same authority's, not the chat's (a warning clicked past for the chat's covers that one only)
+      const atCheck = shown(ips[k], new URL(checks[k]).port, `${dir}/ca-served.pem`), atChat = shown(ips[k], port, `${dir}/ca-served.pem`);
+      expect([atCheck.ok, atChat.ok, !!atCheck.cert && atCheck.cert !== atChat.cert]).toEqual([true, true, true]);
     }
     const pair = await (await fetch(`${urls[0]}/api/pair`)).json();
     expect([pair.lan, pair.fingerprint, pair.setup.map((u: string) => u.replace(/\/$/, "")).sort()]).toEqual([true, fingerprint, [...setups].sort()]);
@@ -618,13 +628,19 @@ test("on the network (CHRYSALIS_HOST 0.0.0.0): this machine keeps plain HTTP; ea
   }
 });
 
-test("on the network only the devices this computer let in get past the pages: its code works once for a key that the device's requests carry, wrong codes void the live ones, Chrysalis's API takes an app's key as OpenAI's and Anthropic's SDKs send it, and a device or key removed is out again", async () => {
-  const { proc, dir, urls, setups } = await onNetwork();
+test("on the network only the devices this computer let in get past the pages, and a browser only while it shows it trusts Chrysalis: a device asks once its nonce came through the trust check, shows its own code, and is let in when that code is allowed here, or not when denied; after a restart it shows it again; Chrysalis's API takes an app's key as OpenAI's and Anthropic's SDKs send it, with no check; a device or key removed is out again", async () => {
+  const first = await onNetwork(), { dir, ips } = first;
+  let proc = first.proc;
   try {
-    const [here, net] = urls, insecure = { tls: { rejectUnauthorized: false } };
+    const [here, net] = first.urls, check = first.checks[0], insecure = { tls: { rejectUnauthorized: false } };
     const asked = (path: string, init: RequestInit = {}) => fetch(`${net}${path}`, { ...insecure, redirect: "manual", ...init });
-    const mint = async () => (await fetch(`${here}/api/pair`, { method: "POST", body: "{}", headers: json })).json();
-    const redeem = (code: string) => asked("/pair", { method: "POST", body: JSON.stringify({ code, name: "Test phone" }), headers: json });
+    // a browser that trusts the authority gets through the trust check (no server can tell how a client checked a
+    // certificate, and this one checks none: the browser test has browsers that do)
+    const through = (base: string, query = "", cookie = "") => fetch(`${base}/check.gif${query}`, { ...insecure, headers: cookie ? { cookie } : {} });
+    const ask = (nonce: string) => asked("/pair/ask", { method: "POST", body: JSON.stringify({ nonce, name: "Test phone" }), headers: json });
+    const answer = (secret: string) => asked(`/pair/ask/${secret}`);
+    const local = (path: string, body: object) => fetch(`${here}${path}`, { method: "POST", body: JSON.stringify(body), headers: json });
+    const nonce = () => crypto.randomUUID().replaceAll("-", "");
     const voice = (cookie = "") => new Promise<string>((done) => {
       const ws = new WebSocket(`${net.replace("https:", "wss:")}/api/voice`, { headers: { Origin: net, cookie }, ...insecure } as unknown as string[]);
       ws.onopen = () => (ws.close(), done("open"));
@@ -632,65 +648,96 @@ test("on the network only the devices this computer let in get past the pages: i
     });
 
     // without a key: the pages, not what they talk to
-    expect([(await asked("/")).status, (await asked("/pair")).status, (await asked("/trusted.gif")).status]).toEqual([200, 200, 200]);
+    expect([(await asked("/")).status, (await asked("/pair")).status]).toEqual([200, 200]);
     expect([(await asked("/api/status")).status, (await asked("/api/tools")).status, (await asked("/api/pair")).status,
       (await asked("/api/chat", { method: "POST", body: JSON.stringify({ stream: true, messages: [] }), headers: json })).status,
       (await asked("/api/chrysalis/stop", { method: "POST" })).status]).toEqual([401, 401, 401, 401, 401]);
     expect(await voice()).toBe("refused");
     expect((await fetch(`${here}/api/status`)).status).toBe(200);             // this machine needs none
 
-    // a code from this computer, typed as people do (a dash, lower case), gets the device a key
-    const { code, url } = await mint();
-    expect([setups.includes(url.replace(/\/#.*$/, "")), url.endsWith(`#${code}`)]).toEqual([true, true]);
-    const got = await redeem(`${code.slice(0, 4)}-${code.slice(4).toLowerCase()}`);
-    expect(got.status).toBe(204);
+    // asking takes a nonce that came through the trust check, once
+    const n = nonce();
+    expect((await ask(n)).status).toBe(403);
+    expect((await through(check, `?n=${n}`)).status).toBe(200);
+    const asking = await ask(n), { secret, code } = await asking.json();
+    expect([asking.status, /^\d{6}$/.test(code)]).toEqual([200, true]);
+    expect((await ask(n)).status).toBe(403);
+    expect(await (await answer(secret)).json()).toEqual({ state: "waiting" });
+
+    // only this computer allows, by the code the device shows (as it shows it, "482 913", too)
+    expect((await asked("/api/pair/allow", { method: "POST", body: JSON.stringify({ code }), headers: json })).status).toBe(401);
+    expect((await (await fetch(`${here}/api/pair`)).json()).waiting.map((a: any) => [a.code, a.name, a.allowed])).toEqual([[code, "Test phone", false]]);
+    expect((await local("/api/pair/allow", { code: code === "000000" ? "111111" : "000000" })).status).toBe(404);
+    expect((await local("/api/pair/allow", { code: `${code.slice(0, 3)} ${code.slice(3)}` })).status).toBe(200);
+    const got = await answer(secret);
+    expect(await got.clone().json()).toEqual({ state: "allowed" });
     const set = got.headers.get("set-cookie")!, cookie = set.split(";")[0], key = cookie.split("=")[1];
     expect(set.split(/;\s*/).slice(1).filter((a) => /^(Secure|HttpOnly|SameSite=Strict)$/.test(a)).sort()).toEqual(["HttpOnly", "SameSite=Strict", "Secure"]);
+    expect((await answer(secret)).status).toBe(404);                          // its key, once
     const status = await asked("/api/status", { headers: { cookie } });
     expect([status.status, status.headers.get("set-cookie")?.split(";")[0]]).toEqual([200, cookie]);   // set again as it is used
     expect([(await asked("/api/tools", { headers: { cookie } })).status, await voice(cookie)]).toEqual([200, "open"]);
     expect((await asked("/pair", { headers: { cookie } })).headers.get("location")).toBe("/");
-    expect((await redeem(code)).status).toBe(403);                              // once
-    expect((await asked("/api/pair", { method: "POST", body: "{}", headers: { ...json, cookie } })).status).toBe(403);   // only this computer lets devices in
+    expect((await asked("/api/pair/key", { method: "POST", body: "{}", headers: { ...json, cookie } })).status).toBe(403);   // only this computer makes keys
     expect(readFileSync(`${dir}/devices.json`, "utf8")).not.toContain(key);
+
+    // a device denied is not let in
+    const m = nonce();
+    await through(check, `?n=${m}`);
+    const denied = await (await ask(m)).json();
+    // (nor can a device let in let others in: only this computer's screen does)
+    expect((await asked("/api/pair/allow", { method: "POST", body: JSON.stringify({ code: denied.code }), headers: { ...json, cookie } })).status).toBe(403);
+    expect((await local("/api/pair/deny", { code: denied.code })).status).toBe(204);
+    expect((await answer(denied.secret)).status).toBe(404);
 
     // Chrysalis's API, behind the same keys: an app's, made on this computer only; a reply streams through, and an app that
     // hangs up stops Chrysalis's
-    const completion = (headers: Record<string, string> = {}, signal?: AbortSignal, messages: object[] = []) => asked("/v1/chat/completions",
-      { method: "POST", body: JSON.stringify({ stream: true, messages }), headers: { ...json, ...headers }, signal });
+    const completion = (headers: Record<string, string> = {}, signal?: AbortSignal, messages: object[] = [], base = net) => fetch(`${base}/v1/chat/completions`,
+      { ...insecure, method: "POST", body: JSON.stringify({ stream: true, messages }), headers: { ...json, ...headers }, signal });
     expect((await completion()).status).toBe(401);
-    expect((await asked("/api/pair/key", { method: "POST", body: "{}", headers: { ...json, cookie } })).status).toBe(403);
-    const { key: appKey } = await (await fetch(`${here}/api/pair/key`, { method: "POST", body: JSON.stringify({ name: "Test app" }), headers: json })).json();
+    const { key: appKey } = await (await local("/api/pair/key", { name: "Test app" })).json();
     const streamed = await completion({ authorization: `Bearer ${appKey}` });
     expect([streamed.status, (await streamed.text()).trim().endsWith("data: [DONE]")]).toEqual([200, true]);
     const anthropic = await completion({ "x-api-key": appKey });
     expect([anthropic.status, (await anthropic.text()).trim().endsWith("data: [DONE]")]).toEqual([200, true]);
-    const local = await fetch(`${here}/v1/chat/completions`, { method: "POST", body: JSON.stringify({ stream: true, messages: [] }), headers: json });
-    expect([local.status, (await local.text()).trim().endsWith("data: [DONE]")]).toEqual([200, true]);   // this machine needs none
+    const mine = await fetch(`${here}/v1/chat/completions`, { method: "POST", body: JSON.stringify({ stream: true, messages: [] }), headers: json });
+    expect([mine.status, (await mine.text()).trim().endsWith("data: [DONE]")]).toEqual([200, true]);   // this machine needs none
     const aborts = chrysalisAborted, ctrl = new AbortController(), live = await completion({ authorization: `Bearer ${appKey}` }, ctrl.signal);
     await live.body!.getReader().read();
     ctrl.abort();
     for (let t = Date.now(); chrysalisAborted === aborts && Date.now() - t < 3000; ) await Bun.sleep(50);
     expect(chrysalisAborted).toBe(aborts + 1);
     // and one that hangs up while Chrysalis is still reading the prompt, before it has answered at all (3 s here)
-    const early = new AbortController(), asking = completion({ authorization: `Bearer ${appKey}` }, early.signal,
+    const early = new AbortController(), waiting = completion({ authorization: `Bearer ${appKey}` }, early.signal,
       [{ role: "user", content: 'run [{"wait": 3000}]\nhangs up early' }]).catch(() => undefined);
     await Bun.sleep(300);
     early.abort();
-    await asking;
+    await waiting;
     for (let t = Date.now(); chrysalisAborted === aborts + 1 && Date.now() - t < 1500; ) await Bun.sleep(50);
     expect(chrysalisAborted).toBe(aborts + 2);
     expect(readFileSync(`${dir}/devices.json`, "utf8")).not.toContain(appKey);
 
-    // 20 wrong codes, and a live one no longer works
-    const { code: next } = await mint();
-    for (let i = 0; i < 20; i++) expect((await redeem("WRONG-OOO")).status).toBe(403);
-    expect((await redeem(next)).status).toBe(403);
+    // After a restart the trust check's certificate is new, and the browser shows again that it trusts Chrysalis before
+    // the gate lets it through (its page is told to check); an app's key needs no check
+    const before = shown(ips[0], new URL(check).port, `${dir}/ca.pem`).cert;
+    proc.kill();
+    await proc.exited;
+    const second = await onNetwork(dir);
+    proc = second.proc;
+    const [here2, net2] = second.urls, check2 = second.checks[0];
+    const stale = await fetch(`${net2}/api/status`, { ...insecure, headers: { cookie } });
+    expect([stale.status, (await stale.json()).check]).toEqual([401, true]);
+    expect((await through(check2, "", cookie)).status).toBe(200);
+    expect((await fetch(`${net2}/api/status`, { ...insecure, headers: { cookie } })).status).toBe(200);
+    expect((await completion({ authorization: `Bearer ${appKey}` }, undefined, [], net2)).status).toBe(200);
+    const after = shown(ips[0], new URL(check2).port, `${dir}/ca.pem`);
+    expect([after.ok, !!before && after.cert !== before]).toEqual([true, true]);
 
-    const listed = await (await fetch(`${here}/api/pair`)).json();
-    expect(listed.devices.map((d: { name: string }) => d.name)).toEqual(["Test phone", "Test app"]);
-    for (const d of listed.devices) expect((await fetch(`${here}/api/pair/${d.id}`, { method: "DELETE" })).status).toBe(204);
-    expect([(await asked("/api/status", { headers: { cookie } })).status, (await completion({ authorization: `Bearer ${appKey}` })).status]).toEqual([401, 401]);
+    const listed = await (await fetch(`${here2}/api/pair`)).json();
+    expect(listed.devices.map((d: { name: string; kind: string }) => [d.name, d.kind])).toEqual([["Test phone", "browser"], ["Test app", "app"]]);
+    for (const d of listed.devices) expect((await fetch(`${here2}/api/pair/${d.id}`, { method: "DELETE" })).status).toBe(204);
+    expect([(await fetch(`${net2}/api/status`, { ...insecure, headers: { cookie } })).status,
+      (await completion({ authorization: `Bearer ${appKey}` }, undefined, [], net2)).status]).toEqual([401, 401]);
   } finally {
     proc.kill();
   }

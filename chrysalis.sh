@@ -21,6 +21,7 @@ usage: chrysalis <command>
   restart   stop, then start (after rebuilding or editing the code; takes --lan too)
   status    is it running, and where
   logs      follow the request log (prompt and cached tokens, TTFT, tok/s)
+  allow     let in the device asking to join with this code (--lan; Connect a device does the same)
   key       a key for an app on another computer to use the API with (--lan)
 
 one-time setup:
@@ -42,22 +43,22 @@ lan_subnet() {
 }
 
 # A firewall that drops what comes in from the network (ufw, as Omarchy and others ship it) keeps other devices out of
-# the web chat's ports (8081 the chat and the API, 8082 the setup page). On the way onto the network, let this network in (and nothing from outside it), asking for the
+# the web chat's ports (8081 the chat and the API, 8082 the setup page, 8083 the trust check). On the way onto the network, let this network in (and nothing from outside it), asking for the
 # password once. ufw's rules may be root's to read: what was let in is noted in ~/.config/chrysalis/ufw too.
 UFW_NOTE=~/.config/chrysalis/ufw
 blocked() {
     systemctl is-active -q ufw 2>/dev/null || return 1
     local net; net=$(lan_subnet)
-    ! grep -qsE "allow tcp 808[01]:8082 0.0.0.0/0 any $net in" /etc/ufw/user.rules && ! grep -qsx "$net" "$UFW_NOTE"
+    ! grep -qsE "allow tcp 808[01]:8083 0.0.0.0/0 any $net in" /etc/ufw/user.rules && ! grep -qsx "$net 8081:8083" "$UFW_NOTE"
 }
 let_in() {
     blocked || return 0
     local net; net=$(lan_subnet)
-    echo "ufw keeps other devices out: letting $net reach Chrysalis (TCP 8081-8082) takes your password, once"
-    if [ -t 0 ] && sudo ufw allow from "$net" to any port 8081:8082 proto tcp comment "Chrysalis Inference" >/dev/null; then
-        mkdir -p "${UFW_NOTE%/*}" && echo "$net" >> "$UFW_NOTE"
+    echo "ufw keeps other devices out: letting $net reach Chrysalis (TCP 8081-8083) takes your password, once"
+    if [ -t 0 ] && sudo ufw allow from "$net" to any port 8081:8083 proto tcp comment "Chrysalis Inference" >/dev/null; then
+        mkdir -p "${UFW_NOTE%/*}" && echo "$net 8081:8083" >> "$UFW_NOTE"
     else
-        echo "  not changed: sudo ufw allow from $net to any port 8081:8082 proto tcp"
+        echo "  not changed: sudo ufw allow from $net to any port 8081:8083 proto tcp"
     fi
 }
 
@@ -72,20 +73,13 @@ urls() {
             echo "            https://$at:8081/v1 from the network, with a key ('chrysalis key')"
             # the network gets HTTPS (a browser gives the microphone, voice mode, only to secure pages); this machine
             # keeps plain HTTP on 127.0.0.1, which is one. A device starts at the setup page (plain HTTP, port 8082):
-            # it trusts this machine's authority there, then the chat opens over HTTPS (web/setup.ts)
+            # it trusts this machine's authority there, then asks to join over HTTPS and shows its own code to allow
+            # here (web/setup.ts, web/devices.ts)
             echo "  web chat  https://$at:8081   (here: http://127.0.0.1:8081)"
-            # a code that lets one device in (web/devices.ts), from the web server, which may still be starting
-            local pair="" i
-            for i in $(seq 30); do
-                pair=$(curl -sf -X POST -H "Content-Type: application/json" -d "{}" http://127.0.0.1:8081/api/pair) && break
-                sleep 0.1
-            done
-            read -r link code < <(printf %s "$pair" | "$PY" -Ic 'import json, sys; p = json.load(sys.stdin); print(p["url"], p["code"][:4] + "-" + p["code"][4:])' 2>/dev/null) || true
-            if [ -n "${link:-}" ]; then
-                echo "  devices   scan this with a phone's camera to connect it; elsewhere open ${link%%#*} and enter $code"
-                if command -v qrencode >/dev/null; then qrencode -t ANSIUTF8 -m 2 "$link"; fi
-                echo "            the code works once, for 10 minutes ('chrysalis status' prints a new one)"
-            fi
+            echo "  devices   scan this with a phone's camera, or open http://$at:8082 on the device: it sets the device up,"
+            echo "            then the device shows a code to allow in Connect a device or with 'chrysalis allow <code>'"
+            if command -v qrencode >/dev/null; then qrencode -t ANSIUTF8 -m 2 "http://$at:8082"; fi
+            asking
             local ca="${CHRYSALIS_TLS_DIR:-$HOME/.config/chrysalis/tls}/ca.pem"
             if [ -f "$ca" ]; then
                 echo "  authority SHA-256 $(openssl x509 -in "$ca" -noout -fingerprint -sha256 | cut -d= -f2)"
@@ -94,6 +88,16 @@ urls() {
             if blocked; then echo "  ufw keeps other devices out: 'chrysalis start --lan' lets this network in"; fi
         fi
     fi
+}
+
+# the devices asking to join, from the web server (which may still be starting), each with the code it shows
+asking() {
+    local p="" i
+    for i in $(seq 30); do p=$(curl -sf http://127.0.0.1:8081/api/pair) && break; sleep 0.1; done
+    printf %s "$p" | "$PY" -Ic '
+import json, sys
+for a in json.load(sys.stdin).get("waiting", []):
+    print("  asking    %-24s %s %s%s" % (a["name"], a["code"][:3], a["code"][3:], "  (allowed)" if a["allowed"] else ""))' 2>/dev/null || true
 }
 
 # /health answers once the model has loaded (~1.5 s): poll it 10 times a second, then print the URLs
@@ -146,6 +150,15 @@ case "${1:-help}" in
             elif systemctl --user is-active -q chrysalis; then echo "Chrysalis is loading the model ('chrysalis logs' to follow)"
             else echo "Chrysalis is stopped ('chrysalis start' starts it)"; fi ;;
   logs)     exec journalctl --user -u chrysalis -f -o cat ;;
+  allow)    code=$(printf %s "${*:2}" | tr -cd 0-9)          # its digits: "482 913" as the device shows it, too
+            [ -n "$code" ] || { echo "usage: chrysalis allow <code>   (the code the device shows; 'chrysalis status' lists them)"; exit 1; }
+            r=$(curl -s -w "\n%{http_code}" -X POST -H "Content-Type: application/json" -d "{\"code\": \"$code\"}" http://127.0.0.1:8081/api/pair/allow) \
+                || { echo "the web chat is not running: 'chrysalis start --lan'"; exit 1; }
+            if [ "${r##*$'\n'}" = 200 ]; then
+                echo "allowed: $(printf %s "${r%$'\n'*}" | "$PY" -Ic 'import json, sys; print(json.load(sys.stdin)["name"])')"
+            else
+                echo "no device is asking with that code (an ask lasts 10 minutes; 'chrysalis status' lists them)"; exit 1
+            fi ;;
   key)      [ "$(host)" = 0.0.0.0 ] || { echo "Chrysalis is on this computer only: 'chrysalis start --lan' opens it to the network"; exit 1; }
             k=$(curl -sf -X POST -H "Content-Type: application/json" -d "{\"name\": \"${2:-An app}\"}" http://127.0.0.1:8081/api/pair/key) \
                 || { echo "the web chat is not running: 'chrysalis start --lan'"; exit 1; }

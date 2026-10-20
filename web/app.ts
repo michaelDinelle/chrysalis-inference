@@ -65,7 +65,8 @@ interface VoiceSettings { tts?: string; name?: string; speed?: number; prompt?: 
 interface ToolInfo { fn: string; name: string; title: string; description: string; readOnly: boolean }
 interface SourceInfo { id: string; label: string; kind: "fetch" | "agent" | "mcp"; detail: string; state: "idle" | "connecting" | "connected" | "failed" | "disabled"; error?: string; tools: ToolInfo[] }
 interface Catalog { config: string; error?: string; sources: SourceInfo[] }
-interface Status { state: "online" | "loading" | "offline"; build?: string; model?: string; loading?: string; progress?: number; context?: number; kv_tokens?: number; cache?: { free_kv_tokens: number } }
+interface Status { state: "online" | "loading" | "offline"; build?: string; model?: string; loading?: string; progress?: number; context?: number; kv_tokens?: number; cache?: { free_kv_tokens: number };
+  check?: boolean; waiting?: number }   // (on the network: check the device's trust again; here: devices asking to join)
 interface View {
   el: HTMLElement; think: HTMLDetailsElement; summary: HTMLElement; thought: HTMLElement; body: HTMLElement; foot: HTMLElement; shown?: string; blocks?: Blocks;
   tok?: { reasoning: number; content: number };     // tokens drawn so far, shown as tokens
@@ -1201,18 +1202,25 @@ for (const [t, label] of [["system", "System"], ["light", "Light"], ["dark", "Da
   themePick.append(b);
 }
 // Connect a device (the top bar, on this computer only: from the network the chat is HTTPS, here plain HTTP): a QR code
-// that sets a phone up and lets it in (setup.ts, devices.ts), the code to type where there is no camera, the devices let
-// in, a key for an app on another computer (shown once: it is kept only as its hash), and the authority's fingerprint,
-// which a device's certificate details show too when it trusts this computer and not an impostor's. A code works once:
-// the one shown is replaced as soon as a device has used it or its 10 minutes are up.
+// of the page that sets a device up (setup.ts); the devices asking to join, each with the code it shows, to allow or
+// deny (devices.ts); the devices let in; a key for an app on another computer (shown once: it is kept only as its hash);
+// and the authority's fingerprint, which a device's certificate details show too when it trusts this computer and not an
+// impostor's.
 const connectView = $<HTMLDialogElement>("connect-view");
-let pairing: { code: string; url: string; qr?: string } | undefined, known: Set<string> | undefined, joined = "", connectTimer = 0, appKey = "";
-interface Paired { id: string; name: string; added: number; seen: number }
+let known: Set<string> | undefined, joined = "", connectTimer = 0, appKey = "";
+interface Paired { id: string; name: string; added: number; seen: number; kind: "browser" | "app" }
+interface Joining { code: string; name: string; at: number; allowed: boolean }
 const since = (t: number) => {
   const m = Math.round((Date.now() - t) / 60_000);
   return m < 1 ? "just now" : m < 60 ? `${m} min ago` : m < 1440 ? `${Math.round(m / 60)} h ago` : day(t);
 };
 const day = (t: number) => new Date(t).toLocaleDateString(undefined, { month: "short", day: "numeric" });
+const spaced = (code: string) => `${code.slice(0, 3)} ${code.slice(3)}`;
+async function answer(how: "allow" | "deny", code: string) {
+  await fetch(`/api/pair/${how}`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ code }) }).catch(() => {});
+  $("connect-body").dataset.key = "";
+  void renderConnect();
+}
 async function renderConnect() {
   const p = await fetch("/api/pair").then((r) => r.json()).catch(() => null);
   if (!connectView.open) return;
@@ -1225,27 +1233,35 @@ async function renderConnect() {
     box.dataset.key = "";
     return void box.replaceChildren(note);
   }
-  const list: Paired[] = p.devices, fresh = known && list.find((d) => !known!.has(d.id));
+  const list: Paired[] = p.devices, asking: Joining[] = p.waiting, fresh = known && list.find((d) => !known!.has(d.id));
   if (fresh) joined = fresh.name;
   known = new Set(list.map((d) => d.id));
-  if (!pairing || !p.live.includes(pairing.code)) {
-    pairing = await fetch("/api/pair", { method: "POST", headers: { "Content-Type": "application/json" }, body: "{}" }).then((r) => r.json()).catch(() => undefined);
-  }
-  const key = JSON.stringify([pairing, joined, list.map((d) => [d.id, since(d.seen)]), p.setup, appKey]);
-  if (!pairing || !connectView.open || box.dataset.key === key) return;
+  const key = JSON.stringify([joined, asking, list.map((d) => [d.id, since(d.seen)]), p.setup, !!p.qr, appKey]);
+  if (box.dataset.key === key) return;
   box.dataset.key = key;
-  const code = `${pairing.code.slice(0, 4)}-${pairing.code.slice(4)}`, row = h("div", "dev-row"), text = h("div", "dev-text");
-  if (pairing.qr) {
+  const row = h("div", "dev-row"), text = h("div", "dev-text"), other = h("p");
+  if (p.qr) {
     const qr = h("img", "dev-qr");
-    qr.src = `data:image/svg+xml;base64,${btoa(pairing.qr)}`;
-    qr.alt = "QR code that connects a device";
+    qr.src = `data:image/svg+xml;base64,${btoa(p.qr)}`;
+    qr.alt = "QR code of the page that sets a device up";
     row.append(qr);
   }
-  const typed = h("p");
-  typed.append(pairing.qr ? "No camera? On the device, open " : "On the device, open ", h("code", "dev-url", p.setup[0].replace(/\/$/, "")), " and enter ", h("code", "dev-code", code), ".");
-  text.append(...(pairing.qr ? [h("p", "dev-lead", "Scan this with your phone's camera. It sets the phone up, then opens Chrysalis on it.")] : []), typed,
-    h("p", "set-note", `The code works once, for 10 minutes.${pairing.qr ? "" : " With qrencode installed, a QR code shows here for phones to scan."}`));
+  other.append(p.qr ? "No camera? On the device, open " : "On the device, open ", h("code", "dev-url", p.setup[0].replace(/\/$/, "")), ".");
+  text.append(h("p", "dev-lead", `${p.qr ? "Scan this with your phone's camera. It sets the phone up" : "It sets the device up"}; then the device shows a code, which appears here to allow.`),
+    other, ...(p.qr ? [] : [h("p", "set-note", "With qrencode installed, a QR code shows here for phones to scan.")]));
   row.append(text);
+  const asks = h("div", "dev-list");
+  if (asking.length) asks.append(h("div", "set-title", "Asking to join"));
+  for (const a of asking) {
+    const item = h("div", "dev-ask"), allow = h("button", "btn small primary", a.allowed ? "Allowed" : "Allow"), deny = h("button", "btn small", "Deny");
+    allow.type = deny.type = "button";
+    allow.disabled = a.allowed;
+    allow.onclick = () => void answer("allow", a.code);
+    deny.onclick = () => void answer("deny", a.code);
+    item.append(h("span", "dev-name", a.name), h("code", "dev-ask-code", spaced(a.code)), deny, allow);
+    asks.append(item);
+  }
+  if (asking.length) asks.append(h("p", "set-note", "Allow the one whose code your device shows: one code per device, good for 10 minutes."));
   const devs = h("div", "dev-list");
   devs.append(h("div", "set-title", "Let in"));
   if (!list.length) devs.append(h("p", "set-note", "None yet."));
@@ -1253,7 +1269,7 @@ async function renderConnect() {
     const item = h("div", "dev-item"), remove = h("button", "btn small", "Remove");
     remove.type = "button";
     remove.onclick = async () => { await fetch(`/api/pair/${d.id}`, { method: "DELETE" }); box.dataset.key = ""; void renderConnect(); };
-    item.append(h("span", "dev-name", d.name), h("span", "dev-when", `added ${day(d.added)} · used ${since(d.seen)}`), remove);
+    item.append(h("span", "dev-name", d.name), h("span", "dev-when", `${d.kind === "app" ? "app key · " : ""}added ${day(d.added)} · used ${since(d.seen)}`), remove);
     devs.append(item);
   }
   const apps = h("div", "dev-list"), apiRow = h("div", "dev-item"), api = h("span", "dev-api"), make = h("button", "btn small", "New key");
@@ -1282,13 +1298,28 @@ async function renderConnect() {
   const done = h("p", "dev-joined");
   done.innerHTML = icon("check");
   done.append(`${joined} is connected.`);
-  box.replaceChildren(...(joined ? [done] : []), row, devs, apps, fp);
+  box.replaceChildren(...(joined ? [done] : []), row, ...(asking.length ? [asks] : []), devs, apps, fp);
 }
 function openConnect() {
   joined = appKey = "";
   known = undefined;
   connectView.showModal();
   void renderConnect();
+}
+// On the network a browser shows it trusts Chrysalis through the trust check (devices.ts), in a frame of the server's
+// (/check-frame): the page's own policy lets images in from itself only. One check at a time.
+let checking: Promise<boolean> | undefined;
+function checkTrust(): Promise<boolean> {
+  return checking ??= new Promise<boolean>((done) => {
+    const frame = h("iframe");
+    const finish = (ok: boolean) => { removeEventListener("message", heard); clearTimeout(timer); frame.remove(); checking = undefined; done(ok); };
+    const heard = (e: MessageEvent) => { if (e.source === frame.contentWindow && typeof e.data?.chrysalisCheck === "boolean") finish(e.data.chrysalisCheck); };
+    const timer = setTimeout(() => finish(false), 10_000);
+    addEventListener("message", heard);
+    frame.hidden = true;
+    frame.src = "/check-frame";
+    document.body.append(frame);
+  });
 }
 function markTheme() {
   for (const b of themePick.querySelectorAll<HTMLElement>("button")) b.setAttribute("aria-checked", String(b.dataset.theme === chosen()));
@@ -1455,13 +1486,22 @@ function renderStatus() {
   renderControls();
 }
 
-async function refreshStatus() {
+let asked = 0;
+async function refreshStatus(again = true) {
   const was = current();
   try {
     const r = await fetch("/api/status");
-    if (r.status === 401) return location.replace("/pair");   // a device on the network this computer has not let in
+    // a device on the network this computer has not let in, or one that shows again it trusts Chrysalis, once (devices.ts)
+    if (r.status === 401) {
+      if ((await r.json().catch(() => ({}))).check && again && await checkTrust()) return refreshStatus(false);
+      return location.replace("/pair");
+    }
     status = await r.json();
   } catch { status = { state: "offline" }; }
+  if (status.check) void checkTrust();             // past half its time: checked again before the gate has to
+  $("connect").classList.toggle("asking", !!status.waiting);
+  if ((status.waiting ?? 0) > asked && !connectView.open) toast("A device is asking to join: Connect a device, the phone at the top");
+  asked = status.waiting ?? 0;
   build ||= status.build ?? "";
   if (status.state === "online" && status.model && !status.loading && status.model !== picked) {
     picked = status.model;                         // the picker follows Chrysalis (another client may have switched it)
@@ -2008,7 +2048,7 @@ async function openVoice() {
   voice = { client, c: conv, muted: false, partial: "", level: 0, frame: 0, check: [], asking: asking(), now: {}, defaults: { voices: {} }, asked: voiceWant(null) };
   tellVoice(voice);
   renderVoice();
-  if (status.state === "offline") void start().then(refreshStatus);   // the first question finds the model loaded
+  if (status.state === "offline") void start().then(() => refreshStatus());   // the first question finds the model loaded
   // http://<this machine's address> is not a secure page, and there the browser has no microphone to give at all
   if (!navigator.mediaDevices?.getUserMedia) {
     voice.error = isSecureContext ? "This browser gives no page a microphone"
@@ -3602,7 +3642,7 @@ function renderControls() {
     else if (on) mark.innerHTML = icon("check");
     item.append(h("span", "model-label", label), mark);
     item.onclick = () => {
-      if (!on || state === "offline") { picked = id; setPref("model", id); void (state === "offline" ? start().then(refreshStatus) : pickModel(id)); }
+      if (!on || state === "offline") { picked = id; setPref("model", id); void (state === "offline" ? start().then(() => refreshStatus()) : pickModel(id)); }
       setModelsOpen(false, true);
     };
     return item;
@@ -4164,6 +4204,8 @@ $("voice-dots").addEventListener("click", () => { if (voice?.reply || voice?.cli
 $("voice-pick").addEventListener("click", () => setVoicePop(!voicePop));
 buildControls();
 buildTools();
+// a page on the network starts by showing it trusts Chrysalis, so that its first requests find the gate open
+if (location.protocol === "https:") await checkTrust();
 void loadCatalog();
 $("to-latest").innerHTML = icon("down");
 $("settings-reset").insertAdjacentHTML("afterbegin", icon("retry"));

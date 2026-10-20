@@ -2,9 +2,9 @@
 // device warns about its certificate until it trusts this machine's authority, so a device starts at plain HTTP on a
 // port of its own (the QR code of Connect a device and `chrysalis status`): a page that offers the authority as the
 // device's system takes it (a profile on Apple's, the certificate elsewhere, Firefox's own prompt), the taps that
-// trust it there, and goes on to the chat itself once the device trusts it (it keeps loading an image from the chat's
-// HTTPS address: the load succeeds only then). There the device is let in (pairPage, devices.ts) with the code the QR
-// code's address carries after "#", which a browser never sends, so it crosses the network over HTTPS only.
+// trust it there, and goes on to the chat itself once the device trusts it (it keeps loading an image from the trust
+// check, devices.ts: the load succeeds only then). There the device asks to join and shows its own code, which the
+// computer's screen shows beside Allow (pairPage): nothing secret crosses plain HTTP.
 //
 // Over plain HTTP, someone on the network at that moment could serve a page and an authority of their own, so nothing
 // this page says can vouch for it: the check is the device's own certificate details against the computer's screen.
@@ -116,10 +116,7 @@ ${TOKENS}
     font-size: 16.5px; font-weight: 600; line-height: 1.2; text-align: center; text-decoration: none; cursor: pointer; }
   .go:hover { filter: brightness(1.06); }
   .go:active { filter: brightness(0.92); }
-  .code { display: block; width: 100%; margin: 0 0 12px; padding: 13px 14px; border: 1px solid var(--line); border-radius: 12px; background: var(--bg);
-    color: var(--text); font: 600 22px/1.2 var(--mono); letter-spacing: 0.12em; text-align: center; text-transform: uppercase; }
-  .code::placeholder { color: var(--faint); }
-  .code:focus { border-color: color-mix(in srgb, var(--accent) 45%, var(--line)); outline: 0; }
+  .code { margin: 0 0 18px; color: var(--text); font: 600 40px/1.1 var(--mono); letter-spacing: 0.08em; text-align: center; }
   ol { margin: 20px 0 0; padding: 0; list-style: none; counter-reset: step; }
   li { position: relative; margin: 0 0 14px; padding-left: 38px; counter-increment: step; }
   li::before { content: counter(step); position: absolute; left: 0; top: 0; display: grid; place-items: center; width: 26px; height: 26px; border-radius: 50%;
@@ -174,8 +171,8 @@ export async function deviceScript(): Promise<string> {
 }
 
 // The page: the guide for the device it detects (any other one a tap away), its download, and the check that goes on
-// to the chat. chat: the chat's HTTPS address at the name or address the device used.
-export function setupPage(a: Authority, chat: string, sea: string): string {
+// to the chat. chat: the chat's HTTPS address at the name or address the device used; check: the trust check's image.
+export function setupPage(a: Authority, chat: string, check: string, sea: string): string {
   const name = esc(a.caName), guides = {
     ios: { title: "iPhone and iPad", button: ["Download the profile", "/chrysalis.mobileconfig"], steps: [
       "Tap <b>Download the profile</b>, then <b>Allow</b>.",
@@ -221,7 +218,7 @@ export function setupPage(a: Authority, chat: string, sea: string): string {
       for private addresses and local names, so it changes nothing for any other site. This page came over plain HTTP, so
       someone else on the network could have sent one of their own: to be sure, compare the SHA-256 fingerprint this device
       shows for <b>${name}</b> in its certificate details with the one under <b>Connect a device</b> on the computer.</p>
-  </details>`, `const CHAT = ${JSON.stringify(chat)}, GUIDES = ${JSON.stringify(guides)};
+  </details>`, `const CHAT = ${JSON.stringify(chat)}, CHECK = ${JSON.stringify(check)}, GUIDES = ${JSON.stringify(guides)};
 // desktop Firefox keeps an authority list of its own, and asks itself; on phones it goes by the system's
 const detected = /Firefox\\//.test(ua) && os !== "ios" && os !== "android" ? "firefox" : os;
 function show(key) {
@@ -253,15 +250,15 @@ for (const [key, g] of Object.entries(GUIDES)) {
   $("others").append(b);
 }
 show(detected);
-// The device trusts the chat once an image from its HTTPS address loads: then the chat's page that lets it in opens, with
-// the code this page's address carries. Checked again at once when the page comes back into view (after Settings).
+// The device trusts Chrysalis once the trust check's image loads: then the chat's page that lets it in opens. Checked
+// again at once when the page comes back into view (after Settings).
 let checking = false, timer = 0;
 function probe() {
   return new Promise((done) => {
     const img = new Image();
     img.onload = () => done(true);
     img.onerror = () => done(false);
-    img.src = CHAT + "trusted.gif?" + Date.now();
+    img.src = CHECK + "?t=" + Date.now();
   });
 }
 async function check() {
@@ -275,7 +272,7 @@ async function check() {
     status.classList.add("ok");
     status.textContent = "Trusted. Opening Chrysalis…";
     document.dispatchEvent(new Event("chrysalis-opening"));
-    setTimeout(() => location.replace(CHAT + "pair" + location.hash), 900);
+    setTimeout(() => location.replace(CHAT + "pair"), 900);
     return;
   }
   status.textContent = "Waiting for this device to trust Chrysalis…";
@@ -285,35 +282,81 @@ document.addEventListener("visibilitychange", () => { if (!document.hidden) chec
 check();`, sea);
 }
 
-// The chat's page for a device it has not let in (server.ts /pair, over HTTPS): the code from the setup page, or typed,
-// sent once for the device's key. The code leaves the address at once, so it stays out of the browser's history.
-export function pairPage(sea: string): string {
-  return page(`  <p class="sub">Enter the code Chrysalis shows on the computer it runs on.</p>
-  <div class="status" id="status" role="status" aria-live="polite" hidden></div>
-  <form id="form">
-    <input id="code" class="code" autocomplete="one-time-code" autocapitalize="characters" spellcheck="false" maxlength="9" placeholder="XXXX-XXXX" aria-label="Code" required>
-    <button class="go" type="submit">Connect</button>
-  </form>
-  <p class="aside">It is under <b>Connect a device</b> at the top of Chrysalis there, and <code>chrysalis status</code> prints it.</p>`, `
+// The chat's page for a browser it has not let in, or that has not shown lately it trusts Chrysalis (server.ts /pair).
+// It checks first, through the trust check's own certificate. Trusted, it asks to join and shows the device's code, which
+// Connect a device on the computer shows beside Allow, and waits; not trusted (a warning clicked past included), it sends
+// the browser to set the device up. check: the trust check's image; setup: the setup page.
+export function pairPage(sea: string, check: string, setup: string): string {
+  return page(`  <p class="sub" id="sub">Checking that this device trusts Chrysalis…</p>
+  <div class="status" id="status" role="status" aria-live="polite">Checking the secure connection…</div>
+  <div class="code" id="code" hidden></div>
+  <div id="next"></div>`, `const CHECK = ${JSON.stringify(check)}, SETUP = ${JSON.stringify(setup)};
 const status = $("status");
 function say(text, kind) {
-  status.hidden = false;
   status.className = "status" + (kind ? " " + kind : "");
   status.textContent = text;
 }
-async function send(code) {
-  say("Connecting…");
-  const r = await fetch("/pair", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ code, name: NAME }) }).catch(() => null);
-  if (r?.ok) {
-    say("Connected. Opening Chrysalis…", "ok");
-    document.dispatchEvent(new Event("chrysalis-opening"));
-    return void setTimeout(() => location.replace("/"), 900);
-  }
-  say(r ? "That code did not work. Each one works once, for 10 minutes: Connect a device shows a new one." : "Chrysalis did not answer. Try again in a moment.", "bad");
-  $("code").select();
+const sleep = (ms) => new Promise((done) => setTimeout(done, ms));
+// the image loads only where this browser trusts Chrysalis's authority: a warning clicked past covers the chat's
+// certificate alone, and an image cannot show one
+function trusts(nonce) {
+  return new Promise((done) => {
+    const img = new Image();
+    img.onload = () => done(true);
+    img.onerror = () => done(false);
+    img.src = CHECK + "?n=" + nonce + "&t=" + Date.now();
+  });
 }
-const given = decodeURIComponent(location.hash.slice(1));
-history.replaceState(null, "", location.pathname);
-$("form").onsubmit = (e) => { e.preventDefault(); send($("code").value); };
-if (given) { $("code").value = given; send(given); }`, sea);
+function open() {
+  say("Allowed. Opening Chrysalis…", "ok");
+  document.dispatchEvent(new Event("chrysalis-opening"));
+  setTimeout(() => location.replace("/"), 900);
+}
+function untrusted() {
+  $("sub").textContent = "This device does not trust Chrysalis yet, so its connection is not verified.";
+  say("Not secure: set this device up first", "bad");
+  const go = document.createElement("a"), aside = document.createElement("p");
+  go.className = "go";
+  go.href = SETUP;
+  go.textContent = "Set this device up";
+  aside.className = "aside";
+  aside.textContent = "A warning clicked past does not count: the device itself has to trust Chrysalis. The setup page shows how, then comes back here.";
+  $("next").replaceChildren(go, aside);
+}
+async function start() {
+  $("code").hidden = true;
+  $("next").replaceChildren();
+  say("Checking the secure connection…");
+  const nonce = Array.from(crypto.getRandomValues(new Uint8Array(18)), (b) => b.toString(16).padStart(2, "0")).join("");
+  if (!(await trusts(nonce))) return untrusted();
+  const r = await fetch("/pair/ask", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ nonce, name: NAME }) })
+    .then((x) => x.json()).catch(() => null);
+  if (r?.in) return open();
+  if (!r?.code) return untrusted();
+  $("sub").innerHTML = "Allow this device on the computer running Chrysalis: <b>Connect a device</b>, the phone at the top of the chat, shows this code.";
+  $("code").textContent = r.code.slice(0, 3) + " " + r.code.slice(3);
+  $("code").hidden = false;
+  say("Waiting for you to allow it…");
+  const aside = document.createElement("p"), cmd = document.createElement("code");
+  aside.className = "aside";
+  cmd.textContent = "chrysalis allow " + r.code;
+  aside.append("In a terminal there: ", cmd);
+  $("next").replaceChildren(aside);
+  for (;;) {
+    await sleep(1500);
+    const got = await fetch("/pair/ask/" + r.secret).then((x) => x.json()).catch(() => null);
+    if (got?.state === "allowed") return open();
+    if (got?.state === "gone") {
+      $("code").hidden = true;
+      say("Not allowed, or it waited too long", "bad");
+      const again = document.createElement("button");
+      again.className = "go";
+      again.type = "button";
+      again.textContent = "Ask again";
+      again.onclick = start;
+      return void $("next").replaceChildren(again);
+    }
+  }
+}
+start();`, sea);
 }

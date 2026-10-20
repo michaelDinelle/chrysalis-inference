@@ -53,10 +53,16 @@ export function lanTls(dir = process.env.CHRYSALIS_TLS_DIR ?? `${homedir()}/.con
       "-addext", "basicConstraints=critical,CA:FALSE", "-addext", "keyUsage=critical,digitalSignature");
     writeFileSync(`${dir}/names`, names);
   }
-  for (const k of ["ca.key", "server.key"]) chmodSync(`${dir}/${k}`, 0o600);
+  // The trust check's own certificate (devices.ts): made anew at every start, so that a warning clicked past for it, if
+  // anyone went there on purpose, does not outlast the run
+  run("req", "-x509", ...ec, "-keyout", `${dir}/check.key`, "-out", `${dir}/check.pem`, "-days", "825", "-subj", `/CN=${host} trust check`,
+    "-CA", `${dir}/ca.pem`, "-CAkey", `${dir}/ca.key`, "-addext", `subjectAltName=${names}`, "-addext", "extendedKeyUsage=serverAuth",
+    "-addext", "basicConstraints=critical,CA:FALSE", "-addext", "keyUsage=critical,digitalSignature");
+  for (const k of ["ca.key", "server.key", "check.key"]) chmodSync(`${dir}/${k}`, 0o600);
   const ca = readFileSync(`${dir}/ca.pem`, "utf8"), x = new X509Certificate(ca);
   // the authority as devices take it (DER: Apple's profiles, Android's installer), its name and its SHA-256 fingerprint
   // as their certificate details show it
   return { dir, cert: readFileSync(`${dir}/server.pem`, "utf8"), key: readFileSync(`${dir}/server.key`, "utf8"), ca, caDer: Uint8Array.from(x.raw),
-    caName: x.subject.replace(/^CN=/, ""), fingerprint: x.fingerprint256 };
+    caName: x.subject.replace(/^CN=/, ""), fingerprint: x.fingerprint256,
+    check: { cert: readFileSync(`${dir}/check.pem`, "utf8"), key: readFileSync(`${dir}/check.key`, "utf8") } };
 }
