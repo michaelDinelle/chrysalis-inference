@@ -1,13 +1,15 @@
-// Setting a device up for the web chat on the network (`chrysalis start --lan`). The chat is HTTPS there (tls.ts), and a
-// device warns about its certificate until it trusts this machine's authority, so a device starts at plain HTTP on a
-// port of its own (the QR code of Connect a device and `chrysalis status`): a page that offers the authority as the
-// device's system takes it (a profile on Apple's, the certificate elsewhere, Firefox's own prompt), the taps that
-// trust it there, and goes on to the chat itself once the device trusts it (it keeps loading an image from the trust
-// check, devices.ts: the load succeeds only then). There the device asks to join and shows its own code, which the
-// computer's screen shows beside Allow (pairPage): nothing secret crosses plain HTTP.
+// Connecting a device to the web chat on the network (`chrysalis start --lan`): the page the chat's own address serves a
+// browser this computer has not let in, or one that has not shown lately it trusts Chrysalis (server.ts). The chat is
+// HTTPS there (tls.ts) and a device warns about its certificate until it trusts this machine's authority, so a new device
+// comes here past that warning, once. The page offers the authority the way the device's system takes it (a profile on
+// Apple's, the certificate elsewhere, Firefox's own prompt) with the taps that trust it there. It has to be offered over
+// HTTPS: Chromium holds back every download a plain-HTTP page makes, blob: and data: ones too. Once the device trusts
+// the authority (an image from the trust check loads, devices.ts), the same page asks to join and shows the device's own
+// code, which the computer's screen shows beside Allow; allowed, the chat opens in its place.
 //
-// Over plain HTTP, someone on the network at that moment could serve a page and an authority of their own, so nothing
-// this page says can vouch for it: the check is the device's own certificate details against the computer's screen.
+// Until the device trusts the authority, nothing proves this page came from this computer: someone on the network could
+// answer with a page and an authority of their own. The check is the device's own certificate details against the
+// computer's screen.
 import { readFileSync } from "node:fs";
 
 export interface Authority { caDer: Uint8Array; caName: string; fingerprint: string }
@@ -16,7 +18,7 @@ const TOKENS = readFileSync(`${import.meta.dir}/tokens.css`, "utf8");
 // the aurora the chat's panels wear on their heads (index.html's sprite), for the card's
 const INDEX = readFileSync(`${import.meta.dir}/index.html`, "utf8"), SPRITE_AT = INDEX.indexOf('<svg class="sprite"');
 const AURORA = INDEX.slice(SPRITE_AT, INDEX.indexOf("</svg>", SPRITE_AT) + "</svg>".length);
-if (SPRITE_AT < 0 || !AURORA.includes('id="aurora"')) throw new Error("index.html has no aurora sprite for the setup pages");
+if (SPRITE_AT < 0 || !AURORA.includes('id="aurora"')) throw new Error("index.html has no aurora sprite for the connect page");
 const esc = (s: string) => s.replace(/[&<>"']/g, (c) => `&#${c.charCodeAt(0)};`);
 const b64 = (b: Uint8Array) => Buffer.from(b).toString("base64");
 // a profile's identifiers from the authority's fingerprint: the same authority is the same profile, so setting a device
@@ -59,10 +61,10 @@ export function appleProfile(a: Authority): string {
 `;
 }
 
-// A 1x1 transparent GIF: the image the setup page loads from the chat's HTTPS address to see whether the device trusts it
+// A 1x1 transparent GIF: the trust check's image, which a page loads to see whether the device trusts Chrysalis
 export const TRUSTED_GIF = Uint8Array.from(atob("R0lGODlhAQABAIAAAAAAAP///yH5BAEAAAAALAAAAAABAAEAAAIBRAA7"), (c) => c.charCodeAt(0));
 
-// The device as both pages tell it: its system (the guide it gets) and, for the list of devices let in, a name
+// The device as the page tells it: its system (the guide it gets) and, for the list of devices let in, a name
 const DETECT = `const ua = navigator.userAgent, touchMac = /Macintosh/.test(ua) && navigator.maxTouchPoints > 1;
 const os = /iPhone|iPad|iPod/.test(ua) || touchMac ? "ios" : /Android/.test(ua) ? "android" : /CrOS/.test(ua) ? "chromeos"
   : /Macintosh/.test(ua) ? "mac" : /Windows/.test(ua) ? "windows" : "linux";
@@ -71,7 +73,7 @@ const NAME = { ios: /iPad/.test(ua) || touchMac ? "iPad" : "iPhone", android: "A
   + (browser ? " · " + browser : "");
 const $ = (id) => document.getElementById(id);`;
 
-// The pages' look is the chat's (tokens.css): its sea of characters fills the window (device.ts, whose built script each
+// The page's look is the chat's (tokens.css): its sea of characters fills the window (device.ts, whose built script the
 // page carries: `sea`), and the page is a card floating on it, as the message box does, with the butterfly above it and
 // a night sky over the page's top: the aurora the chat's panels wear, fading into the sea.
 const page = (body: string, script: string, sea: string) => `<!doctype html>
@@ -84,7 +86,9 @@ const page = (body: string, script: string, sea: string) => `<!doctype html>
 <style>
 ${TOKENS}
   * { box-sizing: border-box; }
-  body { margin: 0; background: var(--bg); color: var(--text); font: 16px/1.55 var(--sans); -webkit-font-smoothing: antialiased; }
+  /* no bounce past the page's ends: the sea is fixed to the window, and the sky would come away from its top */
+  html, body { overscroll-behavior: none; background: var(--bg); }
+  body { margin: 0; color: var(--text); font: 16px/1.55 var(--sans); -webkit-font-smoothing: antialiased; }
   .sea { position: fixed; inset: 0; overflow: hidden; }
   .sea > .ocean { position: absolute; touch-action: manipulation; }
   main { position: relative; display: flex; flex-direction: column; align-items: center; min-height: 100dvh;
@@ -109,7 +113,6 @@ ${TOKENS}
   .status.ok::before { background: var(--ok); animation: none; }
   .status.bad { color: var(--text); border-color: color-mix(in srgb, var(--accent) 50%, var(--line)); }
   .status.bad::before { background: var(--accent); animation: none; }
-  .status[hidden] { display: none; }
   @keyframes pulse { 50% { opacity: 0.35; } }
   @media (prefers-reduced-motion: reduce) { .status::before { animation: none; } }
   .go { display: block; width: 100%; padding: 14px 18px; border: 0; border-radius: 12px; background: var(--accent); color: #fff; font-family: inherit;
@@ -117,14 +120,20 @@ ${TOKENS}
   .go:hover { filter: brightness(1.06); }
   .go:active { filter: brightness(0.92); }
   .code { margin: 0 0 18px; color: var(--text); font: 600 40px/1.1 var(--mono); letter-spacing: 0.08em; text-align: center; }
-  ol { margin: 20px 0 0; padding: 0; list-style: none; counter-reset: step; }
-  li { position: relative; margin: 0 0 14px; padding-left: 38px; counter-increment: step; }
-  li::before { content: counter(step); position: absolute; left: 0; top: 0; display: grid; place-items: center; width: 26px; height: 26px; border-radius: 50%;
-    background: var(--panel); border: 1px solid var(--line); color: var(--accent); font-size: 13.5px; font-weight: 650; }
-  li:has(.aside) { counter-increment: none; }
-  li:has(.aside)::before { content: none; }
+  .now { margin: 0 0 16px; font-size: 17px; line-height: 1.5; text-align: center; }
+  .copyable { display: flex; align-items: center; gap: 8px; margin-top: 12px; padding: 6px 6px 6px 12px; border: 1px solid var(--line); border-radius: 12px;
+    background: var(--panel); text-align: left; }
+  .copyable code { flex: 1; padding: 0; background: none; color: var(--text); font-size: 13.5px; }
+  .copy { flex: none; padding: 8px 16px; border: 0; border-radius: 9px; background: var(--accent); color: #fff; font: inherit; font-size: 14.5px; font-weight: 600;
+    cursor: pointer; }
+  .steps { display: grid; grid-template-columns: 1fr auto 1fr; align-items: center; margin-top: 12px; color: var(--muted); font-size: 14px; }
+  .steps button { padding: 6px 2px; border: 0; background: none; color: var(--accent-hi); font: inherit; cursor: pointer; }
+  .steps button[hidden] { display: block; visibility: hidden; }
+  #back { justify-self: start; }
+  #on { justify-self: end; }
+  [hidden] { display: none; }
   .aside { color: var(--muted); font-size: 14px; }
-  p.aside { margin: 16px 0 0; text-align: center; }
+  div.aside { margin: 16px 0 0; text-align: center; }
   code { padding: 1px 5px; border-radius: 6px; background: var(--code); font: 13px var(--mono); overflow-wrap: anywhere; }
   .warn { margin: 0 0 16px; padding: 12px 14px; border-radius: 12px; background: var(--accent-soft); font-size: 15px; }
   .warn button { margin-top: 8px; padding: 8px 12px; border: 1px solid var(--line); border-radius: 9px; background: var(--raised); color: var(--text); font: inherit; }
@@ -159,7 +168,7 @@ ${script}
 </html>
 `;
 
-// device.ts as a script of its own, its drawing in it as a data: URL: the pages are served whole, from a port of their own
+// device.ts as a script of its own, its drawing in it as a data: URL: the page is served whole, as its policy lets in no file but the trust check's image
 export async function deviceScript(): Promise<string> {
   const built = await Bun.build({ entrypoints: [`${import.meta.dir}/device.ts`], target: "browser", minify: true, plugins: [{ name: "svg as a data: URL",
     setup(b) {
@@ -170,193 +179,204 @@ export async function deviceScript(): Promise<string> {
   return (await built.outputs[0].text()).replaceAll("</script", "<\\/script");
 }
 
-// The page: the guide for the device it detects (any other one a tap away), its download, and the check that goes on
-// to the chat. chat: the chat's HTTPS address at the name or address the device used; check: the trust check's image.
-export function setupPage(a: Authority, chat: string, check: string, sea: string): string {
-  const name = esc(a.caName), guides = {
-    ios: { title: "iPhone and iPad", button: ["Download the profile", "/chrysalis.mobileconfig"], steps: [
-      "Tap <b>Download the profile</b>, then <b>Allow</b>.",
-      "Open <b>Settings</b>, tap <b>Profile Downloaded</b> near the top, then <b>Install</b> and enter your passcode.",
-      `In <b>Settings → General → About → Certificate Trust Settings</b>, turn on <b>${name}</b>.`,
-      "Come back here: Chrysalis opens by itself."] },
-    android: { title: "Android", button: ["Download the certificate", "/chrysalis-ca.crt"], steps: [
-      "Tap <b>Download the certificate</b>.",
-      "Open <b>Settings</b> and search for <b>CA certificate</b>. Tap it, then <b>Install anyway</b>, and pick <b>chrysalis-ca.crt</b> from Downloads.",
-      "Come back here: Chrysalis opens by itself.",
-      "<span class=\"aside\">Firefox: also turn on <b>Use third party CA certificates</b> (Settings → About Firefox, tap the logo five times, then Secret settings).</span>"] },
-    mac: { title: "Mac", button: ["Download the profile", "/chrysalis.mobileconfig"], steps: [
-      "Click <b>Download the profile</b> (and open it, if the browser only saves it).",
-      "Open <b>System Settings</b>, click <b>Profile Downloaded</b> (or General → Device Management), then <b>Install</b>, and enter your password.",
-      "Come back here: Chrysalis opens by itself.",
-      `<span class="aside">Still waiting? In Keychain Access, open <b>${name}</b> and set <b>Trust → When using this certificate</b> to <b>Always Trust</b>.</span>`] },
-    windows: { title: "Windows", button: ["Download the certificate", "/chrysalis-ca.crt"], steps: [
-      "Click <b>Download the certificate</b> and open it.",
-      "Click <b>Install Certificate…</b>, choose <b>Current User</b>, then <b>Place all certificates in the following store → Browse… → Trusted Root Certification Authorities</b>.",
-      "Click <b>Next</b>, <b>Finish</b>, and <b>Yes</b> to the warning.",
-      "Come back here: Chrysalis opens by itself (or restart the browser if it does not)."] },
-    linux: { title: "Linux", button: ["Download the certificate", "/chrysalis-ca.crt"], steps: [
-      "Click <b>Download the certificate</b>.",
-      "Chrome or Chromium: open <code>chrome://certificate-manager</code>, then <b>Local certificates → Installed by you → Trusted certificates → Import</b>, and pick <b>chrysalis-ca.crt</b>.",
-      "Come back here: Chrysalis opens by itself.",
-      "<span class=\"aside\">For the whole system (curl and others): <code>sudo trust anchor --store chrysalis-ca.crt</code>, or on Debian and Ubuntu copy it to <code>/usr/local/share/ca-certificates/</code> and run <code>sudo update-ca-certificates</code>.</span>"] },
-    chromeos: { title: "ChromeOS", button: ["Download the certificate", "/chrysalis-ca.crt"], steps: [
-      "Click <b>Download the certificate</b>.",
-      "Open <b>Settings → Privacy and security → Security → Manage certificates → Authorities → Import</b>, pick <b>chrysalis-ca.crt</b> and tick <b>Trust this certificate for identifying websites</b>.",
-      "Come back here: Chrysalis opens by itself."] },
+// The page: what it checks, the guide for the device it detects (any other one a tap away) one step at a time, the
+// device's code once it trusts Chrysalis, and the chat once it is allowed. check: the trust check's image. self: the
+// computer Chrysalis runs on, at its network address, whose browsers the command line sets up and which needs no code.
+export function connectPage(a: Authority, check: string, sea: string, self: boolean): string {
+  const name = esc(a.caName);
+  // an address the person copies: browsers open no chrome:// address from a page, by link or by script
+  const copyable = (text: string) => `<span class="copyable"><code>${esc(text)}</code><button type="button" class="copy">Copy</button></span>`;
+  // Each step as the card names it, and how (the download's alone, with only what its button does not say): as few as each
+  // system allows, the last one trusting the authority. The page moves on to the next step on the download, and again
+  // each time the person comes back to it (from Settings) and the device does not trust Chrysalis yet.
+  const guides = {
+    // iOS installs a profile in one place and trusts its authority in another
+    ios: { title: "iPhone and iPad", button: ["Download", "/chrysalis.mobileconfig"], steps: [
+      ["Download", "Then tap <b>Allow</b>."],
+      ["Install", "Open <b>Settings</b>, tap <b>Profile Downloaded</b>, then <b>Install</b>."],
+      ["Trust", `In <b>Settings → General → About → Certificate Trust Settings</b>, turn on <b>${name}</b>. Then come back here.`]] },
+    android: { title: "Android", button: ["Download", "/chrysalis-ca.crt"], steps: [
+      ["Download", ""],
+      ["Trust", "Open <b>Settings</b>, search for <b>CA certificate</b>, tap <b>Install anyway</b> and pick <b>chrysalis-ca.crt</b>. Then come back here."]],
+      // Firefox on Android goes by its own list until told to take the system's
+      firefox: ["Trust in Firefox", "In Firefox, <b>Settings → About Firefox</b>, tap the logo five times, then in <b>Secret settings</b> turn on <b>Use third party CA certificates</b>."] },
+    // a profile the person installed may leave its authority untrusted on a Mac: Keychain Access trusts it then (the page
+    // goes on before this step where it does not)
+    mac: { title: "Mac", button: ["Download", "/chrysalis.mobileconfig"], steps: [
+      ["Download", "Then open the file, if the browser only saves it."],
+      ["Install", "Open <b>System Settings</b>, click <b>Profile Downloaded</b> (or <b>General → Device Management</b>), then <b>Install</b>."],
+      ["Trust", `Open <b>Keychain Access</b>, double-click <b>${name}</b> and set <b>Trust</b> to <b>Always Trust</b>. Then come back here.`]] },
+    windows: { title: "Windows", button: ["Download", "/chrysalis-ca.crt"], steps: [
+      ["Download", "Then open the file."],
+      ["Trust", "Click <b>Install Certificate…</b> and <b>Next</b>, choose <b>Place all certificates in the following store → Browse… → Trusted Root Certification Authorities</b>, then <b>Next</b>, <b>Finish</b> and <b>Yes</b>."]] },
+    // Chrome's certificate manager opens on the list it imports authorities into at this address
+    linux: { title: "Linux", button: ["Download", "/chrysalis-ca.crt"], steps: [
+      ["Download", ""],
+      ["Trust", `Open this address in a new tab, click <b>Import</b> beside <b>Trusted Certificates</b> and pick <b>chrysalis-ca.crt</b>.${copyable("chrome://certificate-manager/localcerts/usercerts")}`]] },
+    chromeos: { title: "ChromeOS", button: ["Download", "/chrysalis-ca.crt"], steps: [
+      ["Download", ""],
+      ["Trust", "In <b>Settings → Privacy and security → Security → Manage certificates → Authorities</b>, click <b>Import</b>, pick <b>chrysalis-ca.crt</b> and tick <b>Trust this certificate for identifying websites</b>."]] },
     firefox: { title: "Firefox", button: ["Trust in Firefox", "/chrysalis-ca-firefox.crt"], steps: [
-      "Click <b>Trust in Firefox</b>.",
-      "Tick <b>Trust this CA to identify websites</b>, then <b>OK</b>.",
-      "Chrysalis opens by itself."] },
+      ["Open", ""],
+      ["Trust", "Tick <b>Trust this CA to identify websites</b>, then <b>OK</b>."]] },
   };
-  return page(`  <p class="sub">Set this device up once, and Chrysalis opens securely on it from then on.</p>
+  // a browser open before `chrysalis start --lan` trusted the authority reads its store again only when it restarts
+  const here = ["Trust", `Run this in a terminal, then quit this browser and open it again.${copyable("chrysalis start --lan")}`];
+  return page(`  <p class="sub" id="sub">Checking this device…</p>
   <div class="status" id="status" role="status" aria-live="polite">Checking the secure connection…</div>
-  <div id="guide"></div>
-  <details>
+  <div class="code" id="code" hidden></div>
+  <div id="setup" hidden>
+    <div class="warn" id="safari" hidden>Open this page in <b>Safari</b>: iPhone and iPad install profiles from Safari only.<br><button type="button">Copy this page's address</button></div>
+    <div class="now" id="now" aria-live="polite"></div>
+    <a class="go" id="go"></a>
+    <div class="steps"><button type="button" id="back">‹ Back</button><span id="count"></span><button type="button" id="on">Next ›</button></div>
+  </div>
+  <div id="after"></div>
+  <details id="more" hidden>
     <summary>Another device, or what this does</summary>
     <div class="others" id="others"></div>
     <p class="about">This device will trust <b>${name}</b>, an authority this computer made for its own web chat. It can only vouch
-      for private addresses and local names, so it changes nothing for any other site. This page came over plain HTTP, so
-      someone else on the network could have sent one of their own: to be sure, compare the SHA-256 fingerprint this device
-      shows for <b>${name}</b> in its certificate details with the one under <b>Connect a device</b> on the computer.</p>
-  </details>`, `const CHAT = ${JSON.stringify(chat)}, CHECK = ${JSON.stringify(check)}, GUIDES = ${JSON.stringify(guides)};
+      for private addresses and local names, so it changes nothing for any other site. Until this device trusts it, nothing
+      proves this page came from your computer (that is what the browser's warning said): to be sure, compare the SHA-256
+      fingerprint this device shows for <b>${name}</b> in its certificate details with the one under <b>Connect a device</b>
+      on the computer.</p>
+  </details>`, `const CHECK = ${JSON.stringify(check)}, GUIDES = ${JSON.stringify(guides)}, SELF = ${self}, HERE = ${JSON.stringify(here)};
 // desktop Firefox keeps an authority list of its own, and asks itself; on phones it goes by the system's
 const detected = /Firefox\\//.test(ua) && os !== "ios" && os !== "android" ? "firefox" : os;
-function show(key) {
-  const g = GUIDES[key], guide = $("guide");
-  guide.innerHTML = "";
-  // a profile installs from Safari only
-  if (key === "ios" && os === "ios" && /CriOS|FxiOS|EdgiOS|OPiOS/.test(ua)) {
-    const w = document.createElement("div");
-    w.className = "warn";
-    w.innerHTML = "Open this page in <b>Safari</b>: iPhone and iPad install profiles from Safari only.<br><button type=\\"button\\">Copy this page's address</button>";
-    w.querySelector("button").onclick = (e) => navigator.clipboard?.writeText(location.href).then(() => { e.target.textContent = "Copied"; });
-    guide.append(w);
-  }
-  const go = document.createElement("a");
-  go.className = "go";
-  go.textContent = g.button[0];
-  go.href = g.button[1];
-  const steps = document.createElement("ol");
-  steps.innerHTML = g.steps.map((s) => "<li>" + s + "</li>").join("");
-  guide.append(go, steps);
-  for (const b of $("others").children) b.setAttribute("aria-pressed", String(b.dataset.key === key));
-}
-for (const [key, g] of Object.entries(GUIDES)) {
-  const b = document.createElement("button");
-  b.type = "button";
-  b.dataset.key = key;
-  b.textContent = g.title;
-  b.onclick = () => show(key);
-  $("others").append(b);
-}
-show(detected);
-// The device trusts Chrysalis once the trust check's image loads: then the chat's page that lets it in opens. Checked
-// again at once when the page comes back into view (after Settings).
-let checking = false, timer = 0;
-function probe() {
-  return new Promise((done) => {
-    const img = new Image();
-    img.onload = () => done(true);
-    img.onerror = () => done(false);
-    img.src = CHECK + "?t=" + Date.now();
-  });
-}
-async function check() {
-  if (checking) return;
-  checking = true;
-  clearTimeout(timer);
-  const ok = await probe();
-  checking = false;
-  const status = $("status");
-  if (ok) {
-    status.classList.add("ok");
-    status.textContent = "Trusted. Opening Chrysalis…";
-    document.dispatchEvent(new Event("chrysalis-opening"));
-    setTimeout(() => location.replace(CHAT + "pair"), 900);
-    return;
-  }
-  status.textContent = "Waiting for this device to trust Chrysalis…";
-  timer = setTimeout(check, 1500);
-}
-document.addEventListener("visibilitychange", () => { if (!document.hidden) check(); });
-check();`, sea);
-}
-
-// The chat's page for a browser it has not let in, or that has not shown lately it trusts Chrysalis (server.ts /pair).
-// It checks first, through the trust check's own certificate. Trusted, it asks to join and shows the device's code, which
-// Connect a device on the computer shows beside Allow, and waits; not trusted (a warning clicked past included), it sends
-// the browser to set the device up. check: the trust check's image; setup: the setup page.
-export function pairPage(sea: string, check: string, setup: string): string {
-  return page(`  <p class="sub" id="sub">Checking that this device trusts Chrysalis…</p>
-  <div class="status" id="status" role="status" aria-live="polite">Checking the secure connection…</div>
-  <div class="code" id="code" hidden></div>
-  <div id="next"></div>`, `const CHECK = ${JSON.stringify(check)}, SETUP = ${JSON.stringify(setup)};
+if (os === "android" && browser === "Firefox") GUIDES.android.steps.push(GUIDES.android.firefox);
 const status = $("status");
 function say(text, kind) {
   status.className = "status" + (kind ? " " + kind : "");
   status.textContent = text;
 }
+function copied(button, text) {
+  const done = () => { button.textContent = "Copied"; setTimeout(() => { button.textContent = "Copy"; }, 2000); };
+  navigator.clipboard?.writeText(text).then(done, () => {});
+}
+function copies(root) {
+  for (const b of root.querySelectorAll(".copy")) b.onclick = () => {
+    getSelection().selectAllChildren(b.previousElementSibling);      // to paste by hand where nothing may be copied
+    copied(b, b.previousElementSibling.textContent);
+  };
+}
+let guide = SELF ? { button: ["", ""], steps: [HERE] } : GUIDES[detected], at = 0, returned = false;
+function render() {
+  const n = guide.steps.length, now = $("now"), go = $("go");
+  now.innerHTML = guide.steps[at][1];
+  now.hidden = !guide.steps[at][1];
+  copies(now);
+  go.hidden = at > 0 || SELF;
+  $("count").parentElement.hidden = SELF;
+  go.textContent = guide.button[0];
+  go.href = guide.button[1];
+  $("back").hidden = at === 0;
+  $("on").hidden = at === n - 1;
+  $("count").textContent = "Step " + (at + 1) + " of " + n + " · " + guide.steps[at][0];
+  // a profile installs from Safari only
+  $("safari").hidden = !(guide === GUIDES.ios && os === "ios" && /CriOS|FxiOS|EdgiOS|OPiOS/.test(ua));
+  for (const b of $("others").children) b.setAttribute("aria-pressed", String(GUIDES[b.dataset.key] === guide));
+}
+const move = (by) => { at = Math.max(0, Math.min(guide.steps.length - 1, at + by)); render(); };
+$("back").onclick = () => move(-1);
+$("on").onclick = () => move(1);
+// the next step once the download has begun (moving the link at once could cancel it)
+$("go").onclick = () => setTimeout(() => { if (at === 0) move(1); }, 500);
+$("safari").querySelector("button").onclick = (e) => copied(e.target, location.href);
+for (const [key, g] of Object.entries(GUIDES)) {
+  const b = document.createElement("button");
+  b.type = "button";
+  b.dataset.key = key;
+  b.textContent = g.title;
+  b.onclick = () => { guide = g; at = 0; render(); };
+  $("others").append(b);
+}
+render();
 const sleep = (ms) => new Promise((done) => setTimeout(done, ms));
-// the image loads only where this browser trusts Chrysalis's authority: a warning clicked past covers the chat's
-// certificate alone, and an image cannot show one
+// The image loads only where this browser trusts Chrysalis's authority: a warning clicked past covers the chat's
+// certificate alone, and an image cannot show one. A certificate it does not trust fails at once; no answer at all
+// (null) is a firewall that drops the trust check's port.
 function trusts(nonce) {
   return new Promise((done) => {
-    const img = new Image();
-    img.onload = () => done(true);
-    img.onerror = () => done(false);
+    const img = new Image(), late = setTimeout(() => done(null), 6000);
+    img.onload = () => (clearTimeout(late), done(true));
+    img.onerror = () => (clearTimeout(late), done(false));
     img.src = CHECK + "?n=" + nonce + "&t=" + Date.now();
   });
 }
-function open() {
-  say("Allowed. Opening Chrysalis…", "ok");
+function setUp(on) {
+  $("setup").hidden = !on;
+  $("more").hidden = !on || SELF;
+  status.hidden = on;
+  if (on) $("sub").textContent = SELF ? "This is the computer Chrysalis runs on: its browsers trust Chrysalis once its command line sets them up."
+    : "Set this device up once, and it opens Chrysalis from then on.";
+}
+function opening(text) {
+  say(text, "ok");
   document.dispatchEvent(new Event("chrysalis-opening"));
   setTimeout(() => location.replace("/"), 900);
 }
-function untrusted() {
-  $("sub").textContent = "This device does not trust Chrysalis yet, so its connection is not verified.";
-  say("Not secure: set this device up first", "bad");
-  const go = document.createElement("a"), aside = document.createElement("p");
-  go.className = "go";
-  go.href = SETUP;
-  go.textContent = "Set this device up";
-  aside.className = "aside";
-  aside.textContent = "A warning clicked past does not count: the device itself has to trust Chrysalis. The setup page shows how, then comes back here.";
-  $("next").replaceChildren(go, aside);
-}
-async function start() {
-  $("code").hidden = true;
-  $("next").replaceChildren();
-  say("Checking the secure connection…");
+// Checked every 1.5 s, and at once when the page comes back into view, until the device trusts Chrysalis; then it asks
+// to join and waits for this computer's answer
+let asking = false, timer = 0;
+async function check() {
+  if (asking) return;
+  asking = true;
+  clearTimeout(timer);
   const nonce = Array.from(crypto.getRandomValues(new Uint8Array(18)), (b) => b.toString(16).padStart(2, "0")).join("");
-  if (!(await trusts(nonce))) return untrusted();
+  const trusted = await trusts(nonce);
+  if (trusted === null) {
+    asking = false;
+    setUp(false);
+    $("sub").innerHTML = "This device cannot reach Chrysalis's trust check (port " + new URL(CHECK).port + "). On the computer running Chrysalis, "
+      + "<code>chrysalis start --lan</code> lets it through the firewall.";
+    say("Cannot reach this computer", "bad");
+    timer = setTimeout(check, 1500);
+    return;
+  }
+  if (!trusted) {
+    asking = false;
+    setUp(true);
+    if (returned && at > 0) move(1);
+    returned = false;
+    timer = setTimeout(check, 1500);
+    return;
+  }
+  setUp(false);
   const r = await fetch("/pair/ask", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ nonce, name: NAME }) })
     .then((x) => x.json()).catch(() => null);
-  if (r?.in) return open();
-  if (!r?.code) return untrusted();
-  $("sub").innerHTML = "Allow this device on the computer running Chrysalis: <b>Connect a device</b>, the phone at the top of the chat, shows this code.";
+  if (r?.in) return opening("Trusted. Opening Chrysalis…");     // let in before, and trusted again
+  if (!r?.code) return again("Could not ask to join");
+  $("sub").innerHTML = "Allow this device on your computer: <b>Connect a device</b>, the phone at the top of the chat, shows this code.";
   $("code").textContent = r.code.slice(0, 3) + " " + r.code.slice(3);
   $("code").hidden = false;
   say("Waiting for you to allow it…");
-  const aside = document.createElement("p"), cmd = document.createElement("code");
+  const aside = document.createElement("div");
   aside.className = "aside";
-  cmd.textContent = "chrysalis allow " + r.code;
-  aside.append("In a terminal there: ", cmd);
-  $("next").replaceChildren(aside);
+  aside.innerHTML = 'Or in a terminal there:<span class="copyable"><code></code><button type="button" class="copy">Copy</button></span>';
+  aside.querySelector("code").textContent = "chrysalis allow " + r.code;
+  copies(aside);
+  $("after").replaceChildren(aside);
   for (;;) {
     await sleep(1500);
     const got = await fetch("/pair/ask/" + r.secret).then((x) => x.json()).catch(() => null);
-    if (got?.state === "allowed") return open();
-    if (got?.state === "gone") {
-      $("code").hidden = true;
-      say("Not allowed, or it waited too long", "bad");
-      const again = document.createElement("button");
-      again.className = "go";
-      again.type = "button";
-      again.textContent = "Ask again";
-      again.onclick = start;
-      return void $("next").replaceChildren(again);
-    }
+    if (got?.state === "allowed") return opening("Allowed. Opening Chrysalis…");
+    if (got?.state === "gone") return again("Not allowed, or it waited too long");
   }
 }
-start();`, sea);
+function again(why) {
+  $("code").hidden = true;
+  say(why, "bad");
+  const b = document.createElement("button");
+  b.className = "go";
+  b.type = "button";
+  b.textContent = "Ask again";
+  b.onclick = () => { $("after").replaceChildren(); asking = false; check(); };
+  $("after").replaceChildren(b);
+}
+document.addEventListener("visibilitychange", () => {
+  if (document.hidden) return;
+  returned = true;
+  if (!asking) check();
+});
+check();`, sea);
 }

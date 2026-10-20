@@ -89,6 +89,16 @@ export class Devices {
     return { state: "allowed", key };
   }
 
+  // This computer's own browser, at its network address, once its nonce came through the trust check (once): in at once,
+  // with no code (what runs here reaches Chrysalis anyway), and held to the trust check as any browser is. Its key.
+  here(nonce: string, name: string): string | undefined {
+    this.prune();
+    if (!this.nonces.delete(nonce)) return undefined;
+    const { key, id } = this.add(name, "browser");
+    this.checked.set(id, Date.now());
+    return key;
+  }
+
   add(name: string, kind: "browser" | "app"): { key: string; id: string } {
     const key = randomBytes(32).toString("base64url"), now = Date.now(), id = randomBytes(6).toString("hex");
     this.list.push({ id, name: name.slice(0, 40), hash: sha(key), added: now, seen: now, kind });

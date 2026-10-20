@@ -145,6 +145,7 @@ main { display: flex; flex-direction: column; min-height: 0; grid-column: 2; }
 .act.ghost { visibility: hidden; }
 .msg-foot .act { flex: none; }
 .act { display: inline-grid; place-items: center; width: 28px; height: 28px; border: 0; border-radius: 7px; background: none; color: var(--muted); }
+.act[hidden] { display: none; }
 .act:hover { background: var(--hover); color: var(--text); }
 .act.done { color: var(--ok); }
 .act .i { width: 15px; height: 15px; }

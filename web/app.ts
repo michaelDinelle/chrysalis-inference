@@ -66,7 +66,7 @@ interface ToolInfo { fn: string; name: string; title: string; description: strin
 interface SourceInfo { id: string; label: string; kind: "fetch" | "agent" | "mcp"; detail: string; state: "idle" | "connecting" | "connected" | "failed" | "disabled"; error?: string; tools: ToolInfo[] }
 interface Catalog { config: string; error?: string; sources: SourceInfo[] }
 interface Status { state: "online" | "loading" | "offline"; build?: string; model?: string; loading?: string; progress?: number; context?: number; kv_tokens?: number; cache?: { free_kv_tokens: number };
-  check?: boolean; waiting?: number }   // (on the network: check the device's trust again; here: devices asking to join)
+  check?: boolean; here?: boolean; waiting?: number }   // (on the network: check the device's trust again; this computer: devices asking to join)
 interface View {
   el: HTMLElement; think: HTMLDetailsElement; summary: HTMLElement; thought: HTMLElement; body: HTMLElement; foot: HTMLElement; shown?: string; blocks?: Blocks;
   tok?: { reasoning: number; content: number };     // tokens drawn so far, shown as tokens
@@ -1201,10 +1201,10 @@ for (const [t, label] of [["system", "System"], ["light", "Light"], ["dark", "Da
   b.onclick = () => { choose(t); markTheme(); };
   themePick.append(b);
 }
-// Connect a device (the top bar, on this computer only: from the network the chat is HTTPS, here plain HTTP): a QR code
-// of the page that sets a device up (setup.ts); the devices asking to join, each with the code it shows, to allow or
-// deny (devices.ts); the devices let in; a key for an app on another computer (shown once: it is kept only as its hash);
-// and the authority's fingerprint, which a device's certificate details show too when it trusts this computer and not an
+// Connect a device (the top bar, on this computer's own screen only): a QR code of the chat's address, where a new device
+// gets the connect page (setup.ts); the devices asking to join, each with the code it shows, to allow or deny
+// (devices.ts); the devices let in; a key for an app on another computer (shown once: it is kept only as its hash); and
+// the authority's fingerprint, which a device's certificate details show too when it trusts this computer and not an
 // impostor's.
 const connectView = $<HTMLDialogElement>("connect-view");
 let known: Set<string> | undefined, joined = "", connectTimer = 0, appKey = "";
@@ -1222,12 +1222,16 @@ async function answer(how: "allow" | "deny", code: string) {
   void renderConnect();
 }
 async function renderConnect() {
-  const p = await fetch("/api/pair").then((r) => r.json()).catch(() => null);
+  const p = await fetch("/api/pair").then((r) => r.ok ? r.json() : null).catch(() => null);
   if (!connectView.open) return;
   clearTimeout(connectTimer);
   connectTimer = window.setTimeout(renderConnect, 2000);
   const box = $("connect-body");
-  if (!p?.lan) {
+  if (!p) {                                         // the web server restarting: the dialog asks again in 2 s
+    box.dataset.key = "";
+    return void box.replaceChildren(h("p", "set-note", "Cannot reach Chrysalis's web server. Trying again…"));
+  }
+  if (!p.lan) {
     const note = h("p", "set-note");
     note.append("Chrysalis is on this computer only. Run ", h("code", "", "chrysalis start --lan"), " in a terminal to let your phone and other devices on this network in.");
     box.dataset.key = "";
@@ -1236,18 +1240,18 @@ async function renderConnect() {
   const list: Paired[] = p.devices, asking: Joining[] = p.waiting, fresh = known && list.find((d) => !known!.has(d.id));
   if (fresh) joined = fresh.name;
   known = new Set(list.map((d) => d.id));
-  const key = JSON.stringify([joined, asking, list.map((d) => [d.id, since(d.seen)]), p.setup, !!p.qr, appKey]);
+  const key = JSON.stringify([joined, asking, list.map((d) => [d.id, since(d.seen)]), p.connect, !!p.qr, appKey]);
   if (box.dataset.key === key) return;
   box.dataset.key = key;
   const row = h("div", "dev-row"), text = h("div", "dev-text"), other = h("p");
   if (p.qr) {
     const qr = h("img", "dev-qr");
     qr.src = `data:image/svg+xml;base64,${btoa(p.qr)}`;
-    qr.alt = "QR code of the page that sets a device up";
+    qr.alt = "QR code of Chrysalis's address on this network";
     row.append(qr);
   }
-  other.append(p.qr ? "No camera? On the device, open " : "On the device, open ", h("code", "dev-url", p.setup[0].replace(/\/$/, "")), ".");
-  text.append(h("p", "dev-lead", `${p.qr ? "Scan this with your phone's camera. It sets the phone up" : "It sets the device up"}; then the device shows a code, which appears here to allow.`),
+  other.append(p.qr ? "No camera? On the device, open " : "On the device, open ", h("code", "dev-url", p.connect[0].replace(/\/$/, "")), ".");
+  text.append(h("p", "dev-lead", `${p.qr ? "Scan this with your phone's camera." : "The device connects there."} It warns once that the connection is not private, as it does not trust this computer yet: go on past it, and the page sets the device up. Then the device shows a code, which appears here to allow.`),
     other, ...(p.qr ? [] : [h("p", "set-note", "With qrencode installed, a QR code shows here for phones to scan.")]));
   row.append(text);
   const asks = h("div", "dev-list");
@@ -1290,7 +1294,7 @@ async function renderConnect() {
     copyKey.onclick = () => copy(appKey, copyKey);
     shown.append(h("code", "", appKey), copyKey);
     apps.append(shown, h("p", "set-note", "Shown this once: Chrysalis keeps only its hash. Apps send it as OpenAI's and Anthropic's SDKs send "
-      + "theirs, over HTTPS, so that computer trusts this one's authority (its setup page, or the app pointed at chrysalis-ca.crt)."));
+      + "theirs, over HTTPS, so that computer trusts this one's authority (its connect page, or the app pointed at chrysalis-ca.crt)."));
   }
   const fp = h("p", "set-note dev-fp");
   fp.append(`To be sure a device trusts this computer and not an impostor on the network, its certificate details show the same SHA-256 fingerprint for ${p.name}: `,
@@ -1306,7 +1310,7 @@ function openConnect() {
   connectView.showModal();
   void renderConnect();
 }
-// On the network a browser shows it trusts Chrysalis through the trust check (devices.ts), in a frame of the server's
+// A browser shows it trusts Chrysalis through the trust check (devices.ts), in a frame of the server's
 // (/check-frame): the page's own policy lets images in from itself only. One check at a time.
 let checking: Promise<boolean> | undefined;
 function checkTrust(): Promise<boolean> {
@@ -1494,11 +1498,12 @@ async function refreshStatus(again = true) {
     // a device on the network this computer has not let in, or one that shows again it trusts Chrysalis, once (devices.ts)
     if (r.status === 401) {
       if ((await r.json().catch(() => ({}))).check && again && await checkTrust()) return refreshStatus(false);
-      return location.replace("/pair");
+      return location.replace("/");                // the connect page, in the chat's place
     }
     status = await r.json();
   } catch { status = { state: "offline" }; }
   if (status.check) void checkTrust();             // past half its time: checked again before the gate has to
+  $("connect").hidden = !status.here;              // this computer's own screen only, at whichever address
   $("connect").classList.toggle("asking", !!status.waiting);
   if ((status.waiting ?? 0) > asked && !connectView.open) toast("A device is asking to join: Connect a device, the phone at the top");
   asked = status.waiting ?? 0;
@@ -2049,10 +2054,8 @@ async function openVoice() {
   tellVoice(voice);
   renderVoice();
   if (status.state === "offline") void start().then(() => refreshStatus());   // the first question finds the model loaded
-  // http://<this machine's address> is not a secure page, and there the browser has no microphone to give at all
   if (!navigator.mediaDevices?.getUserMedia) {
-    voice.error = isSecureContext ? "This browser gives no page a microphone"
-      : `The microphone needs a secure page: open https://${location.host} (after chrysalis start --lan)`;
+    voice.error = "This browser gives no page a microphone";
     return renderVoice();
   }
   void warmVoice(voice);
@@ -2901,8 +2904,8 @@ function remove(id: string) {
   else renderList();
 }
 
-// The Clipboard API only exists on HTTPS and localhost pages, not on the web chat on the LAN (plain HTTP). The copy
-// command works on every page: copy from a hidden textarea.
+// The copy command, from a hidden textarea: every browser has it, and it asks for nothing (the Clipboard API asks for a
+// permission in some).
 function copy(text: string, button: HTMLElement) {
   const area = h("textarea");
   area.value = text;
@@ -4185,7 +4188,6 @@ document.addEventListener("visibilitychange", () => { if (!document.hidden) void
 $("new-chat").innerHTML = `${icon("plus")}New chat`;
 $("export").innerHTML = icon("download");
 $("connect").innerHTML = icon("phone");
-$("connect").hidden = location.protocol === "https:";
 $("connect").onclick = openConnect;
 $("connect-close").innerHTML = icon("x");
 $("connect-close").onclick = () => connectView.close();
@@ -4204,8 +4206,8 @@ $("voice-dots").addEventListener("click", () => { if (voice?.reply || voice?.cli
 $("voice-pick").addEventListener("click", () => setVoicePop(!voicePop));
 buildControls();
 buildTools();
-// a page on the network starts by showing it trusts Chrysalis, so that its first requests find the gate open
-if (location.protocol === "https:") await checkTrust();
+// a page starts by showing it trusts Chrysalis, so that its first requests find the gate open
+await checkTrust();
 void loadCatalog();
 $("to-latest").innerHTML = icon("down");
 $("settings-reset").insertAdjacentHTML("afterbegin", icon("retry"));

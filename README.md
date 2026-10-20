@@ -16,56 +16,62 @@ About 6,100 lines: C++/HIP kernels and model code in `engine/` (3,500), the Pyth
 ./chrysalis.sh install        # once: systemd user services + ~/.local/bin/chrysalis (does not enable autostart)
 
 chrysalis start               # loads the model (~1.5 s), starts the web chat, prints both URLs:
-                              #   API http://127.0.0.1:8080/v1, web chat http://127.0.0.1:8081
+                              #   API http://127.0.0.1:8080/v1, web chat https://localhost:8081
 chrysalis start --lan         # the same, also on the local network: prints its URLs and a QR code that connects a phone
 chrysalis key                 # (with --lan) a key for an app on another computer to use the API with
 chrysalis stop                # stops both and frees the GPU (also: restart, status)
 chrysalis logs                # one line per request: prompt/cached tokens, TTFT, tok/s, draft acceptance
 ```
 
-`--lan` puts the web chat and the API on the local network, for the devices it lets in, and asks for the password once
-to let that network (and nothing outside it) through ufw, when ufw is on (TCP 8081-8083; another firewall needs the
-same); a plain `chrysalis start` or `chrysalis restart` goes back to this machine only. Chrysalis itself
-(`127.0.0.1:8080`) listens on this machine only: the network reaches its API through the web chat, over HTTPS at
-`https://<address>:8081/v1`, behind the same keys as the chat. A browser let in has its own; an app on another computer
-sends a key made here (Connect a device, or `chrysalis key`, shown once) as OpenAI's SDKs send theirs
-(`Authorization: Bearer`) or Anthropic's (`x-api-key`), and trusts this machine's authority (its setup page, or
-`chrysalis-ca.crt` as `NODE_EXTRA_CA_CERTS` or `SSL_CERT_FILE`). A reply streams through as it comes, and an app that
-hangs up stops it. The web chat is HTTPS on the network (`https://<address>:8081`) and plain HTTP on this machine
-(`http://127.0.0.1:8081`), as browsers give the microphone (voice mode) only to secure pages, which localhost is and
-`http://<address>` is not. Its certificate comes from an authority of this machine's own (`~/.config/chrysalis/tls`,
-made by `web/tls.ts`) whose name constraints let it vouch only for private addresses and local names, so trusting it
-trusts nothing else. From the network, only the devices this computer let in get past the chat's pages to its replies,
-tools and voice (`web/devices.ts`), and a browser only while it shows it trusts that authority. No server can see
-whether a browser checked the certificate it was shown, and a page loads all the same past a warning clicked through.
-So a trust check listens on a port of its own (`https://<address>:8083`, `CHRYSALIS_CHECK_PORT`) with a certificate of
-its own, from the same authority and made anew at each start: a browser's request reaches it only where the browser
-trusts the authority itself, since a warning clicked past covers the one certificate it was shown (per certificate in
-Chromium, per port too in Firefox), and an image cannot show a warning. A browser has to come through it to ask to
-join, and again every few minutes and after each restart (its chat does so by itself); past the warning, Chromium and
-Firefox get nowhere but to the setup page (`browser.test.ts`, which drives both). Connect a device (the phone at the
-top of the chat here) and `chrysalis status` show a QR code of the setup page, with no secret in it; a phone's camera
-opens it over plain HTTP (`http://<address>:8082`, `CHRYSALIS_SETUP_PORT`; the HTTPS chat would warn first; a card on
-the chat's sea, the butterfly above it and the aurora's night sky over the page), and it offers the authority the way
+The web chat is HTTPS always, on this machine and on the network. `chrysalis start` makes this computer's own browsers
+trust its authority, as mkcert does (Chromium's store and each Firefox profile's, by NSS's `certutil`; no password; a
+browser open since before then trusts it once it restarts). `--lan` puts the web chat and the API on the local network
+too, for the devices it lets in, and asks for the password once to let that network (and nothing outside it) through
+ufw, when ufw is on (TCP 8081-8083; another firewall needs the same); a plain `chrysalis start` or `chrysalis restart`
+goes back to this machine only. Chrysalis itself (`127.0.0.1:8080`) listens on this machine only: the network reaches
+its API through the web chat, over HTTPS at `https://<address>:8081/v1`, behind the same keys as the chat. A browser let
+in has its own; an app on another computer sends a key made here (Connect a device, or `chrysalis key`, shown once) as
+OpenAI's SDKs send theirs (`Authorization: Bearer`) or Anthropic's (`x-api-key`), and trusts this machine's authority
+(its connect page, or `chrysalis-ca.crt` as `NODE_EXTRA_CA_CERTS` or `SSL_CERT_FILE`). A reply streams through as it
+comes, and an app that hangs up stops it. The web chat is `https://localhost:8081` here and `https://<address>:8081` on
+the network (browsers give the microphone, voice mode, only to secure pages, which `http://<address>` is not). Its
+certificate comes from an authority of this machine's own (`~/.config/chrysalis/tls`, made by `web/tls.ts`) whose name
+constraints let it vouch only for private addresses and local names, so trusting it trusts nothing else. Only the
+devices this computer let in get past the chat's pages to its replies, tools and voice (`web/devices.ts`), and a browser
+only while it shows it trusts that authority, this computer's own too. No server can see whether a browser checked the
+certificate it was shown, and a page loads all the same past a warning clicked through. So a trust check listens on a
+port of its own (`https://<address>:8083` and here, `CHRYSALIS_CHECK_PORT`) with a certificate of its own, from the same
+authority and made anew at each start: a browser's request reaches it only where the browser trusts the authority
+itself, since a warning clicked past covers the one certificate it was shown (per certificate in Chromium, per port too
+in Firefox), and an image cannot show a warning. A browser has to come through it to ask to join, and again every few
+minutes and after each restart (its chat does so by itself); past the warning, Chromium and Firefox get the connect page
+at the chat's address and none of the chat's own files (`browser.test.ts`, which drives both). Connect a device (the
+phone at the top of the chat here) and `chrysalis status` show a QR code of the chat's address, with no secret in it. A
+new device's browser warns there once, as it does not trust the authority yet; past the warning, the connect page (a
+card on the chat's sea, the butterfly above it and the aurora's night sky over the page) offers the authority the way
 the device's system trusts one (a configuration profile on iPhone, iPad and Mac, the certificate on Android, Windows,
-Linux and ChromeOS, Firefox's own prompt in Firefox), says the few taps that trust it there, and goes on to the chat by
-itself once the trust check's image loads (`web/setup.ts`). There the device asks to join and shows a code of its
-own, one per device; Connect a device shows the same code beside Allow and Deny (`chrysalis allow <code>` in a
-terminal), and an ask lasts 10 minutes. Allowed, the device gets a 256-bit key of its own as a cookie (Secure,
-HttpOnly, SameSite=Strict, 400 days from its last visit), kept here as its SHA-256 only (`devices.json` beside the
-certificates); Connect a device lists the devices and removes one. Nothing secret crosses plain HTTP. Over plain HTTP someone on the network at that moment could send a
-page and an authority of their own: to be sure, a device's certificate details show the SHA-256 fingerprint that
-Connect a device and `chrysalis status` show. A new address (another network) gets a new certificate at the next
-start, from the same authority, which devices keep trusting. Either way both
-servers answer only requests addressed to an IP address or to this machine's name, which keeps web pages from other
-sites out (DNS rebinding). `systemctl --user enable chrysalis chrysalis-web` starts both at login. `chrysalis serve`
-runs the server in the foreground instead of as a service (it takes `--port`, `--draft`, `--use`, ...:
+Linux and ChromeOS, Firefox's own prompt in Firefox) and leads through the few taps that trust it there, one at a time
+(`web/setup.ts`). It is offered over that HTTPS, as Chromium holds back every download a plain-HTTP page makes. Once the
+trust check's image loads, the same page asks to join and shows a code of its own, one per device; Connect a device
+shows the same code beside Allow and Deny (`chrysalis allow <code>` in a terminal), and an ask lasts 10 minutes.
+Allowed, the device gets a 256-bit key of its own as a cookie (Secure, HttpOnly, SameSite=Strict, 400 days from its last
+visit), kept here as its SHA-256 only (`devices.json` beside the certificates), and the chat opens in the page's place;
+Connect a device lists the devices and removes one. This computer, at `localhost` and at its own network address, needs
+no code, but its browser too gets the chat only once it trusts the authority (`chrysalis start` sets it up; a browser
+open since before then trusts it once it restarts). What a browser gets before it trusts the authority comes over
+connections that close after each answer: a browser keeps using one it went past a warning on, and marks the page not
+secure on it even after it trusts the authority, so the chat opens on a new one, verified. Until a device trusts the
+authority, someone on the network at that moment could answer with a page and an authority of their own: to be sure, a
+device's certificate details show the SHA-256 fingerprint that Connect a device and `chrysalis status` show. A new
+address (another network) gets a new certificate at the next start, from the same authority, which devices keep
+trusting. Either way both servers answer only requests addressed to an IP address or to this machine's name, which keeps
+web pages from other sites out (DNS rebinding). `systemctl --user enable chrysalis chrysalis-web` starts both at login.
+`chrysalis serve` runs the server in the foreground instead of as a service (it takes `--port`, `--draft`, `--use`, ...:
 `chrysalis serve -h`). Models: `qwen3.8-27b` (thinking, reasoning effort `xhigh` by default; OpenCode variants pick
 `medium`/`low`) and `qwen3.8-27b-fast` (no thinking; also used for session titles), and the same pair for
-`qwen3.8-flash-next`. One model is on the GPU at a time: a request naming the other one switches
-(titles never do); `chrysalis status` says which is loaded (and the PCIe link, when it came up slow: see Notes).
-OpenCode reaches it as an OpenAI-compatible provider at `http://127.0.0.1:8080/v1`, set up in
-`~/.config/opencode/opencode.json`.
+`qwen3.8-flash-next`. One model is on the GPU at a time: a request naming the other one switches (titles never do);
+`chrysalis status` says which is loaded (and the PCIe link, when it came up slow: see Notes). OpenCode reaches it as an
+OpenAI-compatible provider at `http://127.0.0.1:8080/v1`, set up in `~/.config/opencode/opencode.json`.
 
 `/metrics` on the API port is Prometheus's text format (`chrysalis/metrics.py`): counters of the replies by model and
 finish reason, their prompt, cached and written tokens, prefill and decode seconds and decode steps (tok/s and tokens

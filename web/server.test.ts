@@ -12,6 +12,11 @@ import { WebStandardStreamableHTTPServerTransport } from "@modelcontextprotocol/
 import { fakeMcp } from "./fake-mcp";
 import { lanAddresses } from "./tls";
 
+// Each server here is HTTPS with an authority of its own, made in a folder of each run's (TLS): what checks
+// certificates is openssl here and the browsers in browser.test.ts, not these requests
+process.env.NODE_TLS_REJECT_UNAUTHORIZED = "0";
+const TLS = () => mkdtempSync(`${tmpdir()}/chrysalis-tls-`);
+
 const CHUNKS = 12, GAP_MS = 20;
 let chrysalisAborted = 0;
 // A tool script, as the user's message: "run ", the rounds as JSON (each the calls Chrysalis answers with, or its
@@ -112,7 +117,8 @@ let web: Bun.Subprocess<"ignore", "pipe", "inherit">, base = "", port = "";
 beforeAll(async () => {
   web = Bun.spawn([process.execPath, "server.ts"], {
     cwd: import.meta.dir, stdout: "pipe", stderr: "inherit",
-    env: { ...process.env, PORT: "0", CHRYSALIS_URL: `http://127.0.0.1:${fake.port}`, CHRYSALIS_HOST: "127.0.0.1", NODE_ENV: "production", CHRYSALIS_MCP_CONFIG: CONFIG },
+    env: { ...process.env, PORT: "0", CHRYSALIS_URL: `http://127.0.0.1:${fake.port}`, CHRYSALIS_HOST: "127.0.0.1", NODE_ENV: "production", CHRYSALIS_MCP_CONFIG: CONFIG,
+      CHRYSALIS_TLS_DIR: TLS(), CHRYSALIS_CHECK_PORT: "0" },
   });
   const reader = web.stdout.getReader(), dec = new TextDecoder();
   let out = "";
@@ -472,7 +478,8 @@ const Socket = WebSocket as unknown as new (url: string, o: { headers?: Record<s
 async function voiceServer(env: Record<string, string>) {
   const proc = Bun.spawn([process.execPath, "server.ts"], {
     cwd: import.meta.dir, stdout: "pipe", stderr: "inherit",
-    env: { ...process.env, PORT: "0", CHRYSALIS_URL: `http://127.0.0.1:${fake.port}`, CHRYSALIS_HOST: "127.0.0.1", NODE_ENV: "production", CHRYSALIS_MCP_CONFIG: CONFIG, ...env },
+    env: { ...process.env, PORT: "0", CHRYSALIS_URL: `http://127.0.0.1:${fake.port}`, CHRYSALIS_HOST: "127.0.0.1", NODE_ENV: "production", CHRYSALIS_MCP_CONFIG: CONFIG,
+      CHRYSALIS_TLS_DIR: TLS(), CHRYSALIS_CHECK_PORT: "0", ...env },
   });
   const reader = proc.stdout.getReader(), dec = new TextDecoder();
   let out = "";
@@ -536,26 +543,36 @@ test("voice: a speech service that cannot start says how to install one", async 
 });
 
 // The web server on the network (CHRYSALIS_HOST 0.0.0.0), with its certificates and devices in `dir`: its chat's URLs
-// (this machine's first, then each address's), its setup pages' and its trust checks'
-async function onNetwork(dir = mkdtempSync(`${tmpdir()}/chrysalis-tls-`)) {
+// (this machine's first, then each address's), each address's trust check and this machine's. Requests from here to an
+// address stand in for other devices' unless `self` (this machine at its own address, as it is).
+async function onNetwork(dir = TLS(), self = false) {
   const ips = lanAddresses();
   expect(ips.length).toBeGreaterThan(0);
   const proc = Bun.spawn([process.execPath, "server.ts"], {
     cwd: import.meta.dir, stdout: "pipe", stderr: "inherit",
     env: { ...process.env, PORT: "0", CHRYSALIS_URL: `http://127.0.0.1:${fake.port}`, CHRYSALIS_HOST: "0.0.0.0", NODE_ENV: "production", CHRYSALIS_MCP_CONFIG: CONFIG,
-      CHRYSALIS_TLS_DIR: dir, CHRYSALIS_SETUP_PORT: "0", CHRYSALIS_CHECK_PORT: "0", CHRYSALIS_VOICE_CMD: JSON.stringify([process.execPath, `${import.meta.dir}/fake-voice.ts`]),
+      CHRYSALIS_SELF_AS_NETWORK: self ? "" : "1",
+      CHRYSALIS_TLS_DIR: dir, CHRYSALIS_CHECK_PORT: "0", CHRYSALIS_VOICE_CMD: JSON.stringify([process.execPath, `${import.meta.dir}/fake-voice.ts`]),
       FAKE_VOICE_LOG: `${dir}/voice.log` },
   });
   const reader = proc.stdout.getReader(), dec = new TextDecoder();
   let out = "";
-  while ((out.match(/chrysalis (web|setup|check): \S+/g) ?? []).length < 1 + 3 * ips.length) {
+  while ((out.match(/chrysalis (web|check): \S+/g) ?? []).length < 2 + 2 * ips.length) {
     const { value, done } = await reader.read();
     if (done) throw new Error(`server.ts exited: ${out}`);
     out += dec.decode(value);
   }
   const strip = (m: RegExpExecArray) => m[1].replace(/\/$/, "");
-  return { proc, dir, ips, urls: [...out.matchAll(/chrysalis web: (\S+)/g)].map(strip), setups: [...out.matchAll(/chrysalis setup: (\S+)/g)].map(strip),
-    checks: [...out.matchAll(/chrysalis check: (\S+)/g)].map(strip) };
+  const checks = [...out.matchAll(/chrysalis check: (\S+)/g)].map(strip);
+  return { proc, dir, ips, urls: [...out.matchAll(/chrysalis web: (\S+)/g)].map(strip), checks: checks.filter((u) => !u.includes("//127.")),
+    checkHere: checks.find((u) => u.includes("//127."))! };
+}
+// This machine's browser let in, as its connect page lets it in once it trusts Chrysalis: its cookie
+async function letInHere(url: string, check: string) {
+  const nonce = crypto.randomUUID().replaceAll("-", "");
+  await fetch(`${check}/check.gif?n=${nonce}`);
+  const r = await fetch(`${url}/pair/ask`, { method: "POST", headers: json, body: JSON.stringify({ nonce, name: "Linux · Chrome" }) });
+  return r.headers.get("set-cookie")!.split(";")[0];
 }
 // the certificate a TLS server at ip:port shows, and openssl's verdict on it against the authority in `ca`
 function shown(ip: string, port: string, ca: string) {
@@ -564,22 +581,21 @@ function shown(ip: string, port: string, ca: string) {
   return { cert: out.match(/-----BEGIN CERTIFICATE-----[\s\S]*?-----END CERTIFICATE-----/)?.[0], ok: out.includes("Verify return code: 0 (ok)") };
 }
 
-test("on the network (CHRYSALIS_HOST 0.0.0.0): this machine keeps plain HTTP; each address gets HTTPS whose certificate the server's own authority signs, and no plain HTTP; that authority vouches for nothing public; a setup port of plain HTTP serves the authority for devices to trust, and nothing else; the trust check has a certificate of its own from the same authority", async () => {
-  const { proc, dir, ips, urls, setups, checks } = await onNetwork();
+test("on the network (CHRYSALIS_HOST 0.0.0.0): this machine and each address get HTTPS whose certificate the server's own authority signs, and no plain HTTP; that authority vouches for nothing public; a device without a key gets the connect page and the authority as its system takes it, and none of the chat's files; the trust check has a certificate of its own from the same authority", async () => {
+  const { proc, dir, ips, urls, checks, checkHere } = await onNetwork();
   try {
     const port = new URL(urls[0]).port;
-    expect(urls[0]).toBe(`http://127.0.0.1:${port}`);
-    expect(urls.slice(1)).toEqual(ips.map((ip) => `https://${ip}:${port}`));
+    expect(urls).toEqual([`https://127.0.0.1:${port}`, ...ips.map((ip) => `https://${ip}:${port}`)]);
     const ca = await (await fetch(`${urls[0]}/chrysalis-ca.crt`)).text();
     writeFileSync(`${dir}/ca-served.pem`, ca);
     // openssl checks the chain: Bun's BoringSSL has no IP name constraints ("unsupported name constraint type"), the
     // browsers' verifiers do
     const tlsCheck = (ip: string, ...with_: string[]) => Bun.spawnSync(["openssl", "s_client", "-connect", `${ip}:${port}`, "-verify_return_error",
       "-verify_ip", ip, ...with_], { stdin: new Uint8Array(), stdout: "pipe", stderr: "pipe" });
-    for (const [k, u] of urls.slice(1).entries()) {
-      const good = tlsCheck(ips[k], "-CAfile", `${dir}/ca-served.pem`);
+    for (const u of urls) {
+      const ip = new URL(u).hostname, good = tlsCheck(ip, "-CAfile", `${dir}/ca-served.pem`);
       expect(good.stdout.toString()).toContain("Verify return code: 0 (ok)");
-      expect(tlsCheck(ips[k]).exitCode).not.toBe(0);                       // nothing vouches for it without the authority
+      expect(tlsCheck(ip).exitCode).not.toBe(0);                           // nothing vouches for it without the authority
       expect((await fetch(`${u}/`, { tls: { rejectUnauthorized: false } })).status).toBe(200);
       expect(await fetch(`${u.replace("https:", "http:")}/`).then((r) => `plain ${r.status}`, () => "refused")).toBe("refused");
     }
@@ -590,17 +606,23 @@ test("on the network (CHRYSALIS_HOST 0.0.0.0): this machine keeps plain HTTP; ea
     expect(verify.exitCode).not.toBe(0);
     expect(verify.stdout.toString() + verify.stderr.toString()).toContain("permitted subtree violation");
 
-    // Setting a device up: plain HTTP at each address, its page pointing at that address's HTTPS, and the authority as
-    // the devices take it, checked against openssl's reading of the authority and Python's of Apple's profile format
-    expect(setups.map((u) => new URL(u).hostname)).toEqual(ips);
+    // A device without a key, at each address: the connect page in the chat's place, and the authority as the devices
+    // take it, checked against openssl's reading of the authority and Python's of Apple's profile format
     const der = Bun.spawnSync(["openssl", "x509", "-in", `${dir}/ca.pem`, "-outform", "DER"]).stdout;
     const fingerprint = Bun.spawnSync(["openssl", "x509", "-in", `${dir}/ca.pem`, "-noout", "-fingerprint", "-sha256"]).stdout.toString().trim().split("=")[1];
-    for (const [k, s] of setups.entries()) {
-      const page = await fetch(`${s}/`);
-      expect([page.status, page.headers.get("content-type")]).toEqual([200, "text/html; charset=utf-8"]);
+    const insecure = { tls: { rejectUnauthorized: false } };
+    const here = { headers: { cookie: await letInHere(urls[0], checkHere) } };
+    const chatJs = (await (await fetch(`${urls[0]}/`, here)).text()).match(/src="(\/[^"]+\.js)"/)![1];      // the chat's bundle, as this machine gets it
+    for (const [k, u] of urls.slice(1).entries()) {
+      const page = await fetch(`${u}/`, insecure);
+      expect([page.status, page.headers.get("content-type"), page.headers.get("cache-control")]).toEqual([200, "text/html; charset=utf-8", "no-store"]);
       const html = await page.text();
-      expect(html).toContain(JSON.stringify(`https://${ips[k]}:${port}/`));
-      const profile = await fetch(`${s}/chrysalis.mobileconfig`);
+      expect([html.includes("<title>Connect to Chrysalis</title>"), html.includes(chatJs), html.includes(JSON.stringify(`${checks[k]}/check.gif`))]).toEqual([true, false, true]);
+      expect([(await fetch(`${u}${chatJs}`, insecure)).status, (await fetch(`${urls[0]}${chatJs}`, here)).status]).toEqual([404, 200]);
+      // another address opened in a browser goes to the connect page
+      const other = await fetch(`${u}/pair`, { ...insecure, redirect: "manual", headers: { "Sec-Fetch-Mode": "navigate" } });
+      expect([other.status, other.headers.get("location")]).toEqual([302, "/"]);
+      const profile = await fetch(`${u}/chrysalis.mobileconfig`, insecure);
       expect(profile.headers.get("content-type")).toBe("application/x-apple-aspen-config");
       writeFileSync(`${dir}/served.mobileconfig`, Buffer.from(await profile.arrayBuffer()));
       const read = Bun.spawnSync([`${import.meta.dir}/../data/venv/bin/python`, "-c", "import plistlib, sys; p = plistlib.load(open(sys.argv[1], 'rb')); "
@@ -609,12 +631,9 @@ test("on the network (CHRYSALIS_HOST 0.0.0.0): this machine keeps plain HTTP; ea
       const [types, ...rest] = Buffer.from(read.stdout).toString("latin1").split("\n");
       expect(types).toBe("Configuration com.apple.security.root");
       expect(Buffer.from(rest.join("\n"), "latin1").equals(Buffer.from(der))).toBe(true);
-      expect(Buffer.from(await (await fetch(`${s}/chrysalis-ca.crt`)).arrayBuffer()).equals(Buffer.from(der))).toBe(true);
-      expect((await fetch(`${s}/chrysalis-ca-firefox.crt`)).headers.get("content-type")).toBe("application/x-x509-ca-cert");
-      const other = await fetch(`${s}/api/chat`, { redirect: "manual" });
-      expect([other.status, other.headers.get("location")]).toEqual([302, "/"]);
-      expect((await fetch(`${s}/api/chat`, { method: "POST", body: "{}", headers: { "Content-Type": "application/json" } })).status).toBe(405);
-      expect(await fetch(s.replace("http:", "https:"), { tls: { rejectUnauthorized: false } }).then(() => "https", () => "refused")).toBe("refused");
+      expect(await (await fetch(`${u}/chrysalis-ca.crt`, insecure)).text()).toBe(readFileSync(`${dir}/ca.pem`, "utf8"));
+      const firefox = await fetch(`${u}/chrysalis-ca-firefox.crt`, insecure);
+      expect([firefox.headers.get("content-type"), Buffer.from(await firefox.arrayBuffer()).equals(Buffer.from(der))]).toEqual(["application/x-x509-ca-cert", true]);
       const gif = await fetch(`${checks[k]}/check.gif`, { tls: { rejectUnauthorized: false } });
       expect([gif.status, gif.headers.get("content-type")]).toEqual([200, "image/gif"]);
       // the trust check's certificate: the same authority's, not the chat's (a warning clicked past for the chat's covers that one only)
@@ -622,7 +641,35 @@ test("on the network (CHRYSALIS_HOST 0.0.0.0): this machine keeps plain HTTP; ea
       expect([atCheck.ok, atChat.ok, !!atCheck.cert && atCheck.cert !== atChat.cert]).toEqual([true, true, true]);
     }
     const pair = await (await fetch(`${urls[0]}/api/pair`)).json();
-    expect([pair.lan, pair.fingerprint, pair.setup.map((u: string) => u.replace(/\/$/, "")).sort()]).toEqual([true, fingerprint, [...setups].sort()]);
+    expect([pair.lan, pair.fingerprint, pair.connect.map((u: string) => u.replace(/\/$/, "")).sort()]).toEqual([true, fingerprint, urls.slice(1).sort()]);
+  } finally {
+    proc.kill();
+  }
+});
+
+test("on the network, this machine (at 127.0.0.1 and at its own address) lets devices in with no key, but its browser gets the chat only once it shows it trusts Chrysalis, with no code; nothing past a certificate warning keeps its connection", async () => {
+  const { proc, urls, checks } = await onNetwork(undefined, true);
+  try {
+    const insecure = { tls: { rejectUnauthorized: false } }, net = urls[1], json = { "Content-Type": "application/json" };
+    const connecting = async (cookie = "") => (await (await fetch(`${net}/`, { ...insecure, headers: cookie ? { cookie } : {} })).text())
+      .includes("<title>Connect to Chrysalis</title>");
+    const status = await (await fetch(`${net}/api/status`, insecure)).json(), pair = await fetch(`${net}/api/pair`, insecure);
+    expect([await connecting(), status.here, pair.status, (await pair.json()).lan]).toEqual([true, true, 200, true]);
+    expect((await (await fetch(`${urls[0]}/`)).text()).includes("<title>Connect to Chrysalis</title>")).toBe(true);   // at 127.0.0.1 too
+    // asking takes a nonce that came through the trust check, as any browser's; then in, with no code
+    const ask = (nonce: string) => fetch(`${net}/pair/ask`, { ...insecure, method: "POST", headers: json, body: JSON.stringify({ nonce, name: "Linux · Chrome" }) });
+    const n = crypto.randomUUID().replaceAll("-", "");
+    expect((await ask(n)).status).toBe(403);
+    await fetch(`${checks[0]}/check.gif?n=${n}`, insecure);
+    const asked = await ask(n), cookie = asked.headers.get("set-cookie")!.split(";")[0];
+    expect([await asked.json(), await connecting(cookie)]).toEqual([{ in: true }, false]);
+    expect((await (await fetch(`${urls[0]}/api/pair`)).json()).devices.map((d: { name: string }) => d.name)).toEqual(["Linux · Chrome (this computer)"]);
+    // a browser keeps using a connection it went past the warning on, and shows the page as not secure on it after it
+    // trusts Chrysalis: the connect page's answers close theirs (curl asks twice on one connection where it may)
+    const twice = (path: string, ...args: string[]) => Bun.spawnSync(["curl", "-sk", "-v", ...args, "-o", "/dev/null", `${net}${path}`, ...args, "-o", "/dev/null", `${net}${path}`],
+      { stderr: "pipe" }).stderr.toString().match(/Re-?using existing/) !== null;
+    expect([twice("/"), twice("/pair/ask", "-H", "Content-Type: application/json", "-d", "{}"), twice("/chrysalis-ca.crt"), twice("/", "-H", `Cookie: ${cookie}`)])
+      .toEqual([false, false, false, true]);
   } finally {
     proc.kill();
   }
@@ -647,8 +694,10 @@ test("on the network only the devices this computer let in get past the pages, a
       ws.onerror = () => done("refused");
     });
 
-    // without a key: the pages, not what they talk to
-    expect([(await asked("/")).status, (await asked("/pair")).status]).toEqual([200, 200]);
+    // without a key: the connect page, not what it talks to
+    const connecting = async (cookie = "", base = net) => (await (await fetch(`${base}/`, { ...insecure, headers: cookie ? { cookie } : {} })).text())
+      .includes("<title>Connect to Chrysalis</title>");
+    expect(await connecting()).toBe(true);
     expect([(await asked("/api/status")).status, (await asked("/api/tools")).status, (await asked("/api/pair")).status,
       (await asked("/api/chat", { method: "POST", body: JSON.stringify({ stream: true, messages: [] }), headers: json })).status,
       (await asked("/api/chrysalis/stop", { method: "POST" })).status]).toEqual([401, 401, 401, 401, 401]);
@@ -677,7 +726,7 @@ test("on the network only the devices this computer let in get past the pages, a
     const status = await asked("/api/status", { headers: { cookie } });
     expect([status.status, status.headers.get("set-cookie")?.split(";")[0]]).toEqual([200, cookie]);   // set again as it is used
     expect([(await asked("/api/tools", { headers: { cookie } })).status, await voice(cookie)]).toEqual([200, "open"]);
-    expect((await asked("/pair", { headers: { cookie } })).headers.get("location")).toBe("/");
+    expect(await connecting(cookie)).toBe(false);                            // the chat itself
     expect((await asked("/api/pair/key", { method: "POST", body: "{}", headers: { ...json, cookie } })).status).toBe(403);   // only this computer makes keys
     expect(readFileSync(`${dir}/devices.json`, "utf8")).not.toContain(key);
 
@@ -737,7 +786,7 @@ test("on the network only the devices this computer let in get past the pages, a
     expect(listed.devices.map((d: { name: string; kind: string }) => [d.name, d.kind])).toEqual([["Test phone", "browser"], ["Test app", "app"]]);
     for (const d of listed.devices) expect((await fetch(`${here2}/api/pair/${d.id}`, { method: "DELETE" })).status).toBe(204);
     expect([(await fetch(`${net2}/api/status`, { ...insecure, headers: { cookie } })).status,
-      (await completion({ authorization: `Bearer ${appKey}` }, undefined, [], net2)).status]).toEqual([401, 401]);
+      (await completion({ authorization: `Bearer ${appKey}` }, undefined, [], net2)).status, await connecting(cookie, net2)]).toEqual([401, 401, true]);
   } finally {
     proc.kill();
   }

@@ -1,7 +1,8 @@
-// The web chat over HTTPS on the local network (`chrysalis start --lan`). Browsers give the microphone (voice mode)
-// only to secure pages, and http://<this machine's address> is not one (localhost is). A certificate authority of this
-// machine's own signs the server's certificate; its name constraints let it vouch only for private addresses and local
-// names, so a device that trusts it (chrysalis-ca.crt, installed once) trusts nothing else because of it.
+// The web chat's HTTPS, on this machine and with `chrysalis start --lan` on the local network: a page a browser trusts
+// everywhere (and gives the microphone, voice mode, which http://<this machine's address> does not get). A certificate
+// authority of this machine's own signs the server's certificate; its name constraints let it vouch only for private
+// addresses and local names, so a browser or device that trusts it (chrysalis-ca.crt, installed once; this machine's
+// browsers by `chrysalis start`) trusts nothing else because of it.
 import { X509Certificate } from "node:crypto";
 import { createSocket } from "node:dgram";
 import { chmodSync, existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
@@ -29,7 +30,7 @@ function openssl(...args: string[]) {
   return { ok: r.exitCode === 0, err: r.stderr.toString().trim() };
 }
 
-export function lanTls(dir = process.env.CHRYSALIS_TLS_DIR ?? `${homedir()}/.config/chrysalis/tls`) {
+export function webTls(dir = process.env.CHRYSALIS_TLS_DIR ?? `${homedir()}/.config/chrysalis/tls`) {
   mkdirSync(dir, { recursive: true, mode: 0o700 });
   const host = hostname().toLowerCase(), ec = ["-newkey", "ec", "-pkeyopt", "ec_paramgen_curve:prime256v1", "-nodes"];
   const run = (...args: string[]) => {

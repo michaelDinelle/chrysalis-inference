@@ -426,7 +426,7 @@ export class Ocean {
 
   // `layer`: the room the sea fills (under the top bar, behind the message box), shown while a new chat is. `box`: what
   // the water is quiet around and the butterfly floats above, in the room between it and the layer's top, and `hint` the
-  // line under it (the message box). A device's setup page (setup.ts) names its card and the room the butterfly has.
+  // line under it (the message box). A device's connect page (setup.ts) names its card and the room the butterfly has.
   private boxAt: string;
   private hintAt: string;
   private roomAt: string;
@@ -437,7 +437,7 @@ export class Ocean {
     this.dress(this.canvas);
     onTheme(() => { this.readColors(); this.wake(); });
     this.still.addEventListener("change", () => this.wake());
-    addEventListener("scroll", () => this.layout(), { passive: true });   // a setup page scrolls its card; the chat's window never scrolls
+    addEventListener("scroll", () => this.layout(), { passive: true });   // the connect page scrolls its card; the chat's window never scrolls
   }
 
   private dress(c: HTMLCanvasElement) {
@@ -573,7 +573,7 @@ export class Ocean {
     const column = box && box.width > 0 ? box : r, top = box && box.width > 0 ? box.top : r.bottom;
     this.box = box && box.width > 0 ? [box.left, box.top, box.right, Math.max(box.bottom, hint?.height ? hint.bottom : 0)] : [-1e4, -1e4, -1e4, -1e4];
     const room = this.roomAt ? document.querySelector(this.roomAt)?.getBoundingClientRect() : undefined;
-    if (room) {                                     // a setup page's: it scrolls, and spans the window's width
+    if (room) {                                     // the connect page's: it scrolls, and spans the window's width
       this.center = [room.left + room.width / 2, room.top + room.height * 0.5];
       this.flyW = Math.min(room.height * 0.8 * VIEW_W / VIEW_H, r.width * 0.92);
     } else {
