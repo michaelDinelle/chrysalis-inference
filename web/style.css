@@ -738,6 +738,12 @@ main { position: relative; }
 .set-note { margin: 8px 0 0; color: var(--faint); font-size: 12px; line-height: 1.45; }
 .set-switch { display: flex; align-items: center; justify-content: space-between; gap: 12px; min-height: 30px; font-size: 13.5px; }
 label.set-switch { cursor: pointer; }
+.dev-row { display: flex; align-items: center; gap: 14px; }
+.dev-qr { flex: none; width: 132px; height: 132px; border-radius: 10px; background: #fff; image-rendering: pixelated; }
+.dev-text { min-width: 0; font-size: 13px; }
+.dev-text > p { margin: 0 0 6px; }
+.dev-url { display: inline-block; padding: 2px 7px; border-radius: 6px; background: var(--code); font: 12.5px var(--mono); overflow-wrap: anywhere; user-select: all; }
+.dev-fp code { font: 11px var(--mono); overflow-wrap: anywhere; }
 .set-switch + .set-switch { margin-top: 8px; }
 #tools-knobs:not(:empty) { margin-top: 10px; }
 .allow-list { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; margin-top: 10px; }

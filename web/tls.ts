@@ -2,12 +2,24 @@
 // only to secure pages, and http://<this machine's address> is not one (localhost is). A certificate authority of this
 // machine's own signs the server's certificate; its name constraints let it vouch only for private addresses and local
 // names, so a device that trusts it (chrysalis-ca.crt, installed once) trusts nothing else because of it.
+import { X509Certificate } from "node:crypto";
+import { createSocket } from "node:dgram";
 import { chmodSync, existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { homedir, hostname, networkInterfaces } from "node:os";
 
 // IPv4 only: the CA's constraints name the private IPv4 ranges, and a network's IPv6 addresses are usually global
 export const lanAddresses = () =>
   Object.values(networkInterfaces()).flat().flatMap((a) => (a && !a.internal && a.family === "IPv4" ? [a.address] : []));
+
+// The address other devices reach this machine at: the one its default route leaves from (a container bridge's or a
+// VPN's is not), found by connecting a UDP socket, which sends nothing; else the first one.
+export function routeAddress(): Promise<string | undefined> {
+  return new Promise((resolve) => {
+    const s = createSocket("udp4"), done = (a?: string) => { s.close(); resolve(a ?? lanAddresses()[0]); };
+    s.on("error", () => done());
+    s.connect(9, "192.0.2.1", () => done(s.address().address));   // TEST-NET-1: routed like any public address
+  });
+}
 
 const PRIVATE = ["10.0.0.0/255.0.0.0", "172.16.0.0/255.240.0.0", "192.168.0.0/255.255.0.0", "100.64.0.0/255.192.0.0",
   "169.254.0.0/255.255.0.0", "127.0.0.0/255.0.0.0"];                  // 100.64/10: Tailscale's addresses
@@ -42,5 +54,9 @@ export function lanTls(dir = process.env.CHRYSALIS_TLS_DIR ?? `${homedir()}/.con
     writeFileSync(`${dir}/names`, names);
   }
   for (const k of ["ca.key", "server.key"]) chmodSync(`${dir}/${k}`, 0o600);
-  return { cert: readFileSync(`${dir}/server.pem`, "utf8"), key: readFileSync(`${dir}/server.key`, "utf8"), ca: readFileSync(`${dir}/ca.pem`, "utf8") };
+  const ca = readFileSync(`${dir}/ca.pem`, "utf8"), x = new X509Certificate(ca);
+  // the authority as devices take it (DER: Apple's profiles, Android's installer), its name and its SHA-256 fingerprint
+  // as their certificate details show it
+  return { cert: readFileSync(`${dir}/server.pem`, "utf8"), key: readFileSync(`${dir}/server.key`, "utf8"), ca, caDer: Uint8Array.from(x.raw),
+    caName: x.subject.replace(/^CN=/, ""), fingerprint: x.fingerprint256 };
 }

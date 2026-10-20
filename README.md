@@ -17,20 +17,26 @@ About 6,100 lines: C++/HIP kernels and model code in `engine/` (3,500), the Pyth
 
 chrysalis start               # loads the model (~1.5 s), starts the web chat, prints both URLs:
                               #   API http://127.0.0.1:8080/v1, web chat http://127.0.0.1:8081
-chrysalis start --lan         # the same, also on the local network: prints its URLs and a QR code for phones
+chrysalis start --lan         # the same, also on the local network: prints its URLs and a QR code that sets devices up
 chrysalis stop                # stops both and frees the GPU (also: restart, status)
 chrysalis logs                # one line per request: prompt/cached tokens, TTFT, tok/s, draft acceptance
 ```
 
-`--lan` is for a trusted home network, without logins; the firewall has to let other devices in (TCP 8080-8081), and
-a plain `chrysalis start` or `chrysalis restart` goes back to this machine only. The API stays plain HTTP; the web chat
-is HTTPS on the network (`https://<address>:8081`) and plain HTTP on this machine (`http://127.0.0.1:8081`), as browsers
-give the microphone (voice mode) only to secure pages, which localhost is and `http://<address>` is not. Its certificate
-comes from an authority of this machine's own (`~/.config/chrysalis/tls`, made by `web/tls.ts`) whose name constraints
-let it vouch only for private addresses and local names: a device warns about the certificate until it trusts
-`https://<address>:8081/chrysalis-ca.crt` (macOS: open it, then Always Trust in Keychain Access; iOS: install the
-profile, then turn it on in Settings > General > About > Certificate Trust Settings), and trusting it trusts nothing
-else. A new address (another network) gets a new certificate at the next start, from the same authority. Either way both
+`--lan` is for a trusted home network, without logins; the firewall has to let other devices in (TCP 8080-8082; with
+ufw, `chrysalis status` prints the rule), and a plain `chrysalis start` or `chrysalis restart` goes back to this machine
+only. The API stays plain HTTP; the web chat is HTTPS on the network (`https://<address>:8081`) and plain HTTP on this
+machine (`http://127.0.0.1:8081`), as browsers give the microphone (voice mode) only to secure pages, which localhost
+is and `http://<address>` is not. Its certificate comes from an authority of this machine's own (`~/.config/chrysalis/tls`,
+made by `web/tls.ts`) whose name constraints let it vouch only for private addresses and local names, so trusting it
+trusts nothing else. A device is set up once, from the QR code `chrysalis start --lan` and `chrysalis status` print (and
+Settings' Other devices shows): it opens a setup page over plain HTTP (`http://<address>:8082`, `CHRYSALIS_SETUP_PORT`;
+the HTTPS chat would warn first), which offers the authority the way the device's system trusts one (a configuration
+profile on iPhone, iPad and Mac, the certificate on Android, Windows, Linux and ChromeOS, Firefox's own prompt in
+Firefox), says the few taps that trust it there, and opens the chat over HTTPS by itself as soon as the device does
+(it keeps loading an image from the chat's address, which loads only then; `web/setup.ts`). The setup port serves the
+authority's certificate and nothing else. Over plain HTTP someone on the network at that moment could swap it: the page,
+`chrysalis status` and the device's own certificate details show its SHA-256 fingerprint to compare. A new address
+(another network) gets a new certificate at the next start, from the same authority, which devices keep trusting. Either way both
 servers answer only requests addressed to an IP address or to this machine's name, which keeps web pages from other
 sites out (DNS rebinding). `systemctl --user enable chrysalis chrysalis-web` starts both at login. `chrysalis serve`
 runs the server in the foreground instead of as a service (it takes `--port`, `--draft`, `--use`, ...:
@@ -630,6 +636,7 @@ chrysalis/
 web/      server.ts app.ts files.ts sampler.ts wire.ts      Bun web UI; tools.ts tool-fetch.ts tool-agent.ts tool-mcp.ts its tools; tls.ts HTTPS (--lan)
           voice.ts voice-worklet.js                     voice mode's client: the microphone, playback, the protocol
           ocean.ts logo.svg logo-thin.svg               a new chat's sea of characters and its butterfly (WebGL2)
+          setup.ts                                      a device's setup page for the HTTPS chat on the network
           index.html style.css                          (make test_web: sampler.test.ts, server.test.ts with fake-mcp.ts
                                                         and fake-voice.ts, browser.test.ts: the page in headless Chromium;
                                                         bench-voice.ts: voice mode's latency end to end)

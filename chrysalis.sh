@@ -15,7 +15,7 @@ usage: chrysalis <command>
 
   start     load the model, start the web chat, print their URLs
             (requests pick the model: qwen3.8-27b or qwen3.8-flash-next; Chrysalis switches between them)
-            --lan: also on the local network, with a QR code for phones
+            --lan: also on the local network, with a QR code that sets phones and computers up
   stop      stop both and free the GPU
   restart   stop, then start (after rebuilding or editing the code; takes --lan too)
   status    is it running, and where
@@ -31,6 +31,12 @@ EOF
 # there (set by the web chat's model picker) is the model Chrysalis loads at start.
 host() { systemctl --user show-environment | sed -n 's/^CHRYSALIS_HOST=//p'; }
 lan_ip() { ip -4 route show default | awk '{ for (i = 1; i < NF; i++) if ($i == "src") { print $(i + 1); exit } }'; }
+# the subnet on the default route's interface: what a firewall lets in
+lan_subnet() {
+    local dev
+    dev=$(ip -4 route show default | awk '{ for (i = 1; i < NF; i++) if ($i == "dev") { print $(i + 1); exit } }')
+    ip -4 route show dev "$dev" scope link proto kernel | awk 'NR == 1 { print $1 }'
+}
 
 urls() {
     local at=127.0.0.1
@@ -41,12 +47,18 @@ urls() {
             echo "  web chat  http://$at:8081"
         else
             # the network gets HTTPS (a browser gives the microphone, voice mode, only to secure pages); this machine
-            # keeps plain HTTP on 127.0.0.1, which is one
+            # keeps plain HTTP on 127.0.0.1, which is one. A device starts at the setup page (plain HTTP, port 8082):
+            # it trusts this machine's authority there, then the chat opens over HTTPS (web/setup.ts)
             echo "  web chat  https://$at:8081   (here: http://127.0.0.1:8081)"
-            echo "            a device warns about the certificate until it trusts https://$at:8081/chrysalis-ca.crt"
-            if command -v qrencode >/dev/null; then qrencode -t ANSIUTF8 -m 2 "https://$at:8081"; fi
-            if systemctl is-active -q ufw && ! grep -qs "8080:8081" /etc/ufw/user.rules; then
-                echo "  ufw blocks other devices until it allows TCP 8080-8081 (~/chrysalis-ufw.sh does that)"
+            echo "  devices   http://$at:8082    sets a phone or another computer up, then opens the chat: scan it"
+            if command -v qrencode >/dev/null; then qrencode -t ANSIUTF8 -m 2 "http://$at:8082"; fi
+            local ca="${CHRYSALIS_TLS_DIR:-$HOME/.config/chrysalis/tls}/ca.pem"
+            if [ -f "$ca" ]; then
+                echo "  authority SHA-256 $(openssl x509 -in "$ca" -noout -fingerprint -sha256 | cut -d= -f2)"
+            fi
+            if systemctl is-active -q ufw && ! grep -qs "8080:8082" /etc/ufw/user.rules; then
+                echo "  ufw may keep other devices out: they need TCP 8080-8082 from this network, for example"
+                echo "    sudo ufw allow from $(lan_subnet) to any port 8080:8082 proto tcp"
             fi
         fi
     fi

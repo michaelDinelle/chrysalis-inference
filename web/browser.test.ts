@@ -895,6 +895,55 @@ test("voice mode on a page that is not secure (plain HTTP at this machine's addr
   }
 });
 
+test("a device's setup page (plain HTTP on the network) offers each kind of device the way its system trusts the authority, and opens the chat once the device trusts it, not before", async () => {
+  const lan = Bun.spawn([process.execPath, "server.ts"], {
+    cwd: import.meta.dir, stdout: "pipe", stderr: "inherit",
+    env: { ...process.env, PORT: "0", CHRYSALIS_SETUP_PORT: "0", CHRYSALIS_URL: `http://127.0.0.1:${fake.port}`, CHRYSALIS_HOST: "0.0.0.0", NODE_ENV: "production",
+      CHRYSALIS_MCP_CONFIG: `${dir}/mcp.json`, CHRYSALIS_TLS_DIR: mkdtempSync(`${tmpdir()}/chrysalis-tls-`) },
+  });
+  let trusting: Browser | undefined;
+  try {
+    let out = "";
+    for (const reader = lan.stdout.getReader(), dec = new TextDecoder(); !/chrysalis setup: \S+/.test(out); ) {
+      const { value, done } = await reader.read();
+      if (done) throw new Error(`server.ts exited: ${out}`);
+      out += dec.decode(value);
+    }
+    const setup = out.match(/chrysalis setup: (\S+)/)![1], chat = `https://${new URL(setup).hostname}:${new URL(out.match(/chrysalis web: (\S+)/)![1]).port}/`;
+    const UA = {
+      iphone: "Mozilla/5.0 (iPhone; CPU iPhone OS 18_0 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/18.0 Mobile/15E148 Safari/604.1",
+      android: "Mozilla/5.0 (Linux; Android 15; Pixel 9) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/130.0.0.0 Mobile Safari/537.36",
+      firefox: "Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:132.0) Gecko/20100101 Firefox/132.0",
+      mac: "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/18.0 Safari/605.1.15",
+      windows: "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/130.0.0.0 Safari/537.36 Edg/130.0.0.0",
+    };
+    const offered: Record<string, string | null> = {};
+    for (const [kind, ua] of Object.entries(UA)) {
+      const page = await (await browser.createBrowserContext()).newPage();
+      await page.setUserAgent(ua);
+      await page.goto(setup, { waitUntil: "load" });
+      offered[kind] = await page.$eval(".go", (a) => a.getAttribute("href"));
+      if (kind === "android") {                                   // a browser that does not trust it stays here
+        await page.waitForFunction(() => /Waiting/.test(document.getElementById("status")!.textContent!), { timeout: 10_000 });
+        await Bun.sleep(2000);
+        expect(page.url()).toBe(setup);
+      }
+      await page.close();
+    }
+    expect(offered).toEqual({ iphone: "/chrysalis.mobileconfig", android: "/chrysalis-ca.crt", firefox: "/chrysalis-ca-firefox.crt",
+      mac: "/chrysalis.mobileconfig", windows: "/chrysalis-ca.crt" });
+    // one that trusts the chat's certificate is taken to the chat
+    trusting = await puppeteer.launch({ executablePath: process.env.CHROMIUM ?? "/usr/bin/chromium", headless: true, args: ["--no-sandbox", "--ignore-certificate-errors"] });
+    const page = await trusting.newPage();
+    await page.goto(setup, { waitUntil: "load" });
+    await page.waitForFunction((c) => location.href === c, { timeout: 10_000 }, chat);
+    await page.waitForSelector("#input");
+  } finally {
+    await trusting?.close();
+    lan.kill();
+  }
+}, 60_000);
+
 // The service's log of a session: the replies the page asked it to speak (by id, their text) and the ones it cancelled.
 const spokenOf = (log: any[]) => {
   const said = new Map<string, string>();

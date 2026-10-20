@@ -4,9 +4,10 @@
 import { hostname } from "node:os";
 import type { Server, Subprocess } from "bun";
 import app from "./index.html";
+import { appleProfile, setupPage, TRUSTED_GIF } from "./setup";
 import { SUBAGENT_SYSTEM } from "./tool-agent";
 import * as registry from "./tools";
-import { lanAddresses, lanTls } from "./tls";
+import { lanAddresses, lanTls, routeAddress } from "./tls";
 import { assistantTurn, DESCRIPTIONS, toolTurn, unnoted, type ToolChoice, type WireCall } from "./wire";
 
 const CHRYSALIS = process.env.CHRYSALIS_URL ?? "http://127.0.0.1:8080";
@@ -447,6 +448,15 @@ const serve = (hostname: string, port: number, secure?: { cert: string; key: str
     // the authority behind the network's certificate, for a device to install once and then trust the page
     "/chrysalis-ca.crt": { GET: guarded(() => tls ? new Response(tls.ca, { headers: { "Content-Type": "application/x-x509-ca-cert" } })
       : new Response("not on the network (chrysalis start --lan)", { status: 404 })) },
+    // the image a device's setup page loads from here: it loads once the device trusts the certificate (setup.ts)
+    "/trusted.gif": { GET: guarded(() => new Response(TRUSTED_GIF, { headers: { "Content-Type": "image/gif", "Cache-Control": "no-store" } })) },
+    // Settings' Other devices: where a device is set up (a QR code of it, when qrencode is installed) and the authority
+    "/api/pair": { GET: guarded(async () => {
+      if (!tls) return Response.json({ lan: false });
+      const first = await routeAddress(), ips = lanAddresses().sort((a, b) => Number(b === first) - Number(a === first));
+      const urls = ips.map((ip) => `http://${ip}:${setupPort}/`);
+      return Response.json({ lan: true, urls, qr: urls[0] && qrSvg(urls[0]), name: tls.caName, fingerprint: tls.fingerprint });
+    }) },
     "/vendor/mermaid/*": { GET: guarded(vendor) },
     "/sandbox": { GET: guarded(() => new Response(SANDBOX, { headers: { "Content-Type": "text/html; charset=utf-8", "Content-Security-Policy": SANDBOX_CSP } })) },
 
@@ -608,5 +618,41 @@ const serve = (hostname: string, port: number, secure?: { cert: string; key: str
 const server = serve(LAN ? "127.0.0.1" : process.env.CHRYSALIS_HOST ?? "127.0.0.1", Number(process.env.PORT ?? 8081));
 // only the certificate and key: Bun takes a `ca` there as the authority clients must show certificates of
 const secure = tls ? lanAddresses().map((ip) => serve(ip, server.port!, { cert: tls.cert, key: tls.key })) : [];
+// Setting a device up (setup.ts): plain HTTP on a port of its own at each address, since the chat's HTTPS warns until the
+// device trusts the authority. It serves the authority's certificate and the page around it, nothing else.
+let setupPort = Number(process.env.CHRYSALIS_SETUP_PORT ?? 8082);
+const setup = tls ? lanAddresses().map((ip) => {
+  const s = Bun.serve({ hostname: ip, port: setupPort, fetch: setupFetch });
+  setupPort = s.port!;
+  return s;
+}) : [];
 console.log(`chrysalis web: ${server.url}`);
 for (const s of secure) console.log(`chrysalis web: ${s.url}`);
+for (const s of setup) console.log(`chrysalis setup: ${s.url}`);
+
+function setupFetch(req: Request): Response {
+  if (!hostOk(req)) return new Response("unknown host", { status: 403 });
+  if (req.method !== "GET" && req.method !== "HEAD") return new Response(null, { status: 405 });
+  const url = new URL(req.url), chat = `https://${url.host.replace(/:\d+$/, "")}:${server.port}/`;
+  const file = (body: Uint8Array<ArrayBuffer> | string, type: string, name?: string) => new Response(body, { headers: { "Content-Type": type,
+    "Cache-Control": "no-store", ...(name ? { "Content-Disposition": `attachment; filename="${name}"` } : {}) } });
+  switch (url.pathname) {
+    case "/": return new Response(setupPage(tls!, chat), { headers: { "Content-Type": "text/html; charset=utf-8", "Cache-Control": "no-store",
+      "Content-Security-Policy": `default-src 'none'; script-src 'unsafe-inline'; style-src 'unsafe-inline'; img-src ${new URL(chat).origin}; ` +
+        "base-uri 'none'; form-action 'none'; frame-ancestors 'none'" } });
+    case "/chrysalis.mobileconfig": return file(appleProfile(tls!), "application/x-apple-aspen-config", "chrysalis.mobileconfig");
+    case "/chrysalis-ca.crt": return file(tls!.caDer, "application/octet-stream", "chrysalis-ca.crt");
+    case "/chrysalis-ca-firefox.crt": return file(tls!.caDer, "application/x-x509-ca-cert");   // Firefox asks to trust it
+    default: return new Response(null, { status: 302, headers: { Location: "/" } });
+  }
+}
+
+// A QR code of a URL as SVG, by qrencode where it is installed
+function qrSvg(url: string): string | undefined {
+  try {
+    const r = Bun.spawnSync(["qrencode", "-t", "SVG", "-m", "2", "-o", "-", url], { stdout: "pipe", stderr: "ignore" });
+    return r.exitCode === 0 ? r.stdout.toString() : undefined;
+  } catch {
+    return undefined;
+  }
+}

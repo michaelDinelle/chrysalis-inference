@@ -533,17 +533,18 @@ test("voice: a speech service that cannot start says how to install one", async 
   }
 });
 
-test("on the network (CHRYSALIS_HOST 0.0.0.0): this machine keeps plain HTTP; each address gets HTTPS whose certificate the server's own authority signs, and no plain HTTP; that authority vouches for nothing public", async () => {
+test("on the network (CHRYSALIS_HOST 0.0.0.0): this machine keeps plain HTTP; each address gets HTTPS whose certificate the server's own authority signs, and no plain HTTP; that authority vouches for nothing public; a setup port of plain HTTP serves the authority for devices to trust, and nothing else", async () => {
   const dir = mkdtempSync(`${tmpdir()}/chrysalis-tls-`), ips = lanAddresses();
   expect(ips.length).toBeGreaterThan(0);
   const proc = Bun.spawn([process.execPath, "server.ts"], {
     cwd: import.meta.dir, stdout: "pipe", stderr: "inherit",
-    env: { ...process.env, PORT: "0", CHRYSALIS_URL: `http://127.0.0.1:${fake.port}`, CHRYSALIS_HOST: "0.0.0.0", NODE_ENV: "production", CHRYSALIS_MCP_CONFIG: CONFIG, CHRYSALIS_TLS_DIR: dir },
+    env: { ...process.env, PORT: "0", CHRYSALIS_URL: `http://127.0.0.1:${fake.port}`, CHRYSALIS_HOST: "0.0.0.0", NODE_ENV: "production", CHRYSALIS_MCP_CONFIG: CONFIG,
+      CHRYSALIS_TLS_DIR: dir, CHRYSALIS_SETUP_PORT: "0" },
   });
   try {
     const reader = proc.stdout.getReader(), dec = new TextDecoder();
     let out = "";
-    while ((out.match(/chrysalis web: \S+/g) ?? []).length < 1 + ips.length) {
+    while ((out.match(/chrysalis (web|setup): \S+/g) ?? []).length < 1 + 2 * ips.length) {
       const { value, done } = await reader.read();
       if (done) throw new Error(`server.ts exited: ${out}`);
       out += dec.decode(value);
@@ -570,6 +571,38 @@ test("on the network (CHRYSALIS_HOST 0.0.0.0): this machine keeps plain HTTP; ea
     const verify = Bun.spawnSync(["openssl", "verify", "-CAfile", `${dir}/ca-served.pem`, `${dir}/x.pem`], { stderr: "pipe" });
     expect(verify.exitCode).not.toBe(0);
     expect(verify.stdout.toString() + verify.stderr.toString()).toContain("permitted subtree violation");
+
+    // Setting a device up: plain HTTP at each address, its page pointing at that address's HTTPS, and the authority as
+    // the devices take it, checked against openssl's reading of the authority and Python's of Apple's profile format
+    const setups = [...out.matchAll(/chrysalis setup: (\S+)/g)].map((m) => m[1].replace(/\/$/, ""));
+    expect(setups.map((u) => new URL(u).hostname)).toEqual(ips);
+    const der = Bun.spawnSync(["openssl", "x509", "-in", `${dir}/ca.pem`, "-outform", "DER"]).stdout;
+    const fingerprint = Bun.spawnSync(["openssl", "x509", "-in", `${dir}/ca.pem`, "-noout", "-fingerprint", "-sha256"]).stdout.toString().trim().split("=")[1];
+    for (const [k, s] of setups.entries()) {
+      const page = await fetch(`${s}/`);
+      expect([page.status, page.headers.get("content-type")]).toEqual([200, "text/html; charset=utf-8"]);
+      const html = await page.text();
+      expect([html.includes(JSON.stringify(`https://${ips[k]}:${port}/`)), html.includes(fingerprint)]).toEqual([true, true]);
+      const profile = await fetch(`${s}/chrysalis.mobileconfig`);
+      expect(profile.headers.get("content-type")).toBe("application/x-apple-aspen-config");
+      writeFileSync(`${dir}/served.mobileconfig`, Buffer.from(await profile.arrayBuffer()));
+      const read = Bun.spawnSync([`${import.meta.dir}/../data/venv/bin/python`, "-c", "import plistlib, sys; p = plistlib.load(open(sys.argv[1], 'rb')); "
+        + "c = p['PayloadContent'][0]; print(p['PayloadType'], c['PayloadType']); sys.stdout.flush(); sys.stdout.buffer.write(c['PayloadContent'])",
+        `${dir}/served.mobileconfig`], { stdout: "pipe", stderr: "pipe" });
+      const [types, ...rest] = Buffer.from(read.stdout).toString("latin1").split("\n");
+      expect(types).toBe("Configuration com.apple.security.root");
+      expect(Buffer.from(rest.join("\n"), "latin1").equals(Buffer.from(der))).toBe(true);
+      expect(Buffer.from(await (await fetch(`${s}/chrysalis-ca.crt`)).arrayBuffer()).equals(Buffer.from(der))).toBe(true);
+      expect((await fetch(`${s}/chrysalis-ca-firefox.crt`)).headers.get("content-type")).toBe("application/x-x509-ca-cert");
+      const other = await fetch(`${s}/api/chat`, { redirect: "manual" });
+      expect([other.status, other.headers.get("location")]).toEqual([302, "/"]);
+      expect((await fetch(`${s}/api/chat`, { method: "POST", body: "{}", headers: { "Content-Type": "application/json" } })).status).toBe(405);
+      expect(await fetch(s.replace("http:", "https:"), { tls: { rejectUnauthorized: false } }).then(() => "https", () => "refused")).toBe("refused");
+      const gif = await fetch(`${urls[k + 1]}/trusted.gif`, { tls: { rejectUnauthorized: false } });
+      expect([gif.status, gif.headers.get("content-type")]).toEqual([200, "image/gif"]);
+    }
+    const pair = await (await fetch(`${urls[0]}/api/pair`)).json();
+    expect([pair.lan, pair.fingerprint, setups.includes(pair.urls[0].replace(/\/$/, ""))]).toEqual([true, fingerprint, true]);
   } finally {
     proc.kill();
   }

@@ -239,7 +239,7 @@ const pane = (name: string, el: HTMLElement, key: string, besideFrom: number, wi
 };
 const panes = {
   conversations: pane("conversations", $("sidebar"), "b", 761, "--side-open", 208),
-  settings: pane("settings", panel, ",", 1460, "--panel-open", 340, () => { syncSettings(); growSystem(); void loadCatalog(); }),
+  settings: pane("settings", panel, ",", 1460, "--panel-open", 340, () => { syncSettings(); growSystem(); void loadCatalog(); void renderDevices(); }),
 };
 const PANES = Object.values(panes);
 
@@ -1198,6 +1198,33 @@ for (const [t, label] of [["system", "System"], ["light", "Light"], ["dark", "Da
   b.dataset.theme = t;
   b.onclick = () => { choose(t); markTheme(); };
   themePick.append(b);
+}
+// Settings' Other devices: on the network (chrysalis start --lan), a QR code of the page that sets a device up (server.ts
+// /api/pair, setup.ts), which a phone's camera opens: the device trusts this computer's authority, and then the chat opens
+// there over HTTPS. Off the network, how to get there.
+async function renderDevices() {
+  const box = $("devices"), p = await fetch("/api/pair").then((r) => r.json()).catch(() => null);
+  const key = JSON.stringify(p);
+  if (box.dataset.key === key) return;
+  box.dataset.key = key;
+  if (!p?.lan) {
+    const note = h("p", "set-note");
+    note.append("Chrysalis is on this computer only. ", h("code", "", "chrysalis start --lan"), " opens it to your network, and a code that sets up a phone or another computer shows here.");
+    return void box.replaceChildren(note);
+  }
+  const row = h("div", "dev-row"), text = h("div", "dev-text"), url = h("code", "dev-url", p.urls[0] ?? "");
+  if (p.qr) {
+    const qr = h("img", "dev-qr") as HTMLImageElement;
+    qr.src = `data:image/svg+xml;base64,${btoa(p.qr)}`;
+    qr.alt = `QR code of ${p.urls[0]}`;
+    row.append(qr);
+  }
+  text.append(h("p", "", p.qr ? "Scan it with a phone's camera, or open this on another device here:" : "Open this on the device:"), url,
+    h("p", "set-note", "It sets the device up to trust this computer once, then opens Chrysalis there securely."));
+  row.append(text);
+  const fp = h("p", "set-note dev-fp");
+  fp.append(`${p.name}, SHA-256: `, h("code", "", p.fingerprint));
+  box.replaceChildren(row, ...(p.urls.length > 1 ? [h("p", "set-note", `Also at ${p.urls.slice(1).join(", ")}`)] : []), fp);
 }
 function markTheme() {
   for (const b of themePick.querySelectorAll<HTMLElement>("button")) b.setAttribute("aria-checked", String(b.dataset.theme === chosen()));
