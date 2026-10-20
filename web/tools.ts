@@ -1,10 +1,11 @@
-// The tools a reply can call, whatever provides them: the built-in Fetch URL (tool-fetch.ts) and the MCP servers in
-// the config file (tool-mcp.ts). Each provider is a Source of Tools behind the interfaces below; server.ts only talks to
+// The tools a reply can call, whatever provides them: the built-in Fetch URL (tool-fetch.ts) and Sub-agents
+// (tool-agent.ts), and the MCP servers in the config file (tool-mcp.ts). Each provider is a Source of Tools behind the interfaces below; server.ts only talks to
 // this file. The config file is the only place a server's command, URL or environment comes from: the page (no logins,
 // and on the LAN after `chrysalis start --lan`) can list sources, start, retry and reload them, never define one, or it
 // could run any command on this machine.
 import { readFileSync } from "node:fs";
 import { homedir } from "node:os";
+import { agentSource } from "./tool-agent";
 import { fetchSource } from "./tool-fetch";
 import { mcpSource } from "./tool-mcp";
 
@@ -18,8 +19,8 @@ export interface Tool {
 }
 export type State = "idle" | "connecting" | "connected" | "failed" | "disabled";
 export interface Source {
-  id: string;                                       // "fetch", or "mcp:" and the server's name in the config
-  label: string; kind: "fetch" | "mcp";
+  id: string;                                       // "fetch", "agents", or "mcp:" and the server's name in the config
+  label: string; kind: "fetch" | "agent" | "mcp";
   prefix: string;                                   // of its tools' function names ("" for the built-in one)
   detail: string;                                   // what it runs or reaches, for the page to show
   spec: string;                                     // its config, to tell a changed one on reload
@@ -67,7 +68,7 @@ export async function reload() {
     config = {};
   }
   const servers = config.mcpServers && typeof config.mcpServers === "object" ? config.mcpServers : {};
-  const wanted = [fetchSource(config.fetch ?? {}),
+  const wanted = [fetchSource(config.fetch ?? {}), agentSource(),
     ...Object.entries(servers).map(([name, spec]) => mcpSource(name, spec && typeof spec === "object" ? spec as Record<string, unknown> : {}))];
   const kept: Source[] = [];
   for (const w of wanted) {

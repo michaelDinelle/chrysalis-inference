@@ -45,6 +45,9 @@ const TOOL_ASKS: Record<string, { name: string; args: string }> = {
   "tool echo": { name: "fake__echo", args: '{"text":  "hello"}' },
   "tool note": { name: "fake__write_note", args: '{"text": "n1"}' },
 };
+// A question that hands two tasks to sub-agents at once. Each task is one of the questions above, so each sub-agent calls
+// the fake MCP server's tool (the note's asks first) and answers with what it said.
+const AGENT_TASKS = [{ description: "Echo a word", prompt: "tool echo" }, { description: "Write a note", prompt: "tool note" }];
 let lastStream: any = null, probes = 0, callIds = 0, chrysalisStopped = 0;  // probes: requests a sandboxed page got through to a server
 const streams: any[] = [], streamAt: number[] = [];  // every streamed request Chrysalis got, and when
 const checks: any[] = [];                            // every check of what speech recognition heard (app.ts CHECK)
@@ -74,20 +77,26 @@ const fake = Bun.serve({
     // what the user said, without the app's note to the model before it (voice mode's)
     const said = (typeof last.content === "string" ? last.content : last.content.map((p: any) => p.text ?? "").join("")).replace(/^\[[^\]]*\]\n\n/, "");
     const round = body.messages.slice(at).filter((m: any) => m.role === "assistant" && m !== prefix).length, ask = TOOL_ASKS[said];
-    const call = ask && body.tools && round === 0 ? ask : undefined;
-    const text = call ? "Let me check." : ask ? `The tool said: ${body.messages.at(-1).content}` : said.startsWith("slow")
+    const agents = said === "agents" && round === 0 && body.tools?.some((t: any) => t.function.name === "subagent");
+    const calls = agents ? AGENT_TASKS.map((a) => ({ name: "subagent", args: JSON.stringify(a) })) : ask && body.tools && round === 0 ? [ask] : [];
+    // the hand-off is thought through, not said: the reply's last word before the calls is its thinking
+    const think = agents ? "Two separate tasks: each goes to a sub-agent." : "";
+    const text = agents ? "" : calls.length ? "Let me check." : ask ? `The tool said: ${body.messages.at(-1).content}` : said === "agents"
+      ? `The sub-agents said: ${body.messages.slice(at).filter((m: any) => m.role === "tool").map((m: any) => m.content).join(" | ")}` : said.startsWith("slow")
       ? Array.from({ length: 40 }, (_, k) => `w${k} `).join("") : Object.entries(REPLIES).find(([k]) => said.includes(k))?.[1] ?? `You said: ${said}`;
     const step = said.startsWith("slow") ? 4 : 9, gap = said.startsWith("slow") ? 60 : 5;
-    let i = 0, restated = !prefix, read = false;
+    let i = 0, j = 0, restated = !prefix, read = false;
     return new Response(new ReadableStream({
       async pull(ctl) {
         await Bun.sleep(gap);
         // a continued reply restates itself first, as Chrysalis does, and the prompt's length comes once it is read
         if (!restated) { restated = true; return ctl.enqueue(enc.encode(`data: ${JSON.stringify({ choices: [{ delta: { chrysalis_prefix: { content: prefix.content } } }] })}\n\n`)); }
         if (!read) { read = true; return ctl.enqueue(enc.encode(`data: ${JSON.stringify({ choices: [{ delta: {} }], chrysalis_prompt: { prompt_tokens: 10, cached_tokens: 0 } })}\n\n`)); }
+        if (j < think.length) { ctl.enqueue(enc.encode(`data: ${JSON.stringify({ choices: [{ delta: { reasoning_content: think.slice(j, j + step) } }] })}\n\n`)); j += step; return; }
         if (i < text.length) { ctl.enqueue(enc.encode(`data: ${JSON.stringify({ choices: [{ delta: { content: text.slice(i, i + step) } }] })}\n\n`)); i += step; return; }
-        if (call) {
-          ctl.enqueue(enc.encode(`data: ${JSON.stringify({ choices: [{ delta: { tool_calls: [{ index: 0, id: `call_${++callIds}`, type: "function", function: { name: call.name, arguments: call.args } }] } }] })}\n\n`));
+        if (calls.length) {
+          ctl.enqueue(enc.encode(`data: ${JSON.stringify({ choices: [{ delta: { tool_calls: calls.map((c, k) => ({ index: k, id: `call_${++callIds}`, type: "function",
+            function: { name: c.name, arguments: c.args } })) } }] })}\n\n`));
           ctl.enqueue(enc.encode(`data: ${JSON.stringify({ choices: [{ delta: {}, finish_reason: "tool_calls" }] })}\n\n`));
           ctl.enqueue(enc.encode(`data: ${JSON.stringify({ choices: [], usage: { prompt_tokens: 10, completion_tokens: 20, total_tokens: 30 } })}\n\n`));
           ctl.enqueue(enc.encode("data: [DONE]\n\n"));
@@ -268,7 +277,8 @@ test("the Tools popover turns servers and single tools on and off for this chat,
   await page.click("#tools-btn");
   await page.waitForSelector(sw("mcp:fake"));
   const rows = await page.$$eval(`${pop} .tp-src`, (r) => r.map((x) => [x.querySelector(".tp-name")!.textContent, x.querySelector(".tp-sub")!.textContent]));
-  expect(rows).toEqual([["Fetch URL", "Reads web pages at public addresses"], ["fake", "Not started"], ["broken", "Not started"]]);   // as the config file lists them
+  expect(rows).toEqual([["Fetch URL", "Reads web pages at public addresses"], ["Sub-agents", "Hands tasks to agents that work side by side"],
+    ["fake", "Not started"], ["broken", "Not started"]]);                 // the built-in ones, then the servers as the config file lists them
   await page.click(sw("mcp:fake"));                                       // starts the server, every tool on
   await page.waitForFunction(() => document.querySelector('#tools-pop [data-src="mcp:fake"]')?.closest(".tp-src")?.querySelector(".tp-sub")?.textContent === "5 of 5 tools on",
     { timeout: 20_000 });
@@ -368,6 +378,76 @@ test("a tool that asks first shows the call with Allow once, Always allow and De
   await page.keyboard.down("Control"); await page.keyboard.press(","); await page.keyboard.up("Control");
   await page.waitForSelector("#allow-list .chip");
   expect(await page.$$eval("#allow-list .chip", (c) => c.map((x) => x.textContent))).toEqual(["fake__write_note"]);
+  await page.close();
+}, 90_000);
+
+test("sub-agents: two tasks handed off at once get a card each that says what it is doing, a call that asks first asks in its card, one can be stopped alone, and only their answers go back to the reply", async () => {
+  writeFileSync(LOG, "");
+  const page = await open();
+  await toolsOn(page);
+  await page.click("#tools-btn");
+  await page.waitForSelector(sw("agents"));
+  await page.click(sw("agents"));
+  expect(await checked(page, sw("agents"))).toBe("true");
+  await page.keyboard.press("Escape");
+  const cards = () => page.evaluate(() => [...[...document.querySelectorAll(".msg.assistant")].at(-1)!.querySelectorAll(".agent-card")].map((c) => ({
+    label: c.querySelector(".tool-name")!.textContent, now: c.querySelector(".agent-now")!.textContent, meta: c.querySelector(".agent-meta")!.textContent,
+    state: c.getAttribute("data-state") })));
+  const ask = async () => {
+    await page.type("#input", "agents");
+    await page.keyboard.press("Enter");
+    await page.waitForSelector('.agent-card .tool-card[data-state="approval"] .tool-ask:not([hidden])', { timeout: 20_000 });   // its card opened
+  };
+  const done = (n: number) => page.waitForFunction((k) => document.querySelectorAll(".msg .stats").length > k, { timeout: 20_000 }, n);
+  // the tool results the reply's last round read: those after the question
+  const results = () => { const m = streams.at(-1).messages; return m.slice(m.findLastIndex((x: any) => x.role === "user")).filter((x: any) => x.role === "tool").map((x: any) => x.content); };
+
+  // the note's sub-agent waits for the user, and is stopped alone: the reply goes on with the other's answer
+  await ask();
+  const asking = await cards();
+  expect(asking.map((c) => c.label)).toEqual(["Echo a word", "Write a note"]);
+  // the reply's own thinking ended with its calls: it is not shown as thinking while its sub-agents work
+  expect(await page.evaluate(() => {
+    const t = [...[...document.querySelectorAll(".msg.assistant")].at(-1)!.querySelectorAll("details.thinking")].find((d) => !d.closest(".round, .agent-card"))!;
+    return [t.querySelector("summary")!.textContent, t.classList.contains("live")];
+  })).toEqual(["Thoughts", false]);
+  expect(asking[1]).toMatchObject({ state: "running" });
+  expect(asking[1].now).toStartWith("Asks to run ");
+  await page.click('.agent-card:has(.tool-card[data-state="approval"]) .agent-stop:not([hidden])');
+  await done(0);
+  expect((await cards()).map((c) => [c.state, c.now])).toEqual([["done", "The tool said: echo: hello"], ["stopped", "Stopped before it finished"]]);
+  const [echoed, stopped] = results();
+  expect(echoed).toBe("The tool said: echo: hello");
+  expect(stopped).toStartWith("Stopped before it finished: the user stopped it.");
+  expect(readFileSync(LOG, "utf8")).not.toContain("wrote n1");
+
+  // allowed in its card, it runs; each sub-agent's request had the other tools and its own prompt, and the reply got
+  // their answers, not their work
+  const before = await page.$$eval(".msg .stats", (s) => s.length);
+  await ask();
+  await page.click('.agent-card .tool-card[data-state="approval"] [data-decision="once"]');
+  await done(before);
+  const end = await cards();
+  expect(end.map((c) => c.state)).toEqual(["done", "done"]);
+  expect(end.map((c) => c.meta)).toEqual(["1 tool · 40 tokens", "1 tool · 40 tokens"]);   // two rounds of the fake's 20
+  expect(readFileSync(LOG, "utf8").match(/wrote n1/g)?.length).toBe(1);
+  expect(results()).toEqual(end.map((c) => c.now));
+  const subs = streams.filter((b) => /^You are a sub-agent/.test(b.messages[0].content)).slice(-4);   // side by side: in either order
+  expect(subs.map((b) => [b.messages[1].content, b.tools.map((t: any) => t.function.name).includes("subagent"), "logprobs" in b]).sort()).toEqual([
+    ["tool echo", false, false], ["tool echo", false, false], ["tool note", false, false], ["tool note", false, false]]);
+  const last = await page.evaluate(() => (([...document.querySelectorAll(".msg.assistant")].at(-1) as HTMLElement).querySelector(":scope > .markdown") as HTMLElement).innerText);
+  expect(last).toBe(`The sub-agents said: ${results().join(" | ")}`);
+
+  // open, a card shows the task, its work and its answer; after a reload, all of it is still there
+  await page.evaluate(() => ([...[...document.querySelectorAll(".msg.assistant")].at(-1)!.querySelectorAll(".agent-card .agent-head")][0] as HTMLElement).click());
+  const body = await page.evaluate(() => {
+    const b = [...[...document.querySelectorAll(".msg.assistant")].at(-1)!.querySelectorAll(".agent-card")][0].querySelector(".agent-body") as HTMLElement;
+    return { hidden: b.hidden, task: b.querySelector(".agent-task")!.textContent, tool: b.querySelector(".tool-card .tool-name")!.textContent,
+      answer: (b.querySelector(":scope > .markdown") as HTMLElement).innerText.trim() };
+  });
+  expect(body).toEqual({ hidden: false, task: "tool echo", tool: "Echo", answer: "The tool said: echo: hello" });
+  await page.reload({ waitUntil: "networkidle0" });
+  expect(await cards()).toEqual(end);
   await page.close();
 }, 90_000);
 

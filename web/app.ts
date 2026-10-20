@@ -22,7 +22,10 @@ type Effort = "xhigh" | "medium" | "low" | "off";
 interface Stats { ttft: number; tps: number; tokens: number; prompt: number; cached: number; thought?: number; seed?: number; model?: string; ctx?: number }
 // A tool call as Chrysalis wrote it (WireCall: its id and argument string, kept byte for byte), and what became of it.
 type CallState = "approval" | "running" | "done" | "failed" | "declined" | "stopped";
-interface Call extends WireCall { title?: string; source?: string; readOnly?: boolean; state?: CallState; result?: string; ms?: number }
+interface Call extends WireCall { title?: string; source?: string; readOnly?: boolean; state?: CallState; result?: string; ms?: number; agent?: AgentRun }
+// A sub-agent's work (a call to the Sub-agents tool: server.ts, subagent()), kept with its call: its finished rounds as a
+// reply's are kept, the round it is in, whether Chrysalis has read its prompt yet, and the tokens it has written.
+interface AgentRun { content: string; reasoning: string; calls?: Call[]; rounds?: Round[]; notes?: string[]; read?: boolean; tokens?: number; error?: string }
 // A reply with tools is rounds: each but the last ended in tool calls, whose results the next one read.
 interface Round { content: string; reasoning?: string; calls: Call[] }
 // A conversation is a tree, kept as the path on screen: the first message of a stretch that has other versions holds
@@ -60,7 +63,7 @@ interface Settings {
 interface VoiceSettings { tts?: string; name?: string; speed?: number; prompt?: string }
 // The tool sources server.ts offers (tools.ts catalog()).
 interface ToolInfo { fn: string; name: string; title: string; description: string; readOnly: boolean }
-interface SourceInfo { id: string; label: string; kind: "fetch" | "mcp"; detail: string; state: "idle" | "connecting" | "connected" | "failed" | "disabled"; error?: string; tools: ToolInfo[] }
+interface SourceInfo { id: string; label: string; kind: "fetch" | "agent" | "mcp"; detail: string; state: "idle" | "connecting" | "connected" | "failed" | "disabled"; error?: string; tools: ToolInfo[] }
 interface Catalog { config: string; error?: string; sources: SourceInfo[] }
 interface Status { state: "online" | "loading" | "offline"; build?: string; model?: string; loading?: string; progress?: number; context?: number; kv_tokens?: number; cache?: { free_kv_tokens: number } }
 interface View {
@@ -211,6 +214,7 @@ const ICONS = {
   next: '<path d="M9.5 6.5 15 12l-5.5 5.5"/>',
   wrench: '<path d="M14.7 6.3a4 4 0 0 0 5 5L21 12.6a6 6 0 0 1-7.4 1.6L7 20.8a2.1 2.1 0 0 1-3-3l6.6-6.6A6 6 0 0 1 12.2 3.8l1.3 1.3a4 4 0 0 0 1.2 1.2z"/>',
   globe: '<circle cx="12" cy="12" r="9"/><path d="M3 12h18M12 3c2.5 2.6 3.8 5.6 3.8 9s-1.3 6.4-3.8 9c-2.5-2.6-3.8-5.6-3.8-9S9.5 5.6 12 3z"/>',
+  agent: '<circle cx="12" cy="5.5" r="2.2"/><circle cx="6" cy="18.5" r="2.2"/><circle cx="18" cy="18.5" r="2.2"/><path d="M12 7.7v3.8M6 16.3v-1.8a3 3 0 0 1 3-3h6a3 3 0 0 1 3 3v1.8"/>',
   wave: '<path d="M4 10v4M8 7v10M12 4v16M16 8v8M20 11v2"/>',
   play: '<path fill="currentColor" stroke="none" d="M8 5.8v12.4a.8.8 0 0 0 1.2.7l10-6.2a.8.8 0 0 0 0-1.4l-10-6.2a.8.8 0 0 0-1.2.7z"/>',
   mic: '<rect x="9" y="3" width="6" height="11" rx="3"/><path d="M5.5 11a6.5 6.5 0 0 0 13 0M12 17.5V21"/>',
@@ -959,10 +963,17 @@ function resultView(c: Call): HTMLElement {
   }
   return box;
 }
+const cardLists = new WeakMap<HTMLElement, Call[]>();   // each list of cards' calls as last drawn (a click redraws it)
 function syncCards(box: HTMLElement, calls: Call[], m: Message, live: boolean) {
+  cardLists.set(box, calls);
   const kept = new Map([...box.children].map((el) => [(el as HTMLElement).dataset.call!, el as HTMLElement]));
   calls.forEach((c, k) => {
     let el = kept.get(c.id);
+    if (c.name === AGENT_FN) {
+      el ??= agentCard(c);
+      if (box.children[k] !== el) box.insertBefore(el, box.children[k] ?? null);
+      return paintAgent(el, c, m, live);
+    }
     if (!el) {
       el = h("div", "tool-card");
       el.dataset.call = c.id;
@@ -1006,6 +1017,87 @@ function syncCards(box: HTMLElement, calls: Call[], m: Message, live: boolean) {
   for (const el of [...box.children].slice(calls.length)) el.remove();
 }
 const prettyArgs = (args: string) => { try { return JSON.stringify(JSON.parse(args), null, 2); } catch { return args; } };
+
+// Sub-agents (server.ts, subagent()): a call to the Sub-agents tool has a card of its own. Shut, it shows the task's
+// label, what the sub-agent is doing (once it is done, the start of its answer), its tool calls and tokens, and how it
+// went; open, the task as it was given, its work as a reply's rounds are shown, its answer, and Stop for it alone.
+const AGENT_FN = "subagent";
+interface AgentView { task: HTMLElement; log: HTMLElement; think: HTMLDetailsElement; thought: HTMLElement; calls: HTMLElement;
+  answerLabel: HTMLElement; answer: { body: HTMLElement; blocks?: Blocks }; notes: HTMLElement; stop: HTMLButtonElement; logShown: number }
+const agentViews = new WeakMap<HTMLElement, AgentView>();
+function agentArgs(c: Call): { description?: unknown; prompt?: unknown } {
+  try { const a = JSON.parse(c.args); return a && typeof a === "object" ? a : {}; } catch { return {}; }
+}
+const agentCalls = (a?: AgentRun) => [...(a?.rounds ?? []).flatMap((r) => r.calls), ...(a?.calls ?? [])];
+// the first line of what it wrote that says something (a heading or a bold label alone does not), as plain words
+function gist(text: string) {
+  const lines = text.split("\n").map((l) => l.trim()).filter(Boolean);
+  const line = lines.find((l) => !/^#{1,6}\s/.test(l) && !/^\*\*[^*]+\*\*:?$/.test(l)) ?? lines[0] ?? "";
+  return line.replace(/^(([#>*+|-]|\d+\.)\s*)+/, "").replace(/\*\*|__|`/g, "").trim();
+}
+function agentNow(c: Call, live: boolean) {
+  const a = c.agent;
+  if (c.state === "done") return gist(a?.content || c.result || "") || "Done";
+  if (c.state === "failed") return a?.error || gist(c.result ?? "") || "Failed";
+  if (c.state === "stopped") return "Stopped before it finished";
+  if (c.state !== "running") return live ? "Waiting to start" : "Not run";
+  const x = a?.calls?.find((y) => y.state === "approval") ?? a?.calls?.find((y) => y.state === "running");
+  if (x) return x.state === "approval" ? `Asks to run ${x.title ?? x.name}` : `${x.title ?? x.name}: ${argLine(x)}`;
+  if (a?.content) return "Writing its answer";
+  if (a?.reasoning) return "Thinking";
+  if (a?.rounds?.length) return "Reading the results";
+  return a?.read ? "Working" : "Starting";
+}
+function agentCard(c: Call): HTMLElement {
+  const el = h("div", "tool-card agent-card"), id = `tc-${c.id.replace(/[^\w-]/g, "")}`;
+  el.dataset.call = c.id;
+  el.innerHTML = `<button type="button" class="tool-head agent-head" data-act="card" aria-controls="${id}"><span class="tool-ico">${icon("agent")}</span>` +
+    `<span class="agent-text"><span class="agent-title"><span class="tool-name"></span><span class="tool-src">Sub-agent</span></span>` +
+    `<span class="agent-now"></span></span><span class="agent-meta"></span><span class="tool-state"></span>${icon("chevron")}</button>` +
+    `<div class="tool-body agent-body" id="${id}" hidden></div>`;
+  return el;
+}
+function paintAgent(el: HTMLElement, c: Call, m: Message, live: boolean) {
+  const a = c.agent, open = openCards.has(c.id), n = agentCalls(a).length, label = agentArgs(c).description;
+  const set = (x: Element, v: string) => { if (x.textContent !== v) x.textContent = v; };
+  el.dataset.state = c.state ?? (live ? "asked" : "none");
+  set(el.querySelector(".tool-name")!, typeof label === "string" && label.trim() ? label.trim() : "Sub-agent");
+  set(el.querySelector(".agent-now")!, agentNow(c, live));
+  set(el.querySelector(".agent-meta")!, [n ? `${n} tool${n === 1 ? "" : "s"}` : "", a?.tokens ? `${fmtK(a.tokens)} tokens` : ""].filter(Boolean).join(" · "));
+  set(el.querySelector(".tool-state")!, stateText(c, live));
+  el.querySelector(".tool-head")!.setAttribute("aria-expanded", String(open));
+  const body = el.querySelector<HTMLElement>(".agent-body")!;
+  body.hidden = !open;
+  if (!open) return;
+  let v = agentViews.get(el);
+  if (!v) {
+    const task = agentArgs(c).prompt;
+    v = { task: h("div", "agent-task", typeof task === "string" ? task : c.args), log: h("div", "agent-log"), think: h("details", "thinking"),
+      thought: h("div", "thought"), calls: h("div", "tool-cards"), answerLabel: h("div", "tool-label", "Answer"), answer: { body: h("div", "markdown") },
+      notes: h("div", "agent-notes"), stop: h("button", "btn small agent-stop", "Stop sub-agent"), logShown: -1 };
+    v.think.append(h("summary", "", "Thoughts"), v.thought);
+    v.stop.type = "button";
+    v.stop.dataset.act = "agent-stop";
+    body.append(h("div", "tool-label", "Task"), v.task, v.log, v.think, v.calls, v.answerLabel, v.answer.body, v.notes, v.stop);
+    agentViews.set(el, v);
+  }
+  const working = c.state === "running" && live, rounds = a?.rounds ?? [];
+  if (v.logShown !== rounds.length) {
+    v.log.replaceChildren(...rounds.map((r) => roundView(r, m)));
+    v.logShown = rounds.length;
+  }
+  v.think.hidden = !a?.reasoning;
+  v.think.classList.toggle("live", working && !!a?.reasoning && !a.content && !a.calls?.length);
+  set(v.think.firstElementChild!, v.think.classList.contains("live") ? "Thinking" : "Thoughts");
+  set(v.thought, a?.reasoning ?? "");
+  syncCards(v.calls, a?.calls ?? [], m, live);
+  v.answerLabel.hidden = !a?.content;
+  renderBlocks(v.answer, a?.content ?? "", working);
+  // what the web server said of it: a limit reached, a failure, a stop (and what it gave back then)
+  const said = [...(a?.notes ?? []), ...(c.state === "failed" || c.state === "stopped" ? [c.result ?? ""] : [])].filter(Boolean);
+  if (v.notes.childElementCount !== said.length) v.notes.replaceChildren(...said.map((x) => h("div", "note", x)));
+  v.stop.hidden = !(working && m.job);
+}
 
 // Message actions in fixed places: from the right, delete, edit and copy on every message, then a reply's token odds,
 // regenerate and continue. An action that is not available keeps its place empty, so none ever moves.
@@ -1519,23 +1611,17 @@ function take(run: Run, ev: any) {
     run.last = ev.usage;
   }
   if (ev.seed !== undefined) run.seed ??= ev.seed;
-  // tool calls as Chrysalis streams them (by index, their arguments possibly in pieces), the same way server.ts adds
-  // them up
   for (const c of d.tool_calls ?? []) {
-    if (live.phase === "waiting") live.phase = "writing";
-    const calls = (m.calls ??= []), at = (calls[c.index ?? calls.length] ??= { id: "", name: "", args: "" });
-    if (c.id) at.id = c.id;
-    if (c.function?.name) at.name += c.function.name;
-    if (c.function?.arguments) at.args += c.function.arguments;
-  }
-  if (ev.tool) {
-    const c = m.calls?.find((x) => x.id === ev.tool.id);
-    if (c) {
-      for (const k of ["title", "source", "readOnly", "state", "result", "ms"] as const) if (ev.tool[k] !== undefined) (c as any)[k] = ev.tool[k];
-      if (c.state === "running") callSince.set(c.id, now);
-      if (c.state === "approval") openCards.delete(c.id);
-      deciding.delete(c.id);
+    if (live.phase !== "writing") {                // a call ends the thinking, as text does
+      if (live.phase === "thinking" && v) v.think.open = false;
+      live.phase = "writing";
     }
+    addCall(m, c);
+  }
+  if (ev.tool) toolEvent(m.calls, ev.tool, now);
+  if (ev.agent) {
+    const c = m.calls?.find((x) => x.id === ev.agent.id);
+    if (c) feedAgent(c, ev.agent.ev, now);
   }
   if (ev.round) {                                  // the calls' results are in: Chrysalis reads them in a new round
     m.rounds = [...(m.rounds ?? []), { content: m.content, ...(m.reasoning ? { reasoning: m.reasoning } : {}), calls: m.calls ?? [] }];
@@ -1566,6 +1652,42 @@ function take(run: Run, ev: any) {
   }
   feedVoice(m);
   schedule(run);
+}
+
+// A tool call as Chrysalis streams it (by index, its arguments possibly in pieces), the same way server.ts adds them up.
+function addCall(holder: { calls?: Call[] }, t: any) {
+  const calls = (holder.calls ??= []), at = (calls[t.index ?? calls.length] ??= { id: "", name: "", args: "" });
+  if (t.id) at.id = t.id;
+  if (t.function?.name) at.name += t.function.name;
+  if (t.function?.arguments) at.args += t.function.arguments;
+}
+// What the web server says of a call as it goes: its state, its result, how long it ran.
+function toolEvent(calls: Call[] | undefined, tool: any, now: number): Call | undefined {
+  const c = calls?.find((x) => x.id === tool.id);
+  if (!c) return undefined;
+  for (const k of ["title", "source", "readOnly", "state", "result", "ms"] as const) if (tool[k] !== undefined) (c as any)[k] = tool[k];
+  if (c.state === "running") callSince.set(c.id, now);
+  if (c.state === "approval") openCards.delete(c.id);
+  deciding.delete(c.id);
+  return c;
+}
+// A sub-agent's event (server.ts: agent) into its call, as a reply's own events go into the reply (take). A call of its
+// that needs the user opens its card: the question is in there.
+function feedAgent(c: Call, ev: any, now: number) {
+  const a = (c.agent ??= { content: "", reasoning: "" }), d = ev.choices?.[0]?.delta ?? {};
+  if (ev.error) a.error = ev.error.message;
+  if (ev.chrysalis_prompt) a.read = true;
+  if (ev.usage) a.tokens = (a.tokens ?? 0) + (ev.usage.completion_tokens ?? 0);
+  if (d.reasoning_content) a.reasoning += d.reasoning_content;
+  if (d.content) a.content += d.content;
+  for (const t of d.tool_calls ?? []) addCall(a, t);
+  if (ev.tool && toolEvent(a.calls, ev.tool, now)?.state === "approval") openCards.add(c.id);
+  if (ev.round) {
+    a.rounds = [...(a.rounds ?? []), { content: a.content, ...(a.reasoning ? { reasoning: a.reasoning } : {}), calls: a.calls ?? [] }];
+    a.content = a.reasoning = "";
+    a.calls = undefined;
+  }
+  if (ev.note) a.notes = [...(a.notes ?? []), ev.note];
 }
 
 // After Chrysalis restates a continued reply: keep the tokens it still starts with; the rest (a picked alternative)
@@ -2708,6 +2830,7 @@ thread.addEventListener("click", (e) => {
   }
   if (act.dataset.act === "card" || act.dataset.act === "more") return toggleCard(act);
   if (act.dataset.act === "decide") return void decide(act);
+  if (act.dataset.act === "agent-stop") return stopAgent(act, m);
   if (running()) return;
   if (act.dataset.act === "retry") void generate(conv, i);
   else if (act.dataset.act === "cont") continueReply(m);
@@ -2726,16 +2849,30 @@ function toggleCard(btn: HTMLElement) {
   const card = btn.closest<HTMLElement>(".tool-card")!, id = card.dataset.call!;
   if (btn.dataset.act === "more") return void btn.closest(".tool-result")!.classList.remove("long");
   if (!openCards.delete(id)) openCards.add(id);
-  const m = conv.messages[Number(card.closest<HTMLElement>("article")?.dataset.i)], round = card.closest<HTMLElement>(".round");
-  const calls = round ? m.rounds?.[[...round.parentElement!.children].indexOf(round)]?.calls : m.calls;
-  syncCards(card.parentElement!, calls ?? [], m, running()?.m === m);
+  const m = conv.messages[Number(card.closest<HTMLElement>("article")?.dataset.i)];
+  syncCards(card.parentElement!, cardLists.get(card.parentElement!) ?? [], m, running()?.m === m);
+}
+// a call anywhere in a reply's last round, a sub-agent's included (one waiting for the user is there)
+function findCall(calls: Call[] | undefined, id: string): Call | undefined {
+  for (const c of calls ?? []) {
+    const found = c.id === id ? c : c.agent && (findCall(c.agent.calls, id) ?? c.agent.rounds?.map((r) => findCall(r.calls, id)).find(Boolean));
+    if (found) return found;
+  }
+  return undefined;
+}
+// One sub-agent stops (the reply goes on with what it had written)
+function stopAgent(btn: HTMLElement, m: Message) {
+  const card = btn.closest<HTMLElement>(".agent-card")!;
+  if (!m.job) return;
+  (btn as HTMLButtonElement).disabled = true;
+  void fetch(`/api/chat/${m.job}/agent/${encodeURIComponent(card.dataset.call!)}/stop`, { method: "POST" }).catch(() => {});
 }
 
 // The user's answer to a call that asks first, to the web server (whichever page answers, the reply goes on).
 // Always allow also lets the tool run without asking from now on, in every chat of the tab (Settings lists it).
 async function decide(btn: HTMLElement) {
   const card = btn.closest<HTMLElement>(".tool-card")!, id = card.dataset.call!, decision = btn.dataset.decision!;
-  const m = conv.messages[Number(card.closest<HTMLElement>("article")?.dataset.i)], c = m?.calls?.find((x) => x.id === id);
+  const m = conv.messages[Number(card.closest<HTMLElement>("article")?.dataset.i)], c = findCall(m?.calls, id);
   if (!m?.job || !c) return;
   if (decision === "always" && !settings.allow?.includes(c.name)) {
     settings.allow = [...(settings.allow ?? []), c.name].sort();
@@ -3107,6 +3244,7 @@ const dotOf = (s: SourceInfo) => (s.state === "connected" ? "online" : s.state =
 function stateLine(s: SourceInfo) {
   const n = s.tools.length, k = s.tools.filter((t) => toolOn(s.id, t.name)).length;
   if (s.kind === "fetch") return "Reads web pages at public addresses";
+  if (s.kind === "agent") return "Hands tasks to agents that work side by side";
   return s.state === "connected" ? `${k} of ${n} tool${n === 1 ? "" : "s"} on` : s.state === "connecting" ? "Starting…"
     : s.state === "failed" ? "Could not start" : s.state === "disabled" ? "Disabled in the config file" : isOn(s.id) ? "Starts with the next reply" : "Not started";
 }
@@ -3129,8 +3267,8 @@ function toolSwitch(what: string, src: string, tool: string, on: boolean, label:
 }
 function sourceView(s: SourceInfo): HTMLElement {
   const box = h("div", `tp-src${isOn(s.id) ? " on" : ""}`), row = h("div", "tp-row"), text = h("span", "tp-text");
-  const lead = s.kind === "fetch" ? h("span", "tp-ico") : h("span", `dot ${dotOf(s)}`);
-  if (s.kind === "fetch") lead.innerHTML = icon("globe");
+  const lead = s.kind === "mcp" ? h("span", `dot ${dotOf(s)}`) : h("span", "tp-ico");
+  if (s.kind !== "mcp") lead.innerHTML = icon(s.kind === "fetch" ? "globe" : "agent");
   else lead.title = s.state;
   text.append(h("span", "tp-name", s.label), h("span", "tp-sub", stateLine(s)));
   row.append(lead, text);
@@ -3192,8 +3330,8 @@ function renderTools() {
   if (!catalog) parts.push(h("div", "tp-empty", "Asking the web server…"));
   else {
     if (catalog.error) parts.push(h("div", "tp-err", catalog.error));
-    const fetchSrc = catalog.sources.filter((s) => s.kind === "fetch"), mcp = catalog.sources.filter((s) => s.kind === "mcp");
-    parts.push(...fetchSrc.map(sourceView), h("div", "tp-group", "MCP servers"));
+    const builtIn = catalog.sources.filter((s) => s.kind !== "mcp"), mcp = catalog.sources.filter((s) => s.kind === "mcp");
+    parts.push(...builtIn.map(sourceView), h("div", "tp-group", "MCP servers"));
     if (mcp.length) parts.push(...mcp.map(sourceView));
     else {
       const help = h("div", "tp-empty");
@@ -3257,10 +3395,10 @@ function renderToolSettings() {
         rows.push(help);
       }
       const f = catalog.sources.find((s) => s.kind === "fetch");
-      if (f) {
+      for (const b of catalog.sources.filter((s) => s.kind !== "mcp")) {
         const r = h("div", "ts-row"), top = h("div", "ts-top");
-        top.append(h("span", `dot ${dotOf(f)}`), h("span", "ts-name", f.label), h("span", "ts-state", "built in"));
-        r.append(top, ...toolDescriptions(f.tools));
+        top.append(h("span", `dot ${dotOf(b)}`), h("span", "ts-name", b.label), h("span", "ts-state", "built in"));
+        r.append(top, ...toolDescriptions(b.tools));
         rows.push(r);
       }
       const note = h("p", "set-note");

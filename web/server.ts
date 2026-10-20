@@ -4,6 +4,7 @@
 import { hostname } from "node:os";
 import type { Server, Subprocess } from "bun";
 import app from "./index.html";
+import { SUBAGENT_SYSTEM } from "./tool-agent";
 import * as registry from "./tools";
 import { lanAddresses, lanTls } from "./tls";
 import { assistantTurn, DESCRIPTIONS, toolTurn, unnoted, type ToolChoice, type WireCall } from "./wire";
@@ -55,6 +56,7 @@ interface Job {
   ctrl: AbortController;
   waiters: Set<() => void>;
   asks: Map<string, (d: Decision) => void>;         // tool calls waiting for the user, by call id
+  agents: Map<string, AbortController>;             // sub-agents at work, by their call's id: each can be stopped alone
   t0: number; tFirst?: number; tAnswer?: number; tLast?: number;   // ms: start, first token, first answer token, last
   gen: number;                                      // ms between each round's first token and its last, summed
   held?: Promise<void>; go?: () => void;            // a voice reply begun ahead (HELD_MS): it runs no tool until go
@@ -70,7 +72,8 @@ const HELD_MS = 60_000;
 const FIRST_ONLY = ["continue_final_message", "chrysalis_original", "chrysalis_append_token"];
 
 function startJob(body: string): Job {
-  const job: Job = { id: crypto.randomUUID(), events: [], done: false, ctrl: new AbortController(), waiters: new Set(), asks: new Map(), t0: Date.now(), gen: 0 };
+  const job: Job = { id: crypto.randomUUID(), events: [], done: false, ctrl: new AbortController(), waiters: new Set(), asks: new Map(),
+    agents: new Map(), t0: Date.now(), gen: 0 };
   jobs.set(job.id, job);
   const push = (data: string | object) => {
     job.events.push(typeof data === "string" ? data : JSON.stringify(data));
@@ -111,7 +114,7 @@ function startJob(body: string): Job {
         if (!out || !out.calls.length || web?.loop === false || job.ctrl.signal.aborted) break;
         await job.held;
         if (job.ctrl.signal.aborted) throw new DOMException("stopped", "AbortError");
-        const results = k + 1 < MAX_ROUNDS ? await Promise.all(out.calls.map((c) => call(job, c, tools, allow, web ?? { tools: {} }, push)))
+        const results = k + 1 < MAX_ROUNDS ? await Promise.all(out.calls.map((c) => call(job, c, tools, allow, web ?? { tools: {} }, push, req)))
           : out.calls.map((c) => {
             const result = `Not run: this reply reached its limit of ${MAX_ROUNDS} rounds of tool calls.`;
             push({ tool: { id: c.id, state: "stopped", result } });
@@ -144,7 +147,9 @@ async function asSent(raw: any) {
   const ahead = req.chrysalis_voice?.ahead === true;
   delete req.chrysalis_web;
   delete req.chrysalis_voice;
-  const { tools, notes } = web ? await registry.select(web.tools ?? {}) : { tools: [] as registry.Named[], notes: [] as string[] };
+  const picked = web ? await registry.select(web.tools ?? {}) : { tools: [] as registry.Named[], notes: [] as string[] };
+  // a spoken reply stays quick: no sub-agents in voice mode
+  const tools = said ? picked.tools.filter((n) => n.source.kind !== "agent") : picked.tools, notes = picked.notes;
   if (tools.length) req.tools = tools.map((n) => registry.openai(n, DESCRIPTIONS[n.tool.name]));
   return { req, web, said, tool, ahead, tools, notes };
 }
@@ -153,8 +158,9 @@ class ChrysalisDown extends Error {}
 // Chrysalis took the request and its answer broke off (its log says why: an exception in Chrysalis drops the
 // connection)
 class ChrysalisBroke extends Error { message = "Chrysalis's reply broke off (Chrysalis's log has why)"; }
-// One request to Chrysalis, its events passed on as they come: what it wrote, and the tool calls it ended with.
-async function round(job: Job, body: string, push: (d: string | object) => void, signal = job.ctrl.signal) {
+// One request to Chrysalis, its events passed on as they come: what it wrote, and the tool calls it ended with. timed:
+// its tokens count in the reply's timings (a sub-agent's do not: they are not the reply's own words).
+async function round(job: Job, body: string, push: (d: string | object) => void, signal = job.ctrl.signal, timed = true) {
   const r = await fetch(`${CHRYSALIS}/v1/chat/completions`, {
     method: "POST", body, headers: { "Content-Type": "application/json" }, signal,
   }).catch((e) => { throw signal.aborted ? e : new ChrysalisDown(); });
@@ -176,7 +182,7 @@ async function round(job: Job, body: string, push: (d: string | object) => void,
         buf = buf.slice(end + 2);
         if (!data || data === "[DONE]") continue;
         const now = Date.now(), delta = data.includes('"delta"') ? JSON.parse(data).choices?.[0]?.delta : undefined;
-        if (delta?.content || delta?.reasoning_content || delta?.tool_calls) {
+        if ((delta?.content || delta?.reasoning_content || delta?.tool_calls) && timed) {
           job.tFirst ??= now;
           job.tLast = last = now;
           first ??= now;
@@ -242,9 +248,11 @@ async function forced(job: Job, req: any, messages: object[], push: (d: string |
 }
 
 // One tool call, from the model's arguments to the result it is given: refused when the chat did not turn the tool on,
-// asked about when it is not read-only (unless the user allowed it for good), stopped by Stop. Its events carry what
-// the page shows of it; the result also goes to the model as its tool message.
-async function call(job: Job, c: WireCall, tools: registry.Named[], allow: Set<string>, web: ToolChoice, push: (d: object) => void): Promise<string> {
+// asked about when it is not read-only (unless the user allowed it for good), stopped by Stop (signal: the reply's, or a
+// sub-agent's). Its events carry what the page shows of it; the result also goes to the model as its tool message. req:
+// the reply's request, which a sub-agent's are made from.
+async function call(job: Job, c: WireCall, tools: registry.Named[], allow: Set<string>, web: ToolChoice, push: (d: object) => void, req: any,
+  signal = job.ctrl.signal): Promise<string> {
   const n = tools.find((t) => t.fn === c.name);
   const about = { id: c.id, title: n?.tool.title ?? c.name, source: n?.source.label, readOnly: n?.tool.readOnly };
   const end = (state: string, result: string, ms?: number) => (push({ tool: { ...about, state, result, ms } }), result);
@@ -259,9 +267,9 @@ async function call(job: Job, c: WireCall, tools: registry.Named[], allow: Set<s
   if (!n.tool.readOnly && !allow.has(n.fn)) {
     push({ tool: { ...about, state: "approval" } });
     const d = await new Promise<Decision | "stop">((resolve) => {
-      if (job.ctrl.signal.aborted) return resolve("stop");
+      if (signal.aborted) return resolve("stop");
       job.asks.set(c.id, resolve);
-      job.ctrl.signal.addEventListener("abort", () => resolve("stop"), { once: true });
+      signal.addEventListener("abort", () => resolve("stop"), { once: true });
     });
     job.asks.delete(c.id);
     if (d === "stop") return end("stopped", "Not run: the user stopped the reply before this call was allowed.");
@@ -270,12 +278,64 @@ async function call(job: Job, c: WireCall, tools: registry.Named[], allow: Set<s
   }
   push({ tool: { ...about, state: "running" } });
   const t = Date.now();
+  if (n.source.kind === "agent") {
+    const [state, result] = await subagent(job, c, args, tools.filter((x) => x.source.kind !== "agent"), allow, web, push, req, signal);
+    return end(state, result, Date.now() - t);
+  }
   try {
-    const result = await registry.run(n, args, job.ctrl.signal, n.source.kind === "fetch" ? web.fetchChars : undefined);
+    const result = await registry.run(n, args, signal, n.source.kind === "fetch" ? web.fetchChars : undefined);
     return end("done", result, Date.now() - t);
   } catch (e) {
-    if (job.ctrl.signal.aborted) return end("stopped", "Stopped: the user stopped the reply while this call ran.", Date.now() - t);
+    if (signal.aborted) return end("stopped", "Stopped: the user stopped the reply while this call ran.", Date.now() - t);
     return end("failed", `Error: ${e instanceof Error ? e.message : String(e)}`, Date.now() - t);
+  }
+}
+
+// A sub-agent (tool-agent.ts): a conversation of its own on the task the reply handed it, with the chat's other tools,
+// run to its end as a reply's rounds are (its calls ask, run and stop as the reply's do). Its events reach the page
+// inside the call's (agent: {id, ev}); only its final answer goes back to the reply, as the call's result, so what it
+// read stays out of the reply's context. It can be stopped alone (/api/chat/:id/agent/:call/stop), and then gives back
+// what it had written.
+async function subagent(job: Job, c: WireCall, args: Record<string, unknown>, tools: registry.Named[], allow: Set<string>,
+  web: ToolChoice, push: (d: object) => void, req: any, outer: AbortSignal): Promise<["done" | "stopped" | "failed", string]> {
+  const task = typeof args.prompt === "string" ? args.prompt.trim() : "";
+  if (!task) return ["failed", "Error: the call needs a prompt: the task, with everything the sub-agent needs to know."];
+  const ctrl = new AbortController(), signal = AbortSignal.any([outer, ctrl.signal]);
+  job.agents.set(c.id, ctrl);
+  let failure: string | undefined;
+  const inner = (d: string | object) => {
+    const ev = typeof d === "string" ? JSON.parse(d) : d;
+    if (ev?.error?.message) failure = ev.error.message;
+    push({ agent: { id: c.id, ev } });
+  };
+  // the reply's model and settings, not its messages, tools, seed or log probs (only the page's token view reads those)
+  const base = { ...req };
+  for (const f of ["messages", "tools", "tool_choice", "seed", "logprobs", "top_logprobs", ...FIRST_ONLY]) delete base[f];
+  if (tools.length) base.tools = tools.map((n) => registry.openai(n, DESCRIPTIONS[n.tool.name]));
+  let messages: object[] = [{ role: "system", content: SUBAGENT_SYSTEM }, { role: "user", content: task }], said = "";
+  try {
+    for (let k = 0; ; k++) {
+      if (k) inner({ round: k });
+      const out = await round(job, JSON.stringify({ ...base, messages }), inner, signal, false);
+      if (!out) return ["failed", `Error: the sub-agent could not go on: ${failure ?? "Chrysalis refused its request"}`];
+      said = out.content.trim();
+      if (!out.calls.length) return ["done", said || "The sub-agent finished without writing an answer."];
+      if (k + 1 >= MAX_ROUNDS) {
+        inner({ note: `Stopped after ${MAX_ROUNDS} rounds of tool calls.` });
+        return ["done", `${said}\n\n[The sub-agent stopped here: it reached its limit of ${MAX_ROUNDS} rounds of tool calls.]`.trim()];
+      }
+      const results = await Promise.all(out.calls.map((x) => call(job, x, tools, allow, web, inner, req, signal)));
+      if (signal.aborted) throw new DOMException("stopped", "AbortError");
+      messages = [...messages, assistantTurn(out.content, out.reasoning, out.calls), ...out.calls.map((x, i) => toolTurn(x.id, results[i]))];
+    }
+  } catch (e) {
+    if (signal.aborted) {
+      const by = outer.aborted ? "the user stopped the reply" : "the user stopped it";
+      return ["stopped", `Stopped before it finished: ${by}.${said ? ` What it had written last:\n\n${said}` : ""}`];
+    }
+    return ["failed", `Error: the sub-agent could not go on: ${e instanceof ChrysalisDown ? "Chrysalis is not running" : e instanceof Error ? e.message : String(e)}`];
+  } finally {
+    job.agents.delete(c.id);
   }
 }
 
@@ -428,6 +488,14 @@ const serve = (hostname: string, port: number, secure?: { cert: string; key: str
     "/api/chat/:id/stop": {
       POST: guarded((req) => {
         jobs.get((req as Request & { params: { id: string } }).params.id)?.ctrl.abort();
+        return new Response(null, { status: 204 });
+      }),
+    },
+    // one sub-agent stops (Stop in its card): the reply goes on with what it had written
+    "/api/chat/:id/agent/:call/stop": {
+      POST: guarded((req) => {
+        const { id, call } = (req as Request & { params: { id: string; call: string } }).params;
+        jobs.get(id)?.agents.get(call)?.abort();
         return new Response(null, { status: 204 });
       }),
     },

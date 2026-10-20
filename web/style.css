@@ -638,6 +638,26 @@ main { position: relative; }
 .notes:not(:empty) { display: grid; gap: 4px; margin-top: 8px; }
 .note { color: var(--muted); font-size: 12.5px; }
 .note::before { content: "· "; color: var(--accent); }
+/* a sub-agent's card (app.ts, paintAgent): its head two lines, the task's label and what it is doing now; open, the task as
+   given, its work (rounds and cards as a reply's), its answer, and Stop for it alone */
+.agent-card[data-state="running"] { border-color: color-mix(in srgb, var(--accent) 30%, var(--line)); }
+.agent-head { min-height: 50px; padding: 7px 10px; }
+.agent-text { display: grid; flex: 1; gap: 1px; min-width: 0; }
+.agent-title { display: flex; align-items: baseline; gap: 8px; min-width: 0; }
+.agent-title > .tool-name { flex: 0 1 auto; min-width: 0; overflow: hidden; white-space: nowrap; text-overflow: ellipsis; }
+.agent-now { overflow: hidden; color: var(--muted); font-size: 12.5px; white-space: nowrap; text-overflow: ellipsis; }
+.agent-card[data-state="failed"] .agent-now { color: var(--danger); }
+.agent-meta { flex: none; color: var(--faint); font: 11.5px var(--mono); font-variant-numeric: tabular-nums; }
+.agent-meta:not(:empty)::after { content: "·"; margin-left: 8px; }
+.agent-task { max-height: 160px; padding: 8px 10px; overflow: auto; border-radius: 8px; background: var(--code); color: var(--muted);
+  font-size: 13px; line-height: 1.5; white-space: pre-wrap; overflow-wrap: anywhere; }
+.agent-log:not(:empty) { margin-top: 10px; }
+.agent-body > .thinking { margin: 10px 0 0; }
+.agent-body > .markdown { font-size: 14px; }
+.agent-notes:not(:empty) { display: grid; gap: 4px; margin-top: 8px; }
+.agent-stop { margin-top: 10px; }
+.agent-stop[hidden], .agent-body > .tool-label[hidden], .agent-body > .thinking[hidden] { display: none; }
+@media (max-width: 639px) { .agent-meta { display: none; } }
 @media (prefers-reduced-motion: reduce) { .tool-card .tool-state::before { animation: none !important; } }
 
 /* Tools in the message box: a wrench with how many tools this chat has on, opening them by source */

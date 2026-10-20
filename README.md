@@ -63,7 +63,7 @@ refused. `previous_response_id` continues one of the last 256 responses (kept un
 ## Web UI
 
 `web/` is a small Bun app: `server.ts` serves the page, proxies Chrysalis's API on the same origin and runs the tools
-(`tools.ts`, with `tool-fetch.ts` and `tool-mcp.ts`); `app.ts` is plain TypeScript (marked, highlight.js, DOMPurify,
+(`tools.ts`, with `tool-fetch.ts`, `tool-agent.ts` and `tool-mcp.ts`); `app.ts` is plain TypeScript (marked, highlight.js, DOMPurify,
 KaTeX; Mermaid's own build loads with the first diagram). The chat lies on a sea of characters that fills everything
 under the top bar, the message box floating on it (`ocean.ts`, two WebGL2 passes: one fragment per character cell works
 out what it shows, then each screen pixel draws its cell's glyph from an atlas at the screen's own pixel size; the grid
@@ -146,7 +146,7 @@ so prices and shell variables stay text. A ```html block holding a whole documen
 fragment when its Preview is clicked), in an iframe on `/sandbox` behind two walls, each enough alone: the iframe's
 sandbox (an opaque origin: no cookies, storage or chat) and that route's policy, which lets the page's own code run but
 nothing load or connect anywhere, Chrysalis included. Tools: the wrench beside the thinking bar (with how many tools are
-on) opens them for this chat: Fetch URL, then each MCP server with its state (not started, starting, running, failed
+on) opens them for this chat: Fetch URL and Sub-agents, then each MCP server with its state (not started, starting, running, failed
 with the error and Retry, disabled), a switch for the whole server, and under its arrow one per tool, marked read-only
 or asks first. The choice is the chat's, kept with it (export too); a new chat starts from the last one. A server starts
 the first time a chat turns it on, keeps running, and after a failure starts again 1, 2, 4 ... 60 s later. The servers
@@ -186,8 +186,16 @@ allow (that tool, from then on, in every chat of the tab) and Deny, and a denied
 A call to a tool the chat has not turned on gets an error result, not a crash. Stop ends a reply anywhere, a call too
 (MCP's cancellation reaches the server). Calls show where they happened among each round's thinking and text, as cards
 (the tool and its server, a line of its arguments, running with its time, asks to run, done in N s, failed, declined,
-stopped) that open to the arguments and the result (markdown through the same sanitizer; a long one folds). A reply's
-stats count its rounds as one: time to its first token, tokens over the time spent writing them (each round's first
+stopped) that open to the arguments and the result (markdown through the same sanitizer; a long one folds). Sub-agents
+(`web/tool-agent.ts`, built in) let a reply hand a task to an agent of its own: the model calls `subagent` with a short
+label and a self-contained task (OpenCode's shape, without its background runs), and the web server runs a fresh
+conversation on it (a system prompt of its own, the chat's other tools, the reply's model and thinking) round after
+round as a reply's, its calls asking first as the reply's do. Calls in one message run side by side (Chrysalis writes
+three replies at once and queues the rest), and only a sub-agent's final answer goes back, as the call's result, so what
+it read stays out of the reply's context. Its card shows the task's label, what it is doing (thinking, the tool it runs,
+writing; once done, the start of its answer), its tool calls, tokens and time; open, the task as given, its rounds
+(thinking, text, tool cards: one that asks first opens the card), its answer, and Stop for it alone, after which the
+reply goes on with what it had written. Voice replies have none. A reply's stats count its rounds as one: time to its first token, tokens over the time spent writing them (each round's first
 token to its last), prompts summed; the usage meter shows the context its last round left. Text files, pictures, PDFs
 and videos can be attached (the clip, a drop anywhere, a paste): Chrysalis gets each file before the typed text, a text
 file as its name and a fenced block, a picture as an image, a PDF as a file (its pages as pictures and text) and a video
@@ -618,7 +626,7 @@ engine/   common.h kernels.h gguf.h      constants, kernel entry points, GGUF re
 chrysalis/
           engine.py chat.py cache.py server.py apis.py structured.py vision.py documents.py sleep.py link.py warm.py
           metrics.py __main__.py
-web/      server.ts app.ts files.ts sampler.ts wire.ts      Bun web UI; tools.ts tool-fetch.ts tool-mcp.ts its tools; tls.ts HTTPS (--lan)
+web/      server.ts app.ts files.ts sampler.ts wire.ts      Bun web UI; tools.ts tool-fetch.ts tool-agent.ts tool-mcp.ts its tools; tls.ts HTTPS (--lan)
           voice.ts voice-worklet.js                     voice mode's client: the microphone, playback, the protocol
           ocean.ts logo.svg logo-thin.svg               a new chat's sea of characters and its butterfly (WebGL2)
           index.html style.css                          (make test_web: sampler.test.ts, server.test.ts with fake-mcp.ts
