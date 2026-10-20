@@ -83,3 +83,21 @@ for i in range(200):
     serve(c, e, [7, 7, 7] + [i % 13] * (i % 11 + 1), reply=i % 17)
     assert all(e.snaps[en.snap] is not None for en in c.entries)
 print("churn: ok")
+
+# An agent that hands work to three sub-agents and waits: the third takes its slot (its state is kept as a snapshot),
+# and their steps add far more snapshots than are kept. When they are done, the agent's next step (their results
+# appended) must still find everything it had.
+e = FakeEngine()
+c = cache.Cache(e, n_slots=3, max_snapshots=6, min_snapshot_gap=8)
+agent = [9] * 40
+serve(c, e, agent, reply=10)
+before = agent + list(range(10_000, 10_010))
+subs = [[200 + k] * 20 for k in range(3)]
+for step in range(6):
+    for k in range(3):
+        serve(c, e, subs[k], reply=5)
+        subs[k] = subs[k] + list(range(10_000, 10_005)) + [300 + k] * 12   # its reply, then a tool's output
+assert not any(len(s.tokens) and s.tokens.tolist()[:len(before)] == before for s in c.slots), "setup: the agent lost its slot"
+cached = serve(c, e, before + [400] * 30, reply=5)
+assert cached == len(before), f"the agent's step read {len(before) + 30 - cached} tokens again (cached {cached} of {len(before)})"
+print("an agent waiting on its sub-agents keeps its cache: ok")

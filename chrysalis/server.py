@@ -259,7 +259,8 @@ class Turnstile:
         # (Batcher), and would otherwise have it back before a prompt waiting to be read woke up.
         self.ticket = self.serving = 0
 
-    def acquire(self, main):
+    def acquire(self, main, arrived=None):
+        """arrived: when a side request came (its SIDE_IDLE counts from then at the latest)."""
         with self.cv:
             if main:
                 turn, self.ticket = self.ticket, self.ticket + 1
@@ -269,13 +270,20 @@ class Turnstile:
                 self.serving += 1
                 self.waiting -= 1
             else:
-                arrived = time.time()
-                while True:
-                    idle = time.time() - max(self.main_seen, arrived)
-                    if not self.busy and not self.waiting and idle >= self.SIDE_IDLE:
-                        break
-                    self.cv.wait(None if self.busy or self.waiting else self.SIDE_IDLE - idle)
+                self.side_turn(arrived or time.time())
             self.busy = True
+
+    def wait_side(self, arrived):
+        """Until the GPU would be a side request's, without taking it."""
+        with self.cv:
+            self.side_turn(arrived)
+
+    def side_turn(self, arrived):
+        while True:
+            idle = time.time() - max(self.main_seen, arrived)
+            if not self.busy and not self.waiting and idle >= self.SIDE_IDLE:
+                return
+            self.cv.wait(None if self.busy or self.waiting else self.SIDE_IDLE - idle)
 
     def release(self, main=True):
         with self.cv:
@@ -297,6 +305,18 @@ class Lanes:
         with self.cv:
             self.cv.wait_for(lambda: self.used < self.n and not self.exclusive)
             self.used += 1
+
+    def try_enter(self):
+        with self.cv:
+            if self.used < self.n and not self.exclusive:
+                self.used += 1
+                return True
+            return False
+
+    def changed(self, timeout):
+        """Waits for a lane to be left (or the timeout)."""
+        with self.cv:
+            self.cv.wait(timeout)
 
     def leave(self):
         with self.cv:
@@ -321,17 +341,30 @@ class Lanes:
             self.cv.notify_all()
 
 
+def admit(lanes, gpu, side, arrived):
+    """A lane for a request. A side request waits for its turn at the GPU first, holding none: it waits as long as agent
+    requests queue or run, and a lane held that long keeps one of them out (OpenCode titles a session as it starts, and an
+    agent that starts three sub-agents needs all three lanes: waiting in one, the title held the third back 7 s)."""
+    if not side:
+        return lanes.enter()
+    while True:
+        gpu.wait_side(arrived)
+        if lanes.try_enter():
+            return
+        lanes.changed(0.5)
+
+
 class Held:
     """A request's turn at the GPU, taken and given back as it goes: its prompt is read with the GPU to itself, its reply's
     steps share passes (Batcher), and a constrained answer's steps or a freeing of KV pages take it for the moment."""
 
-    def __init__(self, gpu, main):
-        self.gpu, self.main, self.on = gpu, main, False
+    def __init__(self, gpu, main, arrived=None):
+        self.gpu, self.main, self.arrived, self.on = gpu, main, arrived, False
         self.slot = None                             # the cache slot its reply is written in, freed when it ends
 
     def take(self):
         if not self.on:
-            self.gpu.acquire(self.main)
+            self.gpu.acquire(self.main, self.arrived)
             self.on = True
 
     def drop(self):
@@ -690,8 +723,9 @@ class Server:
                                f"({self.capacity} tokens), try increasing it")
         max_tokens = min(max_tokens, self.capacity - len(prompt) - 1)
         record = None if side or compacting or cont or aside else {"messages": messages, "tools": tools, "style": style}
-        self.lanes.enter()
-        held = Held(self.gpu, main=not side)
+        arrived = time.time()
+        admit(self.lanes, self.gpu, side, arrived)
+        held = Held(self.gpu, main=not side, arrived=arrived)
         try:
             want = self.active if side else self.resolve(body.get("model"))   # titles never cause a switch
             if want != self.active:                      # replies in flight finish on the model they began with

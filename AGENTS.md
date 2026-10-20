@@ -24,6 +24,7 @@ a stale comment steers people and agents wrong. `make lint` catches the mechanic
 ## Running them
 
 - CPU only: `make build/test_sampler && build/test_sampler`, `data/venv/bin/python tools/test_cache.py`,
+  `data/venv/bin/python tools/test_lanes.py` (requests in flight, sub-agents beside a session's title),
   `data/venv/bin/python tools/test_chat.py`, `data/venv/bin/python tools/test_documents.py` (which PDF pages are
   pictured), `make build_fn/test_cpujob_fn && build_fn/test_cpujob_fn`, `make test_voice` (the voice service: its features against
   transformers', turns, echo and barge-in over its WebSocket; `make voice` first), `make test_web` (the web UI's sampler against

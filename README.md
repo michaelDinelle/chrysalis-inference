@@ -429,7 +429,9 @@ the end of the tool block, of the static system prompt (cut before OpenCode's da
 lines, so it is shared across projects and days), of the system turn, and of every prompt: that last one
 keeps the next token's distribution, so a resent prompt (a retry, a redraw) needs no prefill at all and an
 agent step is one forward pass. A prompt is always cut at these points, so a seed draws the same reply
-from any cached state. Pinned buffers for all snapshot slots are made during warm-up (Flash-Next: one 1.9 GB
+from any cached state. Beyond what RAM holds (40 snapshots on the 27B, 16 on Flash-Next), the ones a session has moved on
+from go first (an agent's older steps), then the least recently used: an agent that waits while its sub-agents work keeps
+its place however many steps they take, and reads only their results when they are done. Pinned buffers for all snapshot slots are made during warm-up (Flash-Next: one 1.9 GB
 region whose pages fault in while the warm-up runs; made one at a time, each cost a request 0.1-0.4 s in the
 minutes after a load). The ones every session shares (the tool block, the static system prompt, the side requests'
 instructions) are also written to disk (`data/cache/<model>`, 0.2-0.4 GB each, 6 GB kept per model), by a thread, from a
@@ -438,8 +440,8 @@ back in 0.2 s instead of prefilling it for 6.4 s. A file holds its tokens and is
 engine build. The rest live in RAM and VRAM only.
 Tokenization is memoized per message, so re-rendering a 200K-token conversation each turn costs ~2 ms.
 Side requests (OpenCode's session title, sent 8 ms before the session's first request, and its summaries)
-go last: they start after 0.3 s without an agent request, and their instructions are kept like the tool
-block. OpenCode specifics: the date in its environment block is frozen per conversation, plan-mode
+go last: they start after 0.3 s without an agent request, waiting outside the three request lanes meanwhile (an agent
+that starts three sub-agents needs all three), and their instructions are kept like the tool block. OpenCode specifics: the date in its environment block is frozen per conversation, plan-mode
 reminders are kept where they first appeared, and its compaction request (normally a full re-read of the
 older part of the conversation) is answered by appending the summary request to the cached conversation,
 rendered with that conversation's own settings. Extra system messages from plugins are merged into the

@@ -6,7 +6,8 @@ A request is served from whatever cached state shares the longest prefix with it
     an edited or undone turn, a session that was evicted from the GPU),
   * otherwise a fresh sequence.
 Only the remaining suffix is prefilled. Snapshots hold the recurrent state in host RAM and share KV
-pages copy-on-write; least recently used ones are dropped when RAM or KV pages run short. The pinned
+pages copy-on-write; when RAM or KV pages run short, the ones a session has moved on from are dropped first, then the
+least recently used (Cache.trim). The pinned
 ones (prefixes every session shares) are also kept on disk (Disk), so a restart or a wake from sleep
 reads them back instead of prefilling them.
 """
@@ -24,6 +25,12 @@ def common_prefix(a, b):
         return 0
     diff = np.flatnonzero(a[:n] != b[:n])
     return int(diff[0]) if len(diff) else n
+
+
+def extends(longer, shorter):
+    """`longer` begins with all of `shorter` and goes on (its last token first: unrelated states mostly differ there)."""
+    n = len(shorter)
+    return len(longer) > n > 0 and longer[n - 1] == shorter[n - 1] and common_prefix(longer[:n], shorter) == n
 
 
 class Slot:
@@ -229,13 +236,18 @@ class Cache:
             self.disk.save(self.e, self.entries[-1].snap, self.entries[-1].tokens)
 
     def trim(self, need_tokens=0):
-        """Drop least recently used snapshots beyond the count limit, or until `need_tokens` of KV is free."""
+        """Drop snapshots beyond the count limit, or until `need_tokens` of KV is free. Pinned ones go last. Of the rest, those
+        a session has moved on from go first: two or more cached states extend them (an agent loop's older steps, which
+        only an edit further back would use; its latest prompt, which a resend uses, has one: the reply after it), then the
+        least recently used. So a session that waits keeps where it was: an agent while its sub-agents work, whose steps
+        each add a snapshot, and by age alone the agent's would go first."""
         while self.entries:
             over = len(self.entries) > self.max_snapshots
             if not over and self.e.free_tokens() >= need_tokens:
                 return
             victims = [en for en in self.entries if not en.pinned] or self.entries
-            v = min(victims, key=lambda en: en.used)
+            states = [en.tokens for en in self.entries] + [s.tokens for s in self.slots]
+            v = max(victims, key=lambda en: (sum(extends(t, en.tokens) for t in states) >= 2, -en.used))
             self.entries.remove(v)
             self.e.free_snapshot(v.snap)
 
