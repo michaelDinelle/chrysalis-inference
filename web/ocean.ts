@@ -21,8 +21,10 @@ const CELL_W = 6, CELL_H = 11, FONT_PX = 10;
 // The drawing's viewBox (logo.svg's), and its stroke half-width in those units (logo-thin.svg's strokes: 70% of
 // logo.svg's 32.18).
 const VIEW_W = 660, VIEW_H = 473, HALF_STROKE = 11.26;
-// A small butterfly (a phone's) keeps its strokes about two glyphs wide, CSS px: thinner, they break into scattered marks.
-const MIN_HALF_STROKE = 6.5;
+// A small butterfly (a phone's) is drawn bolder, its strokes at least this half-width, CSS px (three glyphs wide, about
+// logo.svg's own weight there): as thin as a large one's, they broke into scattered marks.
+const MIN_HALF_STROKE = 9;
+const strokes = (w: number) => { const half = HALF_STROKE * w / VIEW_W; return { half: Math.max(half, MIN_HALF_STROKE), bold: Math.max(0, MIN_HALF_STROKE - half) }; };
 // Click waves, in the order clicks cycle through them (the shader's kinds), each WAVE_LIFE s long; a drag leaves a wake
 // (WAKE), small swells WAKE_LIFE s long.
 const PATTERNS = [1, 0, 2, 3, 4];
@@ -47,7 +49,7 @@ uniform vec2 uLane;         // the chat's column (the message box's): left and r
 uniform float uFlyOn;       // the butterfly: 1 in a new chat, 0 sunk into the water behind a chat
 uniform float uTime, uMotion;
 uniform vec4 uRip[${MAX_RIPPLES}];
-uniform vec2 uFly;          // the drawing's width and its strokes' half-width, CSS px
+uniform vec3 uFly;          // the drawing's width, its strokes' half-width and how much a small one's are thickened, CSS px
 uniform vec2 uCenter;       // the butterfly's middle, CSS px
 uniform sampler2D uSdf;     // distance to the drawing in texels, negative inside
 uniform vec2 uSdfSize;
@@ -190,7 +192,7 @@ void main() {
   float sunk = smoothstep(0.0, 1.0, 1.0 - uFlyOn);
   vec2 drift = sunk * 6.0 * vec2(snoise(vec3(p * 0.011, t * 0.12)), snoise(vec3(p * 0.011 + 31.0, t * 0.12)));
   vec2 q = uCenter + (p - uCenter) / vec2(breathe, 1.0) - slope * 30.0 + drift;
-  float d = flyAt(q, uCenter, uFly.x);
+  float d = flyAt(q, uCenter, uFly.x) - uFly.z;
   // as it sinks its bold glyphs give way to the water's, unevenly (patches and single cells), and rise back the same way
   float grain = 0.999 * (0.65 * (0.5 + 0.5 * snoise(vec3(p * 0.018, 5.0))) + 0.35 * fract(sin(dot(cell, vec2(12.9898, 78.233))) * 43758.5453));
   float edge = smoothstep(0.0, 28.0, min(min(p.x - uView.x, uView.z - p.x), min(p.y - uView.y, uView.w - p.y)));
@@ -423,9 +425,15 @@ export class Ocean {
   private resize = new ResizeObserver(() => this.layout());
 
   // `layer`: the room the sea fills (under the top bar, behind the message box), shown while a new chat is. `box`: what
-  // the butterfly floats above and the water is quiet around, and `hint` the line under it (the message box; a device
-  // setup page's card, setup.ts).
-  constructor(private layer: HTMLElement, private boxAt = ".composer-box", private hintAt = "#composer .hint") {
+  // the water is quiet around and the butterfly floats above, in the room between it and the layer's top, and `hint` the
+  // line under it (the message box). A device's setup page (setup.ts) names its card and the room the butterfly has.
+  private boxAt: string;
+  private hintAt: string;
+  private roomAt: string;
+  constructor(private layer: HTMLElement, { box = ".composer-box", hint = "#composer .hint", room = "" } = {}) {
+    this.boxAt = box;
+    this.hintAt = hint;
+    this.roomAt = room;
     this.dress(this.canvas);
     onTheme(() => { this.readColors(); this.wake(); });
     this.still.addEventListener("change", () => this.wake());
@@ -564,10 +572,14 @@ export class Ocean {
     const hint = this.hintAt ? document.querySelector(this.hintAt)?.getBoundingClientRect() : undefined;
     const column = box && box.width > 0 ? box : r, top = box && box.width > 0 ? box.top : r.bottom;
     this.box = box && box.width > 0 ? [box.left, box.top, box.right, Math.max(box.bottom, hint?.height ? hint.bottom : 0)] : [-1e4, -1e4, -1e4, -1e4];
-    // (the room measured from the page's top: a setup page scrolls the butterfly away with its card, at its size)
-    const roomTop = r.top - scrollY;
-    this.center = [column.left + column.width / 2, roomTop + (top - roomTop) * 0.47];
-    this.flyW = Math.min(column.width * 0.86, (top - roomTop) * 0.74 * VIEW_W / VIEW_H, r.width * 0.92);
+    const room = this.roomAt ? document.querySelector(this.roomAt)?.getBoundingClientRect() : undefined;
+    if (room) {                                     // a setup page's: it scrolls, and spans the window's width
+      this.center = [room.left + room.width / 2, room.top + room.height * 0.5];
+      this.flyW = Math.min(room.height * 0.8 * VIEW_W / VIEW_H, r.width * 0.92);
+    } else {
+      this.center = [column.left + column.width / 2, r.top + (top - r.top) * 0.47];
+      this.flyW = Math.min(column.width * 0.86, (top - r.top) * 0.74 * VIEW_W / VIEW_H, r.width * 0.92);
+    }
     this.lane = [column.left, column.right];
     // the sea showing (again): the butterfly is where it belongs at once, as the sea is
     if (!was) { this.fly = this.empty?.isConnected ? 1 : 0; this.wake(); }
@@ -689,7 +701,8 @@ export class Ocean {
     gl.uniform1f(c("uTime"), still ? 12 : t);
     gl.uniform1f(c("uMotion"), still ? 0 : 1);
     gl.uniform4fv(c("uRip"), this.ripples);
-    gl.uniform2f(c("uFly"), this.flyW, Math.max(HALF_STROKE * this.flyW / VIEW_W, MIN_HALF_STROKE));
+    const { half, bold } = strokes(this.flyW);
+    gl.uniform3f(c("uFly"), this.flyW, half, bold);
     gl.uniform2f(c("uCenter"), this.center[0], this.center[1]);
     gl.uniform3f(c("uPointer"), this.pointer[0], this.pointer[1], still ? 0 : this.pointer[2]);
     gl.uniform2f(c("uSdfSize"), this.sdf.w, this.sdf.h);
@@ -725,7 +738,7 @@ export class Ocean {
   private cellsCpu(uTime: number, uMotion: number) {
     const cpu = this.cpu!, sdf = this.sdf!, out = cpu.cells, [sx, sy, sw, sh] = this.seen;
     const uCellX = this.cellPx[0] / this.dpr, uCellY = this.cellPx[1] / this.dpr, uFlyOn = this.fly;
-    const uFlyW = this.flyW, uFlyHalf = Math.max(HALF_STROKE * this.flyW / VIEW_W, MIN_HALF_STROKE);
+    const uFlyW = this.flyW, { half: uFlyHalf, bold: uFlyBold } = strokes(this.flyW);
     const [cx0, cy0] = this.center, [vl, vt, vr, vb] = this.view, [bl, bt, br, bb] = this.box, [lane0, lane1] = this.lane;
     const [px0, py0, pz] = [this.pointer[0], this.pointer[1], uMotion ? this.pointer[2] : 0];
     const waves: Wave[] = [];
@@ -774,7 +787,7 @@ export class Ocean {
         const slopeX = waves.length ? (height(px + 3, py) - w) / 3 : 0, slopeY = waves.length ? (height(px, py + 3) - w) / 3 : 0;
         const driftX = sunk ? sunk * 6 * snoise(px * 0.011, py * 0.011, t * 0.12) : 0, driftY = sunk ? sunk * 6 * snoise(px * 0.011 + 31, py * 0.011 + 31, t * 0.12) : 0;
         const qx = cx0 + (px - cx0) / breathe - slopeX * 30 + driftX, qy = cy0 + (py - cy0) - slopeY * 30 + driftY;
-        const d = flyAt(qx, qy, cx0, cy0, uFlyW);
+        const d = flyAt(qx, qy, cx0, cy0, uFlyW) - uFlyBold;
         const lift = Math.max(w, 0);
         if (d < 0.5 && uFlyOn > 0 && (uFlyOn >= 1 || 0.999 * (0.65 * (0.5 + 0.5 * snoise(px * 0.018, py * 0.018, 5))
           + 0.35 * fract(Math.sin(cx * 12.9898 + cy * 78.233) * 43758.5453)) < uFlyOn)) {

@@ -73,7 +73,7 @@ const $ = (id) => document.getElementById(id);`;
 
 // The pages' look is the chat's (tokens.css): its sea of characters fills the window (device.ts, whose built script each
 // page carries: `sea`), and the page is a card floating on it, as the message box does, with the butterfly above it and
-// the aurora on its head, as the chat's panels have.
+// a night sky over the page's top: the aurora the chat's panels wear, fading into the sea.
 const page = (body: string, script: string, sea: string) => `<!doctype html>
 <html lang="en">
 <head>
@@ -88,19 +88,20 @@ ${TOKENS}
   .sea { position: fixed; inset: 0; overflow: hidden; }
   .sea > .ocean { position: absolute; touch-action: manipulation; }
   main { position: relative; display: flex; flex-direction: column; align-items: center; min-height: 100dvh;
-    padding: env(safe-area-inset-top) 16px max(28px, env(safe-area-inset-bottom)); pointer-events: none; }
-  .stage { display: grid; flex: none; place-items: center; width: 100%; height: clamp(200px, 40vh, 440px); }
+    padding: 0 16px max(28px, env(safe-area-inset-bottom)); pointer-events: none; }
+  /* the whole art across a wide window (its own proportions), its middle on a phone's, under the status bar too */
+  .sky { position: relative; display: grid; place-items: center; align-self: stretch; margin: 0 -16px; box-sizing: content-box;
+    height: clamp(68px, 100vw * 51 / 640, 120px); padding-top: env(safe-area-inset-top); }
+  .sky > .aurora { position: absolute; inset: 0; width: 100%; height: 100%; mask-image: linear-gradient(#000 45%, transparent); }
+  .sky > .brand { position: relative; color: #f6edf1; font-size: 16px; font-weight: 600; letter-spacing: 0.015em;
+    text-shadow: 0 0 2px var(--aurora-sky), 0 0 10px var(--aurora-sky); }
+  .stage { display: grid; flex: none; place-items: center; width: 100%; height: clamp(200px, 38vh, 440px); }
   .stage > .logo { width: min(78%, 320px); filter: drop-shadow(0 0 40px rgb(226 77 133 / 0.14)); }
-  .card { width: 100%; max-width: 520px; overflow: hidden; border: 1px solid var(--line); border-radius: 20px; background: var(--raised);
+  .card { width: 100%; max-width: 520px; padding: 22px 20px 18px; border: 1px solid var(--line); border-radius: 20px; background: var(--raised);
     box-shadow: var(--shadow); pointer-events: auto; }
   .sprite { position: absolute; width: 0; height: 0; }
-  .card-head { position: relative; display: grid; place-items: center; height: 60px; border-bottom: 1px solid var(--line); --glow: var(--raised); }
-  .card-head > h1 { position: relative; margin: 0; font-size: 17px; font-weight: 600; letter-spacing: 0.015em; text-shadow: 0 0 2px var(--glow), 0 0 10px var(--glow); }
-  .aurora { position: absolute; inset: 0; width: 100%; height: 100%; mask-image: linear-gradient(#000 55%, transparent 92%); }
-  :root[data-theme="light"] .card-head { --glow: var(--aurora-sky); color: #f6edf1; }
-  :root[data-theme="light"] .aurora { mask-image: none; }
-  .card-body { padding: 18px 20px 18px; }
-  .sub { margin: 0 0 18px; color: var(--muted); font-size: 15px; text-align: center; }
+  h1 { margin: 0; font-size: 22px; font-weight: 650; text-align: center; letter-spacing: -0.01em; }
+  .sub { margin: 4px 0 18px; color: var(--muted); font-size: 15px; text-align: center; }
   .status { display: flex; align-items: center; justify-content: center; gap: 10px; margin: 0 0 18px; padding: 10px 14px; border: 1px solid var(--line);
     border-radius: 12px; background: var(--panel); color: var(--muted); font-size: 14.5px; }
   .status::before { content: ""; flex: none; width: 8px; height: 8px; border-radius: 50%; background: var(--faint); animation: pulse 1.4s ease-in-out infinite; }
@@ -142,15 +143,14 @@ ${TOKENS}
 ${AURORA}
 <div id="sea" class="sea"></div>
 <main>
+  <header class="sky">
+    <svg class="aurora" aria-hidden="true" viewBox="0 0 640 51" preserveAspectRatio="xMidYMax slice"><use href="#aurora" /></svg>
+    <span class="brand">Chrysalis</span>
+  </header>
   <div class="stage" id="stage"></div>
   <section class="card">
-    <header class="card-head">
-      <svg class="aurora" aria-hidden="true" viewBox="0 0 640 51" preserveAspectRatio="xMinYMin slice"><use href="#aurora" /></svg>
-      <h1>Connect to Chrysalis</h1>
-    </header>
-    <div class="card-body">
+    <h1>Connect to Chrysalis</h1>
 ${body}
-    </div>
   </section>
 </main>
 <script>

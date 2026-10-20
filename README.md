@@ -38,7 +38,7 @@ made by `web/tls.ts`) whose name constraints let it vouch only for private addre
 trusts nothing else. From the network, only the devices this computer let in get past the chat's pages to its replies,
 tools and voice (`web/devices.ts`). Connect a device (the phone at the top of the chat here) and `chrysalis status` show
 a QR code; a phone's camera opens a setup page over plain HTTP (`http://<address>:8082`, `CHRYSALIS_SETUP_PORT`; the
-HTTPS chat would warn first; it floats on the chat's sea, the butterfly above it and the aurora on its head), which offers the authority the way the device's system trusts one (a configuration
+HTTPS chat would warn first; a card on the chat's sea, the butterfly above it and the aurora's night sky over the page), which offers the authority the way the device's system trusts one (a configuration
 profile on iPhone, iPad and Mac, the certificate on Android, Windows, Linux and ChromeOS, Firefox's own prompt in
 Firefox), says the few taps that trust it there, and goes on to the chat by itself as soon as the device does (it keeps
 loading an image from the chat's address, which loads only then; `web/setup.ts`). There the device is let in with the
@@ -89,7 +89,8 @@ out what it shows, then each screen pixel draws its cell's glyph from an atlas a
 is fixed to the window, so a side panel slides over it without redrawing it at a new size). Without WebGL2 (no GPU, or
 WebGL turned off) the CPU runs the same two passes into a 2D canvas, a quarter of the time at most, and draws the same
 picture: the noise's permutations and gradient choices are integers in the shader, so every GPU and the CPU make the
-same ones, and the browser test holds the two drawings to each other. A new chat opens on the
+same ones, and the browser test holds the two drawings to each other. A small butterfly (a phone's) is drawn bolder,
+its strokes three glyphs wide. A new chat opens on the
 butterfly in it: the current drifts in ribbons, a click sends soft ripples across it in a shape (a heart, a ring, the
 butterfly, a star, a flower) that bend the current and the butterfly as they pass, and keeps the message box's focus,
 and a drag leaves a wake. Once the chat begins the butterfly sinks into the water, where its shape stays faintly, and

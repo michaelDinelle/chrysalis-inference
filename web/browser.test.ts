@@ -1134,32 +1134,37 @@ async function look(page: Page, clip: { x: number; y: number; width: number; hei
   return { png, ...counts };
 }
 
-// Where WebGL2 is missing the CPU draws the sea (ocean.ts): the same picture, held here to WebGL2's. Reduced motion draws
-// one frame, the same instant in both.
-test("the sea drawn by the CPU, in a browser without WebGL, is the sea WebGL2 draws: the same water, the same butterfly", async () => {
+// Where WebGL2 is missing the CPU draws the sea (ocean.ts): the same picture, held here to WebGL2's, in a window and on a
+// phone (whose small butterfly is drawn bolder). Reduced motion draws one frame, the same instant in both.
+test("the sea drawn by the CPU, in a browser without WebGL, is the sea WebGL2 draws: the same water, the same butterfly, in a window and on a phone", async () => {
   const shots: Record<string, Awaited<ReturnType<typeof look>>> = {};
   for (const [name, flag] of [["gpu", "--enable-unsafe-swiftshader"], ["cpu", "--disable-3d-apis"]] as const) {
     const b = await puppeteer.launch({ executablePath: process.env.CHROMIUM ?? "/usr/bin/chromium", headless: true, args: ["--no-sandbox", flag] });
     try {
-      const page = await b.newPage();
-      page.on("pageerror", (e) => { throw e; });
-      await page.emulateMediaFeatures([{ name: "prefers-reduced-motion", value: "reduce" }, { name: "prefers-color-scheme", value: "dark" }]);
-      await page.setViewport({ width: 1280, height: 800 });
-      await page.goto(`${base}/`, { waitUntil: "load" });
-      expect(await page.evaluate(() => !!document.createElement("canvas").getContext("webgl2"))).toBe(name === "gpu");
-      await Bun.sleep(2000);
-      const sea = await page.$eval("#sea", (e) => { const r = e.getBoundingClientRect(); return { x: r.x, y: r.y, width: r.width, height: r.height }; });
-      shots[name] = await look(page, sea, shots.gpu?.png ?? "");
+      for (const [size, width, height] of [["window", 1280, 800], ["phone", 390, 844]] as const) {
+        const page = await (await b.createBrowserContext()).newPage();
+        page.on("pageerror", (e) => { throw e; });
+        await page.emulateMediaFeatures([{ name: "prefers-reduced-motion", value: "reduce" }, { name: "prefers-color-scheme", value: "dark" }]);
+        await page.setViewport({ width, height });
+        await page.goto(`${base}/`, { waitUntil: "load" });
+        expect(await page.evaluate(() => !!document.createElement("canvas").getContext("webgl2"))).toBe(name === "gpu");
+        await Bun.sleep(2000);
+        const sea = await page.$eval("#sea", (e) => { const r = e.getBoundingClientRect(); return { x: r.x, y: r.y, width: r.width, height: r.height }; });
+        shots[`${name} ${size}`] = await look(page, sea, shots[`gpu ${size}`]?.png ?? "");
+        await page.close();
+      }
     } finally {
       await b.close();
     }
   }
-  const { gpu, cpu } = shots;
-  expect(gpu.lit).toBeGreaterThan(20_000);
-  expect(gpu.pink).toBeGreaterThan(10_000);
-  expect(cpu.changed / cpu.lit).toBeLessThan(0.01);
-  expect(Math.abs(cpu.pink - gpu.pink) / gpu.pink).toBeLessThan(0.02);
-}, 60_000);
+  for (const size of ["window", "phone"]) {
+    const gpu = shots[`gpu ${size}`], cpu = shots[`cpu ${size}`];
+    expect(gpu.lit).toBeGreaterThan(size === "window" ? 20_000 : 5_000);
+    expect(gpu.pink).toBeGreaterThan(size === "window" ? 10_000 : 3_000);
+    expect(cpu.changed / cpu.lit).toBeLessThan(0.01);
+    expect(Math.abs(cpu.pink - gpu.pink) / gpu.pink).toBeLessThan(0.02);
+  }
+}, 90_000);
 
 // The sea needs WebGL2, which headless Chromium here gets only from SwiftShader on request: a browser of its own, so the
 // other tests run without its frames (costly when rendered in software) and with the plain logo in a new chat.
