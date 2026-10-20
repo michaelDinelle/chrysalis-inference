@@ -810,11 +810,13 @@ class Server:
         return toks, toks
 
     @functools.cache
-    def close_thinking(self):
-        """The words that end the reasoning at a thinking budget, as Qwen3's technical report gives them, and </think>."""
+    def close_thinking(self, budget=True, newline=False):
+        """What ends the reasoning for the model, then </think>: at a thinking budget, the words Qwen3's technical report
+        gives; else only the line break the reasoning ends with (newline: it lacks one)."""
         enc = lambda t: self.tok.full.encode(t, add_special_tokens=False).ids
-        return enc("\n\nConsidering the limited time by the user, I have to give the solution based on the thinking "
-                   "directly now.\n") + [self.tok.id["</think>"]] + enc("\n\n")
+        head = enc("\n\nConsidering the limited time by the user, I have to give the solution based on the thinking directly "
+                   "now.\n") if budget else enc("\n") if newline else []
+        return head + [self.tok.id["</think>"]] + enc("\n\n")
 
     def inject(self, slot, held, pending, toks, keep=False):
         """The reply goes on after tokens it did not draw: the engine reads its pending token (a list: none at the reply's
@@ -1031,6 +1033,7 @@ class Server:
         # read (a step leaves its last one pending); unread: those of a held answer.
         think_end, call_start = self.tok.id["</think>"], self.tok.id["<tool_call>"]
         holding, unread, behind = answer is not None and not thinking, [], 0
+        unclosed = False                                 # an end of turn was drawn inside the reasoning (and dropped)
         sp.halt = think_end if answer is not None and thinking else call_start if strict is not None else -1
         hsp = Sampling.from_buffer_copy(sp)
         hsp.halt = -1                                    # a held answer's steps end where its grammar says
@@ -1046,9 +1049,10 @@ class Server:
         try:
             yield "start", {"prompt_tokens": len(prompt), "cached_tokens": cached}
             while True:
-                if budget is not None and parser.state == "reasoning" and len(out) >= budget:
-                    # Qwen3's own way to end its thinking at a budget (its technical report, 4.3): these words and </think>
-                    close = self.close_thinking()
+                if parser.state == "reasoning" and (unclosed or budget is not None and len(out) >= budget):
+                    # Qwen3's own way to end its thinking at a budget (its technical report, 4.3): these words and </think>.
+                    # An end of turn drawn in the reasoning: </think> alone, and the model answers from there
+                    close = self.close_thinking(not unclosed, not self.tok.full.decode(out[-1:]).endswith("\n"))
                     if len(close) > max_tokens - len(out):
                         finish = "length"
                         break
@@ -1061,7 +1065,7 @@ class Server:
                         finish = "length"
                         break
                     out += close
-                    behind, budget = 0, None
+                    behind, budget, unclosed = 0, None, False
                     for ev in stop_text.feed(parser.feed(close)):
                         yield ev
                     if answer is not None:               # its first token comes from the logits after the closing words
@@ -1111,6 +1115,13 @@ class Server:
                 if n > room or n == room and stop is None:   # cut at max_tokens (a step can carry several tokens)
                     finish = "length"
                     break
+                if stop is not None and parser.state == "reasoning" and not holding:
+                    # A reply never ends inside its thinking, without an answer (Flash-Next drew an end of turn there for 1
+                    # in 11 seeds of "hello" with tools offered): the end of turn, the step's last token and still pending,
+                    # is dropped, and the reasoning closed at the top of the loop
+                    out.pop()
+                    behind, unclosed = 0, True
+                    continue
                 if stop is not None or holding and answer.done():
                     break
                 if self.pausing.is_set():                # the machine is going to sleep

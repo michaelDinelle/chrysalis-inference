@@ -309,6 +309,22 @@ n = len(srv.tok.full.encode(r["reasoning"], add_special_tokens=False).ids)
 check("thinking_budget: reasoning closed there, then the answer", n <= 200 + len(srv.close_thinking()) + 4
       and r["reasoning"].rstrip().endswith("directly now.") and len(r["content"]) > 20, f"{n} reasoning tokens; {r['content'][:40]!r}")
 
+# A reply never ends inside its thinking: an end of turn drawn there closes the reasoning for the model, which answers.
+# Drawn here on purpose: the reply's first step gives the end of turn in place of what the model drew.
+step = srv.batcher.step
+
+
+def ends_turn(engine, sid, sp, rows=False, most=16):
+    srv.batcher.step = step
+    return [srv.tok.id["<|im_end|>"]]
+
+
+srv.batcher.step = ends_turn
+r = answer_of({"model": MODEL, "messages": hi, "max_tokens": 600, "seed": 1})
+check("an end of turn in the thinking: the answer comes", srv.batcher.step is step and r["content"].strip() != ""
+      and r["info"]["finish_reason"] == "stop", f"{r['content'][:40]!r}, {r['info']['finish_reason']}")
+check("after the thinking it closed: cache matches engine", *consistent())
+
 
 # Anthropic's Messages API and OpenAI's Responses API over HTTP, through their official SDKs; every response and every
 # streamed event is also validated strictly against the SDKs' own types (the SDKs parse leniently).

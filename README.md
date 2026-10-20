@@ -396,7 +396,8 @@ exact for the masked distribution: 2.6 tokens a step where one at a time it was 
 55), no logprobs. `thinking_budget` (also in `chat_template_kwargs`; Anthropic's `budget_tokens`, OpenRouter's
 `reasoning.max_tokens`) ends the reasoning at that many tokens with the words Qwen3's technical report closes it with
 ("Considering the limited time by the user, I have to give the solution based on the thinking directly now." and
-`</think>`), and the model answers from there. `continue_final_message` (as in vLLM) writes on from the end of a final assistant message: Chrysalis uses the
+`</think>`), and the model answers from there. A reply never ends inside its reasoning: an end of turn drawn there (Flash-Next, now and
+then, on a greeting with tools offered) is dropped, the reasoning closed with `</think>` alone, and the model answers. `continue_final_message` (as in vLLM) writes on from the end of a final assistant message: Chrysalis uses the
 reply's own tokens when it generated it, restates the reply as it now stands (a `chrysalis_prefix` delta), and serves
 the prompt from its cache. With `chrysalis_original` (the reply as generated) the final message may be a cut of it, and
 `chrysalis_append_token` adds a token after the cut: that rewrites a reply from a token's alternative. `chrysalis_aside`
