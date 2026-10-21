@@ -1213,6 +1213,8 @@ class Server:
                     g += [("chrysalis_experts_decode_picks_total", "Experts routed to by decode steps", [({}, x["decode_picks"])]),
                           ("chrysalis_experts_decode_picks_in_pool_total", "Of them, experts in the VRAM pool", [({}, x["decode_picks_in_pool"])]),
                           ("chrysalis_experts_placed_total", "Experts copied into the pool", [({}, x["placed"])]),
+                          ("chrysalis_experts_mirrored", "The file's VRAM-tier experts out of the pool, copied into RAM", [({}, x["mirrored"])]),
+                          ("chrysalis_experts_mirror_cap", "How many of them RAM may hold (CHRYSALIS_FN_SPILL_GB)", [({}, x["mirror_cap"])]),
                           ("chrysalis_dma_bytes_per_second", "Host-to-GPU DMA rate the pool's copies measure", [({}, x["dma_bytes_per_s"])]),
                           ("chrysalis_experts_gpu_share", "Share of the cold picks the GPU computes in decode", [({}, x["gpu_share"])])]
         ln = link.status(self.link_dev)

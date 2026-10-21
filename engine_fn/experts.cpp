@@ -6,15 +6,22 @@
 // more megabytes of than the least of the pool's (by a margin) takes that one's slot.
 //
 // An expert keeps its own format wherever it is (the VRAM tier's IQ4_XS, the RAM tier's Q3_K / Q2_K): moving it changes
-// where it is computed, not its weights. One out of the pool goes back to its RAM copy, or for the file's VRAM tier, which
-// has none, to the model file's mapping (ColdLayer group 2), so RAM use stays as it was. Coming in, its blocks are copied
-// to a VRAM stage (a load: by DMA from RAM, or read from the file into pinned memory first, on the loader thread), and
-// at a pass boundary one launch writes the stages into their slots and patches the routing tables, in stream order with
-// the passes, which therefore see either expert whole. Results depend on where an expert was computed only by rounding.
+// where it is computed, not its weights. One out of the pool goes back to its RAM copy. The file's VRAM tier has none:
+// one of those leaving gets a copy in the spill mirror (ColdLayer group 2), read from the file before the placement that
+// pushes it out, and freed once it is back. Computing them from the file's mapping instead left decode at the page
+// cache's mercy: the tier is 15 GB, and with Flash-Next in RAM the cache that holds the drifted part is what any other
+// program's memory comes out of (decode fell from 85 to 15-40 tok/s, reading experts from the disk). The mirror holds
+// spill_cap experts at most, and grows only while the machine has `spare` bytes of RAM available (past that, other
+// programs' memory would go to swap for it); with it full, only RAM-tier experts leave the pool. Coming in, an expert's blocks are copied
+// to a VRAM stage (a load: by DMA from RAM, or from the mirror through pinned memory, on the loader thread), and at a pass
+// boundary one launch writes the stages into their slots and patches the routing tables, in stream order with the
+// passes, which therefore see either expert whole. Results depend on where an expert was computed only by rounding.
 #include "model.h"
 #include <algorithm>
 #include <cmath>
+#include <cstdlib>
 #include <cstring>
+#include <fcntl.h>
 #include <sys/mman.h>
 #include <unistd.h>
 
@@ -23,8 +30,38 @@ constexpr float PRIOR = 8;          // picks a VRAM-tier expert starts with: the
 constexpr float MARGIN = 0.25f;     // an expert takes a slot from one it beats by this share of the latter's megabytes ...
 constexpr float MIN_GAIN = 2.0f;    // ... plus this many (about one pick)
 constexpr size_t STAGE_BYTES = 2 * (size_t)FE * D / 256 * 136 + (size_t)D * FE / 32 * 18;   // the widest expert: IQ4_XS
+constexpr double SPILL_GB = 6;      // the mirror's default size (CHRYSALIS_FN_SPILL_GB)
+
+// A VRAM-tier expert's gate, up and down: where the mirror keeps them and where the file has them
+struct HotCopy { uint8_t *mirror[3]; const uint8_t *file[3]; size_t n[3]; };
+HotCopy hot_copy(const ColdLayer &c, int h) {
+    const uint8_t *m[3] = {c.gu_row(false, h, 0), c.gu_row(true, h, 0), c.dn_row(h, 0)};
+    const uint8_t *mb[3] = {c.gate[2], c.up[2], c.down2}, *fb[3] = {c.file_gate, c.file_up, c.file_down2};
+    HotCopy hc;
+    for (int i = 0; i < 3; i++) {
+        hc.mirror[i] = const_cast<uint8_t *>(m[i]);
+        hc.file[i] = fb[i] + (m[i] - mb[i]);
+        hc.n[i] = i < 2 ? (size_t)FE * c.row_gu[2] : (size_t)D * c.row_dn;
+    }
+    return hc;
+}
 }
 
+// The RAM the kernel could give a program now (MemAvailable), read at most once a second
+static double mem_available(Engine::Experts &x) {
+    const auto now = std::chrono::steady_clock::now();
+    if (now - x.avail_at < std::chrono::seconds(1)) return x.avail;
+    x.avail_at = now;
+    if (FILE *f = fopen("/proc/meminfo", "r")) {
+        char line[128];
+        while (fgets(line, sizeof line, f))
+            if (!strncmp(line, "MemAvailable:", 13)) { x.avail = atof(line + 13) * 1024; break; }
+        fclose(f);
+    }
+    return x.avail;
+}
+
+// The page cache need not keep what is read: the mirror holds it now
 void Engine::file_read(uint8_t *dst, const uint8_t *src, size_t n) const {
     const off_t off = (off_t)(src - file_base);
     for (size_t got = 0; got < n;) {
@@ -32,6 +69,7 @@ void Engine::file_read(uint8_t *dst, const uint8_t *src, size_t n) const {
         if (r <= 0) FAIL("reading experts from the model file failed");
         got += (size_t)r;
     }
+    posix_fadvise(file_fd, off, (off_t)n, POSIX_FADV_DONTNEED);
 }
 
 void Engine::experts_init() {
@@ -56,6 +94,11 @@ void Engine::experts_init() {
             x.mb[k] = (float)(c.bytes(x.home[k]) / 1e6);
         }
     }
+    size_t hot_bytes = 0;
+    for (const ColdLayer &c : cold) if (c.n2) hot_bytes = c.bytes(c.n);
+    const char *gb = getenv("CHRYSALIS_FN_SPILL_GB");
+    x.spilled = 0;
+    x.spill_cap = hot_bytes ? (int)((gb ? atof(gb) : SPILL_GB) * 1e9 / (double)hot_bytes) : 0;
     CK(hipMalloc(&x.d_counts, keys * 4));
     CK(hipMemsetAsync(x.d_counts, 0, keys * 4, st));
     CK(hipHostMalloc(&x.h_counts, keys * 4));
@@ -66,7 +109,8 @@ void Engine::experts_init() {
         CK(hipHostMalloc(&ld.bounce, STAGE_BYTES));
         CK(hipEventCreate(&ld.start));
         CK(hipEventCreate(&ld.copied));
-        CK(hipEventCreateWithFlags(&ld.done, hipEventDisableTiming));
+        // the loader sleeps on it before freeing a mirror copy: a spinning wait would take a core from the CPU's experts
+        CK(hipEventCreateWithFlags(&ld.done, hipEventDisableTiming | hipEventBlockingSync));
     }
     x.quit = false;
     x.loader = std::thread(&Engine::experts_loader, this);
@@ -87,8 +131,9 @@ void Engine::experts_stop() {
         if (ld.copied) (void)hipEventDestroy(ld.copied);
         if (ld.done) (void)hipEventDestroy(ld.done);
         ld.stage = ld.bounce = nullptr; ld.start = ld.copied = ld.done = nullptr;
-        ld.state = Experts::FREE; ld.key = ld.slot = -1;
+        ld.state = Experts::FREE; ld.key = ld.slot = ld.out = -1;
     }
+    x.jobs.clear();
     if (x.d_counts) (void)hipFree(x.d_counts);
     if (x.h_counts) (void)hipHostFree(x.h_counts);
     if (x.counted) (void)hipEventDestroy(x.counted);
@@ -97,47 +142,48 @@ void Engine::experts_stop() {
     x.counts_pending = false;
 }
 
-// The loads' copies. A load's stage is free once the placement that last read it ran (its `done` event, waited for on
-// the copy stream); its bounce buffer once the copy that last read it finished (`copied`, waited for here). Between
-// loads, readahead of the file pages of experts that left the pool (madvise may wait to submit the reads: not on the
-// thread that queues the passes).
+// The loader's jobs, in the order they were decided. A load: the expert it pushes out of the pool, if the file's, is
+// copied into the mirror first (from the disk: here, not on the thread that queues the passes); then the one coming in
+// into its stage. Its stage is free once the placement that last read it ran (its `done` event, waited for on the copy
+// stream); its bounce buffer once the copy that last read it finished (`copied`, waited for here). A freeing waits for
+// the placement that took the expert into the pool: the passes before it may still compute it from the mirror. Only the
+// pages wholly its own are freed (the first and last may hold its neighbours').
 void Engine::experts_loader() {
     Experts &x = xc;
     for (;;) {
-        int k = -1, ra = -1;
+        Experts::Job job;
         {
             std::unique_lock<std::mutex> lk(x.mu);
-            x.cv.wait(lk, [&] {
-                if (x.quit || !x.readahead.empty()) return true;
-                for (int i = 0; i < PLACE_MAX; i++) if (x.loads[i].state.load(std::memory_order_acquire) == Experts::QUEUED) return true;
-                return false;
-            });
+            x.cv.wait(lk, [&] { return x.quit || !x.jobs.empty(); });
             if (x.quit) return;
-            for (int i = 0; i < PLACE_MAX && k < 0; i++) if (x.loads[i].state.load(std::memory_order_acquire) == Experts::QUEUED) k = i;
-            if (k < 0) { ra = x.readahead.front(); x.readahead.pop_front(); }
+            job = x.jobs.front();
+            x.jobs.pop_front();
         }
-        if (ra >= 0) {
-            const ColdLayer &c = cold[ra / NE];
-            const int h = x.home[ra];
-            const uint8_t *r[3] = {c.gu_row(false, h, 0), c.gu_row(true, h, 0), c.dn_row(h, 0)};
-            const size_t n[3] = {FE * c.row_gu[2], FE * c.row_gu[2], D * c.row_dn};
+        if (job.what < 0) {
+            const int key = -1 - job.what;
+            CK(hipEventSynchronize(x.loads[job.after].done));
+            const HotCopy hc = hot_copy(cold[key / NE], x.home[key]);
             for (int m = 0; m < 3; m++) {
-                const uintptr_t a = (uintptr_t)r[m] & ~uintptr_t(4095);
-                madvise((void *)a, (uintptr_t)r[m] + n[m] - a, MADV_WILLNEED);
+                const uintptr_t a = ((uintptr_t)hc.mirror[m] + 4095) & ~uintptr_t(4095), b = ((uintptr_t)hc.mirror[m] + hc.n[m]) & ~uintptr_t(4095);
+                if (b > a) madvise((void *)a, b - a, MADV_DONTNEED);
             }
             continue;
         }
-        Experts::Load &ld = x.loads[k];
+        Experts::Load &ld = x.loads[job.what];
+        if (ld.out >= 0) {
+            const HotCopy hc = hot_copy(cold[ld.out / NE], x.home[ld.out]);
+            for (int m = 0; m < 3; m++) file_read(hc.mirror[m], hc.file[m], hc.n[m]);
+        }
         const int l = ld.key / NE, h = x.home[ld.key];
         const ColdLayer &c = cold[l];
         const size_t gu = (size_t)FE * c.row_gu[c.grp(h)], dn = (size_t)D * c.row_dn;
         const uint8_t *src[3] = {c.gu_row(false, h, 0), c.gu_row(true, h, 0), c.dn_row(h, 0)};
         const size_t len[3] = {gu, gu, dn};
         CK(hipStreamWaitEvent(x.xst, ld.done, 0));
-        if (c.grp(h) == 2) {                     // not in RAM: from the file, into pinned memory
+        if (c.grp(h) == 2) {                     // in the mirror, which is not registered: through pinned memory
             CK(hipEventSynchronize(ld.copied));
             size_t at = 0;
-            for (int m = 0; m < 3; m++) { file_read(ld.bounce + at, src[m], len[m]); at += len[m]; }
+            for (int m = 0; m < 3; m++) { memcpy(ld.bounce + at, src[m], len[m]); at += len[m]; }
             CK(hipEventRecord(ld.start, x.xst));
             CK(hipMemcpyAsync(ld.stage, ld.bounce, at, hipMemcpyHostToDevice, x.xst));
         } else {
@@ -167,6 +213,8 @@ void Engine::experts_place(int T) {
     PlaceArgs pa;
     pa.gate = pool_gate; pa.up = pool_up; pa.down = pool_down; pa.slot_of = d_slot_of; pa.fmt = d_fmt;
     int placed[PLACE_MAX], np = 0;
+    Experts::Job freed[PLACE_MAX];
+    int nfreed = 0;
     for (int k = 0; k < PLACE_MAX; k++) {
         Experts::Load &ld = x.loads[k];
         if (ld.state.load(std::memory_order_acquire) != Experts::COPYING || hipEventQuery(ld.copied) != hipSuccess) continue;
@@ -181,10 +229,6 @@ void Engine::experts_place(int T) {
             x.slot[old] = -1;
             const int lo = old / NE;
             L[lo].slot_h[old % NE] = -1 - x.home[old];
-            if (cold[lo].grp(x.home[old]) == 2) {   // back to the file: the loader starts reading its pages for the CPU
-                std::lock_guard<std::mutex> lk(x.mu);
-                x.readahead.push_back(old);
-            }
         }
         pa.patch[pa.npatch++] = {key, -1, s};
         pa.patch[pa.npatch++] = {-1, s, x.type[key]};
@@ -192,7 +236,11 @@ void Engine::experts_place(int T) {
         L[key / NE].slot_h[key % NE] = s;
         x.busy[s] = 0; x.coming[key] = 0;
         x.placed++;
-        x.loaded_file += cold[key / NE].grp(x.home[key]) == 2;
+        if (cold[key / NE].grp(x.home[key]) == 2) {   // its mirror copy is freed once this placement has run
+            x.loaded_file++;
+            x.spilled--;
+            freed[nfreed++] = {-1 - key, k};
+        }
         placed[np++] = k;
     }
     // The link's speed changes under the engine (this card's PCIe link has come up for whole sessions at 2.5 GT/s, 3.5 GB/s,
@@ -209,12 +257,17 @@ void Engine::experts_place(int T) {
             CK(hipEventRecord(x.loads[placed[i]].done, st));
             x.loads[placed[i]].state.store(Experts::FREE, std::memory_order_release);
         }
+        if (nfreed) {
+            std::lock_guard<std::mutex> lk(x.mu);
+            x.jobs.insert(x.jobs.end(), freed, freed + nfreed);
+        }
         x.cv.notify_one();
     }
 }
 
 // Once a pass is queued (the host would wait for the GPU anyway): the picks counted so far into the scores, and loads for
-// the free stages, the experts the CPU would read the most megabytes of against the pool's least.
+// the free stages, the experts the CPU would read the most megabytes of against the pool's least that may leave it (a
+// file's expert only while the mirror has room for its copy).
 void Engine::experts_plan() {
     Experts &x = xc;
     if (x.owner.empty()) return;
@@ -254,17 +307,25 @@ void Engine::experts_plan() {
     for (size_t k = 0; k < keys; k++)
         if (x.slot[k] < 0 && !x.coming[k] && x.score[k] > 0) keep(in, {x.score[k] * x.mb[k], (int)k}, true);
     if (in.empty()) return;
+    auto file_tier = [&](int k) { return k >= 0 && cold[k / NE].grp(x.home[k]) == 2; };
+    int room = x.spill_cap - x.spilled;
+    if (room > 0 && mem_available(x) < x.spare) room = 0;
     for (int s = 0; s < n_slots; s++)
-        if (!x.busy[s]) keep(out, {x.owner[s] >= 0 ? x.score[x.owner[s]] * x.mb[x.owner[s]] : -1.0f, s}, false);
+        if (!x.busy[s] && (room > 0 || !file_tier(x.owner[s])))
+            keep(out, {x.owner[s] >= 0 ? x.score[x.owner[s]] * x.mb[x.owner[s]] : -1.0f, s}, false);
     bool queued = false;
-    for (int i = 0; i < (int)std::min(in.size(), out.size()); i++) {
-        if (in[i].first <= out[i].first * (1 + MARGIN) + MIN_GAIN) break;
-        Experts::Load &ld = x.loads[free_k[i]];
-        ld.key = in[i].second; ld.slot = out[i].second;
+    for (int i = 0, j = 0, q = 0; i < (int)in.size() && j < (int)out.size(); i++, j++) {
+        while (j < (int)out.size() && room <= 0 && file_tier(x.owner[out[j].second])) j++;
+        if (j == (int)out.size() || in[i].first <= out[j].first * (1 + MARGIN) + MIN_GAIN) break;
+        Experts::Load &ld = x.loads[free_k[q]];
+        ld.key = in[i].second; ld.slot = out[j].second;
+        ld.out = file_tier(x.owner[ld.slot]) ? x.owner[ld.slot] : -1;
+        if (ld.out >= 0) { x.spilled++; room--; }
         x.coming[ld.key] = 1; x.busy[ld.slot] = 1;
         {
             std::lock_guard<std::mutex> lk(x.mu);
             ld.state.store(Experts::QUEUED, std::memory_order_release);
+            x.jobs.push_back({free_k[q++], -1});
         }
         queued = true;
     }

@@ -39,5 +39,5 @@ a stale comment steers people and agents wrong. `make lint` catches the mechanic
   against llama.cpp; the transformers references need data/ref-venv, see README Rebuilding), `make test_fn` (Flash-Next
   kernels) and `make test_fn_model` (the Flash-Next model in-process: generation and snapshots, the server, llama.cpp's
   logits, pictures and videos).
-- Flash-Next takes ~47 GiB of system RAM, in Chrysalis or in-process. Check MemAvailable before loading it, and run it
+- Flash-Next takes ~47 GiB of system RAM, in Chrysalis or in-process, and up to 6 GB more as its expert pool moves. Check MemAvailable before loading it, and run it
   in its own scope (`systemd-run --user --scope ...`): systemd-oomd kills whole terminal scopes under memory pressure.

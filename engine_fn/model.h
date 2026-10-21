@@ -10,6 +10,7 @@ static_assert(TOPK == SAMPLE_N, "the sampler takes the engine's rows as they are
 #include "../engine/vision.h"
 #include <hipblaslt/hipblaslt.h>
 #include <atomic>
+#include <chrono>
 #include <condition_variable>
 #include <deque>
 #include <map>
@@ -89,6 +90,8 @@ struct Engine {
     int *d_slot_of = nullptr;                    // [NL][NE] the decoder layers' slot_of
     uint8_t *d_fmt = nullptr;                    // [n_slots] each slot's gate / up format
     int file_fd = -1; const uint8_t *file_base = nullptr;   // the model file and its mapping (VRAM-tier experts out of the pool)
+    uint8_t *spill_mem = nullptr; size_t spill_bytes = 0;   // the spill mirror (ColdLayer group 2), only the pages of experts out
+                                                            // of the pool backed by memory
     struct Experts {
         bool on = true;                          // experiments and tests (chrysalis_tune "experts"): false keeps the pool as it is
         double half_life = 256;                  // tokens over which an expert's picks count half (from a story to code:
@@ -101,12 +104,17 @@ struct Engine {
         std::vector<uint64_t> total;             // all decode picks (CHRYSALIS_FN_DECODE_COUNTS)
         std::vector<uint8_t> busy;               // per slot: an expert is on its way into it
         std::vector<uint8_t> coming;             // per layer * NE + expert: on its way into the pool
+        int spilled = 0, spill_cap = 0;          // the file's experts out of the pool or on their way out (each with a
+                                                 // copy in the spill mirror), and how many may be (CHRYSALIS_FN_SPILL_GB)
+        double spare = 4e9;                      // the mirror takes no more while the machine has less RAM available
+        double avail = 0;                        // MemAvailable as last read, and when
+        std::chrono::steady_clock::time_point avail_at{};
         double tokens = 0;                       // tokens passed since the scores last decayed
         unsigned *d_counts = nullptr;            // [NL][NE] decode picks, counted by the router
         uint32_t *h_counts = nullptr;            // pinned: their copy, read at the next pass
         hipEvent_t counted = nullptr;
         bool counts_pending = false;
-        int placed = 0, loaded_file = 0;         // experts placed, of them read from the model file
+        int placed = 0, loaded_file = 0;         // experts placed, of them the file's VRAM tier's (from the mirror)
         double copied_bytes = 0, copied_ms = 0;  // the loads' copies since the DMA rate was last updated
         uint64_t picks = 0, hits = 0;            // decode picks, of them of experts in the pool (as of the pass after)
         double recent_hits = 0;                  // the share in the pool of recent decode picks
@@ -117,8 +125,9 @@ struct Engine {
         struct Load {
             std::atomic<int> state{FREE};
             int key = -1, slot = -1;             // the expert coming in, the slot it takes
+            int out = -1;                        // the file's expert it pushes out, copied into the mirror first (-1: none)
             uint8_t *stage = nullptr;            // VRAM: its GGUF blocks, gate | up | down
-            uint8_t *bounce = nullptr;           // pinned: the same, read from the model file
+            uint8_t *bounce = nullptr;           // pinned: the same, copied from the spill mirror (not registered)
             hipEvent_t start = nullptr, copied = nullptr, done = nullptr;   // its copies begin; the stage is filled; the placement
                                                                             // that read it ran
         };
@@ -127,7 +136,10 @@ struct Engine {
         std::thread loader;                      // reads and queues the loads' copies (a file read may wait on the disk)
         std::mutex mu;
         std::condition_variable cv;
-        std::deque<int> readahead;               // experts back in the model file whose pages the loader asks for
+        // the loader's work in the order it was decided, so an expert's mirror copy is freed before it is written again:
+        // a load (its index) or a freeing (-1 - key) once the placement by load `after` has run
+        struct Job { int what, after; };
+        std::deque<Job> jobs;
         bool quit = false;
     } xc;
     void experts_init();
@@ -222,7 +234,7 @@ struct Engine {
         uint16_t *h_x16, *h_cout;                // pinned host: MoE inputs for the CPU, its per-pick outputs (fp16)
         float *h_topv; int *h_topi, *h_draft;    // pinned host: a step's top-k and drafts
         uint8_t *raw[4], *sgu[4]; QTensor sd_[4];   // cold expert staging ring: GGUF blocks, then gate | up SoA arrays, down
-        uint8_t *bounce[4];                      // pinned: a ring slot's GGUF blocks read from the model file (format group 2)
+        uint8_t *bounce[4];                      // pinned: a ring slot's GGUF blocks copied from the spill mirror (format group 2)
         const half **img;                        // per token of a pass: its picture's embedding row, or null
         int *rpos;                               // per token of a pass with pictures: M-RoPE (t, h, w)
     } b{};

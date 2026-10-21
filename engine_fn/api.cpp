@@ -137,13 +137,17 @@ double chrysalis_tune(const char *key, double value) {
     if (k == "adapt_left") { old = E->adapt_left; if (value >= 0) E->adapt_left = (int)value; }
     if (k == "experts") { old = E->xc.on; E->xc.on = value != 0; }
     if (k == "experts_half_life") { old = E->xc.half_life; if (value > 0) E->xc.half_life = value; }
+    if (k == "spill") { old = E->xc.spill_cap; if (value >= 0) E->xc.spill_cap = (int)value; }
+    if (k == "spill_spare") { old = E->xc.spare / 1e9; if (value >= 0) { E->xc.spare = value * 1e9; E->xc.avail_at = {}; } }
     return old;
 }
-// The expert pool (engine_fn/experts.cpp): out = {experts placed, of them read from the model file, decode picks, of them
-// of experts in the pool, the DMA rate in MB/s, the decode GPU share of the cold picks in millionths}.
+// The expert pool (engine_fn/experts.cpp): out = {experts placed, of them the file's VRAM tier's, decode picks, of them
+// of experts in the pool, the DMA rate in MB/s, the decode GPU share of the cold picks in millionths, the file's experts
+// out of the pool (in the spill mirror), how many may be}.
 void chrysalis_expert_stats(int64_t *out) {
     out[0] = E->xc.placed; out[1] = E->xc.loaded_file; out[2] = (int64_t)E->xc.picks; out[3] = (int64_t)E->xc.hits;
     out[4] = (int64_t)(E->cal_dma_bw / 1e6); out[5] = (int64_t)(E->gfrac * 1e6);
+    out[6] = E->xc.spilled; out[7] = E->xc.spill_cap;
 }
 // Routing statistics (tools_fn/route_stats.py): out == nullptr starts counting the picks per (layer, expert) of prefill
 // passes from zero; otherwise copies the [48][512] counts so far.

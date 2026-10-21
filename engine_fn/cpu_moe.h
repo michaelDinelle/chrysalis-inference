@@ -28,9 +28,10 @@ struct MoeShared {                     // pinned, coherent host memory shared wi
 
 struct ColdLayer {                     // one layer's experts outside VRAM, GGUF block order
     // gate / up in up to three format groups: the RAM tier's (slots below n0, then up to n; down one tensor for both) and,
-    // slots n.. n + n2, the file's VRAM-tier experts that the expert pool holds no copy of, read from the model file's
-    // mapping (its own down tensor)
+    // slots n.. n + n2, the file's VRAM-tier experts (its own down tensor), in RAM only while out of the expert pool
+    // (experts.cpp: the spill mirror, laid out as the file's tensors are, which file_* point at)
     const uint8_t *gate[3] = {}, *up[3] = {}, *down = nullptr, *down2 = nullptr;
+    const uint8_t *file_gate = nullptr, *file_up = nullptr, *file_down2 = nullptr;
     int type_gu[3] = {-1, -1, -1}, type_dn = -1;   // ggml types
     size_t row_gu[3] = {}, row_dn = 0;             // bytes per row
     int n0 = 0, n = 0, n2 = 0;

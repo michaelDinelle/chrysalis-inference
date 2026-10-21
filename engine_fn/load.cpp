@@ -419,12 +419,26 @@ void Engine::load(const std::string &path, int max_seqs, size_t reserve_bytes) {
         CK(hipHostGetDevicePointer(&dp, cold_mem, 0));
         d_cold = (uint8_t *)dp;
     }
+    // The spill mirror (experts.cpp): the file's VRAM-tier tensors laid out as in the file, in memory that holds only the
+    // experts out of the pool. 4 KiB pages, so one expert's pages are freed without its neighbours'.
+    const char *hot_names[3] = {"ffn_gate_hot.weight", "ffn_up_hot.weight", "ffn_down_hot.weight"};
+    auto page_up = [](size_t n) { return (n + 4095) & ~size_t(4095); };
+    spill_bytes = 0;
+    for (int l = 0; l < NL; l++)
+        if (L[l].n_hot) for (const char *t : hot_names) spill_bytes += page_up(get("blk." + std::to_string(l) + "." + t)->nbytes);
+    if (spill_bytes) {
+        spill_mem = (uint8_t *)mmap(nullptr, spill_bytes, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS | MAP_NORESERVE, -1, 0);
+        if (spill_mem == MAP_FAILED) FAIL("cannot reserve %.1f GB of address space for the spill mirror", spill_bytes / 1e9);
+        madvise(spill_mem, spill_bytes, MADV_NOHUGEPAGE);
+    }
+    size_t spill_at = 0;
     for (int l = 0; l < NL; l++) {
         ColdLayer &c = cold[l];
         if (L[l].n_hot) {                           // the file's VRAM tier, for the CPU while the pool holds no copy
             const std::string p = "blk." + std::to_string(l) + ".";
-            c.gate[2] = get(p + "ffn_gate_hot.weight")->data; c.up[2] = get(p + "ffn_up_hot.weight")->data;
-            c.down2 = get(p + "ffn_down_hot.weight")->data;
+            const GGUFTensor *t[3] = {get(p + hot_names[0]), get(p + hot_names[1]), get(p + hot_names[2])};
+            const uint8_t **mirror[3] = {&c.gate[2], &c.up[2], &c.down2}, **file[3] = {&c.file_gate, &c.file_up, &c.file_down2};
+            for (int m = 0; m < 3; m++) { *file[m] = t[m]->data; *mirror[m] = spill_mem + spill_at; spill_at += page_up(t[m]->nbytes); }
             c.type_gu[2] = IQ4_XS; c.row_gu[2] = qrow_bytes(IQ4_XS, D); c.n2 = L[l].n_hot;
             c.type_dn = IQ4_NL; c.row_dn = qrow_bytes(IQ4_NL, FE);
         }
@@ -727,7 +741,8 @@ void Engine::shutdown() {
     (void)hipStreamDestroy(st); (void)hipStreamDestroy(cst); (void)hipStreamDestroy(pst); (void)hipStreamDestroy(lst);
     (void)hipEventDestroy(la_ready); (void)hipEventDestroy(la_done);
     if (cold_mem) munmap(cold_mem, cold_bytes);
+    if (spill_mem) munmap(spill_mem, spill_bytes);
     if (ngram_map) munmap(ngram_map, ngram_map_bytes);
-    cold_mem = nullptr; ngram_map = nullptr; cold_bytes = 0; d_cold = nullptr;
+    cold_mem = nullptr; spill_mem = nullptr; ngram_map = nullptr; cold_bytes = spill_bytes = 0; d_cold = nullptr;
     cold.clear(); cold_dev.clear();
 }

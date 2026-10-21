@@ -1,7 +1,9 @@
 """Flash-Next speed on this machine: load time, decode tok/s (drafts 0/1/2, Qwen sampling and greedy; in a coding
 conversation; two prose replies in turn, the second after the expert pool has followed the first), and the time to
-first token of appends of various sizes on top of an existing conversation (what an agent turn costs).
-  python tools_fn/bench_fn.py [n_tokens] [--decode-only] [--model FILE] [--use qwen3.8-27b]   (--use: the same for another model)"""
+first token of appends of various sizes on top of an existing conversation (what an agent turn costs). --mix instead:
+decode through a day's mix (code, a story twice, a three.js page, code again), the expert pool following, with the
+share of picks it served and the file's experts out of it (CHRYSALIS_FN_SPILL_GB sets how many may be).
+  python tools_fn/bench_fn.py [n_tokens] [--decode-only | --mix] [--model FILE] [--use qwen3.8-27b]   (--use: the same for another model)"""
 import os
 import sys
 import time
@@ -29,6 +31,28 @@ spec = MODELS[sys.argv[sys.argv.index("--use") + 1] if "--use" in sys.argv else 
 model = sys.argv[sys.argv.index("--model") + 1] if "--model" in sys.argv else os.path.join(ROOT, spec["path"])
 eng = Engine(model, max_seqs=3, umax=spec["chunk"], lib=os.path.join(ROOT, spec["lib"]))
 print(f"load: {time.time() - t0:.1f} s, KV capacity {eng.capacity} tokens", flush=True)
+
+if "--mix" in sys.argv:
+    ask = lambda q: tok.encode(f"<|im_start|>user\n{q}<|im_end|>\n<|im_start|>assistant\n<think>\n\n</think>\n\n", add_special_tokens=False).ids
+    lru = "Implement an LRU cache in Python with O(1) get and put, type hints, docstrings and pytest tests."
+    story = "Write a long story about a lighthouse keeper and a storm."
+    page = ("Make a single HTML page with a three.js scene of a vampire countess's bedroom: canopy bed, candles, a mirror, "
+            "moonlight through a window.")
+    for i, (name, q) in enumerate([("code", lru), ("story", story), ("story again", story), ("three.js page", page), ("code again", lru)]):
+        x0 = eng.expert_stats()
+        s = eng.new_seq(); eng.begin(s, 100 + i)
+        eng.prefill(s, ask(q))
+        sp = Sampling(temperature=0.7, top_p=0.95, min_p=0.0, presence_penalty=0.0, top_k=20, n_draft=spec["draft"])
+        out, t0 = [], time.time()
+        while len(out) < n_tok:
+            out += eng.generate(s, sp, 16)
+        dt = time.time() - t0
+        eng.free_seq(s)
+        x = eng.expert_stats()
+        hits = (x["decode_picks_in_pool"] - x0["decode_picks_in_pool"]) / max(1, x["decode_picks"] - x0["decode_picks"])
+        print(f"{name:14s} {len(out) / dt:6.1f} tok/s  pool served {hits:4.0%} of the picks, the file's experts out of it "
+              f"{x['mirrored']} (at most {x['mirror_cap']})", flush=True)
+    sys.exit(0)
 
 for k in sorted({0, 1, 2, spec["draft"]}):
     for temp in (1.0, 0.0):

@@ -7,14 +7,18 @@ under MIN_TOP1, a prefill path also past SELF_KL from the decode path at the sam
 split is fixed here (all of a prefill's on the CPU, gfrac 0.3 at decode, the expert pool as loaded): the load-time
 calibration and the pool would otherwise move it, and with it the rounding, so every run gives the same numbers. Then
 the pool moves (engine_fn/experts.cpp) and the paths run again under the same limits: once after a prose reply has
-pushed the text's experts out of VRAM (the file's VRAM-tier ones then computed by the CPU from the model file), once
-after the text itself has pulled them back in (RAM-tier experts in their own formats in pool slots, VRAM-tier ones read
-back from the file into other slots).
+pushed the text's experts out of VRAM (the file's VRAM-tier ones then computed by the CPU from their copies in the spill
+mirror), once after code with the text at its end has pulled many back in (RAM-tier experts in their own formats in pool
+slots, VRAM-tier ones copied back from the mirror into other slots). Around them: the mirror holds no more than it may,
+as the process's memory shows, gives a copy back as its expert returns and takes no more when the machine has no RAM to
+spare; and the paths read none of those experts from the model file (computed from its mapping, they come from the page
+cache or the disk, whichever has them).
   python tools_fn/compare_fn.py [--fresh] [--ref-only] [--text FILE --tag NAME] [--model FILE]
 """
 import os
 import subprocess
 import sys
+import time
 
 import ctypes as C
 
@@ -25,6 +29,8 @@ sys.path.insert(0, ROOT)
 from tokenizers import Tokenizer  # noqa: E402
 from chrysalis.engine import Engine  # noqa: E402
 from chrysalis.models import MODELS  # noqa: E402
+sys.path.insert(0, os.path.join(ROOT, "data/llama.cpp/gguf-py"))
+from gguf import GGUFReader  # noqa: E402
 
 MODEL = os.path.join(ROOT, "data/models/flash-next/chrysalis-fn.gguf")
 REF = os.path.join(ROOT, "data/models/flash-next/src/Q8_0/Qwen3.8-Flash-Next-Q8_0-00001-of-00006.gguf")
@@ -162,7 +168,41 @@ def paths(tag):
 
 def placed():
     x = eng.expert_stats()
-    return x["placed"], x["placed_from_file"]
+    return x["placed"], x["placed_file_tier"]
+
+
+# The file's VRAM-tier tensors, and how much of them is in the page cache (mincore over our own mapping of the file)
+HOT = [(t.data_offset, int(t.n_bytes), int(t.shape[-1])) for t in GGUFReader(MODEL).tensors if t.name.endswith("_hot.weight")]
+HOT_EXPERT = sum(nb for _, nb, _ in HOT) / sum(ne for _, _, ne in HOT) * 3   # bytes of one expert's gate, up and down
+
+
+def mirror_rss():
+    """The memory the spill mirror holds, as the kernel counts it: the one mapping as large as the tensors it mirrors."""
+    size_kb = sum((nb + 4095) // 4096 * 4 for _, nb, _ in HOT)
+    found, rss = False, None
+    for line in open("/proc/self/smaps"):
+        if "-" in line.split()[0]:
+            found = False
+        elif line.startswith("Size:"):
+            found = int(line.split()[1]) == size_kb
+        elif found and line.startswith("Rss:"):
+            rss = int(line.split()[1]) * 1024
+    if rss is None:
+        raise RuntimeError("no mapping the spill mirror's size")
+    return rss
+libc = C.CDLL("libc.so.6", use_errno=True)
+libc.mmap.restype, libc.mmap.argtypes = C.c_void_p, [C.c_void_p, C.c_size_t, C.c_int, C.c_int, C.c_int, C.c_long]
+model_fd = os.open(MODEL, os.O_RDONLY)
+model_size = os.fstat(model_fd).st_size
+model_map = libc.mmap(None, model_size, 1, 1, model_fd, 0)    # PROT_READ, MAP_SHARED
+
+
+def hot_cached():
+    vec = (C.c_ubyte * ((model_size + 4095) // 4096))()
+    if libc.mincore(C.c_void_p(model_map), C.c_size_t(model_size), vec):
+        raise OSError(C.get_errno(), "mincore")
+    v = np.frombuffer(vec, np.uint8) & 1
+    return int(sum(v[a // 4096:(a + nb + 4095) // 4096].sum() for a, nb, _ in HOT)) * 4096
 
 
 def move_pool(prompt, steps):
@@ -177,23 +217,47 @@ def move_pool(prompt, steps):
         eng.generate(s, sp, 16)
     eng.free_seq(s)
     eng.lib.chrysalis_tune(b"experts", 0)
+    time.sleep(1)                           # the loader finishes the copies it was given (into the mirror too)
 
 
+os.posix_fadvise(model_fd, 0, 0, os.POSIX_FADV_DONTNEED)
+cached0 = hot_cached()                      # pages beside tensors the load read through its mapping, which stay
 fails = paths("")
 prose = tok.encode("<|im_start|>user\nWrite a long story about a lighthouse keeper and a storm.<|im_end|>\n<|im_start|>assistant\n",
                    add_special_tokens=False).ids
+# fewer of the file's experts may leave than the prose reply would push out, so the mirror is full
+CAP = 500
+eng.lib.chrysalis_tune(b"spill", CAP)
 a = placed()
 move_pool(prose, 400)
-b = placed()
-ok = b[0] - a[0] >= 1000 and b[1] - a[1] > 0
-print(f"pool after a prose reply: {b[0] - a[0]} experts placed, {b[1] - a[1]} read from the model file  {'ok' if ok else 'FAIL'}", flush=True)
+b, r1, out1 = placed(), mirror_rss(), eng.expert_stats()["mirrored"]
+ok = b[0] - a[0] >= 1000 and out1 <= CAP and 0.95 * CAP * HOT_EXPERT <= r1 <= CAP * HOT_EXPERT + 64e6
+print(f"pool after a prose reply: {b[0] - a[0]} experts placed, {out1} of the file's out of it (at most {CAP}), the mirror "
+      f"holding {r1 / 1e9:.2f} GB ({CAP * HOT_EXPERT / 1e9:.2f} GB for {CAP})  {'ok' if ok else 'FAIL'}", flush=True)
 fails += not ok
+os.posix_fadvise(model_fd, 0, 0, os.POSIX_FADV_DONTNEED)      # what another program's memory would take from the cache
 fails += paths(", pool moved by prose")
-move_pool(ids, 400)
-c = placed()
-ok = c[0] - b[0] >= 300 and c[1] - b[1] > 0
-print(f"pool after the text: {c[0] - b[0]} experts placed, {c[1] - b[1]} read from the model file  {'ok' if ok else 'FAIL'}", flush=True)
+read = hot_cached() - cached0
+print(f"paths with the file's experts out of the pool: {read / 1e6:.0f} MB of them read from the model file  {'ok' if read <= 0 else 'FAIL'}", flush=True)
+fails += read > 0
+code = "".join(open(os.path.join(ROOT, f)).read() for f in ("engine_fn/model.cpp", "chrysalis/server.py"))
+code_ids = tok.encode("<|im_start|>user\nHere is a file from my project:\n```\n", add_special_tokens=False).ids + \
+    tok.encode(code, add_special_tokens=False).ids[:6000] + tok.encode("\n```\n", add_special_tokens=False).ids + ids
+move_pool(code_ids, 400)
+c, r2, out2 = placed(), mirror_rss(), eng.expert_stats()["mirrored"]
+ok = c[0] - b[0] >= 300 and c[1] - b[1] >= 50 and abs(r2 - out2 * HOT_EXPERT) <= 0.02 * out2 * HOT_EXPERT + 32e6
+print(f"pool after code: {c[0] - b[0]} experts placed, {c[1] - b[1]} of them the file's back from the mirror, {out2} out of it, "
+      f"the mirror holding {r2 / 1e9:.2f} GB ({out2 * HOT_EXPERT / 1e9:.2f} GB for {out2})  {'ok' if ok else 'FAIL'}", flush=True)
 fails += not ok
-fails += paths(", pool moved by the text")
+fails += paths(", pool moved by code")
+# with no RAM to spare (a floor above any machine's) the mirror takes no more, and the pool still follows a reply
+eng.lib.chrysalis_tune(b"spill", 100000)
+eng.lib.chrysalis_tune(b"spill_spare", 1e6)
+out3 = eng.expert_stats()["mirrored"]
+move_pool(prose, 200)
+d, out4 = placed()[0] - c[0], eng.expert_stats()["mirrored"]
+ok = d >= 300 and out4 <= out3
+print(f"pool after prose with no RAM to spare: {d} experts placed, the file's out of it {out3} -> {out4}  {'ok' if ok else 'FAIL'}", flush=True)
+fails += not ok
 print("all ok" if not fails else f"{fails} FAILURES")
 sys.exit(fails != 0)

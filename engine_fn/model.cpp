@@ -672,8 +672,8 @@ void Engine::moe_back(const Layer &w, int layer, int T) {
     auto gather = [&](int ri, half *X) { const Range &r = ranges[ri]; gather_rows(b.hmoe, b.ent_tok + r.p0, r.p1 - r.p0, X, st); };
     auto accum = [&](int ri, half *Y) { const Range &r = ranges[ri]; moe_accum(Y, b.pos, r.p0, r.p1, b.btok + r.t0, r.t1 - r.t0, b.moe, st); };
     // staging slot k: gate | up regions of stage_gu bytes each (the group's packed GGUF experts), then down
-    // a group of the file's VRAM-tier experts (format group 2, not in RAM) is read from the model file into pinned memory
-    // first, once the copy that last read that memory has finished
+    // a group of the file's VRAM-tier experts (format group 2: the spill mirror, not registered) is copied into pinned
+    // memory first, once the copy that last read that memory has finished
     auto dma = [&](int gi) {                      // runs of consecutive slots in one copy
         const Group &G = gpu_g[gi];
         const int k = gi % NSLOT, fg = cl->grp(cslot(gpu_cold[G.i0])), ng = G.i1 - G.i0;
@@ -688,7 +688,7 @@ void Engine::moe_back(const Layer &w, int layer, int T) {
             const uint8_t *src[3] = {cl->gu_row(false, s0, 0), cl->gu_row(true, s0, 0), cl->dn_row(s0, 0)};
             const size_t at[3] = {c * gsz, stage_gu + c * gsz, 2 * stage_gu + c * dsz}, len[3] = {run_n * gsz, run_n * gsz, run_n * dsz};
             for (int m = 0; m < 3; m++) {
-                if (fg == 2) file_read(b.bounce[k] + at[m], src[m], len[m]);
+                if (fg == 2) memcpy(b.bounce[k] + at[m], src[m], len[m]);
                 else CK(hipMemcpyAsync(r + at[m], src[m], len[m], hipMemcpyHostToDevice, cst));
             }
             c += run_n;

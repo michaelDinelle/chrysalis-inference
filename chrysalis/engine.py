@@ -341,10 +341,10 @@ class Engine:
         """Flash-Next's expert pool (engine_fn/api.cpp chrysalis_expert_stats), None for the 27B."""
         if not hasattr(self.lib, "chrysalis_expert_stats"):
             return None
-        out = (C.c_int64 * 6)()
+        out = (C.c_int64 * 8)()
         self.lib.chrysalis_expert_stats(out)
-        return {"placed": out[0], "placed_from_file": out[1], "decode_picks": out[2], "decode_picks_in_pool": out[3],
-                "dma_bytes_per_s": out[4] * 1e6, "gpu_share": out[5] / 1e6}
+        return {"placed": out[0], "placed_file_tier": out[1], "decode_picks": out[2], "decode_picks_in_pool": out[3],
+                "dma_bytes_per_s": out[4] * 1e6, "gpu_share": out[5] / 1e6, "mirrored": out[6], "mirror_cap": out[7]}
 
     def last_logits(self):
         import numpy as np

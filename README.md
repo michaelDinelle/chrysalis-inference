@@ -77,7 +77,8 @@ OpenAI-compatible provider at `http://127.0.0.1:8080/v1`, set up in `~/.config/o
 finish reason, their prompt, cached and written tokens, prefill and decode seconds and decode steps (tok/s and tokens
 per step are ratios of their rates), a time-to-first-token histogram, model loads and their seconds, error statuses; and
 gauges read at the scrape: the model loaded, replies being written, free KV tokens, snapshots, the PCIe link, and on
-Flash-Next the expert pool's decode picks (all, and in the pool) and the DMA rate.
+Flash-Next the expert pool's decode picks (all, and in the pool), the file's experts out of it (in the spill mirror)
+and the DMA rate.
 
 The same server also speaks Anthropic's Messages API (`/v1/messages`, with `count_tokens`; Claude Code with
 `ANTHROPIC_BASE_URL=http://127.0.0.1:8080`) and OpenAI's Responses API (`/v1/responses`; Codex), translated to the
@@ -591,7 +592,7 @@ on 64 GB of RAM with no swapping:
   pick (below). 3.3 GB of KV covers the 262K context.
 - **System RAM (42.6 GB):** the other 18,976 experts: Q3_K gate/up, the least used fifth of all experts Q2_K,
   IQ4_NL down. K-quants run at the CPU's full memory bandwidth (the IQ3 formats are compute-bound there).
-  Flash-Next takes ~40 GiB of RAM in all.
+  Flash-Next takes ~40 GiB of RAM in all, and up to 6 GB more as the expert pool moves (below).
 - **Disk:** the n-gram table stays in the source file, memory-mapped; a token's 16 rows are requested
   together so the cold ones are read in parallel, and the next token's while the current step finishes.
 
@@ -611,12 +612,20 @@ quarter) takes that one's slot. A background thread copies it into a VRAM stage 
 model file), and one launch per pass writes the arrivals into their slots and patches the routing tables, in stream
 order with the passes. An expert keeps its own format wherever it is (the file tier's IQ4_XS, RAM's Q3_K / Q2_K inside
 the slot's share of the IQ4_XS arrays): moving it changes where it is computed, not its weights. One leaving the pool
-goes back to its RAM copy, or for the file's own tier, which has none, to the model file's mapping (read ahead), so
-RAM use is unchanged. Once it has followed a reply the pool serves 93-95% of a story's picks and 78-85% of code's
-(code spreads wider: even each window's own 5,600 most used serve 83%). Where an expert is computed changes its result
-by rounding, so results depend on what the pool holds: checks that need bit-identical repeats hold it still
-(`chrysalis_tune` "experts" 0), and `tools_fn/compare_fn.py` checks every path against llama.cpp after the pool has
-moved both ways.
+goes back to its RAM copy. The file's own tier has none: one of those leaving gets a copy in RAM (the spill mirror),
+read from the file before the expert leaves the pool and freed when it comes back, up to 6 GB (2,253 experts,
+`CHRYSALIS_FN_SPILL_GB`) and only while the machine has 4 GB of RAM available (past that, other programs would swap for
+it); with the mirror full only RAM-tier experts leave. Computed from the model file's mapping instead, they leave
+decode depending on the page cache to keep them, which is the memory every other program takes first, and a story alone
+pushes 4,300 of them (11.6 GB) out of the pool: with Chrysalis using 50 of the 62 GB, decode fell from 85 to 15-40
+tok/s reading experts from the disk. Through a day's mix (`tools_fn/bench_fn.py 700 --mix`: code, a story twice, a
+three.js page, code again) decode ran 72 / 58 / 83 / 44 / 69 tok/s computing them from the file with the page cache to
+spare, and 81-88 / 72 / 85-88 / 76-77 / 76-84 with the mirror (two runs; 3 GB: 90 / 66 / 70 / 65 / 95; unbounded, 11 GB
+by the second story: 81 / 70 / 97 / 83 / 82; none, the pool held to the file's tier: 88 / 44 / 40 / 60 / 84). Once it
+has followed a reply the pool serves 93-95% of a story's picks and 78-85% of code's (code spreads wider: even each
+window's own 5,600 most used serve 83%). Where an expert is computed changes its result by rounding, so results depend
+on what the pool holds: checks that need bit-identical repeats hold it still (`chrysalis_tune` "experts" 0), and
+`tools_fn/compare_fn.py` checks every path against llama.cpp after the pool has moved both ways.
 
 **Decode.** Per layer the GPU routes (one fused router + top-10 kernel) and hands the cold picks over
 through pinned coherent memory: the CPU workers (one per physical core) compute most of them with AVX-512
@@ -648,7 +657,7 @@ sub-chunks run, so planning a layer's experts waits only for the last one. The s
 each (token, KV head) a workgroup of 8 waves over 128-key stages of the token's selected blocks, split by
 output dims as in the 27B's decode kernel. Of the cold experts, the CPU computes the ones with few tokens in place (an
 AVX-512 VNNI kernel with tokens as lanes) and the GPU DMAs the rest into a staging ring (the file tier's experts out of
-the pool through pinned memory, read from the file). The split follows a
+the pool through pinned memory, copied from the mirror). The split follows a
 cost model with rates measured at load (the DMA rate kept current, above) and a feedback term that keeps the CPU and GPU
 finishing together. The
 feedback runs for the first ten passes after a load and then stays put: the CPU and GPU round differently, so a
@@ -659,8 +668,7 @@ is as fast (frozen at any point between 1.5x and 2x the CPU estimate, within 2% 
 **Memory.** The model is sized to fit, so there is nothing to guard: Chrysalis loads it and runs. Switching to
 the 27B frees all of it (no experts are kept in RAM), and switching back reads the file again: 7 s once the 27B has
 read 45 GB of it into the page cache (Notes), 17-19 s from the disk. Pages of the
-model file are dropped from the page cache once copied; an expert that leaves the pool for the file is read ahead
-into it again.
+model file are dropped from the page cache once copied, the mirror's copies too.
 
 **Measured** (7800X3D, 64 GB DDR5, RX 7900 XTX):
 
@@ -805,7 +813,7 @@ in `tools/agent_sim.py` sessions (`--model=qwen3.8-flash-next`).
   file leaves the cache for it (its weights are on the GPU: a restart or wake then reads it from the disk, 3.9 s instead
   of 1.5). Measured: 45 GB read in 9 s, then the switch took 7.0 s where 19 s from nothing cached (9.8 s with 29 GB, the
   27B's file still cached). Flash-Next reads nothing for the 27B: its experts take 43 GB and its own working set (the
-  n-gram table, the file tier's experts) lives in the page cache. The switch back reads the 27B's 15 GB from the disk:
+  n-gram table) lives in the page cache. The switch back reads the 27B's 15 GB from the disk:
   4.3 s.
 - Before the machine sleeps, Chrysalis frees the GPU (`chrysalis/sleep.py`: a logind delay lock), so the model's VRAM is
   never evicted into RAM: a reply being written ends at its next step (cut short, as at its length limit), a prompt
