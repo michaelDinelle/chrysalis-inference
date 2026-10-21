@@ -609,7 +609,7 @@ on 64 GB of RAM with no swapping:
   pick (below). 3.3 GB of KV covers the 262K context.
 - **System RAM (42.6 GB):** the other 18,976 experts: Q3_K gate/up, the least used fifth of all experts Q2_K,
   IQ4_NL down. K-quants run at the CPU's full memory bandwidth (the IQ3 formats are compute-bound there).
-  Flash-Next takes ~40 GiB of RAM in all, and up to 6 GB more as the expert pool moves (below).
+  Flash-Next takes ~40 GiB of RAM in all, and more as the expert pool moves while the machine has RAM to spare (below).
 - **Disk:** the n-gram table stays in the source file, memory-mapped; a token's 16 rows are requested
   together so the cold ones are read in parallel, and the next token's while the current step finishes.
 
@@ -630,19 +630,20 @@ model file), and one launch per pass writes the arrivals into their slots and pa
 order with the passes. An expert keeps its own format wherever it is (the file tier's IQ4_XS, RAM's Q3_K / Q2_K inside
 the slot's share of the IQ4_XS arrays): moving it changes where it is computed, not its weights. One leaving the pool
 goes back to its RAM copy. The file's own tier has none: one of those leaving gets a copy in RAM (the spill mirror),
-read from the file before the expert leaves the pool and freed when it comes back, up to 6 GB (2,253 experts,
+read from the file before the expert leaves the pool and freed when it comes back, up to the whole tier (15 GB, or
 `CHRYSALIS_FN_SPILL_GB`) and only while the machine has 4 GB of RAM available (past that, other programs would swap for
 it); with the mirror full only RAM-tier experts leave. Computed from the model file's mapping instead, they leave
 decode depending on the page cache to keep them, which is the memory every other program takes first, and a story alone
 pushes 4,300 of them (11.6 GB) out of the pool: with Chrysalis using 50 of the 62 GB, decode fell from 85 to 15-40
 tok/s reading experts from the disk. Through a day's mix (`tools_fn/bench_fn.py 700 --mix`: code, a story twice, a
 three.js page, code again) decode ran 72 / 58 / 83 / 44 / 69 tok/s computing them from the file with the page cache to
-spare, and 81-88 / 72 / 85-88 / 76-77 / 76-84 with the mirror (two runs; 3 GB: 90 / 66 / 70 / 65 / 95; unbounded, 11 GB
-by the second story: 81 / 70 / 97 / 83 / 82; none, the pool held to the file's tier: 88 / 44 / 40 / 60 / 84). Once it
-has followed a reply the pool serves 93-95% of a story's picks and 78-85% of code's (code spreads wider: even each
-window's own 5,600 most used serve 83%). Where an expert is computed changes its result by rounding, so results depend
-on what the pool holds: checks that need bit-identical repeats hold it still (`chrysalis_tune` "experts" 0), and
-`tools_fn/compare_fn.py` checks every path against llama.cpp after the pool has moved both ways.
+spare, and 81 / 70 / 97 / 83 / 82 with the mirror unbounded (11 GB by the second story; held to 6 GB: 81-88 / 72 /
+85-88 / 76-77 / 76-84, 3 GB: 90 / 66 / 70 / 65 / 95, none: 88 / 44 / 40 / 60 / 84); three stories at once wrote 144
+tok/s together with it unbounded, 116 held to 6 GB, 137 from the file. Once it has followed a reply the pool serves
+93-95% of a story's picks and 78-85% of code's (code spreads wider: even each window's own 5,600 most used serve 83%).
+Where an expert is computed changes its result by rounding, so results depend on what the pool holds: checks that need
+bit-identical repeats hold it still (`chrysalis_tune` "experts" 0), and `tools_fn/compare_fn.py` checks every path
+against llama.cpp after the pool has moved both ways.
 
 **Decode.** Per layer the GPU routes (one fused router + top-10 kernel) and hands the cold picks over
 through pinned coherent memory: the CPU workers (one per physical core) compute most of them with AVX-512
@@ -802,7 +803,8 @@ in `tools/agent_sim.py` sessions (`--model=qwen3.8-flash-next`).
   (`Engine::generate_batch`: one read of the weights for all of them, each with its own attention, recurrent state and
   sampler; 8 rows shared out as drafts). Two at once write 141 tok/s together in the engine where 107 in turn (115 / 91
   through the server), and the second reply starts when its prompt is read instead of after the first. Sampling stays
-  exact: two replies (3 drafts each, as alone) draw for a seed the very tokens each would alone. A model switch or sleep
+  exact: two replies (3 drafts each, as alone) draw for a seed the very tokens each would alone, with the same log probs
+  (the web UI asks for them with every reply: three Flash-Next replies wrote 75 tok/s together taken in turn, 125 sharing). A model switch or sleep
   waits for the replies in flight. Flash-Next's replies share passes too, with one draft each (two rows a reply, up to
   four replies; more take none): the projections, routers and experts once for all rows, the CPU's cold experts too.
   With the expert pool warm, two replies write 120 tok/s together where 103 in turn with two drafts each, three 127

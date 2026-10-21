@@ -1280,9 +1280,11 @@ int Engine::generate_masked(int id, const Sampling &sp, const int *drafts, int k
 // while each keeps its own attention, recurrent state, acceptance and commit, as in generate(). A sequence takes one
 // draft (two rows) while 8 rows hold them, none beyond: two replies wrote 115-128 tok/s together with one draft each,
 // 111-113 with two, 82-93 in turn with two (the expert pool warm; three replies: 115-125 with one, 92-110 with none).
-// Prompt lookup stays with steps of one sequence. out: max_out tokens per sequence, counts: how many each emitted. Out of
-// KV pages, it throws before drawing anything.
-void Engine::generate_batch(int n, const int *ids, const Sampling *sps, int *out, int max_out, int *counts) {
+// Prompt lookup stays with steps of one sequence. out: max_out tokens per sequence, counts: how many each emitted, rows_v /
+// rows_i (optional) their candidates as generate() gives them, max_out rows a sequence. Out of KV pages, it throws before
+// drawing anything.
+void Engine::generate_batch(int n, const int *ids, const Sampling *sps, int *out, int max_out, int *counts, float *rows_v,
+                            int *rows_i) {
     int need = 0;                                    // pages for 2 more tokens each, before anything is drawn
     for (int i = 0; i < n; i++) {
         const Seq &s = seqs.at(ids[i]);
@@ -1302,6 +1304,7 @@ void Engine::generate_batch(int n, const int *ids, const Sampling *sps, int *out
             if (s.top_v.empty()) FAIL("generate: nothing to continue from");
             s.pending = draw(make_dist(s.top_v.data(), s.top_i.data(), sp, s.seen, s.ctx), s.rng);
             s.seen.push(s.pending);
+            if (rows_v) keep_row(s.top_v.data(), s.top_i.data(), rows_v, rows_i, i * max_out + counts[i]);
             o[counts[i]++] = s.pending;
             if (sp.lookup > 0) s.look.push(s.pending);
             if (is_eos(s.pending) || s.pending == sp.halt || counts[i] == max_out) continue;
@@ -1363,6 +1366,7 @@ void Engine::generate_batch(int n, const int *ids, const Sampling *sps, int *out
             const int tok = dr[a + 1];
             if (std::uniform_real_distribution<float>(0, 1)(s.rng) < prob(d, tok)) {
                 if (is_eos(tok) || tok == sp.halt) { next = tok; break; }
+                if (rows_v) keep_row(&tv[r * TOPK], &ti[r * TOPK], rows_v, rows_i, i * max_out + counts[i]);
                 o[counts[i]++] = tok; s.seen.push(tok);
                 if (sp.lookup > 0) s.look.push(tok);
                 continue;
@@ -1371,6 +1375,7 @@ void Engine::generate_batch(int n, const int *ids, const Sampling *sps, int *out
             break;
         }
         if (next < 0) next = draw(make_dist(&tv[(p.off + a) * TOPK], &ti[(p.off + a) * TOPK], sp, s.seen, s.ctx), s.rng);
+        if (rows_v) keep_row(&tv[(p.off + a) * TOPK], &ti[(p.off + a) * TOPK], rows_v, rows_i, i * max_out + counts[i]);
         o[counts[i]++] = next;
         s.seen.push(next);
         if (sp.lookup > 0) s.look.push(next);

@@ -50,9 +50,10 @@ void chrysalis_dry_breakers(const int *ids, int n) {
 }
 int chrysalis_free_tokens() { return (int)E->free_pages.size() * PAGE; }
 // One step for several sequences in one pass (Engine::generate_batch): out holds max_out tokens per sequence, counts what
-// each emitted. -1: out of KV pages (the sequences left as they were).
-int chrysalis_generate_batch(int n, const int *ids, const Sampling *sps, int *out, int max_out, int *counts) {
-    try { E->generate_batch(n, ids, sps, out, max_out, counts); return 0; } catch (const std::exception &) { return -1; }
+// each emitted; rows_v / rows_i: null, or room for max_out rows of SAMPLE_N candidates per sequence (each emitted token's,
+// for log probs). -1: out of KV pages (the sequences left as they were).
+int chrysalis_generate_batch(int n, const int *ids, const Sampling *sps, int *out, int max_out, int *counts, float *rows_v, int *rows_i) {
+    try { E->generate_batch(n, ids, sps, out, max_out, counts, rows_v, rows_i); return 0; } catch (const std::exception &) { return -1; }
 }
 // The SAMPLE_N largest of the last prefill's logits among the tokens a bitmask allows (bit t % 32 of word t / 32), a
 // constrained answer's candidates for chrysalis_draw. The logits are overwritten.

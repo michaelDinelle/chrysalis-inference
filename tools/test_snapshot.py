@@ -195,11 +195,15 @@ ok = r1 == r2; fails += not ok
 print(f"a seed redraws its reply in a new seq {'ok' if ok else 'FAIL'}  first difference at "
       f"{next((i for i in range(len(r1)) if r1[i] != r2[i]), None)}")
 # Steps of several sequences in one pass (parallel requests) draw what each draws alone with the same seed and as many
-# drafts: two sequences (the 27B: 3 drafts each, all 8 rows; Flash-Next gives each one) and three (1 draft each), sampled.
+# drafts: two sequences (the 27B: 3 drafts each, all 8 rows; Flash-Next gives each one) and three (1 draft each), sampled;
+# each token with the candidates it was drawn from (log probs), bit for bit.
 if getattr(eng, "batched", False):
     def alone(prompt, seed, sp, steps):
         s_ = eng.new_seq(); eng.prefill(s_, prompt); eng.begin(s_, seed)
-        got = [t for _ in range(steps) for t in eng.generate(s_, sp, 16)]
+        got = []
+        for _ in range(steps):
+            toks, rv, ri = eng.generate(s_, sp, 16, rows=True)
+            got += [(t, v.tobytes(), i.tobytes()) for t, v, i in zip(toks, rv, ri)]
         eng.free_seq(s_)
         return got
 
@@ -209,8 +213,8 @@ if getattr(eng, "batched", False):
             eng.prefill(s_, pr); eng.begin(s_, sd)
         got = [[] for _ in ss]
         for _ in range(steps):
-            for g_, t in zip(got, eng.generate_batch(ss, [sp] * len(ss))):
-                g_ += t
+            for g_, (toks, rv, ri) in zip(got, eng.generate_batch(ss, [sp] * len(ss), rows=True)):
+                g_ += [(t, v.tobytes(), i.tobytes()) for t, v, i in zip(toks, rv, ri)]
         for s_ in ss: eng.free_seq(s_)
         return got
     p3 = [random.randrange(1000, 50000) for _ in range(77)]

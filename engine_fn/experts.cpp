@@ -11,8 +11,9 @@
 // pushes it out, and freed once it is back. Computing them from the file's mapping instead left decode at the page
 // cache's mercy: the tier is 15 GB, and with Flash-Next in RAM the cache that holds the drifted part is what any other
 // program's memory comes out of (decode fell from 85 to 15-40 tok/s, reading experts from the disk). The mirror holds
-// spill_cap experts at most, and grows only while the machine has `spare` bytes of RAM available (past that, other
-// programs' memory would go to swap for it); with it full, only RAM-tier experts leave the pool. Coming in, an expert's blocks are copied
+// spill_cap experts at most (all of the tier unless CHRYSALIS_FN_SPILL_GB says less: three replies at once wrote 144 tok/s
+// with it unbounded, 116 held to 6 GB), and grows only while the machine has `spare` bytes of RAM available (past that,
+// other programs' memory would go to swap for it); with it full, only RAM-tier experts leave the pool. Coming in, an expert's blocks are copied
 // to a VRAM stage (a load: by DMA from RAM, or from the mirror through pinned memory, on the loader thread), and at a pass
 // boundary one launch writes the stages into their slots and patches the routing tables, in stream order with the
 // passes, which therefore see either expert whole. Results depend on where an expert was computed only by rounding.
@@ -30,7 +31,6 @@ constexpr float PRIOR = 8;          // picks a VRAM-tier expert starts with: the
 constexpr float MARGIN = 0.25f;     // an expert takes a slot from one it beats by this share of the latter's megabytes ...
 constexpr float MIN_GAIN = 2.0f;    // ... plus this many (about one pick)
 constexpr size_t STAGE_BYTES = 2 * (size_t)FE * D / 256 * 136 + (size_t)D * FE / 32 * 18;   // the widest expert: IQ4_XS
-constexpr double SPILL_GB = 6;      // the mirror's default size (CHRYSALIS_FN_SPILL_GB)
 
 // A VRAM-tier expert's gate, up and down: where the mirror keeps them and where the file has them
 struct HotCopy { uint8_t *mirror[3]; const uint8_t *file[3]; size_t n[3]; };
@@ -95,10 +95,11 @@ void Engine::experts_init() {
         }
     }
     size_t hot_bytes = 0;
-    for (const ColdLayer &c : cold) if (c.n2) hot_bytes = c.bytes(c.n);
+    int hot = 0;
+    for (const ColdLayer &c : cold) if (c.n2) { hot_bytes = c.bytes(c.n); hot += c.n2; }
     const char *gb = getenv("CHRYSALIS_FN_SPILL_GB");
     x.spilled = 0;
-    x.spill_cap = hot_bytes ? (int)((gb ? atof(gb) : SPILL_GB) * 1e9 / (double)hot_bytes) : 0;
+    x.spill_cap = gb && hot_bytes ? std::min(hot, (int)(atof(gb) * 1e9 / (double)hot_bytes)) : hot;
     CK(hipMalloc(&x.d_counts, keys * 4));
     CK(hipMemsetAsync(x.d_counts, 0, keys * 4, st));
     CK(hipHostMalloc(&x.h_counts, keys * 4));

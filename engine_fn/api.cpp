@@ -77,9 +77,10 @@ int chrysalis_generate_masked(int id, const Sampling *sp, const int *drafts, int
     try { return E->generate_masked(id, *sp, drafts, k, masks, out, max_out); } catch (const std::exception &) { return -1; }
 }
 // One step for several sequences in one pass (Engine::generate_batch): out holds max_out tokens per sequence, counts what
-// each emitted. -1: out of KV pages (the sequences left as they were).
-int chrysalis_generate_batch(int n, const int *ids, const Sampling *sps, int *out, int max_out, int *counts) {
-    try { E->generate_batch(n, ids, sps, out, max_out, counts); return 0; } catch (const std::exception &) { return -1; }
+// each emitted; rows_v / rows_i: null, or room for max_out rows of SAMPLE_N candidates per sequence (each emitted token's,
+// for log probs). -1: out of KV pages (the sequences left as they were).
+int chrysalis_generate_batch(int n, const int *ids, const Sampling *sps, int *out, int max_out, int *counts, float *rows_v, int *rows_i) {
+    try { E->generate_batch(n, ids, sps, out, max_out, counts, rows_v, rows_i); return 0; } catch (const std::exception &) { return -1; }
 }
 int chrysalis_snapshot(int id) { return E->snapshot(id); }
 int chrysalis_restore(int id, int snap) { try { E->restore(id, snap); return 0; } catch (const std::exception &) { return -1; } }

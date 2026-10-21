@@ -475,13 +475,19 @@ void Engine::mtp_catch_up(Seq &s, int T, int pos0, int rope0, bool rpos, bool im
     mtp_forward(s, T, pos0, b.mtp_h, b.tokens + off, rope0, rpos, img);
 }
 
+static void keep_row(const float *v, const int *i, float *rows_v, int *rows_i, int at) {
+    std::copy(v, v + TOPK, rows_v + (size_t)at * TOPK);
+    std::copy(i, i + TOPK, rows_i + (size_t)at * TOPK);
+}
 
 // One speculative step for several sequences at once (parallel requests): their pending tokens and MTP drafts go
 // through the model in one pass, which reads the weights once for all of them, while each keeps its own attention,
 // recurrent state, acceptance and commit, as in generate(). The pass holds 8 rows, shared out as drafts (two sequences:
 // 3 each; five or more: none). Prompt lookup stays with steps of one sequence. out: max_out tokens per sequence, counts:
-// how many each emitted. Out of KV pages, it throws before drawing anything.
-void Engine::generate_batch(int n, const int *ids, const Sampling *sps, int *out, int max_out, int *counts) {
+// how many each emitted, rows_v / rows_i (optional) their candidates as generate() gives them, max_out rows a sequence.
+// Out of KV pages, it throws before drawing anything.
+void Engine::generate_batch(int n, const int *ids, const Sampling *sps, int *out, int max_out, int *counts, float *rows_v,
+                            int *rows_i) {
     int need = 0;                                    // pages for 8 more tokens each, before anything is drawn
     for (int i = 0; i < n; i++) {
         const Seq &s = seqs.at(ids[i]);
@@ -501,6 +507,7 @@ void Engine::generate_batch(int n, const int *ids, const Sampling *sps, int *out
             if (s.top_v.empty()) FAIL("generate: nothing to continue from");
             s.pending = draw(make_dist(s.top_v.data(), s.top_i.data(), sp, s.seen, s.ctx), s.rng);
             s.seen.push(s.pending);
+            if (rows_v) keep_row(s.top_v.data(), s.top_i.data(), rows_v, rows_i, i * max_out + counts[i]);
             o[counts[i]++] = s.pending;
             if (sp.lookup > 0) s.look.push(s.pending);
             if (is_eos(s.pending) || s.pending == sp.halt || counts[i] == max_out) continue;
@@ -551,6 +558,7 @@ void Engine::generate_batch(int n, const int *ids, const Sampling *sps, int *out
             const int tok = drafts[r + 1];
             if (std::uniform_real_distribution<float>(0, 1)(s.rng) < prob(d, tok)) {
                 if (is_eos(tok) || tok == sp.halt) { next = tok; break; }
+                if (rows_v) keep_row(&tv[r * TOPK], &ti[r * TOPK], rows_v, rows_i, i * max_out + counts[i]);
                 o[counts[i]++] = tok; s.seen.push(tok);
                 if (sp.lookup > 0) s.look.push(tok);
                 continue;
@@ -559,6 +567,7 @@ void Engine::generate_batch(int n, const int *ids, const Sampling *sps, int *out
             break;
         }
         if (next < 0) next = draw(make_dist(&tv[(p.off + a) * TOPK], &ti[(p.off + a) * TOPK], sp, s.seen, s.ctx), s.rng);
+        if (rows_v) keep_row(&tv[(p.off + a) * TOPK], &ti[(p.off + a) * TOPK], rows_v, rows_i, i * max_out + counts[i]);
         o[counts[i]++] = next;
         s.seen.push(next);
         if (sp.lookup > 0) s.look.push(next);
@@ -577,11 +586,6 @@ void Engine::generate_batch(int n, const int *ids, const Sampling *sps, int *out
         s.pos += a + 1;
         s.pending = next;
     }
-}
-
-static void keep_row(const float *v, const int *i, float *rows_v, int *rows_i, int at) {
-    std::copy(v, v + TOPK, rows_v + (size_t)at * TOPK);
-    std::copy(i, i + TOPK, rows_i + (size_t)at * TOPK);
 }
 
 // One speculative step. Emits the pending token (if newly sampled), accepted drafts and one more token.

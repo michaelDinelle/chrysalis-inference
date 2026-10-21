@@ -163,9 +163,30 @@ writers = [threading.Thread(target=lambda i=i: both.__setitem__(i, reply({"messa
            for i in range(2)]
 for w in writers: w.start()
 for w in writers: w.join()
-srv.n_draft = drafts
 check("parallel requests: together = alone", both == alone and srv.batcher.shared > shared,
       f"{srv.batcher.shared - shared} passes shared, {[len(x) for x in both]} chars")
+
+
+def reply_odds(body):
+    """A reply's text and each of its tokens' log probs (OpenAI's: the token, its own and the top alternatives')."""
+    text, odds = "", []
+    for kind, val, *rest in srv.chat({"model": MODEL + "-fast", "max_tokens": 60, **body}):
+        if kind == "content":
+            text += val
+            odds.append(rest[0] if rest else None)
+    return text, odds
+
+
+# With log probs (the web UI asks for them with every reply) they share passes too, each with the odds it has alone
+odds = {"temperature": 0, "max_tokens": 120, "logprobs": True, "top_logprobs": 5}
+alone = [reply_odds({"messages": q, **odds}) for q in asks]
+shared, both = srv.batcher.shared, [None, None]
+writers = [threading.Thread(target=lambda i=i: both.__setitem__(i, reply_odds({"messages": asks[i], **odds}))) for i in range(2)]
+for w in writers: w.start()
+for w in writers: w.join()
+srv.n_draft = drafts
+check("parallel requests with log probs: together = alone", both == alone and srv.batcher.shared > shared and all(o for _, o in alone),
+      f"{srv.batcher.shared - shared} passes shared, {[len(o) for _, o in both]} tokens with their odds")
 check("after them: cache matches engine", *consistent())
 
 # A long prompt read while another reply is being written (Server.prefill): after each prefill chunk the GPU goes back to

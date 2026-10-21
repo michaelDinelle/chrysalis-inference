@@ -426,7 +426,8 @@ class Batcher:
 
     def run(self, engine, batch):
         """The pass: results by sequence, its tokens or the exception (KVFull) its step raised."""
-        alone = [sid for sid, (sp, rows, most) in batch.items() if rows or most < 16 or len(batch) == 1 or not engine.batched]
+        # (log probs too: the web UI asks for them with every reply, and taken alone three replies wrote 75 tok/s where 91)
+        alone = [sid for sid, (sp, rows, most) in batch.items() if most < 16 or len(batch) == 1 or not engine.batched]
         together = [sid for sid in batch if sid not in alone]
         if len(together) == 1:
             alone += together
@@ -436,8 +437,10 @@ class Batcher:
         try:
             if together:
                 self.shared += 1
+                rows = any(batch[sid][1] for sid in together)
                 try:
-                    out.update(zip(together, engine.generate_batch(together, [batch[sid][0] for sid in together])))
+                    got = engine.generate_batch(together, [batch[sid][0] for sid in together], rows=rows)
+                    out.update((sid, g if batch[sid][1] or not rows else g[0]) for sid, g in zip(together, got))
                 except KVFull as e:
                     out.update(dict.fromkeys(together, e))
             for sid in alone:

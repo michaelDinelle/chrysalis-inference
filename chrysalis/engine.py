@@ -113,7 +113,7 @@ class Engine:
             L.chrysalis_seq_pending.argtypes = [C.c_int, C.c_int]
         self.batched = hasattr(L, "chrysalis_generate_batch")     # steps of several sequences in one pass (generate_batch)
         if self.batched:
-            L.chrysalis_generate_batch.argtypes = [C.c_int, C.c_void_p, C.c_void_p, C.c_void_p, C.c_int, C.c_void_p]
+            L.chrysalis_generate_batch.argtypes = [C.c_int, C.c_void_p, C.c_void_p, C.c_void_p, C.c_int, C.c_void_p, C.c_void_p, C.c_void_p]
         L.chrysalis_seq_context.argtypes = [C.c_int, C.POINTER(C.c_int), C.c_int]
         L.chrysalis_dry_breakers.argtypes = [C.POINTER(C.c_int), C.c_int]
         L.chrysalis_seq_begin.argtypes = [C.c_int, C.c_uint64]
@@ -274,15 +274,21 @@ class Engine:
             raise KVFull()
         return out[:n].tolist()
 
-    def generate_batch(self, sids, samplings, max_out=16):
-        """One speculative step for each sequence, all in one pass (up to 8 sequences): their token lists."""
+    def generate_batch(self, sids, samplings, max_out=16, rows=False):
+        """One speculative step for each sequence, all in one pass (up to 8 sequences): their token lists; with rows, each
+        sequence's (tokens, candidate logits, candidate ids) as generate(rows=True) gives them."""
         import numpy as np
         n = len(sids)
         ids = np.ascontiguousarray(sids, np.int32)
         sps = (Sampling * n)(*samplings)
         out, counts = np.empty((n, max_out), np.int32), np.empty(n, np.int32)
-        if self.lib.chrysalis_generate_batch(n, ids.ctypes.data, C.cast(sps, C.c_void_p), out.ctypes.data, max_out, counts.ctypes.data) < 0:
+        rv = np.empty((n, max_out, 64), np.float32) if rows else None
+        ri = np.empty((n, max_out, 64), np.int32) if rows else None
+        if self.lib.chrysalis_generate_batch(n, ids.ctypes.data, C.cast(sps, C.c_void_p), out.ctypes.data, max_out, counts.ctypes.data,
+                                             rv.ctypes.data if rows else None, ri.ctypes.data if rows else None) < 0:
             raise KVFull()
+        if rows:
+            return [(out[i, :counts[i]].tolist(), rv[i, :counts[i]], ri[i, :counts[i]]) for i in range(n)]
         return [out[i, :counts[i]].tolist() for i in range(n)]
 
     def set_lookup(self, sid, tokens):

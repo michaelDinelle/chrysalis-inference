@@ -105,7 +105,7 @@ struct Engine {
         std::vector<uint8_t> busy;               // per slot: an expert is on its way into it
         std::vector<uint8_t> coming;             // per layer * NE + expert: on its way into the pool
         int spilled = 0, spill_cap = 0;          // the file's experts out of the pool or on their way out (each with a
-                                                 // copy in the spill mirror), and how many may be (CHRYSALIS_FN_SPILL_GB)
+                                                 // copy in the spill mirror), and how many may be
         double spare = 4e9;                      // the mirror takes no more while the machine has less RAM available
         double avail = 0;                        // MemAvailable as last read, and when
         std::chrono::steady_clock::time_point avail_at{};
@@ -335,7 +335,8 @@ struct Engine {
     void gdn_parts(const Layer &w, int gl, const Part *p, int np, int T, float *res, float *inject);
     void ple_parts(const Part *p, int np, int T, float *res);
     void forward_parts(const Part *p, int np, const int *tokens, int T);   // tokens: host, all rows in order
-    void generate_batch(int n, const int *ids, const Sampling *sps, int *out, int max_out, int *counts);
+    void generate_batch(int n, const int *ids, const Sampling *sps, int *out, int max_out, int *counts, float *rows_v = nullptr,
+                        int *rows_i = nullptr);
     void moe_front(const Layer &w, int n, int c0);   // a sub-chunk's router, shared expert, MoE inputs (passes of T > 8)
     void moe_back(const Layer &w, int layer, int T); // the pass's routed experts -> b.moe
     void ple_block_run(Seq &s, int c0, int n, bool verify, float *res);

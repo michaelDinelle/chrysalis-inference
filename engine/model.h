@@ -135,7 +135,8 @@ struct Engine {
     void attn_parts(const Layer &w, int kvl, const Part *p, int np, int T, float *x);
     void gdn_parts(const Layer &w, int gl, const Part *p, int np, int T, float *x);
     void forward_parts(const Part *p, int np, int T);
-    void generate_batch(int n, const int *ids, const Sampling *sps, int *out, int max_out, int *counts);
+    void generate_batch(int n, const int *ids, const Sampling *sps, int *out, int max_out, int *counts, float *rows_v = nullptr,
+                        int *rows_i = nullptr);
     void gemm(const half *W, int N, int K, const half *x, int ldx, int T, void *y, int ldy, bool y_f16, bool accumulate);
     void gemm32(const half *W, int N, int K, const half *x, int ldx, int T, float *y, int ldy);
     void ffn_block(const Layer &w, int T, float *x, const float *next, float *nf);
