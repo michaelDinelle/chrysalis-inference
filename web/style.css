@@ -1002,7 +1002,6 @@ label.set-switch { cursor: pointer; }
 .card-acts button.icon:hover, .card-acts button.armed { border-color: color-mix(in srgb, var(--danger) 50%, var(--line)); color: var(--danger); }
 .card-acts button.armed { width: auto; padding: 0 12px; }
 .card-acts .i { width: 15px; height: 15px; }
-.card-hint { color: var(--faint); font-size: 12px; }
 .card-members { display: flex; flex-wrap: wrap; gap: 8px; }
 .card-member { position: relative; width: 44px; aspect-ratio: 2 / 3; padding: 0; overflow: hidden; border: 0; border-radius: 9px; background: var(--hover); cursor: pointer;
   transition: opacity 120ms, transform 120ms; }

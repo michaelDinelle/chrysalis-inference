@@ -597,8 +597,8 @@ function openSheet(id: string) {
     if (castOf(conv).members.some((m) => m.id === id) || folderOf(conv) === id) render();
   };
   const d = person?.card.data;
-  title.append(name, h("div", "card-tags", person?.kind === "character" ? [d!.creator ? `by ${d!.creator}` : "", ...(d!.tags ?? []).slice(0, 3)].filter(Boolean).join(" · ")
-    : person ? "You, in every chat" : `${g!.members.length} in the group`));
+  title.append(name);
+  if (person?.kind === "character") title.append(h("div", "card-tags", [d!.creator ? `by ${d!.creator}` : "", ...(d!.tags ?? []).slice(0, 3)].filter(Boolean).join(" · ")));
   scroll.append(art, body);
 
   if (person?.kind === "character") {
@@ -623,7 +623,7 @@ function openSheet(id: string) {
       field("Greeting", "first_mes", "Their first message"), more, acts);
   } else if (person) {
     body.append(text(person.card.data.description ?? "", (v) => { person.card.data.description = v; }, "card-text",
-      "What the characters should know about you"), h("div", "card-hint", "Every card calls you {{user}}: it gets your name."));
+      "What the characters should know about you"));
   } else {
     const members = h("div", "card-members");
     members.append(...[...people.values()].filter((x) => x.kind === "character").map((x) => {
@@ -641,7 +641,7 @@ function openSheet(id: string) {
       return b;
     }));
     const who = h("div", "card-section"), where = h("label", "card-field"), acts = h("div", "card-acts");
-    who.append(h("span", "card-label", "Who is in it"), members, h("div", "card-hint", "Or drop a card on the group's chat."));
+    who.append(h("span", "card-label", "Who is in it"), members);
     where.append(h("span", "card-label", "Scenario"), text(g!.scenario ?? "", (v) => { g!.scenario = v || undefined; }, "card-text",
       "Where they are and what is going on (in place of their own)"));
     acts.append(btn("", "The group as a file (with its members' cards beside it, it imports anywhere this chat runs)", `${icon("download")}Export`,
