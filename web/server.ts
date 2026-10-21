@@ -1,9 +1,11 @@
-// Chrysalis web UI: serves the chat app, proxies the Chrysalis server's OpenAI API (same origin, so no CORS) and runs
-// the tools replies call (tools.ts). Conversations stay in the browser tab, replies being written stay in RAM (see
-// Job): on disk are only its certificates (tls.ts) and the browsers and devices let in (devices.ts). `bun server.ts` for development, NODE_ENV=production for a minified bundle.
+// Chrysalis web UI: serves the chat app, sends its replies' requests to the backend (Chrysalis, or another with OpenAI's
+// API: backend.ts; from the same origin, so no CORS), runs the tools replies call (tools.ts) and proxies Chrysalis's API
+// for the network. Conversations stay in the browser tab, replies being written stay in RAM (see
+// Job): on disk are only its certificates (tls.ts), the browsers and devices let in (devices.ts) and the backend (backend.ts). `bun server.ts` for development, NODE_ENV=production for a minified bundle.
 import { hostname } from "node:os";
 import type { Server, Subprocess } from "bun";
 import app from "./index.html";
+import { Backends, standard } from "./backend";
 import { Devices, keyCookie } from "./devices";
 import { appleProfile, connectPage, deviceScript, TRUSTED_GIF } from "./setup";
 import { SUBAGENT_SYSTEM } from "./tool-agent";
@@ -116,18 +118,18 @@ function startJob(body: string): Job {
           job.ctrl.signal.addEventListener("abort", () => (clearTimeout(timer), go()));
         });
       }
-      if (!web && !said) return void await round(job, JSON.stringify(req), push);
+      if (!web && !said) return void await round(job, req, push);
       for (const note of notes) push({ note });
       const allow = new Set(web?.allow ?? []);
       let messages: object[] = req.messages ?? [];
-      const route = said && tools.length && web?.route ? ROUTE : undefined;
+      const route = said && tools.length && web?.route && backends.isChrysalis ? ROUTE : undefined;
       let called = false, force = false, preamble: string | undefined;
       for (let k = 0; ; k++) {
         if (k) push({ round: k });
         // a voice turn that needs a tool (the page's check, or the user asked for a search) starts with the call
         const first = k === 0 && route && (tool || route.asks.test(unnoted(textOf((messages.findLast((m: any) => m.role === "user") as any)?.content))));
         if (first) preamble = route.preambles[messages.length % route.preambles.length];
-        const out = first || force ? await forced(job, req, messages, push, preamble) : await round(job, JSON.stringify({ ...req, messages }), push);
+        const out = first || force ? await forced(job, req, messages, push, preamble) : await round(job, { ...req, messages }, push);
         // the reply said what it would do and did not: the next round does it
         if (out && !job.ctrl.signal.aborted && route && !out.calls.length && !called && !force && !first && route.announces.test(out.content)) {
           force = true;
@@ -166,9 +168,10 @@ function startJob(body: string): Job {
   return job;
 }
 
-// A reply's request as Chrysalis is sent it: the page's own fields (chrysalis_web, chrysalis_voice) taken off, and the
-// chat's tools (chrysalis_web's choice), each with Chrysalis's description where it has one (wire.ts). The reply's job
-// and the page's view of what the model is sent (/api/preview) both build it here, so the view is what Chrysalis gets.
+// A reply's request as the backend is sent it: the page's own fields (chrysalis_web, chrysalis_voice) taken off, the
+// chat's tools (chrysalis_web's choice), each with Chrysalis's description where it has one (wire.ts), and to any
+// backend but Chrysalis only the standard fields (backend.ts). The reply's job and the page's view of what the model is
+// sent (/api/preview) both build it here, so the view is what the backend gets.
 async function asSent(raw: any) {
   const req = { ...raw }, web: ToolChoice | undefined = req.chrysalis_web, said = !!req.chrysalis_voice, tool = req.chrysalis_voice?.tool === true;
   const ahead = req.chrysalis_voice?.ahead === true;
@@ -178,21 +181,28 @@ async function asSent(raw: any) {
   // a spoken reply stays quick: no sub-agents in voice mode
   const tools = said ? picked.tools.filter((n) => n.source.kind !== "agent") : picked.tools, notes = picked.notes;
   if (tools.length) req.tools = tools.map((n) => registry.openai(n, DESCRIPTIONS[n.tool.name]));
-  return { req, web, said, tool, ahead, tools, notes };
+  return { req: backends.isChrysalis ? req : standard(req), web, said, tool, ahead, tools, notes };
 }
 
-class ChrysalisDown extends Error {}
-// Chrysalis took the request and its answer broke off (its log says why: an exception in Chrysalis drops the
+class ChrysalisDown extends Error {
+  message = backends.atService ? "Chrysalis is not running" : `nothing answers at ${new URL(backends.url).origin}: is the backend running?`;
+}
+// The backend took the request and its answer broke off (Chrysalis's log says why: an exception in Chrysalis drops the
 // connection)
-class ChrysalisBroke extends Error { message = "Chrysalis's reply broke off (Chrysalis's log has why)"; }
-// One request to Chrysalis, its events passed on as they come: what it wrote, and the tool calls it ended with. timed:
-// its tokens count in the reply's timings (a sub-agent's do not: they are not the reply's own words).
-async function round(job: Job, body: string, push: (d: string | object) => void, signal = job.ctrl.signal, timed = true) {
-  const r = await fetch(`${CHRYSALIS}/v1/chat/completions`, {
-    method: "POST", body, headers: { "Content-Type": "application/json" }, signal,
+class ChrysalisBroke extends Error { message = backends.isChrysalis ? "Chrysalis's reply broke off (Chrysalis's log has why)" : "the backend's reply broke off"; }
+// A backend's error, which some send as a string and most as OpenAI's {message}
+const errorOf = async (r: Response) => {
+  const e = (await r.json().catch(() => null))?.error;
+  return (typeof e === "string" ? e : e?.message) ?? `${backends.isChrysalis ? "Chrysalis" : new URL(backends.url).host} answered ${r.status}`;
+};
+// One request to the backend, its events passed on as they come: what it wrote, and the tool calls it ended with.
+// timed: its tokens count in the reply's timings (a sub-agent's do not: they are not the reply's own words).
+async function round(job: Job, body: object, push: (d: string | object) => void, signal = job.ctrl.signal, timed = true) {
+  const r = await fetch(`${backends.url}/chat/completions`, {
+    method: "POST", body: JSON.stringify(body), headers: backends.headers(), signal,
   }).catch((e) => { throw signal.aborted ? e : new ChrysalisDown(); });
   if (!r.ok || !r.body) {
-    push({ error: { message: (await r.json().catch(() => null))?.error?.message ?? `Chrysalis answered ${r.status}` } });
+    push({ error: { message: await errorOf(r) } });
     return null;
   }
   const out = { content: "", reasoning: "", calls: [] as WireCall[] };
@@ -203,12 +213,18 @@ async function round(job: Job, body: string, push: (d: string | object) => void,
     for (;;) {
       const { value, done } = await reader.read().catch((e) => { throw signal.aborted ? e : new ChrysalisBroke(); });
       if (done) break;
-      buf += decoder.decode(value, { stream: true });
+      buf += decoder.decode(value, { stream: true }).replace(/\r\n?/g, "\n");   // SSE also allows CRLF and CR
       for (let end = buf.indexOf("\n\n"); end >= 0; end = buf.indexOf("\n\n")) {
-        const data = buf.slice(0, end).split("\n").filter((l) => l.startsWith("data: ")).map((l) => l.slice(6)).join("\n");
+        let data = buf.slice(0, end).split("\n").filter((l) => l.startsWith("data:")).map((l) => l.slice(l.startsWith("data: ") ? 6 : 5)).join("\n");
         buf = buf.slice(end + 2);
         if (!data || data === "[DONE]") continue;
-        const now = Date.now(), delta = data.includes('"delta"') ? JSON.parse(data).choices?.[0]?.delta : undefined;
+        const now = Date.now(), ev = data.includes('"delta"') ? JSON.parse(data) : undefined, delta = ev?.choices?.[0]?.delta;
+        // Ollama and vLLM send a reply's thinking as reasoning, llama.cpp, LM Studio, KoboldCpp and Chrysalis as reasoning_content
+        if (typeof delta?.reasoning === "string" && !backends.isChrysalis) {
+          delta.reasoning_content ??= delta.reasoning;
+          delete delta.reasoning;
+          data = JSON.stringify(ev);
+        }
         if ((delta?.content || delta?.reasoning_content || delta?.tool_calls) && timed) {
           job.tFirst ??= now;
           job.tLast = last = now;
@@ -243,7 +259,8 @@ async function round(job: Job, body: string, push: (d: string | object) => void,
 // what is happening (one of the route's preambles): a model with thinking off, told its reply is spoken, says "I'm
 // searching for that now" and ends its turn often enough (and then copies that turn: 1 call in 6 after one such turn in
 // the history), and may report results it never got. A reply that announces a tool it did not call (its announces,
-// after "I'll", "let me", ...) is made to call one.
+// after "I'll", "let me", ...) is made to call one. Chrysalis's alone: llama.cpp, LM Studio, Ollama and KoboldCpp
+// answered a thinking model's tool_choice "required" with text.
 type Out = NonNullable<Awaited<ReturnType<typeof round>>>;
 // A list of phrases as a pattern for whole words, whatever the spacing between them.
 function phrasePattern(phrases: string[], before = ""): RegExp {
@@ -269,7 +286,7 @@ async function forced(job: Job, req: any, messages: object[], push: (d: string |
     job.tFirst ??= Date.now();
     job.tAnswer ??= Date.now();
   }
-  const out = await round(job, JSON.stringify({ ...req, messages, ...FORCE }), push);
+  const out = await round(job, { ...req, messages, ...FORCE }, push);
   if (out && preamble) out.content = preamble + out.content;
   return out;
 }
@@ -343,7 +360,7 @@ async function subagent(job: Job, c: WireCall, args: Record<string, unknown>, to
   try {
     for (let k = 0; ; k++) {
       if (k) inner({ round: k });
-      const out = await round(job, JSON.stringify({ ...base, messages }), inner, signal, false);
+      const out = await round(job, { ...base, messages }, inner, signal, false);
       if (!out) return ["failed", `Error: the sub-agent could not go on: ${failure ?? "Chrysalis refused its request"}`];
       said = out.content.trim();
       if (!out.calls.length) return ["done", said || "The sub-agent finished without writing an answer."];
@@ -462,7 +479,7 @@ function voiceClosed() {
 // HTTPS always (tls.ts), on 127.0.0.1, and with `chrysalis start --lan` (CHRYSALIS_HOST 0.0.0.0) at each of this machine's
 // network addresses on the same port too (ufw already lets the port in)
 const LAN = process.env.CHRYSALIS_HOST === "0.0.0.0", tls = webTls();
-const devices = new Devices(`${tls.dir}/devices.json`), sea = await deviceScript();
+const devices = new Devices(`${tls.dir}/devices.json`), backends = new Backends(`${tls.dir}/backend.json`, `${CHRYSALIS}/v1`), sea = await deviceScript();
 const PAGE = { "Content-Type": "text/html; charset=utf-8", "Cache-Control": "no-store" };
 // only the certificate and key: Bun takes a `ca` there as the authority clients must show certificates of
 const serve = (hostname: string, port: number) => Bun.serve<VoiceSocket>({
@@ -558,12 +575,12 @@ img.src = ${JSON.stringify(checkUrl(req))} + "?t=" + Date.now();
         const body = await req.text();
         if ((() => { try { return JSON.parse(body).stream; } catch { return false; } })()) return follow(startJob(body), 0);
         try {
-          const r = await fetch(`${CHRYSALIS}/v1/chat/completions`, {
-            method: "POST", body, headers: { "Content-Type": "application/json" }, signal: req.signal,
+          const r = await fetch(`${backends.url}/chat/completions`, {
+            method: "POST", body: backends.isChrysalis ? body : JSON.stringify(standard(JSON.parse(body))), headers: backends.headers(), signal: req.signal,
           });
           return new Response(r.body, { status: r.status, headers: { "Content-Type": r.headers.get("Content-Type") ?? "application/json" } });
         } catch {
-          return Response.json({ error: { message: "Chrysalis is not running" } }, { status: 502 });
+          return Response.json({ error: { message: new ChrysalisDown().message } }, { status: 502 });
         }
       })),
     },
@@ -646,7 +663,8 @@ img.src = ${JSON.stringify(checkUrl(req))} + "?t=" + Date.now();
     // past half its time since its trust check is told to check again (check), before the gate has to; this machine's
     // page hears how many devices are asking to join (waiting).
     "/api/status": guarded(async (req, srv) => {
-      const state = await (async () => {
+      const backend = await backends.about();
+      const state = backend.listed ? { state: backend.listed.ok ? "online" : "offline", build: BUILD } : await (async () => {
         try {
           const r = await fetch(`${CHRYSALIS}/chrysalis/stats`);
           if (r.status === 503) {                       // listening, still loading its first model
@@ -659,11 +677,19 @@ img.src = ${JSON.stringify(checkUrl(req))} + "?t=" + Date.now();
           return { state: unit("is-active") === "active" ? "loading" : "offline", build: BUILD };
         }
       })(), net = fromNetwork(req, srv), found = devices.find(req);
-      const res = Response.json({ ...state, here: !net, ...(found && devices!.stale(found.device) ? { check: true } : {}),
+      const res = Response.json({ ...state, backend, here: !net, ...(found && devices!.stale(found.device) ? { check: true } : {}),
         ...(LAN && !net ? { waiting: devices.waiting().length } : {}) });
       if (found) res.headers.append("Set-Cookie", keyCookie(found.key));
       return res;
     }),
+    // Where replies come from (backend.ts): set on this computer's own screen only, checked before it is kept
+    "/api/backend": {
+      POST: here(json(async (req) => {
+        const b = await req.json().catch(() => ({}));
+        const r = await backends.set(String(b?.url ?? ""), typeof b?.key === "string" ? b.key : undefined, b?.confirmRemote === true);
+        return r.ok ? Response.json(await backends.about()) : Response.json({ error: { message: r.error }, ...(r.remote ? { remote: r.remote } : {}) }, { status: r.remote ? 409 : 400 });
+      })),
+    },
     "/api/chrysalis/start": { POST: guarded(async (req) => (await pickModel(req), unit("start", "--no-block"), new Response(null, { status: 202 }))) },
     // switch the running Chrysalis to another model; answers once it has loaded (up to ~20 s), the page polls meanwhile
     "/api/chrysalis/load": {

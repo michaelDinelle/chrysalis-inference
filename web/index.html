@@ -99,6 +99,15 @@
       <main>
         <header class="topbar">
           <h1 id="title">New chat</h1>
+          <!-- where replies come from: the address the web server is connected to, and its key (app.ts renderBackend) -->
+          <form id="backend" class="backend" autocomplete="off" hidden>
+            <span id="backend-dot" class="dot"></span>
+            <input id="backend-url" class="backend-input backend-url" type="text" inputmode="url" spellcheck="false" list="backend-known" aria-label="Backend address" placeholder="http://localhost:11434/v1" />
+            <datalist id="backend-known"></datalist>
+            <input id="backend-key" class="backend-input backend-key" type="password" spellcheck="false" aria-label="API key" placeholder="API key" />
+            <button id="backend-go" class="btn small primary" type="submit" hidden>Connect</button>
+            <p id="backend-note" class="backend-note" role="status" hidden><span id="backend-why"></span><button id="backend-far" class="btn small primary" type="button" hidden>Send my chats there</button></p>
+          </form>
           <button id="export" class="act" type="button" title="Export this chat (a file you can import again)" aria-label="Export this chat" hidden></button>
           <button id="connect" class="act" type="button" title="Connect a phone or another device" aria-label="Connect a device" aria-haspopup="dialog" hidden></button>
         </header>
@@ -154,7 +163,7 @@
               <div class="set-sec-head"><label class="set-title" for="system-input">System prompt</label><button id="system-reset" class="act knob-reset" type="button" title="Back to the default system prompt" aria-label="Restore the default system prompt"></button></div>
               <textarea id="system-input" rows="2" placeholder="No system prompt" title="Sent as written, {{MODEL}} as the chat's model; empty sends none. The default keeps the model from acting as a coding agent when it doesn't think, and is sent as its tools version in a chat with tools on. A change makes each chat read its history again once."></textarea>
               <p id="system-note" class="set-note" hidden></p>
-              <button id="sent-open" class="btn small" type="button" title="The open chat's next request, exactly as Chrysalis gets it: the tools, the system prompt and every message">What the model is sent</button>
+              <button id="sent-open" class="btn small" type="button" title="The open chat's next request, exactly as the backend gets it: the tools, the system prompt and every message">What the model is sent</button>
             </section>
             <section class="set-sec">
               <div class="set-sec-head"><span class="set-title">Sampling</span><span class="set-aside"><button id="order-reset" class="act knob-reset" type="button" title="Back to the default order" aria-label="Restore the default order"></button><span id="mode-note" title="Set by the thinking bar in the message box"></span></span></div>

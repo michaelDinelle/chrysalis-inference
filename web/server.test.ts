@@ -201,6 +201,48 @@ test("a request addressed to another site's name is refused; this machine's name
   expect((await status(`127.0.0.1:${port}`)).status).toBe(200);
 });
 
+test("a backend is kept only once it answers: an address where nothing does is said so, one off this computer's networks over http:// is refused (chats and the key would cross the internet in the clear), and replies still come from Chrysalis", async () => {
+  const set = async (url: string) => {
+    const r = await fetch(`${base}/api/backend`, { method: "POST", headers: json, body: JSON.stringify({ url }) });
+    return [r.status, (await r.json()).error?.message];
+  };
+  expect(await set("127.0.0.1:9")).toEqual([400, "nothing answers at http://127.0.0.1:9: is the backend running?"]);
+  expect(await set("http://1.1.1.1/v1")).toEqual([400, "1.1.1.1 is off this computer and its networks: it takes https://"]);
+  expect((await (await fetch(`${base}/api/status`)).json()).backend).toMatchObject({ chrysalis: true, name: "Chrysalis" });
+});
+
+test("a backend is Chrysalis by what its model list says, wherever it is: one that says so gets Chrysalis's own fields as the page sent them, one that does not gets OpenAI's fields alone, its thinking sent as reasoning reaching the page as reasoning_content", async () => {
+  const got: Record<string, any> = {};
+  const backend = (owner: string) => Bun.serve({ hostname: "127.0.0.1", port: 0, async fetch(req) {
+    const path = new URL(req.url).pathname;
+    if (path === "/v1/models") return Response.json({ object: "list", data: [{ id: "m", object: "model", owned_by: owner }] });
+    got[owner] = await req.json();
+    return new Response(`data: ${JSON.stringify({ choices: [{ index: 0, delta: { reasoning: "hmm", content: "ok" } }] })}\n\ndata: [DONE]\n\n`,
+      { headers: { "Content-Type": "text/event-stream" } });
+  } });
+  const chrysalis = backend("chrysalis"), other = backend("llamacpp");
+  const sent = { model: "m", stream: true, messages: [{ role: "user", content: "hi" }, { role: "assistant", content: "Hel" }], continue_final_message: true,
+    chrysalis_original: { role: "assistant", content: "Hello" }, chrysalis_append_token: 7, samplers: ["temperature"], logprobs: true, top_logprobs: 5, temperature: 0.5 };
+  const status = async () => (await (await fetch(`${base}/api/status`)).json()).backend;
+  const ask = async () => [...(await (await fetch(`${base}/api/chat`, { method: "POST", headers: json, body: JSON.stringify(sent) })).text()).matchAll(/data: (\{.*\})/g)]
+    .map((m) => JSON.parse(m[1]).choices?.[0]?.delta).filter(Boolean);
+  try {
+    for (const [s, owner] of [[chrysalis, "chrysalis"], [other, "llamacpp"]] as const) {
+      expect((await fetch(`${base}/api/backend`, { method: "POST", headers: json, body: JSON.stringify({ url: `localhost:${s.port}` }) })).status).toBe(200);
+      expect(await status()).toMatchObject({ url: `http://localhost:${s.port}/v1`, chrysalis: owner === "chrysalis", service: false });
+      expect((await ask()).find((d) => d.content)).toEqual(owner === "chrysalis" ? { reasoning: "hmm", content: "ok" } : { reasoning_content: "hmm", content: "ok" });
+    }
+    const { stream, ...rest } = sent;
+    expect(got.chrysalis).toEqual({ ...rest, stream });
+    expect(got.llamacpp).toEqual({ model: "m", stream: true, messages: sent.messages, logprobs: true, top_logprobs: 5, temperature: 0.5 });
+  } finally {
+    expect((await fetch(`${base}/api/backend`, { method: "POST", headers: json, body: JSON.stringify({ url: `127.0.0.1:${fake.port}/v1` }) })).status).toBe(200);
+    expect(await status()).toMatchObject({ chrysalis: true, service: true });
+    chrysalis.stop(true);
+    other.stop(true);
+  }
+});
+
 test("a job that is not there answers 404", async () => {
   expect((await fetch(`${base}/api/chat/${crypto.randomUUID()}?from=0`)).status).toBe(404);
 });
@@ -675,7 +717,7 @@ test("on the network, this machine (at 127.0.0.1 and at its own address) lets de
   }
 });
 
-test("on the network only the devices this computer let in get past the pages, and a browser only while it shows it trusts Chrysalis: a device asks once its nonce came through the trust check, shows its own code, and is let in when that code is allowed here, or not when denied; after a restart it shows it again; Chrysalis's API takes an app's key as OpenAI's and Anthropic's SDKs send it, with no check; a device or key removed is out again", async () => {
+test("on the network only the devices this computer let in get past the pages, and a browser only while it shows it trusts Chrysalis: a device asks once its nonce came through the trust check, shows its own code, and is let in when that code is allowed here, or not when denied; after a restart it shows it again; Chrysalis's API takes an app's key as OpenAI's and Anthropic's SDKs send it, with no check; a device let in cannot change the backend; a device or key removed is out again", async () => {
   const first = await onNetwork(), { dir, ips } = first;
   let proc = first.proc;
   try {
@@ -729,6 +771,9 @@ test("on the network only the devices this computer let in get past the pages, a
     expect(await connecting(cookie)).toBe(false);                            // the chat itself
     expect((await asked("/api/pair/key", { method: "POST", body: "{}", headers: { ...json, cookie } })).status).toBe(403);   // only this computer makes keys
     expect(readFileSync(`${dir}/devices.json`, "utf8")).not.toContain(key);
+    // nor where replies come from: a device that could point this server at any address would read what only it reaches
+    expect((await asked("/api/backend", { method: "POST", body: JSON.stringify({ url: "http://127.0.0.1:1/v1" }), headers: { ...json, cookie } })).status).toBe(403);
+    expect((await (await asked("/api/status", { headers: { cookie } })).json()).backend.chrysalis).toBe(true);
 
     // a device denied is not let in
     const m = nonce();

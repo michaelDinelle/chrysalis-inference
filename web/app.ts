@@ -18,8 +18,9 @@ import logoThin from "./logo-thin.svg";
 import { Ocean } from "./ocean";
 
 type Effort = "xhigh" | "medium" | "low" | "off";
-// prompt and cached: summed over a reply's rounds; ctx: the context its last round left (prompt + reply)
-interface Stats { ttft: number; tps: number; tokens: number; prompt: number; cached: number; thought?: number; seed?: number; model?: string; ctx?: number }
+// prompt and cached: summed over a reply's rounds (cached: where the backend says, which LM Studio does not); ctx: the
+// context its last round left (prompt + reply)
+interface Stats { ttft: number; tps: number; tokens: number; prompt: number; cached?: number; thought?: number; seed?: number; model?: string; ctx?: number }
 // A tool call as Chrysalis wrote it (WireCall: its id and argument string, kept byte for byte), and what became of it.
 type CallState = "approval" | "running" | "done" | "failed" | "declined" | "stopped";
 interface Call extends WireCall { title?: string; source?: string; readOnly?: boolean; state?: CallState; result?: string; ms?: number; agent?: AgentRun }
@@ -66,7 +67,14 @@ interface ToolInfo { fn: string; name: string; title: string; description: strin
 interface SourceInfo { id: string; label: string; kind: "fetch" | "agent" | "mcp"; detail: string; state: "idle" | "connecting" | "connected" | "failed" | "disabled"; error?: string; tools: ToolInfo[] }
 interface Catalog { config: string; error?: string; sources: SourceInfo[] }
 interface Status { state: "online" | "loading" | "offline"; build?: string; model?: string; loading?: string; progress?: number; context?: number; kv_tokens?: number; cache?: { free_kv_tokens: number };
-  check?: boolean; here?: boolean; waiting?: number }   // (on the network: check the device's trust again; this computer: devices asking to join)
+  check?: boolean; here?: boolean; waiting?: number;   // (on the network: check the device's trust again; this computer: devices asking to join)
+  backend?: Backend }
+// Where replies come from (server.ts, backend.ts): its address, whether it is Chrysalis (it says so of itself) and
+// whether it is this machine's Chrysalis service (whose models the page loads, and which it starts), its models or why
+// it does not answer. key: whether it has one (no page is sent the key itself); remote: off this machine's networks;
+// service: this machine's Chrysalis service's address, the backend until another is set.
+interface Backend { url: string; chrysalis: boolean; service: boolean; key: boolean; remote: boolean; name: string;
+  listed?: { ok: true; models: { id: string }[] } | { ok: false; error: string } }
 interface View {
   el: HTMLElement; think: HTMLDetailsElement; summary: HTMLElement; thought: HTMLElement; body: HTMLElement; foot: HTMLElement; shown?: string; blocks?: Blocks;
   tok?: { reasoning: number; content: number };     // tokens drawn so far, shown as tokens
@@ -83,7 +91,7 @@ interface Run {
   conv: Conversation; m: Message; live: Live;
   at: number;                                       // events of the job seen so far
   stopping: boolean; gone?: boolean;                // Stop pressed; the chat was deleted
-  usage?: { prompt_tokens: number; completion_tokens: number; cached: number }; last?: any;   // summed over rounds; the last round's
+  usage?: { prompt_tokens: number; completion_tokens: number; cached?: number }; last?: any;   // summed over rounds; the last round's
   read?: number; written?: number;                  // the round's prompt, once Chrysalis has read it, and its tokens since
   seed?: number; timing?: { start: number; first?: number; answer?: number; last?: number; gen?: number };
   pick?: Tok;                                       // the alternative a rewrite starts from
@@ -96,7 +104,8 @@ const MODELS: [string, string, string][] = [
   ["qwen3.8-27b", "Qwen3.8-27B", "Quickest replies · 4 s to load"],
   ["qwen3.8-flash-next", "Qwen3.8-Flash-Next", "Fast at any length · 20 s to load"],
 ];
-const modelName = (id?: string) => MODELS.find(([m]) => m === id)?.[1] ?? id ?? "";
+// another backend's model by its id's last part (llama.cpp's is the file's path)
+const modelName = (id?: string) => MODELS.find(([m]) => m === id)?.[1] ?? id?.split("/").pop()?.replace(/\.gguf$/i, "") ?? "";
 // What Chrysalis uses for a value it is not sent, with thinking on and off (DEFAULTS and MAX_OUTPUT in
 // chrysalis/server.py: Qwen's recommended values). Without a seed Chrysalis draws a random one and reports it with the
 // reply.
@@ -1151,7 +1160,7 @@ function paint(v: View, m: Message, live?: Live) {
   if (live) return;
   if (m.error) v.body.append(h("div", "error", m.error));
   const s = m.stats;
-  const facts = s ? [...(s.model ? [modelName(s.model)] : []), `${fmtS(s.ttft)} to first token`, `${Math.round(s.tps)} tok/s`, `${fmtK(s.tokens)} tokens`, `prompt ${fmtK(s.cached)}/${fmtK(s.prompt)} cached`]
+  const facts = s ? [...(s.model ? [modelName(s.model)] : []), `${fmtS(s.ttft)} to first token`, `${Math.round(s.tps)} tok/s`, `${fmtK(s.tokens)} tokens`, s.cached === undefined ? `prompt ${fmtK(s.prompt)}` : `prompt ${fmtK(s.cached)}/${fmtK(s.prompt)} cached`]
     : m.stopped ? ["stopped"] : [];
   if (typeof m.voiceMs === "number") facts.unshift(`voice ${(m.voiceMs / 1000).toFixed(2)} s`);
   if (m.interrupted) facts.push("interrupted");
@@ -1160,11 +1169,13 @@ function paint(v: View, m: Message, live?: Live) {
   if (s?.seed !== undefined) facts.push(`<button type="button" class="seed" data-act="seed" data-seed="${s.seed}" title="Use this seed for the next replies">seed ${s.seed}</button>`);
   const last = conv.messages.at(-1) === m, busy = !!running();
   // Continue is spelled out when the reply was cut short (its length limit, Stop, or the tool rounds' limit); after
-  // tool calls it carries on from their results
-  const cut = m.finish === "length" || m.stopped || (!!m.calls?.some((c) => c.result !== undefined) && !m.error);
+  // tool calls it carries on from their results. Writing on from the middle of a reply is Chrysalis's alone (its
+  // prefix): llama.cpp started over and KoboldCpp wrote into the thinking.
+  const ranCalls = !!m.calls?.some((c) => c.result !== undefined), canCont = onChrysalis() || ranCalls;
+  const cut = m.finish === "length" || m.stopped || (ranCalls && !m.error);
   const cont = cut ? `<button type="button" class="btn" data-act="cont" title="Continue">${icon("cont")}Continue</button>`
     : `<button type="button" class="act" data-act="cont" title="Continue">${icon("cont")}</button>`;
-  v.foot.innerHTML = pager(m) + `<span class="stats">${facts.join(" · ")}</span>` + slots([["cont", last && !busy, cont], ["retry", !busy]])
+  v.foot.innerHTML = pager(m) + `<span class="stats">${facts.join(" · ")}</span>` + slots([["cont", last && !busy && canCont, cont], ["retry", !busy]])
     + slots([["tokens", !!m.id && tokens.has(m.id)], ["copy", true], ["edit", !busy], ["trash", !busy]]);
   delete v.foot.dataset.pager;
   v.foot.querySelector("[data-act=tokens]")?.classList.toggle("on", asTokens);
@@ -1423,7 +1434,7 @@ function renderComposer() {
   draftBtn.title = drafting ? "Stop the draft" : input.value.trim() ? "Finish my message (draft)" : "Draft my next message";
   draftBtn.setAttribute("aria-label", draftBtn.title);
   draftBtn.classList.toggle("on", !!drafting);
-  draftBtn.hidden = busy || !conv.messages.length;
+  draftBtn.hidden = busy || !conv.messages.length || !onChrysalis();   // Chrysalis's aside and prefix
   $("composer").classList.toggle("drafting", !!drafting);
   renderControls();
   if (modeOf(conv) !== chatMode) {                  // Settings shows the values of the thinking slider's mode
@@ -1462,9 +1473,25 @@ function renderList() {
   }
 }
 
-// The model picker: what Chrysalis has loaded (or is loading); while Chrysalis is stopped, what Load will start.
+// The model picker: what this machine's Chrysalis service has loaded (or is loading); while it is stopped, what Load
+// will start. With any other backend, one of its models: the one last picked there while it still lists it (Chrysalis
+// elsewhere: not its -fast twins, which thinking off picks).
 let picked = pref("model", MODELS[0][0]);
-const current = () => status.loading ?? (status.state === "online" ? status.model : undefined) ?? picked;
+const onChrysalis = () => status.backend?.chrysalis ?? true;
+const onService = () => status.backend?.service ?? true;
+const listed = () => {
+  const ids = status.backend?.listed?.ok ? status.backend.listed.models.map((m) => m.id) : [];
+  return onChrysalis() ? ids.filter((id) => !(id.endsWith("-fast") && ids.includes(id.slice(0, -5)))) : ids;
+};
+const otherModel = () => {
+  const mine = pref(`model@${status.backend?.url}`, "");
+  return listed().includes(mine) ? mine : listed()[0] ?? mine;
+};
+const current = () => !onService() ? otherModel() : status.loading ?? (status.state === "online" ? status.model : undefined) ?? picked;
+// A quick answer beside the chat (a title, what speech recognition misheard): Chrysalis's model with thinking off, or
+// the other backend's with the standard way to turn it off, which llama.cpp, Ollama, LM Studio and vLLM honor (KoboldCpp
+// writes a line of thinking first) and Ollama takes for a model that does not think too.
+const quick = () => (onChrysalis() ? { model: `${current()}-fast` } : { model: current(), reasoning_effort: "none" });
 
 async function start() {
   await fetch("/api/chrysalis/start", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ model: picked }) });
@@ -1501,7 +1528,7 @@ async function refreshStatus(again = true) {
       return location.replace("/");                // the connect page, in the chat's place
     }
     status = await r.json();
-  } catch { status = { state: "offline" }; }
+  } catch { status = { state: "offline", backend: status.backend }; }   // the web server unreachable: its backend as it was
   if (status.check) void checkTrust();             // past half its time: checked again before the gate has to
   $("connect").hidden = !status.here;              // this computer's own screen only, at whichever address
   $("connect").classList.toggle("asking", !!status.waiting);
@@ -1537,10 +1564,10 @@ function save(c: Conversation) {
 
 // The request body for a reply after the messages `upto`. Assistant turns go back exactly as Chrysalis sent them, tool
 // rounds and all (wire.ts): Chrysalis then replays its own tokens and every turn is a cache hit (only the new message
-// is read). The reply's tokens come with their odds (log probs, five alternatives each) for the token view. effort: the
-// thinking setting (the chat's by default); sampling: whose values (by default the effort's mode). With tools on,
-// chrysalis_web tells the web server which to offer (it runs them: server.ts); loop: false offers them without running
-// any.
+// is read). Chrysalis's reply's tokens come with their odds (log probs, five alternatives each) for the token view.
+// effort: the thinking setting (the chat's by default); sampling: whose values (by default the effort's mode). With
+// tools on, chrysalis_web tells the web server which to offer (it runs them: server.ts); loop: false offers them without
+// running any.
 function request(c: Conversation, upto: Message[], o: { effort?: Effort; sampling?: Mode; final?: object; extra?: Record<string, unknown>; loop?: boolean; route?: boolean } = {}) {
   const effort = o.effort ?? c.effort, mode: Mode = effort === "off" ? "fast" : "think";
   const messages: object[] = upto.flatMap(wire), system = systemFor(c);
@@ -1549,12 +1576,16 @@ function request(c: Conversation, upto: Message[], o: { effort?: Effort; samplin
   const web: ToolChoice | undefined = toolsOn(c)
     ? { tools: c.tools!, allow: settings.allow, fetchChars: settings.fetchChars, ...(o.loop === false ? { loop: false } : {}),
       ...(o.route ? { route: true } : {}) } : undefined;
+  const chrysalis = onChrysalis();
   return {
-    model: effort === "off" ? `${current()}-fast` : current(), reasoning_effort: effort === "off" ? undefined : effort,
-    ...samplerFields(o.sampling ?? mode), max_tokens: settings.max_tokens, seed: settings.seed, logprobs: true, top_logprobs: 5,
+    model: chrysalis && effort === "off" ? `${current()}-fast` : current(), reasoning_effort: chrysalis ? (effort === "off" ? undefined : effort) : OTHER_EFFORT[effort],
+    ...samplerFields(o.sampling ?? mode), max_tokens: settings.max_tokens, seed: settings.seed, ...(chrysalis ? { logprobs: true, top_logprobs: 5 } : {}),
     messages, stream: true, stream_options: { include_usage: true }, ...(web ? { chrysalis_web: web } : {}), ...o.extra,
   };
 }
+// The thinking bar for another backend, as OpenAI's reasoning_effort. Max sends none, so a model thinks as its backend
+// sets it up: Ollama refuses any other effort for a model that does not think, but takes "none".
+const OTHER_EFFORT: Record<Effort, string | undefined> = { xhigh: undefined, medium: "medium", low: "low", off: "none" };
 const ran = (c: Call) => c.result !== undefined;
 // The end of a reply talked over, as Chrysalis is sent it: kept as it was heard, cut mid-sentence, it taught the model
 // to stop so itself (an essay asked for next came back as a sentence or two in 6 of 6 tries; with this, whole in 5 of
@@ -1596,6 +1627,13 @@ async function* events(body: ReadableStream<Uint8Array>): AsyncGenerator<any> {
 }
 
 async function ensureOnline(run: { stopping: boolean }) {
+  if (!onService()) {                              // nothing here starts another backend
+    if (status.state !== "online") await refreshStatus();
+    const l = status.backend?.listed;
+    if (l && !l.ok) throw new Error(l.error);
+    if (!current()) throw new Error(`${status.backend?.name ?? "The backend"} lists no model to chat with`);
+    return;
+  }
   if (status.state === "offline") await start();
   for (const deadline = Date.now() + 180_000; status.state !== "online" || status.loading; await refreshStatus()) {
     if (run.stopping) throw new DOMException("stopped", "AbortError");
@@ -1745,9 +1783,9 @@ function take(run: Run, ev: any) {
   if (ev.chrysalis_prompt) { run.read = ev.chrysalis_prompt.prompt_tokens; run.written = 0; }
   if (d.content || d.reasoning_content) run.written = (run.written ?? 0) + 1;
   if (ev.usage) {
-    const u = run.usage ?? { prompt_tokens: 0, completion_tokens: 0, cached: 0 };
+    const u = run.usage ?? { prompt_tokens: 0, completion_tokens: 0 }, cached = ev.usage.prompt_tokens_details?.cached_tokens;
     run.usage = { prompt_tokens: u.prompt_tokens + ev.usage.prompt_tokens, completion_tokens: u.completion_tokens + ev.usage.completion_tokens,
-      cached: u.cached + (ev.usage.prompt_tokens_details?.cached_tokens ?? 0) };
+      cached: cached === undefined ? u.cached : (u.cached ?? 0) + cached };
     run.last = ev.usage;
   }
   if (ev.seed !== undefined) run.seed ??= ev.seed;
@@ -1920,18 +1958,21 @@ function stopRun(run: Run, now = false) {
   if (run.m.job) void fetch(`/api/chat/${run.m.job}/stop`, { method: "POST" }).catch(() => {});
 }
 
-// Titles come from the -fast model with a title-generator prompt, which Chrysalis runs as a low-priority request.
+// Titles come from the -fast model with a title-generator prompt, which Chrysalis runs as a low-priority request (with
+// another backend, its model with thinking off: quick).
 async function name(c: Conversation) {
   c.named = true;
   try {
     const res = await fetch("/api/chat", {
       method: "POST", headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ model: `${current()}-fast`, max_tokens: 24, messages: [
+      body: JSON.stringify({ ...quick(), max_tokens: 24, messages: [
         { role: "system", content: TITLE_PROMPT },
         { role: "user", content: (c.messages[0].content || (c.messages[0].files ?? []).map((f) => f.name).join(", ")).slice(0, 2000) },
       ] }),
     });
-    const title: string | undefined = (await res.json()).choices?.[0]?.message?.content?.split("\n")[0]?.replace(/^[\s#*"']+|[\s*"'.]+$/g, "");
+    // a model that thinks whatever it is sent fills the 24 tokens with thinking (KoboldCpp's, cut off, as the answer)
+    const choice = (await res.json()).choices?.[0], cut = !onChrysalis() && choice?.finish_reason === "length";
+    const title: string | undefined = cut ? undefined : choice?.message?.content?.trim().split("\n")[0]?.replace(/^[\s#*"']+|[\s*"'.]+$/g, "");
     if (title) c.title = title.slice(0, 80);
   } catch { /* keep the first line of the question */ }
   save(c);
@@ -2053,7 +2094,7 @@ async function openVoice() {
   voice = { client, c: conv, muted: false, partial: "", level: 0, frame: 0, check: [], asking: asking(), now: {}, defaults: { voices: {} }, asked: voiceWant(null) };
   tellVoice(voice);
   renderVoice();
-  if (status.state === "offline") void start().then(() => refreshStatus());   // the first question finds the model loaded
+  if (status.state === "offline" && onService()) void start().then(() => refreshStatus());   // the first question finds the model loaded
   if (!navigator.mediaDevices?.getUserMedia) {
     voice.error = "This browser gives no page a microphone";
     return renderVoice();
@@ -2118,7 +2159,7 @@ function checkOf(v: VoiceMode, text: string): Promise<Heard> {
   const p = (async (): Promise<Heard> => {
     try {
       const res = await fetch("/api/chat", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({
-        model: `${current()}-fast`, messages: [...v.check, turn], temperature: 0, presence_penalty: 0, max_tokens: 48 }) });
+        ...quick(), messages: [...v.check, turn], temperature: 0, presence_penalty: 0, max_tokens: 48 }) });
       const answer: string = (await res.json())?.choices?.[0]?.message?.content ?? "";
       if (!res.ok || !answer) return { text, fixes: [], tool: false };
       return { text, ...readHeard(answer), asked: [turn, { role: "assistant", content: answer }] };
@@ -2703,7 +2744,7 @@ function renderPending() {
 
 async function addFiles(list: Iterable<File>) {
   for (const f of list) {
-    const r = await attach(f);
+    const r = await attach(f, onChrysalis() ? undefined : status.backend?.name);
     if (typeof r === "string") toast(r);
     else pending.push(r);
   }
@@ -2720,14 +2761,16 @@ async function filesReady(msgs: Message[]) {
   }
 }
 
-// A user message as Chrysalis gets it: its files (pictures as images, PDFs as files, videos as videos, texts as fenced
-// blocks), then the text typed.
+// A user message as the backend gets it: its files (pictures as images, PDFs as files, videos as videos, texts as fenced
+// blocks; to a backend that is not Chrysalis a PDF or video is a line saying it was left out), then the text typed.
 function userContent(m: Message): string | object[] {
   const said = noted(m.note, m.content);
   if (!m.files?.length) return said;
   const parts: object[] = m.files.map((a) => {
     const body = bodies.get(a.id) ?? "";
     if (a.kind === "image") return { type: "image_url", image_url: { url: body } };
+    if ((a.kind === "pdf" || a.kind === "video") && !onChrysalis())   // attached while the chat was on Chrysalis (attach)
+      return { type: "text", text: `[${a.name}: a ${a.kind === "pdf" ? "PDF" : "video"}, which ${status.backend?.name} is not sent]\n\n` };
     if (a.kind === "pdf") return { type: "file", file: { file_data: body, filename: a.name } };
     if (a.kind === "video") return { type: "video_url", video_url: { url: body } };
     return { type: "text", text: `${textBlock(a.name, body)}\n\n` };
@@ -3284,6 +3327,10 @@ function buildControls() {
     e.preventDefault();
   });
   $("model-btn").addEventListener("click", () => setModelsOpen(!modelsOpen));
+  $("backend").addEventListener("submit", (e) => { e.preventDefault(); void setBackend(); });
+  $("backend").addEventListener("input", () => { backendEdited = true; backendNote(""); renderBackend(); });
+  $("backend").addEventListener("keydown", (e) => { if (e.key === "Escape") { resetBackend(); (e.target as HTMLElement).blur(); } });
+  $("backend-far").addEventListener("click", () => void setBackend(true));
   $("power").addEventListener("click", async () => {
     if (status.state === "online") await fetch("/api/chrysalis/stop", { method: "POST" });
     else await start();
@@ -3303,6 +3350,68 @@ function setEffort(i: number) {
   conv.effort = e;
   setPref("effort", e);
   renderComposer();
+}
+
+// Where replies come from, out in the top bar: the address the web server is connected to, as it is, and a key if the
+// backend wants one. This computer's own screen changes it (server.ts checks it, its model list with the key, before it
+// keeps it); a device sees it, read-only. One off this machine's networks is kept only once the user has seen where
+// their chats would go. The addresses this browser has seen it connected to are offered as it is typed.
+let backendEdited = false;
+function renderBackend() {
+  const b = status.backend, form = $("backend");
+  form.hidden = !b;
+  if (!b) return;
+  const url = $<HTMLInputElement>("backend-url"), key = $<HTMLInputElement>("backend-key"), here = !!status.here;
+  const down = b.listed && !b.listed.ok ? b.listed.error : "", dot = $("backend-dot");
+  dot.className = `dot ${down ? "offline" : b.remote ? "remote" : status.state}`;
+  dot.title = down || (b.remote ? "Off this computer and its network" : status.state === "online" ? "Answering" : status.state === "loading" ? "Loading" : "Stopped");
+  if (!backendEdited && document.activeElement !== url) url.value = b.url;
+  url.readOnly = !here;
+  url.title = here ? `${b.name}: replies come from here. Paste another backend's address and press Enter.` : "Set on the computer Chrysalis runs on";
+  key.hidden = !here;
+  key.placeholder = b.key ? "key set" : "API key";
+  $("backend-go").hidden = !here || !backendEdited;
+  let known: string[] = [];
+  try { known = JSON.parse(pref("backends", "[]")); } catch { /* kept as it was */ }
+  if (!known.includes(b.url)) setPref("backends", JSON.stringify((known = [b.url, ...known].slice(0, 8))));
+  const list = $("backend-known");
+  if (list.childElementCount !== known.length) list.replaceChildren(...known.map((u) => Object.assign(h("option"), { value: u })));
+}
+function backendNote(text: string, error = false, far = false) {
+  $("backend-why").textContent = text;
+  $("backend-note").classList.toggle("error", error);
+  $("backend-note").hidden = !text;
+  $("backend-far").hidden = !far;
+}
+// back to the backend as it is connected
+function resetBackend() {
+  backendEdited = false;
+  $<HTMLInputElement>("backend-url").value = status.backend?.url ?? "";
+  $<HTMLInputElement>("backend-key").value = "";
+  backendNote("");
+  renderBackend();
+}
+async function setBackend(confirmRemote = false) {
+  const url = $<HTMLInputElement>("backend-url").value.trim(), key = $<HTMLInputElement>("backend-key").value, go = $<HTMLButtonElement>("backend-go");
+  go.disabled = true;
+  backendNote("Checking…");
+  try {
+    const r = await fetch("/api/backend", { method: "POST", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ url, ...(key ? { key } : {}), ...(confirmRemote ? { confirmRemote: true } : {}) }) });
+    const body = await r.json().catch(() => ({}));
+    if (r.status === 409 && body.remote)
+      return backendNote(`Every chat you send would go to ${body.remote}, off this computer and its network.`, true, true);
+    if (!r.ok) return backendNote(body.error?.message ?? `HTTP ${r.status}`, true);
+    status = { ...status, backend: body };
+    resetBackend();
+    (document.activeElement as HTMLElement | null)?.blur();
+    await refreshStatus();
+    if (!conv.messages.length) render();
+  } catch (e) {
+    backendNote(e instanceof Error ? e.message : String(e), true);
+  } finally {
+    go.disabled = false;
+  }
 }
 
 function setModelsOpen(open: boolean, refocus = false) {
@@ -3594,11 +3703,17 @@ const shortName = (id: string) => modelName(id).replace(/^Qwen3\.8-/, "");
 // Usage, in view: this chat's length against the context (growing while a reply is written: the prompt once Chrysalis
 // has read it, and each token since), and how full Chrysalis's cache of conversations is. The two are spans, so where
 // the row is short the cache's drops out whole rather than cut mid-word (style.css); the title says both in full.
+// Any backend but this machine's Chrysalis service keeps its context and cache to itself: the chat's length alone.
 function renderMeter() {
   const online = status.state === "online" && !status.loading, ctx = status.context ?? 262144;
   const used = status.kv_tokens && status.cache ? 1 - status.cache.free_kv_tokens / status.kv_tokens : 0;
   const r = running(), s = conv.messages.findLast((m) => m.stats)?.stats;
   const n = r?.read !== undefined ? r.read + (r.written ?? 0) : s ? s.ctx ?? s.prompt + s.tokens : undefined;
+  if (!onService()) {
+    $("meter").replaceChildren(...(n !== undefined ? [h("span", "", `${fmtK(n)} tokens`)] : []));
+    $("meter").title = n !== undefined ? `This chat: ${n.toLocaleString("en-US")} tokens` : "";
+    return;
+  }
   const meter = $("meter"), parts = [n !== undefined ? `${fmtK(n)} / ${fmtK(ctx)}` : online ? `${fmtK(ctx)} context` : "", online ? `cache ${Math.round(used * 100)}%` : ""];
   meter.replaceChildren(...parts.filter(Boolean).map((t) => h("span", "", t)));
   meter.title = [n !== undefined ? `This chat: ${n.toLocaleString("en-US")} of ${ctx.toLocaleString("en-US")} tokens of context` : "",
@@ -3606,6 +3721,7 @@ function renderMeter() {
 }
 function renderControls() {
   renderTools();
+  renderBackend();
   const effort = barEffort(), at = EFFORTS.indexOf(effort), energy = $("energy");
   energy.dataset.heat = HEAT[at];
   energy.style.setProperty("--v", String(at));
@@ -3620,7 +3736,9 @@ function renderControls() {
   const pct = status.progress == null ? "" : `${Math.round(status.progress * 100)}%`, name = modelName(current());
   const btn = $("model-btn");
   btn.innerHTML = `<span class="dot ${state}"></span>${shortName(current())}${state === "loading" && pct ? `<span class="model-pct">${pct}</span>` : ""}${icon("chevron")}`;
-  btn.title = state === "online" ? `${name}: ready` : state === "loading" ? `Loading ${name}` : `${name}: stopped`;
+  const b = status.backend, down = b?.listed && !b.listed.ok ? b.listed.error : "";
+  btn.title = !onService() ? (down ? `${b!.name}: ${down}` : `${name || "No model"} on ${b!.name}`)
+    : state === "online" ? `${name}: ready` : state === "loading" ? `Loading ${name}` : `${name}: stopped`;
   btn.setAttribute("aria-expanded", String(modelsOpen));
   btn.classList.toggle("open", modelsOpen);
   renderMeter();
@@ -3629,12 +3747,14 @@ function renderControls() {
   power.innerHTML = icon("power");
   power.title = power.ariaLabel = state === "online" ? `Unload ${name}` : state === "loading" ? `Loading ${name}` : `Load ${name}`;
   power.disabled = state === "loading";
+  power.hidden = !onService();                     // another backend loads its models itself
   if (!modelsOpen) return;
   // the list (redrawn only when something in it changed, so a poll never takes the focus from it)
   const pop = $("model-pop");
-  const key = JSON.stringify([current(), state, pct]);
+  const key = JSON.stringify([current(), state, pct, listed()]);
   if (pop.dataset.key === key) return;
   pop.dataset.key = key;
+  if (!onService()) return void pop.replaceChildren(...otherRows(down));
   const rows = MODELS.map(([id, label]) => {
     const on = id === current(), item = h("button", on ? "model-item current" : "model-item");
     item.type = "button";
@@ -3651,6 +3771,27 @@ function renderControls() {
     return item;
   });
   pop.replaceChildren(...rows);
+}
+
+// Another backend's models, as it lists them: picking one is this browser's choice for that backend.
+function otherRows(down: string): HTMLElement[] {
+  if (!listed().length) return [h("div", "model-empty", down || `${status.backend?.name} lists no model to chat with`)];
+  return listed().map((id) => {
+    const on = id === current(), item = h("button", on ? "model-item current" : "model-item");
+    item.type = "button";
+    item.title = id;
+    item.setAttribute("role", "option");
+    item.setAttribute("aria-selected", String(on));
+    const mark = h("span", "model-check");
+    if (on) mark.innerHTML = icon("check");
+    item.append(h("span", "model-label", modelName(id)), mark);
+    item.onclick = () => {
+      setPref(`model@${status.backend?.url}`, id);
+      setModelsOpen(false, true);
+      if (!conv.messages.length) render();
+    };
+    return item;
+  });
 }
 
 // A panel beside the chat (it opens without moving the chat when there is room). Every change applies to the next
@@ -3861,7 +4002,8 @@ function knob(k: KnobSpec) {
   const commit = (v: number) => {
     if (!Number.isFinite(v)) return sync(true);
     v = Math.min(k.max, Math.max(k.min, roundTo(v, k.step)));
-    k.set(Math.abs(v - k.rec()) < k.step / 2 ? undefined : +v.toFixed(6));
+    // with Chrysalis the recommended value is what it uses unset; another backend's own default is not known here
+    k.set(onChrysalis() && Math.abs(v - k.rec()) < k.step / 2 ? undefined : +v.toFixed(6));
     saveSettings();
   };
   const typed = () => Number(num.value.replace(/[,_\s]/g, "").replace(/^off$/i, "0"));
@@ -3880,13 +4022,15 @@ function knob(k: KnobSpec) {
     }
   });
   function sync(force = false) {
-    const v = k.get(), p = k.pos(v), custom = k.custom();
+    const v = k.get(), p = k.pos(v), custom = k.custom(), unset = !custom && !onChrysalis();   // left to the backend: not sent
     el.classList.toggle("custom", custom);
-    if (force || document.activeElement !== num) num.value = k.fmt(v);
+    el.classList.toggle("unset", unset);
+    num.placeholder = unset ? "default" : "";
+    if (force || document.activeElement !== num) num.value = unset ? "" : k.fmt(v);
     range.value = String(p);
     range.style.setProperty("--fill", `${p * 100}%`);
     rec.style.setProperty("--at", String(k.pos(k.rec())));
-    rec.title = reset.title = `Recommended: ${k.fmt(k.rec())}`;
+    rec.title = reset.title = onChrysalis() ? `Recommended: ${k.fmt(k.rec())}` : "The backend's own value (not sent)";
   }
   knobs.push(sync);
   return el;
@@ -4124,8 +4268,8 @@ async function showSent() {
   }
   const note = said ? noteFor(c, true) : undefined;
   if (note) lines.push("", "── your next question said aloud, after this note:", `[${note}]`);
-  $("sent-about").textContent = (sent.tools?.length ? "Chrysalis's chat template writes the tools first in the system turn (\"# Tools … <tools> … </tools>\"), " +
-    "with how to call them, and the system prompt after them. " : "") + "Your next message goes after these." +
+  $("sent-about").textContent = (!sent.tools?.length ? "" : onChrysalis() ? "Chrysalis's chat template writes the tools first in the system turn (\"# Tools … <tools> … </tools>\"), " +
+    "with how to call them, and the system prompt after them. " : "The backend's chat template writes the tools into the prompt. ") + "Your next message goes after these." +
     (said ? " Each spoken question is first checked, in a conversation of its own beside this one, for what speech recognition misheard (and with tools whether one is needed): the question is sent fixed." : "");
   $("sent-text").textContent = lines.join("\n");
   $<HTMLDialogElement>("sent-view").showModal();
@@ -4177,6 +4321,7 @@ function syncSettings() {
     : `This chat (${toolsOn(conv) ? "tools on" : "no tools"}) is sent no system prompt.`;
   renderToolSettings();
   $("mode-note").textContent = shownMode() === "think" ? "with thinking" : "thinking off";
+  $("settings").classList.toggle("other-backend", !onChrysalis());   // Chrysalis's sampler order and its odds charts
   $("order-reset").classList.toggle("on", !!settings[shownMode()].order);
   placeStages();
   for (const sync of knobs) sync();

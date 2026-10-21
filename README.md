@@ -238,6 +238,31 @@ file as its name and a fenced block, a picture as an image, a PDF as a file (its
 as a video. Their contents live in the tab's IndexedDB (one screenshot is most of sessionStorage), and a closed tab's
 are deleted when a Chrysalis page next loads. Development: `cd web && bun run dev` (hot reload), `bun run check`.
 
+Replies come from whatever backend's address is in the top bar: it shows the address the web server is connected to
+(this machine's Chrysalis, `http://127.0.0.1:8080/v1`, until another is set), and any server with OpenAI's chat API can
+go there, as pasted (`localhost:11434`, with or without `http://` and `/v1`), with a key beside it if it wants one
+(`web/backend.ts`). The web server checks it (its model list, with the key) and sends it every request from then on, so
+no backend needs to let a website in (CORS: LM Studio and vLLM refuse any until they are set to, Ollama any but this
+machine's), and tools, sub-agents, voice and replies that outlive their tab work with any of them. Only this computer's
+own screen changes it: a device that could point the web server anywhere would read what only this machine reaches. The
+key stays in `backend.json` beside the devices (readable by this user only) and goes to the backend alone; a page sees
+only that there is one. An address off this machine and its networks takes https:// (typed without a scheme it gets
+it; over http:// every chat and the key would cross the internet in the clear), and is kept only once the page has
+said where every chat would go. A backend other than Chrysalis gets OpenAI's own fields and the samplers llama.cpp and KoboldCpp take by
+those names, only those the user set: what is left unset is the backend's own (Settings says "default"). The model
+picker lists its models (not embedding models), the thinking bar sends `reasoning_effort` ("none" for Off, which all
+five honor, KoboldCpp after a line of thinking; nothing for Max, as Ollama refuses an effort for a model that cannot think), so at Max a model thinks as
+its backend is set up: llama.cpp, LM Studio and Ollama by default, KoboldCpp and vLLM as the model's chat template does
+unless started to (`--jinjathink true`, `--default-chat-template-kwargs '{"enable_thinking": true}'`; Qwen3.5-2B's does
+not, and vLLM then files its answer as thinking). Thinking Ollama and vLLM send as `reasoning` reaches the page as the
+others send it. Chrysalis is told apart by what its model list says of it (`owned_by`), not by its address, so a
+Chrysalis anywhere gets its own fields; loading its models, starting it, and the context and cache meter are for this
+machine's Chrysalis service, at its address (accepted as it is, stopped or loading too). What needs Chrysalis stays
+Chrysalis's: token odds, continuing a reply from its middle and drafting (llama.cpp started over, KoboldCpp wrote into
+its thinking), PDFs and videos, and the voice turn held to a tool call (llama.cpp, Ollama, LM Studio and KoboldCpp answered
+`tool_choice: "required"` with text from a thinking model). `make test_backends` runs llama.cpp, Ollama, LM Studio, KoboldCpp and vLLM for real
+(Rebuilding).
+
 ## Voice mode
 
 The wave beside Send talks with the chat's model. The message box stays (typing still works): its row gains a pill whose
@@ -704,6 +729,14 @@ the 18 safetensors shards, `data/models/vision/qwen3.8-27b-shard1.safetensors`, 
 `mmproj-fn-bf16.gguf`, checked against Qwen/Qwen3.8-Flash-Next's first shard (`qwen3.8-flash-next-shard1.safetensors`,
 its `config.json` as `flash-next-config.json`). `data/ref-venv` is a venv with CPU torch, torchvision, transformers, Pillow and
 safetensors.
+
+`make test_backends` runs what is in `data/backends`: Ollama's release tarball (`ollama-linux-amd64.tar.zst`) unpacked
+in `ollama/`, its models in `ollama-models/` (`OLLAMA_MODELS=... ollama pull qwen3.5:2b`); KoboldCpp's
+`koboldcpp-linux-x64-nocuda` as `koboldcpp/koboldcpp`; vLLM's CPU wheel (its GitHub release's `+cpu` one) in a venv at
+`vllm/venv`, with torch from PyTorch's CPU index; and the model, lmstudio-community/Qwen3.5-2B-GGUF's `Q8_0` and
+`mmproj-BF16` in `models/qwen3.5-2b-gguf/` and Qwen/Qwen3.5-2B in `models/qwen3.5-2b-hf/`. llama.cpp is `data/llama.cpp`'s
+build. LM Studio is its headless install (`LMS_NO_MODIFY_PATH=1` with lmstudio.ai's `install.sh`, in `~/.lmstudio`), the
+model added to it with `lms import -l`.
 
 `make fn` builds `build/libchrysalis_fn.so`. Its model file comes from Unsloth's Q8_0 split (plus the MTP file and
 imatrix) via `python tools_fn/fn_quantize.py SRC_DIR data/models/flash-next/chrysalis-fn.gguf --hot 5600 --q2 0.2

@@ -27,6 +27,11 @@ build/sampler_cases: tools/sampler_cases.cpp engine/sampler.h
 test_web: build/sampler_cases
 	cd web && bun test
 
+# the web UI with llama.cpp, Ollama, LM Studio, KoboldCpp and vLLM, for real, each started in turn on the CPU (README:
+# Rebuilding has where they come from)
+test_backends:
+	cd web && bun test --timeout 1200000 ./backends.check.ts
+
 test: test_web build/libchrysalis.so build/test_quant build/test_attn build/test_gdn build/test_sampler build/ref_logits build/ref_logits_mm
 	./build/test_quant data/models/chrysalis-mix.gguf && ./build/test_attn && ./build/test_gdn && ./build/test_sampler
 	data/venv/bin/python tools/test_chat.py
@@ -113,4 +118,4 @@ test_voice: voice
 lint:
 	python3 -I tools/lint_comments.py
 
-.PHONY: test test_web fn test_fn test_fn_model lint
+.PHONY: test test_web test_backends fn test_fn test_fn_model lint

@@ -102,7 +102,25 @@ main { display: flex; flex-direction: column; min-height: 0; grid-column: 2; }
 /* the toggles' corners are kept clear while no panel's head is under them: the gutter grows as a panel closes */
 .topbar { display: flex; flex: none; align-items: center; gap: 10px; height: var(--bar-h); border-bottom: 1px solid var(--line);
   padding: 0 max(18px, var(--toggle-room) - var(--panel-w)) 0 max(18px, var(--toggle-room) - var(--side-w)); }
-.topbar h1 { flex: 1; margin: 0; overflow: hidden; font-size: 15px; font-weight: 600; white-space: nowrap; text-overflow: ellipsis; }
+.topbar h1 { flex: 1 1 120px; min-width: 0; margin: 0; overflow: hidden; font-size: 15px; font-weight: 600; white-space: nowrap; text-overflow: ellipsis; }
+/* where replies come from, out in the open: a dot (answering, not, or off this machine's networks), the address the web
+   server is connected to and its key; Connect once either is changed, and what came of it under them */
+.backend { position: relative; display: flex; flex: 0 1 auto; align-items: center; gap: 6px; min-width: 0; margin: 0; }
+.backend[hidden] { display: none; }
+.backend .dot { width: 7px; height: 7px; }
+.backend .dot.remote { background: var(--warn); }
+.backend-input { height: 30px; min-width: 0; padding: 0 9px; border: 1px solid var(--line); border-radius: 8px; background: var(--bg); color: var(--text);
+  font: 12.5px var(--mono); }
+.backend-input:focus { border-color: var(--accent); outline: none; }
+.backend-input[readonly] { border-color: transparent; background: none; color: var(--muted); }
+.backend-url { flex: 0 1 280px; width: 280px; min-width: 110px; }
+.backend-key { flex: 0 1 104px; width: 104px; min-width: 64px; }
+.backend-key[hidden], .backend .btn[hidden] { display: none; }
+.backend-note { position: absolute; top: calc(100% + 8px); right: 0; z-index: 35; display: flex; align-items: center; gap: 10px; width: max-content;
+  max-width: min(420px, calc(100vw - 24px)); margin: 0; padding: 9px 12px; border: 1px solid var(--line); border-radius: 10px; background: var(--raised);
+  box-shadow: var(--shadow); color: var(--muted); font-size: 12.5px; line-height: 1.45; }
+.backend-note[hidden] { display: none; }
+.backend-note.error { color: var(--warn); }
 /* buttons: one look for every labeled button (Settings, New chat, Reset all settings, Cancel, Undo); the main action
    of a form adds .primary. Icon buttons are .act, choices .segmented. */
 .btn { position: relative; display: inline-flex; align-items: center; justify-content: center; gap: 7px; height: 32px; padding: 0 12px; border: 1px solid var(--line);
@@ -748,3 +766,7 @@ label.set-switch { cursor: pointer; }
   .think-ctl { order: 1; flex: 1 0 100%; width: auto; margin: 0 2px; }
   .model-btn { margin-left: auto; }
 }
+/* another backend: what is left unset is its own value, not sent (a dimmed slider); Chrysalis's sampler order and the
+   odds charts drawn with its sampler do not apply */
+.knob.unset .slider, .knob.unset .knob-rec { opacity: 0.35; }
+.other-backend .odds, .other-backend .grip, .other-backend #order-reset { display: none; }
