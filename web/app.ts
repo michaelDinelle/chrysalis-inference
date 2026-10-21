@@ -7,13 +7,15 @@ import DOMPurify from "dompurify";
 import hljs from "highlight.js/lib/common";
 import katex from "katex";
 import "katex/dist/katex.min.css";
-import { marked, type Links, type Token } from "marked";
+import { marked, type Links, type Token, type Tokens } from "marked";
 import { type Attachment, KINDS, attach, dataUrl, fmtBytes, get as getFile, put as putFile, textBlock } from "./files";
 import { type Cand, type Odds, type SamplerKey, type Stage, dryRuns, sample } from "./sampler";
 import { type Part, type VoiceAsk, type VoiceInfo, type VoiceReady, VoiceClient } from "./voice";
 import { type Fix, applyFixes, fixedParts, readHeard } from "./heard";
 import { pointOf, shownWords, unitOf } from "./spoken";
 import { DESCRIPTIONS, type ToolChoice, type WireCall, assistantTurn, noted, toolTurn } from "./wire";
+import { type Block, type Span, type Version, ARTIFACTS_PROMPT, elementById, elementSpans, infoOf, replay, setOpen, withAttr, withCopy, withOrder,
+  withPaint, withoutElement } from "./artifacts";
 import logoThin from "./logo-thin.svg";
 import { Ocean } from "./ocean";
 
@@ -48,8 +50,12 @@ interface Message {
   interrupted?: boolean;                            // talked over: it keeps only what was heard
   note?: string;                                    // the app's words to the model before a question (voice mode on, off): sent, not shown
   heard?: Fix[];                                    // a question said aloud: the misheard words fixed in it (what was heard, on hover)
+  point?: string; pointAt?: string;                 // what the user pointed at in an artifact: told the model, and its name shown
+  fix?: boolean;                                    // the app's own question: an edit that did not apply in full, asked again
+  edits?: { id: string; kind: string; src: string }[];   // artifacts the user changed by hand before it, as they left them
 }
-interface Conversation { id: string; title: string; named?: boolean; updated: number; effort: Effort; messages: Message[]; tools?: ToolChoice["tools"] }
+interface Conversation { id: string; title: string; named?: boolean; updated: number; effort: Effort; messages: Message[]; tools?: ToolChoice["tools"];
+  pending?: Record<string, { kind: string; srcs: string[] }> }   // artifacts changed by hand, not sent yet: each one's source after each change
 type Sampler = Partial<Record<SamplerKey, number>> & { order?: Stage[] };
 type Mode = "think" | "fast";                       // thinking on (Max, Medium, Low) or off: Qwen recommends other values
 // Only what differs from the recommended values is kept, so whatever is left alone follows them. allow: tools that run
@@ -57,6 +63,7 @@ type Mode = "think" | "fast";                       // thinking on (Max, Medium,
 interface Settings {
   v?: 4;                                            // the settings' shape (loadSettings brings older ones to it)
   system: string; think: Sampler; fast: Sampler; max_tokens?: number; seed?: number; allow?: string[]; fetchChars?: number; voice?: VoiceSettings;
+  artifacts?: false;                                // the artifact instructions (artifacts.ts) left out of the system prompt
 }
 // Voice mode's, every one of them (Settings and the dock's voice picker both show these): the voice model (a name from
 // the service's catalog), the voice (an id of that voice model's), its speed, and what its replies are told instead of
@@ -229,6 +236,7 @@ const ICONS = {
   play: '<path fill="currentColor" stroke="none" d="M8 5.8v12.4a.8.8 0 0 0 1.2.7l10-6.2a.8.8 0 0 0 0-1.4l-10-6.2a.8.8 0 0 0-1.2.7z"/>',
   mic: '<rect x="9" y="3" width="6" height="11" rx="3"/><path d="M5.5 11a6.5 6.5 0 0 0 13 0M12 17.5V21"/>',
   phone: '<rect x="6.5" y="2.5" width="11" height="19" rx="2.5"/><path d="M10.5 18.5h3"/>',
+  shapes: '<rect x="3.5" y="10.5" width="10" height="10" rx="2"/><circle cx="15.5" cy="8.5" r="5"/>',
   micOff: '<path d="M15 9.4V6a3 3 0 0 0-5.7-1.3M9 9v2a3 3 0 0 0 4.9 2.3M18.5 11a6.5 6.5 0 0 1-1 3.4M5.5 11a6.5 6.5 0 0 0 10.4 5.2M12 17.5V21M4 4l16 16"/>',
 };
 const TITLES = { copy: "Copy", edit: "Edit", trash: "Delete", tokens: "Token odds", retry: "Regenerate (a new version)" };
@@ -349,16 +357,39 @@ function htmlNodes(t: Token, links: Links): Node[] {
   return [...tpl.content.childNodes];
 }
 
-function renderBlocks(v: { body: HTMLElement; blocks?: Blocks }, src: string, live: boolean) {
+// art: the chat and what holds src (a reply, or one of its rounds), for its artifact blocks' versions
+function renderBlocks(v: { body: HTMLElement; blocks?: Blocks }, src: string, live: boolean, art?: { c: Conversation; holder: object }) {
   if (!v.blocks) { v.body.replaceChildren(); v.blocks = { raws: [], nodes: [] }; }
   const b = v.blocks, tokens = marked.lexer(live ? settle(src) : src), blocks = tokens.filter((t) => t.type !== "space");
+  let seen = 0, all: Map<string, Version[]> | undefined;
+  const nth = art ? blocks.map((t) => (t.type === "code" && infoOf(t.lang) ? seen++ : -1)) : [];
+  // An artifact block as its canvas (its latest version) or a line. The canvas is taken from wherever it is in the chat,
+  // and its old place gets a line (in this reply's own blocks too, so they stay as shown).
+  const artNodes = (k: number, old: Node | undefined, drawing: boolean): Node[] => {
+    const ver = versionAt(all ??= artifactsOf(art!.c), art!.holder, nth[k]);
+    if (!ver) return unknownEdit(blocks[k] as Tokens.Code, tokens.links);
+    const list = all.get(ver.id)!, last = list.at(-1)!;
+    if (list.findLast((x) => x.block.by !== "user") !== ver) return [artLine(ver, list.length)];
+    let canvas = thread.querySelector<HTMLElement>(`.art-canvas[data-art="${CSS.escape(ver.id)}"]`) ?? undefined;
+    if (canvas && canvas !== old) {
+      const was = list[Number(canvas.dataset.made) - 1], line = was ? artLine(was, list.length) : h("span");
+      canvas.replaceWith(line);
+      const j = b.nodes.findIndex((n) => n[0] === canvas);
+      if (j >= 0) b.nodes[j] = [line];
+    } else if (!canvas && old instanceof HTMLElement && !old.classList.contains("art-line")) canvas = old;
+    // the user's own versions since show here too: their questions hold them, not a canvas
+    const el = drawVersion(canvas, last, drawing && last === ver, list.length);
+    el.dataset.made = String(ver.v);
+    return [el];
+  };
   let k = 0;
   while (k < blocks.length && k < b.raws.length && b.raws[k] === blocks[k].raw) k++;
   for (; k < blocks.length; k++) {
     const t = blocks[k], old = b.nodes[k] ?? [];
     const tail = live && k === blocks.length - 1;
     const page = t.type === "code" && !tail && PAGE_LANGS.has((t.lang ?? "").toLowerCase()) && (PAGE_DOC.test(t.text) || previewed.has(t.text));
-    const now = t.type !== "code" ? htmlNodes(t, tokens.links) : SVG_START.test(t.text) ? [svgFigure(old[0], t.text, tail)]
+    const now = t.type !== "code" ? htmlNodes(t, tokens.links) : nth[k] >= 0 ? artNodes(k, old[0], tail)
+      : SVG_START.test(t.text) ? [svgFigure(old[0], t.text, tail)]
       : /^mermaid$/i.test(t.lang ?? "") ? [mermaidFigure(old[0], t.text, tail)] : page ? [pageFigure(old[0], t.text)] : htmlNodes(t, tokens.links);
     b.raws[k] = t.raw;
     if (now.length === 1 && old.length === 1 && now[0] === old[0]) continue;   // a figure updated in place
@@ -372,8 +403,11 @@ function renderBlocks(v: { body: HTMLElement; blocks?: Blocks }, src: string, li
   // a figure that was drawing at the tail finishes once something follows it (its block no longer changes)
   b.nodes.forEach((n, k) => {
     const f = n[0], t = blocks[k];
-    if (f instanceof HTMLElement && f.classList.contains("drawing") && !(live && k === blocks.length - 1) && t.type === "code")
-      (f.dataset.kind === "mermaid" ? mermaidFigure : svgFigure)(f, t.text, false);
+    if (!(f instanceof HTMLElement && f.classList.contains("drawing") && !(live && k === blocks.length - 1) && t.type === "code")) return;
+    if (nth[k] < 0) return void (f.dataset.kind === "mermaid" ? mermaidFigure : svgFigure)(f, t.text, false);
+    const now = artNodes(k, f, false);
+    if (now[0] !== f) f.replaceWith(...now);
+    b.nodes[k] = now;
   });
 }
 
@@ -383,7 +417,7 @@ function renderBlocks(v: { body: HTMLElement; blocks?: Blocks }, src: string, li
 // references) and lives in a shadow root, so its styles and ids stay inside it. The code is a click away.
 const SVG_START = /^\s*(?:<\?xml[^>]*\?>\s*)?(?:<!--[\s\S]*?-->\s*|<!DOCTYPE[^>]*>\s*)*<svg[\s>]/i;
 const SVG_SHADOW = ":host { display: block; color: #1f1b1c; } svg { display: block; width: var(--fig-w, 640px); max-width: 100%; height: auto; } " +
-  ":host(.zoom) svg { max-width: none; }";
+  ":host(.zoom) svg { max-width: none; } :host(.fill) { height: 100%; } :host(.fill) svg { width: 100%; height: 100%; max-width: none; }";
 const svgSource = new WeakMap<Element, string>();
 const reducedMotion = matchMedia("(prefers-reduced-motion: reduce)");
 
@@ -461,8 +495,10 @@ function syncSvg(dst: Element, src: Element, added: Element[]) {
   for (const x of a.slice(b.length)) x.remove();
 }
 
+// A picture's own <svg>: the shadow root's child, not one nested in what sits beside it (the editor's toolbar has icons)
+const pictureOf = (root: ShadowRoot | null | undefined) => [...(root?.children ?? [])].find((e): e is SVGSVGElement => e instanceof SVGSVGElement);
 function drawSvg(root: ShadowRoot, markup: string | null, fade: boolean): boolean {
-  if (!markup) return !!root.querySelector("svg");
+  if (!markup) return !!pictureOf(root);
   svgSanitizing = true;
   let frag: DocumentFragment;
   try {
@@ -473,10 +509,10 @@ function drawSvg(root: ShadowRoot, markup: string | null, fade: boolean): boolea
   const num = (n: string) => /^\s*[\d.]+\s*(px)?\s*$/.test(svg.getAttribute(n) ?? "") ? parseFloat(svg.getAttribute(n)!) : 0;
   const w = num("width"), hh = num("height");
   if (w && hh && !svg.hasAttribute("viewBox")) svg.setAttribute("viewBox", `0 0 ${w} ${hh}`);   // so it can scale down
-  const cur = root.querySelector("svg"), added: Element[] = [];
+  const cur = pictureOf(root), added: Element[] = [];
   if (cur && sameEl(cur, svg)) syncSvg(cur, svg, added);
   else {
-    cur ? cur.replaceWith(svg) : root.append(svg);
+    cur ? cur.replaceWith(svg) : root.querySelector("style")!.after(svg);
     added.push(...svg.children);
   }
   if (fade && !reducedMotion.matches)
@@ -496,18 +532,19 @@ function figureShell(lang: "svg" | "mermaid"): HTMLElement {
   return fig;
 }
 
-function svgFigure(old: Node | undefined, text: string, drawing: boolean): HTMLElement {
+// fade: what changed fades in (as while it is drawn)
+function svgFigure(old: Node | undefined, text: string, drawing: boolean, fade = drawing): HTMLElement {
   const fig = old instanceof HTMLElement && old.dataset.kind === "svg" ? old : figureShell("svg");
   svgSource.set(fig, text);
   fig.classList.toggle("drawing", drawing);
   const t = performance.now();
   if (!drawing || t - Number(fig.dataset.drawn ?? 0) > 90) {             // at most ~11 redraws a second while it streams
     fig.dataset.drawn = String(t);
-    const ok = drawSvg(fig.querySelector(".svg-paper")!.shadowRoot!, svgPrefix(text), drawing);
+    const ok = drawSvg(fig.querySelector(".svg-paper")!.shadowRoot!, svgPrefix(text), fade);
     fig.classList.toggle("failed", !drawing && !ok);
   }
   fitFigure(fig);
-  const svg = fig.querySelector(".svg-paper")!.shadowRoot!.querySelector("svg"), box = svg?.viewBox.baseVal;
+  const svg = pictureOf(fig.querySelector(".svg-paper")!.shadowRoot), box = svg?.viewBox.baseVal;
   fig.querySelector(".svg-state")!.textContent = drawing ? "Drawing" : fig.classList.contains("failed") ? "Couldn't draw this SVG"
     : box && box.width ? `SVG · ${Math.round(box.width)} × ${Math.round(box.height)}` : "SVG";
   if (fig.classList.contains("show-code") || fig.classList.contains("failed")) svgCode(fig);
@@ -517,7 +554,7 @@ function svgFigure(old: Node | undefined, text: string, drawing: boolean): HTMLE
 // A drawing as large as what can be seen at once: the column's width, or the scroll area's height less the caption,
 // whichever runs out first, its shape kept. Set when its <svg> tag arrives, so it never changes size while it draws.
 function fitFigure(fig: HTMLElement) {
-  const paper = fig.querySelector<HTMLElement>(".svg-paper"), vb = paper?.shadowRoot!.querySelector("svg")?.viewBox.baseVal;
+  const paper = fig.querySelector<HTMLElement>(".svg-paper"), vb = pictureOf(paper?.shadowRoot)?.viewBox.baseVal;
   if (!paper || !vb || !vb.width || !vb.height) return;               // (a page figure has no picture)
   const room = thread.clientWidth - 48 - 30;             // the column (the thread's padding), less the paper's padding and border
   const tall = Math.max(scroller.clientHeight - 74, 320); // the scroll area, less 8 + 6 px of gap, the paper's padding and the caption
@@ -546,7 +583,7 @@ function svgAction(btn: HTMLElement) {
     host.className = "zoom";
     host.attachShadow({ mode: "open" }).innerHTML = `<style>${SVG_SHADOW}</style>`;
     drawSvg(host.shadowRoot!, svgPrefix(picture), false);
-    const svg = host.shadowRoot!.querySelector("svg"), vb = svg?.viewBox.baseVal;
+    const svg = pictureOf(host.shadowRoot), vb = svg?.viewBox.baseVal;
     if (svg && vb && vb.width && vb.height) {                           // as large as the window allows, its shape kept
       const ar = vb.width / vb.height, w = Math.min(innerWidth * 0.94 - 40, (innerHeight * 0.92 - 40) * ar);
       svg.style.width = `${w}px`;
@@ -690,6 +727,636 @@ function pageAction(btn: HTMLElement) {
   }
 }
 
+// Artifacts (artifacts.ts): a reply's blocks named ```kind id```, and the edits (```edit id```) that change them in place.
+// A chat's artifacts are its replies' artifact blocks replayed in order: each block makes a version of one. Each text is
+// read once while it stays the same, so as a reply is written only it is read again.
+interface ArtRead { text: string; blocks: { n: number; lang: string; text: string; closed: boolean }[] }
+const artRead = new WeakMap<object, ArtRead>();       // by what holds the text: a reply, or one of its rounds
+function artBlocksOf(holder: object, text: string): ArtRead["blocks"] {
+  let r = artRead.get(holder);
+  if (!r || r.text !== text) {
+    let n = 0;
+    const blocks = marked.lexer(text).flatMap((t) => t.type === "code" && infoOf(t.lang)
+      ? [{ n: n++, lang: t.lang!, text: t.text, closed: /\n {0,3}(?:`{3,}|~{3,})[^\n]*\n?$/.test(t.raw) }] : []);
+    artRead.set(holder, r = { text, blocks });
+  }
+  return r.blocks;
+}
+// label: the question each version answers (the shelf shows it)
+function artifactsOf(c: Conversation): Map<string, Version[]> {
+  const blocks: Block[] = [], writing = runs.get(c.id)?.m;
+  let label = "";
+  for (const m of c.messages) {
+    if (m.role === "user") {
+      label = m.content;
+      for (const [n, e] of (m.edits ?? []).entries())
+        blocks.push({ at: m, n, info: { kind: e.kind, id: e.id }, text: e.src, live: false, label: "Your edit", by: "user" });
+      continue;
+    }
+    const parts: [object, string][] = [...(m.rounds ?? []).map((r): [object, string] => [r, r.content]), [m, m === writing ? settle(m.content) : m.content]];
+    for (const [holder, text] of parts)
+      for (const b of artBlocksOf(holder, text))
+        blocks.push({ at: holder, n: b.n, info: infoOf(b.lang)!, text: b.text, live: m === writing && holder === m && !b.closed, label });
+  }
+  Object.entries(c.pending ?? {}).forEach(([id, p], n) =>
+    blocks.push({ at: c, n, info: { kind: p.kind, id }, text: p.srcs.at(-1)!, live: false, label: "Your edit, not sent yet", by: "user" }));
+  return replay(blocks);
+}
+const versionAt = (all: Map<string, Version[]>, holder: object, n: number) =>
+  [...all.values()].flat().find((v) => v.block.at === holder && v.block.n === n);
+
+// An artifact block in a reply. Each artifact has one canvas in the chat, where it was last changed: the block that made
+// its latest version shows it (a picture, a diagram or a page drawn as any is, or its code), and one that made an
+// earlier version is a line naming it. When a reply changes an artifact its canvas moves there, the same figure, so the
+// edit paints into the picture as it stood, each change landing as it is written; the place it left keeps a line. The
+// canvas steps through the versions in place (‹ ›), redrawing only what differs.
+const editOf = (ver: Version) => ("edit" in ver.block.info ? ver.block.text : undefined);
+const captionOf = (ver: Version) => {
+  const done = (ver.applied ?? []).filter((a) => a.ok).length;
+  const changes = ver.block.by === "user" ? ` · your edit${ver.block.at === conv ? ", not sent yet" : ""}` : !ver.applied ? ""
+    : ver.block.live ? ` · changing${done ? `, ${done} so far` : ""}` : ` · ${done} change${done === 1 ? "" : "s"}`;
+  return `${ver.id} · v${ver.v}${ver.from ? ` · from ${ver.from.id} v${ver.from.v}` : ""}${changes}`;
+};
+const failedOf = (ver: Version) => (ver.applied ?? []).filter((a) => !a.ok && !a.change.partial);
+const actButton = (act: string, name: string, label?: string) => {
+  const b = h("button", "", name);
+  b.type = "button";
+  b.dataset.art = act;
+  if (label) b.title = b.ariaLabel = label;
+  return b;
+};
+
+function unknownEdit(t: Tokens.Code, links: Links): Node[] {   // an edit of an artifact the chat does not have
+  const info = infoOf(t.lang)!, nodes = htmlNodes(t, links);
+  nodes.unshift(h("p", "art-fail", `No artifact “${"edit" in info ? info.from : ""}” comes before this edit, so it changes nothing.`));
+  return nodes;
+}
+
+// The canvas: the version drawn as its kind is, into the figure it had (so what is the same stays, and a version being
+// written paints), with its caption. fade: what changed fades in (stepping between versions, as when it is written).
+function drawVersion(prev: HTMLElement | undefined, ver: Version, drawing: boolean, count: number, fade = drawing): HTMLElement {
+  const src = ver.src;
+  let el: HTMLElement;
+  if (ver.kind === "svg" || (["xml", "html"].includes(ver.kind) && SVG_START.test(src))) el = svgFigure(prev?.dataset.kind === "svg" ? prev : undefined, src, drawing, fade);
+  else if (ver.kind === "mermaid") el = mermaidFigure(prev?.dataset.kind === "mermaid" ? prev : undefined, src, drawing);
+  else if (PAGE_LANGS.has(ver.kind) && !drawing) el = pageFigure(prev?.dataset.kind === "page" ? prev : undefined, src);
+  else el = htmlNodes({ type: "code", raw: "", lang: ver.kind, text: src } as Tokens.Code, {} as Links)[0] as HTMLElement;
+  el.classList.add("art-canvas");
+  el.dataset.art = ver.id;
+  el.dataset.v = String(ver.v);
+  const head = el.querySelector(".svg-bar") ?? el.querySelector(".code-head");
+  if (head && !head.querySelector(".art-label")) {
+    const step = h("span", "art-step");
+    step.append(actButton("prev", "‹", "Earlier version"), h("span", "art-label"), actButton("next", "›", "Later version"));
+    head.prepend(step);
+    head.querySelector(".svg-acts, .code-acts")?.prepend(actButton("use", "Use this version", "Make this version the latest, as your own edit"),
+      actButton("open", "Open"), actButton("changes", "Changes"));
+  }
+  if (head) {
+    head.querySelector(".art-label")!.textContent = captionOf(ver);
+    head.querySelector<HTMLButtonElement>("[data-art=prev]")!.disabled = ver.v <= 1;
+    head.querySelector<HTMLButtonElement>("[data-art=next]")!.disabled = ver.v >= count;
+    head.querySelector(".art-step")!.classList.toggle("single", count < 2);
+    head.querySelector<HTMLElement>("[data-art=changes]")!.hidden = editOf(ver) === undefined;
+    head.querySelector<HTMLElement>("[data-art=use]")!.hidden = ver.v >= count;
+  }
+  const paper = el.dataset.kind === "svg" ? el.querySelector<HTMLElement>(".svg-paper") : null;
+  if (paper && !paper.dataset.pointable) {
+    paper.dataset.pointable = "1";
+    pointable(paper);
+  }
+  paper?.classList.toggle("busy", drawing);                // no tools on a picture still being written
+  if (paper) glow();
+  let fail = el.querySelector<HTMLElement>(":scope > .art-fail");
+  if (failedOf(ver).length && !fail) el.append(fail = h("p", "art-fail"));
+  if (fail) fail.textContent = failedOf(ver).length ? `Not applied: ${failedOf(ver).map((a) => a.how).join("; ")}` : "";
+  el.querySelector(":scope > .art-changes")?.remove();
+  return el;
+}
+
+// A version that is not the latest: a line naming it, how its changes went, Open (on the shelf), Changes, and a way to
+// the canvas.
+function artLine(ver: Version, count: number): HTMLElement {
+  const el = h("div", "art-line");
+  el.dataset.art = ver.id;
+  el.dataset.v = String(ver.v);
+  el.append(h("span", "art-label", captionOf(ver)), h("span", "art-later", `· now v${count}`));
+  const acts = h("span", "art-acts");
+  acts.append(actButton("goto", "Show"), actButton("open", "Open"), ...(editOf(ver) !== undefined ? [actButton("changes", "Changes")] : []));
+  el.append(acts);
+  if (failedOf(ver).length) el.append(h("p", "art-fail", `Not applied: ${failedOf(ver).map((a) => a.how).join("; ")}`));
+  return el;
+}
+
+function artAction(btn: HTMLElement) {
+  const el = btn.closest<HTMLElement>("[data-v]")!, all = artifactsOf(conv), list = all.get(el.dataset.art!) ?? [];
+  const ver = list[Number(el.dataset.v) - 1];
+  if (!ver) return;
+  const act = btn.dataset.art;
+  if (act === "open") return openShelf(ver.id, ver.v);
+  if (act === "use") return editByHand(ver.id, list.at(-1)!, ver.src);
+  if (act === "goto") return void thread.querySelector(`.art-canvas[data-art="${CSS.escape(ver.id)}"]`)?.scrollIntoView({ block: "center", behavior: "smooth" });
+  if (act === "prev" || act === "next") {
+    const to = list[ver.v - 1 + (act === "prev" ? -1 : 1)];
+    if (!to) return;
+    const now = drawVersion(el, to, false, list.length, true);
+    now.dataset.made = el.dataset.made;
+    if (now !== el) el.replaceWith(now);
+    now.querySelector<HTMLElement>(`[data-art=${act}]`)?.focus();
+    return;
+  }
+  let box = el.querySelector<HTMLElement>(":scope > .art-changes");
+  if (!box) {
+    box = h("div", "code art-changes");
+    box.innerHTML = `<div class="code-head"><span>edit</span></div><pre><code class="hljs"></code></pre>`;
+    box.querySelector("code")!.innerHTML = hljs.highlight(editOf(ver) ?? "", { language: "xml", ignoreIllegals: true }).value;
+    box.hidden = true;
+    el.append(box);
+  }
+  box.hidden = !box.hidden;
+  btn.textContent = box.hidden ? "Changes" : "Hide changes";
+}
+
+// The shelf: the chat's artifacts in a card that floats over the chat where it was left (moved by its head, sized by its
+// corner, both kept on this device). It shows one artifact large, at its latest version or the one picked, or two side
+// by side (Compare): a version and the one before it, or a copy and the version it was made from. While a reply draws or
+// edits an artifact it shows that one being drawn, unless a version was picked.
+interface Side { id: string; v?: number }           // v: a version picked, or the latest
+const shelf: { open: boolean; main?: Side; other?: Side; compare: boolean; code: boolean } = { open: false, compare: false, code: false };
+const pickVersion = (all: Map<string, Version[]>, s: Side) => {
+  const list = all.get(s.id)!;
+  return (s.v && list.find((x) => x.v === s.v)) || list.at(-1)!;
+};
+function openShelf(id?: string, v?: number) {
+  shelf.open = true;
+  shelf.main = id ? { id, v: v === artifactsOf(conv).get(id)?.length ? undefined : v } : undefined;
+  shelf.other = undefined;
+  renderShelf();
+}
+// the side beside a version: what it was copied from, else the version before it
+function besideOf(ver: Version): Side | undefined {
+  return ver.from ? { id: ver.from.id, v: ver.from.v } : ver.v > 1 ? { id: ver.id, v: ver.v - 1 } : undefined;
+}
+let shelfAt = 0, shelfLater: number | undefined;
+// at most ~10 times a second while a reply writes (each redraw syncs the picture, painting what changed)
+function shelfSoon() {
+  if (shelfLater) return;
+  const wait = Math.max(0, 100 - (performance.now() - shelfAt));
+  shelfLater = window.setTimeout(() => { shelfLater = undefined; renderShelf(); }, wait);
+}
+function renderShelf() {
+  shelfAt = performance.now();
+  const all = artifactsOf(conv), ids = [...all.keys()], btn = $<HTMLButtonElement>("artifacts"), el = $("shelf");
+  btn.hidden = !ids.length;
+  btn.innerHTML = icon("shapes") + `<span class="art-count">${ids.length}</span>`;
+  btn.title = btn.ariaLabel = `Artifacts in this chat: ${ids.length}`;
+  btn.classList.toggle("on", shelf.open);
+  el.hidden = !shelf.open || !ids.length;
+  if (el.hidden) return;
+  const live = [...all.values()].flat().find((x) => x.block.live);
+  if (!shelf.main || !all.has(shelf.main.id)) shelf.main = { id: live?.id ?? ids.at(-1)! };
+  else if (live && !shelf.main.v && shelf.main.id !== live.id) shelf.main = { id: live.id };
+  const main = pickVersion(all, shelf.main);
+  if (shelf.other && !all.has(shelf.other.id)) shelf.other = undefined;
+  const other = shelf.compare ? (shelf.other ? pickVersion(all, shelf.other) : (() => { const b = besideOf(main); return b ? pickVersion(all, b) : undefined; })()) : undefined;
+  const tabs = $("shelf-tabs");
+  if (tabs.dataset.key !== JSON.stringify([ids, main.id])) {
+    tabs.dataset.key = JSON.stringify([ids, main.id]);
+    tabs.replaceChildren(...ids.map((id) => {
+      const b = h("button", id === main.id ? "shelf-tab on" : "shelf-tab", id);
+      b.type = "button";
+      b.setAttribute("role", "tab");
+      b.setAttribute("aria-selected", String(id === main.id));
+      b.onclick = () => { shelf.main = { id }; shelf.other = undefined; renderShelf(); };
+      return b;
+    }));
+  }
+  $("shelf-compare").setAttribute("aria-pressed", String(shelf.compare));
+  $("shelf-compare").classList.toggle("on", shelf.compare);
+  const stage = $("shelf-stage"), want = other ? 2 : 1;
+  while (stage.childElementCount < want) stage.append(shelfSide());
+  while (stage.childElementCount > want) stage.lastElementChild!.remove();
+  stage.classList.toggle("two", want === 2);
+  if (other) paintSide(stage.children[0] as HTMLElement, other, "other");
+  paintSide(stage.lastElementChild as HTMLElement, main, "main");
+  if (shelf.compare && !other) stage.dataset.note = "Only one version so far: nothing to compare it with";
+  else delete stage.dataset.note;
+  const versions = $("shelf-versions"), list = all.get(main.id)!;
+  const vkey = JSON.stringify([main.id, list.length, main.v]);
+  if (versions.dataset.key !== vkey) {
+    versions.dataset.key = vkey;
+    versions.replaceChildren(...list.map((x) => {
+      const b = h("button", x.v === main.v ? "shelf-v on" : "shelf-v", `v${x.v}`);
+      b.type = "button";
+      b.setAttribute("role", "tab");
+      b.setAttribute("aria-selected", String(x.v === main.v));
+      const failed = (x.applied ?? []).filter((a) => !a.ok).length;
+      b.title = `${x.block.label.trim().split("\n")[0].slice(0, 120) || "v" + x.v}${x.from ? `\n(a copy of ${x.from.id} v${x.from.v})` : ""}${failed ? `\n${failed} change${failed > 1 ? "s" : ""} not applied` : ""}`;
+      b.onclick = () => { shelf.main = { id: main.id, v: x.v === list.length ? undefined : x.v }; shelf.other = undefined; renderShelf(); };
+      return b;
+    }));
+  }
+}
+function shelfSide(): HTMLElement {
+  const side = h("div", "shelf-side"), label = h("div", "shelf-label"), paper = h("div", "shelf-paper");
+  label.innerHTML = `<button type="button" class="act" data-step="-1" aria-label="Earlier version">${icon("prev")}</button><span></span>` +
+    `<button type="button" class="act" data-step="1" aria-label="Later version">${icon("next")}</button>`;
+  side.append(label, paper);
+  return side;
+}
+// One side of the shelf, drawn as its artifact's kind is: a picture or a diagram synced in place (so a version being
+// written paints, and stepping between versions changes only what differs), a page run when it is whole, else its code.
+function paintSide(side: HTMLElement, ver: Version, which: "main" | "other") {
+  side.dataset.art = ver.id;
+  side.dataset.v = String(ver.v);
+  side.dataset.which = which;
+  side.querySelector(".shelf-label span")!.textContent = `${ver.id} · v${ver.v}${ver.block.live ? " · drawing" : ""}`;
+  const count = artifactsOf(conv).get(ver.id)!.length;
+  side.querySelector<HTMLButtonElement>("[data-step='-1']")!.disabled = ver.v <= 1;
+  side.querySelector<HTMLButtonElement>("[data-step='1']")!.disabled = ver.v >= count;
+  const old = side.querySelector<HTMLElement>(".shelf-paper")!, picture = !shelf.code || which === "other";
+  const kind = picture && (ver.kind === "svg" || SVG_START.test(ver.src)) ? "svg" : picture && ver.kind === "mermaid" ? "mermaid"
+    : picture && PAGE_LANGS.has(ver.kind) ? "page" : "code";
+  let paper = old;
+  if (paper.dataset.kind !== kind) {
+    paper = h("div", "shelf-paper");
+    paper.dataset.kind = kind;
+    if (kind === "svg" || kind === "mermaid") {
+      paper.attachShadow({ mode: "open" }).innerHTML = `<style>${SVG_SHADOW}</style>`;
+      paper.classList.add("fill");
+      if (kind === "svg") pointable(paper);
+    }
+    old.replaceWith(paper);
+  }
+  if (paper.dataset.src === ver.src) return;
+  paper.dataset.src = ver.src;
+  if (kind === "svg") {
+    drawSvg(paper.shadowRoot!, svgPrefix(ver.src), ver.block.live);
+    paper.classList.toggle("busy", ver.block.live);
+    glow();
+  } else if (kind === "mermaid") {
+    const seq = String(++mermaidSeq);
+    paper.dataset.seq = seq;
+    void loadMermaid().then(async (m) => {
+      if (!(await m.parse(ver.src, { suppressErrors: true }))) return;
+      const out = await m.render(`chrysalis-mermaid-${seq}`, ver.src).catch(() => null);
+      if (out && paper.dataset.seq === seq) drawSvg(paper.shadowRoot!, out.svg, false);
+    });
+  } else if (kind === "page") {
+    if (!ver.block.live) paper.replaceChildren(pageFrame(ver.src, true));
+  } else {
+    const lang = hljs.getLanguage(ver.kind) ? ver.kind : ver.kind === "svg" ? "xml" : "";
+    paper.innerHTML = `<pre><code class="hljs">${lang ? hljs.highlight(ver.src, { language: lang, ignoreIllegals: true }).value : escapeHtml(ver.src)}</code></pre>`;
+  }
+}
+const EXT: Record<string, string> = { svg: "svg", html: "html", htm: "html", mermaid: "mmd", latex: "tex", tex: "tex", markdown: "md", md: "md",
+  python: "py", javascript: "js", typescript: "ts", json: "json", css: "css" };
+function shelfAction(btn: HTMLElement) {
+  const all = artifactsOf(conv);
+  if (!shelf.main || !all.has(shelf.main.id)) return;
+  const ver = pickVersion(all, shelf.main), act = btn.dataset.shelf;
+  if (act === "code") {
+    shelf.code = !shelf.code;
+    btn.textContent = shelf.code ? "Picture" : "Code";
+    renderShelf();
+  } else if (act === "copy") copy(ver.src, btn);
+  else if (act === "save") download(`${ver.id}.${EXT[ver.kind] ?? "txt"}`, ver.kind === "svg" ? svgFile(ver.src) : ver.src, "text/plain");
+}
+// Where the shelf was left: kept within the window, its size too
+function placeShelf(geo?: { x: number; y: number; w: number; h: number }) {
+  const el = $("shelf");
+  let g = geo;
+  if (!g) try { g = JSON.parse(pref("shelf-geo", "null")) ?? undefined; } catch { /* the default */ }
+  const w = Math.min(g?.w ?? 560, innerWidth - 24), hh = Math.min(g?.h ?? Math.min(640, innerHeight - 120), innerHeight - 24);
+  const x = Math.min(Math.max(g?.x ?? innerWidth - w - 28, 12), innerWidth - w - 12), y = Math.min(Math.max(g?.y ?? 72, 12), innerHeight - hh - 12);
+  Object.assign(el.style, { left: `${x}px`, top: `${y}px`, width: `${w}px`, height: `${hh}px` });
+}
+function keepShelfPlace() {
+  const r = $("shelf").getBoundingClientRect();
+  if (r.width && r.height) setPref("shelf-geo", JSON.stringify({ x: Math.round(r.left), y: Math.round(r.top), w: Math.round(r.width), h: Math.round(r.height) }));
+}
+
+// Pointing and the canvas's tools. Over an artifact's picture (in the chat or on the shelf) the part under the pointer
+// glows, the nearest element with an id (else the element itself), and a click selects it. Shown in the message box,
+// the part selected is what the next question points at: the model is told it, quoting it as it is now (in voice mode,
+// the part under the pointer as a question is said: "make this orange"). And the canvas's tools act on it by hand, with
+// no model in the loop: drag it to move it, a corner to resize it, forward, backward, duplicate, delete, the arrow keys
+// to nudge it; the paint bucket fills whatever shape is clicked. Each change is the source edited where that element is
+// (artifacts.ts), kept at once as the user's next version (editByHand). The glow is a rule beside the picture, never a
+// change to it, so a picture being redrawn keeps it.
+interface Point { art: string; sel: string; partId?: string; markup?: string; tag?: string; paper?: HTMLElement }
+let hovered: Point | undefined, pinned: Point | undefined;
+let tool: "select" | "bucket" = "select", paintColor = pref("paint-color", "#e24d85");
+const samePoint = (a?: Point, b?: Point) => !!a && !!b && a.art === b.art && a.sel === b.sel;
+// The part at an event: the nearest element with an id, or (leaf: the paint bucket's) the shape itself
+function pointOn(paper: HTMLElement, e: Event, leaf = tool === "bucket"): Point | undefined {
+  const host = paper.closest<HTMLElement>("[data-art]"), svg = pictureOf(paper.shadowRoot), t = e.composedPath()[0];
+  if (!host || !svg || !(t instanceof Element) || t === svg || !svg.contains(t)) return undefined;
+  const near = t.closest("[id]"), part = !leaf && near && near !== svg && svg.contains(near) ? near : t;
+  let sel = part.id ? `[id="${CSS.escape(part.id)}"]` : "";
+  if (!part.id) for (let x: Element | null = part; x && x !== svg; x = x.parentElement)
+    sel = `> :nth-child(${[...x.parentElement!.children].indexOf(x) + 1}) ${sel}`;
+  return { art: host.dataset.art!, sel: part.id ? sel : `:scope ${sel}`.trim(), partId: part.id || undefined, markup: part.outerHTML, tag: part.tagName, paper };
+}
+// A part by its selector (relative to the picture's own <svg>), in a picture, and as a rule beside it
+const partIn = (paper: HTMLElement, sel: string) => pictureOf(paper.shadowRoot)?.querySelector<SVGGraphicsElement>(sel) ?? null;
+const ruleFor = (sel: string) => (sel.startsWith(":scope") ? sel.replace(":scope", ":host > svg") : `:host > svg ${sel}`);
+
+const EDITOR_CSS = `:host { position: relative; outline: none; }
+.tools { position: absolute; top: 8px; left: 8px; z-index: 2; display: flex; align-items: center; gap: 1px; padding: 3px; border: 1px solid rgb(0 0 0 / 0.1);
+  border-radius: 10px; background: rgb(255 255 255 / 0.94); box-shadow: 0 2px 10px rgb(0 0 0 / 0.12); opacity: 0; transition: opacity 0.12s; }
+:host(:hover) .tools, :host(:focus-within) .tools, :host(:focus) .tools, .tools.held { opacity: 1; }
+:host(.busy) .tools, :host(.busy) .sel { display: none; }
+.tools button { display: grid; place-items: center; width: 26px; height: 26px; padding: 0; border: 0; border-radius: 7px; background: none; color: #5d5457; cursor: pointer; }
+.tools button:hover:not(:disabled) { background: rgb(0 0 0 / 0.06); color: #1f1b1c; }
+.tools button.on { background: rgb(226 77 133 / 0.14); color: #c2185b; }
+.tools button:disabled { opacity: 0.3; cursor: default; }
+.tools svg { width: 15px; height: 15px; fill: none; stroke: currentColor; stroke-width: 1.8; stroke-linecap: round; stroke-linejoin: round; }
+.swatch { position: relative; width: 18px; height: 18px; margin: 0 4px; border: 1.5px solid rgb(0 0 0 / 0.18); border-radius: 50%; cursor: pointer; }
+.swatch input { position: absolute; inset: 0; width: 100%; height: 100%; padding: 0; border: 0; opacity: 0; cursor: pointer; }
+.on-sel { display: flex; gap: 1px; margin-left: 2px; padding-left: 3px; border-left: 1px solid rgb(0 0 0 / 0.1); }
+.on-sel[hidden] { display: none; }
+.sel { position: absolute; z-index: 1; box-sizing: border-box; border: 1.5px dashed #e24d85; border-radius: 2px; cursor: move; touch-action: none; }
+.sel[hidden] { display: none; }
+.sel i { position: absolute; width: 10px; height: 10px; box-sizing: border-box; border: 1.5px solid #e24d85; border-radius: 2px; background: #fff; }
+.sel i[data-h=nw] { left: -6px; top: -6px; cursor: nwse-resize; } .sel i[data-h=ne] { right: -6px; top: -6px; cursor: nesw-resize; }
+.sel i[data-h=se] { right: -6px; bottom: -6px; cursor: nwse-resize; } .sel i[data-h=sw] { left: -6px; bottom: -6px; cursor: nesw-resize; }`;
+const TOOL_ICONS = {
+  select: '<path d="M6 3.5l12 7.2-5.3 1.5-2.6 5.3z"/>',
+  bucket: '<path d="M5 11.5 11.5 5l7 7-6.5 6.5a2 2 0 0 1-2.8 0L5 14.3a2 2 0 0 1 0-2.8z"/><path d="M4.5 12.5h13.5"/><path d="M20 15.5s1.5 2 1.5 3a1.5 1.5 0 0 1-3 0c0-1 1.5-3 1.5-3z"/>',
+  undo: '<path d="M9 14 4 9l5-5"/><path d="M4 9h10.5a5.5 5.5 0 0 1 0 11H11"/>',
+  forward: '<path d="M12 19V6M6.5 11.5 12 6l5.5 5.5"/>',
+  backward: '<path d="M12 5v13M6.5 12.5 12 18l5.5-5.5"/>',
+  duplicate: ICONS.copy,
+  delete: ICONS.trash,
+};
+const toolIcon = (k: keyof typeof TOOL_ICONS) => `<svg viewBox="0 0 24 24" aria-hidden="true">${TOOL_ICONS[k]}</svg>`;
+
+// An artifact's picture made pointable and editable: its glow, its toolbar and selection box (inside its shadow root,
+// beside the picture, which drawSvg alone redraws), and the pointer and keys on it.
+function pointable(paper: HTMLElement) {
+  const root = paper.shadowRoot!;
+  paper.tabIndex = 0;
+  const style = document.createElement("style"), tools = h("div", "tools"), box = h("div", "sel");
+  style.textContent = EDITOR_CSS;
+  tools.innerHTML = `<button type="button" data-tool="select" title="Select, move and resize (V)">${toolIcon("select")}</button>` +
+    `<button type="button" data-tool="bucket" title="Paint bucket: fill what you click (B)">${toolIcon("bucket")}</button>` +
+    `<label class="swatch" title="The paint bucket's color"><input type="color"></label>` +
+    `<button type="button" data-do="undo" title="Undo your last change (Ctrl+Z)">${toolIcon("undo")}</button>` +
+    `<span class="on-sel" hidden>${(["forward", "backward", "duplicate", "delete"] as const).map((k) =>
+      `<button type="button" data-do="${k}" title="${{ forward: "Bring forward", backward: "Send backward", duplicate: "Duplicate (Ctrl+D)", delete: "Delete (Del)" }[k]}">${toolIcon(k)}</button>`).join("")}</span>`;
+  box.innerHTML = `<i data-h="nw"></i><i data-h="ne"></i><i data-h="se"></i><i data-h="sw"></i>`;
+  box.hidden = true;
+  root.append(style, tools, box);
+  const inTools = (e: Event) => e.composedPath().some((x) => x === tools || x === box);
+  // focused for its keys without the scroll a focus brings: a picture partly out of view would move under the pointer
+  // between press and release, and the click land elsewhere
+  paper.addEventListener("mousedown", (e) => {
+    if (inTools(e)) return;
+    e.preventDefault();
+    paper.focus({ preventScroll: true });
+  });
+  paper.addEventListener("pointermove", (e) => {
+    const p = inTools(e) ? undefined : pointOn(paper, e);
+    if (!samePoint(p, hovered) || (p && hovered?.paper !== paper)) { hovered = p; glow(); }
+  });
+  paper.addEventListener("pointerleave", () => { if (hovered) { hovered = undefined; glow(); } });
+  paper.addEventListener("click", (e) => {
+    if (inTools(e)) return;
+    const p = pointOn(paper, e);
+    if (tool === "bucket") return void (p && paintShape(paper, p));
+    pinned = p && !samePoint(p, pinned) ? p : undefined;
+    glow();
+    renderPointing();
+  });
+  tools.addEventListener("click", (e) => {
+    const b = (e.target as Element).closest<HTMLButtonElement>("button");
+    if (!b) return;
+    if (b.dataset.tool) { tool = b.dataset.tool as typeof tool; hovered = undefined; glow(); }
+    else editSelected(paper, b.dataset.do!);
+  });
+  tools.querySelector("input")!.addEventListener("input", (e) => {
+    paintColor = (e.target as HTMLInputElement).value;
+    setPref("paint-color", paintColor);
+    tool = "bucket";
+    glow();
+  });
+  box.addEventListener("pointerdown", (e) => dragSelected(paper, e));
+  paper.addEventListener("keydown", (e) => {
+    const mod = e.ctrlKey || e.metaKey, k = e.key;
+    const nudge = { ArrowLeft: [-1, 0], ArrowRight: [1, 0], ArrowUp: [0, -1], ArrowDown: [0, 1] }[k];
+    if (mod && k.toLowerCase() === "z") editSelected(paper, "undo");
+    else if (mod && k.toLowerCase() === "d") editSelected(paper, "duplicate");
+    else if (k === "Delete" || k === "Backspace") editSelected(paper, "delete");
+    else if (nudge && pinned?.paper === paper) moveSelected(paper, nudge[0] * (e.shiftKey ? 10 : 1), nudge[1] * (e.shiftKey ? 10 : 1));
+    else if (k === "Escape" && pinned) { pinned = undefined; glow(); renderPointing(); }
+    else if (!mod && (k === "v" || k === "b")) { tool = k === "v" ? "select" : "bucket"; glow(); }
+    else return;
+    e.preventDefault();
+    e.stopPropagation();
+  });
+}
+
+// The version a picture shows (an inline canvas, or a side of the shelf), whose source the tools edit
+function shownVersion(paper: HTMLElement): Version | undefined {
+  const host = paper.closest<HTMLElement>("[data-art][data-v]");
+  return host ? artifactsOf(conv).get(host.dataset.art!)?.[Number(host.dataset.v) - 1] : undefined;
+}
+// An element of the picture as written in its source: by its place among the elements (what the picture was drawn
+// from), else by its id, else by its kind and geometry
+function spanFor(paper: HTMLElement, el: Element, src: string): Span | undefined {
+  const svg = pictureOf(paper.shadowRoot)!, drawn = [svg, ...svg.querySelectorAll("*")], k = drawn.indexOf(el);
+  const spans = elementSpans(src), from = spans.findIndex((x) => x.tag.toLowerCase() === "svg"), tag = el.tagName.toLowerCase();
+  const at = k >= 0 && from >= 0 ? spans[from + k] : undefined;
+  if (at && at.tag.toLowerCase() === tag) return at;
+  const open = (x: Span) => src.slice(x.start, x.openEnd);
+  if (el.id) return spans.find((x) => new RegExp(`(?<![\\w:-])id\\s*=\\s*["']${el.id.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}["']`).test(open(x)));
+  const geo = ["cx", "cy", "r", "rx", "ry", "x", "y", "width", "height", "d", "points", "x1", "y1", "x2", "y2"].filter((a) => el.hasAttribute(a));
+  const hits = geo.length ? spans.filter((x) => x.tag.toLowerCase() === tag && geo.every((a) => open(x).match(new RegExp(`\\s${a}\\s*=\\s*"([^"]*)"`))?.[1] === el.getAttribute(a))) : [];
+  return hits.length === 1 ? hits[0] : undefined;
+}
+// The user's change: the source as they left it, kept at once as the artifact's next version (their own, not sent until
+// the next question) and drawn wherever the artifact is shown
+function editByHand(id: string, base: Version, src: string) {
+  if (src === base.src) return;
+  ((conv.pending ??= {})[id] ??= { kind: base.kind, srcs: [] }).srcs.push(src);
+  save(conv);
+  repaintArtifact(id);
+}
+function repaintArtifact(id: string) {
+  const list = artifactsOf(conv).get(id), canvas = thread.querySelector<HTMLElement>(`.art-canvas[data-art="${CSS.escape(id)}"]`);
+  if (canvas && list) {
+    const now = drawVersion(canvas, list.at(-1)!, false, list.length, true);
+    now.dataset.made = canvas.dataset.made;
+    if (now !== canvas) canvas.replaceWith(now);
+  }
+  renderShelf();
+  glow();
+}
+const fmtTransform = (m: DOMMatrix): string | null => {
+  const r = (x: number) => +x.toFixed(3);
+  if (Math.abs(m.b) > 1e-6 || Math.abs(m.c) > 1e-6 || Math.abs(m.a - m.d) > 1e-6) return `matrix(${[m.a, m.b, m.c, m.d, m.e, m.f].map(r).join(" ")})`;
+  return [r(m.e) || r(m.f) ? `translate(${r(m.e)} ${r(m.f)})` : "", r(m.a) !== 1 ? `scale(${r(m.a)})` : ""].filter(Boolean).join(" ") || null;
+};
+const matrixOf = (el: SVGGraphicsElement) => [...el.transform.baseVal].reduce((m, t) => m.multiply(DOMMatrix.fromMatrix(t.matrix)), new DOMMatrix());
+// An element's transform as the source has it, set (null: taken off)
+function setTransform(paper: HTMLElement, el: Element, t: string | null) {
+  const ver = shownVersion(paper), span = ver && spanFor(paper, el, ver.src);
+  if (!ver || !span) return void toast("That part could not be found in the artifact's source");
+  editByHand(ver.id, ver, setOpen(ver.src, span, withAttr(ver.src.slice(span.start, span.openEnd), "transform", t)));
+}
+function moveSelected(paper: HTMLElement, dx: number, dy: number) {
+  const el = pinned?.paper === paper ? partIn(paper, pinned.sel) : null;
+  if (el) setTransform(paper, el, fmtTransform(new DOMMatrix().translate(dx, dy).multiply(matrixOf(el))));
+}
+// A drag on the selection's box moves it, on a corner resizes it about the opposite one; the picture follows the pointer
+// and the change is kept when it is let go
+function dragSelected(paper: HTMLElement, e: PointerEvent) {
+  const el = pinned?.paper === paper ? partIn(paper, pinned.sel) : null, box = e.currentTarget as HTMLElement;
+  if (!el || e.button !== 0) return;
+  e.preventDefault();
+  e.stopPropagation();
+  box.setPointerCapture(e.pointerId);
+  const corner = (e.target as HTMLElement).dataset.h, r = el.getBoundingClientRect(), cur = matrixOf(el), was = el.getAttribute("transform");
+  const toUser = (x: number, y: number) => new DOMPoint(x, y).matrixTransform((el.parentNode as SVGGraphicsElement).getScreenCTM()!.inverse());
+  const pivot = corner ? { x: corner.includes("w") ? r.right : r.left, y: corner.includes("n") ? r.bottom : r.top } : null;
+  const reach = pivot ? Math.hypot(e.clientX - pivot.x, e.clientY - pivot.y) || 1 : 1, from = toUser(e.clientX, e.clientY);
+  let pre = new DOMMatrix();
+  const move = (ev: PointerEvent) => {
+    if (pivot) {
+      const k = Math.max(0.05, Math.hypot(ev.clientX - pivot.x, ev.clientY - pivot.y) / reach), p = toUser(pivot.x, pivot.y);
+      pre = new DOMMatrix().translate(p.x, p.y).scale(k).translate(-p.x, -p.y);
+    } else {
+      const to = toUser(ev.clientX, ev.clientY);
+      pre = new DOMMatrix().translate(to.x - from.x, to.y - from.y);
+    }
+    const t = fmtTransform(pre.multiply(cur));
+    if (t) el.setAttribute("transform", t); else el.removeAttribute("transform");
+    placeSelection(paper);
+  };
+  const up = () => {
+    box.removeEventListener("pointermove", move);
+    if (pre.isIdentity) return;
+    if (was === null) el.removeAttribute("transform"); else el.setAttribute("transform", was);   // the source decides
+    setTransform(paper, el, fmtTransform(pre.multiply(cur)));
+  };
+  box.addEventListener("pointermove", move);
+  box.addEventListener("pointerup", up, { once: true });
+  box.addEventListener("pointercancel", up, { once: true });
+}
+function paintShape(paper: HTMLElement, p: Point) {
+  const el = partIn(paper, p.sel), ver = shownVersion(paper), span = el && ver && spanFor(paper, el, ver.src);
+  if (!ver || !span) return void toast("That shape could not be found in the artifact's source");
+  editByHand(ver.id, ver, setOpen(ver.src, span, withPaint(ver.src.slice(span.start, span.openEnd), "fill", paintColor)));
+}
+function editSelected(paper: HTMLElement, act: string) {
+  const ver = shownVersion(paper);
+  if (!ver) return;
+  if (act === "undo") {
+    const p = conv.pending?.[ver.id];
+    if (!p) return;
+    p.srcs.pop();
+    if (!p.srcs.length) delete conv.pending![ver.id];
+    if (conv.pending && !Object.keys(conv.pending).length) delete conv.pending;
+    save(conv);
+    return repaintArtifact(ver.id);
+  }
+  const el = pinned?.paper === paper ? partIn(paper, pinned.sel) : null, span = el && spanFor(paper, el, ver.src);
+  if (!span) return;
+  const spans = elementSpans(ver.src);
+  if (act === "delete") {
+    pinned = undefined;
+    renderPointing();
+    editByHand(ver.id, ver, withoutElement(ver.src, span));
+  } else if (act === "duplicate") editByHand(ver.id, ver, withCopy(ver.src, span, 12));
+  else {
+    if (!pinned!.partId) pinned = undefined;                 // its place among its siblings changes: kept by id only
+    renderPointing();
+    editByHand(ver.id, ver, withOrder(ver.src, spans[spans.indexOf(span)], spans, act === "forward"));
+  }
+}
+// The toolbar at the top of what shows of the picture: a tall one scrolled under the top bar keeps it in view
+function placeTools(paper: HTMLElement) {
+  const tools = paper.shadowRoot?.querySelector<HTMLElement>(".tools");
+  if (!tools || !paper.closest("#thread")) return;
+  const r = paper.getBoundingClientRect(), top = scroller.getBoundingClientRect().top;
+  const at = `${Math.round(Math.max(8, Math.min(top - r.top + 8, r.height - tools.offsetHeight - 8)))}px`;
+  if (tools.style.top !== at) tools.style.top = at;
+}
+let toolsFrame = 0;
+scroller.addEventListener("scroll", () => {
+  toolsFrame ||= requestAnimationFrame(() => {
+    toolsFrame = 0;
+    thread.querySelectorAll<HTMLElement>(".art-canvas .svg-paper").forEach(placeTools);
+  });
+}, { passive: true });
+// The selection's box over the part selected, on the picture it was selected in
+function placeSelection(paper: HTMLElement) {
+  const box = paper.shadowRoot?.querySelector<HTMLElement>(".sel");
+  if (!box) return;
+  const el = pinned?.paper === paper && tool === "select" ? partIn(paper, pinned.sel) : null;
+  box.hidden = !el;
+  if (!el) return;
+  const at = paper.getBoundingClientRect(), r = el.getBoundingClientRect();
+  Object.assign(box.style, { left: `${r.left - at.left - 3}px`, top: `${r.top - at.top - 3}px`, width: `${r.width + 6}px`, height: `${r.height + 6}px` });
+}
+function glow() {
+  // a selection whose picture was drawn anew (the chat redrawn) is on the artifact's canvas now
+  if (pinned && !pinned.paper?.isConnected) pinned.paper = thread.querySelector<HTMLElement>(`.art-canvas[data-art="${CSS.escape(pinned.art)}"] .svg-paper`) ?? undefined;
+  for (const paper of document.querySelectorAll<HTMLElement>(".svg-paper, .shelf-paper")) {
+    const root = paper.shadowRoot, art = paper.closest<HTMLElement>("[data-art]")?.dataset.art;
+    if (!root || !art || paper.closest<HTMLElement>("[data-kind]")?.dataset.kind === "mermaid" || paper.dataset.kind === "mermaid") continue;
+    let style = root.querySelector<HTMLStyleElement>("style.point");
+    if (!style) root.append(style = Object.assign(document.createElement("style"), { className: "point" }));
+    const css = [`:host > svg { cursor: ${tool === "bucket" ? "cell" : "pointer"}; }`];
+    if (hovered?.art === art && hovered.paper === paper) css.push(`${ruleFor(hovered.sel)} { filter: drop-shadow(0 0 1.5px #e24d85) drop-shadow(0 0 5px rgb(226 77 133 / 0.75)); }`);
+    if (pinned?.art === art) css.push(`${ruleFor(pinned.sel)} { filter: drop-shadow(0 0 2px #e24d85) drop-shadow(0 0 9px #e24d85); }`);
+    if (style.textContent !== css.join("\n")) style.textContent = css.join("\n");
+    const tools = root.querySelector<HTMLElement>(".tools");
+    if (tools) {
+      tools.querySelectorAll<HTMLElement>("[data-tool]").forEach((b) => b.classList.toggle("on", b.dataset.tool === tool));
+      (tools.querySelector(".swatch") as HTMLElement).style.background = paintColor;
+      tools.querySelector<HTMLInputElement>("input")!.value = paintColor;
+      tools.querySelector<HTMLButtonElement>("[data-do=undo]")!.disabled = !conv.pending?.[art];
+      tools.querySelector<HTMLElement>(".on-sel")!.hidden = !(pinned?.paper === paper && tool === "select");
+      tools.classList.toggle("held", pinned?.paper === paper);
+    }
+    placeTools(paper);
+    placeSelection(paper);
+  }
+}
+const pointName = (p: Point) => `${p.art}${p.partId ? ` · #${p.partId}` : p.tag ? ` · <${p.tag}>` : ""}`;
+function renderPointing() {
+  const el = $("pointing");
+  el.hidden = !pinned;
+  if (!pinned) return el.replaceChildren();
+  const x = h("button", "act");
+  x.type = "button";
+  x.innerHTML = icon("x");
+  x.title = x.ariaLabel = "Stop pointing at it";
+  x.onclick = () => { pinned = undefined; glow(); renderPointing(); };
+  el.replaceChildren(h("span", "", `Pointing at ${pointName(pinned)}`), x);
+}
+// The artifacts changed by hand since the last question: the next one takes them (and the model is told them, editsNote)
+function takeEdits(): Pick<Message, "edits"> {
+  const p = conv.pending;
+  if (!p || !Object.keys(p).length) return {};
+  delete conv.pending;
+  return { edits: Object.entries(p).map(([id, e]) => ({ id, kind: e.kind, src: e.srcs.at(-1)! })) };
+}
+// What a new question points at (the part kept, else in voice mode the one under the pointer), as told the model: the
+// part as its artifact has it now (by its id), or as it was drawn.
+function pointFields(said: boolean): Pick<Message, "point" | "pointAt"> {
+  const p = pinned ?? (said ? hovered : undefined);
+  if (!p) return {};
+  pinned = undefined;
+  glow();
+  renderPointing();
+  const latest = artifactsOf(conv).get(p.art)?.at(-1), part = (p.partId && latest && elementById(latest.src, p.partId)) || p.markup;
+  return { pointAt: pointName(p), point: `The user is pointing at ${p.partId ? `the part #${p.partId} of ` : "this part of "}the artifact ${p.art}` +
+    (part ? `:\n${part.length > 3000 ? part.slice(0, 3000) + "…" : part}` : ".") };
+}
+
 const fmtK = (n: number) => (n < 1000 ? String(n) : `${(n / 1000).toFixed(n < 10_000 ? 1 : 0)}K`);
 const fmtS = (s: number) => `${s < 10 ? s.toFixed(1) : Math.round(s)} s`;
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
@@ -743,6 +1410,7 @@ function render() {
   renderComposer();
   renderList();
   paintGhost();
+  renderShelf();
 }
 
 function messageView(m: Message, i: number): HTMLElement {
@@ -753,7 +1421,7 @@ function messageView(m: Message, i: number): HTMLElement {
     paint(v, m, [...runs.values()].find((r) => r.m === m)?.live);
     return v.el;
   }
-  const el = h("article", "msg user"), foot = h("footer", "msg-foot");
+  const el = h("article", m.fix ? "msg user fix" : "msg user"), foot = h("footer", "msg-foot");
   el.dataset.i = String(i);
   foot.innerHTML = pager(m) + (m.voice ? `<span class="said" title="Said in voice mode">${icon("wave")}</span>` : "")
     + slots([["copy", true], ["edit", !running()], ["trash", !running()]]);
@@ -762,6 +1430,16 @@ function messageView(m: Message, i: number): HTMLElement {
     sum.title = "What the app told the model with this message (Settings, Voice mode)";
     note.append(sum, h("div", "msg-note-text", m.note));
     el.append(note);
+  }
+  for (const e of m.edits ?? []) {                  // artifacts changed by hand before it: sent with it, whole
+    const chip = h("div", "point-chip edit-chip", `you changed ${e.id}`);
+    chip.title = "Changed by hand before this message: the model was sent it as it was then";
+    el.append(chip);
+  }
+  if (m.pointAt) {                                  // what it pointed at in an artifact: the model was told, quoting it
+    const chip = h("div", "point-chip", m.pointAt);
+    chip.title = m.point ?? "";
+    el.append(chip);
   }
   if (m.files?.length) el.append(filesView(m.files));
   if (m.content || !m.files?.length) el.append(heardBubble(m));
@@ -927,7 +1605,7 @@ function roundView(r: Round, m: Message): HTMLElement {
     think.append(summary, thought);
     el.append(think);
   }
-  if (r.content) renderBlocks({ body }, r.content, false);
+  if (r.content) renderBlocks({ body }, r.content, false, { c: conv, holder: r });
   syncCards(calls, r.calls, m, false);
   el.append(body, calls);
   return el;
@@ -1154,7 +1832,7 @@ function paint(v: View, m: Message, live?: Live) {
     v.body.innerHTML = `<p class="waiting">${live.loading ? "" : `${live.note} · ${fmtS(elapsed)}`}</p>`;
     v.shown = v.blocks = undefined;
   } else if (v.shown !== m.content) {
-    renderBlocks(v, m.content, !!live);
+    renderBlocks(v, m.content, !!live, { c: conv, holder: m });
     v.shown = m.content;
   }
   if (live) return;
@@ -1606,7 +2284,9 @@ function wire(m: Message): object[] {
 }
 const toolsOn = (c: Conversation) => !!c.tools && Object.keys(c.tools).length > 0;
 // The system prompt as sent: the user's as written; the default says what is true of the chat (no tools, or these).
-const systemFor = (c: Conversation) => fill((settings.system.trim() === DEFAULT_SYSTEM && toolsOn(c) ? DEFAULT_SYSTEM_TOOLS : settings.system).trim());
+// After it, how to make and change artifacts, unless Settings leaves that out.
+const systemFor = (c: Conversation) => [fill((settings.system.trim() === DEFAULT_SYSTEM && toolsOn(c) ? DEFAULT_SYSTEM_TOOLS : settings.system).trim()),
+  settings.artifacts === false ? "" : ARTIFACTS_PROMPT].filter(Boolean).join("\n\n");
 
 // Server-sent events of a reply, as parsed JSON chunks, then DONE.
 const DONE = Symbol("done");
@@ -1889,7 +2569,7 @@ function schedule(run: Run) {
     if (!v) return;                                // its chat is not on screen
     paint(v, run.m, run.live);
     if (voice?.reply?.m === run.m) paintSpoken(voice, performance.now(), true);   // its text's nodes are new
-    if (run.conv === conv) renderMeter();
+    if (run.conv === conv) { renderMeter(); shelfSoon(); }
     keepUp();
   });
 }
@@ -1948,6 +2628,27 @@ function finish(run: Run) {
   else renderList();
   save(c);
   if (!c.named && !m.error) void name(c);
+  redoEdits(c, m);
+}
+
+// An edit that did not apply in full (a SEARCH not in the artifact, a shape it could not place) is asked for again, once,
+// in a question of the app's own: what went wrong, and the artifact as it is now to copy from. Not in voice mode, where
+// the reply would be spoken, nor after a reply that was stopped or failed, nor for the reply to such a question.
+function redoEdits(c: Conversation, m: Message) {
+  const at = c.messages.indexOf(m);
+  if (m.error || m.stopped || voice?.c === c || at !== c.messages.length - 1 || c.messages[at - 1]?.fix || runs.has(c.id)) return;
+  const all = artifactsOf(c), mine = new Set<object>([m, ...(m.rounds ?? [])]);
+  const failed = [...all.values()].flat().filter((v) => mine.has(v.block.at as object) && v.applied?.some((a) => !a.ok));
+  if (!failed.length) return;
+  const note = failed.map((v) => {
+    const latest = all.get(v.id)!.at(-1)!, misses = v.applied!.filter((a) => !a.ok);
+    return `The edit to ${v.id} did not apply in full: ${misses.length} of its changes did not (${misses.map((a) => a.how).join("; ")}). ` +
+      `${v.id} as it is now:\n\`\`\`${latest.kind} ${v.id}\n${latest.src}\n\`\`\``;
+  }).join("\n\n") + "\n\nWrite those changes again, as an edit block against this. Do not repeat the ones that applied.";
+  const names = [...new Set(failed.map((v) => v.id))].join(", ");
+  c.messages.push({ role: "user", content: `Part of the edit to ${names} did not apply: asked again.`, note, fix: true });
+  save(c);
+  void generate(c);
 }
 
 // Stop: Chrysalis stops and the reply ends with what it has. (Without a job yet, generate() sends this once it has
@@ -1989,7 +2690,7 @@ function submit(text: string) {
   renderPending();
   if (!conv.messages.length) conv.title = (text || files.map((f) => f.name).join(", ")).split("\n")[0].slice(0, 60);
   const note = noteFor(conv, false);
-  conv.messages.push({ role: "user", content: text, ...(files.length ? { files } : {}), ...(note ? { note } : {}) });
+  conv.messages.push({ role: "user", content: text, ...(files.length ? { files } : {}), ...(note ? { note } : {}), ...pointFields(false), ...takeEdits() });
   void generate();
 }
 
@@ -2206,7 +2907,7 @@ function startAhead(v: VoiceMode, text: string, on?: Message): Ahead {
   const c = v.c, known = knownFor(v, text), fixed = applyFixes(text, known?.fixes ?? []), tool = known?.tool ?? false;
   const effort = v.c.effort, mode: Mode = effort === "off" ? "fast" : "think";
   const note = on ? undefined : noteFor(c, true);
-  const q: Message = on ?? { role: "user", content: fixed.text, voice: true, ...(note ? { note } : {}) };
+  const q: Message = on ?? { role: "user", content: fixed.text, voice: true, ...(note ? { note } : {}), ...pointFields(true), ...takeEdits() };
   const sent = { ...q, content: fixed.text }, upto = on ? c.messages.map((x) => (x === on ? sent : x)) : [...c.messages, sent];
   const m: Message = { id: randomId(), role: "assistant", content: "", reasoning: "", effort, params: changed(mode) || undefined };
   const run: Run = { conv: c, m, live: { phase: "waiting", since: performance.now(), note: "Reading the prompt" }, at: 0, stopping: false, frame: 0, saved: 0 };
@@ -2328,7 +3029,7 @@ async function voiceTurn(v: VoiceMode, text: string) {
 // reply does.
 async function answerLater(v: VoiceMode, text: string, on?: Message) {
   const c = v.c, note = on ? undefined : noteFor(c, true);
-  const said: Message = on ?? { role: "user", content: text, voice: true, ...(note ? { note } : {}) };
+  const said: Message = on ?? { role: "user", content: text, voice: true, ...(note ? { note } : {}), ...pointFields(true), ...takeEdits() };
   if (!on) {
     if (!c.messages.length) c.title = text.slice(0, 60);
     c.messages.push(said);
@@ -2763,8 +3464,11 @@ async function filesReady(msgs: Message[]) {
 
 // A user message as the backend gets it: its files (pictures as images, PDFs as files, videos as videos, texts as fenced
 // blocks; to a backend that is not Chrysalis a PDF or video is a line saying it was left out), then the text typed.
+// Artifacts the user changed by hand before a question, whole as they left them: the model's next edits start from them
+const editsNote = (m: Message) => !m.edits?.length ? undefined : `The user changed ${m.edits.map((e) => e.id).join(", ")} by hand since your ` +
+  `last reply. As ${m.edits.length > 1 ? "they are" : "it is"} now:\n\n` + m.edits.map((e) => `\`\`\`${e.kind} ${e.id}\n${e.src}\n\`\`\``).join("\n\n");
 function userContent(m: Message): string | object[] {
-  const said = noted(m.note, m.content);
+  const note = [m.note, editsNote(m), m.point].filter(Boolean).join("\n\n") || undefined, said = noted(note, m.content);
   if (!m.files?.length) return said;
   const parts: object[] = m.files.map((a) => {
     const body = bodies.get(a.id) ?? "";
@@ -2775,7 +3479,7 @@ function userContent(m: Message): string | object[] {
     if (a.kind === "video") return { type: "video_url", video_url: { url: body } };
     return { type: "text", text: `${textBlock(a.name, body)}\n\n` };
   });
-  if (m.note) parts.unshift({ type: "text", text: noted(m.note, "") });
+  if (note) parts.unshift({ type: "text", text: noted(note, "") });
   if (m.content) parts.push({ type: "text", text: m.content });
   return parts;
 }
@@ -2980,6 +3684,8 @@ thread.addEventListener("click", (e) => {
   const tok = t.closest<HTMLElement>(".tok");
   if (tok) return void openTokPop(tok);
   if (code) return void copy(code.closest(".code")?.querySelector("code")?.textContent ?? "", code);
+  const art = t.closest<HTMLElement>("[data-art]:is(button)");
+  if (art) return void artAction(art);
   const svg = t.closest<HTMLElement>("[data-svg]");
   if (svg) return void svgAction(svg);
   const page = t.closest<HTMLElement>("[data-page]");
@@ -4321,6 +5027,7 @@ function syncSettings() {
     : `This chat (${toolsOn(conv) ? "tools on" : "no tools"}) is sent no system prompt.`;
   renderToolSettings();
   $("mode-note").textContent = shownMode() === "think" ? "with thinking" : "thinking off";
+  $("artifacts-switch").setAttribute("aria-checked", String(settings.artifacts !== false));
   $("settings").classList.toggle("other-backend", !onChrysalis());   // Chrysalis's sampler order and its odds charts
   $("order-reset").classList.toggle("on", !!settings[shownMode()].order);
   placeStages();
@@ -4349,6 +5056,44 @@ $("voice-mute").addEventListener("click", () => {
 });
 $("voice-dots").addEventListener("click", () => { if (voice?.reply || voice?.client.playing) cutVoice(true); });
 $("voice-pick").addEventListener("click", () => setVoicePop(!voicePop));
+// the shelf: its button in the top bar, its own buttons, moved by its head (where it is left is kept), sized by its corner
+$("artifacts-switch").addEventListener("click", () => {
+  if (settings.artifacts === false) delete settings.artifacts;
+  else settings.artifacts = false;
+  saveSettings();
+});
+$("artifacts").addEventListener("click", () => { if (shelf.open) { shelf.open = false; renderShelf(); } else openShelf(); });
+$("shelf-close").innerHTML = icon("x");
+$("shelf-close").addEventListener("click", () => { shelf.open = false; renderShelf(); });
+$("shelf-compare").addEventListener("click", () => { shelf.compare = !shelf.compare; shelf.other = undefined; renderShelf(); });
+$("shelf").addEventListener("click", (e) => {
+  const t = e.target as HTMLElement, act = t.closest<HTMLElement>("[data-shelf]"), step = t.closest<HTMLElement>("[data-step]");
+  if (act) return shelfAction(act);
+  if (!step) return;
+  const side = step.closest<HTMLElement>(".shelf-side")!, all = artifactsOf(conv), id = side.dataset.art!, v = Number(side.dataset.v) + Number(step.dataset.step);
+  const at = { id, v: v >= (all.get(id)?.length ?? 0) && side.dataset.which === "main" ? undefined : v };
+  if (side.dataset.which === "main") shelf.main = at; else shelf.other = at;
+  renderShelf();
+});
+$("shelf").addEventListener("keydown", (e) => { if (e.key === "Escape") { shelf.open = false; renderShelf(); $("artifacts").focus(); } });
+$("shelf-head").addEventListener("pointerdown", (e) => {
+  if ((e.target as Element).closest("button") || e.button !== 0) return;
+  const el = $("shelf"), r = el.getBoundingClientRect(), dx = e.clientX - r.left, dy = e.clientY - r.top, head = e.currentTarget as HTMLElement;
+  head.setPointerCapture(e.pointerId);
+  el.classList.add("moving");
+  const move = (ev: PointerEvent) => placeShelf({ x: ev.clientX - dx, y: ev.clientY - dy, w: r.width, h: r.height });
+  const up = () => {
+    el.classList.remove("moving");
+    head.removeEventListener("pointermove", move);
+    keepShelfPlace();
+  };
+  head.addEventListener("pointermove", move);
+  head.addEventListener("pointerup", up, { once: true });
+  head.addEventListener("pointercancel", up, { once: true });
+});
+new ResizeObserver(() => { if (!$("shelf").hidden && !$("shelf").classList.contains("moving")) keepShelfPlace(); }).observe($("shelf"));
+addEventListener("resize", () => { placeShelf(); glow(); });
+placeShelf();
 buildControls();
 buildTools();
 // a page starts by showing it trusts Chrysalis, so that its first requests find the gate open

@@ -6,16 +6,20 @@
 // socket goes to a speech service (fake-voice.ts) the server starts with the first socket and stops once idle. Nothing
 // here reaches the real Chrysalis or systemd.
 import { afterAll, beforeAll, expect, test } from "bun:test";
-import { mkdtempSync, readFileSync, writeFileSync } from "node:fs";
+import { mkdtempSync, rmSync, readFileSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { WebStandardStreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/webStandardStreamableHttp.js";
 import { fakeMcp } from "./fake-mcp";
 import { lanAddresses } from "./tls";
 
+// Everything a run writes (certificates, logs, browser profiles), in one folder of its own that goes when the run ends:
+// /tmp can be memory, and a run's browser profiles alone are hundreds of MB.
+const RUN = mkdtempSync(`${tmpdir()}/chrysalis-test-`);
+
 // Each server here is HTTPS with an authority of its own, made in a folder of each run's (TLS): what checks
 // certificates is openssl here and the browsers in browser.test.ts, not these requests
 process.env.NODE_TLS_REJECT_UNAUTHORIZED = "0";
-const TLS = () => mkdtempSync(`${tmpdir()}/chrysalis-tls-`);
+const TLS = () => mkdtempSync(`${RUN}/tls-`);
 
 const CHUNKS = 12, GAP_MS = 20;
 let chrysalisAborted = 0;
@@ -102,7 +106,7 @@ const mcpHttp = Bun.serve({
   },
 });
 
-const dir = mkdtempSync(`${tmpdir()}/chrysalis-tools-`), CONFIG = `${dir}/mcp.json`, LOG = `${dir}/mcp.log`;
+const dir = mkdtempSync(`${RUN}/tools-`), CONFIG = `${dir}/mcp.json`, LOG = `${dir}/mcp.log`;
 const stdio = (timeout?: number) => ({ command: process.execPath, args: ["fake-mcp.ts"], cwd: import.meta.dir, env: { FAKE_MCP_LOG: LOG }, ...(timeout ? { timeout } : {}) });
 const config = (fetch: object = {}) => writeFileSync(CONFIG, JSON.stringify({
   mcpServers: { fake: stdio(3), "a.b": stdio(), a_b: stdio(), web: { url: `http://127.0.0.1:${mcpHttp.port}/mcp` },
@@ -130,7 +134,7 @@ beforeAll(async () => {
   base = out.match(/chrysalis web: (\S+)/)![1].replace(/\/$/, "");
   port = new URL(base).port;
 });
-afterAll(() => { web.kill(); fake.stop(true); site.stop(true); inner.stop(true); mcpHttp.stop(true); });
+afterAll(() => { web.kill(); fake.stop(true); site.stop(true); inner.stop(true); mcpHttp.stop(true); rmSync(RUN, { recursive: true, force: true }); });
 
 async function* events(res: Response) {   // a job's events as [position, data]
   const reader = res.body!.getReader(), dec = new TextDecoder();
@@ -537,7 +541,7 @@ const outcome = (s: WebSocket) => new Promise<string>((res) => { s.onopen = () =
 const until = async (ok: () => boolean, ms = 5000) => { for (const t = Date.now(); !ok() && Date.now() - t < ms; ) await Bun.sleep(25); return ok(); };
 
 test("voice: only this server's own pages get a socket; it starts the service, passes both sides' frames through as they are, and stops the service once idle", async () => {
-  const log = `${mkdtempSync(`${tmpdir()}/chrysalis-voice-`)}/voice.log`, events = () => {
+  const log = `${mkdtempSync(`${RUN}/voice-`)}/voice.log`, events = () => {
     try { return readFileSync(log, "utf8").trim().split("\n").filter(Boolean).map((l) => JSON.parse(l)); } catch { return []; }
   };
   const v = await voiceServer({ CHRYSALIS_VOICE_CMD: JSON.stringify([process.execPath, `${import.meta.dir}/fake-voice.ts`]), FAKE_VOICE_LOG: log, CHRYSALIS_VOICE_IDLE_MS: "300" });

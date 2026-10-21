@@ -25,6 +25,7 @@ const SCRIPTS: Record<string, Line[]> = {
   silent: [],
   pick: [{ text: "first" }, { text: "second", after: "config" }],
   notes: [{ text: "first question" }, { text: "second question" }, { text: "third question", after: "config" }],
+  point: [{ text: "make this orange" }],
 };
 const voice = (id: string, lang: string, gender: string) => ({ id, label: id[0].toUpperCase() + id.slice(1), lang, gender });
 const CATALOG = {

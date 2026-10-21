@@ -6,10 +6,14 @@
 // and the key never shown to a page. The page itself, in headless Chromium, connects to llama.cpp and chats with it.
 // `make test_backends`; a backend that is not installed fails its tests.
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
-import { existsSync, mkdtempSync, readFileSync, statSync, writeFileSync } from "node:fs";
+import { existsSync, mkdtempSync, rmSync, readFileSync, statSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { deflateSync } from "node:zlib";
 import puppeteer from "puppeteer-core";
+
+// Everything a run writes (certificates, logs, browser profiles), in one folder of its own that goes when the run ends:
+// /tmp can be memory, and a run's browser profiles alone are hundreds of MB.
+const RUN = mkdtempSync(`${tmpdir()}/chrysalis-test-`);
 
 process.env.NODE_TLS_REJECT_UNAUTHORIZED = "0";          // the web server's own authority, made for this run
 const DATA = `${import.meta.dir}/../data`, B = `${DATA}/backends`, GGUF = `${B}/models/qwen3.5-2b-gguf`, KEY = "chrysalis-test-key";
@@ -63,7 +67,7 @@ const RED = (() => {
   return `data:image/png;base64,${Buffer.concat([Buffer.from([137, 80, 78, 71, 13, 10, 26, 10]), chunk("IHDR", ihdr), chunk("IDAT", deflateSync(raw)), chunk("IEND", new Uint8Array())]).toString("base64")}`;
 })();
 
-const dir = mkdtempSync(`${tmpdir()}/chrysalis-backends-`), tls = mkdtempSync(`${tmpdir()}/chrysalis-tls-`);
+const dir = mkdtempSync(`${RUN}/backends-`), tls = mkdtempSync(`${RUN}/tls-`);
 writeFileSync(`${dir}/mcp.json`, JSON.stringify({ mcpServers: { fake: { command: process.execPath, args: ["fake-mcp.ts"], cwd: import.meta.dir } } }));
 const json = { "Content-Type": "application/json" };
 let web: Bun.Subprocess<"ignore", "pipe", "inherit">, base = "", check = "";
@@ -84,7 +88,7 @@ beforeAll(async () => {
   base = out.match(/chrysalis web: (\S+)/)![1].replace(/\/$/, "");
   check = out.match(/chrysalis check: (\S+)/)![1].replace(/\/$/, "");
 });
-afterAll(() => web?.kill());
+afterAll(() => { web?.kill(); rmSync(RUN, { recursive: true, force: true }); });
 
 const connect = (url: string, key?: string) => fetch(`${base}/api/backend`, { method: "POST", headers: json, body: JSON.stringify({ url, ...(key ? { key } : {}) }) });
 // A streamed reply as the page asks for one (its job's events), gathered: thinking, answer, tool events, rounds, usage

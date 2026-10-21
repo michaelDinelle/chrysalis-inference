@@ -181,7 +181,30 @@ KaTeX; a `$` opens math only before a non-space and closes it only after one, no
 so prices and shell variables stay text. A ```html block holding a whole document runs as a page once it is written (a
 fragment when its Preview is clicked), in an iframe on `/sandbox` behind two walls, each enough alone: the iframe's
 sandbox (an opaque origin: no cookies, storage or chat) and that route's policy, which lets the page's own code run but
-nothing load or connect anywhere, Chrysalis included. Tools: the wrench beside the thinking bar (with how many tools are
+nothing load or connect anywhere, Chrysalis included. Artifacts (`web/artifacts.ts`): after the system prompt (unless
+Settings leaves it out) the model is asked to name what it makes, ```` ```svg panda ````, with an id for each part, and to
+change it in place with an edit block, ```` ```edit panda ````, holding only what changes: a whole element by its id
+(a new one is added on top, or for a background in place of the old one), a search and replace, or a shape without an
+id, which replaces the one at its place; ```` ```edit panda-night from panda ```` makes a changed copy. It is plain text
+in the reply, so any backend's model can write it. An artifact has one canvas in the chat, in the reply that changed it
+last: an edit moves it there, the same figure, and paints into the picture as it stood, each change landing as it
+arrives, while the reply it left keeps a line naming the version made there. The canvas's caption names its version
+(`panda · v2 · 2 changes`) and steps through the versions in place (‹ ›, redrawing only what differs); an edit's own
+text is a click away (Changes). Measured with Qwen3.8-Flash-Next: a panda drawn in 1,987 tokens, its coat made red in 325, a copy under
+a starry sky in 956, a cat's eyes made green beside another picture in 272. An edit that does not apply in full is
+asked for again, once, with the artifact as it is now. The shelf (the shapes button in the top bar, or Open on an
+artifact) is a card floating over the chat, moved by its head and sized by its corner, and kept where it is left: the
+chat's artifacts as tabs, the one picked large with its versions, and with Compare the version before beside it (or
+the original of a copy), each side stepped through its versions; it follows an artifact being drawn. Over a picture the
+part under the pointer glows; a click selects it, kept in the message box, and the next question tells the model that
+part, quoting it as it is now. In voice mode the part under the pointer as a question is said goes with it ("make this
+orange"). What can be done by hand needs no model: the canvas's tools (over the picture, on the shelf too) drag the
+part selected to move it, a corner to resize it, bring it forward or send it backward a step, duplicate or delete it
+(the arrow keys nudge it; Ctrl+Z, Ctrl+D, Delete), and the paint bucket fills whatever shape is clicked with its
+color. Each change is the source edited where that element is, the rest left byte for byte, and is kept at once as the
+artifact's next version, the user's own (Undo steps back through it); stepped back to an older version, the canvas
+offers Use this version. The next question carries the artifact whole as the user left it, which the model's next
+edit starts from. Tools: the wrench beside the thinking bar (with how many tools are
 on) opens them for this chat: Fetch URL and Sub-agents, then each MCP server with its state (not started, starting, running, failed
 with the error and Retry, disabled), a switch for the whole server, and under its arrow one per tool, marked read-only
 or asks first. The choice is the chat's, kept with it (export too); a new chat starts from the last one. A server starts
