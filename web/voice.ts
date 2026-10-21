@@ -266,3 +266,65 @@ export class VoiceClient {
     this.on.playing?.(on);
   }
 }
+
+// The voices there are and a voice's sample, apart from voice mode (a character's voice picker): a socket of its own
+// with no microphone, for which the service loads only the voice model a sample needs. It closes when the picker does.
+export class VoiceSampler {
+  private ws?: WebSocket;
+  private out?: AudioContext;
+  private sound?: AudioBufferSourceNode;
+  private listed: ((c: VoiceReady["catalog"] | null) => void)[] = [];
+  previewed = false;                                // a sample was asked for
+  constructor(private failed: (message: string) => void) {}
+
+  catalog(): Promise<VoiceReady["catalog"] | null> {
+    return new Promise((done) => { this.listed.push(done); this.send({ type: "catalog" }); });
+  }
+  // in the click that asked: where audio starts only from a click (Safari), a context made later starts suspended
+  preview(tts: string, voice: string) {
+    this.previewed = true;
+    this.out ??= new AudioContext({ latencyHint: "interactive" });
+    void this.out.resume();
+    this.hush();
+    this.send({ type: "preview", tts, voice });
+  }
+  close() {
+    this.hush();
+    this.ws?.close();
+    void this.out?.close().catch(() => {});
+    this.ws = this.out = undefined;
+    for (const done of this.listed.splice(0)) done(null);
+  }
+
+  private send(o: object) {
+    if (!this.ws || this.ws.readyState > WebSocket.OPEN) {
+      const ws = (this.ws = new WebSocket(`${location.protocol === "https:" ? "wss" : "ws"}://${location.host}/api/voice`));
+      ws.binaryType = "arraybuffer";
+      ws.onmessage = (e) => {
+        if (typeof e.data !== "string") return this.play(e.data);
+        const m = JSON.parse(e.data);
+        if (m.type === "catalog") for (const done of this.listed.splice(0)) done(m.catalog ?? {});
+        else if (m.type === "error") this.failed(m.message);
+      };
+      ws.onclose = () => { if (this.ws === ws) for (const done of this.listed.splice(0)) done(null); };
+    }
+    const ws = this.ws, text = JSON.stringify(o);
+    if (ws.readyState === WebSocket.OPEN) ws.send(text);
+    else ws.addEventListener("open", () => ws.send(text), { once: true });
+  }
+  private play(buf: ArrayBuffer) {
+    const n = new DataView(buf).getUint32(0, true), h: Chunk = JSON.parse(new TextDecoder().decode(new Uint8Array(buf, 4, n)));
+    if (!this.out || h.id !== PREVIEW) return;
+    const pcm = new Int16Array(buf.slice(4 + n)), ab = this.out.createBuffer(1, Math.max(1, pcm.length), h.rate), ch = ab.getChannelData(0);
+    for (let i = 0; i < pcm.length; i++) ch[i] = pcm[i] / 32768;
+    this.hush();
+    const src = (this.sound = this.out.createBufferSource());
+    src.buffer = ab;
+    src.connect(this.out.destination);
+    src.start();
+  }
+  private hush() {
+    try { this.sound?.stop(); } catch { /* not started */ }
+    this.sound = undefined;
+  }
+}

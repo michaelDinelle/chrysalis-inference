@@ -316,6 +316,10 @@ PREVIEW = {"en": "Hi, I'm {}. This is how I sound.", "es": "Hola, soy {}. Así s
            "zh": "你好，这是我的声音。"}
 
 
+def rss_mb():
+    return int(next(l for l in open("/proc/self/status") if l.startswith("VmRSS")).split()[1]) // 1024
+
+
 class Talk:
     """A session: protocol messages in, events and audio out, through `send` (a dict or bytes, in order). Its parts come
     from the library by the names the page asks for (hello, config; DEFAULTS for what hello leaves out), and a switch
@@ -324,6 +328,7 @@ class Talk:
     def __init__(self, lib, send, listen_pool, speak_pool):
         self.lib, self.send, self.lp, self.sp = lib, send, listen_pool, speak_pool
         self.names, self.parts, self.voice, self.speed, self.preview = {}, {}, None, 1.0, 0
+        self.sampler = None                         # (name, part): a voice model loaded for samples alone
         self.playing, self.echo_until, self.awaiting, self.muted = False, 0.0, False, False
         self.terms = ""                             # the conversation's, for the next turn's speech recognition
         self.opened, self.heard_any = time.monotonic(), False
@@ -401,7 +406,9 @@ class Talk:
             self.muted = bool(m.get("on"))
             self.audio.put_nowait(None)
         elif t == "preview":
-            await self.sample(str(m.get("voice", self.voice)), m.get("text"))
+            await self.sample(str(m.get("voice", self.voice)), m.get("text"), m.get("tts"))
+        elif t == "catalog":
+            await self.send({"type": "catalog", "catalog": self.lib.catalog()})
         else:
             await self.send({"type": "error", "message": f"unknown message type {t!r}"})
 
@@ -412,6 +419,8 @@ class Talk:
         loop, t0 = asyncio.get_running_loop(), time.monotonic()
         todo = {k: n for k, n in want.items() if self.names.get(k) != n}
         got = await asyncio.gather(*(loop.run_in_executor(None, self.lib.get, k, n) for k, n in todo.items()), return_exceptions=True)
+        if loaded := [n for n, p in zip(todo.values(), got) if not isinstance(p, Exception)]:
+            print(f"voice: {', '.join(loaded)} in {(time.monotonic() - t0) * 1000:.0f} ms, {rss_mb()} MB", file=sys.stderr, flush=True)
         for (kind, name), part in zip(todo.items(), got):
             if isinstance(part, Exception):           # the session keeps the part it had
                 msg = str(part) if isinstance(part, Missing) else f"{kind} {name} did not load: {part}"
@@ -433,13 +442,16 @@ class Talk:
                          "voices": tts.voice_list if tts else [], "voice": self.voice, "speed": self.speed,
                          "sample_rate": tts.rate if tts else None, "load_ms": round((time.monotonic() - t0) * 1000)})
 
-    async def sample(self, voice, text):
+    async def sample(self, voice, text, name=None):
         """A voice's sample, apart from the conversation: its turn and its reply carry on as they were. A newer
-        preview (or a cancel) replaces one still being made."""
-        tts = self.parts.get("tts")
+        preview (or a cancel) replaces one still being made. A voice of another model than the session speaks with,
+        or in a session that only samples (a character's voice picker, with no hello), has its model loaded for
+        samples alone: a sample needs no speech recognition."""
+        name = name or self.names.get("tts") or DEFAULTS["tts"]
+        tts = self.parts.get("tts") if name == self.names.get("tts") else await self.sampling(name)
         v = next((x for x in (tts.voice_list if tts else []) if x["id"] == voice), None)
         if not v:
-            return await self.send({"type": "error", "message": f"{self.names.get('tts')} has no voice {voice!r}"})
+            return tts and await self.send({"type": "error", "message": f"{name} has no voice {voice!r}"})
         text = str(text or PREVIEW.get((v["lang"] or "en")[:2], PREVIEW["en"]).format(v["label"]))
         self.preview += 1
         mine = self.preview
@@ -447,6 +459,18 @@ class Talk:
         if mine == self.preview:
             await self.send(self.piece("preview", 0, speakable(text), 0, len(text), audio, tts.rate))
             await self.send({"type": "said", "id": "preview"})
+
+    async def sampling(self, name):
+        if self.sampler and self.sampler[0] == name:
+            return self.sampler[1]
+        try:
+            part = await asyncio.get_running_loop().run_in_executor(None, self.lib.get, "tts", name)
+        except Exception as e:
+            return await self.send({"type": "error", "message": str(e) if isinstance(e, Missing) else f"tts {name} did not load: {e}"})
+        if self.sampler:
+            self.lib.release("tts", self.sampler[0])
+        self.sampler = name, part
+        return part
 
     @staticmethod
     def piece(id, seq, text, frm, to, audio, rate):
@@ -506,5 +530,5 @@ class Talk:
         self.listen_task.cancel()
         if self.reply and self.reply.task:
             self.reply.task.cancel()
-        for kind, name in self.names.items():
+        for kind, name in [*self.names.items(), *([("tts", self.sampler[0])] if self.sampler else [])]:
             self.lib.release(kind, name)

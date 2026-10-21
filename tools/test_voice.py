@@ -139,11 +139,29 @@ def kind(m):
     return "audio" if isinstance(m, tuple) else m["type"]
 
 
+# A character's voice picker: a session of its own with no hello and no microphone. The voices there are, and a voice's
+# sample, which needs that voice's model alone: speech recognition and the rest load with voice mode's hello
+rss = lambda: int(next(l for l in open(f"/proc/{svc.pid}/status") if l.startswith("VmRSS")).split()[1]) // 1024
+voice_mode, ws = ws, connect(url, compression=None, max_size=None)
+ws.send(json.dumps({"type": "catalog"}))
+listed = events(lambda m: kind(m) in ("catalog", "error"), 30)[-1]
+check("the voices, before any hello", any(v["id"] == "bf_emma" for e in listed.get("catalog", {}).get("tts", []) for v in e.get("voices", [])),
+      str(listed)[:120])
+ws.send(json.dumps({"type": "preview", "tts": "kokoro", "voice": "bf_emma"}))
+got = events(lambda m: kind(m) in ("said", "error"), 60)
+sample = [m for m in got if kind(m) == "audio"]
+heard = hear(np.concatenate([to16k(m[1], m[0]["rate"]) for m in sample])) if sample else ""
+check("and a voice's sample, as audio of its own", sample and sample[0][0]["id"] == "preview" and got[-1] == {"type": "said", "id": "preview"}
+      and wer("Hi, I'm Emma. This is how I sound.", heard) <= 0.2, repr(heard))
+sampled = rss()
+ws.close()
+ws = voice_mode
 ws.send(json.dumps({"type": "hello"}))
 ready = events(lambda m: kind(m) in ("ready", "error"), 120)[-1]
 heart = next((v for v in ready.get("voices", []) if v["id"] == "af_heart"), None)
 check("hello: ready with the default stack", ready.get("stack") == {"vad": "silero", "stt": "parakeet-110m", "turn": "smart-turn", "tts": "kokoro"}
       and ready.get("voice") == "af_heart" and ready.get("sample_rate") == 24000, f"{ready.get('stack')}, {ready.get('load_ms')} ms")
+check("a sample loaded no more than its voice model", rss() - sampled > 150, f"{sampled} MB after the sample, {rss()} MB with the hello's")
 check("its catalog: every part, installed or not, with voices", heart == {"id": "af_heart", "label": "Heart", "lang": "en-US", "gender": "female"}
       and {e["name"]: e["installed"] for e in ready.get("catalog", {}).get("tts", [])}.get("kokoro") is True
       and [e["name"] for e in ready.get("catalog", {}).get("stt", [])] == ["parakeet-110m"], str(heart))

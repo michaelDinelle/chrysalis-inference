@@ -66,6 +66,7 @@ const GATE = '```html id="gate"\n<!doctype html>\n<html><head><title>Gate</title
 const REPLIES: Record<string, string> = {
   "good morning mirela": "*She smiles.* Good morning.",
   "a toast for the hive": "Mirela: *She raises a cup.* To the bees.\nTomas: To the bees!",
+  "the same speaker": "Mirela: One.\nMirela: Two.\n\n*She hums.*\nTomas: Three.",
   "hall on its line": HALL,
   "gate as an attribute": GATE,
   "rename the sign": '```edit hall\n<h1 id="sign">Goodbye</h1>\n```\n\nRenamed.',
@@ -163,9 +164,11 @@ const fake = Bun.serve({
     const round = body.messages.slice(at).filter((m: any) => m.role === "assistant" && m !== prefix).length, ask = TOOL_ASKS[said];
     const agents = said === "agents" && round === 0 && body.tools?.some((t: any) => t.function.name === "subagent");
     const calls = agents ? AGENT_TASKS.map((a) => ({ name: "subagent", args: JSON.stringify(a) })) : ask && body.tools && round === 0 ? [ask] : [];
-    // the hand-off is thought through, not said: the reply's last word before the calls is its thinking
-    const think = agents ? "Two separate tasks: each goes to a sub-agent." : "";
-    const text = agents ? "" : calls.length ? "Let me check." : ask ? `The tool said: ${body.messages.at(-1).content}` : said === "agents"
+    // the hand-off is thought through, not said: the reply's last word before the calls is its thinking. A reply asked
+    // of one of a group ("[Name next.]") is theirs, thought through first.
+    const next = /\[(.+) next\.\]$/.exec(said)?.[1];
+    const think = agents ? "Two separate tasks: each goes to a sub-agent." : next ? `${next} has the floor.` : "";
+    const text = agents ? "" : next ? `${next}: I go on.` : calls.length ? "Let me check." : ask ? `The tool said: ${body.messages.at(-1).content}` : said === "agents"
       ? `The sub-agents said: ${body.messages.slice(at).filter((m: any) => m.role === "tool").map((m: any) => m.content).join(" | ")}` : said.startsWith("slow")
       ? Array.from({ length: 40 }, (_, k) => `w${k} `).join("") : Object.entries(REPLIES).find(([k]) => said.includes(k))?.[1] ?? `You said: ${said}`;
     const step = said.startsWith("slow") ? 4 : 9, gap = said.startsWith("slow") ? 60 : said.startsWith("steady") ? 25 : 5;
@@ -173,8 +176,12 @@ const fake = Bun.serve({
     return new Response(new ReadableStream({
       async pull(ctl) {
         await Bun.sleep(gap);
-        // a continued reply restates itself first, as Chrysalis does, and the prompt's length comes once it is read
-        if (!restated) { restated = true; return ctl.enqueue(enc.encode(`data: ${JSON.stringify({ choices: [{ delta: { chrysalis_prefix: { content: prefix.content } } }] })}\n\n`)); }
+        // a continued reply restates itself first, as Chrysalis does (a reply with no thinking has a line break for
+        // it), and the prompt's length comes once it is read
+        if (!restated) {
+          restated = true;
+          return ctl.enqueue(enc.encode(`data: ${JSON.stringify({ choices: [{ delta: { chrysalis_prefix: { reasoning_content: prefix.reasoning_content || "\n", content: prefix.content } } }] })}\n\n`));
+        }
         if (!read) { read = true; return ctl.enqueue(enc.encode(`data: ${JSON.stringify({ choices: [{ delta: {} }], chrysalis_prompt: { prompt_tokens: 10, cached_tokens: 0 } })}\n\n`)); }
         if (j < think.length) { ctl.enqueue(enc.encode(`data: ${JSON.stringify({ choices: [{ delta: { reasoning_content: think.slice(j, j + step) } }] })}\n\n`)); j += step; return; }
         if (i < text.length) { ctl.enqueue(enc.encode(`data: ${JSON.stringify({ choices: [{ delta: { content: text.slice(i, i + step) } }] })}\n\n`)); i += step; return; }
@@ -441,59 +448,107 @@ test("pages labelled as models also label them, the id alone on the block's firs
   await page.close();
 }, 30_000);
 
-test("a character card dropped in joins the cast: a portrait on the rail and a folder of chats that opens with its greeting (its others as versions), replies as the character with its face, its card as the system prompt and the persona as {{user}}; a group's reply is the scene, each line its speaker's, a face has the next reply begin as them, and the cast stays after a reload", async () => {
+// A character card as a PNG (the tests' picture), the names of the cast's rows among the chats, and a row opened
+const card = (name: string, data: object) => cardPng({ spec: "chara_card_v3", spec_version: "3.0", data: { name, ...data } }, new Blob([png], { type: "image/png" }));
+const castRows = (page: Page) => page.$$eval("#conversations .cast-row .cast-name", (r) => r.map((x) => x.textContent!).sort());
+const openRow = (page: Page, name: string) => page.evaluate((name) => [...document.querySelectorAll("#conversations .cast-row")]
+  .find((r) => r.querySelector(".cast-name")!.textContent === name)!.querySelector<HTMLElement>(".cast-main")!.click(), name);
+
+test("a character card dropped in joins the cast: a row with their portrait among the chats, a chat that opens with their greeting (the others as versions), their replies with their portrait beside them, which opens their card to read and edit; the card is the system prompt and the persona {{user}}; a continued reply shows no thinking it did not have", async () => {
   const page = await open();
-  const card = (name: string, data: object) => cardPng({ spec: "chara_card_v3", spec_version: "3.0", data: { name, ...data } }, new Blob([png], { type: "image/png" }));
   await Bun.write(`${dir}/Mirela.png`, await card("Mirela", { description: "{{char}} keeps bees for {{user}}.", personality: "calm", scenario: "A hillside.",
     first_mes: "Hello, {{user}}.", alternate_greetings: ["Oh, {{user}}. You again."], mes_example: "<START>\n{{user}}: Why bees?\n{{char}}: They listen.",
     post_history_instructions: "Stay in character." }));
-  await Bun.write(`${dir}/Tomas.png`, await card("Tomas", { description: "{{char}} sells honey.", first_mes: "Honey?" }));
-  writeFileSync(`${dir}/Hive.json`, JSON.stringify({ spec: "chrysalis_group", name: "Hive", members: ["Mirela", "Tomas"], scenario: "Market day." }));
   await (await page.$("input#attach-file"))!.uploadFile(`${dir}/Mirela.png`);          // where any file goes: a card joins the cast
-  await page.waitForSelector('#cast .cast-item[title="Mirela"] img');
-  expect(await page.$$("#attachments .att")).toHaveLength(0);
-  expect([await page.$eval("#folder-head .fh-name", (e) => e.textContent), await page.$eval("#input", (e) => (e as HTMLTextAreaElement).placeholder)]).toEqual(["Mirela", "Message Mirela"]);
+  await page.waitForSelector("#conversations .cast-row img.face");
+  expect([await castRows(page), (await page.$$("#attachments .att")).length]).toEqual([["Mirela"], 0]);
+  expect(await page.$eval("#input", (e) => (e as HTMLTextAreaElement).placeholder)).toBe("Message Mirela");
   expect(await articles(page)).toEqual(["Hello, User."]);
   expect([await pagerOf(page, 0), await page.$eval("#thread .msg.assistant .speaker", (e) => e.textContent)]).toEqual(["1 / 2", "Mirela"]);
+  // her portrait beside the reply opens her card, its fields edited where they are read
+  await page.click("#thread .msg.assistant .speaker .face");
+  await page.waitForSelector("#cast-sheet:not([hidden]) .card-text");
+  const fields = () => page.$$eval("#cast-sheet .card-field", (f) => f.map((x) => [x.querySelector(".card-label")!.textContent, (x.querySelector("textarea") as HTMLTextAreaElement).value]));
+  expect((await fields()).slice(0, 4)).toEqual([["Description", "{{char}} keeps bees for {{user}}."], ["Personality", "calm"], ["Scenario", "A hillside."], ["Greeting", "Hello, {{user}}."]]);
+  await page.click("#cast-sheet .card-field:nth-of-type(2) textarea");
+  await page.keyboard.press("End");
+  await page.keyboard.type(" and kind");
+  await page.keyboard.press("Escape");
 
   // the persona: {{user}} from here on
-  await page.click('#cast .cast-item[title^="You"]');
+  await page.click("#you");
   await page.waitForSelector("#cast-sheet:not([hidden]) input.card-name");
   await page.type("#cast-sheet input.card-name", "Robin");
   await page.keyboard.press("Escape");
   await send(page, "good morning mirela");
   const one = lastStream.messages;
-  expect(one[0].content).toBe("Write Mirela's next reply in a fictional chat between Mirela and Robin.\n\nMirela keeps bees for Robin.\n\nMirela's personality: calm" +
+  expect(one[0].content).toBe("Write Mirela's next reply in a fictional chat between Mirela and Robin.\n\nMirela keeps bees for Robin.\n\nMirela's personality: calm and kind" +
     "\n\nScenario: A hillside.\n\nHow Mirela talks:\nRobin: Why bees?\nMirela: They listen.");
   expect(one.slice(1)).toEqual([{ role: "user", content: "[The scene begins.]" }, { role: "assistant", content: "Hello, User." },
     { role: "user", content: "good morning mirela\n\n[Stay in character.]" }]);
   expect(await page.$$eval("#thread .msg.assistant .speaker", (s) => s.map((x) => x.textContent))).toEqual(["Mirela", "Mirela"]);
+  // written on: Chrysalis restates a reply that did not think with a line break for its thinking, which is not shown
+  await page.$eval('#thread > article[data-i="2"] [data-act="cont"]', (b) => (b as HTMLElement).click());
+  await page.waitForFunction(() => /Good morning\..*Good morning\./.test(document.querySelector('#thread > article[data-i="2"] .markdown')?.textContent ?? ""));
+  await untilIdle(page);
+  expect([lastStream.continue_final_message, await page.$eval('#thread > article[data-i="2"] .thinking', (t) => (t as HTMLElement).hidden)]).toEqual([true, true]);
+  await page.close();
+}, 40_000);
 
-  // a group: the scene in one reply, each line its speaker's; a face has the next reply begin as them
-  await (await page.$("input#cast-file"))!.uploadFile(`${dir}/Tomas.png`, `${dir}/Hive.json`);
-  await page.waitForSelector('#cast .cast-item[title="Hive"]');
-  await page.click('#cast .cast-item[title="Hive"]');
+test("a group's replies are the scene, each paragraph its speaker's and one going on under the same face; a face has the next reply be theirs, thought through first; let them talk takes turns; cards dropped on a chat join it once (a chat with one character becomes a group, her replies hers); the cast stays after a reload", async () => {
+  const page = await open();
+  await Bun.write(`${dir}/Mirela.png`, await card("Mirela", { description: "{{char}} keeps bees.", scenario: "A hillside.", first_mes: "Hello, {{user}}." }));
+  await Bun.write(`${dir}/Tomas.png`, await card("Tomas", { description: "{{char}} sells honey.", first_mes: "Honey?" }));
+  await Bun.write(`${dir}/Ida.png`, await card("Ida", { description: "{{char}} paints hives." }));
+  writeFileSync(`${dir}/Hive.json`, JSON.stringify({ spec: "chrysalis_group", name: "Hive", members: ["Mirela", "Tomas"], scenario: "Market day." }));
+  await (await page.$("input#cast-file"))!.uploadFile(`${dir}/Mirela.png`, `${dir}/Tomas.png`, `${dir}/Hive.json`);
+  await page.waitForFunction(() => document.querySelectorAll("#conversations .cast-row").length === 3);
+  await openRow(page, "Hive");
   await page.waitForSelector("#cast-next:not([hidden])");
   await send(page, "a toast for the hive");
-  expect(await page.$$eval("#thread p.line > .who", (w) => w.map((x) => x.textContent))).toEqual(["Mirela", "Tomas"]);
-  expect(await page.$$eval("#thread p.line", (p) => p.map((x) => x.textContent))).toEqual(["Mirela*She raises a cup.* To the bees.".replace("*She raises a cup.*", "She raises a cup."), "TomasTo the bees!"]);
+  const lines = (i: number) => page.$$eval(`#thread > article[data-i="${i}"] p.line`, (p) => p.map((x) => [x.querySelector(".who")?.textContent ?? "", x.classList.contains("same")]));
+  expect(await lines(1)).toEqual([["Mirela", false], ["Tomas", false]]);
+  expect(await page.$$eval("#thread p.line", (p) => p.map((x) => x.textContent))).toEqual(["MirelaShe raises a cup. To the bees.", "TomasTo the bees!"]);
   expect([lastStream.stop, lastStream.messages[0].content.includes("Scenario: Market day."), lastStream.messages[0].content.includes("A hillside.")])
-    .toEqual([["\nRobin:", "\n**Robin"], true, false]);                                // the group's scenario in place of theirs
+    .toEqual([["\nUser:", "\n**User"], true, false]);                                // the group's scenario in place of theirs
+  await send(page, "the same speaker");
+  expect(await lines(3)).toEqual([["Mirela", false], ["", true], ["", true], ["Tomas", false]]);
+
+  // a face: the next reply is theirs, told to the model before it thinks (not begun for it, which would skip that)
   await page.click('#cast-next button[title="Tomas next"]');
   await untilIdle(page);
-  expect([lastStream.continue_final_message, lastStream.messages.at(-1)]).toEqual([true, { role: "assistant", content: "Tomas:" }]);
-  // let them talk: four replies, each begun as one of them, never the last to speak
+  expect([lastStream.continue_final_message, lastStream.reasoning_effort !== undefined, lastStream.messages.at(-1)])
+    .toEqual([undefined, true, { role: "user", content: "[Tomas next.]" }]);
+  expect([await lines(4), await page.$eval('#thread > article[data-i="4"] .thought', (t) => t.textContent)]).toEqual([[["Tomas", false]], "Tomas has the floor."]);
+  // let them talk: four replies, each asked of one of them, never the last to speak
   const n0 = streams.length;
   await page.click("#cast-next .talk");
   await page.waitForFunction(() => !!document.querySelector("#cast-next .talk:not(.on)")
     && document.querySelector("#send")?.getAttribute("aria-label") === "Send", { timeout: 20_000 });
-  const beats = streams.slice(n0);
-  expect(beats.map((b) => [b.continue_final_message, b.messages.at(-1).role])).toEqual(Array(4).fill([true, "assistant"]));
-  expect(beats.map((b) => b.messages.at(-1).content)).toEqual(Array(4).fill("Mirela:"));   // (each reply here ends with Tomas)
+  expect(streams.slice(n0).map((b) => b.messages.at(-1))).toEqual(["Mirela", "Tomas", "Mirela", "Tomas"].map((n) => ({ role: "user", content: `[${n} next.]` })));
+
+  // a card dropped on the group's chat: she joins it, and is one character however often she is dropped
+  await (await page.$("input#attach-file"))!.uploadFile(`${dir}/Ida.png`);
+  await page.waitForFunction(() => document.querySelectorAll("#cast-next button[title$=' next']").length === 3);
+  await (await page.$("input#attach-file"))!.uploadFile(`${dir}/Mirela.png`);
+  await page.waitForFunction(() => /Mirela is in this chat already/.test(document.querySelector("#toast")?.textContent ?? ""));
+  expect([await castRows(page), (await page.$$("#attachments .att")).length]).toEqual([["Hive", "Ida", "Mirela", "Tomas"], 0]);
+  // a character's row dragged onto a chat with one character: a group of the two, the chat theirs, what she said hers
+  await openRow(page, "Mirela");
+  await page.waitForFunction(() => document.querySelector("#thread .speaker")?.textContent === "Mirela");
+  await page.evaluate(() => {
+    const row = [...document.querySelectorAll("#conversations .cast-row")].find((r) => r.querySelector(".cast-name")!.textContent === "Tomas")!;
+    const dt = new DataTransfer(), at = document.getElementById("thread")!;
+    row.dispatchEvent(new DragEvent("dragstart", { dataTransfer: dt, bubbles: true }));
+    for (const type of ["dragenter", "dragover", "drop"]) at.dispatchEvent(new DragEvent(type, { dataTransfer: dt, bubbles: true, cancelable: true }));
+  });
+  await page.waitForSelector("#cast-next:not([hidden])");
+  expect([await castRows(page), await page.$$eval("#cast-next button[title$=' next']", (b) => b.map((x) => (x as HTMLElement).title)), await lines(0)])
+    .toEqual([["Hive", "Ida", "Mirela", "Mirela and Tomas", "Tomas"], ["Mirela next", "Tomas next"], [[`Mirela`, false]]]);
 
   await page.reload({ waitUntil: "load" });                                              // the cast is this device's, not the tab's
-  await page.waitForSelector('#cast .cast-item[title="Hive"]');
-  expect(await page.$$eval("#cast .cast-item", (c) => c.map((x) => (x as HTMLElement).title))).toEqual(["Chrysalis", "Mirela", "Tomas", "Hive", "You: Robin"]);
+  await page.waitForSelector("#conversations .cast-row");
+  expect(await castRows(page)).toEqual(["Hive", "Ida", "Mirela", "Mirela and Tomas", "Tomas"]);
   await page.close();
 }, 60_000);
 
@@ -1212,25 +1267,30 @@ async function voicePage(script: string, o: { system?: string; first?: (page: Pa
 }
 const replyText = (page: Page, i: number) => page.$eval(`#thread > article[data-i="${i}"] .markdown`, (el) => el.textContent?.trim() ?? "");
 
-test("voice mode: a character speaks with the voice its sheet gives it (kept in its card), another voice model's too", async () => {
-  const { page } = await voicePage("plain");
-  await page.click("#send");                                                            // ends voice mode: the voices are listed now
-  await page.waitForFunction(() => document.querySelector("#send")?.getAttribute("aria-label") === "Send", { timeout: 10_000 });
-  const file = `${dir}/Vox.png`;
-  await Bun.write(file, await cardPng({ spec: "chara_card_v2", spec_version: "2.0", data: { name: "Vox", description: "{{char}} sings.", first_mes: "La." } },
+test("a character's voice is picked and heard from their card with voice mode never opened (the voice service lists its voices and speaks the sample, with no hello: no microphone, no speech recognition), and voice mode speaks with it", async () => {
+  const page = await open();
+  await Bun.write(`${dir}/Vox.png`, await cardPng({ spec: "chara_card_v2", spec_version: "2.0", data: { name: "Vox", description: "{{char}} sings.", first_mes: "La." } },
     new Blob([png], { type: "image/png" })));
-  await (await page.$("input#cast-file"))!.uploadFile(file);
-  await page.waitForSelector("#folder-head:not([hidden])");
-  await page.click("#folder-head .fh-main");
-  await page.waitForSelector("#cast-sheet select");
-  await page.select("#cast-sheet select", "other-tts\nbob");
-  await page.keyboard.press("Escape");
+  await (await page.$("input#cast-file"))!.uploadFile(`${dir}/Vox.png`);
+  await page.waitForSelector("#conversations .cast-row");
   const n = voiceLog().length;
+  await page.click("#conversations .cast-row .cast-pic");
+  await page.waitForFunction(() => [...document.querySelectorAll<HTMLOptionElement>("#cast-sheet option")].some((o) => o.value === "other-tts\nbob"), { timeout: 10_000 });
+  await page.select("#cast-sheet select", "other-tts\nbob");
+  const until = async (ok: () => boolean) => { for (let t = Date.now(); !ok(); await Bun.sleep(50)) if (Date.now() - t > 10_000) throw new Error("timed out"); };
+  await until(() => voiceLog().slice(n).some((e) => e.type === "preview"));
+  const s = voiceLog().slice(n).find((e) => e.type === "catalog").s, own = () => voiceLog().filter((e) => e.s === s);
+  expect(own().filter((e) => e.ev === "msg").map((e) => [e.type, e.tts, e.voice])).toEqual([["catalog", undefined, undefined], ["preview", "other-tts", "bob"]]);
+  await until(() => own().some((e) => e.ev === "chunk"));
+  await page.keyboard.press("Escape");
+  await until(() => own().some((e) => e.ev === "close"));                              // the card's socket goes with it
+  const m = voiceLog().length;
   await page.click("#voice");
   await page.waitForFunction(() => document.querySelector("#voice-status")?.textContent === "Listening", { timeout: 10_000 });
-  const asked = voiceLog().slice(n).filter((e) => e.ev === "msg" && (e.type === "hello" || e.type === "config"));
+  const asked = voiceLog().slice(m).filter((e) => e.ev === "msg" && (e.type === "hello" || e.type === "config"));
   expect(asked.some((e) => e.voice === "bob" && (e.stack?.tts === "other-tts" || asked.some((x) => x.stack?.tts === "other-tts")))).toBe(true);
   await page.click("#send");
+  await page.close();
 }, 30_000);
 
 test("voice mode: what is said shows as it is said, becomes the question, and the reply is spoken as it is written", async () => {

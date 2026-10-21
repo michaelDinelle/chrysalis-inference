@@ -1,23 +1,20 @@
 """Chrysalis's voice service: speech in and out for the web UI's voice mode, one WebSocket per session (talk.py). It
 keeps no preferences: each session names the parts it wants (parts.py), and the page's Settings are where they are
 chosen. The web server starts it when a voice session opens and stops it once the last one has been gone a while, so it
-takes no memory the rest of the time. It loads the default parts as it starts (the first session most likely wants
-them), and exits when its stdin ends (the web server is gone) or on SIGTERM.
+takes no memory the rest of the time. It loads what a session asks for when it asks: voice mode's hello the whole stack,
+a voice's sample (a character's voice picker) only that voice's model. It exits when its stdin ends (the web server is
+gone) or on SIGTERM.
   data/voice-venv/bin/python -m voice [--port N] [--threads N]     prints "voice: ws://127.0.0.1:PORT" once it listens
 threads (CHRYSALIS_VOICE_THREADS, 4) caps the CPU threads a model runs on: at 16 the speech models took the CPU
 Flash-Next's experts need (95 tok/s down to 3), at 4 they cost it 12%."""
-import argparse, asyncio, json, os, signal, sys, threading, time
+import argparse, asyncio, json, os, signal, sys, threading
 from concurrent.futures import ThreadPoolExecutor
 
 from websockets.asyncio.server import serve
 from websockets.exceptions import ConnectionClosed
 
-from .parts import DEFAULTS, Library
+from .parts import Library
 from .talk import Talk
-
-
-def rss_mb():
-    return int(next(l for l in open("/proc/self/status") if l.startswith("VmRSS")).split()[1]) // 1024
 
 
 async def main(port, threads):
@@ -27,22 +24,7 @@ async def main(port, threads):
     threading.Thread(target=lambda: (sys.stdin.buffer.read(), os._exit(0)), daemon=True).start()
     lib, listen_pool, speak_pool = Library(threads), ThreadPoolExecutor(1), ThreadPoolExecutor(1)
 
-    def warm():
-        t, held = time.monotonic(), []
-        with ThreadPoolExecutor(len(DEFAULTS)) as ex:
-            for kind, f in [(k, ex.submit(lib.get, k, n)) for k, n in DEFAULTS.items()]:
-                try:
-                    f.result()
-                    held.append(kind)
-                except Exception as e:
-                    print(f"voice: {e}", file=sys.stderr, flush=True)
-        print(f"voice: {', '.join(DEFAULTS[k] for k in held)} loaded in {(time.monotonic() - t) * 1000:.0f} ms, {rss_mb()} MB",
-              file=sys.stderr, flush=True)
-        return held
-    warming, unheld = loop.run_in_executor(None, warm), False
-
     async def session(ws):
-        nonlocal unheld
         async def send(x):
             try:
                 await ws.send(x if isinstance(x, bytes) else json.dumps(x))
@@ -58,14 +40,7 @@ async def main(port, threads):
                     msg = json.loads(m)
                 except ValueError:
                     msg = None
-                msg = msg if isinstance(msg, dict) else {"type": None}
-                if msg.get("type") == "hello" and not warming.done():
-                    await warming                   # the defaults it asks for are loading already
-                await talk.message(msg)
-                if msg.get("type") == "hello" and not unheld:
-                    unheld = True                   # the first session holds what it uses: the rest may go
-                    for kind in warming.result():
-                        lib.release(kind, DEFAULTS[kind])
+                await talk.message(msg if isinstance(msg, dict) else {"type": None})
         except ConnectionClosed:
             pass
         finally:

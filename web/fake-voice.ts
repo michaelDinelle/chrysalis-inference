@@ -6,8 +6,8 @@
 // sound. "after": the line waits for the page's first config. "goOn": the next line is said straight after this one.
 // "pause": that many frames of silence after the words, which the turn waits out (a pause event at their start, as
 // the service sends when its turn model hears more to come), then the turn, or "more" words in the same turn.
-// Its catalog has a second voice model to switch to and one not installed (refused, as the real service refuses it);
-// a preview speaks a voice's sample as chunks of the reply "preview". Every message, every chunk (with the voice that
+// Its catalog (in ready, or asked for alone) has a second voice model to switch to and one not installed (refused, as the
+// real service refuses it); a preview speaks a voice's sample as chunks of the reply "preview", hello or not. Every message, every chunk (with the voice that
 // spoke it), the audio frames counted and its own start and exit go to FAKE_VOICE_LOG as JSON lines.
 import { appendFileSync } from "node:fs";
 
@@ -167,6 +167,8 @@ function message(ws: Bun.ServerWebSocket<Session>, m: any) {
   } else if (m.type === "config") {
     d.configs++;
     if (ask(ws, m)) ready(ws);
+  } else if (m.type === "catalog") {
+    ws.send(JSON.stringify({ type: "catalog", catalog: CATALOG }));
   } else if (m.type === "preview") {
     const v = Object.values(CATALOG.tts).flatMap((t) => t.voices).find((x) => x.id === m.voice);
     const r: Reply = { text: Array.from(m.text ?? `This is ${v?.label ?? m.voice}.`), told: 0, seq: 0, sent: 0, ended: true, dropped: false };
