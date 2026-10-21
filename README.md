@@ -113,7 +113,8 @@ butterfly again. Settings, Appearance turns the sea behind chats off ("ASCII bac
 theme (the system's, light or dark; `theme.ts`, the stylesheet's colors being light-dark() pairs), both kept on the
 device. With reduced motion it holds still. Both side panels' heads
 have an aurora behind their names (one static SVG after T3 Code's nightly sidebar art), a night sky in either theme. Conversations live in the tab's sessionStorage: a reload keeps
-them, closing the tab ends them, and nothing is stored on the server's disk. Export saves the open chat (Export all:
+them, closing the tab ends them, and nothing is stored on the server's disk. A question is kept as it is sent, before its
+reply begins (with tools on, or a model loading, that takes seconds): a reload then says the reply never began. Export saves the open chat (Export all:
 every chat of the tab) as a JSON file, every version, tool round and attached file included, which Import adds back
 under new ids. A reply belongs to the web server while it is written (in RAM, until 15 minutes after it ends): opening
 another chat, reloading, closing the tab, a laptop asleep or a dropped connection leave it running, and the page follows
@@ -122,7 +123,8 @@ it early. Replies stream with their reasoning (collapsible), each one shows time
 prompt came from cache, the sampling values that differed from the recommended ones and its seed. In the message box, an
 energy bar sets the thinking: Off (the no-thinking mode), Low, Medium or Max. It grows more vivid to the right, in the
 logo's pink (Medium flows; Max is brightest, with a sweeping shine and rising sparks), and dragging takes a stop a third
-of the way to it. The model's name beside the send button opens the models; it is the only place a model is chosen.
+of the way to it. The model's name beside the send button opens the models; it is the only place a model is chosen. One
+picked while a reply is being written is what the next question asks for: Chrysalis switches once that reply ends.
 Beside it are the engine's state (a dot: ready, loading with its progress, or stopped), a power button (unload, or load)
 and the usage: this chat against the context, and how full Chrysalis's cache of conversations is. Message actions keep
 fixed places (from the right: delete, edit, copy on every message, then a reply's token odds, regenerate and continue),
@@ -182,16 +184,21 @@ KaTeX; a `$` opens math only before a non-space and closes it only after one, no
 so prices and shell variables stay text. A ```html block holding a whole document runs as a page once it is written (a
 fragment when its Preview is clicked), in an iframe on `/sandbox` behind two walls, each enough alone: the iframe's
 sandbox (an opaque origin: no cookies, storage or chat) and that route's policy, which lets the page's own code run but
-nothing load or connect anywhere, Chrysalis included. Artifacts (`web/artifacts.ts`): after the system prompt (unless
-Settings leaves it out) the model is asked to name what it makes, ```` ```svg panda ````, with an id for each part, and to
+nothing load or connect anywhere, Chrysalis included. Pages still get three.js and A-Frame from their usual CDN
+addresses, of any version: the chat hands the page the code (the server bundles three, each addon and the classic
+builds older pages load, `web/server.ts`), which the page loads from blob: addresses it makes itself (`web/sandbox.js`).
+Artifacts (`web/artifacts.ts`): after the system prompt (unless
+Settings leaves it out) the model is asked to name what it makes, ```` ```svg panda ```` (it also writes ```` ```svg id="panda" ````,
+or the id alone on the block's first line: asked for a 3D page with thinking off, Flash-Next did so in 9 of 12 replies,
+and the chat takes those too), with an id for each part, and to
 change it in place with an edit block, ```` ```edit panda ````, holding only what changes: a whole element by its id
 (a new one is added on top, or for a background in place of the old one), a search and replace, or a shape without an
 id, which replaces the one at its place; ```` ```edit panda-night from panda ```` makes a changed copy. It is plain text
 in the reply, so any backend's model can write it. An artifact has one canvas in the chat, in the reply that changed it
 last: an edit moves it there, the same figure, and paints into the picture as it stood, each change landing as it
 arrives, while the reply it left keeps a line naming the version made there. The canvas's caption names its version
-(`panda · v2 · 2 changes`) and steps through the versions in place (‹ ›, redrawing only what differs); an edit's own
-text is a click away (Changes). Measured with Qwen3.8-Flash-Next: a panda drawn in 1,987 tokens, its coat made red in 325, a copy under
+(`panda · v2 · 2 changes`) and steps through the versions in place (‹ ›, redrawing only what differs); what a version
+changed is a click away (Changes: its source against the version before, line by line). Measured with Qwen3.8-Flash-Next: a panda drawn in 1,987 tokens, its coat made red in 325, a copy under
 a starry sky in 956, a cat's eyes made green beside another picture in 272. An edit that does not apply in full is
 asked for again, once, with the artifact as it is now. The shelf (the shapes button in the top bar, or Open on an
 artifact) is a card floating over the chat, moved by its head and sized by its corner, and kept where it is left: the
@@ -199,13 +206,23 @@ chat's artifacts as tabs, the one picked large with its versions, and with Compa
 the original of a copy), each side stepped through its versions; it follows an artifact being drawn. Over a picture the
 part under the pointer glows; a click selects it, kept in the message box, and the next question tells the model that
 part, quoting it as it is now. In voice mode the part under the pointer as a question is said goes with it ("make this
-orange"). What can be done by hand needs no model: the canvas's tools (over the picture, on the shelf too) drag the
-part selected to move it, a corner to resize it, bring it forward or send it backward a step, duplicate or delete it
-(the arrow keys nudge it; Ctrl+Z, Ctrl+D, Delete), and the paint bucket fills whatever shape is clicked with its
-color. Each change is the source edited where that element is, the rest left byte for byte, and is kept at once as the
+orange"). What can be done by hand needs no model, in a canvas's edit mode (its Edit, on the shelf too; one canvas at
+a time, so a stray click elsewhere only points): a row over it in the chat's own look names its tools and says what a
+click does now. On a picture, Select drags the part selected to move it, a corner to resize it, and brings it forward or
+sends it backward a step, duplicates or deletes it (the arrow keys nudge it; Ctrl+Z, Ctrl+D, Delete; Esc lets go, then
+leaves); Fill paints whatever shape is clicked with its color. Each change is the source edited where that element is, the rest left byte for byte, and is kept at once as the
 artifact's next version, the user's own (Undo steps back through it); stepped back to an older version, the canvas
 offers Use this version. The next question carries the artifact whole as the user left it, which the model's next
-edit starts from. Tools: the wrench beside the thinking bar (with how many tools are
+edit starts from. A page artifact (a ```` ```html ```` or ```` ```aframe ```` document) paints as it is written, element by
+element, its scripts waiting, and runs once whole; a later version goes into the page as it runs, changing only what
+its source changed, so what the page holds stays (a game's score, a form's input), and only a change to its scripts
+runs it anew, in a frame loaded behind the old one. Outside edit mode a page is the page (its own buttons and links); in
+it, Select (point at a part; move it up or down, copy or delete it), Text (retype it where it is) and Fill (a background,
+a shape's fill, an A-Frame entity's color). A page made to its window's size (a 3D scene's canvas) says so and gets a
+frame fitted to the column. In an A-Frame scene the part under the pointer is the entity the
+camera sees there. LaTeX documents (`web/latex.ts`, numbered and cross-referenced as LaTeX would, with KaTeX for the
+math) and Markdown read as documents, block by block; a block points like a part, and in edit mode Text (or a double
+click) turns it into its source to retype, and Select moves, copies and deletes blocks. Code is edited where it is shown (Edit). Tools: the wrench beside the thinking bar (with how many tools are
 on) opens them for this chat: Fetch URL and Sub-agents, then each MCP server with its state (not started, starting, running, failed
 with the error and Retry, disabled), a switch for the whole server, and under its arrow one per tool, marked read-only
 or asks first. The choice is the chat's, kept with it (export too); a new chat starts from the last one. A server starts

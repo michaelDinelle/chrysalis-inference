@@ -32,6 +32,11 @@ test_web: build/sampler_cases
 test_backends:
 	cd web && bun test --timeout 1200000 ./backends.check.ts
 
+# the chat with this machine's Chrysalis (running Flash-Next), used the odd ways people use it; restarts Chrysalis once and
+# switches it to the 27B and back
+test_chaos:
+	cd web && bun test --timeout 1800000 ./chaos.check.ts
+
 test: test_web build/libchrysalis.so build/test_quant build/test_attn build/test_gdn build/test_sampler build/ref_logits build/ref_logits_mm
 	./build/test_quant data/models/chrysalis-mix.gguf && ./build/test_attn && ./build/test_gdn && ./build/test_sampler
 	data/venv/bin/python tools/test_chat.py
@@ -118,4 +123,4 @@ test_voice: voice
 lint:
 	python3 -I tools/lint_comments.py
 
-.PHONY: test test_web test_backends fn test_fn test_fn_model lint
+.PHONY: test test_web test_backends test_chaos fn test_fn test_fn_model lint

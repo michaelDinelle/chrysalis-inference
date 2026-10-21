@@ -26,7 +26,58 @@ const PANDA = '```svg panda\n<svg viewBox="0 0 100 100" xmlns="http://www.w3.org
   '  <ellipse id="coat" cx="50" cy="60" rx="30" ry="25" fill="#ffffff" stroke="#222222"/>\n  <g id="burger">\n    <rect x="35" y="50" width="30" height="10" fill="#8b4513"/>\n  </g>\n</svg>\n```\n\nHere he is.';
 const RED_COAT = '```edit panda\n<ellipse id="coat" cx="50" cy="60" rx="30" ry="25" fill="#d32f2f" stroke="#222222"/>\n<<<<<<< SEARCH\nfill="#ffffff"/>\n' +
   '=======\nfill="#fff3cd"/>\n>>>>>>> REPLACE\n```\n\nRed now.';
+// A page with a script: what it holds (the count) is kept when its look changes, and starts over when its script does.
+const COUNTER = '```html counter\n<!doctype html>\n<html><head><title>Counter</title>\n<style>\n  body { font: 16px sans-serif; margin: 0; padding: 16px; }\n' +
+  '  #inc { background: #eeeeee; padding: 8px 14px; }\n  .card { padding: 12px; }\n</style></head>\n<body>\n<h1 id="title">Clicks</h1>\n' +
+  '<section class="card" id="card">\n  <p id="count">0</p>\n  <button id="inc">Add</button>\n</section>\n<p id="note">Press the button.</p>\n' +
+  '<script>\nlet n = 0;\ndocument.getElementById("inc").onclick = () => { n += 1; document.getElementById("count").textContent = n; };\n' +
+  'document.body.dataset.ran = "yes";\n</script>\n</body></html>\n```\n\nA counter.';
+// A LaTeX document and an edit to it, and code
+const PAPER = '```latex paper\n\\documentclass{article}\n\\title{Rods}\n\\begin{document}\n\\maketitle\n\\section{Heat}\nThe rod cools as\n' +
+  '\\begin{equation}\n  u_t = -\\alpha u_{xx}\n\\end{equation}\nwhich is Fourier\'s law.\n\nA second paragraph.\n\\end{document}\n```\n\nThe paper.';
+// (the scene named as models name one, by what it is: a page all the same, its edits by id)
+// 3D: three.js as a module by address with addons (by an import map's names and by address, each importing "three"
+// itself: the same three, or its Vector3 is another), as the classic build older pages load, and an A-Frame scene; each
+// from its usual CDN address, which no page can reach
+const CUBE = '```html cube\n<!doctype html>\n<html><head><title>Cube</title>\n<script type="importmap">{"imports":{"three/addons/":"https://unpkg.com/three@0.160.0/examples/jsm/"}}</script>\n' +
+  '</head><body style="margin:0">\n<script type="module">\nimport * as THREE from "https://unpkg.com/three@0.160.0/build/three.module.js";\n' +
+  'import { OrbitControls } from "three/addons/controls/OrbitControls.js";\nimport { RoundedBoxGeometry } from "https://cdn.jsdelivr.net/npm/three@0.158.0/examples/jsm/geometries/RoundedBoxGeometry.js";\n' +
+  'const renderer = new THREE.WebGLRenderer({ preserveDrawingBuffer: true });\nrenderer.setSize(300, 200);\ndocument.body.append(renderer.domElement);\n' +
+  'const scene = new THREE.Scene(), camera = new THREE.PerspectiveCamera(50, 1.5, 0.1, 100);\ncamera.position.z = 3;\n' +
+  'scene.add(new THREE.Mesh(new RoundedBoxGeometry(1, 1, 1, 4, 0.1), new THREE.MeshNormalMaterial()));\nconst controls = new OrbitControls(camera, renderer.domElement);\n' +
+  'renderer.render(scene, camera);\ndocument.body.dataset.three = THREE.REVISION + " " + (controls.target instanceof THREE.Vector3);\n</script>\n</body></html>\n```';
+// (the old one made to its window as most scenes are: its canvas sized to the window in the flow, its title absolute over it)
+const OLD_CUBE = '```html old\n<!doctype html>\n<html><head><title>Old</title>\n<style>body { margin: 0; overflow: hidden; }\n' +
+  '#title { position: absolute; top: 10px; width: 100%; text-align: center; color: #c33; }</style>\n' +
+  '<script src="https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.min.js" integrity="sha512-dLxUelApnYxpLt6K2iomGngnHO83iUvZytA3YjDUCjT0HDOHKXnVYdf3hU4JjM8uEhxf9nD1/ey98U3t2vZ0qQ==" crossorigin="anonymous"></script>\n' +
+  '<script src="https://cdn.jsdelivr.net/npm/three@0.128.0/examples/js/controls/OrbitControls.js"></script>\n</head><body>\n<div id="title">Old</div>\n<script>\n' +
+  'const renderer = new THREE.WebGLRenderer();\nrenderer.setSize(innerWidth, innerHeight);\ndocument.body.append(renderer.domElement);\n' +
+  'addEventListener("resize", () => renderer.setSize(innerWidth, innerHeight));\nconst camera = new THREE.PerspectiveCamera(50, 1, 0.1, 100);\nconst controls = new THREE.OrbitControls(camera, renderer.domElement);\n' +
+  'document.body.dataset.three = THREE.REVISION + " " + (controls.object === camera);\n</script>\n</body></html>\n```';
+const SCENE = '```aframe scene\n<!doctype html>\n<html><head><title>Scene</title>\n<script src="https://aframe.io/releases/1.5.0/aframe.min.js"></script>\n</head>\n<body style="margin:0">\n' +
+  '<a-scene id="world" embedded style="width: 100%; height: 300px" vr-mode-ui="enabled: false" loading-screen="enabled: false">\n' +
+  '  <a-box id="box" position="0 1.4 -3" color="#4CC3D9"></a-box>\n  <a-sky id="sky" color="#ECECEC"></a-sky>\n</a-scene>\n' +
+  '<script>window.started = Math.random();</script>\n</body></html>\n```';
+// (pages labelled as Flash-Next also labels them: the id alone on the block's first line, the reply ending with the fence
+// still open; the id as an attribute)
+const HALL = '```html\nhall\n<!doctype html>\n<html><head><title>Hall</title></head><body><h1 id="sign">Welcome</h1></body></html>\n';
+const GATE = '```html id="gate"\n<!doctype html>\n<html><head><title>Gate</title></head><body><p id="note">Open</p></body></html>\n```\n\nThe gate.';
 const REPLIES: Record<string, string> = {
+  "hall on its line": HALL,
+  "gate as an attribute": GATE,
+  "rename the sign": '```edit hall\n<h1 id="sign">Goodbye</h1>\n```\n\nRenamed.',
+  "three cube": CUBE,
+  "old cube": OLD_CUBE,
+  "a scene": SCENE,
+  "move the box": '```edit scene\n<a-box id="box" position="1 1.4 -3" color="#4CC3D9"></a-box>\n```\n\nMoved.',
+  "write the paper": PAPER,
+  "fix the sign": '```edit paper\n<<<<<<< SEARCH\n  u_t = -\\alpha u_{xx}\n=======\n  u_t = \\alpha u_{xx}\n>>>>>>> REPLACE\n```\n\nFixed.',
+  "write the notes": '```markdown notes\n# Plan\n\nFirst we read.\n\n- milk\n- eggs\n\nThen we cook $x^2$.\n```\n\nNotes.',
+  "write the script": '```python calc\ndef area(r):\n    return 3.14 * r * r\n\nprint(area(2))\n```\n\nA script.',
+  "counter page": COUNTER,
+  "blue button": '```edit counter\n<<<<<<< SEARCH\n#inc { background: #eeeeee;\n=======\n#inc { background: #0000ff;\n>>>>>>> REPLACE\n' +
+    '<<<<<<< SEARCH\n<p id="count">0</p>\n=======\n<p id="count" class="big">0</p>\n>>>>>>> REPLACE\n```\n\nBlue.',
+  "count by two": '```edit counter\n<<<<<<< SEARCH\nn += 1;\n=======\nn += 2;\n>>>>>>> REPLACE\n```\n\nBy two.',
   "draw the panda": PANDA,
   "red coat": RED_COAT,
   "broken edit": '```edit panda\n<<<<<<< SEARCH\nfill="#00ff00"\n=======\nfill="#0000ff"\n>>>>>>> REPLACE\n```',
@@ -72,13 +123,20 @@ const AGENT_TASKS = [{ description: "Echo a word", prompt: "tool echo" }, { desc
 let lastStream: any = null, probes = 0, callIds = 0, chrysalisStopped = 0;  // probes: requests a sandboxed page got through to a server
 const streams: any[] = [], streamAt: number[] = [];  // every streamed request Chrysalis got, and when
 const checks: any[] = [];                            // every check of what speech recognition heard (app.ts CHECK)
+let loaded = "qwen3.8-27b";                           // the model on the GPU: a switch takes 3 s (as Chrysalis's, which waits
+let loading: Promise<void> | null = null;             // for the replies being written first), reporting the old one meanwhile
 const fake = Bun.serve({
   hostname: "127.0.0.1",
   port: 0,
   async fetch(req) {
     const path = new URL(req.url).pathname;
     if (path.startsWith("/probe")) return (probes++, new Response(path.endsWith(".png") ? png : "", { headers: { "Content-Type": "image/png" } }));
-    if (path === "/chrysalis/stats") return Response.json({ model: "qwen3.8-27b", context: 262144, kv_tokens: 276000, cache: { free_kv_tokens: 270000 } });
+    if (path === "/chrysalis/stats") return Response.json({ model: loaded, context: 262144, kv_tokens: 276000, cache: { free_kv_tokens: 270000 } });
+    if (path === "/chrysalis/load") {
+      const { model } = await req.json();
+      await (loading = Bun.sleep(3000).then(() => { loaded = model; }));
+      return Response.json({ model });
+    }
     if (path !== "/v1/chat/completions") return new Response("not found", { status: 404 });
     const body = await req.json();
     const prefix = body.continue_final_message ? body.messages.at(-1) : undefined;
@@ -105,7 +163,7 @@ const fake = Bun.serve({
     const text = agents ? "" : calls.length ? "Let me check." : ask ? `The tool said: ${body.messages.at(-1).content}` : said === "agents"
       ? `The sub-agents said: ${body.messages.slice(at).filter((m: any) => m.role === "tool").map((m: any) => m.content).join(" | ")}` : said.startsWith("slow")
       ? Array.from({ length: 40 }, (_, k) => `w${k} `).join("") : Object.entries(REPLIES).find(([k]) => said.includes(k))?.[1] ?? `You said: ${said}`;
-    const step = said.startsWith("slow") ? 4 : 9, gap = said.startsWith("slow") ? 60 : 5;
+    const step = said.startsWith("slow") ? 4 : 9, gap = said.startsWith("slow") ? 60 : said.startsWith("steady") ? 25 : 5;
     let i = 0, j = 0, restated = !prefix, read = false;
     return new Response(new ReadableStream({
       async pull(ctl) {
@@ -246,19 +304,25 @@ test("the canvas's tools change the picture by hand, with no model: the paint bu
     const r = p.shadowRoot!.querySelector(sel as string)!.getBoundingClientRect();
     return { x: r.x + r.width / 2, y: r.y + r.height * (fy as number) };
   }, sel, fy);
-  const tools = (sel: string) => page.$eval(".art-canvas .svg-paper", (p, sel) => (p.shadowRoot!.querySelector(sel as string) as HTMLElement).click(), sel);
+  const tools = (sel: string) => page.click(`.art-canvas .art-tools ${sel}`);
   const caption = () => page.$eval(".art-canvas .art-label", (l) => l.textContent);
-  // the paint bucket, its color picked
-  await page.$eval(".art-canvas .svg-paper", (p) => {
-    const input = p.shadowRoot!.querySelector<HTMLInputElement>(".tools input")!;
-    input.value = "#00aa00";
-    input.dispatchEvent(new Event("input"));
-  });
+  // nothing changes by hand until Edit: a click points, Delete deletes nothing
   const coat = await inPaper("#coat", 0.85);                                  // below the burger, which lies over its middle
   await page.mouse.click(coat.x, coat.y);
+  await page.keyboard.press("Delete");
+  expect([await page.$eval("#pointing", (e) => e.textContent), await fill(page, "coat"), await caption()]).toEqual(["Pointing at panda · #coat", "#ffffff", "panda · v1"]);
+  await page.keyboard.press("Escape");
+  // Edit, then Fill, its color picked
+  await page.click(".art-canvas [data-art=edit]");
+  await page.$eval(".art-canvas .art-tools input", (i) => {
+    (i as HTMLInputElement).value = "#00aa00";
+    i.dispatchEvent(new Event("input"));
+  });
+  const coatNow = await inPaper("#coat", 0.85);                               // (the toolbar above it moved it down)
+  await page.mouse.click(coatNow.x, coatNow.y);
   expect([await fill(page, "coat"), await caption()]).toEqual(["#00aa00", "panda · v2 · your edit, not sent yet"]);
   // select the burger, drag it 20 px right
-  await tools(".tools [data-tool=select]");
+  await tools("[data-tool=select]");
   const burger = await inPaper("#burger rect");
   await page.mouse.click(burger.x, burger.y);
   expect(await page.$eval("#pointing", (e) => e.textContent)).toBe("Pointing at panda · #burger");
@@ -281,7 +345,7 @@ test("the canvas's tools change the picture by hand, with no model: the paint bu
   // Delete takes it out, Undo brings it back
   await page.keyboard.press("Delete");
   expect(await page.$eval(".art-canvas .svg-paper", (p) => p.shadowRoot!.querySelector("#burger"))).toBeNull();
-  await tools(".tools [data-do=undo]");
+  await tools("[data-do=undo]");
   // (the changes not sent yet are one version, the user's: Undo steps back through them)
   expect([await fill(page, "burger", "transform"), await caption()]).toEqual([moved, "panda · v2 · your edit, not sent yet"]);
   expect(streams.length).toBe(n0);                                          // no model in any of it
@@ -294,6 +358,291 @@ test("the canvas's tools change the picture by hand, with no model: the paint bu
   expect(await page.$$eval(".edit-chip", (c) => c.map((x) => x.textContent))).toEqual(["you changed panda"]);
   await page.close();
 }, 30_000);
+
+// The page artifact's frame (the one shown, not one still loading a rewrite), and a point on an element in it
+const pageFrame = async (page: Page) => (await page.waitForSelector(".art-canvas iframe.page-frame:not(.next)"))!.contentFrame();
+// (once the frame has taken the page's height: a part just put back is in the page before the frame grows to show it)
+async function inPage(page: Page, sel: string) {
+  for (let k = 0; ; k++) {
+    const box = (await (await page.$(".art-canvas iframe.page-frame:not(.next)"))!.boundingBox())!;
+    const r = await (await pageFrame(page)).$eval(sel, (e) => { const r = e.getBoundingClientRect(); return { x: r.x + r.width / 2, y: r.y + r.height / 2 }; });
+    if (r.y < box.height - 2 || k === 40) return { x: box.x + 1 + r.x, y: box.y + 1 + r.y };   // past the frame's border
+    await Bun.sleep(50);
+  }
+}
+// A tool of the page's picked (in edit mode: Edit first if it is not on), and on in the page, which hears of it a moment
+// later; Done leaves edit mode, the page its own again
+async function pageTool(page: Page, sel: string) {
+  if (!(await page.$(".art-canvas .art-tools.on"))) await page.click(".art-canvas [data-art=edit]");
+  await page.click(`.art-canvas .art-tools ${sel}`);
+  const mode = { select: "select", text: "text", fill: "bucket", done: "use" }[sel.match(/data-(?:tool|do)=(\w+)/)?.[1] ?? ""];
+  if (mode) await (await pageFrame(page)).waitForFunction((t) => (window as any).__chrysalis.mode === t, {}, mode);
+}
+const pickColor = (page: Page, color: string) => page.$eval(".art-canvas .art-tools input", (i, color) => {
+  (i as HTMLInputElement).value = color as string;
+  i.dispatchEvent(new Event("input"));
+}, color);
+
+test("a page artifact is drawn as it is written, its script waiting, and runs once whole; an edit to its look goes into the running page, which keeps what it holds, and one to its script runs it anew", async () => {
+  const page = await open();
+  const done = await page.$$eval(".msg .stats", (s) => s.length);
+  await page.type("#input", "steady counter page");
+  await page.keyboard.press("Enter");
+  // its heading is in while the reply is still being written, and its script has not run
+  const frame = await pageFrame(page);
+  await frame.waitForSelector("#title", { timeout: 10_000 });
+  expect([await page.$$eval(".msg .stats", (s) => s.length), await frame.$eval("body", (b) => b.dataset.ran ?? "")]).toEqual([done, ""]);
+  expect(await page.$eval(".art-canvas", (f) => f.classList.contains("drawing"))).toBe(true);
+  await page.waitForFunction((n) => document.querySelectorAll(".msg .stats").length > n, { timeout: 20_000 }, done);
+  await frame.waitForFunction(() => document.body.dataset.ran === "yes");
+  await still(page);
+  for (let k = 0; k < 3; k++) await frame.click("#inc");
+  expect(await frame.$eval("#count", (c) => c.textContent)).toBe("3");
+  // the button turns blue and the count gets a class in the page as it is: the count it shows stays
+  await send(page, "blue button");
+  await frame.waitForFunction(() => getComputedStyle(document.getElementById("inc")!).backgroundColor === "rgb(0, 0, 255)");
+  expect([await frame.$eval("#count", (c) => [c.className, c.textContent]), await page.$$eval(".art-canvas iframe", (f) => f.length)]).toEqual([["big", "3"], 1]);
+  expect(await page.$eval(".art-canvas .art-label", (l) => l.textContent)).toBe("counter · v2 · 2 changes");
+  // its script changes: the page starts over, counting by two
+  await send(page, "count by two");
+  await page.waitForFunction(() => document.querySelectorAll(".art-canvas iframe").length === 1 && !document.querySelector(".art-canvas iframe.next"), { timeout: 10_000 });
+  const anew = await pageFrame(page);
+  await anew.waitForFunction(() => document.body.dataset.ran === "yes");
+  expect(await anew.$eval("#count", (c) => c.textContent)).toBe("0");
+  await anew.click("#inc");
+  expect([await anew.$eval("#count", (c) => c.textContent), await anew.$eval("#inc", (b) => getComputedStyle(b).backgroundColor)]).toEqual(["2", "rgb(0, 0, 255)"]);
+  expect(await page.$eval(".art-canvas .art-label", (l) => l.textContent)).toBe("counter · v3 · 1 change");
+  await page.close();
+}, 40_000);
+
+test("pages labelled as models also label them, the id alone on the block's first line (its fence left open as the reply ends) or as an attribute, are artifacts by that id: each runs as a page, and an edit by its id changes it", async () => {
+  const page = await open(), caption = () => page.$$eval(".art-canvas .art-label", (l) => l.map((x) => x.textContent));
+  await send(page, "a hall on its line");
+  await page.waitForFunction(() => [...document.querySelectorAll(".art-canvas .art-label")].some((l) => l.textContent === "hall · v1"), { timeout: 10_000 });
+  const sign = async () => (await pageFrame(page)).$eval("#sign", (e) => e.textContent);
+  expect(await sign()).toBe("Welcome");
+  await send(page, "rename the sign");
+  await (await pageFrame(page)).waitForFunction(() => document.querySelector("#sign")?.textContent === "Goodbye", { timeout: 10_000 });
+  await send(page, "a gate as an attribute");
+  await page.waitForFunction(() => [...document.querySelectorAll(".art-canvas .art-label")].some((l) => l.textContent === "gate · v1"), { timeout: 10_000 });
+  expect(await caption()).toEqual(["hall · v2 · 1 change", "gate · v1"]);
+  expect(await page.$$eval(".art-canvas iframe.page-frame", (f) => f.length)).toBe(2);
+  await page.close();
+}, 30_000);
+
+test("a page's tools change it by hand, with no model, in the page as it runs: Select points at a part, Text retypes it, the paint bucket fills a background, Delete takes a part out and Undo brings it back; the next question carries the page whole and the part pointed at", async () => {
+  const page = await open();
+  await send(page, "counter page");
+  const frame = await pageFrame(page);
+  await frame.waitForFunction(() => document.body.dataset.ran === "yes");
+  await still(page);
+  const n0 = streams.length, caption = () => page.$eval(".art-canvas .art-label", (l) => l.textContent);
+  await frame.click("#inc");
+  await frame.click("#inc");
+  // Text: the heading retyped where it is
+  await pageTool(page, "[data-tool=text]");
+  let at = await inPage(page, "#title");
+  await page.mouse.click(at.x, at.y);
+  await page.keyboard.press("End");
+  await page.keyboard.type(" so far");
+  await page.keyboard.press("Enter");
+  await page.waitForFunction(() => /your edit/.test(document.querySelector(".art-canvas .art-label")?.textContent ?? ""));
+  expect([await frame.$eval("#title", (t) => t.textContent), await caption()]).toEqual(["Clicks so far", "counter · v2 · your edit, not sent yet"]);
+  // the paint bucket: the card's background
+  await pickColor(page, "#00aa00");
+  await (await pageFrame(page)).waitForFunction(() => (window as any).__chrysalis.mode === "bucket");
+  at = await inPage(page, "#card");
+  await page.mouse.click(at.x, at.y - 30);                               // on the card, above its button
+  await frame.waitForFunction(() => getComputedStyle(document.getElementById("card")!).backgroundColor === "rgb(0, 170, 0)");
+  // Select: the note pointed at, Delete takes it out, Undo brings it back
+  await pageTool(page, "[data-tool=select]");
+  at = await inPage(page, "#note");
+  await page.mouse.click(at.x, at.y);
+  await page.waitForFunction(() => document.getElementById("pointing")!.textContent === "Pointing at counter · #note");
+  await page.keyboard.press("Delete");
+  await frame.waitForFunction(() => !document.getElementById("note"));
+  await page.click(".art-canvas .art-tools [data-do=undo]");
+  await frame.waitForFunction(() => !!document.getElementById("note"));
+  // all of it in the page as it ran: the count it held stays, and nothing went to the model
+  expect([await frame.$eval("#count", (c) => c.textContent), await frame.$eval("#title", (t) => t.textContent), streams.length]).toEqual(["2", "Clicks so far", n0]);
+  at = await inPage(page, "#note");
+  await page.mouse.click(at.x, at.y);
+  await page.waitForFunction(() => document.getElementById("pointing")!.textContent === "Pointing at counter · #note");
+  await send(page, "capital of France");
+  const asked = lastStream.messages.at(-1).content as string;
+  expect([asked.includes("The user changed counter by hand since your last reply. As it is now:"), asked.includes('<h1 id="title">Clicks so far</h1>'),
+    asked.includes('<section class="card" id="card" style="background: #00aa00">'), asked.includes('<p id="note">Press the button.</p>'),
+    asked.includes('The user is pointing at the part #note of the artifact counter:\n<p id="note">Press the button.</p>')]).toEqual([true, true, true, true, true]);
+  await page.close();
+}, 40_000);
+
+// A document's shadow root, and a point on a block in it
+const docRoot = (page: Page) => page.$eval(".art-canvas .doc-paper", (p) => !!p.shadowRoot);
+const inDoc = (page: Page, text: string) => page.$eval(".art-canvas .doc-paper", (p, text) => {
+  const el = [...p.shadowRoot!.querySelectorAll<HTMLElement>("[data-at]")].findLast((e) => e.textContent!.includes(text as string))!;
+  const r = el.getBoundingClientRect();
+  return { x: r.x + Math.min(r.width / 2, 40), y: r.y + r.height / 2 };
+}, text);
+
+test("a LaTeX artifact reads as a document; pointing at a paragraph quotes its source, a double click retypes it there with no model, and the model's edit shows its changes as a diff", async () => {
+  const page = await open();
+  await send(page, "write the paper");
+  await still(page);
+  expect(await docRoot(page)).toBe(true);
+  const shown = () => page.$eval(".art-canvas .doc-paper", (p) => p.shadowRoot!.querySelector(".doc-body")!.textContent!.replace(/\s+/g, " "));
+  expect(await shown()).toMatch(/Rods.*1\s*Heat.*The rod cools as.*\(1\).*which is Fourier’s law\..*A second paragraph\./);
+  // pointed at, the paragraph's source goes with the question
+  let at = await inDoc(page, "A second paragraph");
+  await page.mouse.click(at.x, at.y);
+  expect(await page.$eval("#pointing", (e) => e.textContent)).toBe("Pointing at paper · “A second paragraph.”");
+  await send(page, "capital of France");
+  expect(lastStream.messages.at(-1).content).toBe("[The user is pointing at this part of the artifact paper:\nA second paragraph.]\n\ncapital of France");
+  // retyped where it is (in edit mode): the source changes there, and the document shows it
+  const n0 = streams.length;
+  await page.click(".art-canvas [data-art=edit]");
+  await still(page);
+  at = await inDoc(page, "A second paragraph");
+  await page.mouse.click(at.x, at.y, { count: 2 });
+  await page.waitForFunction(() => !!document.querySelector(".art-canvas .doc-paper")!.shadowRoot!.querySelector("textarea.retype"));
+  expect(await page.$eval(".art-canvas .doc-paper", (p) => p.shadowRoot!.querySelector("textarea")!.value)).toBe("A second paragraph.");
+  await page.keyboard.press("End");
+  await page.keyboard.type(" It has \\textbf{bold}.");
+  await page.keyboard.down("Control");
+  await page.keyboard.press("Enter");
+  await page.keyboard.up("Control");
+  await page.waitForFunction(() => /bold/.test(document.querySelector(".art-canvas .doc-paper")!.shadowRoot!.querySelector(".doc-body")!.textContent!));
+  expect([await page.$eval(".art-canvas .doc-paper", (p) => p.shadowRoot!.querySelector("strong")?.textContent), streams.length,
+    await page.$eval(".art-canvas .art-label", (l) => l.textContent)]).toEqual(["bold", n0, "paper · v2 · your edit, not sent yet"]);
+  // the model's edit: what it changed, line by line
+  await send(page, "fix the sign");
+  expect(await page.$eval(".art-canvas .art-label", (l) => l.textContent)).toBe("paper · v3 · 1 change");
+  await page.click(".art-canvas [data-art=changes]");
+  expect(await page.$$eval(".art-canvas .art-changes :is(.diff-add, .diff-del)", (s) => s.map((x) => x.textContent)))
+    .toEqual(["-   u_t = -\\alpha u_{xx}", "+   u_t = \\alpha u_{xx}"]);
+  expect(await page.$eval(".art-canvas .art-changes .diff-count", (c) => c.textContent)).toBe("+1 −1");
+  await page.close();
+}, 40_000);
+
+test("a Markdown artifact reads as a document whose blocks the tools move and delete by hand: Delete takes the list out, Undo brings it back, Move up puts the last paragraph above it", async () => {
+  const page = await open();
+  await send(page, "write the notes");
+  await still(page);
+  const blocks = () => page.$eval(".art-canvas .doc-paper", (p) => [...p.shadowRoot!.querySelectorAll(".md > [data-at]")].map((b) => b.textContent!.replace(/\s+/g, " ").trim()));
+  expect(await blocks()).toEqual(["Plan", "First we read.", "milk eggs", expect.stringMatching(/^Then we cook x\s*2/)]);
+  const pick = async (text: string) => {
+    const at = await inDoc(page, text);
+    await page.mouse.click(at.x, at.y);
+  };
+  await page.click(".art-canvas [data-art=edit]");
+  await still(page);
+  await pick("milk");
+  await page.keyboard.press("Delete");
+  await page.waitForFunction(() => document.querySelector(".art-canvas .doc-paper")!.shadowRoot!.querySelectorAll(".md > [data-at]").length === 3);
+  await page.keyboard.down("Control");
+  await page.keyboard.press("z");
+  await page.keyboard.up("Control");
+  await page.waitForFunction(() => document.querySelector(".art-canvas .doc-paper")!.shadowRoot!.querySelectorAll(".md > [data-at]").length === 4);
+  await pick("Then we cook");
+  await page.click(".art-canvas .art-tools [data-do=up]");
+  expect((await blocks()).slice(2).map((b) => b.slice(0, 12))).toEqual(["Then we cook", "milk eggs"]);
+  await send(page, "capital of France");
+  expect(lastStream.messages.at(-1).content).toContain("# Plan\n\nFirst we read.\n\nThen we cook $x^2$.\n\n- milk\n- eggs");
+  await page.close();
+}, 30_000);
+
+test("code is changed by hand where it is shown: Edit, type, Done; the change is the artifact's next version, and Changes shows it", async () => {
+  const page = await open();
+  await send(page, "write the script");
+  await page.click(".art-canvas [data-art=edit]");
+  await page.waitForFunction(() => document.activeElement?.matches(".art-canvas code"));
+  await page.keyboard.down("Control");
+  await page.keyboard.press("End");
+  await page.keyboard.up("Control");
+  await page.keyboard.type("\nprint(area(3))");
+  await page.click(".art-canvas [data-art=edit]");
+  await page.waitForFunction(() => /your edit/.test(document.querySelector(".art-canvas .art-label")?.textContent ?? ""));
+  expect(await page.$eval(".art-canvas pre code", (c) => c.textContent)).toBe("def area(r):\n    return 3.14 * r * r\n\nprint(area(2))\nprint(area(3))");
+  await page.click(".art-canvas [data-art=changes]");
+  expect(await page.$$eval(".art-canvas .art-changes :is(.diff-add, .diff-del)", (s) => s.map((x) => x.textContent)))
+    .toEqual(["+ print(area(3))"]);
+  await page.close();
+}, 30_000);
+
+test("3D pages load three.js and A-Frame from their usual addresses, which they cannot reach: three as a module with addons by an import map's names and by address, and the classic build older pages load", async () => {
+  const page = await open();
+  // the least height each page's frame has shown, from when it is on screen
+  await page.evaluate(() => {
+    const low = (window as any).low = new Map<Element, number>();
+    const look = () => {
+      for (const f of document.querySelectorAll<HTMLElement>(".art-canvas iframe.page-frame:not(.next)")) low.set(f, Math.min(low.get(f) ?? Infinity, f.offsetHeight));
+      requestAnimationFrame(look);
+    };
+    look();
+  });
+  for (const [ask, want] of [["three cube", "186 true"], ["steady old cube", "186 true"]]) {
+    await send(page, ask);
+    const frame = (await (await page.$$(".art-canvas iframe.page-frame")).at(-1)!.contentFrame());
+    await frame.waitForFunction(() => !!document.body?.dataset.three, { timeout: 10_000 });
+    expect(await frame.$eval("body", (b) => b.dataset.three)).toBe(want);
+  }
+  // the scene made to its window (only its title is in it until its script runs) has the column's room from the start,
+  // while it is written and when its canvas is made; the cube, drawn at its own size, then has its own
+  await page.waitForFunction(() => (document.querySelectorAll(".art-canvas iframe.page-frame")[1] as HTMLElement).offsetHeight >= 400, { timeout: 5_000 });
+  const wide = await page.$$eval(".art-canvas iframe.page-frame", (f) => [f[1].clientWidth, f[1].offsetHeight, (window as any).low.get(f[1]), f[0].offsetHeight]);
+  expect(Math.abs(wide[1] - Math.round(wide[0] * 0.62))).toBeLessThan(4);
+  expect(wide[2]).toBeGreaterThan(wide[1] - 4);
+  expect(wide[3]).toBeLessThan(260);
+  // the cube was drawn
+  const frame = (await (await page.$$(".art-canvas iframe.page-frame"))[0].contentFrame());
+  const lit = await frame.$eval("canvas", (c) => {
+    const g = (c as HTMLCanvasElement).getContext("webgl2")!, px = new Uint8Array(4);
+    g.readPixels(150, 100, 1, 1, g.RGBA, g.UNSIGNED_BYTE, px);
+    return px[0] + px[1] + px[2];
+  });
+  expect(lit).toBeGreaterThan(0);
+  expect(probes).toBe(0);
+  await page.close();
+}, 40_000);
+
+test("an A-Frame scene is pointed into: the entity under the pointer is the one its camera sees there; the paint bucket colors it and the model's edit by id moves it, in the scene as it runs", async () => {
+  const page = await open();
+  await send(page, "a scene");
+  let frame = await pageFrame(page);
+  await frame.waitForFunction(() => (document.querySelector("a-scene") as any)?.renderStarted, { timeout: 15_000 });
+  await still(page);
+  const started = await frame.evaluate(() => (window as any).started);
+  // where the box is drawn, in the chat's page
+  const boxAt = async () => {
+    const box = (await (await page.$(".art-canvas iframe.page-frame:not(.next)"))!.boundingBox())!;
+    const p = await frame.evaluate(() => {
+      const scene = document.querySelector("a-scene") as any, T = (window as any).AFRAME.THREE, c = scene.canvas.getBoundingClientRect();
+      const v = scene.querySelector("#box").object3D.getWorldPosition(new T.Vector3()).project(scene.camera);
+      return { x: c.left + ((v.x + 1) / 2) * c.width, y: c.top + ((1 - v.y) / 2) * c.height };
+    });
+    return { x: box.x + 1 + p.x, y: box.y + 1 + p.y };
+  };
+  await pageTool(page, "[data-tool=select]");
+  let at = await boxAt();
+  await page.mouse.move(at.x, at.y);
+  await page.mouse.click(at.x, at.y);
+  await page.waitForFunction(() => document.getElementById("pointing")!.textContent === "Pointing at scene · #box");
+  // the sky is what lies beyond it
+  await page.mouse.click(at.x, at.y - 120);
+  await page.waitForFunction(() => document.getElementById("pointing")!.textContent === "Pointing at scene · #sky");
+  await pickColor(page, "#ff8800");
+  await frame.waitForFunction(() => (window as any).__chrysalis.mode === "bucket");
+  at = await boxAt();
+  await page.mouse.click(at.x, at.y);
+  await frame.waitForFunction(() => (document.querySelector("#box") as any).getAttribute("material").color === "#ff8800");
+  await pageTool(page, "[data-do=done]");
+  await send(page, "move the box");
+  frame = await pageFrame(page);
+  await frame.waitForFunction(() => (document.querySelector("#box") as any).object3D.position.x === 1);
+  expect([await frame.evaluate(() => (window as any).started), await frame.evaluate(() => (document.querySelector("#box") as any).getAttribute("material").color)])
+    .toEqual([started, "#4CC3D9"]);
+  expect(probes).toBe(0);
+  await page.close();
+}, 60_000);
 
 test("an edit that does not apply in full is asked for again, once, with the artifact as it is now, and its answer applies", async () => {
   const page = await open();
@@ -621,6 +970,48 @@ const pagerOf = (page: Page, i: number) => page.$eval(`#thread > article[data-i=
 async function untilIdle(page: Page) {
   await page.waitForFunction(() => document.querySelector("#send")?.getAttribute("aria-label") === "Send", { timeout: 20_000 });
 }
+
+test("a model picked while a reply is written is the one the next question asks for, though Chrysalis has the other until it switches", async () => {
+  const page = await open();
+  try {
+    await page.type("#input", "slow one");
+    await page.keyboard.press("Enter");
+    await page.click("#new-chat");
+    await page.click("#model-btn");
+    await page.waitForSelector("#model-pop .model-item");
+    await page.evaluate(() => [...document.querySelectorAll<HTMLElement>("#model-pop .model-item")].find((b) => /Flash/.test(b.textContent ?? ""))!.click());
+    await Bun.sleep(1000);                                                // the page's status polls meanwhile: still the 27B
+    const n = streams.length;
+    await page.type("#input", "which model");
+    await page.keyboard.press("Enter");
+    await untilIdle(page);
+    expect(streams.slice(n).filter((b) => b.messages.at(-1).content === "which model").map((b) => b.model)).toEqual(["qwen3.8-flash-next"]);
+  } finally {
+    await loading;                                                        // (its switch done, the 27B again for the tests after)
+    loaded = "qwen3.8-27b";
+    await page.close();
+  }
+}, 30_000);
+
+test("a question is kept as it is sent, before its reply begins: the chat left at once stays in the list, and after a reload it holds the question and says its reply never began", async () => {
+  const page = await open();
+  await page.setRequestInterception(true);
+  page.on("request", (r) => { if (!(r.method() === "POST" && new URL(r.url()).pathname === "/api/chat")) void r.continue(); });   // its job never begins
+  await page.type("#input", "a held question");
+  await page.keyboard.press("Enter");
+  await page.click("#new-chat");
+  expect(await page.$$eval(".conv .conv-title", (t) => t.map((x) => x.textContent))).toEqual(["a held question"]);
+  await page.reload({ waitUntil: "load" });
+  await page.click(".conv");
+  await page.waitForSelector("#thread > article.msg.assistant .error");
+  expect(await articles(page)).toEqual(["a held question", "The page was left before this reply began: regenerate it"]);
+  await page.setRequestInterception(false);
+  await page.hover('#thread > article[data-i="1"]');
+  await page.click('#thread > article[data-i="1"] [data-act="retry"]');
+  await untilIdle(page);
+  expect(await articles(page)).toEqual(["a held question", "You said: a held question"]);
+  await page.close();
+}, 30_000);
 
 test("regenerate and edit make versions; the pager switches them and shows each one's own continuation", async () => {
   const page = await open();

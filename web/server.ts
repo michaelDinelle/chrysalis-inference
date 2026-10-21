@@ -3,7 +3,7 @@
 // for the network. Conversations stay in the browser tab, replies being written stay in RAM (see
 // Job): on disk are only its certificates (tls.ts), the browsers and devices let in (devices.ts) and the backend (backend.ts). `bun server.ts` for development, NODE_ENV=production for a minified bundle.
 import { hostname } from "node:os";
-import type { Server, Subprocess } from "bun";
+import type { BunPlugin, Server, Subprocess } from "bun";
 import app from "./index.html";
 import { Backends, standard } from "./backend";
 import { Devices, keyCookie } from "./devices";
@@ -16,7 +16,7 @@ import { assistantTurn, DESCRIPTIONS, toolTurn, unnoted, type ToolChoice, type W
 const CHRYSALIS = process.env.CHRYSALIS_URL ?? "http://127.0.0.1:8080";
 // Changes with the page's code. Open tabs compare it on every status poll and reload to pick up an update
 // (their chats are in sessionStorage, so a reload keeps them).
-const BUILD = Bun.hash((await Promise.all(["index.html", "app.ts", "sampler.ts", "files.ts", "wire.ts", "voice.ts", "voice-worklet.js", "heard.ts", "spoken.ts", "ocean.ts", "theme.ts",
+const BUILD = Bun.hash((await Promise.all(["index.html", "app.ts", "sampler.ts", "files.ts", "wire.ts", "voice.ts", "voice-worklet.js", "sandbox.js", "heard.ts", "spoken.ts", "ocean.ts", "theme.ts",
   "logo.svg", "logo-thin.svg", "style.css", "tokens.css"].map((f) => Bun.file(`${import.meta.dir}/${f}`).text()))).join("\0")).toString(36);
 await registry.reload();
 for (const sig of ["SIGINT", "SIGTERM"] as const) process.on(sig, () => void registry.closeAll().finally(() => process.exit(0)));   // MCP servers' processes go too
@@ -410,17 +410,59 @@ const vendor = (req: Request) => {
   return new Response(Bun.file(MERMAID + file), { headers: { "Content-Type": "text/javascript", "Cache-Control": "max-age=86400" } });
 };
 
+// three.js and A-Frame for pages, which reach nothing: the chat hands a page the code it loads from their usual
+// addresses (app.ts, libsOf), from here. three's files import one another, so each is bundled into one: three itself,
+// an addon (examples/jsm) that imports "three" as the page's import map has it, and the classic builds older pages load
+// (a global THREE, and addons that add to it). A-Frame's build has three inside.
+const THREE_DIR = `${import.meta.dir}/node_modules/three/`;
+const AFRAME = `${import.meta.dir}/node_modules/aframe/dist/aframe-v1.8.0.min.js`;
+const bundles = new Map<string, Promise<string | null>>();
+let threeNames: Promise<string[]> | undefined;
+// A module made here (the entry of a classic build), and "three" as the global THREE where an addon is made classic
+function virtual(entry: string, shim?: string[]): BunPlugin {
+  return { name: "chrysalis-three", setup(b) {
+    b.onResolve({ filter: /^chrysalis:entry$/ }, () => ({ path: "entry", namespace: "chrysalis" }));
+    if (shim) b.onResolve({ filter: /^three$/ }, () => ({ path: "three", namespace: "chrysalis" }));
+    b.onLoad({ filter: /.*/, namespace: "chrysalis" }, (a) => ({ loader: "js", contents: a.path === "entry" ? entry
+      : `const T = window.THREE; export const { ${shim!.join(", ")} } = T; export default T;` }));
+  } };
+}
+function bundled(file: string): Promise<string | null> {
+  let made = bundles.get(file);
+  if (made) return made;
+  const build = async (o: Parameters<typeof Bun.build>[0]) => {
+    const out = await Bun.build({ target: "browser", minify: true, ...o });
+    return out.success ? await out.outputs[0].text() : null;
+  };
+  const addon = file.match(/^(addons|classic)\/(.+)$/), path = addon && `${THREE_DIR}examples/jsm/${addon[2]}`;
+  if (file === "three.module.js") made = build({ entrypoints: [`${THREE_DIR}build/three.module.js`], format: "esm" });
+  else if (file === "three.min.js") made = build({ entrypoints: ["chrysalis:entry"], format: "iife", plugins: [virtual(`import * as T from ${JSON.stringify(`${THREE_DIR}build/three.module.js`)}; window.THREE = Object.assign({}, T);`)] });
+  else if (addon?.[1] === "addons") made = build({ entrypoints: [path!], format: "esm", external: ["three"] });
+  else if (addon) made = (threeNames ??= import(`${THREE_DIR}build/three.module.js`).then((t) => Object.keys(t))).then((names) =>
+    build({ entrypoints: ["chrysalis:entry"], format: "iife", plugins: [virtual(`import * as M from ${JSON.stringify(path)}; Object.assign(window.THREE, M);`, names)] }));
+  else return Promise.resolve(null);
+  made = made.catch(() => null);
+  bundles.set(file, made);
+  return made;
+}
+const vendor3d = async (req: Request) => {
+  const path = new URL(req.url).pathname;
+  if (path === "/vendor/aframe/aframe.min.js") return new Response(Bun.file(AFRAME), { headers: { "Content-Type": "text/javascript", "Cache-Control": "max-age=86400" } });
+  const file = path.slice("/vendor/three/".length);
+  const known = /^(three\.module\.js|three\.min\.js|(addons|classic)\/[\w-]+(\/[\w-]+)*\.js)$/.test(file) &&
+    (!/^(addons|classic)\//.test(file) || (await Bun.file(`${THREE_DIR}examples/jsm/${file.slice(file.indexOf("/") + 1)}`).exists()));
+  const code = known ? await bundled(file) : null;
+  return code === null ? new Response("not found", { status: 404 })
+    : new Response(code, { headers: { "Content-Type": "text/javascript", "Cache-Control": "max-age=86400" } });
+};
+
 // The frame an HTML page from a reply runs in. Two walls: the page's iframe is sandboxed (allow-scripts only: an opaque
 // origin, so no cookies, storage or access to the chat), and this policy lets its own inline code run but nothing
-// load from or talk to anywhere, Chrysalis included. The chat posts the page in, which replaces this document.
-const SANDBOX = `<!doctype html><meta charset="utf-8"><script>
-addEventListener("message", (e) => {
-  if (e.source !== parent || typeof e.data?.chrysalisPage !== "string") return;
-  document.open(); document.write(e.data.chrysalisPage); document.close();
-}, { once: true });
-parent.postMessage({ chrysalisReady: true }, "*");
-</script>`;
-const SANDBOX_CSP = "default-src 'none'; script-src 'unsafe-inline' 'unsafe-eval'; style-src 'unsafe-inline'; img-src data: blob:; " +
+// load from or talk to anywhere, Chrysalis included. The chat posts the page in (sandbox.js).
+const SANDBOX = `<!doctype html><meta charset="utf-8"><script>${await Bun.file(`${import.meta.dir}/sandbox.js`).text()}</script>`;
+// (blob: scripts: the libraries the chat hands a page, which it loads from blob: addresses it makes itself; such an address
+// holds only what the page could run anyway)
+const SANDBOX_CSP = "default-src 'none'; script-src 'unsafe-inline' 'unsafe-eval' blob:; style-src 'unsafe-inline'; img-src data: blob:; " +
   "font-src data:; media-src data: blob:; form-action 'none'; base-uri 'none'; frame-ancestors 'self'; sandbox allow-scripts allow-modals";
 
 // Voice mode's speech service: a process of its own (voice/ in data/voice-venv, or any stack that speaks the same
@@ -564,6 +606,8 @@ img.src = ${JSON.stringify(checkUrl(req))} + "?t=" + Date.now();
     "/api/pair/:id": { DELETE: here((req) => new Response(null, { status: devices?.remove((req as Request & { params: { id: string } }).params.id) ? 204 : 404 })) },
     "/v1/*": guarded(proxy),
     "/vendor/mermaid/*": { GET: guarded(vendor) },
+    "/vendor/three/*": { GET: guarded(vendor3d) },
+    "/vendor/aframe/*": { GET: guarded(vendor3d) },
     "/sandbox": { GET: guarded(() => new Response(SANDBOX, { headers: { "Content-Type": "text/html; charset=utf-8", "Content-Security-Policy": SANDBOX_CSP } })) },
 
     // A streamed reply starts a job and follows it (its id in X-Chrysalis-Job); other requests (session titles) pass

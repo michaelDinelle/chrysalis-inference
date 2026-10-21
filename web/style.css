@@ -219,7 +219,8 @@ main { display: flex; flex-direction: column; min-height: 0; grid-column: 2; }
    quiet caption bar; the code replaces the picture on demand */
 .svg-fig { margin: 0.9em 0; }
 .svg-paper { width: fit-content; max-width: 100%; box-sizing: border-box; padding: 14px; border: 1px solid var(--line); border-radius: 12px; background: var(--paper); }
-.svg-bar { display: flex; align-items: center; gap: 12px; min-height: 26px; margin-top: 4px; color: var(--faint); font: 12px var(--sans); }
+.svg-bar { display: flex; flex-wrap: wrap; align-items: center; gap: 2px 12px; min-height: 26px; margin-top: 4px; color: var(--faint); font: 12px var(--sans); }
+.svg-bar button, .svg-state { white-space: nowrap; }
 .svg-state { font-variant-numeric: tabular-nums; }
 .svg-fig.drawing .svg-state::before { content: ""; display: inline-block; width: 6px; height: 6px; margin-right: 7px; border-radius: 50%; background: var(--accent); vertical-align: 1px; animation: pulse 1.2s ease-in-out infinite; }
 .svg-fig.drawing .svg-state::after { content: "…"; }
@@ -240,13 +241,16 @@ main { display: flex; flex-direction: column; min-height: 0; grid-column: 2; }
 .svg-zoom-paper { padding: 20px; border-radius: 14px; background: var(--paper); }
 /* HTML pages from replies: a white page (what pages assume), as wide as the column */
 .page-frame { display: block; width: 100%; border: 1px solid var(--line); border-radius: 12px; background: #fff; color-scheme: light; }
-.page-fig.show-code .page-frame { display: none; }
+/* a page rewritten loads in a second frame over the first, shown once it has loaded */
+.page-paper { position: relative; }
+.page-frame.next { position: absolute; top: 0; left: 0; opacity: 0; pointer-events: none; }
+.page-fig.show-code .page-paper { display: none; }
 .page-fig.show-code .svg-code { display: block; }
 .page-zoom { width: 100vw; height: 100vh; max-width: none; max-height: none; margin: 0; padding: 0; border: 0; background: none; }
 .page-zoom[open] { display: grid; place-items: center; }
 .page-zoom::backdrop { background: rgb(0 0 0 / 0.72); }
 .page-zoom-box { width: 94vw; height: 92vh; }
-.page-zoom-box .page-frame { height: 100%; }
+.page-zoom-box .page-paper, .page-zoom-box .page-frame { height: 100%; }
 .copy.done { color: var(--ok); }
 .code pre { margin: 0; padding: 12px 16px; overflow-x: auto; }
 .code code { font: 13px/1.6 var(--mono); }
@@ -796,6 +800,45 @@ label.set-switch { cursor: pointer; }
 .art-acts button { padding: 3px 8px; border: 0; border-radius: 6px; background: none; color: var(--muted); font: 12px var(--sans); }
 .art-acts button:hover { background: var(--hover); color: var(--text); }
 .art-line .art-fail, .art-line .art-changes { flex-basis: 100%; margin-top: 2px; }
+/* a canvas in edit mode: its tools in a row over it, in the chat's own look, and the canvas outlined */
+.art-tools { display: none; position: sticky; top: 8px; z-index: 5; flex-wrap: wrap; align-items: center; gap: 4px 8px; margin: 0 0 8px; padding: 4px;
+  border: 1px solid var(--line); border-radius: 12px; background: color-mix(in srgb, var(--raised) 90%, transparent); backdrop-filter: blur(10px);
+  box-shadow: 0 4px 18px rgb(0 0 0 / 0.12); color: var(--muted); font: 12.5px/1.3 var(--sans); text-align: left; }
+.art-tools.on { display: flex; }
+.art-tools button { display: inline-flex; align-items: center; gap: 6px; height: 28px; padding: 0 10px; border: 0; border-radius: 8px; background: none;
+  color: var(--muted); font: inherit; white-space: nowrap; cursor: pointer; }
+.art-tools button:hover:not(:disabled) { background: var(--hover); color: var(--text); }
+.art-tools button:disabled { opacity: 0.4; cursor: default; }
+.art-tools button.on { background: var(--accent-soft); color: var(--accent-hi); }
+.art-tools svg { flex: none; width: 15px; height: 15px; fill: none; stroke: currentColor; stroke-width: 1.8; stroke-linecap: round; stroke-linejoin: round; }
+.art-tools .seg { display: flex; gap: 2px; padding: 2px; border-radius: 10px; background: var(--panel); }
+.art-tools .swatch { position: relative; flex: none; width: 20px; height: 20px; border: 2px solid var(--raised); border-radius: 50%; box-shadow: 0 0 0 1px var(--line); cursor: pointer; }
+.art-tools .swatch input { position: absolute; inset: 0; width: 100%; height: 100%; padding: 0; border: 0; opacity: 0; cursor: pointer; }
+.art-tools .hint { flex: 1; min-width: 14em; padding: 0 4px; color: var(--faint); }
+.art-tools .picked { display: flex; flex: 1; flex-wrap: wrap; align-items: center; gap: 2px; min-width: 14em; }
+.art-tools .hint[hidden], .art-tools .picked[hidden] { display: none; }
+.art-tools .picked b { margin-right: 6px; padding: 2px 8px; border-radius: 6px; background: var(--accent-soft); color: var(--accent-hi); font: 500 12px var(--mono); }
+.art-tools .end { display: flex; gap: 2px; margin-left: auto; }
+.art-tools .done { background: var(--accent); color: #fff; font-weight: 500; }
+.art-tools .done:hover:not(:disabled) { background: var(--accent-hi); color: #fff; }
+:is(.svg-paper, .page-paper, .doc-paper, .shelf-paper).editing { outline: 2px solid var(--accent); outline-offset: 2px; }
+.page-paper { border-radius: 12px; }
+[data-art=edit][aria-pressed=true], [data-shelf=edit][aria-pressed=true] { color: var(--accent-hi); }
+/* what a version changed: its source's lines taken out and put in */
+.diff code { display: flex; flex-direction: column; font: 12.5px/1.5 var(--mono); }
+.diff span { padding: 0 6px; white-space: pre-wrap; overflow-wrap: anywhere; }
+.diff-add { background: rgb(46 160 67 / 0.16); } .diff-del { background: rgb(248 81 73 / 0.16); }
+.diff-same { color: var(--muted); } .diff-gap { color: var(--faint); font-style: italic; }
+.diff-count { margin-right: 6px; } .diff-plus { color: #2ea043; } .diff-minus { color: #e5534b; }
+/* code being changed by hand, and a document on its page */
+.code.editing pre { outline: 1.5px solid var(--accent); outline-offset: -1.5px; border-radius: 0 0 12px 12px; }
+.code.editing code { outline: none; caret-color: var(--accent); }
+.doc-paper { max-width: 100%; overflow: hidden; border: 1px solid var(--line); border-radius: 12px; }
+.doc-paper[data-doc=tex] { background: #fffefb; color-scheme: light; }
+.doc-paper[data-doc=md] { background: var(--raised); }
+.doc-fig.show-code .doc-paper { display: none; }
+.doc-fig.show-code .svg-code { display: block; }
+.shelf-paper .doc-paper { min-height: 100%; border: 0; border-radius: 0; }
 .code-head .art-label { margin-right: auto; padding-left: 10px; }
 .code-head .art-label + span { margin-right: 6px; }
 .code-acts [data-art] { padding: 3px 9px; border: 0; border-radius: 6px; background: none; color: var(--muted); font: 12px var(--sans); }
@@ -831,7 +874,8 @@ label.set-switch { cursor: pointer; }
 .shelf-paper.fill { padding: 12px; overflow: hidden; }
 .shelf-paper[data-kind=code] { background: var(--code); }
 .shelf-paper pre { margin: 0; padding: 12px 14px; font-size: 12.5px; }
-.shelf-paper .page-frame { height: 100%; border: 0; border-radius: 0; }
+.shelf-paper .page-paper, .shelf-paper .page-frame { height: 100%; }
+.shelf-paper .page-frame { border: 0; border-radius: 0; }
 .shelf-foot { display: flex; flex: none; align-items: center; gap: 10px; padding: 0 10px 10px; }
 .shelf-versions { display: flex; flex: 1; flex-wrap: wrap; gap: 4px; min-width: 0; }
 .shelf-v { height: 24px; padding: 0 9px; border: 1px solid var(--line); border-radius: 999px; background: none; color: var(--muted); font: 11.5px var(--mono); cursor: pointer; }

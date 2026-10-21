@@ -14,8 +14,9 @@ import { type Part, type VoiceAsk, type VoiceInfo, type VoiceReady, VoiceClient 
 import { type Fix, applyFixes, fixedParts, readHeard } from "./heard";
 import { pointOf, shownWords, unitOf } from "./spoken";
 import { DESCRIPTIONS, type ToolChoice, type WireCall, assistantTurn, noted, toolTurn } from "./wire";
-import { type Block, type Span, type Version, ARTIFACTS_PROMPT, elementById, elementSpans, infoOf, replay, setOpen, withAttr, withCopy, withOrder,
-  withPaint, withoutElement } from "./artifacts";
+import { type Block, type Span, type Version, ARTIFACTS_PROMPT, elementById, elementSpans, idOf, artifactOf, infoOf, type Info, markSource, replay, setOpen, withAttr, withBackground,
+  withContent, withCopy, withOrder, withPaint, withoutElement, lineDiff } from "./artifacts";
+import { LATEX_CSS, latexToHtml } from "./latex";
 import logoThin from "./logo-thin.svg";
 import { Ocean } from "./ocean";
 
@@ -43,6 +44,7 @@ interface Message {
   rounds?: Round[];                                 // a reply's earlier rounds; content, reasoning and calls are its last
   calls?: Call[];
   base?: number;                                    // rounds it had before its job began (a reload replays the job's)
+  starting?: boolean;                               // asked for, its job not begun yet (a reload finds it never began)
   notes?: string[];                                 // what the web server said about the reply (a tool left out, a limit)
   versions?: Versions;
   voice?: boolean;                                  // a question said in voice mode
@@ -357,12 +359,21 @@ function htmlNodes(t: Token, links: Links): Node[] {
   return [...tpl.content.childNodes];
 }
 
+// A node put where it goes. An artifact's canvas moves whole from where it was (moveBefore): a page in it goes on
+// running, as it was, where an iframe taken out and put back would load anew. render() draws the chat into new
+// articles, out of the page until all are drawn: a canvas they take is carried to its place once they are in (carried).
+const place = (into: Node, n: Node, at: Node | null) => {
+  if (n.isConnected && into.isConnected && "moveBefore" in into) (into as Element).moveBefore(n, at);
+  else into.insertBefore(n, at);
+};
+let carried: { slot: Comment; canvas: HTMLElement; b: Blocks }[] | null = null;
+
 // art: the chat and what holds src (a reply, or one of its rounds), for its artifact blocks' versions
 function renderBlocks(v: { body: HTMLElement; blocks?: Blocks }, src: string, live: boolean, art?: { c: Conversation; holder: object }) {
   if (!v.blocks) { v.body.replaceChildren(); v.blocks = { raws: [], nodes: [] }; }
   const b = v.blocks, tokens = marked.lexer(live ? settle(src) : src), blocks = tokens.filter((t) => t.type !== "space");
   let seen = 0, all: Map<string, Version[]> | undefined;
-  const nth = art ? blocks.map((t) => (t.type === "code" && infoOf(t.lang) ? seen++ : -1)) : [];
+  const nth = art ? blocks.map((t) => (t.type === "code" && artifactOf(t.lang, t.text) ? seen++ : -1)) : [];
   // An artifact block as its canvas (its latest version) or a line. The canvas is taken from wherever it is in the chat,
   // and its old place gets a line (in this reply's own blocks too, so they stay as shown).
   const artNodes = (k: number, old: Node | undefined, drawing: boolean): Node[] => {
@@ -371,16 +382,20 @@ function renderBlocks(v: { body: HTMLElement; blocks?: Blocks }, src: string, li
     const list = all.get(ver.id)!, last = list.at(-1)!;
     if (list.findLast((x) => x.block.by !== "user") !== ver) return [artLine(ver, list.length)];
     let canvas = thread.querySelector<HTMLElement>(`.art-canvas[data-art="${CSS.escape(ver.id)}"]`) ?? undefined;
-    if (canvas && canvas !== old) {
+    const carry = carried && canvas && canvas !== old ? carried : null;   // from the chat as it was drawn before
+    if (canvas && canvas !== old && !carry) {
       const was = list[Number(canvas.dataset.made) - 1], line = was ? artLine(was, list.length) : h("span");
-      canvas.replaceWith(line);
+      canvas.before(line);
       const j = b.nodes.findIndex((n) => n[0] === canvas);
       if (j >= 0) b.nodes[j] = [line];
     } else if (!canvas && old instanceof HTMLElement && !old.classList.contains("art-line")) canvas = old;
     // the user's own versions since show here too: their questions hold them, not a canvas
     const el = drawVersion(canvas, last, drawing && last === ver, list.length);
     el.dataset.made = String(ver.v);
-    return [el];
+    if (!carry || el !== canvas) return [el];
+    const slot = document.createComment(ver.id);
+    carry.push({ slot, canvas: el, b });
+    return [slot];
   };
   let k = 0;
   while (k < blocks.length && k < b.raws.length && b.raws[k] === blocks[k].raw) k++;
@@ -394,7 +409,7 @@ function renderBlocks(v: { body: HTMLElement; blocks?: Blocks }, src: string, li
     b.raws[k] = t.raw;
     if (now.length === 1 && old.length === 1 && now[0] === old[0]) continue;   // a figure updated in place
     const at = b.nodes.slice(k).flat()[0] ?? null;
-    for (const n of now) v.body.insertBefore(n, at);
+    for (const n of now) place(v.body, n, at);
     for (const n of old) n.parentNode?.removeChild(n);
     b.nodes[k] = now;
   }
@@ -652,53 +667,189 @@ function captionMermaid(fig: HTMLElement) {
 }
 
 
-// A ```html block holding a whole document runs as a page once it is written; a fragment does when its Preview is
-// clicked. The page runs in an iframe on /sandbox (server.ts): its own code runs, but it can reach neither the chat nor
-// the network. It reports its height and the frame takes it, up to what can be seen at once (a taller page scrolls
-// inside). A page sized by the viewport (100vh) reports the frame's own height, so the frame starts at a useful size.
+// A ```html block holding a whole document is a page once it is written; a fragment is when its Preview is clicked.
+// The page runs in an iframe on /sandbox (server.ts, sandbox.js): its own code runs, but it can reach neither the chat
+// nor the network. It reports its height and the frame takes it, up to what can be seen at once (a taller page scrolls
+// inside). A page sized by the viewport (100vh) reports the frame's own height; one made to the window's size (a 3D
+// scene's canvas) says so, and its frame is fitted to the column (pageFill). Until a page has loaded its frame keeps at
+// least that much: what its scripts draw is not there while it is written, and a scene sizes its canvas to whatever
+// height the frame has when they run.
 const PAGE_LANGS = new Set(["html", "htm"]);
 const PAGE_DOC = /^\s*(?:<!--[\s\S]*?-->\s*)*(?:<!doctype html|<html[\s>])/i;
 const previewed = new Set<string>();                  // fragments whose Preview was clicked
-const pageText = new WeakMap<HTMLIFrameElement, string>();
-// The root element's box: its content's height (scrollHeight would never report less than the frame already is).
-const REPORT = `<script>(() => { const html = document.documentElement, post = () => parent.postMessage({ chrysalisHeight: Math.ceil(html.getBoundingClientRect().height) }, "*");
-  new ResizeObserver(post).observe(html); addEventListener("load", post); post(); })()</script>`;
+// An artifact is a page by its kind or by what it is (models name one by what is in it: ```aframe scene```)
+const isPage = (kind: string, src: string) => PAGE_LANGS.has(kind) || kind === "aframe" || PAGE_DOC.test(src);
 const pageRoom = () => Math.max(scroller.clientHeight - 74, 240);
+const pageStart = () => Math.min(480, pageRoom());     // a page's frame before it reports
+// A page made to its window's size (a 3D scene): the column's width at a landscape screen's shape, within what shows at once
+const pageFill = (frame: HTMLElement) => Math.round(Math.min(pageRoom(), Math.max(240, frame.clientWidth * 0.62)));
+addEventListener("resize", () => document.querySelectorAll<HTMLIFrameElement>("iframe.page-frame.fills:not([data-fixed])").forEach((f) => { f.style.height = `${pageFill(f)}px`; }));
 
-function pageFrame(text: string, fixed: boolean): HTMLIFrameElement {
+// A page is synced into its frame as it is written (each element as it arrives, its scripts waiting), and once it is
+// whole if its scripts are the ones that ran (so what the page holds stays as its look changes: a game's score, what
+// was typed in a form). Else it is written whole, so its scripts run: in its frame if none ran there, else in a new
+// frame over it, shown once it has loaded. sent: the text and whether it was being written; ran: the scripts that ran.
+interface PageFrame { ready: boolean; want?: { lead: string; text: string; live: boolean }; sent?: string; ran?: string; loaded?: boolean; mode?: string; pin?: number | null }
+
+// The libraries a page loads from the web that the chat has (server.ts, vendor3d): three.js (its module, its addons, its
+// classic builds) and A-Frame, by the addresses models write, of any version. A page gets each one's code with it and
+// loads it from a blob: address it makes itself (sandbox.js), so it still reaches nothing.
+const LIBS: [RegExp, (m: RegExpMatchArray) => string][] = [
+  [/^(?:https?:)?\/\/[^"'\s]*?\/three(?:@[\w.^~-]+)?\/build\/three\.module(?:\.min)?\.js(?:\?[^"'\s]*)?$|^https?:\/\/(?:esm\.sh|cdn\.skypack\.dev)\/three(?:@[\w.^~-]+)?$|^three$/, () => "three.module.js"],
+  [/^(?:https?:)?\/\/[^"'\s]*?\/three(?:\.js)?(?:@[\w.^~-]+|\/r?[\d.]+)?\/(?:build\/)?three(?:\.min)?\.js$/, () => "three.min.js"],
+  [/^(?:(?:https?:)?\/\/[^"'\s]*?\/three(?:@[\w.^~-]+)?\/examples\/jsm\/|three\/(?:addons|examples\/jsm)\/)([\w-]+(?:\/[\w-]+)*\.js)(?:\?[^"'\s]*)?$/, (m) => `addons/${m[1]}`],
+  [/^(?:https?:)?\/\/[^"'\s]*?\/three(?:@[\w.^~-]+)?\/examples\/js\/([\w-]+(?:\/[\w-]+)*\.js)$/, (m) => `classic/${m[1]}`],
+  [/^(?:https?:)?\/\/[^"'\s]*?\/aframe(?:@[\w.^~-]+)?\/dist\/aframe[\w.-]*\.js$|^(?:https?:)?\/\/aframe\.io\/releases\/[\w.]+\/aframe(?:\.min)?\.js$/, () => "aframe"],
+];
+const vendorOf = (spec: string) => {
+  for (const [re, path] of LIBS) { const m = spec.match(re); if (m) return path(m); }
+  return null;
+};
+// What a page loads that the chat has: each address or name as the page writes it (a script's src, an import, its
+// import map's), and the file it is. An addon imports "three", so a page with one gets three as "three" too.
+function libsOf(src: string): Map<string, string> {
+  const out = new Map<string, string>(), specs = new Set<string>();
+  for (const m of src.matchAll(/<script\b[^>]*?\ssrc\s*=\s*["']([^"']+)["']/gi)) specs.add(m[1]);
+  for (const m of src.matchAll(/\b(?:from|import)\s*\(?\s*["']([^"']+)["']/g)) specs.add(m[1]);
+  for (const map of src.matchAll(/<script\b[^>]*type\s*=\s*["']importmap["'][^>]*>([\s\S]*?)<\/script>/gi))
+    for (const m of map[1].matchAll(/"([^"]+)"\s*:\s*"([^"]+)"/g)) { specs.add(m[2]); if (!m[1].endsWith("/")) specs.add(m[1]); }
+  for (const spec of specs) { const v = vendorOf(spec); if (v) out.set(spec, v); }
+  if ([...out.values()].some((v) => v.startsWith("addons/"))) out.set("three", "three.module.js");
+  return out;
+}
+const vendorCode = new Map<string, Promise<string | null>>();
+const fetchVendor = (file: string) => {
+  let got = vendorCode.get(file);
+  if (!got) vendorCode.set(file, got = fetch(file === "aframe" ? "/vendor/aframe/aframe.min.js" : `/vendor/three/${file}`).then((r) => (r.ok ? r.text() : null), () => null));
+  return got;
+};
+const vendorDone = new Map<string, string | null>();
+const frames = new WeakMap<HTMLIFrameElement, PageFrame>();
+const scriptsOf = (src: string) => elementSpans(src).filter((s) => s.tag.toLowerCase() === "script").map((s) => src.slice(s.start, s.end)).join("\0");
+
+function pageFrame(fixed: boolean): HTMLIFrameElement {
   const frame = h("iframe", "page-frame");
   frame.setAttribute("sandbox", "allow-scripts allow-modals");
   frame.title = "Page from the reply";
   if (fixed) frame.dataset.fixed = "1";
-  else frame.style.height = `${Math.min(480, pageRoom())}px`;
-  pageText.set(frame, (PAGE_DOC.test(text) ? "" : "<!doctype html>") + text);
+  else frame.style.height = `${pageStart()}px`;
+  frames.set(frame, { ready: false });
   frame.src = "/sandbox";
   return frame;
 }
+// What a page is drawn on: its frame (two while a new one loads), and on an artifact the tools (pagePointable)
+function pagePaper(fixed: boolean): HTMLElement {
+  const paper = h("div", "page-paper");
+  paper.append(pageFrame(fixed));
+  return paper;
+}
+const frameOf = (paper: Element) => [...paper.querySelectorAll<HTMLIFrameElement>(":scope > iframe.page-frame")].at(-1);
+// What goes before a fragment (none of its elements, so none marked): the doctype, and A-Frame for a scene without it
+function showPage(paper: HTMLElement, text: string, live: boolean) {
+  const frame = frameOf(paper)!, lead = (PAGE_DOC.test(text) ? "" : "<!doctype html>") +
+    (/<a-scene[\s>]/.test(text) && !/<script\b[^>]*aframe/i.test(text) ? '<script src="https://aframe.io/releases/1.8.0/aframe.min.js"></script>' : "");
+  frames.get(frame)!.want = { lead, text, live };
+  flushPage(frame);
+}
+function flushPage(frame: HTMLIFrameElement) {
+  const st = frames.get(frame), paper = frame.parentElement as HTMLElement | null;
+  if (!st?.ready || !paper || !frame.contentWindow) return;
+  const msg: { mode?: string; pin?: number | null; page?: string; write?: boolean; libs?: Record<string, string> } = {}, mode = pageModeOf(paper), pin = pagePin(paper);
+  if (mode !== st.mode) msg.mode = st.mode = mode;
+  if (pin !== st.pin) msg.pin = st.pin = pin;
+  const want = st.want, key = want && `${want.live}:${want.lead}${want.text}`;
+  if (want && key !== st.sent) {
+    const scripts = scriptsOf(want.lead + want.text), write = !want.live && scripts !== (st.ran ?? "");
+    if (write && st.ran !== undefined) {
+      const next = pageFrame(!!frame.dataset.fixed);
+      next.classList.add("next");
+      if (!frame.dataset.fixed) next.style.height = frame.style.height;
+      frames.get(next)!.want = want;
+      paper.append(next);
+      setTimeout(() => swapIn(next), 3000);               // one whose load never ends (a script that never returns)
+    } else {
+      // what it loads first, then the page
+      const libs = write ? libsOf(want.lead + want.text) : new Map<string, string>(), missing = [...new Set(libs.values())].filter((f) => !vendorDone.has(f));
+      if (missing.length) {
+        void Promise.all(missing.map((f) => fetchVendor(f).then((code) => vendorDone.set(f, code)))).then(() => flushPage(frame));
+        if (Object.keys(msg).length) frame.contentWindow.postMessage({ chrysalis: msg }, "*");
+        return;
+      }
+      st.sent = key;
+      msg.page = want.lead + markSource(want.text);
+      if (write) {
+        msg.write = true;
+        st.ran = scripts;
+        const code: Record<string, string> = {};
+        for (const [spec, file] of libs) if (vendorDone.get(file)) code[spec] = vendorDone.get(file)!;
+        if (Object.keys(code).length) msg.libs = code;
+      }
+    }
+  }
+  if (Object.keys(msg).length) frame.contentWindow.postMessage({ chrysalis: msg }, "*");
+}
+function swapIn(next: HTMLIFrameElement) {
+  if (!next.classList.contains("next") || !next.isConnected) return;
+  for (const f of next.parentElement!.querySelectorAll(":scope > iframe.page-frame")) if (f !== next) f.remove();
+  next.classList.remove("next");
+}
 
-function pageFigure(old: Node | undefined, text: string): HTMLElement {
-  if (old instanceof HTMLElement && old.dataset.kind === "page" && svgSource.get(old) === text) return old;
-  const fig = h("figure", "svg-fig page-fig");
-  fig.dataset.kind = "page";
-  svgSource.set(fig, text);
+function pageFigure(old: Node | undefined, text: string, live = false): HTMLElement {
+  let fig = old instanceof HTMLElement && old.dataset.kind === "page" ? old : undefined;
+  if (!fig) {
+    fig = h("figure", "svg-fig page-fig");
+    fig.dataset.kind = "page";
+    fig.innerHTML = `<figcaption class="svg-bar"><span class="svg-state"></span><span class="svg-acts">` +
+      ["code:Code", "copy:Copy", "save:Download", "reload:Reload", "zoom:Expand"].map((a) => `<button type="button" data-page="${a.split(":")[0]}">${a.split(":")[1]}</button>`).join("") +
+      `</span></figcaption><div class="code svg-code"><div class="code-head"><span>html</span><button type="button" class="copy">Copy</button></div>` +
+      `<pre><code class="hljs"></code></pre></div>`;
+    fig.prepend(pagePaper(false));
+  }
+  if (svgSource.get(fig) !== text) {
+    svgSource.set(fig, text);
+    if (fig.classList.contains("show-code")) fig.querySelector(".svg-code code")!.innerHTML = hljs.highlight(text, { language: "xml", ignoreIllegals: true }).value;
+  }
   const title = text.match(/<title[^>]*>([^<]*)<\/title>/i)?.[1].trim();
-  fig.innerHTML = `<figcaption class="svg-bar"><span class="svg-state"></span><span class="svg-acts">` +
-    ["code:Code", "copy:Copy", "save:Download", "reload:Reload", "zoom:Expand"].map((a) => `<button type="button" data-page="${a.split(":")[0]}">${a.split(":")[1]}</button>`).join("") +
-    `</span></figcaption><div class="code svg-code"><div class="code-head"><span>html</span><button type="button" class="copy">Copy</button></div>` +
-    `<pre><code class="hljs"></code></pre></div>`;
-  fig.querySelector(".svg-state")!.textContent = title ? `Page · ${title}` : "Page";
-  fig.prepend(pageFrame(text, false));
+  fig.querySelector(".svg-state")!.textContent = live ? "Writing the page" : title ? `Page · ${title}` : "Page";
+  fig.classList.toggle("drawing", live);
+  showPage(fig.querySelector<HTMLElement>(".page-paper")!, text, live);
   return fig;
 }
 
 addEventListener("message", (e) => {
   const frame = [...document.querySelectorAll<HTMLIFrameElement>("iframe.page-frame")].find((f) => f.contentWindow === e.source);
-  if (!frame) return;
-  if (e.data?.chrysalisReady) frame.contentWindow!.postMessage({ chrysalisPage: pageText.get(frame) + REPORT }, "*");
-  else if (typeof e.data?.chrysalisHeight === "number" && !frame.dataset.fixed) {
-    const px = `${Math.round(Math.min(Math.max(e.data.chrysalisHeight, 60), pageRoom()))}px`;
-    if (frame.style.height !== px) frame.style.height = px;
+  const st = frame && frames.get(frame), d = e.data, paper = frame?.parentElement;
+  if (!frame || !st || !paper || typeof d !== "object" || !d) return;
+  if (d.chrysalisReady) {
+    st.ready = true;
+    return flushPage(frame);
   }
+  if (typeof d.chrysalisHeight === "number") {
+    if (d.loaded) st.loaded = true;
+    if (!frame.dataset.fixed) {
+      // one made to its window takes the room fitted to the column, unless its content goes well past the window
+      const fill = d.fills && !(d.chrysalisHeight > (d.view ?? 0) * 1.25);
+      frame.classList.toggle("fills", fill);
+      const want = fill ? pageFill(frame) : st.loaded ? d.chrysalisHeight : Math.max(pageFill(frame), d.chrysalisHeight);
+      const px = `${Math.round(Math.min(Math.max(want, 60), pageRoom()))}px`;
+      if (frame.style.height !== px) frame.style.height = px;
+    }
+    if (d.loaded) swapIn(frame);
+    return;
+  }
+  // The tools' messages, taken only while a tool holds the page: its own code could post them too
+  if (frame !== frameOf(paper) || pageModeOf(paper) === "use") return;
+  if ("chrysalisHover" in d) hovered = pagePoint(paper, d.chrysalisHover);
+  else if ("chrysalisPick" in d) {
+    pinned = pagePoint(paper, d.chrysalisPick);
+    st.pin = pagePin(paper);
+    frame.focus();                                       // the tools' keys (Delete, Ctrl+D) go to the page, which sends them on
+    glow();
+    renderPointing();
+  } else if (typeof d.chrysalisPaint === "number") paintPage(paper, d.chrysalisPaint);
+  else if (typeof d.chrysalisText?.cx === "number" && typeof d.chrysalisText.html === "string") retypePage(paper, d.chrysalisText.cx, d.chrysalisText.html);
+  else if (typeof d.chrysalisKey === "string") editPage(paper, d.chrysalisKey);
+  else if (d.chrysalisNote) toast("That text is made by the page's own code: ask for it to be changed");
 });
 
 function pageAction(btn: HTMLElement) {
@@ -719,10 +870,15 @@ function pageAction(btn: HTMLElement) {
     if (code.textContent !== text) code.innerHTML = hljs.highlight(text, { language: "xml", ignoreIllegals: true }).value;
   } else if (act === "copy") copy(text, btn);
   else if (act === "save") download("page.html", text, "text/html");
-  else if (act === "reload") fig.querySelector("iframe")!.replaceWith(pageFrame(text, false));
-  else if (act === "zoom") {
-    const dlg = $<HTMLDialogElement>("page-zoom");
-    dlg.querySelector(".page-zoom-box")!.replaceChildren(pageFrame(text, true));
+  else if (act === "reload") {                           // run anew: a page's scripts start over
+    const paper = fig.querySelector<HTMLElement>(".page-paper")!;
+    paper.querySelectorAll(":scope > iframe").forEach((f) => f.remove());
+    paper.append(pageFrame(false));
+    showPage(paper, text, false);
+  } else if (act === "zoom") {
+    const dlg = $<HTMLDialogElement>("page-zoom"), paper = pagePaper(true);
+    dlg.querySelector(".page-zoom-box")!.replaceChildren(paper);
+    showPage(paper, text, false);
     dlg.showModal();
   }
 }
@@ -730,14 +886,16 @@ function pageAction(btn: HTMLElement) {
 // Artifacts (artifacts.ts): a reply's blocks named ```kind id```, and the edits (```edit id```) that change them in place.
 // A chat's artifacts are its replies' artifact blocks replayed in order: each block makes a version of one. Each text is
 // read once while it stays the same, so as a reply is written only it is read again.
-interface ArtRead { text: string; blocks: { n: number; lang: string; text: string; closed: boolean }[] }
+interface ArtRead { text: string; blocks: { n: number; info: Info; text: string; closed: boolean }[] }
 const artRead = new WeakMap<object, ArtRead>();       // by what holds the text: a reply, or one of its rounds
 function artBlocksOf(holder: object, text: string): ArtRead["blocks"] {
   let r = artRead.get(holder);
   if (!r || r.text !== text) {
     let n = 0;
-    const blocks = marked.lexer(text).flatMap((t) => t.type === "code" && infoOf(t.lang)
-      ? [{ n: n++, lang: t.lang!, text: t.text, closed: /\n {0,3}(?:`{3,}|~{3,})[^\n]*\n?$/.test(t.raw) }] : []);
+    const blocks = marked.lexer(text).flatMap((t) => {
+      const a = t.type === "code" ? artifactOf(t.lang, t.text) : null;
+      return a ? [{ n: n++, info: a.info, text: a.text, closed: /\n {0,3}(?:`{3,}|~{3,})[^\n]*\n?$/.test(t.raw) }] : [];
+    });
     artRead.set(holder, r = { text, blocks });
   }
   return r.blocks;
@@ -756,7 +914,7 @@ function artifactsOf(c: Conversation): Map<string, Version[]> {
     const parts: [object, string][] = [...(m.rounds ?? []).map((r): [object, string] => [r, r.content]), [m, m === writing ? settle(m.content) : m.content]];
     for (const [holder, text] of parts)
       for (const b of artBlocksOf(holder, text))
-        blocks.push({ at: holder, n: b.n, info: infoOf(b.lang)!, text: b.text, live: m === writing && holder === m && !b.closed, label });
+        blocks.push({ at: holder, n: b.n, info: b.info, text: b.text, live: m === writing && holder === m && !b.closed, label });
   }
   Object.entries(c.pending ?? {}).forEach(([id, p], n) =>
     blocks.push({ at: c, n, info: { kind: p.kind, id }, text: p.srcs.at(-1)!, live: false, label: "Your edit, not sent yet", by: "user" }));
@@ -770,12 +928,15 @@ const versionAt = (all: Map<string, Version[]>, holder: object, n: number) =>
 // earlier version is a line naming it. When a reply changes an artifact its canvas moves there, the same figure, so the
 // edit paints into the picture as it stood, each change landing as it is written; the place it left keeps a line. The
 // canvas steps through the versions in place (‹ ›), redrawing only what differs.
-const editOf = (ver: Version) => ("edit" in ver.block.info ? ver.block.text : undefined);
 const captionOf = (ver: Version) => {
   const done = (ver.applied ?? []).filter((a) => a.ok).length;
   const changes = ver.block.by === "user" ? ` · your edit${ver.block.at === conv ? ", not sent yet" : ""}` : !ver.applied ? ""
     : ver.block.live ? ` · changing${done ? `, ${done} so far` : ""}` : ` · ${done} change${done === 1 ? "" : "s"}`;
   return `${ver.id} · v${ver.v}${ver.from ? ` · from ${ver.from.id} v${ver.from.v}` : ""}${changes}`;
+};
+const beforeOf = (ver: Version): Version | undefined => {
+  const all = artifactsOf(conv);
+  return ver.from ? all.get(ver.from.id)?.[ver.from.v - 1] : ver.v > 1 ? all.get(ver.id)?.[ver.v - 2] : undefined;
 };
 const failedOf = (ver: Version) => (ver.applied ?? []).filter((a) => !a.ok && !a.change.partial);
 const actButton = (act: string, name: string, label?: string) => {
@@ -799,7 +960,8 @@ function drawVersion(prev: HTMLElement | undefined, ver: Version, drawing: boole
   let el: HTMLElement;
   if (ver.kind === "svg" || (["xml", "html"].includes(ver.kind) && SVG_START.test(src))) el = svgFigure(prev?.dataset.kind === "svg" ? prev : undefined, src, drawing, fade);
   else if (ver.kind === "mermaid") el = mermaidFigure(prev?.dataset.kind === "mermaid" ? prev : undefined, src, drawing);
-  else if (PAGE_LANGS.has(ver.kind) && !drawing) el = pageFigure(prev?.dataset.kind === "page" ? prev : undefined, src);
+  else if (isPage(ver.kind, src)) el = pageFigure(prev?.dataset.kind === "page" ? prev : undefined, src, drawing);
+  else if (DOC_KINDS.has(ver.kind)) el = docFigure(prev?.dataset.kind === "doc" ? prev : undefined, ver.kind, src, drawing);
   else el = htmlNodes({ type: "code", raw: "", lang: ver.kind, text: src } as Tokens.Code, {} as Links)[0] as HTMLElement;
   el.classList.add("art-canvas");
   el.dataset.art = ver.id;
@@ -810,20 +972,21 @@ function drawVersion(prev: HTMLElement | undefined, ver: Version, drawing: boole
     step.append(actButton("prev", "‹", "Earlier version"), h("span", "art-label"), actButton("next", "›", "Later version"));
     head.prepend(step);
     head.querySelector(".svg-acts, .code-acts")?.prepend(actButton("use", "Use this version", "Make this version the latest, as your own edit"),
-      actButton("open", "Open"), actButton("changes", "Changes"));
+      actButton("open", "Open"), actButton("changes", "Changes"), ...(el.dataset.kind === "mermaid" ? []
+        : [actButton("edit", "Edit", el.classList.contains("code") ? "Change the code here, by hand" : "Change it by hand: select, retype, fill, move")]));
   }
   if (head) {
     head.querySelector(".art-label")!.textContent = captionOf(ver);
     head.querySelector<HTMLButtonElement>("[data-art=prev]")!.disabled = ver.v <= 1;
     head.querySelector<HTMLButtonElement>("[data-art=next]")!.disabled = ver.v >= count;
     head.querySelector(".art-step")!.classList.toggle("single", count < 2);
-    head.querySelector<HTMLElement>("[data-art=changes]")!.hidden = editOf(ver) === undefined;
+    head.querySelector<HTMLElement>("[data-art=changes]")!.hidden = !beforeOf(ver);
     head.querySelector<HTMLElement>("[data-art=use]")!.hidden = ver.v >= count;
   }
-  const paper = el.dataset.kind === "svg" ? el.querySelector<HTMLElement>(".svg-paper") : null;
+  const paper = el.querySelector<HTMLElement>(el.dataset.kind === "svg" ? ".svg-paper" : el.dataset.kind === "page" ? ".page-paper" : el.dataset.kind === "doc" ? ".doc-paper" : ":scope > :not(*)");
   if (paper && !paper.dataset.pointable) {
     paper.dataset.pointable = "1";
-    pointable(paper);
+    (el.dataset.kind === "page" ? pagePointable : el.dataset.kind === "doc" ? docPointable : pointable)(paper);
   }
   paper?.classList.toggle("busy", drawing);                // no tools on a picture still being written
   if (paper) glow();
@@ -842,7 +1005,7 @@ function artLine(ver: Version, count: number): HTMLElement {
   el.dataset.v = String(ver.v);
   el.append(h("span", "art-label", captionOf(ver)), h("span", "art-later", `· now v${count}`));
   const acts = h("span", "art-acts");
-  acts.append(actButton("goto", "Show"), actButton("open", "Open"), ...(editOf(ver) !== undefined ? [actButton("changes", "Changes")] : []));
+  acts.append(actButton("goto", "Show"), actButton("open", "Open"), ...(beforeOf(ver) ? [actButton("changes", "Changes")] : []));
   el.append(acts);
   if (failedOf(ver).length) el.append(h("p", "art-fail", `Not applied: ${failedOf(ver).map((a) => a.how).join("; ")}`));
   return el;
@@ -865,13 +1028,16 @@ function artAction(btn: HTMLElement) {
     now.querySelector<HTMLElement>(`[data-art=${act}]`)?.focus();
     return;
   }
+  if (act === "edit") {
+    const paper = el.querySelector<HTMLElement>(":scope > [data-edit]");
+    return el.classList.contains("code") ? editCode(el, btn, ver) : paper ? setEditing(paper, paper.dataset.editing !== "1") : undefined;
+  }
   let box = el.querySelector<HTMLElement>(":scope > .art-changes");
   if (!box) {
-    box = h("div", "code art-changes");
-    box.innerHTML = `<div class="code-head"><span>edit</span></div><pre><code class="hljs"></code></pre>`;
-    box.querySelector("code")!.innerHTML = hljs.highlight(editOf(ver) ?? "", { language: "xml", ignoreIllegals: true }).value;
+    const was = beforeOf(ver);
+    if (!was) return;
+    el.append(box = diffView(was, ver));
     box.hidden = true;
-    el.append(box);
   }
   box.hidden = !box.hidden;
   btn.textContent = box.hidden ? "Changes" : "Hide changes";
@@ -939,6 +1105,7 @@ function renderShelf() {
   stage.classList.toggle("two", want === 2);
   if (other) paintSide(stage.children[0] as HTMLElement, other, "other");
   paintSide(stage.lastElementChild as HTMLElement, main, "main");
+  $("shelf").querySelector<HTMLElement>("[data-shelf=edit]")!.hidden = !stage.lastElementChild?.querySelector("[data-edit]");
   if (shelf.compare && !other) stage.dataset.note = "Only one version so far: nothing to compare it with";
   else delete stage.dataset.note;
   const versions = $("shelf-versions"), list = all.get(main.id)!;
@@ -976,7 +1143,7 @@ function paintSide(side: HTMLElement, ver: Version, which: "main" | "other") {
   side.querySelector<HTMLButtonElement>("[data-step='1']")!.disabled = ver.v >= count;
   const old = side.querySelector<HTMLElement>(".shelf-paper")!, picture = !shelf.code || which === "other";
   const kind = picture && (ver.kind === "svg" || SVG_START.test(ver.src)) ? "svg" : picture && ver.kind === "mermaid" ? "mermaid"
-    : picture && PAGE_LANGS.has(ver.kind) ? "page" : "code";
+    : picture && isPage(ver.kind, ver.src) ? "page" : picture && DOC_KINDS.has(ver.kind) ? "doc" : "code";
   let paper = old;
   if (paper.dataset.kind !== kind) {
     paper = h("div", "shelf-paper");
@@ -984,12 +1151,14 @@ function paintSide(side: HTMLElement, ver: Version, which: "main" | "other") {
     if (kind === "svg" || kind === "mermaid") {
       paper.attachShadow({ mode: "open" }).innerHTML = `<style>${SVG_SHADOW}</style>`;
       paper.classList.add("fill");
-      if (kind === "svg") pointable(paper);
     }
     old.replaceWith(paper);
+    side.querySelectorAll(":scope > .art-tools").forEach((b) => b.remove());
+    if (kind === "svg") pointable(paper);
   }
-  if (paper.dataset.src === ver.src) return;
+  if (paper.dataset.src === ver.src && paper.dataset.live === String(ver.block.live)) return;
   paper.dataset.src = ver.src;
+  paper.dataset.live = String(ver.block.live);
   if (kind === "svg") {
     drawSvg(paper.shadowRoot!, svgPrefix(ver.src), ver.block.live);
     paper.classList.toggle("busy", ver.block.live);
@@ -1002,8 +1171,24 @@ function paintSide(side: HTMLElement, ver: Version, which: "main" | "other") {
       const out = await m.render(`chrysalis-mermaid-${seq}`, ver.src).catch(() => null);
       if (out && paper.dataset.seq === seq) drawSvg(paper.shadowRoot!, out.svg, false);
     });
+  } else if (kind === "doc") {
+    let doc = paper.querySelector<HTMLElement>(":scope > .doc-paper");
+    if (!doc || doc.dataset.doc !== (isTex(ver.kind) ? "tex" : "md")) {
+      paper.replaceChildren(doc = docPaper(ver.kind));
+      docPointable(doc);
+    }
+    doc.classList.toggle("busy", ver.block.live);
+    showDoc(doc, ver.kind, ver.src, ver.block.live);
+    glow();
   } else if (kind === "page") {
-    if (!ver.block.live) paper.replaceChildren(pageFrame(ver.src, true));
+    let page = paper.querySelector<HTMLElement>(":scope > .page-paper");
+    if (!page) {
+      paper.replaceChildren(page = pagePaper(true));
+      pagePointable(page);
+    }
+    page.classList.toggle("busy", ver.block.live);
+    showPage(page, ver.src, ver.block.live);
+    glow();
   } else {
     const lang = hljs.getLanguage(ver.kind) ? ver.kind : ver.kind === "svg" ? "xml" : "";
     paper.innerHTML = `<pre><code class="hljs">${lang ? hljs.highlight(ver.src, { language: lang, ignoreIllegals: true }).value : escapeHtml(ver.src)}</code></pre>`;
@@ -1015,6 +1200,11 @@ function shelfAction(btn: HTMLElement) {
   const all = artifactsOf(conv);
   if (!shelf.main || !all.has(shelf.main.id)) return;
   const ver = pickVersion(all, shelf.main), act = btn.dataset.shelf;
+  if (act === "edit") {
+    const paper = $("shelf-stage").lastElementChild?.querySelector<HTMLElement>("[data-edit]");
+    if (paper) setEditing(paper, paper.dataset.editing !== "1");
+    return;
+  }
   if (act === "code") {
     shelf.code = !shelf.code;
     btn.textContent = shelf.code ? "Picture" : "Code";
@@ -1039,17 +1229,22 @@ function keepShelfPlace() {
 // Pointing and the canvas's tools. Over an artifact's picture (in the chat or on the shelf) the part under the pointer
 // glows, the nearest element with an id (else the element itself), and a click selects it. Shown in the message box,
 // the part selected is what the next question points at: the model is told it, quoting it as it is now (in voice mode,
-// the part under the pointer as a question is said: "make this orange"). And the canvas's tools act on it by hand, with
-// no model in the loop: drag it to move it, a corner to resize it, forward, backward, duplicate, delete, the arrow keys
-// to nudge it; the paint bucket fills whatever shape is clicked. Each change is the source edited where that element is
-// (artifacts.ts), kept at once as the user's next version (editByHand). The glow is a rule beside the picture, never a
-// change to it, so a picture being redrawn keeps it.
-interface Point { art: string; sel: string; partId?: string; markup?: string; tag?: string; paper?: HTMLElement }
+// the part under the pointer as a question is said: "make this orange"). Changes by hand, with no model in the loop,
+// are the canvas's edit mode (its Edit): a row of tools over it says what a click does, and until then a click only
+// points, so nothing changes by a stray one. On a picture: drag the part selected to move it, a corner to resize it,
+// forward, backward, duplicate, delete, the arrow keys to nudge it; Fill paints whatever shape is clicked. Each change
+// is the source edited where that element is (artifacts.ts), kept at once as the user's next version (editByHand). The
+// glow is a rule beside the picture, never a change to it, so a picture being redrawn keeps it.
+interface Point { art: string; sel: string; partId?: string; markup?: string; tag?: string; paper?: HTMLElement; cx?: number; at?: number; label?: string }
 let hovered: Point | undefined, pinned: Point | undefined;
-let tool: "select" | "bucket" = "select", paintColor = pref("paint-color", "#e24d85");
+let paintColor = pref("paint-color", "#e24d85");
+// Each canvas's own mode and tool (a picture's, a page's, a document's): "view" outside edit mode
+type EditKind = "svg" | "page" | "doc";
+const editMode = (paper: HTMLElement) => paper.dataset.editing === "1" && !paper.classList.contains("busy");
+const toolOf = (paper: HTMLElement) => (editMode(paper) ? paper.dataset.tool ?? "select" : "view");
 const samePoint = (a?: Point, b?: Point) => !!a && !!b && a.art === b.art && a.sel === b.sel;
 // The part at an event: the nearest element with an id, or (leaf: the paint bucket's) the shape itself
-function pointOn(paper: HTMLElement, e: Event, leaf = tool === "bucket"): Point | undefined {
+function pointOn(paper: HTMLElement, e: Event, leaf = toolOf(paper) === "fill"): Point | undefined {
   const host = paper.closest<HTMLElement>("[data-art]"), svg = pictureOf(paper.shadowRoot), t = e.composedPath()[0];
   if (!host || !svg || !(t instanceof Element) || t === svg || !svg.contains(t)) return undefined;
   const near = t.closest("[id]"), part = !leaf && near && near !== svg && svg.contains(near) ? near : t;
@@ -1063,19 +1258,7 @@ const partIn = (paper: HTMLElement, sel: string) => pictureOf(paper.shadowRoot)?
 const ruleFor = (sel: string) => (sel.startsWith(":scope") ? sel.replace(":scope", ":host > svg") : `:host > svg ${sel}`);
 
 const EDITOR_CSS = `:host { position: relative; outline: none; }
-.tools { position: absolute; top: 8px; left: 8px; z-index: 2; display: flex; align-items: center; gap: 1px; padding: 3px; border: 1px solid rgb(0 0 0 / 0.1);
-  border-radius: 10px; background: rgb(255 255 255 / 0.94); box-shadow: 0 2px 10px rgb(0 0 0 / 0.12); opacity: 0; transition: opacity 0.12s; }
-:host(:hover) .tools, :host(:focus-within) .tools, :host(:focus) .tools, .tools.held { opacity: 1; }
-:host(.busy) .tools, :host(.busy) .sel { display: none; }
-.tools button { display: grid; place-items: center; width: 26px; height: 26px; padding: 0; border: 0; border-radius: 7px; background: none; color: #5d5457; cursor: pointer; }
-.tools button:hover:not(:disabled) { background: rgb(0 0 0 / 0.06); color: #1f1b1c; }
-.tools button.on { background: rgb(226 77 133 / 0.14); color: #c2185b; }
-.tools button:disabled { opacity: 0.3; cursor: default; }
-.tools svg { width: 15px; height: 15px; fill: none; stroke: currentColor; stroke-width: 1.8; stroke-linecap: round; stroke-linejoin: round; }
-.swatch { position: relative; width: 18px; height: 18px; margin: 0 4px; border: 1.5px solid rgb(0 0 0 / 0.18); border-radius: 50%; cursor: pointer; }
-.swatch input { position: absolute; inset: 0; width: 100%; height: 100%; padding: 0; border: 0; opacity: 0; cursor: pointer; }
-.on-sel { display: flex; gap: 1px; margin-left: 2px; padding-left: 3px; border-left: 1px solid rgb(0 0 0 / 0.1); }
-.on-sel[hidden] { display: none; }
+:host(.busy) .sel { display: none; }
 .sel { position: absolute; z-index: 1; box-sizing: border-box; border: 1.5px dashed #e24d85; border-radius: 2px; cursor: move; touch-action: none; }
 .sel[hidden] { display: none; }
 .sel i { position: absolute; width: 10px; height: 10px; box-sizing: border-box; border: 1.5px solid #e24d85; border-radius: 2px; background: #fff; }
@@ -1089,26 +1272,105 @@ const TOOL_ICONS = {
   backward: '<path d="M12 5v13M6.5 12.5 12 18l5.5-5.5"/>',
   duplicate: ICONS.copy,
   delete: ICONS.trash,
+  text: '<path d="M5 7V5h14v2"/><path d="M12 5v14"/><path d="M9 19h6"/>',
 };
 const toolIcon = (k: keyof typeof TOOL_ICONS) => `<svg viewBox="0 0 24 24" aria-hidden="true">${TOOL_ICONS[k]}</svg>`;
 
-// An artifact's picture made pointable and editable: its glow, its toolbar and selection box (inside its shadow root,
-// beside the picture, which drawSvg alone redraws), and the pointer and keys on it.
+// A canvas's edit mode: a row over it in the chat's own look, its tools named, one line saying what a click does now, or
+// what is selected and what can be done to it, Undo and Done. Sticky, so a tall canvas keeps it in view.
+const TOOLS: Record<EditKind, [string, string, keyof typeof TOOL_ICONS][]> = {
+  svg: [["select", "Select", "select"], ["fill", "Fill", "bucket"]],
+  page: [["select", "Select", "select"], ["text", "Text", "text"], ["fill", "Fill", "bucket"]],
+  doc: [["select", "Select", "select"], ["text", "Text", "text"]],
+};
+const HINTS: Record<EditKind, Record<string, string>> = {
+  svg: { select: "Click a part to select it, then drag it to move it, a corner to resize it", fill: "Click a shape to fill it with the color" },
+  page: { select: "Click a part of the page to select it", text: "Click text and type: Enter keeps it, Esc puts it back", fill: "Click a part to fill its background with the color" },
+  doc: { select: "Click a block to select it", text: "Click a block to change its source: Ctrl+Enter keeps it, Esc puts it back" },
+};
+const MOVES: [string, string, keyof typeof TOOL_ICONS][] = [["up", "Up", "forward"], ["down", "Down", "backward"], ["duplicate", "Copy", "duplicate"], ["delete", "Delete", "delete"]];
+const PICKED: Record<EditKind, [string, string, keyof typeof TOOL_ICONS][]> = {
+  svg: [["forward", "Forward", "forward"], ["backward", "Back", "backward"], ["duplicate", "Copy", "duplicate"], ["delete", "Delete", "delete"]],
+  page: MOVES,
+  doc: MOVES,
+};
+const toolbars = new WeakMap<HTMLElement, HTMLElement>();
+function addToolbar(paper: HTMLElement, kind: EditKind) {
+  paper.dataset.edit = kind;
+  paper.dataset.tool ??= "select";
+  const bar = h("div", "art-tools"), button = ([k, name, i]: [string, string, keyof typeof TOOL_ICONS], attr: string) =>
+    `<button type="button" data-${attr}="${k}">${toolIcon(i)}<span>${name}</span></button>`;
+  bar.setAttribute("role", "toolbar");
+  bar.ariaLabel = "Change it by hand";
+  bar.innerHTML = `<span class="seg">${TOOLS[kind].map((t) => button(t, "tool")).join("")}</span>` +
+    (kind !== "doc" ? `<label class="swatch" title="The color Fill paints with"><input type="color"></label>` : "") +
+    `<span class="hint"></span><span class="picked" hidden><b></b>${PICKED[kind].map((t) => button(t, "do")).join("")}</span>` +
+    `<span class="end">${button(["undo", "Undo", "undo"], "do")}<button type="button" class="done" data-do="done">Done</button></span>`;
+  bar.addEventListener("click", (e) => {
+    const b = (e.target as Element).closest<HTMLButtonElement>("button");
+    if (!b) return;
+    if (b.dataset.tool) {
+      paper.dataset.tool = b.dataset.tool;
+      hovered = undefined;
+      glow();
+    } else if (b.dataset.do === "done") setEditing(paper, false);
+    else (kind === "svg" ? editSelected : kind === "page" ? editPage : editDoc)(paper, b.dataset.do!);
+  });
+  bar.querySelector("input")?.addEventListener("input", (e) => {
+    paintColor = (e.target as HTMLInputElement).value;
+    setPref("paint-color", paintColor);
+    paper.dataset.tool = "fill";
+    glow();
+  });
+  paper.parentElement?.querySelector(":scope > .art-tools")?.remove();
+  paper.before(bar);
+  toolbars.set(paper, bar);
+}
+// (one canvas at a time: what a click does is never in doubt)
+function setEditing(paper: HTMLElement, on: boolean) {
+  for (const other of document.querySelectorAll<HTMLElement>("[data-editing]")) {
+    delete other.dataset.editing;
+    other.classList.remove("editing");
+  }
+  if (on) paper.dataset.editing = "1";
+  paper.classList.toggle("editing", on);
+  hovered = undefined;
+  glow();
+  if (on && paper.tabIndex >= 0) paper.focus({ preventScroll: true });
+}
+function syncToolbars() {
+  for (const paper of document.querySelectorAll<HTMLElement>("[data-edit]")) {
+    const bar = toolbars.get(paper), on = editMode(paper), kind = paper.dataset.edit as EditKind, tool = toolOf(paper);
+    const art = paper.closest<HTMLElement>("[data-art]")?.dataset.art;
+    paper.closest(".art-canvas")?.querySelector("[data-art=edit]")?.setAttribute("aria-pressed", String(on));
+    if (paper.closest<HTMLElement>(".shelf-side")?.dataset.which === "main") document.querySelector("[data-shelf=edit]")?.setAttribute("aria-pressed", String(on));
+    if (!bar) continue;
+    bar.classList.toggle("on", on);
+    if (!on) continue;
+    bar.querySelectorAll<HTMLElement>("[data-tool]").forEach((b) => b.classList.toggle("on", b.dataset.tool === tool));
+    const swatch = bar.querySelector<HTMLElement>(".swatch");
+    if (swatch) { swatch.style.background = paintColor; swatch.querySelector("input")!.value = paintColor; }
+    bar.querySelector<HTMLButtonElement>("[data-do=undo]")!.disabled = !art || !conv.pending?.[art];
+    const picked = tool === "select" && pinned?.paper === paper ? pinned : undefined;
+    bar.querySelector<HTMLElement>(".hint")!.hidden = !!picked;
+    bar.querySelector<HTMLElement>(".hint")!.textContent = HINTS[kind][tool] ?? "";
+    bar.querySelector<HTMLElement>(".picked")!.hidden = !picked;
+    bar.querySelector(".picked b")!.textContent = picked ? pointName(picked).split(" · ").slice(1).join(" · ") || "Selected" : "";
+  }
+}
+
+// An artifact's picture made pointable and editable: its glow and selection box (inside its shadow root, beside the
+// picture, which drawSvg alone redraws), its toolbar, and the pointer and keys on it.
 function pointable(paper: HTMLElement) {
   const root = paper.shadowRoot!;
   paper.tabIndex = 0;
-  const style = document.createElement("style"), tools = h("div", "tools"), box = h("div", "sel");
+  const style = document.createElement("style"), box = h("div", "sel");
   style.textContent = EDITOR_CSS;
-  tools.innerHTML = `<button type="button" data-tool="select" title="Select, move and resize (V)">${toolIcon("select")}</button>` +
-    `<button type="button" data-tool="bucket" title="Paint bucket: fill what you click (B)">${toolIcon("bucket")}</button>` +
-    `<label class="swatch" title="The paint bucket's color"><input type="color"></label>` +
-    `<button type="button" data-do="undo" title="Undo your last change (Ctrl+Z)">${toolIcon("undo")}</button>` +
-    `<span class="on-sel" hidden>${(["forward", "backward", "duplicate", "delete"] as const).map((k) =>
-      `<button type="button" data-do="${k}" title="${{ forward: "Bring forward", backward: "Send backward", duplicate: "Duplicate (Ctrl+D)", delete: "Delete (Del)" }[k]}">${toolIcon(k)}</button>`).join("")}</span>`;
   box.innerHTML = `<i data-h="nw"></i><i data-h="ne"></i><i data-h="se"></i><i data-h="sw"></i>`;
   box.hidden = true;
-  root.append(style, tools, box);
-  const inTools = (e: Event) => e.composedPath().some((x) => x === tools || x === box);
+  root.append(style, box);
+  addToolbar(paper, "svg");
+  const inTools = (e: Event) => e.composedPath().includes(box);
   // focused for its keys without the scroll a focus brings: a picture partly out of view would move under the pointer
   // between press and release, and the click land elsewhere
   paper.addEventListener("mousedown", (e) => {
@@ -1124,37 +1386,33 @@ function pointable(paper: HTMLElement) {
   paper.addEventListener("click", (e) => {
     if (inTools(e)) return;
     const p = pointOn(paper, e);
-    if (tool === "bucket") return void (p && paintShape(paper, p));
+    if (toolOf(paper) === "fill") return void (p && paintShape(paper, p));
     pinned = p && !samePoint(p, pinned) ? p : undefined;
     glow();
     renderPointing();
   });
-  tools.addEventListener("click", (e) => {
-    const b = (e.target as Element).closest<HTMLButtonElement>("button");
-    if (!b) return;
-    if (b.dataset.tool) { tool = b.dataset.tool as typeof tool; hovered = undefined; glow(); }
-    else editSelected(paper, b.dataset.do!);
-  });
-  tools.querySelector("input")!.addEventListener("input", (e) => {
-    paintColor = (e.target as HTMLInputElement).value;
-    setPref("paint-color", paintColor);
-    tool = "bucket";
-    glow();
-  });
   box.addEventListener("pointerdown", (e) => dragSelected(paper, e));
   paper.addEventListener("keydown", (e) => {
-    const mod = e.ctrlKey || e.metaKey, k = e.key;
+    const mod = e.ctrlKey || e.metaKey, k = e.key, on = editMode(paper);
     const nudge = { ArrowLeft: [-1, 0], ArrowRight: [1, 0], ArrowUp: [0, -1], ArrowDown: [0, 1] }[k];
-    if (mod && k.toLowerCase() === "z") editSelected(paper, "undo");
+    if (k === "Escape" && (pinned || on)) escape(paper);
+    else if (!on) return;
+    else if (mod && k.toLowerCase() === "z") editSelected(paper, "undo");
     else if (mod && k.toLowerCase() === "d") editSelected(paper, "duplicate");
     else if (k === "Delete" || k === "Backspace") editSelected(paper, "delete");
     else if (nudge && pinned?.paper === paper) moveSelected(paper, nudge[0] * (e.shiftKey ? 10 : 1), nudge[1] * (e.shiftKey ? 10 : 1));
-    else if (k === "Escape" && pinned) { pinned = undefined; glow(); renderPointing(); }
-    else if (!mod && (k === "v" || k === "b")) { tool = k === "v" ? "select" : "bucket"; glow(); }
     else return;
     e.preventDefault();
     e.stopPropagation();
   });
+}
+// Esc lets go of what is selected, then leaves edit mode
+function escape(paper: HTMLElement) {
+  if (pinned) {
+    pinned = undefined;
+    glow();
+    renderPointing();
+  } else setEditing(paper, false);
 }
 
 // The version a picture shows (an inline canvas, or a side of the shelf), whose source the tools edit
@@ -1180,6 +1438,15 @@ function spanFor(paper: HTMLElement, el: Element, src: string): Span | undefined
 function editByHand(id: string, base: Version, src: string) {
   if (src === base.src) return;
   ((conv.pending ??= {})[id] ??= { kind: base.kind, srcs: [] }).srcs.push(src);
+  save(conv);
+  repaintArtifact(id);
+}
+function undoHand(id: string) {
+  const p = conv.pending?.[id];
+  if (!p) return;
+  p.srcs.pop();
+  if (!p.srcs.length) delete conv.pending![id];
+  if (conv.pending && !Object.keys(conv.pending).length) delete conv.pending;
   save(conv);
   repaintArtifact(id);
 }
@@ -1252,15 +1519,7 @@ function paintShape(paper: HTMLElement, p: Point) {
 function editSelected(paper: HTMLElement, act: string) {
   const ver = shownVersion(paper);
   if (!ver) return;
-  if (act === "undo") {
-    const p = conv.pending?.[ver.id];
-    if (!p) return;
-    p.srcs.pop();
-    if (!p.srcs.length) delete conv.pending![ver.id];
-    if (conv.pending && !Object.keys(conv.pending).length) delete conv.pending;
-    save(conv);
-    return repaintArtifact(ver.id);
-  }
+  if (act === "undo") return undoHand(ver.id);
   const el = pinned?.paper === paper ? partIn(paper, pinned.sel) : null, span = el && spanFor(paper, el, ver.src);
   if (!span) return;
   const spans = elementSpans(ver.src);
@@ -1275,26 +1534,351 @@ function editSelected(paper: HTMLElement, act: string) {
     editByHand(ver.id, ver, withOrder(ver.src, spans[spans.indexOf(span)], spans, act === "forward"));
   }
 }
-// The toolbar at the top of what shows of the picture: a tall one scrolled under the top bar keeps it in view
-function placeTools(paper: HTMLElement) {
-  const tools = paper.shadowRoot?.querySelector<HTMLElement>(".tools");
-  if (!tools || !paper.closest("#thread")) return;
-  const r = paper.getBoundingClientRect(), top = scroller.getBoundingClientRect().top;
-  const at = `${Math.round(Math.max(8, Math.min(top - r.top + 8, r.height - tools.offsetHeight - 8)))}px`;
-  if (tools.style.top !== at) tools.style.top = at;
+// A page's tools, the picture's turned to a page: outside edit mode it is the page (its own buttons and links); in it,
+// Select (point at a part; move it up or down among its siblings, copy it, delete it), Text (retype it in place) and
+// Fill (an element's background; a shape's fill in an inline picture; an A-Frame entity's color). The page outlines what
+// the pointer is over and says which source element it is (sandbox.js); the change is made to the source, as on a picture.
+const PAGE_MODES: Record<string, string> = { select: "select", text: "text", fill: "bucket" };
+const pageModeOf = (paper: HTMLElement) => PAGE_MODES[toolOf(paper)] ?? "use";
+const pagePin = (paper: HTMLElement) => (pinned?.paper === paper && pinned.cx !== undefined ? pinned.cx : null);
+function pagePoint(paper: HTMLElement, cx: unknown): Point | undefined {
+  const host = paper.closest<HTMLElement>("[data-art]"), ver = shownVersion(paper);
+  const span = typeof cx === "number" && ver ? elementSpans(ver.src)[cx] : undefined;
+  if (!host || !ver || !span) return undefined;
+  return { art: host.dataset.art!, sel: `cx:${cx}`, cx: cx as number, partId: idOf(ver.src.slice(span.start, span.openEnd)), markup: ver.src.slice(span.start, span.end), tag: span.tag, paper };
 }
-let toolsFrame = 0;
-scroller.addEventListener("scroll", () => {
-  toolsFrame ||= requestAnimationFrame(() => {
-    toolsFrame = 0;
-    thread.querySelectorAll<HTMLElement>(".art-canvas .svg-paper").forEach(placeTools);
+const pagePointable = (paper: HTMLElement) => addToolbar(paper, "page");
+function editPage(paper: HTMLElement, act: string) {
+  const ver = shownVersion(paper);
+  if (!ver) return;
+  if (act === "undo") return undoHand(ver.id);
+  const was = pinned?.paper === paper ? pinned : undefined, spans = elementSpans(ver.src), span = was?.cx === undefined ? undefined : spans[was.cx];
+  if (act === "unpin" && !was) return setEditing(paper, false);
+  if (act === "unpin" || !was || !span) {
+    pinned = undefined;
+    glow();
+    return renderPointing();
+  }
+  const src = act === "delete" ? withoutElement(ver.src, span) : act === "duplicate" ? withCopy(ver.src, span)
+    : act === "up" || act === "down" ? withOrder(ver.src, span, spans, act === "down") : ver.src;
+  // what was picked stays picked where it can be found: by its id, else (a copy goes after it) where it was
+  const at = was.partId ? elementSpans(src).findIndex((x) => idOf(src.slice(x.start, x.openEnd)) === was.partId)
+    : act === "duplicate" ? was.cx! : -1;
+  pinned = undefined;
+  editByHand(ver.id, ver, src);
+  pinned = act !== "delete" && at >= 0 ? pagePoint(paper, at) : undefined;
+  glow();
+  renderPointing();
+}
+function paintPage(paper: HTMLElement, cx: number) {
+  const ver = shownVersion(paper), spans = ver ? elementSpans(ver.src) : [], span = spans[cx];
+  if (!ver || !span) return;
+  let inPicture = false;
+  for (let p = span.parent; p >= 0 && !inPicture; p = spans[p].parent) inPicture = spans[p].tag.toLowerCase() === "svg";
+  const open = ver.src.slice(span.start, span.openEnd), mat = open.match(/\smaterial\s*=\s*"([^"]*)"/)?.[1];
+  // an A-Frame entity's color is its material's (a primitive's color attribute sets that too)
+  const entity = /^a-/i.test(span.tag) && (mat === undefined ? withAttr(open, "color", paintColor)
+    : withAttr(open, "material", /(^|;)\s*color\s*:/.test(mat) ? mat.replace(/((?:^|;)\s*color\s*:)[^;]*/, `$1 ${paintColor}`) : `${mat.trim() ? `${mat.replace(/;?\s*$/, "")}; ` : ""}color: ${paintColor}`));
+  editByHand(ver.id, ver, setOpen(ver.src, span, entity || (inPicture ? withPaint(open, "fill", paintColor) : withBackground(open, paintColor))));
+}
+function retypePage(paper: HTMLElement, cx: number, html: string) {
+  const ver = shownVersion(paper), span = ver && elementSpans(ver.src)[cx];
+  if (!ver || !span || span.end <= span.openEnd) return void toast("That text could not be found in the page's source");
+  editByHand(ver.id, ver, withContent(ver.src, span, html));
+}
+
+// What a version changed in its source, as a unified diff: the lines taken out and put in, with three lines of what
+// stayed around each change, and how much stayed between them
+function diffView(was: Version, ver: Version): HTMLElement {
+  const lines = lineDiff(was.src, ver.src), box = h("div", "code art-changes");
+  const add = lines.filter((d) => d.op === "+").length, del = lines.filter((d) => d.op === "-").length;
+  const near = lines.map((d, k) => lines.slice(Math.max(0, k - 3), k + 4).some((x) => x.op !== " "));
+  let html = "", gap = 0;
+  lines.forEach((d, k) => {
+    if (!near[k]) return void gap++;
+    if (gap) html += `<span class="diff-gap">⋯ ${gap} line${gap > 1 ? "s" : ""} the same</span>`;
+    gap = 0;
+    html += `<span class="diff-${d.op === "+" ? "add" : d.op === "-" ? "del" : "same"}">${d.op === " " ? " " : d.op} ${escapeHtml(d.text) || " "}</span>`;
   });
-}, { passive: true });
+  if (gap) html += `<span class="diff-gap">⋯ ${gap} line${gap > 1 ? "s" : ""} the same</span>`;
+  box.innerHTML = `<div class="code-head"><span>${escapeHtml(`${was.id} v${was.v} → ${ver.id} v${ver.v}`)}</span><span class="diff-count">` +
+    `<span class="diff-plus">+${add}</span> <span class="diff-minus">−${del}</span></span></div><pre class="diff"><code>${html || '<span class="diff-gap">No change</span>'}</code></pre>`;
+  return box;
+}
+
+// Code changed by hand where it is shown: Edit turns the block into its text to type in, kept as the user's next version
+// when it is left (Done, Ctrl+Enter, or a click elsewhere), dropped with Esc
+function editCode(el: HTMLElement, btn: HTMLElement, ver: Version) {
+  const code = el.querySelector<HTMLElement>("pre code")!;
+  if (code.isContentEditable) return code.blur();
+  const before = code.innerHTML;
+  code.textContent = ver.src;
+  code.contentEditable = "plaintext-only";
+  code.spellcheck = false;
+  btn.textContent = "Done";
+  el.classList.add("editing");
+  code.focus();
+  let dropped = false;
+  const keys = (e: KeyboardEvent) => {
+    if (e.key === "Escape") { dropped = true; code.blur(); }
+    else if (e.key === "Enter" && (e.ctrlKey || e.metaKey)) code.blur();
+    else return;
+    e.preventDefault();
+  };
+  code.addEventListener("keydown", keys);
+  code.addEventListener("blur", () => {
+    code.removeEventListener("keydown", keys);
+    code.contentEditable = "false";
+    el.classList.remove("editing");
+    btn.textContent = "Edit";
+    // (a line typed at the very end leaves the browser's own newline after it, to show the caret on)
+    const text = (code.textContent ?? "").replace(ver.src.endsWith("\n") ? /(?!)/ : /\n$/, "");
+    code.innerHTML = before;
+    if (!dropped && text !== ver.src) editByHand(ver.id, artifactsOf(conv).get(ver.id)!.at(-1)!, text);
+  }, { once: true });
+}
+
+// Documents (```latex``` and ```markdown``` artifacts): the document as it reads, LaTeX on a paper's page (latex.ts),
+// Markdown as the chat writes it, each drawn block by block so a document being written grows and one changed keeps
+// what stayed. Each block knows where it is in the source (data-at, data-end): pointing at one quotes its source, and the
+// tools change it there, by hand: Text (or a double click) turns a block into its source to retype, and a block picked
+// moves up or down among its siblings, is copied or deleted.
+const DOC_KINDS = new Set(["latex", "tex", "markdown", "md"]);
+const isTex = (kind: string) => kind === "latex" || kind === "tex";
+const MD_CSS = `:host { display: block; }
+.md { max-width: 46em; padding: 18px 26px; color: var(--text); font: 15px/1.6 var(--sans); }
+.md > [data-at] > :first-child { margin-top: 0; } .md > [data-at] { margin: 0 0 0.85em; }
+.md h1, .md h2, .md h3, .md h4 { margin: 1.1em 0 0.4em; line-height: 1.3; } .md h1 { font-size: 1.6em; } .md h2 { font-size: 1.3em; } .md h3 { font-size: 1.1em; }
+.md p { margin: 0 0 0.7em; } .md ul, .md ol { margin: 0 0 0.7em; padding-left: 1.6em; }
+.md blockquote { margin: 0; padding-left: 1em; border-left: 3px solid var(--line); color: var(--muted); }
+.md table { border-collapse: collapse; } .md th, .md td { padding: 4px 10px; border: 1px solid var(--line); }
+.md code { font: 0.9em var(--mono); } .md a { color: var(--accent); }
+.md .code { margin: 0; overflow: hidden; border: 1px solid var(--line); border-radius: 10px; background: var(--code); }
+.md .code-head { display: flex; justify-content: space-between; padding: 3px 8px 3px 12px; border-bottom: 1px solid var(--line); color: var(--faint); font: 12px var(--mono); }
+.md .code-head button { display: none; } .md pre { margin: 0; padding: 10px 14px; overflow-x: auto; }
+.md img { max-width: 100%; }`;
+const DOC_EDIT_CSS = `.doc-body { position: relative; }
+.doc-body [data-at] { border-radius: 4px; }
+textarea.retype { display: block; box-sizing: border-box; width: 100%; margin: 0.4em 0; padding: 8px 10px; border: 1.5px solid #e24d85; border-radius: 6px;
+  background: rgb(255 255 255 / 0.92); color: #1f1b1c; font: 13px/1.5 ui-monospace, "JetBrains Mono", monospace; resize: vertical; outline: none; }
+:host(.busy) .tools { display: none; }`;
+// KaTeX's and highlight.js's rules (the chat's stylesheet has them) for documents' shadow roots, whose math and code
+// would be unstyled without them; their fonts are the page's already
+let docSheet: CSSStyleSheet | undefined;
+function docRules(): CSSStyleSheet {
+  if (docSheet) return docSheet;
+  const rules: string[] = [];
+  for (const sheet of document.styleSheets) {
+    let list: CSSRuleList;
+    try { list = sheet.cssRules; } catch { continue; }
+    for (const r of list) if (r instanceof CSSStyleRule && /\.(katex|hljs)/.test(r.selectorText)) rules.push(r.cssText);
+  }
+  docSheet = new CSSStyleSheet();
+  docSheet.replaceSync(rules.join("\n"));
+  return docSheet;
+}
+// A document's HTML, each block marked with its place: LaTeX's (latex.ts) as it makes them; Markdown's by its blocks
+function docHtml(kind: string, src: string, live: boolean): string {
+  if (isTex(kind)) return latexToHtml(live ? texSoFar(src) : src);
+  const tokens = marked.lexer(src);
+  let at = 0, html = "";
+  const tpl = document.createElement("template");
+  for (const t of tokens) {
+    const start = src.startsWith(t.raw, at) ? at : Math.max(at, src.indexOf(t.raw, at));
+    at = start + t.raw.length;
+    if (t.type === "space" || t.type === "def") continue;
+    tpl.innerHTML = "";
+    tpl.content.append(...htmlNodes(t, tokens.links));
+    html += `<div data-at="${start}" data-end="${start + t.raw.trimEnd().length}">${tpl.innerHTML}</div>`;
+  }
+  return `<article class="md">${html}</article>`;
+}
+// A LaTeX document being written, up to a display it has not closed yet (that would show as math gone wrong)
+function texSoFar(src: string): string {
+  const re = /\\(begin|end)\s*\{(equation|align|gather|multline|eqnarray|flalign|alignat|tabular|array)\*?\}|\\\[|\\\]/g;
+  let open = -1;
+  for (const m of src.matchAll(re)) {
+    if (m[1] === "begin" || m[0] === "\\[") { if (open < 0) open = m.index!; }
+    else open = -1;
+  }
+  return open < 0 ? src : src.slice(0, open);
+}
+// The new document's blocks brought in where they differ, the rest left as they are
+function syncChildren(live: Element, next: Element) {
+  const have = [...live.childNodes], want = [...next.childNodes];
+  want.forEach((w, k) => {
+    const h = have[k];
+    if (h && h.isEqualNode(w)) return;
+    if (h && h.nodeType === 1 && w.nodeType === 1 && (h as Element).tagName === (w as Element).tagName && !(h as Element).hasAttribute("data-at") && (h as Element).childElementCount)
+      return syncChildren(h as Element, w as Element);
+    if (h) h.replaceWith(w); else live.append(w);
+  });
+  for (const h of have.slice(want.length)) h.remove();
+}
+function docPaper(kind: string): HTMLElement {
+  const paper = h("div", "doc-paper");
+  paper.dataset.doc = isTex(kind) ? "tex" : "md";
+  const root = paper.attachShadow({ mode: "open" });
+  root.adoptedStyleSheets = [docRules()];
+  root.innerHTML = `<style>${isTex(kind) ? LATEX_CSS : MD_CSS}\n${DOC_EDIT_CSS}</style><style class="point"></style><div class="doc-body"></div>`;
+  return paper;
+}
+function showDoc(paper: HTMLElement, kind: string, src: string, live: boolean) {
+  const body = paper.shadowRoot!.querySelector(".doc-body")!, key = `${live}:${src}`;
+  if (paper.dataset.key === key || body.querySelector("textarea.retype")) return;
+  paper.dataset.key = key;
+  const tpl = document.createElement("template");
+  tpl.innerHTML = docHtml(kind, src, live);
+  const next = tpl.content.firstElementChild!;
+  const cur = body.firstElementChild;
+  if (cur && cur.tagName === next.tagName && cur.className === next.className) syncChildren(cur, next);
+  else body.replaceChildren(next);
+}
+function docFigure(old: Node | undefined, kind: string, text: string, live: boolean): HTMLElement {
+  let fig = old instanceof HTMLElement && old.dataset.kind === "doc" && old.querySelector<HTMLElement>(".doc-paper")?.dataset.doc === (isTex(kind) ? "tex" : "md") ? old : undefined;
+  if (!fig) {
+    fig = h("figure", "svg-fig doc-fig");
+    fig.dataset.kind = "doc";
+    fig.innerHTML = `<figcaption class="svg-bar"><span class="svg-state"></span><span class="svg-acts">` +
+      ["code:Source", "copy:Copy", "save:Download"].map((a) => `<button type="button" data-doc="${a.split(":")[0]}">${a.split(":")[1]}</button>`).join("") +
+      `</span></figcaption><div class="code svg-code"><div class="code-head"><span>${isTex(kind) ? "latex" : "markdown"}</span><button type="button" class="copy">Copy</button></div>` +
+      `<pre><code class="hljs"></code></pre></div>`;
+    fig.prepend(docPaper(kind));
+  }
+  svgSource.set(fig, text);
+  fig.dataset.lang = kind;
+  fig.classList.toggle("drawing", live);
+  const title = isTex(kind) ? text.match(/\\title\s*\{([^}]*)\}/)?.[1] : text.match(/^#{1,3}\s+(.+)$/m)?.[1];
+  fig.querySelector(".svg-state")!.textContent = live ? "Writing" : `${isTex(kind) ? "LaTeX" : "Markdown"}${title ? ` · ${title.replace(/\\[a-z]+\s*|[{}*_`]/gi, "").trim()}` : ""}`;
+  if (fig.classList.contains("show-code")) docCode(fig);
+  showDoc(fig.querySelector<HTMLElement>(".doc-paper")!, kind, text, live);
+  return fig;
+}
+function docCode(fig: HTMLElement) {
+  const code = fig.querySelector(".svg-code code")!, text = svgSource.get(fig) ?? "", lang = isTex(fig.dataset.lang ?? "") ? "latex" : "markdown";
+  if (code.textContent !== text) code.innerHTML = hljs.getLanguage(lang) ? hljs.highlight(text, { language: lang, ignoreIllegals: true }).value : escapeHtml(text);
+}
+function docAction(btn: HTMLElement) {
+  const fig = btn.closest<HTMLElement>(".doc-fig")!, text = svgSource.get(fig) ?? "", act = btn.dataset.doc;
+  if (act === "code") {
+    btn.textContent = fig.classList.toggle("show-code") ? "Document" : "Source";
+    docCode(fig);
+  } else if (act === "copy") copy(text, btn);
+  else if (act === "save") download(`${fig.dataset.art ?? "document"}.${isTex(fig.dataset.lang ?? "") ? "tex" : "md"}`, text, "text/plain");
+}
+
+// The block at an event: the innermost with a place in the source
+function docPoint(paper: HTMLElement, e: Event): Point | undefined {
+  const host = paper.closest<HTMLElement>("[data-art]"), t = e.composedPath()[0], ver = shownVersion(paper);
+  const el = t instanceof Element ? t.closest<HTMLElement>("[data-at]") : null;
+  if (!host || !ver || !el || !paper.shadowRoot!.contains(el)) return undefined;
+  const at = Number(el.dataset.at), end = Number(el.dataset.end), words = (el.textContent ?? "").replace(/\s+/g, " ").trim();
+  return { art: host.dataset.art!, sel: `at:${at}`, at, markup: ver.src.slice(at, end), tag: el.tagName.toLowerCase(),
+    label: words.length > 28 ? `${words.slice(0, 26).trimEnd()}…` : words, paper };
+}
+const docBlock = (paper: HTMLElement, at: number) => paper.shadowRoot!.querySelector<HTMLElement>(`[data-at="${at}"]`);
+// The blocks as spans of the source, each with the block it is in, for the structure edits (artifacts.ts)
+function docSpans(paper: HTMLElement): { spans: Span[]; els: HTMLElement[] } {
+  const els = [...paper.shadowRoot!.querySelectorAll<HTMLElement>("[data-at]")];
+  const spans = els.map((el): Span => {
+    const up = el.parentElement?.closest<HTMLElement>("[data-at]");
+    return { tag: el.tagName, start: Number(el.dataset.at), openEnd: Number(el.dataset.at), end: Number(el.dataset.end), parent: up ? els.indexOf(up) : -1 };
+  });
+  return { spans, els };
+}
+function docPointable(paper: HTMLElement) {
+  const root = paper.shadowRoot!;
+  paper.tabIndex = 0;
+  addToolbar(paper, "doc");
+  const inTools = (_e: Event) => false;
+  const retyping = (e: Event) => e.composedPath().some((x) => x instanceof HTMLTextAreaElement);
+  // focused for its keys before the press's own focus, which would scroll a block partly out of view under the pointer
+  paper.addEventListener("pointerdown", (e) => { if (!inTools(e) && !retyping(e)) paper.focus({ preventScroll: true }); });
+  paper.addEventListener("pointermove", (e) => {
+    if (inTools(e) || retyping(e)) return;
+    const p = docPoint(paper, e);
+    if (!samePoint(p, hovered) || (p && hovered?.paper !== paper)) { hovered = p; glow(); }
+  });
+  paper.addEventListener("pointerleave", () => { if (hovered) { hovered = undefined; glow(); } });
+  paper.addEventListener("click", (e) => {
+    if (inTools(e) || retyping(e) || (e.composedPath()[0] as Element).closest?.("a")) return;
+    const p = docPoint(paper, e);
+    if (toolOf(paper) === "text") return void (p && retypeDoc(paper, p));
+    pinned = p && !samePoint(p, pinned) ? p : undefined;
+    glow();
+    renderPointing();
+  });
+  paper.addEventListener("dblclick", (e) => {
+    const p = editMode(paper) && !retyping(e) ? docPoint(paper, e) : undefined;
+    if (p) { e.preventDefault(); retypeDoc(paper, p); }
+  });
+  paper.addEventListener("keydown", (e) => {
+    if (retyping(e)) return;
+    const mod = e.ctrlKey || e.metaKey, k = e.key, on = editMode(paper);
+    if (k === "Escape" && (pinned || on)) escape(paper);
+    else if (!on) return;
+    else if (mod && k.toLowerCase() === "z") editDoc(paper, "undo");
+    else if (mod && k.toLowerCase() === "d") editDoc(paper, "duplicate");
+    else if ((k === "Delete" || k === "Backspace") && pinned?.paper === paper) editDoc(paper, "delete");
+    else if (k === "Enter" && pinned?.paper === paper) retypeDoc(paper, pinned);
+    else return;
+    e.preventDefault();
+    e.stopPropagation();
+  });
+}
+// A block turned into its source, to retype where it is; kept as the user's next version when it is left
+function retypeDoc(paper: HTMLElement, p: Point) {
+  const ver = shownVersion(paper), el = p.at === undefined ? null : docBlock(paper, p.at);
+  if (!ver || !el || paper.classList.contains("busy")) return;
+  const at = p.at!, end = Number(el.dataset.end), area = h("textarea", "retype");
+  area.value = ver.src.slice(at, end);
+  area.spellcheck = false;
+  el.replaceWith(area);
+  const fit = () => { area.style.height = "auto"; area.style.height = `${area.scrollHeight + 4}px`; };
+  fit();
+  area.addEventListener("input", fit);
+  area.focus({ preventScroll: true });
+  let keep = true;
+  area.addEventListener("keydown", (e) => {
+    if (e.key === "Escape") { keep = false; area.blur(); }
+    else if (e.key === "Enter" && (e.ctrlKey || e.metaKey)) area.blur();
+    else return;
+    e.preventDefault();
+    e.stopPropagation();
+  });
+  area.addEventListener("blur", () => {
+    const text = area.value;
+    area.replaceWith(el);
+    if (keep && text !== ver.src.slice(at, end)) {
+      pinned = undefined;
+      renderPointing();
+      editByHand(ver.id, ver, ver.src.slice(0, at) + text + ver.src.slice(end));
+    }
+    paper.focus({ preventScroll: true });
+  }, { once: true });
+}
+function editDoc(paper: HTMLElement, act: string) {
+  const ver = shownVersion(paper);
+  if (!ver) return;
+  if (act === "undo") return undoHand(ver.id);
+  const was = pinned?.paper === paper ? pinned : undefined;
+  if (!was || was.at === undefined) return;
+  const { spans } = docSpans(paper), span = spans.find((x) => x.start === was.at);
+  if (!span) return;
+  const sib = spans.filter((x) => x.parent === span.parent), next = sib[sib.indexOf(span) + 1];
+  const gap = next ? ver.src.slice(span.end, next.start) : "", sep = /^\s+$/.test(gap) ? gap : "\n\n";
+  const src = act === "delete" ? withoutElement(ver.src, span) : act === "duplicate" ? ver.src.slice(0, span.end) + sep + ver.src.slice(span.start, span.end) + ver.src.slice(span.end)
+    : withOrder(ver.src, span, spans, act === "down");
+  pinned = undefined;
+  renderPointing();
+  editByHand(ver.id, ver, src);
+}
+
 // The selection's box over the part selected, on the picture it was selected in
 function placeSelection(paper: HTMLElement) {
   const box = paper.shadowRoot?.querySelector<HTMLElement>(".sel");
   if (!box) return;
-  const el = pinned?.paper === paper && tool === "select" ? partIn(paper, pinned.sel) : null;
+  const el = pinned?.paper === paper && toolOf(paper) === "select" ? partIn(paper, pinned.sel) : null;
   box.hidden = !el;
   if (!el) return;
   const at = paper.getBoundingClientRect(), r = el.getBoundingClientRect();
@@ -1302,30 +1886,34 @@ function placeSelection(paper: HTMLElement) {
 }
 function glow() {
   // a selection whose picture was drawn anew (the chat redrawn) is on the artifact's canvas now
-  if (pinned && !pinned.paper?.isConnected) pinned.paper = thread.querySelector<HTMLElement>(`.art-canvas[data-art="${CSS.escape(pinned.art)}"] .svg-paper`) ?? undefined;
+  if (pinned && !pinned.paper?.isConnected) pinned.paper = thread.querySelector<HTMLElement>(`.art-canvas[data-art="${CSS.escape(pinned.art)}"] :is(.svg-paper, .page-paper, .doc-paper)`) ?? undefined;
   for (const paper of document.querySelectorAll<HTMLElement>(".svg-paper, .shelf-paper")) {
     const root = paper.shadowRoot, art = paper.closest<HTMLElement>("[data-art]")?.dataset.art;
-    if (!root || !art || paper.closest<HTMLElement>("[data-kind]")?.dataset.kind === "mermaid" || paper.dataset.kind === "mermaid") continue;
+    if (!root || !art || paper.closest<HTMLElement>("[data-kind]")?.dataset.kind === "mermaid" || paper.dataset.kind === "mermaid" || paper.querySelector(".doc-paper")) continue;
     let style = root.querySelector<HTMLStyleElement>("style.point");
     if (!style) root.append(style = Object.assign(document.createElement("style"), { className: "point" }));
-    const css = [`:host > svg { cursor: ${tool === "bucket" ? "cell" : "pointer"}; }`];
+    const css = [`:host > svg { cursor: ${toolOf(paper) === "fill" ? "cell" : "pointer"}; }`];
     if (hovered?.art === art && hovered.paper === paper) css.push(`${ruleFor(hovered.sel)} { filter: drop-shadow(0 0 1.5px #e24d85) drop-shadow(0 0 5px rgb(226 77 133 / 0.75)); }`);
     if (pinned?.art === art) css.push(`${ruleFor(pinned.sel)} { filter: drop-shadow(0 0 2px #e24d85) drop-shadow(0 0 9px #e24d85); }`);
     if (style.textContent !== css.join("\n")) style.textContent = css.join("\n");
-    const tools = root.querySelector<HTMLElement>(".tools");
-    if (tools) {
-      tools.querySelectorAll<HTMLElement>("[data-tool]").forEach((b) => b.classList.toggle("on", b.dataset.tool === tool));
-      (tools.querySelector(".swatch") as HTMLElement).style.background = paintColor;
-      tools.querySelector<HTMLInputElement>("input")!.value = paintColor;
-      tools.querySelector<HTMLButtonElement>("[data-do=undo]")!.disabled = !conv.pending?.[art];
-      tools.querySelector<HTMLElement>(".on-sel")!.hidden = !(pinned?.paper === paper && tool === "select");
-      tools.classList.toggle("held", pinned?.paper === paper);
-    }
-    placeTools(paper);
     placeSelection(paper);
   }
+  for (const paper of document.querySelectorAll<HTMLElement>(".doc-paper")) {
+    const root = paper.shadowRoot!, art = paper.closest<HTMLElement>("[data-art]")?.dataset.art;
+    if (!art || !paper.dataset.edit) continue;
+    const css = [`.doc-body [data-at] { cursor: ${toolOf(paper) === "text" ? "text" : "pointer"}; }`];
+    if (hovered?.paper === paper && hovered.at !== undefined) css.push(`.doc-body [data-at="${hovered.at}"] { outline: 1.5px dashed #e24d85; outline-offset: 3px; }`);
+    if (pinned?.paper === paper && pinned.at !== undefined) css.push(`.doc-body [data-at="${pinned.at}"] { outline: 2px solid #e24d85; outline-offset: 3px; background: rgb(226 77 133 / 0.07); }`);
+    const point = root.querySelector<HTMLStyleElement>("style.point")!;
+    if (point.textContent !== css.join("\n")) point.textContent = css.join("\n");
+  }
+  for (const paper of document.querySelectorAll<HTMLElement>(".page-paper[data-edit]")) {
+    const frame = frameOf(paper);
+    if (frame) flushPage(frame);
+  }
+  syncToolbars();
 }
-const pointName = (p: Point) => `${p.art}${p.partId ? ` · #${p.partId}` : p.tag ? ` · <${p.tag}>` : ""}`;
+const pointName = (p: Point) => `${p.art}${p.partId ? ` · #${p.partId}` : p.label ? ` · “${p.label}”` : p.tag ? ` · <${p.tag}>` : ""}`;
 function renderPointing() {
   const el = $("pointing");
   el.hidden = !pinned;
@@ -1403,7 +1991,18 @@ function blank(): Conversation {
 
 function render() {
   views.clear();
-  thread.replaceChildren(...(conv.messages.length ? conv.messages.map(messageView) : [emptyState()]));
+  const was = [...thread.children], carry: NonNullable<typeof carried> = carried = [];
+  try {
+    thread.append(...(conv.messages.length ? conv.messages.map(messageView) : [emptyState()]));
+    for (const { slot, canvas, b } of carry) {
+      place(slot.parentNode!, canvas, slot);
+      for (const n of b.nodes) if (n[0] === slot) n[0] = canvas;
+      slot.remove();
+    }
+  } finally {
+    carried = null;
+  }
+  for (const el of was) el.remove();
   $("title").textContent = conv.title;
   $("export").hidden = !conv.messages.length;
   document.title = conv.messages.length ? `${conv.title} · Chrysalis Inference` : "Chrysalis Inference";
@@ -2165,7 +2764,10 @@ const otherModel = () => {
   const mine = pref(`model@${status.backend?.url}`, "");
   return listed().includes(mine) ? mine : listed()[0] ?? mine;
 };
-const current = () => !onService() ? otherModel() : status.loading ?? (status.state === "online" ? status.model : undefined) ?? picked;
+// A model picked that Chrysalis has not switched to yet: it waits for the replies being written, reporting the model it
+// has meanwhile, and a question asked then is for the one picked (asked for the other, it switched there and back)
+let switching: string | undefined;
+const current = () => !onService() ? otherModel() : switching ?? status.loading ?? (status.state === "online" ? status.model : undefined) ?? picked;
 // A quick answer beside the chat (a title, what speech recognition misheard): Chrysalis's model with thinking off, or
 // the other backend's with the standard way to turn it off, which llama.cpp, Ollama, LM Studio and vLLM honor (KoboldCpp
 // writes a line of thinking first) and Ollama takes for a model that does not think too.
@@ -2178,7 +2780,9 @@ async function start() {
 async function pickModel(model: string) {
   picked = model;
   setPref("model", model);
+  switching = undefined;
   if (status.state !== "online" || status.model === model) return renderStatus();
+  switching = model;
   status = { ...status, loading: model, progress: undefined };   // shown at once; the page polls while Chrysalis switches
   renderStatus();
   if (!conv.messages.length) render();
@@ -2186,6 +2790,7 @@ async function pickModel(model: string) {
     const r = await fetch("/api/chrysalis/load", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ model }) });
     if (!r.ok) console.warn("model switch failed:", await r.text());
   } finally {
+    if (switching === model) switching = undefined;
     await refreshStatus();
   }
 }
@@ -2362,6 +2967,9 @@ function continueReply(m: Message, pick?: { ch: "reasoning" | "content"; i: numb
 }
 
 // body: the request, made once the conversation's files are read (a file that is gone ends the reply with an error)
+// A page being left (reloaded, closed) has its requests failed under it: nothing it records then is true of the reply
+let leaving = false;
+addEventListener("pagehide", () => { leaving = true; });
 async function startRun(c: Conversation, m: Message, body: () => object, pick?: Tok) {
   const phase = m.content ? "writing" : m.reasoning ? "thinking" : "waiting";
   const run: Run = { conv: c, m, live: { phase, since: performance.now(), note: "Reading the prompt" }, at: 0, stopping: false, frame: 0, saved: 0, pick };
@@ -2372,6 +2980,10 @@ async function startRun(c: Conversation, m: Message, body: () => object, pick?: 
     follow = true;
     render();
   }
+  // kept at once: the job can take seconds to begin (the chat's tools started, a model loading), and a chat left or a
+  // page reloaded meanwhile would otherwise lose the question
+  m.starting = true;
+  save(c);
   try {
     if (status.state !== "online" || status.loading) {
       run.live.loading = true;
@@ -2385,10 +2997,12 @@ async function startRun(c: Conversation, m: Message, body: () => object, pick?: 
     const res = await fetch("/api/chat", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body()) });
     if (!res.ok || !res.body) throw new Error((await res.json().catch(() => null))?.error?.message ?? `HTTP ${res.status}`);
     m.job = res.headers.get("X-Chrysalis-Job") ?? undefined;
+    delete m.starting;
     save(c);                                       // a reload finds the reply and follows it again
     if (run.stopping) stopRun(run, true);
     await stream(run, res.body);
   } catch (e) {
+    if (leaving) return;
     if (run.stopping) m.stopped = true;
     else m.error = e instanceof Error ? e.message : String(e);
   }
@@ -2620,6 +3234,7 @@ function finish(run: Run) {
     m.error = `The model asked to run ${[...new Set(unrun.map((x) => x.name))].join(", ")}, but this chat has no tools on, so the reply ends here.`;
   delete m.job;
   delete m.base;
+  delete m.starting;
   cancelAnimationFrame(run.frame);
   if (runs.get(c.id) === run) runs.delete(c.id);
   if (run.gone) return;
@@ -3690,6 +4305,8 @@ thread.addEventListener("click", (e) => {
   if (svg) return void svgAction(svg);
   const page = t.closest<HTMLElement>("[data-page]");
   if (page) return void pageAction(page);
+  const doc = t.closest<HTMLElement>("[data-doc]:is(button)");
+  if (doc) return void docAction(doc);
   if (t instanceof HTMLImageElement && t.dataset.zoom) {
     const big = h("img");
     big.src = t.src;
@@ -5108,6 +5725,11 @@ await refreshStatus();
 for (const c of Object.values(chats)) {                // a reply being written may be in a version not on screen
   const m = [...walk(c.messages)].find((x) => x.role === "assistant" && x.job);
   if (m) void resume(c, m);
+  for (const x of walk(c.messages)) if (x.starting) {
+    delete x.starting;
+    x.error = "The page was left before this reply began: regenerate it";
+    save(c);
+  }
 }
 if (location.hash.length > 1) openConversation(location.hash.slice(1));
 else render();

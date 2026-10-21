@@ -16,7 +16,7 @@
 //   they recolor without the group that holds their id (a panda's coat: <ellipse cx="200" cy="300" … fill="#d32f2f"/>).
 // ```edit copy from original``` makes the copy a new artifact from the original's latest version.
 
-export const ARTIFACTS_PROMPT = `You can make artifacts: pictures (SVG), web pages (HTML), diagrams (Mermaid), documents (LaTeX, Markdown) and code. Write each one in a fenced block whose info string is its kind and then a short id you choose, like \`\`\`svg panda\`\`\`. Give every part its own id, the background too: <rect id="background">, <g id="burger">, <section id="intro">.
+export const ARTIFACTS_PROMPT = `You can make artifacts: pictures (SVG), web pages (HTML), diagrams (Mermaid), documents (LaTeX, Markdown) and code. Write each one in a fenced block whose info string is its kind and then a short id you choose, like \`\`\`svg panda\`\`\`. Give every part its own id, the background too: <rect id="background">, <g id="burger">, <section id="intro">. A page can load three.js or A-Frame from their usual CDN addresses and nothing else; for a 3D scene prefer A-Frame, whose entities take ids like any element: <a-box id="table">.
 
 To change an artifact that already exists, never write it again: write an edit block for it, \`\`\`edit panda\`\`\`, with only what changes:
 - to change a part, write its whole element, with its id, as it should now be; it replaces the element with that id (a new id adds the element on top):
@@ -32,11 +32,21 @@ One edit block can hold several of these. To keep the original and change a copy
 The user can change an artifact themselves (paint it, move, resize or delete its parts); their next message then holds it as it is now, and your edits start from that.`;
 
 export type Info = { kind: string; id: string } | { edit: string; from: string };
-// A fence's info string as an artifact's: its kind and id, or an edit's target (and what it copies)
+// A fence's info string as an artifact's: its kind and id, or an edit's target (and what it copies). Models also write
+// the id as an attribute (```html id="bedroom"```).
 export function infoOf(lang: string | undefined): Info | null {
-  const w = (lang ?? "").trim().split(/\s+/);
+  const w = (lang ?? "").trim().split(/\s+/).map((x, i) => (i ? x.replace(/^id\s*=\s*(["']?)([\w.-]+)\1$/, "$2") : x));
   if (w[0] === "edit") return w[1] ? { edit: w[1], from: w[2] === "from" && w[3] ? w[3] : w[1] } : null;
   return w.length === 2 && /^[a-z][\w+#.-]*$/i.test(w[0]) && /^[\w.-]+$/.test(w[1]) ? { kind: w[0].toLowerCase(), id: w[1] } : null;
+}
+// A fenced block as an artifact: its kind, id and source. Models also put the id alone on the block's first line, above
+// markup (```html, then bedroom, then <!doctype html>): asked for a 3D page with thinking off, Flash-Next did in 5 of 12
+// replies, where a line with only a name is no page's or picture's start.
+export function artifactOf(lang: string | undefined, text: string): { info: Info; text: string } | null {
+  const info = infoOf(lang);
+  if (info) return { info, text };
+  const kind = (lang ?? "").trim(), line = text.match(/^([A-Za-z][\w.-]*)[ \t]*\n(?=\s*<)/);
+  return /^[a-z][\w+#.-]*$/i.test(kind) && line ? { info: { kind: kind.toLowerCase(), id: line[1] }, text: text.slice(line[0].length) } : null;
 }
 
 export interface Change { kind: "element" | "search" | "shape"; text: string; search?: string; id?: string; partial?: boolean }
@@ -44,10 +54,11 @@ export interface Applied { change: Change; ok: boolean; how: string }
 
 const HUNK = /<{7} SEARCH\n([\s\S]*?)\n?={7}\n([\s\S]*?)\n?>{7} REPLACE/g;
 const OPEN = /<([A-Za-z][\w:.-]*)\b((?:[^>"']|"[^"]*"|'[^']*')*?)(\/?)>/g;
-const idOf = (attrs: string) => attrs.match(/(?<![\w:-])id\s*=\s*["']([^"']+)["']/)?.[1];
+export const idOf = (attrs: string) => attrs.match(/(?<![\w:-])id\s*=\s*["']([^"']+)["']/)?.[1];
 // Kinds whose parts are elements: an edit to any other (code, LaTeX, Mermaid) is searches and replaces alone
 const MARKUP = new Set(["svg", "html", "htm", "xml", "xhtml"]);
-export const isMarkup = (kind: string) => MARKUP.has(kind);
+// (by its source too: models name a page by what is in it, ```aframe scene```)
+export const isMarkup = (kind: string, src = "") => MARKUP.has(kind) || /^\s*<[!?A-Za-z]/.test(src);
 
 // From the open tag at `at` in s: the end of its element (balanced by its own tag name), or -1 if it has not closed.
 function elementEnd(s: string, at: number): number {
@@ -214,7 +225,7 @@ export function replay(blocks: Block[]): Map<string, Version[]> {
     }
     const base = all.get(b.info.from)?.at(-1);
     if (!base) continue;
-    const changes = changesOf(b.text, b.live, isMarkup(base.kind)), { src, applied } = applyChanges(base.src, changes);
+    const changes = changesOf(b.text, b.live, isMarkup(base.kind, base.src)), { src, applied } = applyChanges(base.src, changes);
     // an edit that holds no change this can read (written some other way) changes nothing: said, as a change not applied
     if (!changes.length && !b.live && b.text.trim()) applied.push({ change: { kind: "search", text: b.text }, ok: false, how: "nothing in it reads as a change" });
     const list = all.get(b.info.edit) ?? [];
@@ -229,21 +240,48 @@ export function replay(blocks: Block[]): Map<string, Version[]> {
 // picture drawn from the source has them.
 export interface Span { tag: string; start: number; openEnd: number; end: number; parent: number }
 const TAG = /<!--[\s\S]*?-->|<!\[CDATA\[[\s\S]*?\]\]>|<(\/?)([A-Za-z][\w:.-]*)\b((?:[^>"']|"[^"]*"|'[^']*')*?)(\/?)>/g;
+// Elements whose content is text, not markup: what is in them (a script's "<div>", a style's "a > b") is not read as tags
+const RAW = new Set(["script", "style", "textarea", "title"]);
+// HTML's elements that never close (written <br>, not <br/>)
+const VOID = new Set(["area", "base", "br", "col", "embed", "hr", "img", "input", "link", "meta", "source", "track", "wbr"]);
 // Every element of src in document order: its tag, where its open tag starts and ends, where it ends, its parent
 export function elementSpans(src: string): Span[] {
-  const out: Span[] = [], stack: number[] = [];
-  for (const m of src.matchAll(TAG)) {
+  const out: Span[] = [], stack: number[] = [], re = new RegExp(TAG.source, "g");
+  for (let m = re.exec(src); m; m = re.exec(src)) {
     if (!m[2]) continue;                                   // a comment or CDATA
-    const end = m.index! + m[0].length;
+    const end = m.index + m[0].length, tag = m[2].toLowerCase();
     if (m[1]) {
-      const at = stack.findLastIndex((k) => out[k].tag === m[2]);
+      const at = stack.findLastIndex((k) => out[k].tag.toLowerCase() === tag);
       if (at >= 0) { out[stack[at]].end = end; stack.length = at; }
       continue;
     }
-    out.push({ tag: m[2], start: m.index!, openEnd: end, end, parent: stack.at(-1) ?? -1 });
-    if (!m[4]) stack.push(out.length - 1);
+    out.push({ tag: m[2], start: m.index, openEnd: end, end, parent: stack.at(-1) ?? -1 });
+    if (m[4] || VOID.has(tag)) continue;
+    if (RAW.has(tag)) {                                    // to its close tag, unread
+      const close = src.slice(end).search(new RegExp(`</${tag}\\s*>`, "i"));
+      const at = close < 0 ? src.length : end + close;
+      out.at(-1)!.end = close < 0 ? src.length : at + src.slice(at).indexOf(">") + 1;
+      re.lastIndex = out.at(-1)!.end;
+      continue;
+    }
+    stack.push(out.length - 1);
   }
   return out;
+}
+// Where an element's content ends (its close tag starts); its open tag's end where it has none
+export const contentEnd = (src: string, s: Span) => (s.end > s.openEnd ? src.lastIndexOf("<", s.end - 1) : s.openEnd);
+// Its source with each element marked by its place among them (data-cx), which the page reports back of what is pointed
+// at, painted or retyped, so the source's element is found whatever the parser made of the rest (the tbody it adds, a p
+// it closes)
+export function markSource(src: string): string {
+  const spans = elementSpans(src);
+  let out = "", at = 0;
+  spans.forEach((s, i) => {
+    const close = src.slice(s.start, s.openEnd).endsWith("/>") ? s.openEnd - 2 : s.openEnd - 1;
+    out += src.slice(at, close) + ` data-cx="${i}"`;
+    at = close;
+  });
+  return out + src.slice(at);
 }
 
 const attrRe = (name: string) => new RegExp(`(\\s${name.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}\\s*=\\s*)("[^"]*"|'[^']*')`);
@@ -262,14 +300,24 @@ export function withPaint(open: string, prop: string, color: string): string {
   if (attrRe(prop).test(open) || !attrRe("class").test(open)) return withAttr(open, prop, color);
   return withAttr(open, "style", `${style ? style[2].slice(1, -1).replace(/;?\s*$/, "; ") : ""}${prop}: ${color}`);
 }
+// A page's element filled: its background, in its style (which wins over its classes' rules), whatever set it before
+export function withBackground(open: string, color: string): string {
+  const style = open.match(attrRe("style"))?.[2].slice(1, -1).replace(/(?:^|;)\s*background(?:-color|-image)?\s*:[^;]*/g, "").replace(/^\s*;\s*|[;\s]+$/g, "");
+  return withAttr(open, "style", `${style ? `${style}; ` : ""}background: ${color}`);
+}
+// An element's content as it is now written: between its open tag and its close tag
+export function withContent(src: string, s: Span, content: string): string {
+  return src.slice(0, s.openEnd) + content + src.slice(contentEnd(src, s));
+}
 export const setOpen = (src: string, s: Span, open: string) => src.slice(0, s.start) + open + src.slice(s.openEnd);
 // The element taken out, with the line it stood on if it stood alone there
 export function withoutElement(src: string, s: Span): string {
   const before = src.slice(0, s.start), after = src.slice(s.end), indent = before.match(/\n[ \t]*$/);
   return indent && /^[ \t]*\n/.test(after) ? before.slice(0, indent.index) + after.replace(/^[ \t]*/, "") : before + after;
 }
-// A copy of the element after it (a new id if it had one: ids must stay unique), moved a little so it shows
-export function withCopy(src: string, s: Span, offset: number): string {
+// A copy of the element after it (a new id if it had one: ids must stay unique), in a picture moved a little so it shows
+// (offset; a page's copy shows beside it)
+export function withCopy(src: string, s: Span, offset?: number): string {
   let copy = src.slice(s.start, s.end);
   const id = copy.match(/^<[^>]*?\bid\s*=\s*["']([^"']+)["']/)?.[1];
   if (id) {
@@ -277,8 +325,10 @@ export function withCopy(src: string, s: Span, offset: number): string {
     while (new RegExp(`\\bid\\s*=\\s*["']${id.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}-${n}["']`).test(src)) n++;
     copy = copy.replace(/^(<[^>]*?\bid\s*=\s*["'])([^"']+)/, `$1$2-${n}`);
   }
-  const open = copy.match(/^<(?:[^>"']|"[^"]*"|'[^']*')*>/)![0], t = open.match(attrRe("transform"))?.[2].slice(1, -1);
-  copy = withAttr(open, "transform", `translate(${offset} ${offset})${t ? ` ${t}` : ""}`) + copy.slice(open.length);
+  if (offset !== undefined) {
+    const open = copy.match(/^<(?:[^>"']|"[^"]*"|'[^']*')*>/)![0], t = open.match(attrRe("transform"))?.[2].slice(1, -1);
+    copy = withAttr(open, "transform", `translate(${offset} ${offset})${t ? ` ${t}` : ""}`) + copy.slice(open.length);
+  }
   const indent = src.slice(0, s.start).match(/\n([ \t]*)$/)?.[1] ?? "";
   return src.slice(0, s.end) + `\n${indent}` + copy + src.slice(s.end);
 }
@@ -289,4 +339,32 @@ export function withOrder(src: string, s: Span, spans: Span[], forward: boolean)
   if (!other) return src;
   const [a, b] = forward ? [s, other] : [other, s];      // a comes first in the text: swap the two, with what lies between
   return src.slice(0, a.start) + src.slice(b.start, b.end) + src.slice(a.end, b.start) + src.slice(a.start, a.end) + src.slice(b.end);
+}
+
+// The lines that differ from a to b, as a unified diff's: kept (" "), taken out ("-"), put in ("+"). Myers' algorithm:
+// the fewest lines changed, found in time that grows with the size of the change, not of the text.
+export type DiffLine = { op: " " | "-" | "+"; text: string };
+export function lineDiff(a: string, b: string): DiffLine[] {
+  const x = a.split("\n"), y = b.split("\n"), n = x.length, m = y.length, max = n + m, v = new Int32Array(2 * max + 2), trace: Int32Array[] = [];
+  let found = n === 0 && m === 0;
+  for (let d = 0; d <= max && !found; d++) {
+    trace.push(v.slice());
+    for (let k = -d; k <= d; k += 2) {
+      let i = k === -d || (k !== d && v[max + k - 1] < v[max + k + 1]) ? v[max + k + 1] : v[max + k - 1] + 1, j = i - k;
+      while (i < n && j < m && x[i] === y[j]) { i++; j++; }
+      v[max + k] = i;
+      if (i >= n && j >= m) { found = true; break; }
+    }
+  }
+  trace.push(v.slice());
+  const out: DiffLine[] = [];
+  let i = n, j = m;
+  for (let d = trace.length - 2; d >= 0 && (i > 0 || j > 0); d--) {
+    const t = trace[d], k = i - j;
+    const down = k === -d || (k !== d && t[max + k - 1] < t[max + k + 1]), pk = down ? k + 1 : k - 1, pi = t[max + pk], pj = pi - pk;
+    while (i > pi && j > pj) out.push({ op: " ", text: x[--i] }), j--;
+    if (d > 0) { if (down) out.push({ op: "+", text: y[--j] }); else out.push({ op: "-", text: x[--i] }); }
+  }
+  while (i > 0 && j > 0) out.push({ op: " ", text: x[--i] }), j--;
+  return out.reverse();
 }

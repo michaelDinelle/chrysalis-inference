@@ -30,6 +30,9 @@ a stale comment steers people and agents wrong. `make lint` catches the mechanic
   transformers', turns, echo and barge-in over its WebSocket; `make voice` first), `make test_web` (the web UI's sampler against
   the engine's, its server against a fake Chrysalis, the page in headless Chromium, and Firefox past and trusting the network's
   certificate; certutil makes their trust), `make lint`.
+- With Chrysalis running Flash-Next: `make test_chaos` (the chat for real, used oddly: replies through reloads, closed
+  tabs and chat switches, several at once, Stop / regenerate / edit mid-reply, tools, settings, a 3D page, memory taken
+  by another program; it restarts Chrysalis and switches models, so ask first, as for stopping it).
 - GPU, with Chrysalis's model server stopped (`systemctl --user stop chrysalis`; the user runs Chrysalis: check the GPU
   is idle, ask once per task, then just say when it stops and for how long): `make test` (test_web, the 27B kernels,
   then the model in-process: chat format, cache, snapshots and generation (held answers' masked steps too), the server
