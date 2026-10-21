@@ -59,13 +59,14 @@ const SCENE = '```aframe scene\n<!doctype html>\n<html><head><title>Scene</title
   '  <a-box id="box" position="0 1.4 -3" color="#4CC3D9"></a-box>\n  <a-sky id="sky" color="#ECECEC"></a-sky>\n</a-scene>\n' +
   '<script>window.started = Math.random();</script>\n</body></html>\n```';
 // (pages labelled as Flash-Next also labels them: the id alone on the block's first line, the reply ending with the fence
-// still open; the id as an attribute)
+// still open; the id as an attribute; none at all)
 const HALL = '```html\nhall\n<!doctype html>\n<html><head><title>Hall</title></head><body><h1 id="sign">Welcome</h1></body></html>\n';
 const GATE = '```html id="gate"\n<!doctype html>\n<html><head><title>Gate</title></head><body><p id="note">Open</p></body></html>\n```\n\nThe gate.';
 const REPLIES: Record<string, string> = {
   "hall on its line": HALL,
   "gate as an attribute": GATE,
   "rename the sign": '```edit hall\n<h1 id="sign">Goodbye</h1>\n```\n\nRenamed.',
+  "a page with no name": '```html\n<!doctype html>\n<html><head><title>Room</title></head><body><p id="lamp">Lamp</p></body></html>\n```\n\nA room.',
   "three cube": CUBE,
   "old cube": OLD_CUBE,
   "a scene": SCENE,
@@ -415,7 +416,7 @@ test("a page artifact is drawn as it is written, its script waiting, and runs on
   await page.close();
 }, 40_000);
 
-test("pages labelled as models also label them, the id alone on the block's first line (its fence left open as the reply ends) or as an attribute, are artifacts by that id: each runs as a page, and an edit by its id changes it", async () => {
+test("pages labelled as models also label them, the id alone on the block's first line (its fence left open as the reply ends) or as an attribute, are artifacts by that id, and one with none is \"page\": each runs as a page with the tools, and an edit by its id changes it", async () => {
   const page = await open(), caption = () => page.$$eval(".art-canvas .art-label", (l) => l.map((x) => x.textContent));
   await send(page, "a hall on its line");
   await page.waitForFunction(() => [...document.querySelectorAll(".art-canvas .art-label")].some((l) => l.textContent === "hall · v1"), { timeout: 10_000 });
@@ -427,6 +428,12 @@ test("pages labelled as models also label them, the id alone on the block's firs
   await page.waitForFunction(() => [...document.querySelectorAll(".art-canvas .art-label")].some((l) => l.textContent === "gate · v1"), { timeout: 10_000 });
   expect(await caption()).toEqual(["hall · v2 · 1 change", "gate · v1"]);
   expect(await page.$$eval(".art-canvas iframe.page-frame", (f) => f.length)).toBe(2);
+  await send(page, "a page with no name");
+  await page.waitForFunction(() => [...document.querySelectorAll(".art-canvas .art-label")].some((l) => l.textContent === "page · v1"), { timeout: 10_000 });
+  const room = (await page.$$(".art-canvas")).at(-1)!;
+  await (await room.$("[data-art=edit]"))!.click();
+  await room.waitForSelector(".art-tools.on");
+  expect(await (await (await room.$("iframe.page-frame"))!.contentFrame()).$eval("#lamp", (e) => e.textContent)).toBe("Lamp");
   await page.close();
 }, 30_000);
 

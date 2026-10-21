@@ -190,7 +190,8 @@ builds older pages load, `web/server.ts`), which the page loads from blob: addre
 Artifacts (`web/artifacts.ts`): after the system prompt (unless
 Settings leaves it out) the model is asked to name what it makes, ```` ```svg panda ```` (it also writes ```` ```svg id="panda" ````,
 or the id alone on the block's first line: asked for a 3D page with thinking off, Flash-Next did so in 9 of 12 replies,
-and the chat takes those too), with an id for each part, and to
+and the chat takes those too; a whole page with no id, 2 of the 12, is `page`, the chat's next one its next version),
+with an id for each part, and to
 change it in place with an edit block, ```` ```edit panda ````, holding only what changes: a whole element by its id
 (a new one is added on top, or for a background in place of the old one), a search and replace, or a shape without an
 id, which replaces the one at its place; ```` ```edit panda-night from panda ```` makes a changed copy. It is plain text

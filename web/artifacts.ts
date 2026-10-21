@@ -39,14 +39,18 @@ export function infoOf(lang: string | undefined): Info | null {
   if (w[0] === "edit") return w[1] ? { edit: w[1], from: w[2] === "from" && w[3] ? w[3] : w[1] } : null;
   return w.length === 2 && /^[a-z][\w+#.-]*$/i.test(w[0]) && /^[\w.-]+$/.test(w[1]) ? { kind: w[0].toLowerCase(), id: w[1] } : null;
 }
+export const PAGE_DOC = /^\s*(?:<!--[\s\S]*?-->\s*)*(?:<!doctype html|<html[\s>])/i;
 // A fenced block as an artifact: its kind, id and source. Models also put the id alone on the block's first line, above
 // markup (```html, then bedroom, then <!doctype html>): asked for a 3D page with thinking off, Flash-Next did in 5 of 12
-// replies, where a line with only a name is no page's or picture's start.
+// replies, where a line with only a name is no page's or picture's start. A whole page with no id at all (2 of those 12)
+// is "page", so the chat's next one is its next version.
 export function artifactOf(lang: string | undefined, text: string): { info: Info; text: string } | null {
   const info = infoOf(lang);
   if (info) return { info, text };
-  const kind = (lang ?? "").trim(), line = text.match(/^([A-Za-z][\w.-]*)[ \t]*\n(?=\s*<)/);
-  return /^[a-z][\w+#.-]*$/i.test(kind) && line ? { info: { kind: kind.toLowerCase(), id: line[1] }, text: text.slice(line[0].length) } : null;
+  const kind = (lang ?? "").trim().toLowerCase(), line = text.match(/^([A-Za-z][\w.-]*)[ \t]*\n(?=\s*<)/);
+  if (!/^[a-z][\w+#.-]*$/.test(kind)) return null;
+  if (line) return { info: { kind, id: line[1] }, text: text.slice(line[0].length) };
+  return /^html?$/.test(kind) && PAGE_DOC.test(text) ? { info: { kind, id: "page" }, text } : null;
 }
 
 export interface Change { kind: "element" | "search" | "shape"; text: string; search?: string; id?: string; partial?: boolean }

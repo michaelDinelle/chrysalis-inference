@@ -14,7 +14,7 @@ import { type Part, type VoiceAsk, type VoiceInfo, type VoiceReady, VoiceClient 
 import { type Fix, applyFixes, fixedParts, readHeard } from "./heard";
 import { pointOf, shownWords, unitOf } from "./spoken";
 import { DESCRIPTIONS, type ToolChoice, type WireCall, assistantTurn, noted, toolTurn } from "./wire";
-import { type Block, type Span, type Version, ARTIFACTS_PROMPT, elementById, elementSpans, idOf, artifactOf, infoOf, type Info, markSource, replay, setOpen, withAttr, withBackground,
+import { type Block, type Span, type Version, ARTIFACTS_PROMPT, PAGE_DOC, elementById, elementSpans, idOf, artifactOf, infoOf, type Info, markSource, replay, setOpen, withAttr, withBackground,
   withContent, withCopy, withOrder, withPaint, withoutElement, lineDiff } from "./artifacts";
 import { LATEX_CSS, latexToHtml } from "./latex";
 import logoThin from "./logo-thin.svg";
@@ -675,7 +675,6 @@ function captionMermaid(fig: HTMLElement) {
 // least that much: what its scripts draw is not there while it is written, and a scene sizes its canvas to whatever
 // height the frame has when they run.
 const PAGE_LANGS = new Set(["html", "htm"]);
-const PAGE_DOC = /^\s*(?:<!--[\s\S]*?-->\s*)*(?:<!doctype html|<html[\s>])/i;
 const previewed = new Set<string>();                  // fragments whose Preview was clicked
 // An artifact is a page by its kind or by what it is (models name one by what is in it: ```aframe scene```)
 const isPage = (kind: string, src: string) => PAGE_LANGS.has(kind) || kind === "aframe" || PAGE_DOC.test(src);
