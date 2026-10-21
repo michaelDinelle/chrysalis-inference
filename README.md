@@ -223,7 +223,24 @@ a shape's fill, an A-Frame entity's color). A page made to its window's size (a 
 frame fitted to the column. In an A-Frame scene the part under the pointer is the entity the
 camera sees there. LaTeX documents (`web/latex.ts`, numbered and cross-referenced as LaTeX would, with KaTeX for the
 math) and Markdown read as documents, block by block; a block points like a part, and in edit mode Text (or a double
-click) turns it into its source to retype, and Select moves, copies and deletes blocks. Code is edited where it is shown (Edit). Tools: the wrench beside the thinking bar (with how many tools are
+click) turns it into its source to retype, and Select moves, copies and deletes blocks. Code is edited where it is shown (Edit).
+
+Characters (`web/cast.ts`): SillyTavern's character cards (Character Card V2 and V3: a PNG with the card in it, or the
+JSON), dropped anywhere or added with the rail's +, become portraits on a rail beside the conversations, each a folder
+of its chats; a group (a small JSON of our own: a name, the members, a scenario) is their faces in one circle, and the
+user's persona sits at the bottom. A folder's head opens its sheet: the card's fields as they are sent, the voice it
+speaks with in voice mode, Export (the card as a PNG any app reads, every field kept: a lorebook, other apps'
+extensions) and Delete. A chat with a character opens with its greeting (the card's others are versions of it) and its
+replies carry the character's face. The card is the system prompt (`{{char}}` and `{{user}}` filled in, the persona's
+description after it) and stays the same all chat, so every reply reads it from Chrysalis's cache; its instructions for
+after the chat go at the end of the last question, since Chrysalis takes a system turn only first. A group's reply is
+the scene: each line its speaker's name and a colon (over three turns Flash-Next tagged all 9 of its paragraphs and kept
+the three voices apart), each paragraph shown with its speaker's face. The faces over the message box have the next
+reply begin as one of them, and "let them talk" plays four beats, each begun as one of them other than the last to
+speak (a scene's reply written on ends at once). The cast is kept in this browser's IndexedDB, on this device, never on
+the server; lorebooks are kept, not used yet.
+
+Tools: the wrench beside the thinking bar (with how many tools are
 on) opens them for this chat: Fetch URL and Sub-agents, then each MCP server with its state (not started, starting, running, failed
 with the error and Retry, disabled), a switch for the whole server, and under its arrow one per tool, marked read-only
 or asks first. The choice is the chat's, kept with it (export too); a new chat starts from the last one. A server starts

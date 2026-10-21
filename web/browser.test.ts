@@ -8,6 +8,7 @@ import { existsSync, mkdirSync, mkdtempSync, rmSync, readFileSync, readdirSync, 
 import { tmpdir } from "node:os";
 import puppeteer, { type Browser, type Page } from "puppeteer-core";
 import { ARTIFACTS_PROMPT } from "./artifacts";
+import { cardPng } from "./cast";
 
 // Everything a run writes (certificates, logs, browser profiles), in one folder of its own that goes when the run ends:
 // /tmp can be memory, and a run's browser profiles alone are hundreds of MB.
@@ -63,6 +64,8 @@ const SCENE = '```aframe scene\n<!doctype html>\n<html><head><title>Scene</title
 const HALL = '```html\nhall\n<!doctype html>\n<html><head><title>Hall</title></head><body><h1 id="sign">Welcome</h1></body></html>\n';
 const GATE = '```html id="gate"\n<!doctype html>\n<html><head><title>Gate</title></head><body><p id="note">Open</p></body></html>\n```\n\nThe gate.';
 const REPLIES: Record<string, string> = {
+  "good morning mirela": "*She smiles.* Good morning.",
+  "a toast for the hive": "Mirela: *She raises a cup.* To the bees.\nTomas: To the bees!",
   "hall on its line": HALL,
   "gate as an attribute": GATE,
   "rename the sign": '```edit hall\n<h1 id="sign">Goodbye</h1>\n```\n\nRenamed.',
@@ -155,7 +158,8 @@ const fake = Bun.serve({
     req.signal.addEventListener("abort", () => chrysalisStopped++);
     const at = body.messages.findLastIndex((m: any) => m.role === "user"), last = body.messages[at];
     // what the user said, without the app's note to the model before it (voice mode's)
-    const said = (typeof last.content === "string" ? last.content : last.content.map((p: any) => p.text ?? "").join("")).replace(/^\[[^\]]*\]\n\n/, "");
+    // (none: a chat a character's greeting begins, warmed for voice mode before anything is said)
+    const said = !last ? "" : (typeof last.content === "string" ? last.content : last.content.map((p: any) => p.text ?? "").join("")).replace(/^\[[^\]]*\]\n\n/, "");
     const round = body.messages.slice(at).filter((m: any) => m.role === "assistant" && m !== prefix).length, ask = TOOL_ASKS[said];
     const agents = said === "agents" && round === 0 && body.tools?.some((t: any) => t.function.name === "subagent");
     const calls = agents ? AGENT_TASKS.map((a) => ({ name: "subagent", args: JSON.stringify(a) })) : ask && body.tools && round === 0 ? [ask] : [];
@@ -436,6 +440,62 @@ test("pages labelled as models also label them, the id alone on the block's firs
   expect(await (await (await room.$("iframe.page-frame"))!.contentFrame()).$eval("#lamp", (e) => e.textContent)).toBe("Lamp");
   await page.close();
 }, 30_000);
+
+test("a character card dropped in joins the cast: a portrait on the rail and a folder of chats that opens with its greeting (its others as versions), replies as the character with its face, its card as the system prompt and the persona as {{user}}; a group's reply is the scene, each line its speaker's, a face has the next reply begin as them, and the cast stays after a reload", async () => {
+  const page = await open();
+  const card = (name: string, data: object) => cardPng({ spec: "chara_card_v3", spec_version: "3.0", data: { name, ...data } }, new Blob([png], { type: "image/png" }));
+  await Bun.write(`${dir}/Mirela.png`, await card("Mirela", { description: "{{char}} keeps bees for {{user}}.", personality: "calm", scenario: "A hillside.",
+    first_mes: "Hello, {{user}}.", alternate_greetings: ["Oh, {{user}}. You again."], mes_example: "<START>\n{{user}}: Why bees?\n{{char}}: They listen.",
+    post_history_instructions: "Stay in character." }));
+  await Bun.write(`${dir}/Tomas.png`, await card("Tomas", { description: "{{char}} sells honey.", first_mes: "Honey?" }));
+  writeFileSync(`${dir}/Hive.json`, JSON.stringify({ spec: "chrysalis_group", name: "Hive", members: ["Mirela", "Tomas"], scenario: "Market day." }));
+  await (await page.$("input#attach-file"))!.uploadFile(`${dir}/Mirela.png`);          // where any file goes: a card joins the cast
+  await page.waitForSelector('#cast .cast-item[title="Mirela"] img');
+  expect(await page.$$("#attachments .att")).toHaveLength(0);
+  expect([await page.$eval("#folder-head .fh-name", (e) => e.textContent), await page.$eval("#input", (e) => (e as HTMLTextAreaElement).placeholder)]).toEqual(["Mirela", "Message Mirela"]);
+  expect(await articles(page)).toEqual(["Hello, User."]);
+  expect([await pagerOf(page, 0), await page.$eval("#thread .msg.assistant .speaker", (e) => e.textContent)]).toEqual(["1 / 2", "Mirela"]);
+
+  // the persona: {{user}} from here on
+  await page.click('#cast .cast-item[title^="You"]');
+  await page.waitForSelector("#cast-sheet:not([hidden]) input.card-name");
+  await page.type("#cast-sheet input.card-name", "Robin");
+  await page.keyboard.press("Escape");
+  await send(page, "good morning mirela");
+  const one = lastStream.messages;
+  expect(one[0].content).toBe("Write Mirela's next reply in a fictional chat between Mirela and Robin.\n\nMirela keeps bees for Robin.\n\nMirela's personality: calm" +
+    "\n\nScenario: A hillside.\n\nHow Mirela talks:\nRobin: Why bees?\nMirela: They listen.");
+  expect(one.slice(1)).toEqual([{ role: "user", content: "[The scene begins.]" }, { role: "assistant", content: "Hello, User." },
+    { role: "user", content: "good morning mirela\n\n[Stay in character.]" }]);
+  expect(await page.$$eval("#thread .msg.assistant .speaker", (s) => s.map((x) => x.textContent))).toEqual(["Mirela", "Mirela"]);
+
+  // a group: the scene in one reply, each line its speaker's; a face has the next reply begin as them
+  await (await page.$("input#cast-file"))!.uploadFile(`${dir}/Tomas.png`, `${dir}/Hive.json`);
+  await page.waitForSelector('#cast .cast-item[title="Hive"]');
+  await page.click('#cast .cast-item[title="Hive"]');
+  await page.waitForSelector("#cast-next:not([hidden])");
+  await send(page, "a toast for the hive");
+  expect(await page.$$eval("#thread p.line > .who", (w) => w.map((x) => x.textContent))).toEqual(["Mirela", "Tomas"]);
+  expect(await page.$$eval("#thread p.line", (p) => p.map((x) => x.textContent))).toEqual(["Mirela*She raises a cup.* To the bees.".replace("*She raises a cup.*", "She raises a cup."), "TomasTo the bees!"]);
+  expect([lastStream.stop, lastStream.messages[0].content.includes("Scenario: Market day."), lastStream.messages[0].content.includes("A hillside.")])
+    .toEqual([["\nRobin:", "\n**Robin"], true, false]);                                // the group's scenario in place of theirs
+  await page.click('#cast-next button[title="Tomas next"]');
+  await untilIdle(page);
+  expect([lastStream.continue_final_message, lastStream.messages.at(-1)]).toEqual([true, { role: "assistant", content: "Tomas:" }]);
+  // let them talk: four replies, each begun as one of them, never the last to speak
+  const n0 = streams.length;
+  await page.click("#cast-next .talk");
+  await page.waitForFunction(() => !!document.querySelector("#cast-next .talk:not(.on)")
+    && document.querySelector("#send")?.getAttribute("aria-label") === "Send", { timeout: 20_000 });
+  const beats = streams.slice(n0);
+  expect(beats.map((b) => [b.continue_final_message, b.messages.at(-1).role])).toEqual(Array(4).fill([true, "assistant"]));
+  expect(beats.map((b) => b.messages.at(-1).content)).toEqual(Array(4).fill("Mirela:"));   // (each reply here ends with Tomas)
+
+  await page.reload({ waitUntil: "load" });                                              // the cast is this device's, not the tab's
+  await page.waitForSelector('#cast .cast-item[title="Hive"]');
+  expect(await page.$$eval("#cast .cast-item", (c) => c.map((x) => (x as HTMLElement).title))).toEqual(["Chrysalis", "Mirela", "Tomas", "Hive", "You: Robin"]);
+  await page.close();
+}, 60_000);
 
 test("a page's tools change it by hand, with no model, in the page as it runs: Select points at a part, Text retypes it, the paint bucket fills a background, Delete takes a part out and Undo brings it back; the next question carries the page whole and the part pointed at", async () => {
   const page = await open();
@@ -1151,6 +1211,27 @@ async function voicePage(script: string, o: { system?: string; first?: (page: Pa
   return { page, session: () => voiceLog().filter((e) => e.s === s) };
 }
 const replyText = (page: Page, i: number) => page.$eval(`#thread > article[data-i="${i}"] .markdown`, (el) => el.textContent?.trim() ?? "");
+
+test("voice mode: a character speaks with the voice its sheet gives it (kept in its card), another voice model's too", async () => {
+  const { page } = await voicePage("plain");
+  await page.click("#send");                                                            // ends voice mode: the voices are listed now
+  await page.waitForFunction(() => document.querySelector("#send")?.getAttribute("aria-label") === "Send", { timeout: 10_000 });
+  const file = `${dir}/Vox.png`;
+  await Bun.write(file, await cardPng({ spec: "chara_card_v2", spec_version: "2.0", data: { name: "Vox", description: "{{char}} sings.", first_mes: "La." } },
+    new Blob([png], { type: "image/png" })));
+  await (await page.$("input#cast-file"))!.uploadFile(file);
+  await page.waitForSelector("#folder-head:not([hidden])");
+  await page.click("#folder-head .fh-main");
+  await page.waitForSelector("#cast-sheet select");
+  await page.select("#cast-sheet select", "other-tts\nbob");
+  await page.keyboard.press("Escape");
+  const n = voiceLog().length;
+  await page.click("#voice");
+  await page.waitForFunction(() => document.querySelector("#voice-status")?.textContent === "Listening", { timeout: 10_000 });
+  const asked = voiceLog().slice(n).filter((e) => e.ev === "msg" && (e.type === "hello" || e.type === "config"));
+  expect(asked.some((e) => e.voice === "bob" && (e.stack?.tts === "other-tts" || asked.some((x) => x.stack?.tts === "other-tts")))).toBe(true);
+  await page.click("#send");
+}, 30_000);
 
 test("voice mode: what is said shows as it is said, becomes the question, and the reply is spoken as it is written", async () => {
   const n0 = streams.length, c0 = checks.length;

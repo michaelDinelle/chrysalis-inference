@@ -18,6 +18,8 @@ import { type Block, type Span, type Version, ARTIFACTS_PROMPT, PAGE_DOC, elemen
   withContent, withCopy, withOrder, withPaint, withoutElement, lineDiff } from "./artifacts";
 import { LATEX_CSS, latexToHtml } from "./latex";
 import logoThin from "./logo-thin.svg";
+import { type CardData, type Group, type Person, type Voice, cardPng, castPrompt, dropGroup, dropPerson, fill as fillCard, loadCast, readCast, saveGroup, savePerson, speakerOf,
+  voiceOf } from "./cast";
 import { Ocean } from "./ocean";
 
 type Effort = "xhigh" | "medium" | "low" | "off";
@@ -57,7 +59,8 @@ interface Message {
   edits?: { id: string; kind: string; src: string }[];   // artifacts the user changed by hand before it, as they left them
 }
 interface Conversation { id: string; title: string; named?: boolean; updated: number; effort: Effort; messages: Message[]; tools?: ToolChoice["tools"];
-  pending?: Record<string, { kind: string; srcs: string[] }> }   // artifacts changed by hand, not sent yet: each one's source after each change
+  pending?: Record<string, { kind: string; srcs: string[] }>;   // artifacts changed by hand, not sent yet: each one's source after each change
+  who?: string }                                    // the character or group it is with (the cast)
 type Sampler = Partial<Record<SamplerKey, number>> & { order?: Stage[] };
 type Mode = "think" | "fast";                       // thinking on (Max, Medium, Low) or off: Qwen recommends other values
 // Only what differs from the recommended values is kept, so whatever is left alone follows them. allow: tools that run
@@ -271,6 +274,529 @@ function h<K extends keyof HTMLElementTagNameMap>(tag: K, cls = "", text = ""): 
   return e;
 }
 
+// The cast (cast.ts): characters from SillyTavern's cards, the user's persona and groups of characters, kept on this
+// device. Each character or group is a folder of chats: the rail's portraits pick one (Chrysalis, the top one, holds the
+// chats with neither), and its head opens its sheet (what its card says, its voice, export, delete). A chat with a
+// character opens with its greeting (the card's other greetings are versions of it) and is written as the character; a
+// group's replies are the scene, each paragraph its speaker's, and a face over the message box has the next reply begin
+// as them. Cards (a PNG with one in it, or the JSON) dropped anywhere or picked join the cast.
+const people = new Map<string, Person>(), groups = new Map<string, Group>(), faces = new Map<string, string>();
+const ME = "me";                                     // the persona's id: there is one
+let folder = pref("folder", "");
+let talking = 0;                                     // "let them talk": the beats a group has left to write on its own
+const persona = () => people.get(ME);
+const userName = () => persona()?.card.data.name.trim() || "User";
+const folderOf = (c: Conversation) => (c.who && (people.has(c.who) || groups.has(c.who)) ? c.who : "");
+function castOf(c: Conversation): { members: Person[]; group?: Group } {
+  const id = folderOf(c), g = id ? groups.get(id) : undefined;
+  if (!id) return { members: [] };
+  return g ? { members: g.members.map((m) => people.get(m)).filter((p): p is Person => !!p), group: g } : { members: [people.get(id)!] };
+}
+const hues = new Map<string, number>();            // a portrait's own color (its most colorful pixels' hue), once it is read
+const hue = (s: string, id?: string) => (id && hues.get(id)) ?? [...s].reduce((a, ch) => (a * 31 + ch.charCodeAt(0)) % 360, 7);
+async function readHue(p: Person) {
+  if (!p.image) return;
+  try {
+    const bmp = await createImageBitmap(p.image, { resizeWidth: 24, resizeHeight: 36 }), c = new OffscreenCanvas(24, 36), g = c.getContext("2d")!;
+    g.drawImage(bmp, 0, 0);
+    const px = g.getImageData(0, 0, 24, 36).data;
+    let x = 0, y = 0;
+    for (let i = 0; i < px.length; i += 4) {        // each pixel's hue as a direction, weighted by how colorful it is
+      const r = px[i] / 255, gr = px[i + 1] / 255, b = px[i + 2] / 255, max = Math.max(r, gr, b), min = Math.min(r, gr, b), sat = max - min;
+      if (sat < 0.15) continue;
+      const hh = max === r ? ((gr - b) / sat) % 6 : max === gr ? (b - r) / sat + 2 : (r - gr) / sat + 4;
+      x += Math.cos(hh * Math.PI / 3) * sat; y += Math.sin(hh * Math.PI / 3) * sat;
+    }
+    if (x || y) hues.set(p.id, Math.round(((Math.atan2(y, x) * 180 / Math.PI) + 360) % 360));
+  } catch { /* not a picture this browser reads */ }
+}
+function face(id: string): HTMLElement {
+  const g = groups.get(id);
+  if (g) {                                           // a group: its members in one circle (two halves, a half and two quarters, four quarters)
+    const ms = g.members.slice(0, 4), s = h("span", `face mosaic m${Math.max(ms.length, 1)}`);
+    s.append(...(ms.length ? ms.map((m) => face(m)) : [h("span", "face initials", "?")]));
+    return s;
+  }
+  const url = faces.get(id), p = people.get(id), name = p?.card.data.name.trim() || "?";
+  if (url) {
+    const img = h("img", "face");
+    img.src = url;
+    img.alt = "";
+    img.draggable = false;
+    return img;
+  }
+  if (id === ME) {                                   // the user with no picture of their own
+    const s = h("span", "face you");
+    s.innerHTML = '<svg class="i" viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="8" r="4"/><path d="M4 21c1.5-4 4.5-6 8-6s6.5 2 8 6"/></svg>';
+    return s;
+  }
+  const s = h("span", "face initials", name.slice(0, 1).toUpperCase());
+  s.style.setProperty("--hue", String(hue(name)));
+  return s;
+}function setFace(p: Person): Promise<void> {
+  const was = faces.get(p.id);
+  if (was) URL.revokeObjectURL(was);
+  if (p.image) faces.set(p.id, URL.createObjectURL(p.image));
+  else faces.delete(p.id);
+  hues.delete(p.id);
+  return readHue(p);
+}
+const nameOf = (id: string) => groups.get(id)?.name ?? people.get(id)?.card.data.name ?? "Chrysalis";
+
+function renderCast() {
+  const rail = $("cast");
+  const item = (id: string, el: HTMLElement, title: string, onclick = () => pickFolder(id)) => {
+    const b = h("button", `cast-item${folder === id && id !== ME ? " on" : ""}`);
+    b.type = "button";
+    b.title = b.ariaLabel = title;
+    b.append(el);
+    b.onclick = onclick;
+    return b;
+  };
+  const top = h("span", "face chrysalis"), logo = h("img");
+  logo.src = logoThin;
+  logo.alt = "";
+  top.append(logo);
+  const plus = h("button", "cast-plus");
+  plus.type = "button";
+  plus.title = plus.ariaLabel = "Add a character or a group";
+  plus.innerHTML = icon("plus");
+  plus.onclick = (e) => { e.stopPropagation(); openAdd(plus); };
+  rail.replaceChildren(item("", top, "Chrysalis"), h("div", "cast-sep"),
+    ...[...people.values()].filter((p) => p.kind === "character").sort((a, b) => a.added - b.added).map((p) => item(p.id, face(p.id), p.card.data.name)),
+    ...[...groups.values()].sort((a, b) => a.added - b.added).map((g) => item(g.id, face(g.id), g.name)),
+    plus, h("div", "cast-gap"), item(ME, face(ME), `You: ${userName()}`, () => openSheet(ME)));
+  renderHead();
+}
+// The open folder's head (the chats with Chrysalis keep the New chat button); + is a new chat with them
+function renderHead() {
+  const head = $("folder-head");
+  head.hidden = !folder;
+  $("new-chat").hidden = !!folder;
+  if (!folder) return head.replaceChildren();
+  const g = groups.get(folder), n = Object.values(chats).filter((s) => folderOf(s) === folder).length;
+  const main = h("button", "fh-main"), text = h("span", "fh-text");
+  main.type = "button";
+  main.title = `${nameOf(folder)}: ${g ? "the group" : "the card"}, voice and more`;
+  text.append(h("span", "fh-name", nameOf(folder)), h("span", "fh-sub", [g ? `Group of ${g.members.length}` : "", n ? `${n} chat${n > 1 ? "s" : ""}` : "No chats yet"].filter(Boolean).join(" · ")));
+  main.append(face(folder), text);
+  main.onclick = () => openSheet(folder);
+  const add = h("button", "act fh-new");
+  add.type = "button";
+  add.title = add.ariaLabel = `New chat with ${nameOf(folder)}`;
+  add.innerHTML = icon("plus");
+  add.onclick = newChat;
+  head.replaceChildren(main, add);
+}// A folder picked: its latest chat, or a new one (with a character's greeting)
+function pickFolder(id: string) {
+  if (id === folder && folderOf(conv) === id) return;
+  setFolder(id);
+  const last = Object.values(chats).filter((s) => folderOf(s) === id).sort((a, b) => b.updated - a.updated)[0];
+  if (last) location.hash = last.id;
+  else newChat();
+}
+function setFolder(id: string) {
+  folder = id;
+  setPref("folder", id);
+  renderCast();
+  renderList();
+  renderCastNext();
+}
+// A new chat in a character's folder opens with the card's greeting; its other greetings are versions of it
+function greet(c: Conversation) {
+  const { members, group } = castOf(c);
+  if (group || !members.length) return;
+  const d = members[0].card.data, say = (t: string): Message => ({ id: randomId(), role: "assistant", content: fillCard(t, d.name, userName()), reasoning: "" });
+  const all = [d.first_mes ?? "", ...(d.alternate_greetings ?? [])].filter((t) => t.trim());
+  if (!all.length) return;
+  const first = say(all[0]);
+  if (all.length > 1) first.versions = { shown: 0, others: all.slice(1).map((t) => [say(t)]) };
+  c.messages.push(first);
+}
+// The system prompt of a chat with characters (cast.ts castPrompt), in place of the chat's own and the artifacts'
+function castSystem(c: Conversation) {
+  const { members, group } = castOf(c);
+  const base = members.length > 1 ? "Write the next part of a fictional scene between {{user}} and these characters."
+    : "Write {{char}}'s next reply in a fictional chat between {{char}} and {{user}}.";
+  return castPrompt(base, members.map((p) => p.card.data), { name: userName(), description: persona()?.card.data.description }, group?.scenario);
+}
+
+// A dropped or picked file that is a card or a group joins the cast (its folder opens, unless another of the same drop's
+// did); it says whether it was one
+async function adopt(f: File, open = true): Promise<boolean> {
+  const got = await readCast(f).catch(() => null);
+  if (!got) return false;
+  if ("group" in got) {
+    const ids = got.group.members.map((n) => [...people.values()].find((p) => p.kind === "character" && p.card.data.name === n)?.id);
+    const g: Group = { id: randomId(), name: got.group.name, members: ids.filter((x): x is string => !!x), scenario: got.group.scenario, added: Date.now() };
+    groups.set(g.id, g);
+    await saveGroup(g);
+    const missing = got.group.members.filter((_, i) => !ids[i]);
+    toast(missing.length ? `${g.name}: no card yet for ${missing.join(", ")}` : `${g.name} is here`);
+    if (open) pickFolder(g.id);
+    else renderCast();
+    return true;
+  }
+  const p: Person = { id: randomId(), kind: "character", card: got.card, image: got.image, added: Date.now() };
+  people.set(p.id, p);
+  setFace(p);
+  await savePerson(p);
+  if (open) pickFolder(p.id);
+  else renderCast();
+  toast(`${p.card.data.name} is here`, () => void forget(p.id));
+  return true;
+}
+async function forget(id: string) {
+  people.delete(id);
+  await dropPerson(id);
+  for (const g of groups.values()) if (g.members.includes(id)) { g.members = g.members.filter((m) => m !== id); await saveGroup(g); }
+  if (folder === id) setFolder("");
+  if (folderOf(conv) === "" && conv.who === id) render();
+  renderCast();
+  renderList();
+}
+
+// The + on the rail: a card, or a new group
+function openAdd(at: HTMLElement) {
+  const menu = $("cast-add"), r = at.getBoundingClientRect();
+  menu.hidden = false;
+  menu.style.left = `${r.right + 8}px`;
+  menu.style.top = `${r.top}px`;
+}
+for (const [add, svg] of [["card", icon("plus")], ["group", icon("agent")]]) $("cast-add").querySelector(`[data-add="${add}"]`)!.insertAdjacentHTML("afterbegin", svg);
+$("cast-add").addEventListener("click", async (e) => {
+  const b = (e.target as HTMLElement).closest<HTMLElement>("[data-add]");
+  if (!b) return;
+  $("cast-add").hidden = true;
+  if (b.dataset.add === "card") return $("cast-file").click();
+  const g: Group = { id: randomId(), name: "New group", members: [], added: Date.now() };
+  groups.set(g.id, g);
+  await saveGroup(g);
+  pickFolder(g.id);
+  openSheet(g.id);
+});
+$("cast-file").addEventListener("change", async (e) => {
+  const input = e.currentTarget as HTMLInputElement;
+  let open = true;
+  for (const f of input.files ?? []) {
+    if (await adopt(f, open)) open = false;
+    else toast(`${f.name} holds no character card`);
+  }
+  input.value = "";
+});
+
+// A sheet is the character's card: the portrait at its own shape with the name on it, a line of who they are, the voice
+// they speak with in voice mode, and Edit, which turns the card over to its fields (the four that make a character, the
+// rest under More). The user's own card takes a picture, their name and what the characters know of them; a group's
+// shows its members side by side, which of the characters are in it, and its scenario. What is typed is kept as it is.
+let sheetOf = "", turned = false;
+function openSheet(id: string, edit = false) {
+  const sheet = $("cast-sheet"), p = people.get(id), g = groups.get(id);
+  if (id === ME && !p) {
+    const me: Person = { id: ME, kind: "persona", card: { spec: "chara_card_v2", spec_version: "2.0", data: { name: "", description: "" } }, added: Date.now() };
+    people.set(ME, me);
+    void savePerson(me);
+  }
+  const person = people.get(id);
+  if (!person && !g) return;
+  if (sheetOf !== id) turned = false;
+  sheetOf = id;
+  turned = edit || (turned && !!person && person.kind === "character");
+  let saving = 0;
+  const keep = () => { clearTimeout(saving); saving = window.setTimeout(() => void (person ? savePerson(person) : saveGroup(g!)), 300); };
+  const btn = (cls: string, title: string, html: string, onclick: () => void) => {
+    const b = h("button", cls);
+    b.type = "button";
+    b.title = b.ariaLabel = title;
+    b.innerHTML = html;
+    b.onclick = onclick;
+    return b;
+  };
+  const picture = (p: Person, then: () => void) => {
+    const f = h("input");
+    f.type = "file";
+    f.accept = "image/*";
+    f.onchange = () => {
+      const file = f.files?.[0];
+      if (!file) return;
+      p.image = file;
+      keep();
+      void setFace(p).then(() => { renderCast(); then(); });
+    };
+    f.click();
+  };
+  const grow = (area: HTMLTextAreaElement) => { area.style.height = "auto"; area.style.height = `${area.scrollHeight + 2}px`; };
+  const text = (value: string, set: (v: string) => void, cls: string, placeholder = "") => {
+    const area = h("textarea", cls);
+    area.value = value;
+    area.placeholder = placeholder;
+    area.rows = 1;
+    area.oninput = () => { set(area.value); grow(area); keep(); };
+    requestAnimationFrame(() => grow(area));
+    return area;
+  };
+  const close = btn("card-float card-x", "Close", icon("x"), closeSheet);
+  const parts: HTMLElement[] = [];
+
+  if (person?.kind === "character" && turned) {      // the card turned over: its fields
+    const d = person.card.data, box = h("div", "card-edit"), head = h("div", "edit-head"), name = h("input");
+    const pic = h("button", "edit-pic");
+    pic.type = "button";
+    pic.title = "Another picture";
+    pic.append(face(id));
+    pic.onclick = () => picture(person, () => openSheet(id, true));
+    name.value = d.name;
+    name.ariaLabel = "Name";
+    name.oninput = () => { d.name = name.value; keep(); renderCast(); renderCastNext(); };
+    head.append(btn("act", "Back to the card", icon("prev"), () => openSheet(id, false)), pic, name);
+    const field = (label: string, k: keyof CardData) => {
+      const f = h("label", "edit-field");
+      f.append(h("span", "card-label", label), text(String(d[k] ?? ""), (v) => { d[k] = v; }, ""));
+      return f;
+    };
+    const more = h("details", "edit-more");
+    more.append(h("summary", "", "More"),
+      field("How they talk", "mes_example"), field("System prompt", "system_prompt"), field("After the chat", "post_history_instructions"));
+    box.append(head, field("Description", "description"), field("Personality", "personality"), field("Scenario", "scenario"), field("Greeting", "first_mes"), more);
+    parts.push(box);
+  } else {
+    // the card's face: the portrait (a group's members side by side; the user's, or a place for one), the name on it
+    const art = h("div", "card-art"), title = h("div", "card-title");
+    if (g) {
+      const strips = h("div", "strips");
+      strips.append(...(g.members.length ? g.members.slice(0, 5).map((m) => face(m)) : [face(id)]));
+      art.append(strips);
+    } else if (person?.kind === "persona" && !person.image) {
+      const blank = h("button", "card-blank");
+      blank.type = "button";
+      blank.innerHTML = '<svg class="i" viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="8" r="4"/><path d="M4 21c1.5-4 4.5-6 8-6s6.5 2 8 6"/></svg>Add a picture';
+      blank.onclick = () => picture(person, () => openSheet(id));
+      art.append(blank);
+    } else art.append(face(id));
+    art.append(h("div", "card-scrim"), title, close);
+    if (person?.kind === "persona" && person.image) art.append(btn("card-float card-back", "Another picture", icon("edit"), () => picture(person, () => openSheet(id))));
+    if (person?.kind === "character") {
+      const d = person.card.data;
+      title.append(h("div", "card-name", d.name), h("div", "card-tags", [d.creator ? `by ${d.creator}` : "", ...(d.tags ?? []).slice(0, 3)].filter(Boolean).join(" · ")));
+    } else {                                          // the user's name and a group's are typed on the card
+      const name = h("input", "card-name");
+      name.value = person ? person.card.data.name : g!.name;
+      name.placeholder = person ? "Your name" : "The group's name";
+      name.ariaLabel = "Name";
+      name.spellcheck = false;
+      name.oninput = () => {
+        if (person) person.card.data.name = name.value; else g!.name = name.value;
+        keep();
+        renderCast();
+        renderCastNext();
+      };
+      title.append(name, h("div", "card-tags", person ? "You, in every chat" : `${g!.members.length} in the group`));
+    }
+    parts.push(art);
+    const body = h("div", "card-body");
+    if (person?.kind === "character") {
+      const d = person.card.data, line = blurb(d);
+      if (line) body.append(h("p", "card-blurb", line));
+      body.append(voicePick(person, keep));
+      const acts = h("div", "card-acts");
+      const del = btn("icon", `Delete ${d.name} (their chats stay)`, icon("trash"), async () => {
+        if (!del.classList.contains("armed")) { del.classList.add("armed"); del.innerHTML = `${icon("trash")}Delete?`; return; }
+        closeSheet();
+        await forget(id);
+      });
+      acts.append(btn("", "Turn the card over: its fields", `${icon("edit")}Edit`, () => openSheet(id, true)),
+        btn("", "The card as a PNG any app reads", `${icon("download")}Export`, async () => {
+          const a = h("a");
+          a.href = URL.createObjectURL(await cardPng(person.card, person.image));
+          a.download = `${d.name || "character"}.png`;
+          a.click();
+          setTimeout(() => URL.revokeObjectURL(a.href), 1000);
+        }), del);
+      body.append(acts);
+    } else if (person) {
+      body.append(text(person.card.data.description ?? "", (v) => { person.card.data.description = v; }, "card-about",
+        "What the characters should know about you"), h("div", "card-hint", "Every card calls you {{user}}: it gets your name."));
+    } else {
+      const members = h("div", "card-members");
+      members.append(...[...people.values()].filter((x) => x.kind === "character").map((x) => {
+        const inside = g!.members.includes(x.id), b = h("button", `card-member ${inside ? "in" : "out"}`);
+        b.type = "button";
+        b.title = `${x.card.data.name}: ${inside ? "in the group (click to take out)" : "click to add"}`;
+        b.append(face(x.id));
+        b.onclick = () => {
+          g!.members = inside ? g!.members.filter((m) => m !== x.id) : [...g!.members, x.id];
+          keep();
+          renderCast();
+          renderCastNext();
+          openSheet(id);
+        };
+        return b;
+      }));
+      const who = h("div", "card-section"), where = h("div", "card-section"), acts = h("div", "card-acts");
+      who.append(h("span", "card-label", "Who is in it"), members);
+      where.append(h("span", "card-label", "Scenario"), text(g!.scenario ?? "", (v) => { g!.scenario = v || undefined; }, "card-about",
+        "Where they are and what is going on (in place of their own)"));
+      const del = btn("icon", "Delete the group (its chats stay)", icon("trash"), async () => {
+        if (!del.classList.contains("armed")) { del.classList.add("armed"); del.innerHTML = `${icon("trash")}Delete?`; return; }
+        closeSheet();
+        groups.delete(id);
+        await dropGroup(id);
+        if (folder === id) setFolder("");
+        renderCast();
+        renderList();
+      });
+      acts.append(btn("", "The group as a file (with its members' cards beside it, it imports anywhere this chat runs)", `${icon("download")}Export`,
+        () => download(`${g!.name || "group"}.json`, JSON.stringify({ spec: "chrysalis_group", name: g!.name,
+          members: g!.members.map((m) => people.get(m)?.card.data.name).filter(Boolean), ...(g!.scenario ? { scenario: g!.scenario } : {}) }, null, 2), "application/json")), del);
+      body.append(who, where, acts);
+    }
+    parts.push(body);
+  }
+  sheet.replaceChildren(...parts);
+  sheet.hidden = false;
+  const side = $("sidebar").getBoundingClientRect();
+  sheet.style.left = `${Math.max(12, Math.min(side.right + 10, innerWidth - sheet.offsetWidth - 12))}px`;
+  sheet.style.top = `${Math.max(12, Math.min(64, innerHeight - sheet.offsetHeight - 12))}px`;
+}
+// Who a character is in a line: the first sentences of their card's description that read as prose (cards often keep
+// lists there too: [Personality= "kind", ...]), with their name and the user's in place
+function blurb(d: CardData) {
+  const lines = fillCard(d.description ?? "", d.name, userName()).split("\n").map((l) => l.trim());
+  const text = lines.filter((l) => l && !/^[[{<]|=\s*["[]/.test(l)).join(" ") || fillCard(d.personality ?? "", d.name, userName());
+  const sentences = text.match(/[^.!?]+[.!?]+["')\]]*/g) ?? [text];
+  let out = "";
+  for (const s of sentences) { if (out && (out + s).length > 200) break; out += s; }
+  return out.trim();
+}
+function closeSheet() {
+  $("cast-sheet").hidden = true;
+  sheetOf = "";
+}
+// The voice a character speaks with in voice mode, from the voices the voice service has listed (kept in its card)
+function voicePick(p: Person, keep: () => void) {
+  const box = h("label", "card-voice"), sel = h("select"), mine = voiceOf(p.card.data);
+  box.title = "The voice they speak with in voice mode";
+  box.innerHTML = icon("wave");
+  const none = h("option", "", voiceCatalog.tts?.length ? "The chat's voice" : "Voices: open voice mode once");
+  none.value = "";
+  sel.append(none);
+  for (const m of voiceCatalog.tts ?? []) {
+    if (!m.installed || !m.voices?.length) continue;
+    const group = h("optgroup");
+    group.label = m.label;
+    for (const x of m.voices) {
+      const o = h("option", "", `${x.label} · ${voiceGroup(x)}`);
+      o.value = `${m.name}\n${x.id}`;
+      o.selected = mine?.tts === m.name && mine?.name === x.id;
+      group.append(o);
+    }
+    sel.append(group);
+  }
+  sel.onchange = () => {
+    const [tts, name] = sel.value.split("\n");
+    const ext = (p.card.data.extensions ??= {}), own = (ext.chrysalis ??= {}) as { voice?: Voice };
+    if (sel.value) own.voice = { tts, name }; else delete own.voice;
+    keep();
+    if (voice && folderOf(voice.c) === p.id) pushVoice();
+  };
+  box.append(sel);
+  return box;
+}
+document.addEventListener("pointerdown", (e) => {
+  const t = e.target as HTMLElement;
+  if (!$("cast-add").hidden && !t.closest("#cast-add, .cast-plus")) $("cast-add").hidden = true;
+  if (!$("cast-sheet").hidden && !t.closest("#cast-sheet, #folder-head, .cast-item")) closeSheet();
+});
+document.addEventListener("keydown", (e) => {
+  if (e.key !== "Escape") return;
+  if (!$("cast-add").hidden) { $("cast-add").hidden = true; e.preventDefault(); }
+  else if (!$("cast-sheet").hidden) { closeSheet(); e.preventDefault(); }
+}, true);
+
+// A group's paragraphs each their speaker's: a line begun with a member's name and a colon starts a paragraph, and gets
+// their face and name in place of the name as written
+function sceneText(src: string, c: Conversation) {
+  const { members, group } = castOf(c);
+  if (!group || !members.length) return src;
+  const names = members.map((m) => m.card.data.name.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")).join("|");
+  return src.replace(new RegExp(`(?<!\\n)\\n(?=\\s*(?:\\*\\*)?(?:${names})(?:\\*\\*)?\\s*:)`, "g"), "\n\n");
+}
+function speakLine(n: Node | undefined, c: Conversation) {
+  const { members, group } = castOf(c);
+  if (!group || !(n instanceof HTMLParagraphElement)) return;
+  const who = speakerOf(n.textContent ?? "", members.map((m) => m.card.data.name));
+  if (!who) return;
+  let drop = who.rest;
+  const walker = document.createTreeWalker(n, NodeFilter.SHOW_TEXT);
+  for (let t = walker.nextNode(); t && drop > 0; t = walker.nextNode()) {
+    const k = Math.min(drop, t.textContent!.length);
+    t.textContent = t.textContent!.slice(k);
+    drop -= k;
+  }
+  for (const el of [...n.querySelectorAll("strong, b")]) if (!el.textContent) el.remove();
+  const m = members.find((x) => x.card.data.name === who.name)!, tag = h("span", "who");
+  tag.style.setProperty("--hue", String(hue(who.name, m.id)));
+  tag.append(face(m.id), h("b", "", who.name));
+  n.prepend(tag);
+  n.classList.add("line");
+}
+// A character's reply: their face and name over it
+function speakerHead(c: Conversation) {
+  const { members, group } = castOf(c);
+  if (group || members.length !== 1) return null;
+  const head = h("div", "speaker");
+  head.append(face(members[0].id), h("span", "", members[0].card.data.name));
+  return head;
+}
+
+// Over a group's message box: its members' faces (the next reply begins as the one clicked, after what is typed, if
+// anything) and "let them talk" (the scene goes on by itself, a few beats, until something is typed or it is stopped:
+// each a reply begun as one of them, not the last to speak: a scene's reply written on ends at once)
+function renderCastNext() {
+  const box = $("cast-next"), { members, group } = castOf(conv);
+  input.placeholder = members.length ? `Message ${group ? group.name : members[0].card.data.name}` : "Message Chrysalis";
+  box.hidden = !group || !members.length;
+  if (box.hidden) return;
+  const talk = h("button", `talk${talking ? " on" : ""}`);
+  talk.type = "button";
+  talk.title = talking ? "Stop them" : "They go on by themselves for a few turns (typing stops them)";
+  talk.innerHTML = talking ? `${icon("stop")}Stop them` : `${icon("play")}Let them talk`;
+  talk.onclick = () => {
+    if (talking) { talking = 0; return renderCastNext(); }
+    talking = 4;
+    renderCastNext();
+    talkOn();
+  };
+  box.replaceChildren(h("span", "", "Next"), ...members.map((m) => {
+    const b = h("button");
+    b.type = "button";
+    b.title = b.ariaLabel = `${m.card.data.name} next`;
+    b.append(face(m.id));
+    b.onclick = () => replyAs(m);
+    return b;
+  }), talk);
+}function replyAs(p: Person, auto = false) {
+  if (running()) return;
+  if (!auto) talking = 0;
+  const text = input.value.trim();
+  if (text) submit(text, false);
+  const c = conv, at = c.messages.length, start = `${p.card.data.name}:`;
+  const m: Message = { id: randomId(), role: "assistant", content: start, reasoning: "", params: changed(modeOf(c)) || undefined, effort: c.effort };
+  branch(c, at, m);
+  void startRun(c, m, () => request(c, c.messages.slice(0, at), { final: { role: "assistant", content: start }, extra: { continue_final_message: true } }));
+  renderCastNext();
+}
+// The next beat of a scene left to talk: the last reply written on (or a first one)
+function talkOn() {
+  const { members, group } = castOf(conv);
+  if (!talking || running() || !group || !members.length) return;
+  talking--;
+  const said = conv.messages.filter((m) => m.role === "assistant").map((m) => sceneText(m.content, conv)).join("\n\n").split(/\n\n/);
+  const lastSpoke = [...said].reverse().map((t) => speakerOf(t, members.map((m) => m.card.data.name))?.name).find(Boolean);
+  const next = members.length > 1 ? members.filter((m) => m.card.data.name !== lastSpoke) : members;
+  replyAs(next[Math.floor(Math.random() * next.length)], true);
+}
+
 const escapeHtml = (s: string) => s.replace(/[&<>"']/g, (c) => `&#${c.charCodeAt(0)};`);
 
 marked.use({
@@ -371,7 +897,8 @@ let carried: { slot: Comment; canvas: HTMLElement; b: Blocks }[] | null = null;
 // art: the chat and what holds src (a reply, or one of its rounds), for its artifact blocks' versions
 function renderBlocks(v: { body: HTMLElement; blocks?: Blocks }, src: string, live: boolean, art?: { c: Conversation; holder: object }) {
   if (!v.blocks) { v.body.replaceChildren(); v.blocks = { raws: [], nodes: [] }; }
-  const b = v.blocks, tokens = marked.lexer(live ? settle(src) : src), blocks = tokens.filter((t) => t.type !== "space");
+  const text = art ? sceneText(src, art.c) : src;
+  const b = v.blocks, tokens = marked.lexer(live ? settle(text) : text), blocks = tokens.filter((t) => t.type !== "space");
   let seen = 0, all: Map<string, Version[]> | undefined;
   const nth = art ? blocks.map((t) => (t.type === "code" && artifactOf(t.lang, t.text) ? seen++ : -1)) : [];
   // An artifact block as its canvas (its latest version) or a line. The canvas is taken from wherever it is in the chat,
@@ -406,6 +933,7 @@ function renderBlocks(v: { body: HTMLElement; blocks?: Blocks }, src: string, li
     const now = t.type !== "code" ? htmlNodes(t, tokens.links) : nth[k] >= 0 ? artNodes(k, old[0], tail)
       : SVG_START.test(t.text) ? [svgFigure(old[0], t.text, tail)]
       : /^mermaid$/i.test(t.lang ?? "") ? [mermaidFigure(old[0], t.text, tail)] : page ? [pageFigure(old[0], t.text)] : htmlNodes(t, tokens.links);
+    if (art && t.type === "paragraph") speakLine(now[0], art.c);
     b.raws[k] = t.raw;
     if (now.length === 1 && old.length === 1 && now[0] === old[0]) continue;   // a figure updated in place
     const at = b.nodes.slice(k).flat()[0] ?? null;
@@ -1990,6 +2518,7 @@ function blank(): Conversation {
 
 function render() {
   views.clear();
+  renderCastNext();
   const was = [...thread.children], carry: NonNullable<typeof carried> = carried = [];
   try {
     thread.append(...(conv.messages.length ? conv.messages.map(messageView) : [emptyState()]));
@@ -2014,7 +2543,8 @@ function render() {
 function messageView(m: Message, i: number): HTMLElement {
   if (m === editing) return editorView(m, i);
   if (m.role === "assistant") {
-    const v = assistantView(i);
+    const v = assistantView(i), head = speakerHead(conv);
+    if (head) v.el.prepend(head);
     views.set(m, v);
     paint(v, m, [...runs.values()].find((r) => r.m === m)?.live);
     return v.el;
@@ -2726,11 +3256,12 @@ const customized = () => settings.system !== DEFAULT_SYSTEM
   || Object.keys(settings.voice ?? {}).length > 0;
 
 function renderList() {
+  renderHead();
   const nav = $("conversations"), today = new Date().setHours(0, 0, 0, 0);
   const group = (t: number) => (t >= today ? "Today" : t >= today - 6 * 864e5 ? "Previous 7 days" : "Older");
   let current = "";
   nav.replaceChildren();
-  for (const s of Object.values(chats).sort((a, b) => b.updated - a.updated)) {
+  for (const s of Object.values(chats).filter((x) => folderOf(x) === folder).sort((a, b) => b.updated - a.updated)) {
     if (group(s.updated) !== current) nav.append(h("div", "group", (current = group(s.updated))));
     const a = h("a", `conv${s.id === conv.id ? " active" : ""}${runs.has(s.id) ? " running" : ""}`), del = h("button", "conv-del", "×");
     a.href = `#${s.id}`;
@@ -2852,7 +3383,19 @@ function save(c: Conversation) {
 // running any.
 function request(c: Conversation, upto: Message[], o: { effort?: Effort; sampling?: Mode; final?: object; extra?: Record<string, unknown>; loop?: boolean; route?: boolean } = {}) {
   const effort = o.effort ?? c.effort, mode: Mode = effort === "off" ? "fast" : "think";
-  const messages: object[] = upto.flatMap(wire), system = systemFor(c);
+  const messages: object[] = upto.flatMap(wire), system = systemFor(c), { members, group } = castOf(c);
+  // a card's instructions for after the chat go at the end of the last question: Chrysalis takes a system turn only
+  // first, and the rest of the conversation stays as it was sent before, a cache hit
+  const after = !group && members.length ? members[0].card.data.post_history_instructions?.trim() : "";
+  const asked = [...messages].reverse().find((x) => (x as { role: string }).role === "user") as { content: string | { type: string; text?: string }[] } | undefined;
+  if (after && asked) {
+    const note = `\n\n[${fillCard(after, members[0].card.data.name, userName())}]`;
+    if (typeof asked.content === "string") asked.content += note;
+    else asked.content = [...asked.content, { type: "text", text: note }];
+  }
+  // Chrysalis takes no conversation without a user turn, and a chat with characters begins with theirs (a greeting, a
+  // scene they start): one goes first, the same every time, so what follows stays a cache hit
+  if (members.length && (messages[0] as { role: string } | undefined)?.role !== "user") messages.unshift({ role: "user", content: "[The scene begins.]" });
   if (system) messages.unshift({ role: "system", content: system });
   if (o.final) messages.push(o.final);
   const web: ToolChoice | undefined = toolsOn(c)
@@ -2862,7 +3405,8 @@ function request(c: Conversation, upto: Message[], o: { effort?: Effort; samplin
   return {
     model: chrysalis && effort === "off" ? `${current()}-fast` : current(), reasoning_effort: chrysalis ? (effort === "off" ? undefined : effort) : OTHER_EFFORT[effort],
     ...samplerFields(o.sampling ?? mode), max_tokens: settings.max_tokens, seed: settings.seed, ...(chrysalis ? { logprobs: true, top_logprobs: 5 } : {}),
-    messages, stream: true, stream_options: { include_usage: true }, ...(web ? { chrysalis_web: web } : {}), ...o.extra,
+    messages, stream: true, stream_options: { include_usage: true }, ...(web ? { chrysalis_web: web } : {}),
+    ...(group ? { stop: [`\n${userName()}:`, `\n**${userName()}`] } : {}), ...o.extra,   // a scene never writes the user's lines
   };
 }
 // The thinking bar for another backend, as OpenAI's reasoning_effort. Max sends none, so a model thinks as its backend
@@ -2889,8 +3433,9 @@ function wire(m: Message): object[] {
 const toolsOn = (c: Conversation) => !!c.tools && Object.keys(c.tools).length > 0;
 // The system prompt as sent: the user's as written; the default says what is true of the chat (no tools, or these).
 // After it, how to make and change artifacts, unless Settings leaves that out.
-const systemFor = (c: Conversation) => [fill((settings.system.trim() === DEFAULT_SYSTEM && toolsOn(c) ? DEFAULT_SYSTEM_TOOLS : settings.system).trim()),
-  settings.artifacts === false ? "" : ARTIFACTS_PROMPT].filter(Boolean).join("\n\n");
+const systemFor = (c: Conversation) => castOf(c).members.length ? castSystem(c)
+  : [fill((settings.system.trim() === DEFAULT_SYSTEM && toolsOn(c) ? DEFAULT_SYSTEM_TOOLS : settings.system).trim()),
+    settings.artifacts === false ? "" : ARTIFACTS_PROMPT].filter(Boolean).join("\n\n");
 
 // Server-sent events of a reply, as parsed JSON chunks, then DONE.
 const DONE = Symbol("done");
@@ -3243,6 +3788,8 @@ function finish(run: Run) {
   save(c);
   if (!c.named && !m.error) void name(c);
   redoEdits(c, m);
+  if (talking && c === conv && !m.error && !m.stopped) setTimeout(talkOn, 400);
+  else if (talking) { talking = 0; renderCastNext(); }
 }
 
 // An edit that did not apply in full (a SEARCH not in the artifact, a shape it could not place) is asked for again, once,
@@ -3268,6 +3815,7 @@ function redoEdits(c: Conversation, m: Message) {
 // Stop: Chrysalis stops and the reply ends with what it has. (Without a job yet, generate() sends this once it has
 // one.)
 function stopRun(run: Run, now = false) {
+  if (talking) { talking = 0; renderCastNext(); }
   if (run.stopping && !now) return;
   run.stopping = true;
   if (run.m.job) void fetch(`/api/chat/${run.m.job}/stop`, { method: "POST" }).catch(() => {});
@@ -3277,12 +3825,17 @@ function stopRun(run: Run, now = false) {
 // another backend, its model with thinking off: quick).
 async function name(c: Conversation) {
   c.named = true;
+  const first = c.messages.find((m) => m.role === "user");
+  if (!first) {                                      // a scene begun by its characters: the group's name
+    c.title = nameOf(folderOf(c));
+    return save(c);
+  }
   try {
     const res = await fetch("/api/chat", {
       method: "POST", headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ ...quick(), max_tokens: 24, messages: [
         { role: "system", content: TITLE_PROMPT },
-        { role: "user", content: (c.messages[0].content || (c.messages[0].files ?? []).map((f) => f.name).join(", ")).slice(0, 2000) },
+        { role: "user", content: (first.content || (first.files ?? []).map((f) => f.name).join(", ")).slice(0, 2000) },
       ] }),
     });
     // a model that thinks whatever it is sent fills the 24 tokens with thinking (KoboldCpp's, cut off, as the answer)
@@ -3294,7 +3847,7 @@ async function name(c: Conversation) {
   if (c === conv) $("title").textContent = document.title = c.title;
 }
 
-function submit(text: string) {
+function submit(text: string, reply = true) {
   text = text.trim();
   if ((!text && !pending.length) || running() || drafting) return;
   input.value = "";
@@ -3302,10 +3855,11 @@ function submit(text: string) {
   const files = pending;
   pending = [];
   renderPending();
-  if (!conv.messages.length) conv.title = (text || files.map((f) => f.name).join(", ")).split("\n")[0].slice(0, 60);
+  if (!conv.messages.some((m) => m.role === "user")) conv.title = (text || files.map((f) => f.name).join(", ")).split("\n")[0].slice(0, 60);
   const note = noteFor(conv, false);
   conv.messages.push({ role: "user", content: text, ...(files.length ? { files } : {}), ...(note ? { note } : {}), ...pointFields(false), ...takeEdits() });
-  void generate();
+  if (reply) void generate();
+  else save(conv);
 }
 
 // Voice mode: the message box becomes a dock (the orb, what it is doing, mute and end) and the conversation goes on in
@@ -3910,7 +4464,9 @@ function setVoice(change: Partial<VoiceSettings>) {
 // What the settings ask the service for; with voice mode open, what is unset is filled in with what the service runs
 // when not told (so taking a choice back goes back to that).
 function voiceWant(v: VoiceMode | null): VoiceAsk {
-  const s = settings.voice ?? {}, d = v?.defaults, tts = s.tts ?? d?.tts, name = s.name ?? (tts ? d?.voices[tts] : undefined);
+  const { members, group } = v ? castOf(v.c) : { members: [] as Person[], group: undefined };
+  const own = !group && members.length === 1 ? voiceOf(members[0].card.data) : undefined;   // a character's own voice
+  const s = { ...(settings.voice ?? {}), ...(own ?? {}) }, d = v?.defaults, tts = s.tts ?? d?.tts, name = s.name ?? (tts ? d?.voices[tts] : undefined);
   const stack: VoiceAsk["stack"] = tts ? { tts } : {};
   return { ...(Object.keys(stack).length ? { stack } : {}), ...(name ? { voice: name } : {}), speed: s.speed ?? 1 };
 }
@@ -4058,7 +4614,9 @@ function renderPending() {
 }
 
 async function addFiles(list: Iterable<File>) {
+  let open = true;
   for (const f of list) {
+    if (await adopt(f, open)) { open = false; continue; }
     const r = await attach(f, onChrysalis() ? undefined : status.backend?.name);
     if (typeof r === "string") toast(r);
     else pending.push(r);
@@ -4237,6 +4795,7 @@ async function draft() {
 function openConversation(id: string) {
   closeVoice();
   conv = runs.get(id)?.conv ?? (chats[id] ? structuredClone(chats[id]) : blank());   // a reply being written keeps going
+  if (folderOf(conv) !== folder) setFolder(folderOf(conv));
   closeOver(panes.conversations);
   render();
   scroller.scrollTop = scroller.scrollHeight;
@@ -4247,6 +4806,10 @@ function openConversation(id: string) {
 function newChat() {
   closeVoice();
   conv = blank();
+  if (folder) {
+    conv.who = folder;
+    greet(conv);
+  }
   history.replaceState(null, "", location.pathname);
   closeOver(panes.conversations);
   render();
@@ -4397,6 +4960,7 @@ $("composer").addEventListener("submit", (e) => {
   else submit(input.value);
 });
 input.addEventListener("input", () => { grow(); if (!drafting) $("draft").title = input.value.trim() ? "Finish my message (draft)" : "Draft my next message"; });
+input.addEventListener("input", () => { if (talking) { talking = 0; renderCastNext(); } });   // typing joins the scene
 input.addEventListener("keydown", (e) => {
   if (e.key === "Enter" && !e.shiftKey && !e.isComposing) {
     e.preventDefault();
@@ -5730,7 +6294,17 @@ for (const c of Object.values(chats)) {                // a reply being written 
     save(c);
   }
 }
+{
+  const got = await loadCast();
+  for (const p of got.people) people.set(p.id, p);
+  await Promise.all(got.people.map(setFace));        // (the portraits' colors before the first chat is drawn)
+  for (const g of got.groups) groups.set(g.id, g);
+  if (folder && !people.has(folder) && !groups.has(folder)) folder = "";
+  renderCast();
+  renderList();
+}
 if (location.hash.length > 1) openConversation(location.hash.slice(1));
+else if (folder) newChat();
 else render();
 // Every 4 s, or 4 times a second while a model loads (5-20 s).
 (async () => {

@@ -85,17 +85,28 @@
             <span class="brand">Chrysalis</span>
           </div>
           <div class="side-body">
-            <button id="new-chat" class="btn" type="button"></button>
-            <nav id="conversations" aria-label="Conversations"></nav>
-            <div class="side-foot">
-              <button id="import" class="btn" type="button" title="Add chats from files exported here">Import</button>
-              <button id="export-all" class="btn" type="button" title="Every chat of this tab, in one file">Export all</button>
-              <input id="import-file" type="file" accept=".json,application/json" multiple hidden />
+            <div id="cast" class="cast" aria-label="Characters"></div>
+            <div class="side-main">
+              <button id="new-chat" class="btn" type="button"></button>
+              <div id="folder-head" class="folder-head" hidden></div>
+              <nav id="conversations" aria-label="Conversations"></nav>
+              <div class="side-foot">
+                <button id="import" class="btn" type="button" title="Add chats from files exported here">Import</button>
+                <button id="export-all" class="btn" type="button" title="Every chat of this tab, in one file">Export all</button>
+                <input id="import-file" type="file" accept=".json,application/json" multiple hidden />
+              </div>
             </div>
           </div>
           <div class="pane-rail" role="separator" aria-orientation="vertical"></div>
         </div>
       </aside>
+      <!-- a character's, a group's or the user's own sheet (app.ts, openSheet), beside the conversations -->
+      <div id="cast-sheet" class="cast-sheet" role="dialog" aria-label="Character" hidden></div>
+      <div id="cast-add" class="cast-add" role="menu" hidden>
+        <button type="button" data-add="card" role="menuitem">A character from a card…</button>
+        <button type="button" data-add="group" role="menuitem">A group of characters</button>
+      </div>
+      <input id="cast-file" type="file" accept=".png,.json,image/png,application/json" multiple hidden />
       <main>
         <header class="topbar">
           <h1 id="title">New chat</h1>
@@ -120,6 +131,7 @@
             <button id="to-latest" class="act to-latest" type="button" title="Jump to the latest" aria-label="Jump to the latest" hidden></button>
             <div id="pointing" class="pointing" hidden></div>
             <div id="attachments" class="attachments" hidden></div>
+            <div id="cast-next" class="cast-next" hidden></div>
             <textarea id="input" rows="1" placeholder="Message Chrysalis" autofocus></textarea>
             <div id="model-pop" class="model-pop" role="listbox" aria-label="Model" hidden></div>
             <div id="tools-pop" class="tools-pop" role="dialog" aria-label="Tools in this chat" hidden></div>
