@@ -19,6 +19,7 @@
   --heat-1: light-dark(#a85771, #ea99b0);          /* the thinking levels, soft to vivid: Low, Medium, Max */
   --heat-2: #e24d85;
   --heat-3: light-dark(#bb1562, #ff619a);
+  --quote: light-dark(#b45309, #e18a24);           /* speech in a chat: SillyTavern's orange, darker to read on light */
   --ok: #6ccf8e;
   --warn: #e8b04a;
   --danger: #f2706b;

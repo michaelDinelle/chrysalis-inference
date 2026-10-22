@@ -65,6 +65,9 @@ const HALL = '```html\nhall\n<!doctype html>\n<html><head><title>Hall</title></h
 const GATE = '```html id="gate"\n<!doctype html>\n<html><head><title>Gate</title></head><body><p id="note">Open</p></body></html>\n```\n\nThe gate.';
 const REPLIES: Record<string, string> = {
   "good morning mirela": "*She smiles.* Good morning.",
+  "the kettle": '*She smiles.* "Good morning," *she says.* "Did you *sleep* well?"\nThe kettle sings.\n"It\'s still open\nAnd «bonjour» and `say "hi"` in code.',
+  "steady speech": '*She looks up.* "You came back," *she says, and smiles at the window, where the snow is still falling.* "I kept the lamp lit for you, all night long."',
+  "write the letter": '```markdown letter\nShe wrote "come home"\nand signed it.\n```\n\nA letter.',
   "a toast for the hive": "Mirela: *She raises a cup.* To the bees.\nTomas: To the bees!",
   "the same speaker": "Mirela: One.\nMirela: Two.\n\n*She hums.*\nTomas: Three.",
   "a duet": "Vox: *She sings.* La la.\nAda: Hum.\n\nHum hum.",
@@ -899,6 +902,53 @@ test("TeX is typeset; prices, escaped dollars and code stay text", async () => {
   expect(body.math).toEqual(["ax^2 + bx + c = 0", "x = \\frac{-b \\pm \\sqrt{b^2 - 4ac}}{2a}", "e^{i\\pi} + 1 = 0", "\\int_0^1 x\\,dx"]);
   expect(body.display).toBe(2);
   expect(body.text).toContain("It costs $5 and $10. Escaped: $x$. Code: $HOME stays.");
+  await page.close();
+}, 30_000);
+
+test("a chat reads as SillyTavern sets it: speech in quotes in its orange, the marks kept (one left open to its line's end), italics muted but a quote's inside one, a line break where one was written, code as written; the user's own text the same, its code and HTML as typed; a document's text as written", async () => {
+  const page = await open();
+  await page.emulateMediaFeatures([{ name: "prefers-color-scheme", value: "dark" }]);
+  await send(page, '*knocks* "Is **the kettle** on?" and `ls "x"` <b>as typed</b>');
+  const look = (sel: string) => page.$eval(sel, (b) => {
+    const color = (e: Element | null) => e && getComputedStyle(e).color;
+    return {
+      quotes: [...b.querySelectorAll("q")].map((q) => q.textContent),
+      marks: [...b.querySelectorAll("q")].map((q) => getComputedStyle(q, "::before").content + " " + getComputedStyle(q, "::after").content),
+      breaks: b.querySelectorAll("br").length,
+      text: color(b), quote: color(b.querySelector("q")), em: color(b.querySelector(":not(q) > em")), quoteEm: color(b.querySelector("q em")),
+      html: b.innerHTML, said: b.textContent,
+    };
+  });
+  const reply = await look(".msg.assistant .markdown"), mine = await look(".msg.user .bubble");
+  expect(reply.quotes).toEqual(['"Good morning,"', '"Did you sleep well?"', '"It\'s still open', "«bonjour»"]);
+  expect(reply.marks).toEqual(Array(4).fill("none none"));
+  expect([reply.breaks, reply.quote, reply.quoteEm]).toEqual([3, "rgb(225, 138, 36)", "rgb(225, 138, 36)"]);   // ST's Dark Lite quote color
+  expect([reply.em === reply.text, reply.em === reply.quote]).toEqual([false, false]);
+  expect(reply.said).toContain('well?"\nThe kettle sings.\n"It');   // a break keeps its newline in the text, where voice mode counts words
+  expect(mine.html).toBe('<em>knocks</em> <q>"Is <strong>the kettle</strong> on?"</q> and `ls "x"` &lt;b&gt;as typed&lt;/b&gt;');
+  expect([mine.quote, mine.em, mine.marks]).toEqual([reply.quote, reply.em, ["none none"]]);
+  await send(page, "write the letter");
+  expect(await page.$eval(".art-canvas .doc-paper", (p) => {
+    const md = p.shadowRoot!.querySelector(".md")!;
+    return [md.querySelectorAll("q, br").length, md.textContent!.replace(/\s+/g, " ").trim()];
+  })).toEqual([0, 'She wrote "come home" and signed it.']);
+  await page.close();
+}, 30_000);
+
+test("speech and italics are set as they are written: a quote in its color from its opening mark, italics from their first word, and no asterisk shown on the way", async () => {
+  const page = await open();
+  await page.evaluate(() => {
+    const seen: string[] = (window as any).seen = [];
+    new MutationObserver(() => { const m = document.querySelector(".msg.assistant .markdown"); if (m) seen.push(m.innerHTML); })
+      .observe(document.getElementById("thread")!, { childList: true, subtree: true, characterData: true });
+  });
+  await send(page, "steady speech");
+  const seen: string[] = await page.evaluate(() => (window as any).seen);
+  expect(seen.length).toBeGreaterThan(10);
+  expect(seen.filter((h) => h.replace(/<[^>]*>/g, "").includes("*"))).toEqual([]);
+  expect(seen.some((h) => /<q>"I kept[^"]*<\/q>/.test(h))).toBe(true);
+  expect(seen.some((h) => /<em>she says(?!, and smiles at the window, where the snow is still falling\.<)[^<]*<\/em>/.test(h))).toBe(true);
+  expect(seen.at(-1)).toContain('<q>"I kept the lamp lit for you, all night long."</q>');
   await page.close();
 }, 30_000);
 

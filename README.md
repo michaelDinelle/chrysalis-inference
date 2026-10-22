@@ -250,7 +250,11 @@ goes on. A card dropped on a chat with characters joins it (as does a character'
 them, and a chat with one character becomes a group of them all. The faces over the message box have the next reply be
 one of them's, said in a note after the last message ("[Name next.]") so the model thinks first as it would for any
 question (a reply begun with the name for it skips the thinking); Flash-Next began with the one named in 6 of 6 tries,
-thinking or not. "Let them talk" plays four such beats, each one of them other than the last to speak. The cast is kept
+thinking or not. "Let them talk" plays four such beats, each one of them other than the last to speak. Messages are set
+as SillyTavern sets them: speech in quotes in its orange, the marks kept (one left open runs to its line's end, as
+SillyTavern closes it, and is in color as it is written), italics muted (a quote's color inside one), a line break where
+one was written; the user's own text gets the quotes, italics and bold alone, so pasted code and HTML show as typed.
+Documents and tool results are Markdown as written. The cast is kept
 in this browser's IndexedDB, on this device, never on the server; lorebooks are kept, not used yet.
 
 Tools: the wrench beside the thinking bar (with how many tools are

@@ -981,9 +981,32 @@ marked.use({
       return `<div class="code"><div class="code-head"><span>${escapeHtml(language || "text")}</span>` +
         `<span class="code-acts">${preview}<button type="button" class="copy">Copy</button></span></div><pre><code class="hljs">${html}</code></pre></div>`;
     },
+    // the newline it stands for stays in the text: voice mode counts words over text nodes (afterWords), and
+    // "one<br>two" would be one word
+    br: () => "<br>\n",
   },
 });
 const markdown = (src: string) => DOMPurify.sanitize(marked.parse(src, { async: false }));
+
+// A chat's messages read as SillyTavern shows them: a line break where one was written, and speech in quotes set in
+// its color, the marks kept. A quote ends at its close or at its line's end, as ST closes one left open (one being
+// written is in color as it comes). Documents and tool results are Markdown as written: they are lexed without breaks.
+const QUOTES: Record<string, string> = { '"': '"', "“": "”", "«": "»", "「": "」", "『": "』", "＂": "＂" };
+const chatTokens = (src: string) => marked.lexer(src, { ...marked.defaults, breaks: true });
+marked.use({
+  extensions: [{
+    name: "quote", level: "inline",
+    start: (src) => src.match(/["“«「『＂]/)?.index,
+    tokenizer(src) {
+      const close = QUOTES[src[0]];
+      if (!close || !this.lexer.options.breaks) return;
+      const nl = src.indexOf("\n"), line = nl < 0 ? src : src.slice(0, nl), end = line.indexOf(close, 1);
+      const text = end < 0 ? line.slice(1) : line.slice(1, end);
+      return { type: "quote", raw: end < 0 ? line : line.slice(0, end + 1), open: src[0], close: end < 0 ? "" : close, tokens: this.lexer.inlineTokens(text) };
+    },
+    renderer(t) { return `<q>${escapeHtml(t.open)}${this.parser.parseInline(t.tokens!)}${escapeHtml(t.close)}</q>`; },
+  }],
+});
 
 // TeX as Qwen writes it: $$ … $$ or \[ … \] on their own lines (display), $ … $ or \( … \) in a line. A $ opens math
 // only before a non-space and closes it only after one, not before a digit, and math never crosses a backtick (a code
@@ -1044,9 +1067,11 @@ function settle(src: string): string {
   const lastDollar = dollars.at(-1)?.index ?? 0;                          // inline math once it closes ($5 is a price)
   if (dollars.length % 2 && !/^\$\d/.test(para.slice(lastDollar))) para = para.slice(0, lastDollar);
   if (para.lastIndexOf("\\(") > para.lastIndexOf("\\)")) para = para.slice(0, para.lastIndexOf("\\("));
-  if ((para.replace(/```[\s\S]*?```/g, "").match(/`/g)?.length ?? 0) % 2) para += "`";   // open code and bold close
-  if ((para.match(/\*\*/g)?.length ?? 0) % 2) para += "**";
-  if ((para.match(/~~/g)?.length ?? 0) % 2) para += "~~";
+  if ((para.replace(/```[\s\S]*?```/g, "").match(/`/g)?.length ?? 0) % 2) para += "`";   // open code, bold and italics
+  // close, right after the text (a closing mark after a space is not one); a list's bullet and a spaced "a * b" open nothing
+  if ((para.match(/\*\*/g)?.length ?? 0) % 2) para = para.trimEnd() + "**";
+  if ((para.replace(/^ {0,3}[*+-] +|`[^`]*`/gm, "").replace(/\*\*|\s\*\s/g, "").match(/\*/g)?.length ?? 0) % 2) para = para.trimEnd() + "*";
+  if ((para.match(/~~/g)?.length ?? 0) % 2) para = para.trimEnd() + "~~";
   return text.slice(0, p) + para;
 }
 
@@ -1070,7 +1095,7 @@ let carried: { slot: Comment; canvas: HTMLElement; b: Blocks }[] | null = null;
 function renderBlocks(v: { body: HTMLElement; blocks?: Blocks }, src: string, live: boolean, art?: { c: Conversation; holder: object }) {
   if (!v.blocks) { v.body.replaceChildren(); v.blocks = { raws: [], nodes: [] }; }
   const text = art ? sceneText(src, art.c) : src;
-  const b = v.blocks, tokens = marked.lexer(live ? settle(text) : text), blocks = tokens.filter((t) => t.type !== "space");
+  const b = v.blocks, tokens = chatTokens(live ? settle(text) : text), blocks = tokens.filter((t) => t.type !== "space");
   let seen = 0, all: Map<string, Version[]> | undefined;
   const nth = art ? blocks.map((t) => (t.type === "code" && artifactOf(t.lang, t.text) ? seen++ : -1)) : [];
   // An artifact block as its canvas (its latest version) or a line. The canvas is taken from wherever it is in the chat,
@@ -2750,8 +2775,28 @@ function messageView(m: Message, i: number): HTMLElement {
 }
 function heardBubble(m: Message): HTMLElement {
   const b = h("div", "bubble");
-  for (const p of m.heard?.length ? fixedParts(m.content, m.heard) : [m.content]) b.append(typeof p === "string" ? p : fixedSpan(p));
+  if (!m.heard?.length) b.innerHTML = userHtml(m.content);
+  else for (const p of fixedParts(m.content, m.heard)) b.append(typeof p === "string" ? p : fixedSpan(p));
   return b;
+}
+// The user's text as a reply's is shown (chatTokens): speech in quotes in color, *italics*, **bold**. Nothing else
+// is read as Markdown, so pasted code, paths and HTML show as typed, and code in backticks is left as it is.
+function userHtml(s: string): string {
+  const re = /```[\s\S]*?(?:```|$)|`[^`\n]*`|\*\*(?=\S)(.+?)(?<=\S)\*\*|\*(?=[^\s*])(.+?)(?<=[^\s*])\*|["“«「『＂]/g;
+  let out = "", at = 0;
+  for (let m; (m = re.exec(s)); at = re.lastIndex) {
+    out += escapeHtml(s.slice(at, m.index));
+    if (m[1] !== undefined) out += `<strong>${userHtml(m[1])}</strong>`;
+    else if (m[2] !== undefined) out += `<em>${userHtml(m[2])}</em>`;
+    else if (m[0][0] === "`") out += escapeHtml(m[0]);
+    else {
+      const close = QUOTES[m[0]], nl = s.indexOf("\n", m.index), eol = nl < 0 ? s.length : nl, end = s.indexOf(close, m.index + 1);
+      const shut = end >= 0 && end < eol;
+      re.lastIndex = shut ? end + 1 : eol;
+      out += `<q>${escapeHtml(m[0])}${userHtml(s.slice(m.index + 1, shut ? end : eol))}${shut ? escapeHtml(close) : ""}</q>`;
+    }
+  }
+  return out + escapeHtml(s.slice(at));
 }
 function fixedSpan(p: Fix): HTMLElement {
   const f = h("span", "fixed", p.said);

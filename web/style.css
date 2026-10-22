@@ -199,6 +199,12 @@ main { display: flex; flex-direction: column; min-height: 0; grid-column: 2; }
 .markdown h3 { font-size: 1.1em; }
 .markdown a { color: var(--accent-hi); text-underline-offset: 2px; }
 .markdown strong { font-weight: 650; }
+/* a chat's speech and narration as SillyTavern sets them: quotes (their marks in the text) in color, italics muted,
+   italics inside a quote the quote's */
+:is(.markdown, .bubble) em { color: var(--muted); }
+:is(.markdown, .bubble) q { color: var(--quote); }
+:is(.markdown, .bubble) q::before, :is(.markdown, .bubble) q::after { content: none; }
+:is(.markdown, .bubble) q em { color: inherit; }
 /* KaTeX sets math at 1.21em, a size up from the text around it */
 .markdown .katex { font-size: 1.1em; }
 .markdown .katex-display { margin: 0.8em 0; overflow-x: auto; overflow-y: hidden; padding: 2px 0; }
