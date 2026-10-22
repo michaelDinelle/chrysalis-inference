@@ -477,12 +477,16 @@ test("a character card dropped in joins the cast: a row with their portrait amon
   await page.keyboard.type(" and kind");
   await page.keyboard.press("Escape");
 
-  // the persona: {{user}} from here on
+  // the user is a character named as the cards call them: User, until renamed, and the name shown is the one sent
+  expect([await page.$eval("#you .you-name", (e) => e.textContent), await page.$eval("#cast-sheet", (e) => (e as HTMLElement).hidden)]).toEqual(["User", true]);
   await page.click("#you");
   await page.waitForSelector("#cast-sheet:not([hidden]) input.card-name");
-  await page.type("#cast-sheet input.card-name", "Robin");
+  expect(await page.$eval("#cast-sheet input.card-name", (e) => (e as HTMLInputElement).value)).toBe("User");
+  await page.$eval("#cast-sheet input.card-name", (e) => { (e as HTMLInputElement).focus(); (e as HTMLInputElement).select(); });
+  await page.keyboard.type("Robin");
   await page.keyboard.press("Escape");
   await send(page, "good morning mirela");
+  expect([await page.$eval("#you .you-name", (e) => e.textContent), await page.$eval("#thread .msg.user .speaker", (e) => e.textContent)]).toEqual(["Robin", "Robin"]);
   const one = lastStream.messages;
   expect(one[0].content).toBe("Write Mirela's next reply in a fictional chat between Mirela and Robin.\n\nMirela keeps bees for Robin.\n\nMirela's personality: calm and kind" +
     "\n\nScenario: A hillside.\n\nHow Mirela talks:\nRobin: Why bees?\nMirela: They listen.");
@@ -516,6 +520,37 @@ test("the conversations are folders, Chrysalis's and each character's: a folder 
   await page.reload({ waitUntil: "load" });
   await page.waitForSelector("#conversations .folder");
   expect(await folders()).toEqual([["Mirela", "closed: 1"], ["Chrysalis", "open: 1"]]);
+  await page.close();
+}, 30_000);
+
+test("a character deleted takes their chats with them (none become Chrysalis's), Undo brings it all back, and a character deleted in another tab takes their chats here too", async () => {
+  const page = await open();
+  await send(page, "one for chrysalis");
+  await Bun.write(`${dir}/Mirela.png`, await card("Mirela", { description: "{{char}} keeps bees.", first_mes: "Hello, {{user}}." }));
+  await (await page.$("input#attach-file"))!.uploadFile(`${dir}/Mirela.png`);
+  await page.waitForFunction(() => document.querySelector("#thread .speaker")?.textContent === "Mirela");
+  await send(page, "good morning mirela");
+  const kept = () => page.evaluate(() => Object.values(JSON.parse(sessionStorage.getItem("chats")!)).map((c: any) => c.who ?? "chrysalis").sort());
+  const folders = () => page.$$eval("#conversations .folder", (f) => f.map((x) => `${x.querySelector(".cast-name")!.textContent}: ${x.querySelectorAll(".conv").length || x.querySelector(".cast-count")?.textContent}`));
+  const mirela = (await kept()).find((w) => w !== "chrysalis")!;
+  await inRow(page, "Mirela", ".cast-pic");
+  await page.waitForSelector("#cast-sheet:not([hidden]) .card-acts .icon");
+  await page.click("#cast-sheet .card-acts .icon");
+  expect(await page.$eval("#cast-sheet .card-acts .icon", (b) => b.textContent)).toBe("Delete, with 1 chat?");
+  await page.click("#cast-sheet .card-acts .icon");
+  await page.waitForFunction(() => /^Mirela deleted, with 1 chat/.test(document.querySelector("#toast")?.textContent ?? ""));
+  expect([await kept(), await folders(), await page.$$eval("#thread .speaker", (s) => s.length)]).toEqual([["chrysalis"], ["Chrysalis: 1"], 0]);
+  await page.click("#toast .btn");                                     // Undo
+  await page.waitForFunction(() => document.querySelectorAll("#conversations .folder").length === 2);
+  expect((await kept()).sort()).toEqual(["chrysalis", mirela].sort());
+  // deleted in another tab (the cast is this device's, the chats this tab's): here, her chat goes when the page opens again
+  await page.evaluate((id) => new Promise<void>((done) => {
+    const open = indexedDB.open("chrysalis-cast", 1);
+    open.onsuccess = () => { const t = open.result.transaction("people", "readwrite"); t.objectStore("people").delete(id); t.oncomplete = () => { open.result.close(); done(); }; };
+  }), mirela);
+  await page.reload({ waitUntil: "load" });
+  await page.waitForSelector("#conversations .folder");
+  expect([await kept(), await folders()]).toEqual([["chrysalis"], ["Chrysalis: 1"]]);
   await page.close();
 }, 30_000);
 
@@ -1552,6 +1587,13 @@ test("What the model is sent shows the next request as Chrysalis gets it: the to
   await page.keyboard.press("Escape");
   await send(page, "fourth");
   expect(lastStream.messages[0]).toEqual({ role: "system", content: `Be terse, Qwen3.8-27B.\n\nScenario: A rainy afternoon.\n\n${ARTIFACTS_PROMPT}` });
+  // and what the user's own card says of them, as every character's chat has it
+  await page.click("#you");
+  await page.waitForSelector("#cast-sheet:not([hidden]) .card-text");
+  await page.type("#cast-sheet .card-text", "{{user}} keeps bees.");
+  await page.keyboard.press("Escape");
+  await send(page, "fifth");
+  expect(lastStream.messages[0]).toEqual({ role: "system", content: `Be terse, Qwen3.8-27B.\n\nScenario: A rainy afternoon.\n\nUser keeps bees.\n\n${ARTIFACTS_PROMPT}` });
   await page.close();
 }, 60_000);
 

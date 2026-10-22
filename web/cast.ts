@@ -167,9 +167,10 @@ const db: Promise<IDBDatabase | null> = new Promise((resolve) => {
   } catch { resolve(null); }
 });
 const store = async (name: "people" | "groups", mode: IDBTransactionMode) => (await db)?.transaction(name, mode).objectStore(name);
-export async function loadCast(): Promise<{ people: Person[]; groups: Group[] }> {
+// null: this browser keeps no cast (no IndexedDB), which is not the same as an empty one
+export async function loadCast(): Promise<{ people: Person[]; groups: Group[] } | null> {
   const d = await db, t = d?.transaction(["people", "groups"], "readonly");   // one transaction: it ends at the first await
-  if (!t) return { people: [], groups: [] };
+  if (!t) return null;
   const [people, groups] = await Promise.all([ask(t.objectStore("people").getAll()), ask(t.objectStore("groups").getAll())]);
   return { people: people as Person[], groups: groups as Group[] };
 }

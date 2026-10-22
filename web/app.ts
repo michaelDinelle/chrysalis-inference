@@ -292,12 +292,16 @@ function h<K extends keyof HTMLElementTagNameMap>(tag: K, cls = "", text = ""): 
 const people = new Map<string, Person>(), groups = new Map<string, Group>(), faces = new Map<string, string>();
 const ME = "me", CHRYSALIS = "chrysalis";            // the persona's id and the assistant's: there is one of each
 people.set(CHRYSALIS, { id: CHRYSALIS, kind: "assistant", card: { spec: "chara_card_v2", spec_version: "2.0", data: { name: "Chrysalis" } }, added: 0 });
+// the user is a character too, named as every card's {{user}} is sent: the one name, shown and sent
+people.set(ME, { id: ME, kind: "persona", card: { spec: "chara_card_v2", spec_version: "2.0", data: { name: "User", description: "" } }, added: 0 });
 const CAST_DRAG = "application/x-chrysalis-cast";    // a character's row dragged onto a chat
 let talking = 0;                                     // "let them talk": the beats a group has left to write on its own
-const persona = () => people.get(ME);
-const userName = () => persona()?.card.data.name.trim() || "User";
+const persona = () => people.get(ME)!;
+const userName = () => nameOf(ME);
 const folderOf = (c: Conversation) => (c.who && c.who !== CHRYSALIS && (people.has(c.who) || groups.has(c.who)) ? c.who : "");
-const whoOf = (c: Conversation) => folderOf(c) || CHRYSALIS;
+// whose folder a chat is in: its character's or group's, Chrysalis's only for a chat with neither (never one whose
+// character is gone: its chats go with it, forget)
+const whoOf = (c: Conversation) => (c.who && c.who !== CHRYSALIS ? c.who : CHRYSALIS);
 function castOf(c: Conversation): { members: Person[]; group?: Group } {
   const id = folderOf(c), g = id ? groups.get(id) : undefined;
   if (!id) return { members: [] };
@@ -348,11 +352,11 @@ function setFace(p: Person) {
   if (p.image) faces.set(p.id, URL.createObjectURL(p.image));
   else faces.delete(p.id);
 }
-const nameOf = (id: string) => groups.get(id)?.name ?? (people.get(id)?.card.data.name.trim() || (id === CHRYSALIS ? "Chrysalis" : ""));
+const nameOf = (id: string) => groups.get(id)?.name ?? (people.get(id)?.card.data.name.trim() || (id === CHRYSALIS ? "Chrysalis" : id === ME ? "User" : ""));
 const names = (ids: string[]) => { const n = ids.map(nameOf); return n.length < 2 ? n.join("") : `${n.slice(0, -1).join(", ")} and ${n.at(-1)}`; };
 
 function renderCast() {
-  $("you").replaceChildren(face(ME), h("span", "you-name", persona()?.card.data.name.trim() || "You"));
+  $("you").replaceChildren(face(ME), h("span", "you-name", nameOf(ME)));
   renderList();
   renderCastNext();
 }
@@ -418,7 +422,7 @@ function castSystem(c: Conversation) {
   const { members, group } = castOf(c);
   const base = members.length > 1 ? "Write the next part of a fictional scene between {{user}} and these characters."
     : "Write {{char}}'s next reply in a fictional chat between {{char}} and {{user}}.";
-  return castPrompt(base, members.map((p) => p.card.data), { name: userName(), description: persona()?.card.data.description }, group?.scenario);
+  return castPrompt(base, members.map((p) => p.card.data), { name: userName(), description: persona().card.data.description }, group?.scenario);
 }
 
 // A file that is a card or a group joins the cast (a card already here, by its name and description, is that
@@ -464,7 +468,7 @@ async function welcome(files: Iterable<File>, into: boolean): Promise<File[]> {
   else if (ids.length) {
     pickFolder(ids[0]);
     renderCast();
-    if (fresh.length) toast(`${names(fresh)} ${fresh.length > 1 ? "are" : "is"} here`, () => { for (const id of fresh) void forget(id); });
+    if (fresh.length) toast(`${names(fresh)} ${fresh.length > 1 ? "are" : "is"} here`, () => { for (const id of fresh) void forget(id); });   // (no chats yet)
   }
   return rest;
 }
@@ -498,14 +502,39 @@ function join(ids: string[]) {
   renderCast();
   render();
 }
+// A character or a group deleted takes its chats with it: a chat is theirs, no one else's. Undo brings all of it back.
 async function forget(id: string) {
-  if (groups.delete(id)) await dropGroup(id);
-  people.delete(id);
-  await dropPerson(id);
-  for (const g of groups.values()) if (g.members.includes(id)) { g.members = g.members.filter((m) => m !== id); await saveGroup(g); }
-  render();
+  const p = people.get(id), g = groups.get(id), name = nameOf(id), gone = Object.values(chats).filter((c) => c.who === id);
+  const was = [...groups.values()].filter((x) => x.members.includes(id)).map((x) => ({ x, members: x.members }));
+  if (g) { groups.delete(id); await dropGroup(id); }
+  if (p) { people.delete(id); await dropPerson(id); }
+  for (const { x } of was) { x.members = x.members.filter((m) => m !== id); await saveGroup(x); }
+  dropChats(gone.map((c) => c.id));
   renderCast();
+  return { name, chats: gone.length, undo: async () => {
+    if (p) { people.set(id, p); setFace(p); await savePerson(p); }
+    if (g) { groups.set(id, g); await saveGroup(g); }
+    for (const { x, members } of was) { x.members = members; await saveGroup(x); }
+    for (const c of gone) chats[c.id] = c;
+    store("chats", chats);
+    renderCast();
+    render();
+  } };
 }
+// Chats gone with their character: their replies stop, and the open one gives way to a new chat with Chrysalis
+function dropChats(ids: string[]) {
+  for (const id of ids) {
+    const r = runs.get(id);
+    if (r) { r.gone = true; stopRun(r); }
+    delete chats[id];
+  }
+  store("chats", chats);
+  if (ids.includes(conv.id) || (conv.who && !folderOf(conv))) newChat();
+  else render();
+}
+// a chat whose character or group is not here: one deleted in another tab (its chats went there, these go now), or
+// a chat imported from a device that has them
+const castless = (c: Conversation) => !!c.who && c.who !== CHRYSALIS && !people.has(c.who) && !groups.has(c.who);
 
 // + beside New chat: a card, or a new group
 function openAdd(at: HTMLElement) {
@@ -541,11 +570,6 @@ $("cast-file").addEventListener("change", async (e) => {
 let sheetOf = "", sampler: Speaker | undefined;
 function openSheet(id: string) {
   const sheet = $("cast-sheet"), g = groups.get(id);
-  if (id === ME && !people.has(ME)) {
-    const me: Person = { id: ME, kind: "persona", card: { spec: "chara_card_v2", spec_version: "2.0", data: { name: "", description: "" } }, added: Date.now() };
-    people.set(ME, me);
-    void savePerson(me);
-  }
   const person = people.get(id);
   if (!person && !g) return;
   const again = sheetOf === id, top = sheet.querySelector(".card-scroll")?.scrollTop ?? 0;
@@ -587,11 +611,13 @@ function openSheet(id: string) {
     requestAnimationFrame(() => grow(area));
     return area;
   };
-  const del = (title: string, gone: () => Promise<void>) => {
-    const b = btn("icon", title, icon("trash"), async () => {
-      if (!b.classList.contains("armed")) { b.classList.add("armed"); b.innerHTML = `${icon("trash")}Delete?`; return; }
+  const n = Object.values(chats).filter((c) => c.who === id).length, theirs = n ? `, with ${n} chat${n > 1 ? "s" : ""}` : "";
+  const del = () => {
+    const b = btn("icon", `Delete ${nameOf(id) || "them"}${n ? " and their chats" : ""}`, icon("trash"), async () => {
+      if (!b.classList.contains("armed")) { b.classList.add("armed"); b.innerHTML = `${icon("trash")}Delete${theirs}?`; return; }
       closeSheet();
-      await gone();
+      const f = await forget(id);
+      toast(`${f.name} deleted${theirs}`, () => void f.undo());
     });
     return b;
   };
@@ -618,7 +644,7 @@ function openSheet(id: string) {
   if (person?.kind === "assistant" && !person.image) art.append(btn("card-float card-pic", "A picture", icon("edit"), () => picture(person)));
   const name = h("input", "card-name");
   name.value = person ? person.card.data.name : g!.name;
-  name.placeholder = person?.kind === "persona" ? "Your name" : g ? "The group's name" : "Their name";
+  name.placeholder = id === ME ? "User" : id === CHRYSALIS ? "Chrysalis" : g ? "The group's name" : "Their name";   // (what an empty one is sent as)
   name.ariaLabel = "Name";
   name.spellcheck = false;
   name.oninput = () => {
@@ -648,7 +674,7 @@ function openSheet(id: string) {
       a.download = `${d!.name || "character"}.png`;
       a.click();
       setTimeout(() => URL.revokeObjectURL(a.href), 1000);
-    }), del(`Delete ${d!.name} (their chats stay)`, () => forget(id)));
+    }), del());
     body.append(voicePick(person, keep), field("Description", "description", "Who they are: looks, past, manner"),
       field("Personality", "personality", "A few words"), field("Scenario", "scenario", "Where and when the chat begins"),
       field("Greeting", "first_mes", "Their first message"), more, acts);
@@ -687,12 +713,7 @@ function openSheet(id: string) {
     acts.append(btn("", "The group as a file (with its members' cards beside it, it imports anywhere this chat runs)", `${icon("download")}Export`,
       () => download(`${g!.name || "group"}.json`, JSON.stringify({ spec: "chrysalis_group", name: g!.name,
         members: [...g!.members.map((m) => people.get(m)?.card.data.name).filter(Boolean), ...(g!.missing ?? [])], ...(g!.scenario ? { scenario: g!.scenario } : {}) }, null, 2), "application/json")),
-      del("Delete the group (its chats stay)", async () => {
-        groups.delete(id);
-        await dropGroup(id);
-        render();
-        renderCast();
-      }));
+      del());
     body.append(who, where, acts);
   }
   sheet.replaceChildren(btn("card-float card-x", "Close", icon("x"), closeSheet), scroll);
@@ -842,7 +863,7 @@ function speakerHead(c: Conversation) {
   return group ? null : head(members[0]?.id ?? CHRYSALIS);
 }
 function head(id: string) {
-  const el = h("div", "speaker"), name = nameOf(id) || (id === ME ? "You" : "");
+  const el = h("div", "speaker"), name = nameOf(id);
   el.dataset.who = id;
   el.title = `${name}'s card`;
   el.append(face(id), h("span", "", name));
@@ -3604,8 +3625,8 @@ const toolsOn = (c: Conversation) => !!c.tools && Object.keys(c.tools).length > 
 // After it, how to make and change artifacts, unless Settings leaves that out.
 const systemFor = (c: Conversation) => castOf(c).members.length ? castSystem(c)
   : [fill((settings.system.trim() === DEFAULT_SYSTEM && toolsOn(c) ? DEFAULT_SYSTEM_TOOLS : settings.system).trim()), chrysalisScenario(),
-    settings.artifacts === false ? "" : ARTIFACTS_PROMPT].filter(Boolean).join("\n\n");
-// what Chrysalis's card sets the chats with it in, after the system prompt
+    fillCard(persona().card.data.description?.trim() ?? "", nameOf(CHRYSALIS), userName()), settings.artifacts === false ? "" : ARTIFACTS_PROMPT].filter(Boolean).join("\n\n");
+// after the system prompt, as a character's card has them: what Chrysalis's card sets the chats in, and the user's own
 const chrysalisScenario = () => { const t = people.get(CHRYSALIS)?.card.data.scenario?.trim(); return t ? `Scenario: ${t}` : ""; };
 
 // Server-sent events of a reply, as parsed JSON chunks, then DONE.
@@ -4908,10 +4929,13 @@ async function importFiles(files: FileList) {
       added = added.concat(list.filter(Boolean));
     } catch { bad++; }
   }
+  const theirs = added.filter(castless).length;          // with a character this device has no card of: not anyone else's
+  added = added.filter((c) => !castless(c));
   for (const c of added) save(c);
   if (added.length) openConversation(added.at(-1)!.id);
-  toast(added.length ? `Imported ${added.length} chat${added.length > 1 ? "s" : ""}${bad ? ` (${bad} not a Chrysalis chat)` : ""}`
-    : "Nothing to import: not a chat exported from Chrysalis");
+  const why = [bad ? `${bad} not a Chrysalis chat` : "", theirs ? `${theirs} with a character not on this device: add their card first` : ""].filter(Boolean).join("; ");
+  toast(added.length ? `Imported ${added.length} chat${added.length > 1 ? "s" : ""}${why ? ` (${why})` : ""}`
+    : theirs && !bad ? `Nothing imported: ${why}` : "Nothing to import: not a chat exported from Chrysalis");
 }
 
 // Chrysalis writes the message the user would likely send next, into the composer to edit and send. It is asked as the
@@ -6477,11 +6501,13 @@ for (const c of Object.values(chats)) {                // a reply being written 
 }
 {
   const got = await loadCast();
-  for (const p of got.people) {
+  for (const p of got?.people ?? []) {
     people.set(p.id, p);
     setFace(p);
   }
-  for (const g of got.groups) groups.set(g.id, g);
+  for (const g of got?.groups ?? []) groups.set(g.id, g);
+  const orphans = got ? Object.values(chats).filter(castless).map((c) => c.id) : [];
+  if (orphans.length) dropChats(orphans);
   renderCast();
 }
 if (location.hash.length > 1) openConversation(location.hash.slice(1), false);

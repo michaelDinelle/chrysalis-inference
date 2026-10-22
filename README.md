@@ -236,8 +236,10 @@ as their initials until theirs is added, which puts them in. A folder opens and 
 name and stays as it is left; closed, it says how many chats it holds. A portrait, in the list or beside a reply, opens the card: its fields as they are sent, edited where they are
 read, the voice it speaks with in voice mode (picked and heard there: the voice service lists its voices and speaks a
 sample with no microphone, loading only that voice's model, 230 MB against the whole stack's 566 MB), Export (the card
-as a PNG any app reads, every field kept: a lorebook, other apps' extensions) and Delete. The user's persona is the row
-at the bottom. Every message has who wrote it beside it: a reply its writer's portrait on the left, the user's own on
+as a PNG any app reads, every field kept: a lorebook, other apps' extensions) and Delete (the character and their chats: a chat is theirs, never handed to anyone else; Undo brings
+it all back, and a character deleted in another tab takes their chats from this one when it opens). The user is a
+character too, the row at the bottom, named User until renamed: the one name shown and sent as every card's
+`{{user}}`, and what their card says of them goes to Chrysalis as to every character. Every message has who wrote it beside it: a reply its writer's portrait on the left, the user's own on
 the right. A reply's speaker button reads it aloud with voice mode closed, in its writer's voice (a group's paragraphs
 each in their speaker's, without their names), through the same service with only that voice's model loaded. A chat
 with a character opens with its greeting (the card's others are versions of it). The card is the system prompt (`{{char}}` and `{{user}}` filled in, the
