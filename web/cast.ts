@@ -11,7 +11,8 @@ export interface CardData {
 }
 export interface Card { spec?: string; spec_version?: string; data: CardData; [k: string]: unknown }
 export interface Person { id: string; kind: "character" | "persona" | "assistant"; card: Card; image?: Blob; added: number }
-export interface Group { id: string; name: string; members: string[]; scenario?: string; added: number }
+// members: the characters' ids; missing: names its file gave with no card here yet (shown, and in once theirs comes)
+export interface Group { id: string; name: string; members: string[]; missing?: string[]; scenario?: string; added: number }
 export interface Voice { tts?: string; name?: string }
 
 const enc = new TextEncoder(), dec = new TextDecoder();

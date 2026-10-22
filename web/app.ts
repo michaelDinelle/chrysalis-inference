@@ -255,7 +255,7 @@ const icon = (name: keyof typeof ICONS) => `<svg class="i" viewBox="0 0 24 24" a
 
 const $ = <T extends HTMLElement = HTMLElement>(id: string) => document.getElementById(id) as T;
 const thread = $("thread"), scroller = $("scroller"), input = $<HTMLTextAreaElement>("input"), sendBtn = $<HTMLButtonElement>("send");
-const panel = $("settings");
+const panel = $("settings"), systemInput = $<HTMLTextAreaElement>("system-input");
 // The side panels (the conversations, Settings): one mechanism, in "the side panels" below. A panel's default width
 // is style.css's (widthVar); `preferred` is the width it was given, `width` what the window allows of it.
 interface Pane {
@@ -269,7 +269,7 @@ const pane = (name: string, el: HTMLElement, key: string, besideFrom: number, wi
 };
 const panes = {
   conversations: pane("conversations", $("sidebar"), "b", 761, "--side-open", 208),
-  settings: pane("settings", panel, ",", 1460, "--panel-open", 340, () => { syncSettings(); void loadCatalog(); }),
+  settings: pane("settings", panel, ",", 1460, "--panel-open", 340, () => { syncSettings(); growSystem(); void loadCatalog(); }),
 };
 const PANES = Object.values(panes);
 
@@ -281,10 +281,10 @@ function h<K extends keyof HTMLElementTagNameMap>(tag: K, cls = "", text = ""): 
 }
 
 // The cast (cast.ts): characters from SillyTavern's cards, the user's persona and groups of characters, kept on this
-// device, and Chrysalis, the character the chats without one are with (its card holds the system prompt and the
-// default voice: Settings'). Each is a row among the chats, where its latest chat would be: its portrait opens its card
-// (what the card says, edited where it is read, the voice they speak with, export, delete), the rest its latest chat,
-// and the open chat's row lists its chats. A chat with a character opens with its greeting (the card's other greetings
+// device, and Chrysalis, the character the chats without one are with (its card holds the default voice, Settings',
+// and a scenario after the system prompt). Each is a folder of its chats in the conversations, the latest first: its portrait opens
+// its card (what the card says, edited where it is read, the voice they speak with, export, delete), its name opens or
+// closes it, and a folder left open stays open. A chat with a character opens with its greeting (the card's other greetings
 // are versions of it) and is written as the character, their portrait beside each reply; a group's replies are the
 // scene, each paragraph its speaker's, and a face over the message box has the next reply be theirs. A card dropped in
 // or picked joins the cast (one already here is that character again); dropped on a chat with characters, it joins
@@ -308,8 +308,8 @@ const hue = (s: string) => [...s].reduce((a, ch) => (a * 31 + ch.charCodeAt(0)) 
 function face(id: string): HTMLElement {
   const g = groups.get(id);
   if (g) {                                           // a group: its members in one circle (two halves, a half and two quarters, four quarters)
-    const ms = g.members.slice(0, 4), s = h("span", `face mosaic m${Math.max(ms.length, 1)}`);
-    s.append(...(ms.length ? ms.map((m) => face(m)) : [h("span", "face initials", "?")]));
+    const ms = inGroup(g).slice(0, 4), s = h("span", `face mosaic m${Math.max(ms.length, 1)}`);
+    s.append(...(ms.length ? ms : [initials("?")]));
     return s;
   }
   const url = faces.get(id), p = people.get(id), name = p?.card.data.name.trim() || "?";
@@ -333,10 +333,15 @@ function face(id: string): HTMLElement {
     s.append(img);
     return s;
   }
+  return initials(name);
+}
+function initials(name: string) {
   const s = h("span", "face initials", name.slice(0, 1).toUpperCase());
   s.style.setProperty("--hue", String(hue(name)));
   return s;
 }
+// a group's members' faces, those with no card yet as their initials
+const inGroup = (g: Group) => [...g.members.map((m) => face(m)), ...(g.missing ?? []).map((n) => { const f = initials(n); f.title = `${n}: no card yet`; return f; })];
 function setFace(p: Person) {
   const was = faces.get(p.id);
   if (was) URL.revokeObjectURL(was);
@@ -351,18 +356,34 @@ function renderCast() {
   renderList();
   renderCastNext();
 }
-// A character's or a group's row among the chats: its last words under its name, + a new chat with them
-function castRow(id: string, list: Conversation[]): HTMLElement {
-  const g = groups.get(id), name = nameOf(id), open = whoOf(conv) === id, last = list[0]?.messages.at(-1);
-  const row = h("div", `cast-row${open ? " open" : ""}${open && !chats[conv.id] ? " active" : ""}${list.some((s) => runs.has(s.id)) ? " running" : ""}`);
+// The folders open, kept on this device (Chrysalis's to begin with); the open chat's opens with it
+const unfolded = new Set<string>((() => { try { return JSON.parse(pref("unfolded", `["${CHRYSALIS}"]`)) as string[]; } catch { return [CHRYSALIS]; } })());
+function unfold(id: string, open = true) {
+  if (open === unfolded.has(id)) return;
+  if (open) unfolded.add(id); else unfolded.delete(id);
+  setPref("unfolded", JSON.stringify([...unfolded]));
+}
+// A folder's head: the portrait, the name (opening or closing it; with no chats yet, a new one), how many chats it
+// holds while it is closed, + a new chat with them
+function castRow(id: string, list: Conversation[], open: boolean): HTMLElement {
+  const g = groups.get(id), name = nameOf(id);
+  const row = h("div", `cast-row${list.some((s) => runs.has(s.id)) ? " running" : ""}`);
   const pic = h("button", "cast-pic"), main = h("button", "cast-main"), add = h("button", "act cast-new");
   pic.type = main.type = add.type = "button";
   pic.title = pic.ariaLabel = g ? `${name}: who is in it` : `${name}'s card`;
   pic.append(face(id));
   pic.onclick = () => openSheet(id);
-  const said = last && (last.role === "user" ? "You: " : "") + last.content.replace(/[*_`#>~[\]]/g, "").replace(/\s+/g, " ").trim().slice(0, 140);
-  main.append(h("span", "cast-name", name || "Unnamed"), h("span", "cast-sub", said || (g ? names(g.members) || "No one in it yet" : "No chats yet")));
-  main.onclick = () => pickFolder(id);
+  main.append(h("span", "cast-name", name || "Unnamed"));
+  if (list.length) {
+    main.insertAdjacentHTML("beforeend", icon("chevron"));
+    main.setAttribute("aria-expanded", String(open));
+    if (!open) main.append(h("span", "cast-count", String(list.length)));
+  }
+  main.onclick = () => {
+    if (!list.length) return newChat(id);
+    unfold(id, !open);
+    renderList();
+  };
   add.title = add.ariaLabel = `New chat with ${name}`;
   add.innerHTML = icon("plus");
   add.onclick = () => newChat(id);
@@ -373,9 +394,10 @@ function castRow(id: string, list: Conversation[]): HTMLElement {
   }
   return row;
 }
-// A row picked: its latest chat, or a new one (with a character's greeting)
+// A folder picked (its card just added): open, at its latest chat or a new one (with a character's greeting)
 function pickFolder(id: string) {
   const last = chatsOf(id)[0];
+  unfold(id);
   if (last && last.id !== conv.id) location.hash = last.id;
   else if (!last && whoOf(conv) !== id) newChat(id);
   else closeOver(panes.conversations);
@@ -406,10 +428,11 @@ async function adopt(f: File): Promise<string | null> {
   if (!got) return null;
   if ("group" in got) {
     const ids = got.group.members.map((n) => [...people.values()].find((p) => p.kind === "character" && p.card.data.name === n)?.id);
-    const g: Group = { id: randomId(), name: got.group.name, members: ids.filter((x): x is string => !!x), scenario: got.group.scenario, added: Date.now() };
+    const missing = got.group.members.filter((_, i) => !ids[i]);
+    const g: Group = { id: randomId(), name: got.group.name, members: ids.filter((x): x is string => !!x), ...(missing.length ? { missing } : {}),
+      scenario: got.group.scenario, added: Date.now() };
     groups.set(g.id, g);
     await saveGroup(g);
-    const missing = got.group.members.filter((_, i) => !ids[i]);
     if (missing.length) toast(`${g.name}: no card yet for ${missing.join(", ")}`);
     return g.id;
   }
@@ -420,6 +443,12 @@ async function adopt(f: File): Promise<string | null> {
   people.set(p.id, p);
   setFace(p);
   await savePerson(p);
+  for (const g of groups.values()) if (g.missing?.includes(d.name)) {   // a group that was waiting for them
+    g.members = [...g.members, p.id];
+    g.missing = g.missing.filter((n) => n !== d.name);
+    if (!g.missing.length) delete g.missing;
+    await saveGroup(g);
+  }
   return p.id;
 }
 // Files dropped in, attached or picked: those that are cards join the cast, and (into: dropped or attached) the open
@@ -571,7 +600,8 @@ function openSheet(id: string) {
   const art = h("div", "card-art"), title = h("div", "card-title"), body = h("div", "card-body"), scroll = h("div", "card-scroll");
   if (g) {
     const strips = h("div", "strips");
-    strips.append(...(g.members.length ? g.members.slice(0, 5).map((m) => face(m)) : [face(id)]));
+    const all = inGroup(g).slice(0, 5);
+    strips.append(...(all.length ? all : [face(id)]));
     art.append(strips);
   } else if (person!.kind === "persona" && !person!.image) {
     const blank = h("button", "card-blank");
@@ -623,21 +653,8 @@ function openSheet(id: string) {
       field("Personality", "personality", "A few words"), field("Scenario", "scenario", "Where and when the chat begins"),
       field("Greeting", "first_mes", "Their first message"), more, acts);
   } else if (person?.kind === "assistant") {
-    // the system prompt the chats with Chrysalis are sent (Settings')
-    const f = h("label", "card-field card-system"), head = h("span", "card-label", "System prompt");
-    const reset = btn("act card-reset", "Back to the default system prompt", icon("retry"), () => {
-      const before = settings.system;
-      settings.system = DEFAULT_SYSTEM;
-      saveSettings();
-      openSheet(id);
-      toast("The system prompt is back to the default", () => { settings.system = before; saveSettings(); openSheet(id); });
-    });
-    reset.hidden = settings.system === DEFAULT_SYSTEM;
-    const sys = text(settings.system, (v) => { settings.system = v; reset.hidden = v === DEFAULT_SYSTEM; saveSettings(); }, "card-text", "No system prompt");
-    sys.title = "Sent as written, {{MODEL}} as the chat's model; empty sends none. The default keeps the model from acting as a coding agent when "
-      + "it doesn't think, and is sent as its tools version in a chat with tools on. A change makes each chat read its history again once.";
-    head.append(reset);
-    f.append(head, sys);
+    const f = h("label", "card-field");
+    f.append(h("span", "card-label", "Scenario"), text(d!.scenario ?? "", (v) => { d!.scenario = v; }, "card-text", "Where and when the chat is, after the system prompt"));
     body.append(voicePick(person, keep), f);
   } else if (person) {
     body.append(text(person.card.data.description ?? "", (v) => { person.card.data.description = v; }, "card-text",
@@ -657,6 +674,11 @@ function openSheet(id: string) {
         openSheet(id);
       };
       return b;
+    }), ...(g!.missing ?? []).map((n) => {                // in the group, waiting for their card
+      const m = h("span", "card-member waiting");
+      m.title = `${n}: no card yet (theirs joins the group once it is added)`;
+      m.append(initials(n));
+      return m;
     }));
     const who = h("div", "card-section"), where = h("label", "card-field"), acts = h("div", "card-acts");
     who.append(h("span", "card-label", "Who is in it"), members);
@@ -664,7 +686,7 @@ function openSheet(id: string) {
       "Where they are and what is going on (in place of their own)"));
     acts.append(btn("", "The group as a file (with its members' cards beside it, it imports anywhere this chat runs)", `${icon("download")}Export`,
       () => download(`${g!.name || "group"}.json`, JSON.stringify({ spec: "chrysalis_group", name: g!.name,
-        members: g!.members.map((m) => people.get(m)?.card.data.name).filter(Boolean), ...(g!.scenario ? { scenario: g!.scenario } : {}) }, null, 2), "application/json")),
+        members: [...g!.members.map((m) => people.get(m)?.card.data.name).filter(Boolean), ...(g!.missing ?? [])], ...(g!.scenario ? { scenario: g!.scenario } : {}) }, null, 2), "application/json")),
       del("Delete the group (its chats stay)", async () => {
         groups.delete(id);
         await dropGroup(id);
@@ -766,7 +788,7 @@ function voicePick(p: Person, keep: () => void) {
 document.addEventListener("pointerdown", (e) => {
   const t = e.target as HTMLElement;
   if (!$("cast-add").hidden && !t.closest("#cast-add, #add-cast")) $("cast-add").hidden = true;
-  if (!$("cast-sheet").hidden && !t.closest("#cast-sheet, .cast-pic, #you, #system-card, [data-who]")) closeSheet();
+  if (!$("cast-sheet").hidden && !t.closest("#cast-sheet, .cast-pic, #you, [data-who]")) closeSheet();
 });
 document.addEventListener("keydown", (e) => {
   if (e.key !== "Escape") return;
@@ -3382,22 +3404,25 @@ const customized = () => settings.system !== DEFAULT_SYSTEM
   || !!settings.max_tokens || settings.seed !== undefined || !!settings.allow?.length || settings.fetchChars !== undefined
   || Object.keys(settings.voice ?? {}).length > 0;
 
-// Chrysalis, the characters and the groups, newest first under their dates: each a row where its latest chat would be
-// (castRow), with its chats under it while one of them is open
+// Chrysalis, the characters and the groups, each a folder of its chats (castRow its head), the latest-used first
 function renderList() {
-  const nav = $("conversations"), today = new Date().setHours(0, 0, 0, 0), open = whoOf(conv);
-  const group = (t: number) => (t >= today ? "Today" : t >= today - 6 * 864e5 ? "Previous 7 days" : "Older");
-  const rows: { at: number; els: HTMLElement[] }[] = [];
-  for (const x of [...[...people.values()].filter((p) => p.kind !== "persona"), ...groups.values()]) {
-    const list = chatsOf(x.id);
-    rows.push({ at: list[0]?.updated ?? x.added, els: [castRow(x.id, list), ...(open === x.id ? list.map(convRow) : [])] });
-  }
-  let current = "";
-  nav.replaceChildren();
-  for (const r of rows.sort((a, b) => b.at - a.at)) {
-    if (group(r.at) !== current) nav.append(h("div", "group", (current = group(r.at))));
-    nav.append(...r.els);
-  }
+  const folders = [...[...people.values()].filter((p) => p.kind !== "persona"), ...groups.values()].map((x) => ({ id: x.id, list: chatsOf(x.id), at: x.added }));
+  $("conversations").replaceChildren(...folders.sort((a, b) => (b.list[0]?.updated ?? b.at) - (a.list[0]?.updated ?? a.at)).map(({ id, list }) => {
+    const open = unfolded.has(id) && list.length > 0, box = h("div", `folder${open ? " open" : ""}`);
+    box.append(castRow(id, list, open));
+    if (open) {
+      const kids = h("div", "folder-chats");
+      kids.append(...list.map(convRow));
+      box.append(kids);
+    }
+    return box;
+  }));
+}
+// how long ago, as a chat's row says it
+function ago(t: number) {
+  const s = (Date.now() - t) / 1000;
+  return s < 60 ? "now" : s < 3600 ? `${Math.floor(s / 60)}m` : s < 86400 ? `${Math.floor(s / 3600)}h` : s < 7 * 86400 ? `${Math.floor(s / 86400)}d`
+    : s < 30 * 86400 ? `${Math.floor(s / 604800)}w` : new Date(t).toLocaleDateString(undefined, { month: "short", day: "numeric" });
 }
 function convRow(s: Conversation) {
   const a = h("a", `conv${s.id === conv.id ? " active" : ""}${runs.has(s.id) ? " running" : ""}`), del = h("button", "conv-del", "×");
@@ -3412,7 +3437,7 @@ function convRow(s: Conversation) {
     del.textContent = "Delete";
     setTimeout(() => { del.classList.remove("armed"); del.textContent = "×"; }, 2500);
   };
-  a.append(h("span", "conv-title", s.title), del);
+  a.append(h("span", "conv-title", s.title), h("span", "conv-ago", ago(s.updated)), del);
   return a;
 }
 
@@ -3578,8 +3603,10 @@ const toolsOn = (c: Conversation) => !!c.tools && Object.keys(c.tools).length > 
 // The system prompt as sent: the user's as written; the default says what is true of the chat (no tools, or these).
 // After it, how to make and change artifacts, unless Settings leaves that out.
 const systemFor = (c: Conversation) => castOf(c).members.length ? castSystem(c)
-  : [fill((settings.system.trim() === DEFAULT_SYSTEM && toolsOn(c) ? DEFAULT_SYSTEM_TOOLS : settings.system).trim()),
+  : [fill((settings.system.trim() === DEFAULT_SYSTEM && toolsOn(c) ? DEFAULT_SYSTEM_TOOLS : settings.system).trim()), chrysalisScenario(),
     settings.artifacts === false ? "" : ARTIFACTS_PROMPT].filter(Boolean).join("\n\n");
+// what Chrysalis's card sets the chats with it in, after the system prompt
+const chrysalisScenario = () => { const t = people.get(CHRYSALIS)?.card.data.scenario?.trim(); return t ? `Scenario: ${t}` : ""; };
 
 // Server-sent events of a reply, as parsed JSON chunks, then DONE.
 const DONE = Symbol("done");
@@ -4936,10 +4963,12 @@ async function draft() {
   }
 }
 
-function openConversation(id: string) {
+// reveal: its folder opens (not where the page opens again at it: the folders stay as they were left)
+function openConversation(id: string, reveal = true) {
   closeVoice();
   stopReading();
   conv = runs.get(id)?.conv ?? (chats[id] ? structuredClone(chats[id]) : blank());   // a reply being written keeps going
+  if (reveal) unfold(whoOf(conv));
   closeOver(panes.conversations);
   render();
   scroller.scrollTop = scroller.scrollHeight;
@@ -4951,6 +4980,7 @@ function newChat(who = "") {
   closeVoice();
   stopReading();
   conv = blank();
+  unfold(who || CHRYSALIS);
   if (who && who !== CHRYSALIS) {
     conv.who = who;
     greet(conv);
@@ -6254,17 +6284,29 @@ function buildSettings() {
   });
 
 
-  $("system-card").onclick = () => openSheet(CHRYSALIS);
+  systemInput.addEventListener("input", () => {
+    settings.system = systemInput.value;
+    growSystem();
+    saveSettings();
+  });
   $("sent-open").onclick = () => void showSent();
   $("sent-close").innerHTML = icon("x");
   $("sent-close").onclick = () => $<HTMLDialogElement>("sent-view").close();
   $("sent-copy").onclick = () => copy($("sent-text").textContent ?? "", $("sent-copy"));
+  $("system-reset").onclick = () => {
+    const before = settings.system;
+    settings.system = DEFAULT_SYSTEM;
+    saveSettings();
+    growSystem();
+    toast("The system prompt is back to the default", () => { settings.system = before; saveSettings(); growSystem(); });
+  };
   $("settings-reset").onclick = () => {
     if (!customized()) return toast("Everything is already at the recommended values");
     const before = structuredClone(settings);
     settings = { v: 4, system: DEFAULT_SYSTEM, think: {}, fast: {} };
     saveSettings();
-    toast("Everything is back to the recommended values", () => { settings = before; saveSettings(); });
+    growSystem();
+    toast("Everything is back to the recommended values", () => { settings = before; saveSettings(); growSystem(); });
   };
   measureScrollbar();
   addEventListener("resize", measureScrollbar);
@@ -6307,6 +6349,11 @@ function measureScrollbar() {
   document.documentElement.style.setProperty("--sb", `${scroller.offsetWidth - scroller.clientWidth}px`);
 }
 
+function growSystem() {
+  systemInput.style.height = "auto";
+  systemInput.style.height = `${Math.min(systemInput.scrollHeight + 2, innerHeight * 0.4)}px`;
+}
+
 const stageRows = new Map<Stage, HTMLElement>();
 function moveStage(stage: Stage, to: number) {
   const order = orderOf(shownMode()).filter((x) => x !== stage);
@@ -6330,15 +6377,12 @@ function placeStages() {
 
 function syncSettings() {
   if (!isOpen(panes.settings)) return;
-  $("system-card").replaceChildren(face(CHRYSALIS), h("span", "", `On ${nameOf(CHRYSALIS)}'s card`));
+  if (document.activeElement !== systemInput && systemInput.value !== settings.system) systemInput.value = settings.system;
+  $("system-reset").classList.toggle("on", settings.system !== DEFAULT_SYSTEM);
   const vp = $<HTMLTextAreaElement>("voice-prompt");
   if (document.activeElement !== vp && vp.value !== voicePrompt()) { vp.value = voicePrompt(); fit(vp); }
   $("voice-prompt-reset").classList.toggle("on", settings.voice?.prompt !== undefined);
 
-  const sent = systemFor(conv), note = $("system-note");
-  note.hidden = false;
-  note.textContent = sent ? `This chat (${toolsOn(conv) ? "tools on" : "no tools"}) is sent: “${sent}”. A change makes each chat read its history again once.`
-    : `This chat (${toolsOn(conv) ? "tools on" : "no tools"}) is sent no system prompt.`;
   renderToolSettings();
   $("mode-note").textContent = shownMode() === "think" ? "with thinking" : "thinking off";
   $("artifacts-switch").setAttribute("aria-checked", String(settings.artifacts !== false));
@@ -6418,7 +6462,7 @@ await checkTrust();
 void loadCatalog();
 $("to-latest").innerHTML = icon("down");
 $("settings-reset").insertAdjacentHTML("afterbegin", icon("retry"));
-for (const id of ["order-reset", "voice-prompt-reset"]) $(id).innerHTML = icon("retry");
+for (const id of ["system-reset", "order-reset", "voice-prompt-reset"]) $(id).innerHTML = icon("retry");
 buildSettings();
 for (const p of PANES) restorePane(p);
 await refreshStatus();
@@ -6440,7 +6484,7 @@ for (const c of Object.values(chats)) {                // a reply being written 
   for (const g of got.groups) groups.set(g.id, g);
   renderCast();
 }
-if (location.hash.length > 1) openConversation(location.hash.slice(1));
+if (location.hash.length > 1) openConversation(location.hash.slice(1), false);
 else render();
 // Every 4 s, or 4 times a second while a model loads (5-20 s).
 (async () => {

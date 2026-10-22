@@ -497,6 +497,54 @@ test("a character card dropped in joins the cast: a row with their portrait amon
   await page.close();
 }, 40_000);
 
+test("the conversations are folders, Chrysalis's and each character's: a folder opened stays open while another's chat is, a closed one says how many chats it holds, and both stay as left after a reload", async () => {
+  const page = await open();
+  await send(page, "one for chrysalis");
+  await Bun.write(`${dir}/Mirela.png`, await card("Mirela", { description: "{{char}} keeps bees.", first_mes: "Hello, {{user}}." }));
+  await (await page.$("input#attach-file"))!.uploadFile(`${dir}/Mirela.png`);
+  await page.waitForFunction(() => document.querySelector("#thread .speaker")?.textContent === "Mirela");
+  await send(page, "good morning mirela");
+  const folders = () => page.$$eval("#conversations .folder", (f) => f.map((x) => [x.querySelector(".cast-name")!.textContent,   // (its chats' titles change as they are named)
+    x.classList.contains("open") ? `open: ${x.querySelectorAll(".conv").length}` : `closed: ${x.querySelector(".cast-count")?.textContent}`]));
+  expect(await folders()).toEqual([["Mirela", "open: 1"], ["Chrysalis", "open: 1"]]);
+  await openRow(page, "Chrysalis");                                    // closed: how many chats it holds
+  expect(await folders()).toEqual([["Mirela", "open: 1"], ["Chrysalis", "closed: 1"]]);
+  await openRow(page, "Chrysalis");                                    // open again, and left open in Mirela's chat
+  await page.click("#conversations .folder:first-child .conv");
+  expect(await folders()).toEqual([["Mirela", "open: 1"], ["Chrysalis", "open: 1"]]);
+  await openRow(page, "Mirela");
+  await page.reload({ waitUntil: "load" });
+  await page.waitForSelector("#conversations .folder");
+  expect(await folders()).toEqual([["Mirela", "closed: 1"], ["Chrysalis", "open: 1"]]);
+  await page.close();
+}, 30_000);
+
+test("a group whose file names characters with no card here yet shows them all (their initials, in its face and on its card) and takes each in as their card comes", async () => {
+  const page = await open();
+  await Bun.write(`${dir}/Ada.png`, await card("Ada", { description: "{{char}} hums." }));
+  await Bun.write(`${dir}/Bea.png`, await card("Bea", { description: "{{char}} drums." }));
+  writeFileSync(`${dir}/Duo.json`, JSON.stringify({ spec: "chrysalis_group", name: "Duo", members: ["Ada", "Bea"] }));
+  await (await page.$("input#cast-file"))!.uploadFile(`${dir}/Ada.png`, `${dir}/Duo.json`);
+  await page.waitForFunction(() => document.querySelectorAll("#conversations .folder").length === 3);
+  const tiles = () => page.evaluate(() => [...[...document.querySelectorAll("#conversations .cast-row")].find((r) => r.querySelector(".cast-name")!.textContent === "Duo")!
+    .querySelectorAll(".face.mosaic > *")].map((f) => f.tagName === "IMG" ? "picture" : f.textContent));
+  expect(await tiles()).toEqual(["picture", "B"]);
+  await inRow(page, "Duo", ".cast-pic");
+  await page.waitForSelector("#cast-sheet:not([hidden]) .card-member.waiting");
+  expect(await page.$$eval("#cast-sheet .strips > *", (s) => s.length)).toBe(2);
+  await page.keyboard.press("Escape");
+  await (await page.$("input#cast-file"))!.uploadFile(`${dir}/Bea.png`);   // hers comes: she is in
+  await page.waitForFunction(() => document.querySelectorAll("#conversations .folder").length === 4);
+  expect(await tiles()).toEqual(["picture", "picture"]);
+  await openRow(page, "Duo");
+  await page.waitForSelector("#cast-next:not([hidden])");
+  expect(await page.$$eval("#cast-next button[title$=' next']", (b) => b.map((x) => (x as HTMLElement).title))).toEqual(["Ada next", "Bea next"]);
+  await page.reload({ waitUntil: "load" });
+  await page.waitForSelector("#conversations .folder");
+  expect(await tiles()).toEqual(["picture", "picture"]);
+  await page.close();
+}, 30_000);
+
 test("a group's replies are the scene, each paragraph its speaker's and one going on under the same face; a face has the next reply be theirs, thought through first; let them talk takes turns; cards dropped on a chat join it once (a chat with one character becomes a group, her replies hers); the cast stays after a reload", async () => {
   const page = await open();
   await Bun.write(`${dir}/Mirela.png`, await card("Mirela", { description: "{{char}} keeps bees.", scenario: "A hillside.", first_mes: "Hello, {{user}}." }));
@@ -1468,7 +1516,7 @@ test("voice mode's note goes before the first question said and again when it ch
   await page.close();
 }, 45_000);
 
-test("What the model is sent shows the next request as Chrysalis gets it: the tools as JSON, the one system prompt, every message; a prompt edited on Chrysalis's card goes as written", async () => {
+test("What the model is sent shows the next request as Chrysalis gets it: the tools as JSON, the one system prompt, every message; an edited prompt goes as written, and Chrysalis's card's scenario after it", async () => {
   const page = await open();
   await page.setViewport({ width: 1600, height: 900 });
   await page.click("#tools-btn");
@@ -1494,12 +1542,16 @@ test("What the model is sent shows the next request as Chrysalis gets it: the to
     at = k;
   }
   expect(next.messages[0].content).toContain("The tools offered here are the only ones");
-  await page.click("#system-card");                                    // Settings' way to the card that holds it
-  await page.waitForSelector("#cast-sheet:not([hidden]) .card-system textarea");
-  await page.$eval("#cast-sheet .card-system textarea", (el) => { (el as HTMLTextAreaElement).value = "Be terse, {{MODEL}}."; el.dispatchEvent(new Event("input")); });
-  await page.keyboard.press("Escape");
+  await page.$eval("#system-input", (el) => { (el as HTMLTextAreaElement).value = "Be terse, {{MODEL}}."; el.dispatchEvent(new Event("input")); });
   await send(page, "third");
   expect(lastStream.messages[0]).toEqual({ role: "system", content: `Be terse, Qwen3.8-27B.\n\n${ARTIFACTS_PROMPT}` });
+  // the scenario on Chrysalis's card (its portrait beside a reply opens it) goes after the system prompt
+  await page.click("#thread > article.msg.assistant .speaker");
+  await page.waitForSelector("#cast-sheet:not([hidden]) .card-field textarea");
+  await page.type("#cast-sheet .card-field textarea", "A rainy afternoon.");
+  await page.keyboard.press("Escape");
+  await send(page, "fourth");
+  expect(lastStream.messages[0]).toEqual({ role: "system", content: `Be terse, Qwen3.8-27B.\n\nScenario: A rainy afternoon.\n\n${ARTIFACTS_PROMPT}` });
   await page.close();
 }, 60_000);
 

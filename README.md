@@ -142,8 +142,8 @@ to write it (Qwen will not write a user turn: at one it ends it). Settings (Ctrl
 opens without moving the conversation, otherwise it slides the column over (never re-wrapping it) or, in narrow windows,
 slides over it. Every change applies from the next reply and can be undone, for every conversation in the tab (kept with
 them). It shows exactly what Chrysalis is sent:
-- The system prompt, by default "There are no tools or files in this chat. Answer directly.", written on Chrysalis's
-  card (Characters, below), which Settings opens. It is an ordinary prompt: edit or delete it. Without it, Flash-Next with thinking off takes asks like "design a cute SVG" for a coding-agent
+- The system prompt, by default "There are no tools or files in this chat. Answer directly." It is an ordinary prompt:
+  edit or delete it. Without it, Flash-Next with thinking off takes asks like "design a cute SVG" for a coding-agent
   task ("let me first explore the project structure", then calls to tools that do not exist), as the Q8_0 original does
   too. In a chat with tools on, the default is sent as "The tools offered here are the only ones in this chat, and there
   are no files or projects to explore. Use a tool when it helps; otherwise answer directly." (a prompt of your own goes
@@ -226,13 +226,14 @@ math) and Markdown read as documents, block by block; a block points like a part
 click) turns it into its source to retype, and Select moves, copies and deletes blocks. Code is edited where it is shown (Edit).
 
 Characters (`web/cast.ts`): every chat is with someone, as in SillyTavern. The chats without a character are Chrysalis's,
-a character of its own: its card holds the system prompt and the default voice, and its name and picture can change
-(until a picture is given, its card shows the ASCII background's butterfly, live, ripples and all).
+a character of its own: its card holds the default voice and a scenario sent after the system prompt, and its name and
+picture can change (until a picture is given, its card shows the ASCII background's butterfly, live, ripples and all).
 SillyTavern's character cards (Character Card V2 and V3: a PNG with the card in it, or the
-JSON), dropped anywhere or added with the + beside New chat, join the conversations as a row each with their portrait,
-where their latest chat would be (a card already here, by its name and description, is that character again); a group
-(a small JSON of our own: a name, the members, a scenario) is their faces in one circle, and the open chat's row lists
-its chats. A portrait, in the list or beside a reply, opens the card: its fields as they are sent, edited where they are
+JSON), dropped anywhere or added with the + beside New chat, join the conversations as a folder each, its head their portrait
+and name, the latest-used first (a card already here, by its name and description, is that character again); a group
+(a small JSON of our own: a name, the members, a scenario) is their faces in one circle, a member with no card here yet
+as their initials until theirs is added, which puts them in. A folder opens and closes by its
+name and stays as it is left; closed, it says how many chats it holds. A portrait, in the list or beside a reply, opens the card: its fields as they are sent, edited where they are
 read, the voice it speaks with in voice mode (picked and heard there: the voice service lists its voices and speaks a
 sample with no microphone, loading only that voice's model, 230 MB against the whole stack's 566 MB), Export (the card
 as a PNG any app reads, every field kept: a lorebook, other apps' extensions) and Delete. The user's persona is the row

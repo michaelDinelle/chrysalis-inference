@@ -74,14 +74,13 @@ button { font: inherit; color: inherit; cursor: pointer; }
 .side-body { display: flex; flex: 1; flex-direction: column; gap: 6px; min-height: 0; padding: 10px; }
 #new-chat { justify-content: flex-start; }
 #conversations { flex: 1; min-height: 0; overflow-y: auto; margin: 4px -4px 0; padding: 0 4px; }
-.group { margin: 14px 10px 4px; font-size: 11px; font-weight: 600; letter-spacing: 0.07em; text-transform: uppercase; color: var(--faint); }
 .conv { display: flex; align-items: center; gap: 6px; padding: 6px 6px 6px 10px; border-radius: 8px; color: var(--muted); font-size: 14px; text-decoration: none; }
 .conv:hover { background: var(--hover); color: var(--text); }
 .conv.active { background: var(--accent-soft); color: var(--text); }
 .conv-title { flex: 1; overflow: hidden; white-space: nowrap; text-overflow: ellipsis; }
 .conv.running .conv-title::before { content: ""; display: inline-block; width: 6px; height: 6px; margin-right: 7px; border-radius: 50%; background: var(--accent); vertical-align: 1px; animation: pulse 1.2s ease-in-out infinite; }   /* a reply being written */
-.conv-del { visibility: hidden; padding: 0 6px; border: 0; border-radius: 6px; background: none; color: var(--faint); font-size: 13px; line-height: 22px; }
-.conv:hover .conv-del, .conv-del.armed { visibility: visible; }
+.conv-del { display: none; padding: 0 6px; border: 0; border-radius: 6px; background: none; color: var(--faint); font-size: 13px; line-height: 22px; }
+.conv:hover .conv-del, .conv-del.armed { display: block; }   /* in place of how long ago */
 .conv-del:hover, .conv-del.armed { color: var(--danger); }
 .side-foot { display: flex; flex: none; gap: 6px; padding-top: 8px; border-top: 1px solid var(--line); }
 .side-foot .btn { height: 34px; color: var(--muted); font-size: 13px; }
@@ -903,20 +902,27 @@ label.set-switch { cursor: pointer; }
 .side-top #new-chat { flex: 1; }
 .side-top #add-cast { flex: none; width: 36px; padding: 0; justify-content: center; color: var(--muted); }
 .side-top #add-cast:hover { color: var(--text); }
-.cast-row { display: flex; align-items: center; gap: 10px; margin: 1px 0; padding: 5px 4px 5px 5px; border-radius: 12px; color: var(--muted); }
+/* a folder: its head (the portrait, the name with its arrow, + on hover), then its chats on a line down from the portrait */
+.folder { margin-bottom: 2px; }
+.cast-row { display: flex; align-items: center; gap: 10px; padding: 4px 4px 4px 5px; border-radius: 12px; color: var(--muted); }
 .cast-row:hover { background: var(--hover); color: var(--text); }
-.cast-row.active { background: var(--accent-soft); color: var(--text); }
 .cast-pic { flex: none; padding: 0; border: 0; border-radius: 50%; background: none; cursor: pointer; }
-.cast-pic > .face { width: 40px; height: 40px; font-size: 15px; transition: transform 140ms ease, box-shadow 140ms ease; }
+.cast-pic > .face { width: 36px; height: 36px; font-size: 14px; transition: transform 140ms ease, box-shadow 140ms ease; }
 .cast-pic:hover > .face { transform: scale(1.06); box-shadow: 0 0 0 2px var(--panel), 0 0 0 3.5px var(--accent); }
-.cast-main { display: grid; flex: 1; gap: 1px; min-width: 0; padding: 0; border: 0; background: none; color: inherit; font: inherit; text-align: left; cursor: pointer; }
+.cast-main { display: flex; flex: 1; align-items: center; gap: 4px; min-width: 0; height: 36px; padding: 0; border: 0; background: none; color: inherit; font: inherit;
+  text-align: left; cursor: pointer; }
 .cast-name { overflow: hidden; color: var(--text); font-size: 14px; font-weight: 600; white-space: nowrap; text-overflow: ellipsis; }
-.cast-sub { overflow: hidden; color: var(--faint); font-size: 12.5px; white-space: nowrap; text-overflow: ellipsis; }
+.cast-main > .i { flex: none; width: 14px; height: 14px; color: var(--faint); transition: transform 140ms ease; }
+.cast-main[aria-expanded="false"] > .i { transform: rotate(-90deg); }
+.cast-count { margin-left: auto; padding: 0 4px; color: var(--faint); font-size: 12px; }
 .cast-row.running .cast-name::after { content: ""; display: inline-block; width: 6px; height: 6px; margin-left: 7px; border-radius: 50%; background: var(--accent);
   vertical-align: 2px; animation: pulse 1.2s ease-in-out infinite; }
 .cast-new { flex: none; visibility: hidden; }
-.cast-row:hover .cast-new, .cast-row.open .cast-new { visibility: visible; }
-.conv.inner { margin-left: 45px; }
+.cast-row:hover .cast-new { visibility: visible; }
+.folder-chats { margin: 0 0 6px 23px; padding-left: 9px; border-left: 1.5px solid var(--line); }
+.folder-chats .conv { font-size: 13.5px; }
+.conv-ago { flex: none; color: var(--faint); font-size: 11.5px; }
+.conv:hover .conv-ago, .conv:has(.armed) .conv-ago { display: none; }
 .side-foot .you { display: flex; flex: 1; align-items: center; gap: 9px; min-width: 0; padding: 3px 8px 3px 3px; border: 0; border-radius: 10px; background: none;
   color: var(--muted); font: inherit; font-size: 13.5px; text-align: left; cursor: pointer; }
 .side-foot .you:hover { background: var(--hover); color: var(--text); }
@@ -1020,6 +1026,8 @@ label.set-switch { cursor: pointer; }
 .card-member.out { opacity: 0.35; filter: grayscale(1); }
 .card-member.out:hover { opacity: 0.7; }
 .card-member.in { box-shadow: 0 0 0 2px var(--raised), 0 0 0 3.5px var(--accent); }
+.card-member.waiting { opacity: 0.55; cursor: default; box-shadow: 0 0 0 2px var(--raised), 0 0 0 3.5px var(--line); }
+.card-member > .face.initials { font-size: 16px; }
 .card-section { display: grid; gap: 6px; }
 .card-label { color: var(--faint); font-size: 11px; font-weight: 600; letter-spacing: 0.07em; text-transform: uppercase; }
 /* every message has who wrote it beside it, as a chat with characters has it: their portrait in the margin (a reply's
@@ -1055,11 +1063,4 @@ p.line > .who .face { position: absolute; left: -56px; top: 1px; width: 44px; he
   .speaker .face, p.line > .who .face { width: 32px; height: 32px; font-size: 13px; }
   p.line > .who .face { left: -42px; }
 }
-/* Chrysalis's card: its system prompt, with the way back to the default beside its label */
-.card-system .card-label { display: flex; align-items: center; gap: 6px; }
-.card-reset { width: 20px; height: 20px; }
-.card-reset .i { width: 12px; height: 12px; }
-.system-card { display: flex; align-items: center; gap: 10px; width: 100%; padding: 6px 10px 6px 6px; border: 1px solid var(--line); border-radius: 12px;
-  background: none; color: var(--text); font: inherit; font-size: 13px; text-align: left; cursor: pointer; }
-.system-card:hover { background: var(--hover); }
-.system-card .face { width: 28px; height: 28px; }
+
