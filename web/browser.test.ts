@@ -1012,6 +1012,11 @@ test("the Tools popover turns servers and single tools on and off for this chat,
   expect(await subOf(page, "mcp:fake")).toBe("4 of 5 tools on");
   await page.click(sw("fetch"));
   expect(await badge(page)).toEqual(["5", "Tools: 5 on in this chat"]);
+  const pageLength = () => page.$$eval(`${pop} .tp-src`, (r) => r.map((x) => x.querySelector(".knob label")?.textContent ?? "").filter(Boolean));
+  expect(await pageLength()).toEqual(["Page length"]);                  // Fetch URL's, under it while it is on
+  await page.click(sw("fetch"));
+  expect(await pageLength()).toEqual([]);
+  await page.click(sw("fetch"));
   await page.click(sw("mcp:broken"));                                     // a server that cannot start says why, with Retry
   await page.waitForSelector(`${pop} .tp-err [data-do="retry"][data-src="mcp:broken"]`, { timeout: 20_000 });
   expect(await page.$eval(`${pop} .tp-err`, (e) => e.textContent)).toMatch(/ENOENT|nonexistent|not found/i);
@@ -1096,9 +1101,15 @@ test("a tool that asks first shows the call with Allow once, Always allow and De
   await send(page, "tool note");                                          // allowed now: it runs without asking
   expect(await page.$$eval(".msg.assistant .tool-card", (c) => c.at(-1)!.getAttribute("data-state"))).toBe("done");
   expect(readFileSync(LOG, "utf8").match(/wrote n1/g)?.length).toBe(3);
-  await page.keyboard.down("Control"); await page.keyboard.press(","); await page.keyboard.up("Control");
-  await page.waitForSelector("#allow-list .chip");
-  expect(await page.$$eval("#allow-list .chip", (c) => c.map((x) => x.textContent))).toEqual(["fake__write_note"]);
+  await page.click("#tools-btn");                                          // the tools of the chat list it; a click makes it ask again
+  await page.waitForSelector("#tools-pop .tp-allow .chip");
+  expect(await page.$$eval("#tools-pop .tp-allow .chip", (c) => c.map((x) => x.textContent))).toEqual(["fake__write_note"]);
+  await page.click("#tools-pop .tp-allow .chip");
+  await page.waitForFunction(() => !document.querySelector("#tools-pop .tp-allow"));
+  await page.keyboard.press("Escape");
+  await page.type("#input", "tool note");                                 // and so it does
+  await page.keyboard.press("Enter");
+  await page.waitForSelector('.tool-card[data-state="approval"] .tool-ask:not([hidden])', { timeout: 20_000 });
   await page.close();
 }, 90_000);
 

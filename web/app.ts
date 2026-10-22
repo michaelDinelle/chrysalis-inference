@@ -5525,8 +5525,9 @@ function setModelsOpen(open: boolean, refocus = false) {
 // config file's alone: nothing here can change it (tools.ts).
 let catalog: Catalog | null = null, toolsOpen = false;
 const shownTools = new Set<string>();               // servers shown with their tools in the popover
+let fetchKnob: HTMLElement | undefined;            // Fetch URL's page length (made with Settings' sliders), under it while it is on
 const JSON_POST = { method: "POST", headers: { "Content-Type": "application/json" } };
-const FETCH_CHARS = 20_000;                         // what Fetch URL gives at a time unless Settings says otherwise (tool-fetch.ts' default)
+const FETCH_CHARS = 20_000;                         // what Fetch URL gives at a time unless its page length says otherwise (tool-fetch.ts' default)
 const EXAMPLE = '{"mcpServers": {"notes": {"command": "npx", "args": ["-y", "@modelcontextprotocol/server-filesystem", "/home/me/notes"]}}}';
 
 async function loadCatalog(how: { reload?: boolean; connect?: string } = {}) {
@@ -5626,6 +5627,7 @@ function sourceView(s: SourceInfo): HTMLElement {
   }
   row.append(toolSwitch("src", s.id, "", isOn(s.id), `${s.label} in this chat`, s.state === "disabled"));
   box.append(row);
+  if (s.kind === "fetch" && isOn(s.id) && fetchKnob) box.append(fetchKnob);
   if (s.state === "failed" && s.error) {
     const err = h("div", "tp-err"), retry = h("button", "btn small", "Retry");
     retry.type = "button";
@@ -5637,7 +5639,7 @@ function sourceView(s: SourceInfo): HTMLElement {
     const list = h("div", "tp-tools");
     for (const t of s.tools) {
       const r = h("div", "tp-tool"), [tag, why] = toolTag(t), label = h("span", "tp-tname", t.title), badge = h("span", `tp-tag${t.readOnly ? "" : " asks"}`, tag);
-      label.title = t.description || t.name;
+      label.title = DESCRIPTIONS[t.name] ?? (t.description || t.name);   // what the model is told of it
       badge.title = why;
       r.append(label, badge, toolSwitch("tool", s.id, t.name, toolOn(s.id, t.name), `${t.title} (${s.label})`));
       list.append(r);
@@ -5658,7 +5660,6 @@ function renderTools() {
   btn.classList.toggle("on", on);
   btn.classList.toggle("open", toolsOpen);
   btn.classList.toggle("pending", starting);
-  renderToolSettings();
   if (!toolsOpen) return;
   // redrawn only when something in it changed (a poll never takes the focus from it), and the focus is kept
   const pop = $("tools-pop"), key = JSON.stringify([catalog, conv.tools, [...shownTools], settings.allow]);
@@ -5680,86 +5681,26 @@ function renderTools() {
         h("pre", "tp-code", EXAMPLE), "then Reload.");
       parts.push(help);
     }
+    if (settings.allow?.length) {                  // a click makes one ask first again
+      const allow = h("div", "tp-allow");
+      allow.append(h("span", "tp-allow-label", "Run without asking"), ...settings.allow.map((fn) => {
+        const b = keyed(h("button", "chip", fn), "unallow", "", fn);
+        b.type = "button";
+        b.title = b.ariaLabel = `${fn}: ask first again`;
+        b.insertAdjacentHTML("beforeend", icon("x"));
+        return b;
+      }));
+      parts.push(allow);
+    }
     const foot = h("div", "tp-foot"), reload = h("button", "btn small", "Reload config");
     reload.type = "button";
     keyed(reload, "reload");
-    reload.title = `Read ${catalog.config} again`;
+    reload.title = `Read ${catalog.config} again (servers that changed restart)`;
     foot.append(reload);
     parts.push(foot);
   }
   pop.replaceChildren(...parts);
   if (focus) pop.querySelector<HTMLElement>(`[data-k="${CSS.escape(focus)}"]`)?.focus();
-}
-// Settings' Tools: the config file's servers as they stand (what each runs or reaches, read-only), what Fetch URL
-// may reach, and the tools allowed to run without asking (a click makes one ask again).
-const STATE_WORD: Record<SourceInfo["state"], string> = { idle: "not started", connecting: "starting…", connected: "running", failed: "failed", disabled: "disabled" };
-// Each tool opens to its description as Chrysalis is sent it: Chrysalis's own for that tool where it has one (wire.ts),
-// else its server's. A description is what tells the model when to call the tool and when not.
-function toolDescriptions(tools: ToolInfo[]): HTMLElement[] {
-  return [...tools].sort((a, b) => (a.fn < b.fn ? -1 : 1)).map((t) => {
-    const d = h("details", "ts-tool"), sum = h("summary");
-    sum.append(h("span", "ts-tool-name", t.title || t.name), h("code", "ts-tool-fn", t.fn));
-    d.dataset.fn = t.fn;
-    d.append(sum, h("p", "ts-tool-desc", DESCRIPTIONS[t.name] ?? t.description));
-    if (DESCRIPTIONS[t.name] && DESCRIPTIONS[t.name] !== t.description) {
-      const own = h("p", "set-note");
-      own.append("Chrysalis's description for it; the server's own: ", h("q", "", t.description));
-      d.append(own);
-    }
-    return d;
-  });
-}
-function renderToolSettings() {
-  if (!isOpen(panes.settings)) return;
-  const list = $("tools-list"), key = JSON.stringify(catalog);
-  if (list.dataset.key !== key) {
-    list.dataset.key = key;
-    const rows: HTMLElement[] = [];
-    if (!catalog) rows.push(h("p", "set-note", "Asking the web server…"));
-    else {
-      if (catalog.error) rows.push(h("div", "tp-err", catalog.error));
-      const mcp = catalog.sources.filter((s) => s.kind === "mcp");
-      for (const s of mcp) {
-        const r = h("div", "ts-row"), top = h("div", "ts-top"), n = s.tools.length;
-        top.append(h("span", `dot ${dotOf(s)}`), h("span", "ts-name", s.label),
-          h("span", "ts-state", s.state === "connected" ? `${n} tool${n === 1 ? "" : "s"}` : STATE_WORD[s.state]));
-        const detail = h("code", "ts-detail", s.detail || "(no command or URL)");
-        detail.title = s.detail;
-        r.append(top, detail);
-        if (s.error) r.append(h("div", "ts-err", s.error));
-        r.append(...toolDescriptions(s.tools));
-        rows.push(r);
-      }
-      if (!mcp.length) {
-        const help = h("p", "set-note");
-        help.append("No MCP servers. Add them to the config file, for example: ", h("code", "", EXAMPLE));
-        rows.push(help);
-      }
-      const f = catalog.sources.find((s) => s.kind === "fetch");
-      for (const b of catalog.sources.filter((s) => s.kind !== "mcp")) {
-        const r = h("div", "ts-row"), top = h("div", "ts-top");
-        top.append(h("span", `dot ${dotOf(b)}`), h("span", "ts-name", b.label), h("span", "ts-state", "built in"));
-        r.append(top, ...toolDescriptions(b.tools));
-        rows.push(r);
-      }
-      const note = h("p", "set-note");
-      note.append(`Fetch URL reaches ${f?.detail ?? "public addresses only"}. Config file: `, h("code", "", catalog.config));
-      rows.push(note);
-    }
-    list.replaceChildren(...rows);
-  }
-  const allow = $("allow-list"), akey = JSON.stringify(settings.allow ?? []);
-  if (allow.dataset.key === akey) return;
-  allow.dataset.key = akey;
-  allow.hidden = !settings.allow?.length;
-  allow.replaceChildren(h("span", "set-note", "Run without asking:"), ...(settings.allow ?? []).map((fn) => {
-    const b = h("button", "chip", fn);
-    b.type = "button";
-    b.dataset.allow = fn;
-    b.title = b.ariaLabel = `${fn}: ask first again`;
-    b.insertAdjacentHTML("beforeend", icon("x"));
-    return b;
-  }));
 }
 function setToolsOpen(open: boolean, refocus = false) {
   toolsOpen = open;
@@ -5787,6 +5728,14 @@ function buildTools() {
     else if (what === "more") { if (!shownTools.delete(src)) shownTools.add(src); renderTools(); }
     else if (what === "retry") void loadCatalog({ connect: src });
     else if (what === "reload") void loadCatalog({ reload: true });
+    else if (what === "unallow") {
+      const before = settings.allow;
+      settings.allow = settings.allow?.filter((x) => x !== tool);
+      if (!settings.allow?.length) delete settings.allow;
+      saveSettings();
+      renderTools();
+      toast(`${tool} asks first again`, () => { settings.allow = before; saveSettings(); renderTools(); });
+    }
   });
   document.addEventListener("pointerdown", (e) => {
     if (toolsOpen && !(e.target as Element).closest("#tools-pop, #tools-btn")) setToolsOpen(false);
@@ -6098,11 +6047,12 @@ function knob(k: KnobSpec) {
     // with Chrysalis the recommended value is what it uses unset; another backend's own default is not known here
     k.set(onChrysalis() && Math.abs(v - k.rec()) < k.step / 2 ? undefined : +v.toFixed(6));
     saveSettings();
+    sync();
   };
   const typed = () => Number(num.value.replace(/[,_\s]/g, "").replace(/^off$/i, "0"));
   range.addEventListener("input", () => commit(k.val(range.valueAsNumber)));
-  range.addEventListener("dblclick", () => { k.set(undefined); saveSettings(); });
-  reset.addEventListener("click", () => { k.set(undefined); saveSettings(); });
+  range.addEventListener("dblclick", () => { k.set(undefined); saveSettings(); sync(true); });
+  reset.addEventListener("click", () => { k.set(undefined); saveSettings(); sync(true); });
   num.addEventListener("change", () => commit(typed()));
   num.addEventListener("keydown", (e) => {
     if (e.key === "Enter") commit(typed());
@@ -6126,6 +6076,7 @@ function knob(k: KnobSpec) {
     rec.title = reset.title = onChrysalis() ? `Recommended: ${k.fmt(k.rec())}` : "The backend's own value (not sent)";
   }
   knobs.push(sync);
+  sync();
   return el;
 }
 function samplerKnob(key: SamplerKey) {
@@ -6231,15 +6182,16 @@ function buildSettings() {
   });
   $("reply-knobs").replaceChildren(maxLen, seed);
 
-  // Fetch URL's page length: what is safe to change from here (the private-address rule is the config file's)
+  // Fetch URL's page length, under it in the tools of a chat: what is safe to change from here (the private-address
+  // rule is the config file's)
   const FLO = 2000, FHI = 100_000;
-  $("tools-knobs").replaceChildren(knob({
+  fetchKnob = knob({
     id: "fetchChars", label: "Page length", min: FLO, max: FHI, step: 1000,
     help: "Fetch URL: how much of a page the model gets at a time, in characters (it can ask for the rest).",
     fmt: (v) => v.toLocaleString("en-US"), get: () => settings.fetchChars ?? FETCH_CHARS, rec: () => FETCH_CHARS,
     custom: () => settings.fetchChars !== undefined, set: (v) => { settings.fetchChars = v; },
     pos: (v) => Math.min(1, Math.max(0, Math.log(v / FLO) / Math.log(FHI / FLO))), val: (p) => Math.round(FLO * (FHI / FLO) ** p / 1000) * 1000,
-  }));
+  });
   // Voice mode: its prompt, the voice (the service's list, kept from the last time it said), its speed, its thinking.
   const voicePromptInput = $<HTMLTextAreaElement>("voice-prompt");
   voicePromptInput.addEventListener("input", () => {
@@ -6295,17 +6247,6 @@ function buildSettings() {
   });
   $("voice-knobs").replaceChildren(pick.row, speed);
 
-  $("tools-reload").onclick = () => void loadCatalog({ reload: true }).then(() => toast(catalog?.error ? "The config file has an error (shown under Tools)"
-    : `Config read: ${catalog?.sources.filter((s) => s.kind === "mcp").length ?? 0} MCP server(s)`));
-  $("allow-list").addEventListener("click", (e) => {
-    const fn = (e.target as Element).closest<HTMLElement>("[data-allow]")?.dataset.allow;
-    if (!fn) return;
-    const before = settings.allow;
-    settings.allow = settings.allow?.filter((x) => x !== fn);
-    if (!settings.allow?.length) delete settings.allow;
-    saveSettings();
-    toast(`${fn} asks first again`, () => { settings.allow = before; saveSettings(); });
-  });
 
 
   systemInput.addEventListener("input", () => {
@@ -6406,8 +6347,6 @@ function syncSettings() {
   const vp = $<HTMLTextAreaElement>("voice-prompt");
   if (document.activeElement !== vp && vp.value !== voicePrompt()) { vp.value = voicePrompt(); fit(vp); }
   $("voice-prompt-reset").classList.toggle("on", settings.voice?.prompt !== undefined);
-
-  renderToolSettings();
   $("mode-note").textContent = shownMode() === "think" ? "with thinking" : "thinking off";
   $("artifacts-switch").setAttribute("aria-checked", String(settings.artifacts !== false));
   $("settings").classList.toggle("other-backend", !onChrysalis());   // Chrysalis's sampler order and its odds charts

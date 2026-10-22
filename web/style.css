@@ -697,14 +697,10 @@ main { position: relative; }
 .switch[aria-checked="true"]::after { background: #fff; translate: 14px 0; }
 .switch:disabled { cursor: default; opacity: 0.4; }
 @media (prefers-reduced-motion: reduce) { .switch, .switch::after { transition: none; } }
-/* Settings' Tools: the config file's servers, read-only */
-.tools-list { display: grid; gap: 8px; }
-.ts-row { display: grid; gap: 3px; }
-.ts-tool { margin-left: 16px; font-size: 12.5px; }
-.ts-tool summary { display: flex; align-items: baseline; gap: 8px; padding: 3px 0; color: var(--muted); cursor: pointer; }
-.ts-tool summary:hover, .ts-tool[open] summary { color: var(--text); }
-.ts-tool-fn { color: var(--faint); font: 11px var(--mono); }
-.ts-tool-desc { margin: 2px 0 6px; color: var(--muted); line-height: 1.45; }
+/* in the tools of a chat: Fetch URL's page length under it, and the tools let run without asking */
+.tp-src > .knob { margin: 0 8px 6px 38px; grid-template-columns: 80px minmax(0, 1fr) 60px 22px; }
+.tp-allow { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; margin: 8px 8px 2px; }
+.tp-allow-label { margin-right: 2px; color: var(--faint); font-size: 12px; }
 /* What the model is sent: the next request as Chrysalis gets it, read-only */
 .sent-view { width: min(860px, 94vw); max-height: 88vh; padding: 16px 18px; }
 .sent-view[open] { display: grid; grid-template-rows: auto auto minmax(0, 1fr); gap: 8px; }
@@ -714,11 +710,6 @@ main { position: relative; }
 .sent-text { margin: 0; overflow: auto; padding: 12px; border: 1px solid var(--line); border-radius: 10px; background: var(--code);
   font: 12px/1.5 var(--mono); white-space: pre-wrap; overflow-wrap: anywhere; user-select: text; }
 #sent-open { margin-top: 8px; }
-.ts-top { display: flex; align-items: center; gap: 8px; font-size: 13px; }
-.ts-name { flex: 1; font-weight: 600; }
-.ts-state { color: var(--muted); font-size: 12px; }
-.ts-detail { overflow: hidden; color: var(--muted); font: 11.5px var(--mono); white-space: nowrap; text-overflow: ellipsis; }
-.ts-err { color: var(--danger); font-size: 12px; overflow-wrap: anywhere; }
 .set-note { margin: 8px 0 0; color: var(--faint); font-size: 12px; line-height: 1.45; }
 .set-switch { display: flex; align-items: center; justify-content: space-between; gap: 12px; min-height: 30px; font-size: 13.5px; }
 label.set-switch { cursor: pointer; }
@@ -752,9 +743,6 @@ label.set-switch { cursor: pointer; }
 .dev-fp code { font: 11px var(--mono); overflow-wrap: anywhere; }
 .set-switch + .set-switch { margin-top: 8px; }
 #tools-knobs:not(:empty) { margin-top: 10px; }
-.allow-list { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; margin-top: 10px; }
-.allow-list[hidden] { display: none; }
-.allow-list .set-note { margin: 0; }
 .chip { display: inline-flex; align-items: center; gap: 4px; height: 24px; padding: 0 6px 0 9px; border: 1px solid var(--line); border-radius: 999px; background: var(--bg);
   color: var(--text); font: 11.5px var(--mono); }
 .chip .i { width: 12px; height: 12px; color: var(--faint); }

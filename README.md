@@ -160,8 +160,6 @@ token's 64 candidates): the reply line marks the names presence counts as used a
 "Shadow" (91% from the model) pushed down, tagged used and repeats. Pointing at a row explains it in the line under the
 chart; explanations elsewhere are tooltips, so nothing in the panel changes size while it is used.
 - The reply's max length and the seed: random for every reply, or fixed. Clicking a reply's seed fixes it.
-- Tools: the config file's MCP servers as they stand (state, tools, the command or URL, read-only), Reload config, Fetch
-  URL's page length, and the tools allowed to run without asking (a click makes one ask again).
 A value that differs from the recommended one is marked; ↺ or a double click on its slider brings it back. The sidebar
 holds the conversations (sending a message starts the model too). It and Settings are side panels that work alike: a
 toggle fixed in the window's top corner (left: conversations, Ctrl+B; right: Settings, Ctrl+,), which never moves. With
@@ -257,7 +255,8 @@ in this browser's IndexedDB, on this device, never on the server; lorebooks are 
 Tools: the wrench beside the thinking bar (with how many tools are
 on) opens them for this chat: Fetch URL and Sub-agents, then each MCP server with its state (not started, starting, running, failed
 with the error and Retry, disabled), a switch for the whole server, and under its arrow one per tool, marked read-only
-or asks first. The choice is the chat's, kept with it (export too); a new chat starts from the last one. A server starts
+or asks first (its description, as the model is told it, on hover). Under Fetch URL while it is on, its page length;
+at the end, the tools allowed to run without asking (a click makes one ask again), and Reload config. The choice is the chat's, kept with it (export too); a new chat starts from the last one. A server starts
 the first time a chat turns it on, keeps running, and after a failure starts again 1, 2, 4 ... 60 s later. The servers
 come from `~/.config/chrysalis/mcp.json` (`CHRYSALIS_MCP_CONFIG` overrides the path), in Claude Desktop's and Claude
 Code's shape, so a config can be pasted:
