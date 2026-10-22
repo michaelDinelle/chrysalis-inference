@@ -1,5 +1,5 @@
 // Characters as SillyTavern's cards hold them (Character Card V2 and V3: the card's JSON in base64 in a PNG's tEXt chunk,
-// "chara" or "ccv3", or the JSON as a file), the user's persona (the same shape: a name, a description, a picture) and
+// "chara" or "ccv3", or the JSON as a file), the user's (a card like any other: kind says only which one is them) and
 // groups of characters (a small file of our own: SillyTavern keeps none). They live in this browser's IndexedDB, on this
 // device: never on the server. A card is kept whole, so exporting it loses nothing this chat does not use (a lorebook,
 // another app's extensions); the voice picked for it is kept in it too (extensions.chrysalis.voice).
@@ -122,22 +122,21 @@ export const fill = (text: string, char: string, user: string) =>
 const examples = (s: string) => s.replace(/^\s*<START>\s*$/gim, "").trim();
 
 // The system prompt of a chat with characters (Chrysalis's too): the chat's own (base: a card's own system prompt is
-// kept in it, not sent), then for each character what its card says of it (with the group's scenario in place of
-// theirs), and the user's persona. Nothing in it changes from turn to turn, so every reply reads
-// it from Chrysalis's cache. With several, the reply is the scene: each line its speaker's name and a colon (app.ts sceneText).
-export function castPrompt(base: string, cast: CardData[], user: { name: string; description?: string }, scenario?: string): string {
+// kept in it, not sent), then what each card says of who it is (with the group's scenario in place of theirs), the
+// user's as any character's. Nothing in it changes from turn to turn, so every reply reads it from Chrysalis's cache.
+// With several, the reply is the scene: each line its speaker's name and a colon (app.ts sceneText).
+export function castPrompt(base: string, cast: CardData[], user: CardData, scenario?: string): string {
   const one = cast.length === 1, out: string[] = [base];
   if (!one) out.push(`This is a scene with ${list(cast.map((c) => c.name))}. Write it one paragraph per line, each beginning with the ` +
     `speaker's name and a colon:\n\n${cast[0].name}: *What they do.* What they say.\n\nWrite only for them; {{user}} speaks ` +
     `for themself. Everyone here takes part: whoever would answer or react does, often more than one, then stop when it is {{user}}'s turn.`);
-  for (const c of cast) {
-    const parts = [one ? "" : `## ${c.name}`, c.description?.trim() ?? "", c.personality?.trim() ? `{{char}}'s personality: ${c.personality.trim()}` : "",
-      !scenario && c.scenario?.trim() ? `Scenario: ${c.scenario.trim()}` : "",
-      c.mes_example?.trim() ? `How {{char}} talks:\n${examples(c.mes_example)}` : ""].filter(Boolean);
-    out.push(fill(parts.join("\n\n"), c.name, user.name));
-  }
+  const about = (c: CardData) => [c.description?.trim() ?? "", c.personality?.trim() ? `${c.name}'s personality: ${c.personality.trim()}` : "",
+    !scenario && c.scenario?.trim() ? `Scenario: ${c.scenario.trim()}` : "", c.mes_example?.trim() ? `How ${c.name} talks:\n${examples(c.mes_example)}` : ""].filter(Boolean);
+  for (const c of cast) out.push(fill([one ? "" : `## ${c.name}`, ...about(c)].filter(Boolean).join("\n\n"), c.name, user.name));
   if (scenario?.trim()) out.push(`Scenario: ${scenario.trim()}`);
-  if (user.description?.trim()) out.push(user.description.trim());
+  // the user's own text is filled last: its {{char}} is the one they talk to, as in SillyTavern's persona
+  const you = about(user);
+  if (you.length) out.push([one ? "" : `## ${user.name}`, ...you].filter(Boolean).join("\n\n"));
   return fill(out.filter(Boolean).join("\n\n"), cast[0]?.name ?? "", user.name);
 }
 const list = (names: string[]) => names.length < 2 ? names.join("") : `${names.slice(0, -1).join(", ")} and ${names.at(-1)}`;

@@ -298,6 +298,7 @@ const CAST_DRAG = "application/x-chrysalis-cast";    // a character's row dragge
 let talking = 0;                                     // "let them talk": the beats a group has left to write on its own
 const persona = () => people.get(ME)!;
 const userName = () => nameOf(ME);
+const userCard = () => ({ ...persona().card.data, name: userName() });   // as it is sent: an empty name is "User"
 const folderOf = (c: Conversation) => (c.who && c.who !== CHRYSALIS && (people.has(c.who) || groups.has(c.who)) ? c.who : "");
 // whose folder a chat is in: its character's or group's, Chrysalis's only for a chat with neither (never one whose
 // character is gone: its chats go with it, forget)
@@ -357,6 +358,7 @@ const names = (ids: string[]) => { const n = ids.map(nameOf); return n.length < 
 
 function renderCast() {
   $("you").replaceChildren(face(ME), h("span", "you-name", nameOf(ME)));
+  $("you").dataset.card = ME;
   renderList();
   renderCastNext();
 }
@@ -376,7 +378,7 @@ function castRow(id: string, list: Conversation[], open: boolean): HTMLElement {
   pic.type = main.type = add.type = "button";
   pic.title = pic.ariaLabel = g ? `${name}: who is in it` : `${name}'s card`;
   pic.append(face(id));
-  pic.onclick = () => openSheet(id);
+  pic.dataset.card = id;
   main.append(h("span", "cast-name", name || "Unnamed"));
   if (list.length) {
     main.insertAdjacentHTML("beforeend", icon("chevron"));
@@ -427,7 +429,7 @@ function castSystem(c: Conversation) {
   const { members, group } = castOf(c);
   const base = members.length > 1 ? "Write the next part of a fictional scene between {{user}} and these characters."
     : "Write {{char}}'s next reply in a fictional chat between {{char}} and {{user}}.";
-  return castPrompt(base, members.map((p) => p.card.data), { name: userName(), description: persona().card.data.description }, group?.scenario);
+  return castPrompt(base, members.map((p) => p.card.data), userCard(), group?.scenario);
 }
 
 // A file that is a card or a group joins the cast (a card already here, by its name and description, is that
@@ -569,10 +571,11 @@ $("cast-file").addEventListener("change", async (e) => {
 
 // A sheet is a card: the portrait at its own shape with the name on it, then what the card says, each field edited
 // where it is read (the four that make a character; the rest under More), the voice they speak with (heard from
-// here), export and delete. The user's own card takes a picture, their name and what the characters know of them; a
-// group's shows its members side by side, which of the characters are in it, and its scenario. What is typed is kept
-// as it is.
-let sheetOf = "", sampler: Speaker | undefined;
+// here), and delete. Everyone's card is the same, the user's and Chrysalis's too (who stay: there is one of each). The
+// portrait is the card as a file: dragged out of the page (or saved as a picture), it is the PNG any app reads. A
+// group's shows its members side by side, which of the characters are in it, its scenario and its file. What is typed
+// is kept as it is.
+let sheetOf = "", sampler: Speaker | undefined, sheetFile: { id: string; url: string } | undefined;
 function openSheet(id: string) {
   const sheet = $("cast-sheet"), g = groups.get(id);
   const person = people.get(id);
@@ -580,7 +583,10 @@ function openSheet(id: string) {
   const again = sheetOf === id, top = sheet.querySelector(".card-scroll")?.scrollTop ?? 0;
   sheetOf = id;
   let saving = 0;
-  const keep = () => { clearTimeout(saving); saving = window.setTimeout(() => void (person ? savePerson(person) : saveGroup(g!)), 300); };
+  const keep = () => {
+    clearTimeout(saving);
+    saving = window.setTimeout(() => { void (person ? savePerson(person) : saveGroup(g!)); if (person) void cardFile(person); }, 300);
+  };
   const btn = (cls: string, title: string, html: string, onclick: () => void) => {
     const b = h("button", cls);
     b.type = "button";
@@ -599,6 +605,8 @@ function openSheet(id: string) {
       p.image = file;
       keep();
       setFace(p);
+      if (sheetFile) URL.revokeObjectURL(sheetFile.url);
+      sheetFile = undefined;                         // (the file with the picture before it)
       renderCast();
       render();
       openSheet(id);
@@ -627,26 +635,34 @@ function openSheet(id: string) {
     return b;
   };
 
-  // the card's face: the portrait (a group's members side by side; the user's, or a place for one), the name on it
+  // the card's face: the portrait (a group's members side by side), the name on it
   const art = h("div", "card-art"), title = h("div", "card-title"), body = h("div", "card-body"), scroll = h("div", "card-scroll");
   if (g) {
     const strips = h("div", "strips");
     const all = inGroup(g).slice(0, 5);
     strips.append(...(all.length ? all : [face(id)]));
     art.append(strips);
-  } else if (person!.kind === "persona" && !person!.image) {
-    const blank = h("button", "card-blank");
-    blank.type = "button";
-    blank.innerHTML = `${icon("person")}Add a picture`;
-    blank.onclick = () => picture(person!);
-    art.append(blank);
-  } else if (person?.kind === "assistant" && !person.image && seaPortrait()) {
+  } else if (person!.kind === "assistant" && !person!.image && seaPortrait()) {
     art.append(cardSea!.layer);
     scroll.addEventListener("scroll", () => cardSea!.ocean.place(), { passive: true });
-  } else art.append(face(id));
+  } else {
+    // The portrait is the card's file (cardFile), named for them: a click saves it, as do the browser's Save image and
+    // Save link. It is not dragged out: Chromium on Wayland hands a file manager a dragged link only as text.
+    const file = h("a", "card-file"), pic = person!.image ? h("img") : face(id);
+    file.download = file.title = cardName(id);
+    file.draggable = false;
+    if (sheetFile?.id === id) file.href = sheetFile.url;
+    if (pic instanceof HTMLImageElement) {
+      pic.src = sheetFile?.id === id ? sheetFile.url : faces.get(id)!;
+      pic.alt = "";
+      pic.draggable = false;
+    }
+    file.append(pic);
+    art.append(file);
+    if (sheetFile?.id !== id) void cardFile(person!);
+  }
   art.append(h("div", "card-scrim"), title);
-  if (person?.image) art.append(btn("card-float card-pic", "Another picture", icon("edit"), () => picture(person)));
-  if (person?.kind === "assistant" && !person.image) art.append(btn("card-float card-pic", "A picture", icon("edit"), () => picture(person)));
+  if (person) art.append(btn("card-float card-pic", person.image ? "Another picture" : "A picture", icon("edit"), () => picture(person)));
   const name = h("input", "card-name");
   name.value = person ? person.card.data.name : g!.name;
   name.placeholder = id === ME ? "User" : id === CHRYSALIS ? "Chrysalis" : g ? "The group's name" : "Their name";   // (what an empty one is sent as)
@@ -654,16 +670,18 @@ function openSheet(id: string) {
   name.spellcheck = false;
   name.oninput = () => {
     if (person) person.card.data.name = name.value; else g!.name = name.value;
+    const file = art.querySelector<HTMLAnchorElement>("a.card-file");
+    if (file) file.download = file.title = cardName(id);
     keep();
     renderCast();
     if (castOf(conv).members.some((m) => m.id === id) || folderOf(conv) === id) render();
   };
   const d = person?.card.data;
   title.append(name);
-  if (person?.kind === "character") title.append(h("div", "card-tags", [d!.creator ? `by ${d!.creator}` : "", ...(d!.tags ?? []).slice(0, 3)].filter(Boolean).join(" · ")));
+  if (d) title.append(h("div", "card-tags", [d.creator ? `by ${d.creator}` : "", ...(d.tags ?? []).slice(0, 3)].filter(Boolean).join(" · ")));
   scroll.append(art, body);
 
-  if (person?.kind === "character" || person?.kind === "assistant") {
+  if (person) {
     const field = (label: string, k: keyof CardData, placeholder: string) => {
       const f = h("label", "card-field");
       f.append(h("span", "card-label", label), text(String(d![k] ?? ""), (v) => { d![k] = v; }, "card-text", placeholder));
@@ -677,18 +695,9 @@ function openSheet(id: string) {
       field("Greeting", "first_mes", "Their first message"), more);
     if (person.kind === "character") {
       const acts = h("div", "card-acts");
-      acts.append(btn("", "The card as a PNG any app reads", `${icon("download")}Export`, async () => {
-        const a = h("a");
-        a.href = URL.createObjectURL(await cardPng(person.card, person.image));
-        a.download = `${d!.name || "character"}.png`;
-        a.click();
-        setTimeout(() => URL.revokeObjectURL(a.href), 1000);
-      }), del());
+      acts.append(del());
       body.append(acts);
     }
-  } else if (person) {
-    body.append(text(person.card.data.description ?? "", (v) => { person.card.data.description = v; }, "card-text",
-      "What the characters should know about you"));
   } else {
     const members = h("div", "card-members");
     members.append(...[...people.values()].filter((x) => x.kind === "character").map((x) => {
@@ -743,8 +752,23 @@ function seaPortrait() {
 // the card's line to the voice service: what goes wrong is said only once a voice was asked to be heard (a service
 // that is not set up is no news to a card opened for its fields)
 const samples = () => (sampler ??= new Speaker((m) => { if (sampler?.previewed) toast(m); }));
+// The open card as the file it exports as (cast.ts cardPng), made again as it changes: a drag is given its data as it
+// starts, with no time to make it
+async function cardFile(p: Person) {
+  const url = URL.createObjectURL(await cardPng(p.card, p.image));
+  if (sheetOf !== p.id) return URL.revokeObjectURL(url);
+  if (sheetFile) URL.revokeObjectURL(sheetFile.url);
+  sheetFile = { id: p.id, url };
+  const file = $("cast-sheet").querySelector<HTMLAnchorElement>("a.card-file");
+  if (!file) return;
+  file.href = url;
+  file.querySelector("img")?.setAttribute("src", url);
+}
+const cardName = (id: string) => `${nameOf(id) || "character"}.png`;
 function closeSheet() {
   $("cast-sheet").hidden = true;
+  if (sheetFile) URL.revokeObjectURL(sheetFile.url);
+  sheetFile = undefined;
   sheetOf = "";
   sampler?.close();
   sampler = undefined;
@@ -813,17 +837,19 @@ function voicePick(p: Person, keep: () => void) {
 document.addEventListener("pointerdown", (e) => {
   const t = e.target as HTMLElement;
   if (!$("cast-add").hidden && !t.closest("#cast-add, #add-cast")) $("cast-add").hidden = true;
-  if (!$("cast-sheet").hidden && !t.closest("#cast-sheet, .cast-pic, #you, [data-who]")) closeSheet();
+  if (!$("cast-sheet").hidden && !t.closest("#cast-sheet, [data-card]")) closeSheet();
 });
 document.addEventListener("keydown", (e) => {
   if (e.key !== "Escape") return;
   if (!$("cast-add").hidden) { $("cast-add").hidden = true; e.preventDefault(); }
   else if (!$("cast-sheet").hidden) { closeSheet(); e.preventDefault(); }
 }, true);
-// a portrait or a name beside a reply opens their card
-thread.addEventListener("click", (e) => {
-  const who = (e.target as HTMLElement).closest<HTMLElement>(".speaker, p.line > .who")?.closest<HTMLElement>("[data-who]")?.dataset.who;
-  if (who && (people.has(who) || who === ME)) openSheet(who);
+// A portrait (a folder's, the user's, or with a name beside a message) opens their card, or closes it if it is the
+// one open
+document.addEventListener("click", (e) => {
+  const id = (e.target as HTMLElement).closest<HTMLElement>("[data-card]")?.dataset.card;
+  if (!id) return;
+  if (sheetOf === id) closeSheet(); else openSheet(id);
 });
 
 // A group's paragraphs each their speaker's: a line begun with a member's name and a colon starts a paragraph and is
@@ -856,6 +882,7 @@ function speakLine(n: Node | undefined, c: Conversation, before: Node | undefine
   n.classList.add("line");
   if (before instanceof HTMLElement && before.dataset.who === m.id) return void n.classList.add("same");
   const tag = h("span", "who"), name = m.card.data.name;
+  tag.dataset.card = m.id;
   tag.title = `${name}'s card`;
   tag.append(face(m.id), h("b", "", name));
   n.prepend(tag);
@@ -868,7 +895,7 @@ function speakerHead(c: Conversation) {
 }
 function head(id: string) {
   const el = h("div", "speaker"), name = nameOf(id);
-  el.dataset.who = id;
+  el.dataset.card = id;
   el.title = `${name}'s card`;
   el.append(face(id), h("span", "", name));
   return el;
@@ -909,8 +936,8 @@ function replyAs(p: Person, auto = false) {
   void generate(conv, conv.messages.length, p.id);
   renderCastNext();
 }
-// A reply read aloud outside voice mode (its speaker button), in the voice its writer speaks with in voice mode: a
-// group's paragraphs each in their speaker's, without the names they begin with. One at a time: its button again, or
+// A message read aloud outside voice mode (its speaker button), in the voice its writer speaks with in voice mode (the
+// user's own too): a group's paragraphs each in their speaker's, without the names they begin with. One at a time: its button again, or
 // another's, stops it, as do another chat and voice mode.
 let reader: Speaker | undefined, reading: Message | undefined, readerIdle = 0;
 function readAloud(m: Message) {
@@ -920,7 +947,8 @@ function readAloud(m: Message) {
     const c = conv, { members, group } = castOf(c), s = settings.voice ?? {};
     const base: VoiceAsk = { ...(s.tts ? { stack: { tts: s.tts } } : {}), ...(s.name ? { voice: s.name } : {}), speed: s.speed ?? 1 };
     const parts: { text: string; who?: Person }[] = [];
-    if (!group) parts.push({ text: m.content, who: writerOf(c) });
+    if (m.role === "user") parts.push({ text: m.content, who: persona() });
+    else if (!group) parts.push({ text: m.content, who: writerOf(c) });
     else {
       const names = members.map((x) => x.card.data.name);
       let who = m.as ? people.get(m.as) : undefined;
@@ -949,7 +977,7 @@ function stopReading() {
 // the speaker buttons as what is read says; a reader left unused lets go of the service (its voice model with it)
 function paintReading() {
   for (const b of thread.querySelectorAll<HTMLElement>("[data-act=speak]")) {
-    const on = !!reading && b.closest("article") === views.get(reading)?.el;
+    const on = !!reading && conv.messages[Number(b.closest<HTMLElement>("article")?.dataset.i)] === reading;
     b.classList.toggle("on", on);
     b.title = on ? "Stop reading" : TITLES.speak;
     b.innerHTML = icon(on ? "stop" : "speak");
@@ -2750,7 +2778,8 @@ function messageView(m: Message, i: number): HTMLElement {
   el.dataset.i = String(i);
   el.append(head(ME));
   foot.innerHTML = pager(m) + (m.voice ? `<span class="said" title="Said in voice mode">${icon("wave")}</span>` : "")
-    + slots([["copy", true], ["edit", !running()], ["trash", !running()]]);
+    + slots([["speak", !!m.content.trim() && !voice, reading === m ? `<button type="button" class="act on" data-act="speak" title="Stop reading">${icon("stop")}</button>` : undefined],
+      ["copy", true], ["edit", !running()], ["trash", !running()]]);
   if (m.note) {                                      // what the app told the model with it: sent, so shown
     const note = h("details", "msg-note"), sum = h("summary", "", m.voice ? "Voice mode note" : "Note to the model");
     sum.title = "What the app told the model with this message (Settings, Voice mode)";
@@ -3618,12 +3647,13 @@ function save(c: Conversation) {
 function request(c: Conversation, upto: Message[], o: { effort?: Effort; sampling?: Mode; final?: object; extra?: Record<string, unknown>; loop?: boolean; route?: boolean; as?: string } = {}) {
   const effort = o.effort ?? c.effort, mode: Mode = effort === "off" ? "fast" : "think";
   const messages: object[] = upto.flatMap(wire), system = systemFor(c), { members, group } = castOf(c);
-  // a card's instructions for after the chat go at the end of the last question: Chrysalis takes a system turn only
-  // first, and the rest of the conversation stays as it was sent before, a cache hit
-  const writer = writerOf(c), after = writer?.card.data.post_history_instructions?.trim();
+  // the cards' instructions for after the chat (the writer's, then the user's) go at the end of the last question:
+  // Chrysalis takes a system turn only first, and the rest of the conversation stays as it was sent before, a cache hit
+  const writer = writerOf(c), char = writer?.card.data.name ?? members[0]?.card.data.name ?? "";
+  const after = [writer, persona()].map((p) => p?.card.data.post_history_instructions?.trim()).filter(Boolean).map((t) => `[${fillCard(t!, char, userName())}]`);
   const asked = [...messages].reverse().find((x) => (x as { role: string }).role === "user") as { content: string | { type: string; text?: string }[] } | undefined;
-  if (after && asked) {
-    const note = `\n\n[${fillCard(after, writer!.card.data.name, userName())}]`;
+  if (after.length && asked) {
+    const note = `\n\n${after.join("\n\n")}`;
     if (typeof asked.content === "string") asked.content += note;
     else asked.content = [...asked.content, { type: "text", text: note }];
   }
@@ -3676,7 +3706,7 @@ const toolsOn = (c: Conversation) => !!c.tools && Object.keys(c.tools).length > 
 // own (cast.ts castPrompt), then the artifacts' instructions
 const systemFor = (c: Conversation) => castOf(c).members.length ? castSystem(c)
   : [castPrompt(fill((settings.system.trim() === DEFAULT_SYSTEM && toolsOn(c) ? DEFAULT_SYSTEM_TOOLS : settings.system).trim()),
-    [people.get(CHRYSALIS)!.card.data], { name: userName(), description: persona().card.data.description }),
+    [people.get(CHRYSALIS)!.card.data], userCard()),
     settings.artifacts === false ? "" : ARTIFACTS_PROMPT].filter(Boolean).join("\n\n");
 
 // Server-sent events of a reply, as parsed JSON chunks, then DONE.
@@ -5057,6 +5087,12 @@ function newChat(who = "") {
   unfold(who || CHRYSALIS);
   if (who && who !== CHRYSALIS) conv.who = who;
   greet(conv);
+  // the user's own greeting is their first message, in the box to send as it is or change (a character's opens the chat)
+  const mine = persona().card.data.first_mes?.trim();
+  if (mine && !input.value.trim()) {
+    input.value = fillCard(mine, writerOf(conv)?.card.data.name ?? castOf(conv).members[0]?.card.data.name ?? "", userName());
+    grow();
+  }
   history.replaceState(null, "", location.pathname);
   closeOver(panes.conversations);
   render();
@@ -5266,7 +5302,6 @@ window.addEventListener("hashchange", () => {
 });
 $("new-chat").addEventListener("click", () => newChat());
 $("add-cast").addEventListener("click", (e) => { e.stopPropagation(); openAdd(e.currentTarget as HTMLElement); });
-$("you").addEventListener("click", () => openSheet(ME));
 $("export").addEventListener("click", () => void exportChats([conv], fileName(conv.title)));
 $("export-all").addEventListener("click", () => {
   const all = Object.values(chats).sort((a, b) => b.updated - a.updated);

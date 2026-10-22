@@ -232,17 +232,19 @@ JSON), dropped anywhere or added with the + beside New chat, join the conversati
 and name, the latest-used first (a card already here, by its name and description, is that character again); a group
 (a small JSON of our own: a name, the members, a scenario) is their faces in one circle, a member with no card here yet
 as their initials until theirs is added, which puts them in. A folder opens and closes by its
-name and stays as it is left; closed, it says how many chats it holds. A portrait, in the list or beside a reply, opens the card: its fields as they are sent, edited where they are
+name and stays as it is left; closed, it says how many chats it holds. A portrait, in the list or beside a message, opens the card (and closes it again): its fields as they are sent, edited where they are
 read, the voice it speaks with in voice mode (picked and heard there: the voice service lists its voices and speaks a
-sample with no microphone, loading only that voice's model, 230 MB against the whole stack's 566 MB), Export (the card
-as a PNG any app reads, every field kept: a lorebook, other apps' extensions) and Delete (the character and their chats: a chat is theirs, never handed to anyone else; Undo brings
-it all back, and a character deleted in another tab takes their chats from this one when it opens). The user is a
-character too, the row at the bottom, named User until renamed: the one name shown and sent as every card's
-`{{user}}`, and what their card says of them goes to Chrysalis as to every character. Every message has who wrote it beside it: a reply its writer's portrait on the left, the user's own on
-the right. A reply's speaker button reads it aloud with voice mode closed, in its writer's voice (a group's paragraphs
+sample with no microphone, loading only that voice's model, 230 MB against the whole stack's 566 MB), and Delete (the character and their chats: a chat is theirs, never handed to anyone else; Undo brings
+it all back, and a character deleted in another tab takes their chats from this one when it opens). The portrait on
+the card is the card as a file named for them, a PNG any app reads with every field kept (a lorebook, other apps'
+extensions): a click saves it, as do the browser's Save image and Save link. The user is a
+character like any other, the row at the bottom, named User until renamed: the one name shown and sent as every card's
+`{{user}}`, their card the same as everyone's and sent as theirs are (their greeting is a new chat's first message,
+in the box to send or change). Every message is a bubble beside who wrote it, their name over it: a reply's on the left, the user's on the right.
+A message's speaker button reads it aloud with voice mode closed, in its writer's voice (a group's paragraphs
 each in their speaker's, without their names), through the same service with only that voice's model loaded. A chat
 with a character opens with its greeting (the card's others are versions of it). The card is the system prompt (`{{char}}` and `{{user}}` filled in, the
-persona's description after it; a card's own system prompt is kept in it, not sent) and stays the same all chat, so every reply reads it from Chrysalis's cache; its
+user's card after it; a card's own system prompt is kept in it, not sent) and stays the same all chat, so every reply reads it from Chrysalis's cache; its
 instructions for after the chat go at the end of the last question, since Chrysalis takes a system turn only first. A
 group's reply is the scene: each line its speaker's name and a colon (over three turns Flash-Next tagged all 9 of its
 paragraphs and kept the three voices apart), each paragraph shown with its speaker's portrait, once for a speaker who

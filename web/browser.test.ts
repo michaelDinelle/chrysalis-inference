@@ -504,6 +504,95 @@ test("a character card dropped in joins the cast: a row with their portrait amon
   await page.close();
 }, 40_000);
 
+test("the user is a character like any other: a portrait opens its card and closes it again (another's switches to theirs); the user's card has every field a character's has, sent as theirs are, their greeting the first message of a new chat (in the box), their voice the one their messages are read in; their messages and the replies alike in bubbles, each from its writer's side", async () => {
+  const page = await open();
+  await Bun.write(`${dir}/Mirela.png`, await card("Mirela", { description: "{{char}} keeps bees.", first_mes: "Hello, {{user}}." }));
+  await (await page.$("input#attach-file"))!.uploadFile(`${dir}/Mirela.png`);
+  await page.waitForFunction(() => document.querySelector("#thread .speaker")?.textContent === "Mirela");
+  const shown = () => page.$eval("#cast-sheet", (s) => (s as HTMLElement).hidden ? "" : s.querySelector<HTMLInputElement>("input.card-name")!.value);
+  const steps: string[] = [];
+  for (const click of [() => page.click("#thread .msg.assistant .speaker .face"), () => page.click("#you"), () => page.click("#you"),
+    () => inRow(page, "Mirela", ".cast-pic"), () => inRow(page, "Mirela", ".cast-pic")]) { await click(); steps.push(await shown()); }
+  expect(steps).toEqual(["Mirela", "User", "", "Mirela", ""]);
+  const parts = () => page.$eval("#cast-sheet", (s) => [...s.querySelectorAll(".card-pic, .card-voice select, .card-label")].map((x) => x.classList.contains("card-pic") ? "picture" : x.textContent || "voice"));
+  await inRow(page, "Mirela", ".cast-pic");
+  const hers = await parts();
+  await page.click("#you");
+  expect(await parts()).toEqual(hers);
+  await page.waitForFunction(() => [...document.querySelectorAll<HTMLOptionElement>("#cast-sheet option")].some((o) => o.value === "other-tts\nbob"), { timeout: 10_000 });
+  await page.select("#cast-sheet select", "other-tts\nbob");
+  for (const [label, text] of [["Personality", "curious"], ["Greeting", "Hi, {{char}}."], ["How they talk", "{{user}}: Hm."], ["After the chat", "Keep it short."]]) {
+    await page.evaluate((label) => {
+      const f = [...document.querySelectorAll("#cast-sheet .card-field")].find((x) => x.querySelector(".card-label")!.textContent === label)!;
+      f.closest("details")?.setAttribute("open", "");
+      f.querySelector("textarea")!.focus();
+    }, label);
+    await page.keyboard.type(text);
+  }
+  await page.keyboard.press("Escape");
+  await inRow(page, "Mirela", ".cast-new");
+  expect(await page.$eval("#input", (e) => (e as HTMLTextAreaElement).value)).toBe("Hi, Mirela.");
+  const done = await page.$$eval(".msg .stats", (s) => s.length);
+  await page.focus("#input");
+  await page.keyboard.press("Enter");
+  await page.waitForFunction((n) => document.querySelectorAll(".msg .stats").length > n, { timeout: 20_000 }, done);
+  expect(lastStream.messages[0].content).toBe("Write Mirela's next reply in a fictional chat between Mirela and User.\n\nMirela keeps bees.\n\n" +
+    "User's personality: curious\n\nHow User talks:\nUser: Hm.");
+  expect(lastStream.messages.at(-1)).toEqual({ role: "user", content: "Hi, Mirela.\n\n[Keep it short.]" });
+  const look = await page.evaluate(() => {
+    const at = (s: string) => document.querySelector(s)!.getBoundingClientRect(), mine = at(".msg.user .bubble"), hers = at(".msg.assistant > .markdown");
+    const style = (s: string) => { const c = getComputedStyle(document.querySelector(s)!); return [c.borderTopWidth, c.backgroundColor, c.paddingLeft]; };
+    // each bubble beside its writer's portrait, the same way from either side
+    return { sides: [hers.left - at(".msg.assistant .speaker .face").right, at(".msg.user .speaker .face").left - mine.right],
+      bubbles: [style(".msg.user .bubble"), style(".msg.assistant > .markdown")] };
+  });
+  expect([look.sides[0] > 0 && look.sides[0] === look.sides[1], look.bubbles[0][0], look.bubbles[1]]).toEqual([true, "1px", look.bubbles[0]]);
+  const n = voiceLog().length, button = '#thread > article[data-i="1"] [data-act="speak"]';
+  await page.click(button);
+  await page.waitForFunction((b) => !document.querySelector(`${b}.on`), { timeout: 10_000 }, button);
+  const said = voiceLog().slice(n).filter((e) => e.ev === "chunk" || e.type === "say");
+  expect([said.find((e) => e.type === "say")?.text, [...new Set(said.filter((e) => e.ev === "chunk").map((e) => `${e.tts}/${e.voice}`))]]).toEqual(["Hi, Mirela.", ["other-tts/bob"]]);
+  await page.close();
+}, 40_000);
+
+// A PNG's tEXt chunks, read here (not with cast.ts): keyword -> text, and its pixels' chunk
+function pngText(b: Uint8Array) {
+  const v = new DataView(b.buffer, b.byteOffset), out: Record<string, string> = {};
+  let idat = "";
+  for (let at = 8; at + 12 <= b.length;) {
+    const n = v.getUint32(at), type = String.fromCharCode(...b.subarray(at + 4, at + 8)), data = b.subarray(at + 8, at + 8 + n);
+    if (type === "tEXt") { const z = data.indexOf(0); out[String.fromCharCode(...data.subarray(0, z))] = String.fromCharCode(...data.subarray(z + 1)); }
+    if (type === "IDAT") idat += Buffer.from(data).toString("hex");
+    at += 12 + n;
+  }
+  return { text: out, idat };
+}
+
+test("a card's portrait is the card's file, named for them and as it is now: a click saves it, the PNG any app reads with the picture as given", async () => {
+  const page = await open();
+  const saved = mkdtempSync(`${RUN}/saved-`), cdp = await page.createCDPSession();
+  await cdp.send("Browser.setDownloadBehavior", { behavior: "allow", downloadPath: saved, browserContextId: page.browserContext().id });
+  await Bun.write(`${dir}/Mirela.png`, await card("Mirela", { description: "{{char}} keeps bees.", first_mes: "Hello, {{user}}." }));
+  await (await page.$("input#cast-file"))!.uploadFile(`${dir}/Mirela.png`);
+  await page.waitForFunction(() => document.querySelectorAll("#conversations .cast-row").length === 2);
+  await inRow(page, "Mirela", ".cast-pic");
+  await page.click("#cast-sheet .card-field textarea");
+  await page.keyboard.press("End");
+  await page.keyboard.type(" Twelve hives.");
+  await Bun.sleep(600);                                           // past the card's keeping (300 ms), and its file made again
+  await page.click("#cast-sheet a.card-file");
+  for (const t = Date.now(); !existsSync(`${saved}/Mirela.png`); await Bun.sleep(50)) if (Date.now() - t > 10_000) throw new Error(`not saved: ${readdirSync(saved)}`);
+  await Bun.sleep(200);
+  const got = pngText(readFileSync(`${saved}/Mirela.png`));
+  const v3 = JSON.parse(Buffer.from(got.text.ccv3 ?? "", "base64").toString()), v2 = JSON.parse(Buffer.from(got.text.chara ?? "", "base64").toString());
+  expect([readdirSync(saved), v3.data.name, v3.data.description, v2.data.description]).toEqual([["Mirela.png"], "Mirela", "{{char}} keeps bees. Twelve hives.", "{{char}} keeps bees. Twelve hives."]);
+  expect(got.idat).toBe(pngText(png).idat);
+  // the picture shown is that file
+  expect(await page.$eval("#cast-sheet a.card-file", (a) => [(a as HTMLAnchorElement).download, a.querySelector("img")!.src === (a as HTMLAnchorElement).href]))
+    .toEqual(["Mirela.png", true]);
+  await page.close();
+}, 30_000);
+
 test("the conversations are folders, Chrysalis's and each character's: a folder opened stays open while another's chat is, a closed one says how many chats it holds, and both stay as left after a reload", async () => {
   const page = await open();
   await send(page, "one for chrysalis");
