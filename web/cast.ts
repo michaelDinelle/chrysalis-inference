@@ -121,14 +121,12 @@ export const fill = (text: string, char: string, user: string) =>
   text.replace(/\{\{char\}\}|<BOT>/gi, char).replace(/\{\{user\}\}|<USER>/gi, user);
 const examples = (s: string) => s.replace(/^\s*<START>\s*$/gim, "").trim();
 
-// The system prompt of a chat with characters: the first one's system prompt in place of the chat's own if its card has
-// one ({{original}} in it is the chat's own), then for each character what its card says of it (with the group's
-// scenario in place of theirs), and the user's persona. Nothing in it changes from turn to turn, so every reply reads
+// The system prompt of a chat with characters (Chrysalis's too): the chat's own (base: a card's own system prompt is
+// kept in it, not sent), then for each character what its card says of it (with the group's scenario in place of
+// theirs), and the user's persona. Nothing in it changes from turn to turn, so every reply reads
 // it from Chrysalis's cache. With several, the reply is the scene: each line its speaker's name and a colon (app.ts sceneText).
 export function castPrompt(base: string, cast: CardData[], user: { name: string; description?: string }, scenario?: string): string {
-  const one = cast.length === 1, out: string[] = [];
-  const own = cast[0]?.system_prompt?.trim();
-  out.push(own ? own.replace(/\{\{original\}\}/gi, base) : base);
+  const one = cast.length === 1, out: string[] = [base];
   if (!one) out.push(`This is a scene with ${list(cast.map((c) => c.name))}. Write it one paragraph per line, each beginning with the ` +
     `speaker's name and a colon:\n\n${cast[0].name}: *What they do.* What they say.\n\nWrite only for them; {{user}} speaks ` +
     `for themself. Everyone here takes part: whoever would answer or react does, often more than one, then stop when it is {{user}}'s turn.`);

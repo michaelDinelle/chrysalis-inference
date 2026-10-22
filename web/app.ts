@@ -406,11 +406,16 @@ function pickFolder(id: string) {
   else if (!last && whoOf(conv) !== id) newChat(id);
   else closeOver(panes.conversations);
 }
-// A new chat with a character opens with the card's greeting; its other greetings are versions of it
-function greet(c: Conversation) {
+// A new chat opens with its writer's greeting, if their card has one; the card's other greetings are versions of it
+// who writes a chat's replies: its character, or Chrysalis for a chat with none; a group's are the scene's, no one's
+function writerOf(c: Conversation): Person | undefined {
   const { members, group } = castOf(c);
-  if (group || !members.length) return;
-  const d = members[0].card.data, say = (t: string): Message => ({ id: randomId(), role: "assistant", content: fillCard(t, d.name, userName()), reasoning: "" });
+  return group ? undefined : members[0] ?? (c.who ? undefined : people.get(CHRYSALIS));
+}
+function greet(c: Conversation) {
+  const p = writerOf(c);
+  if (!p) return;
+  const d = p.card.data, say = (t: string): Message => ({ id: randomId(), role: "assistant", content: fillCard(t, d.name, userName()), reasoning: "" });
   const all = [d.first_mes ?? "", ...(d.alternate_greetings ?? [])].filter((t) => t.trim());
   if (!all.length) return;
   const first = say(all[0]);
@@ -658,30 +663,29 @@ function openSheet(id: string) {
   if (person?.kind === "character") title.append(h("div", "card-tags", [d!.creator ? `by ${d!.creator}` : "", ...(d!.tags ?? []).slice(0, 3)].filter(Boolean).join(" · ")));
   scroll.append(art, body);
 
-  if (person?.kind === "character") {
+  if (person?.kind === "character" || person?.kind === "assistant") {
     const field = (label: string, k: keyof CardData, placeholder: string) => {
       const f = h("label", "card-field");
       f.append(h("span", "card-label", label), text(String(d![k] ?? ""), (v) => { d![k] = v; }, "card-text", placeholder));
       return f;
     };
-    const more = h("details", "card-more"), acts = h("div", "card-acts");
+    const more = h("details", "card-more");
     more.append(h("summary", "", "More"), field("How they talk", "mes_example", "Example lines: {{user}}: … {{char}}: …"),
-      field("System prompt", "system_prompt", "In place of the chat's own ({{original}} keeps it)"),
       field("After the chat", "post_history_instructions", "A note after the last message"));
-    acts.append(btn("", "The card as a PNG any app reads", `${icon("download")}Export`, async () => {
-      const a = h("a");
-      a.href = URL.createObjectURL(await cardPng(person.card, person.image));
-      a.download = `${d!.name || "character"}.png`;
-      a.click();
-      setTimeout(() => URL.revokeObjectURL(a.href), 1000);
-    }), del());
-    body.append(voicePick(person, keep), field("Description", "description", "Who they are: looks, past, manner"),
+    body.append(voicePick(person, keep), field("Description", "description", person.kind === "assistant" ? "Who they are, after the system prompt" : "Who they are: looks, past, manner"),
       field("Personality", "personality", "A few words"), field("Scenario", "scenario", "Where and when the chat begins"),
-      field("Greeting", "first_mes", "Their first message"), more, acts);
-  } else if (person?.kind === "assistant") {
-    const f = h("label", "card-field");
-    f.append(h("span", "card-label", "Scenario"), text(d!.scenario ?? "", (v) => { d!.scenario = v; }, "card-text", "Where and when the chat is, after the system prompt"));
-    body.append(voicePick(person, keep), f);
+      field("Greeting", "first_mes", "Their first message"), more);
+    if (person.kind === "character") {
+      const acts = h("div", "card-acts");
+      acts.append(btn("", "The card as a PNG any app reads", `${icon("download")}Export`, async () => {
+        const a = h("a");
+        a.href = URL.createObjectURL(await cardPng(person.card, person.image));
+        a.download = `${d!.name || "character"}.png`;
+        a.click();
+        setTimeout(() => URL.revokeObjectURL(a.href), 1000);
+      }), del());
+      body.append(acts);
+    }
   } else if (person) {
     body.append(text(person.card.data.description ?? "", (v) => { person.card.data.description = v; }, "card-text",
       "What the characters should know about you"));
@@ -859,8 +863,8 @@ function speakLine(n: Node | undefined, c: Conversation, before: Node | undefine
 // Who wrote a message (a character's or Chrysalis's reply, the user's question): their portrait beside it, their name
 // over it. A group's replies have theirs on each paragraph instead.
 function speakerHead(c: Conversation) {
-  const { members, group } = castOf(c);
-  return group ? null : head(members[0]?.id ?? CHRYSALIS);
+  const w = writerOf(c);
+  return w ? head(w.id) : null;
 }
 function head(id: string) {
   const el = h("div", "speaker"), name = nameOf(id);
@@ -916,7 +920,7 @@ function readAloud(m: Message) {
     const c = conv, { members, group } = castOf(c), s = settings.voice ?? {};
     const base: VoiceAsk = { ...(s.tts ? { stack: { tts: s.tts } } : {}), ...(s.name ? { voice: s.name } : {}), speed: s.speed ?? 1 };
     const parts: { text: string; who?: Person }[] = [];
-    if (!group) parts.push({ text: m.content, who: members[0] });
+    if (!group) parts.push({ text: m.content, who: writerOf(c) });
     else {
       const names = members.map((x) => x.card.data.name);
       let who = m.as ? people.get(m.as) : undefined;
@@ -3571,16 +3575,16 @@ function request(c: Conversation, upto: Message[], o: { effort?: Effort; samplin
   const messages: object[] = upto.flatMap(wire), system = systemFor(c), { members, group } = castOf(c);
   // a card's instructions for after the chat go at the end of the last question: Chrysalis takes a system turn only
   // first, and the rest of the conversation stays as it was sent before, a cache hit
-  const after = !group && members.length ? members[0].card.data.post_history_instructions?.trim() : "";
+  const writer = writerOf(c), after = writer?.card.data.post_history_instructions?.trim();
   const asked = [...messages].reverse().find((x) => (x as { role: string }).role === "user") as { content: string | { type: string; text?: string }[] } | undefined;
   if (after && asked) {
-    const note = `\n\n[${fillCard(after, members[0].card.data.name, userName())}]`;
+    const note = `\n\n[${fillCard(after, writer!.card.data.name, userName())}]`;
     if (typeof asked.content === "string") asked.content += note;
     else asked.content = [...asked.content, { type: "text", text: note }];
   }
   // Chrysalis takes no conversation without a user turn, and a chat with characters begins with theirs (a greeting, a
   // scene they start): one goes first, the same every time, so what follows stays a cache hit
-  if (members.length && (messages[0] as { role: string } | undefined)?.role !== "user") messages.unshift({ role: "user", content: "[The scene begins.]" });
+  if ((members.length || c.messages[0]?.role === "assistant") && (messages[0] as { role: string } | undefined)?.role !== "user") messages.unshift({ role: "user", content: "[The scene begins.]" });
   // a reply asked of one of a group: who, last, as a note the model reads before it thinks (a reply begun with their
   // name would skip its thinking)
   const next = o.as && people.get(o.as)?.card.data.name, last = messages.at(-1) as { role: string; content: unknown } | undefined;
@@ -3623,11 +3627,12 @@ function wire(m: Message): object[] {
 const toolsOn = (c: Conversation) => !!c.tools && Object.keys(c.tools).length > 0;
 // The system prompt as sent: the user's as written; the default says what is true of the chat (no tools, or these).
 // After it, how to make and change artifacts, unless Settings leaves that out.
+// A chat with Chrysalis: Settings' system prompt, then Chrysalis's card as any character's is sent after its chat's
+// own (cast.ts castPrompt), then the artifacts' instructions
 const systemFor = (c: Conversation) => castOf(c).members.length ? castSystem(c)
-  : [fill((settings.system.trim() === DEFAULT_SYSTEM && toolsOn(c) ? DEFAULT_SYSTEM_TOOLS : settings.system).trim()), chrysalisScenario(),
-    fillCard(persona().card.data.description?.trim() ?? "", nameOf(CHRYSALIS), userName()), settings.artifacts === false ? "" : ARTIFACTS_PROMPT].filter(Boolean).join("\n\n");
-// after the system prompt, as a character's card has them: what Chrysalis's card sets the chats in, and the user's own
-const chrysalisScenario = () => { const t = people.get(CHRYSALIS)?.card.data.scenario?.trim(); return t ? `Scenario: ${t}` : ""; };
+  : [castPrompt(fill((settings.system.trim() === DEFAULT_SYSTEM && toolsOn(c) ? DEFAULT_SYSTEM_TOOLS : settings.system).trim()),
+    [people.get(CHRYSALIS)!.card.data], { name: userName(), description: persona().card.data.description }),
+    settings.artifacts === false ? "" : ARTIFACTS_PROMPT].filter(Boolean).join("\n\n");
 
 // Server-sent events of a reply, as parsed JSON chunks, then DONE.
 const DONE = Symbol("done");
@@ -5005,10 +5010,8 @@ function newChat(who = "") {
   stopReading();
   conv = blank();
   unfold(who || CHRYSALIS);
-  if (who && who !== CHRYSALIS) {
-    conv.who = who;
-    greet(conv);
-  }
+  if (who && who !== CHRYSALIS) conv.who = who;
+  greet(conv);
   history.replaceState(null, "", location.pathname);
   closeOver(panes.conversations);
   render();

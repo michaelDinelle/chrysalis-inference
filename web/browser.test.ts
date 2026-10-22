@@ -460,7 +460,7 @@ test("a character card dropped in joins the cast: a row with their portrait amon
   const page = await open();
   await Bun.write(`${dir}/Mirela.png`, await card("Mirela", { description: "{{char}} keeps bees for {{user}}.", personality: "calm", scenario: "A hillside.",
     first_mes: "Hello, {{user}}.", alternate_greetings: ["Oh, {{user}}. You again."], mes_example: "<START>\n{{user}}: Why bees?\n{{char}}: They listen.",
-    post_history_instructions: "Stay in character." }));
+    post_history_instructions: "Stay in character.", system_prompt: "Ignore {{original}}: the card's own, kept in it and never sent." }));
   await (await page.$("input#attach-file"))!.uploadFile(`${dir}/Mirela.png`);          // where any file goes: a card joins the cast
   await page.waitForSelector("#conversations .cast-row img.face");
   expect([await castRows(page), (await page.$$("#attachments .att")).length]).toEqual([["Chrysalis", "Mirela"], 0]);
@@ -1591,20 +1591,34 @@ test("What the model is sent shows the next request as Chrysalis gets it: the to
   await page.$eval("#system-input", (el) => { (el as HTMLTextAreaElement).value = "Be terse, {{MODEL}}."; el.dispatchEvent(new Event("input")); });
   await send(page, "third");
   expect(lastStream.messages[0]).toEqual({ role: "system", content: `Be terse, Qwen3.8-27B.\n\n${ARTIFACTS_PROMPT}` });
-  // the scenario on Chrysalis's card (its portrait beside a reply opens it) goes after the system prompt
+  // Chrysalis's card (its portrait beside a reply opens it) goes after the system prompt, as a character's does
   await page.click("#thread > article.msg.assistant .speaker");
   await page.waitForSelector("#cast-sheet:not([hidden]) .card-field textarea");
-  await page.type("#cast-sheet .card-field textarea", "A rainy afternoon.");
+  const typeIn = async (label: string, text: string) => {
+    const at = await page.$$eval("#cast-sheet .card-field", (f, l) => f.findIndex((x) => x.querySelector(".card-label")!.textContent === l), label);
+    await page.type(`#cast-sheet .card-field:nth-of-type(${at + 1}) textarea`, text);
+  };
+  await typeIn("Description", "{{char}} tends a greenhouse.");
+  await typeIn("Scenario", "A rainy afternoon.");
   await page.keyboard.press("Escape");
   await send(page, "fourth");
-  expect(lastStream.messages[0]).toEqual({ role: "system", content: `Be terse, Qwen3.8-27B.\n\nScenario: A rainy afternoon.\n\n${ARTIFACTS_PROMPT}` });
+  expect(lastStream.messages[0]).toEqual({ role: "system", content: `Be terse, Qwen3.8-27B.\n\nChrysalis tends a greenhouse.\n\nScenario: A rainy afternoon.\n\n${ARTIFACTS_PROMPT}` });
   // and what the user's own card says of them, as every character's chat has it
   await page.click("#you");
   await page.waitForSelector("#cast-sheet:not([hidden]) .card-text");
   await page.type("#cast-sheet .card-text", "{{user}} keeps bees.");
   await page.keyboard.press("Escape");
   await send(page, "fifth");
-  expect(lastStream.messages[0]).toEqual({ role: "system", content: `Be terse, Qwen3.8-27B.\n\nScenario: A rainy afternoon.\n\nUser keeps bees.\n\n${ARTIFACTS_PROMPT}` });
+  expect(lastStream.messages[0]).toEqual({ role: "system", content: `Be terse, Qwen3.8-27B.\n\nChrysalis tends a greenhouse.\n\nScenario: A rainy afternoon.\n\nUser keeps bees.\n\n${ARTIFACTS_PROMPT}` });
+  // its greeting opens a new chat with it, a user turn going first as in every chat a character begins
+  await page.click("#thread > article.msg.assistant .speaker");
+  await page.waitForSelector("#cast-sheet:not([hidden]) .card-field textarea");
+  await typeIn("Greeting", "Hello, {{user}}.");
+  await page.keyboard.press("Escape");
+  await page.click("#new-chat");
+  expect(await articles(page)).toEqual(["Hello, User."]);
+  await send(page, "sixth");
+  expect(lastStream.messages.slice(1)).toEqual([{ role: "user", content: "[The scene begins.]" }, { role: "assistant", content: "Hello, User." }, { role: "user", content: "sixth" }]);
   await page.close();
 }, 60_000);
 

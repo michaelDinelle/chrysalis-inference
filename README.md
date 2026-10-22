@@ -224,7 +224,8 @@ math) and Markdown read as documents, block by block; a block points like a part
 click) turns it into its source to retype, and Select moves, copies and deletes blocks. Code is edited where it is shown (Edit).
 
 Characters (`web/cast.ts`): every chat is with someone, as in SillyTavern. The chats without a character are Chrysalis's,
-a character of its own: its card holds the default voice and a scenario sent after the system prompt, and its name and
+a character of its own, with a card like any character's (description, personality, scenario, greeting, how it
+talks), sent after Settings' system prompt as a character's is after its chat's, and the default voice; its name and
 picture can change (until a picture is given, its card shows the ASCII background's butterfly, live, ripples and all).
 SillyTavern's character cards (Character Card V2 and V3: a PNG with the card in it, or the
 JSON), dropped anywhere or added with the + beside New chat, join the conversations as a folder each, its head their portrait
@@ -241,7 +242,7 @@ character too, the row at the bottom, named User until renamed: the one name sho
 the right. A reply's speaker button reads it aloud with voice mode closed, in its writer's voice (a group's paragraphs
 each in their speaker's, without their names), through the same service with only that voice's model loaded. A chat
 with a character opens with its greeting (the card's others are versions of it). The card is the system prompt (`{{char}}` and `{{user}}` filled in, the
-persona's description after it) and stays the same all chat, so every reply reads it from Chrysalis's cache; its
+persona's description after it; a card's own system prompt is kept in it, not sent) and stays the same all chat, so every reply reads it from Chrysalis's cache; its
 instructions for after the chat go at the end of the last question, since Chrysalis takes a system turn only first. A
 group's reply is the scene: each line its speaker's name and a colon (over three turns Flash-Next tagged all 9 of its
 paragraphs and kept the three voices apart), each paragraph shown with its speaker's portrait, once for a speaker who
