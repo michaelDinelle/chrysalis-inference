@@ -949,7 +949,7 @@ label.set-switch { cursor: pointer; }
   overflow: hidden; border: 1px solid var(--line); border-radius: 20px; background: var(--raised); box-shadow: 0 24px 60px -18px rgb(0 0 0 / 0.55), var(--shadow); }
 .card-scroll { min-height: 0; overflow-y: auto; overscroll-behavior: contain; scrollbar-width: thin; }
 .card-art { position: relative; aspect-ratio: 2 / 3; overflow: hidden; background: var(--hover); }
-.card-art > img, .card-art > .face, .card-art > .strips, .card-art > .card-blank { position: absolute; inset: 0; width: 100%; height: 100%; border-radius: 0; }
+.card-art > img, .card-art > .face, .card-art > .strips, .card-art > .card-blank, .card-art > .card-sea { position: absolute; inset: 0; width: 100%; height: 100%; border-radius: 0; }
 .card-art > img { object-fit: cover; object-position: 50% 0; }
 .card-art:has(> .card-blank) { aspect-ratio: 4 / 3; }
 .card-art:has(> .card-blank) .card-scrim { display: none; }
@@ -958,6 +958,15 @@ label.set-switch { cursor: pointer; }
 .card-art:has(> .card-blank) .card-tags { color: var(--muted); }
 .cast-sheet:has(.card-blank) .card-x { background: var(--hover); color: var(--muted); }
 .card-art > .face { font-size: 72px; }
+/* Chrysalis's sea: the butterfly in the room above the name (whole, inside the picture's edges), the water fading into
+   the card under it */
+.card-art:has(> .card-sea) { background: var(--bg); }
+.card-sea { overflow: hidden; }
+.card-sea > .ocean { position: absolute; touch-action: manipulation; }
+.card-sea-room { position: absolute; inset: 11% 0 43%; pointer-events: none; }
+.card-art:has(> .card-sea) .card-scrim { background: linear-gradient(to bottom, transparent, var(--raised) 85%); }
+.card-art:has(> .card-sea) .card-name { color: var(--text); text-shadow: none; }
+.cast-sheet:has(.card-sea) .card-float { background: color-mix(in srgb, var(--raised) 70%, transparent); color: var(--muted); }
 .card-art > .face.self .i { width: 30%; height: 30%; }
 .strips { display: flex; gap: 2px; }
 .strips > * { flex: 1; min-width: 0; height: 100%; border-radius: 0; object-fit: cover; object-position: 50% 0; font-size: 30px; }
@@ -1014,13 +1023,13 @@ label.set-switch { cursor: pointer; }
 .card-section { display: grid; gap: 6px; }
 .card-label { color: var(--faint); font-size: 11px; font-weight: 600; letter-spacing: 0.07em; text-transform: uppercase; }
 /* every message has who wrote it beside it, as a chat with characters has it: their portrait in the margin (a reply's
-   on the left, the user's on the right), their name over it in their color; in a group each paragraph is its
+   on the left, the user's on the right), their name over it; in a group each paragraph is its
    speaker's, and one going on shows theirs once */
 .msg.assistant { position: relative; padding-left: 56px; }
 .msg.user { position: relative; padding-right: 56px; }
 .msg > .speaker { margin-bottom: 4px; font-size: 13.5px; font-weight: 600; }
 .msg.user > .speaker .face { left: auto; right: 0; }
-.speaker, p.line > .who { color: light-dark(hsl(var(--hue) 48% 36%), hsl(var(--hue) 62% 74%)); cursor: pointer; }
+.speaker, p.line > .who { cursor: pointer; }
 .speaker .face { position: absolute; left: 0; top: 0; width: 44px; height: 44px; font-size: 16px; }
 .speaker:hover .face, p.line > .who:hover .face { box-shadow: 0 0 0 2px var(--bg), 0 0 0 3.5px var(--accent); }
 .speaker:hover > span, p.line > .who:hover b { text-decoration: underline; text-underline-offset: 3px; }

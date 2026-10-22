@@ -226,7 +226,8 @@ math) and Markdown read as documents, block by block; a block points like a part
 click) turns it into its source to retype, and Select moves, copies and deletes blocks. Code is edited where it is shown (Edit).
 
 Characters (`web/cast.ts`): every chat is with someone, as in SillyTavern. The chats without a character are Chrysalis's,
-a character of its own: its card holds the system prompt and the default voice, and its name and picture can change.
+a character of its own: its card holds the system prompt and the default voice, and its name and picture can change
+(until a picture is given, its card shows the ASCII background's butterfly, live, ripples and all).
 SillyTavern's character cards (Character Card V2 and V3: a PNG with the card in it, or the
 JSON), dropped anywhere or added with the + beside New chat, join the conversations as a row each with their portrait,
 where their latest chat would be (a card already here, by its name and description, is that character again); a group

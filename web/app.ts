@@ -304,24 +304,7 @@ function castOf(c: Conversation): { members: Person[]; group?: Group } {
   return g ? { members: g.members.map((m) => people.get(m)).filter((p): p is Person => !!p), group: g } : { members: [people.get(id)!] };
 }
 const chatsOf = (id: string) => Object.values(chats).filter((s) => whoOf(s) === id).sort((a, b) => b.updated - a.updated);
-const hues = new Map<string, number>();            // a portrait's own color (its most colorful pixels' hue), once it is read
-const hue = (s: string, id?: string) => (id && hues.get(id)) ?? (id === CHRYSALIS ? 336 : [...s].reduce((a, ch) => (a * 31 + ch.charCodeAt(0)) % 360, 7));   // (336: the logo's pink)
-async function readHue(p: Person) {
-  if (!p.image) return;
-  try {
-    const bmp = await createImageBitmap(p.image, { resizeWidth: 24, resizeHeight: 36 }), c = new OffscreenCanvas(24, 36), g = c.getContext("2d")!;
-    g.drawImage(bmp, 0, 0);
-    const px = g.getImageData(0, 0, 24, 36).data;
-    let x = 0, y = 0;
-    for (let i = 0; i < px.length; i += 4) {        // each pixel's hue as a direction, weighted by how colorful it is
-      const r = px[i] / 255, gr = px[i + 1] / 255, b = px[i + 2] / 255, max = Math.max(r, gr, b), min = Math.min(r, gr, b), sat = max - min;
-      if (sat < 0.15) continue;
-      const hh = max === r ? ((gr - b) / sat) % 6 : max === gr ? (b - r) / sat + 2 : (r - gr) / sat + 4;
-      x += Math.cos(hh * Math.PI / 3) * sat; y += Math.sin(hh * Math.PI / 3) * sat;
-    }
-    if (x || y) hues.set(p.id, Math.round(((Math.atan2(y, x) * 180 / Math.PI) + 360) % 360));
-  } catch { /* not a picture this browser reads */ }
-}
+const hue = (s: string) => [...s].reduce((a, ch) => (a * 31 + ch.charCodeAt(0)) % 360, 7);   // initials' ground, from the name
 function face(id: string): HTMLElement {
   const g = groups.get(id);
   if (g) {                                           // a group: its members in one circle (two halves, a half and two quarters, four quarters)
@@ -354,13 +337,11 @@ function face(id: string): HTMLElement {
   s.style.setProperty("--hue", String(hue(name)));
   return s;
 }
-function setFace(p: Person): Promise<void> {
+function setFace(p: Person) {
   const was = faces.get(p.id);
   if (was) URL.revokeObjectURL(was);
   if (p.image) faces.set(p.id, URL.createObjectURL(p.image));
   else faces.delete(p.id);
-  hues.delete(p.id);
-  return readHue(p);
 }
 const nameOf = (id: string) => groups.get(id)?.name ?? (people.get(id)?.card.data.name.trim() || (id === CHRYSALIS ? "Chrysalis" : ""));
 const names = (ids: string[]) => { const n = ids.map(nameOf); return n.length < 2 ? n.join("") : `${n.slice(0, -1).join(", ")} and ${n.at(-1)}`; };
@@ -437,7 +418,7 @@ async function adopt(f: File): Promise<string | null> {
   if (had) return had.id;
   const p: Person = { id: randomId(), kind: "character", card: got.card, image: got.image, added: Date.now() };
   people.set(p.id, p);
-  await setFace(p);
+  setFace(p);
   await savePerson(p);
   return p.id;
 }
@@ -559,7 +540,10 @@ function openSheet(id: string) {
       if (!file) return;
       p.image = file;
       keep();
-      void setFace(p).then(() => { renderCast(); render(); openSheet(id); });
+      setFace(p);
+      renderCast();
+      render();
+      openSheet(id);
     };
     f.click();
   };
@@ -595,6 +579,9 @@ function openSheet(id: string) {
     blank.innerHTML = `${icon("person")}Add a picture`;
     blank.onclick = () => picture(person!);
     art.append(blank);
+  } else if (person?.kind === "assistant" && !person.image && seaPortrait()) {
+    art.append(cardSea!.layer);
+    scroll.addEventListener("scroll", () => cardSea!.ocean.place(), { passive: true });
   } else art.append(face(id));
   art.append(h("div", "card-scrim"), title);
   if (person?.image) art.append(btn("card-float card-pic", "Another picture", icon("edit"), () => picture(person)));
@@ -692,6 +679,19 @@ function openSheet(id: string) {
   const side = $("sidebar").getBoundingClientRect();
   sheet.style.left = `${Math.max(12, Math.min(side.right + 10, innerWidth - sheet.offsetWidth - 12))}px`;
   sheet.style.top = `${Math.max(12, Math.min(64, innerHeight - sheet.offsetHeight - 12))}px`;
+}
+// Chrysalis's own picture, while it has none of the user's: its butterfly in the sea of characters, as a new chat
+// shows it. One, made the first time the card opens and kept: it draws only while the card shows it.
+let cardSea: { layer: HTMLElement; ocean: Ocean; ok: boolean } | undefined;
+function seaPortrait() {
+  if (!seaReady) return false;
+  if (!cardSea) {
+    const layer = h("div", "card-sea"), ocean = new Ocean(layer, { box: "", hint: "", room: "#cast-sheet .card-sea-room" });
+    layer.append(h("div", "card-sea-room"));
+    cardSea = { layer, ocean, ok: ocean.start() };
+    ocean.butterfly(layer);
+  }
+  return cardSea.ok;
 }
 // the card's line to the voice service: what goes wrong is said only once a voice was asked to be heard (a service
 // that is not set up is no news to a card opened for its fields)
@@ -809,7 +809,6 @@ function speakLine(n: Node | undefined, c: Conversation, before: Node | undefine
   n.classList.add("line");
   if (before instanceof HTMLElement && before.dataset.who === m.id) return void n.classList.add("same");
   const tag = h("span", "who"), name = m.card.data.name;
-  tag.style.setProperty("--hue", String(hue(name, m.id)));
   tag.title = `${name}'s card`;
   tag.append(face(m.id), h("b", "", name));
   n.prepend(tag);
@@ -824,7 +823,6 @@ function head(id: string) {
   const el = h("div", "speaker"), name = nameOf(id) || (id === ME ? "You" : "");
   el.dataset.who = id;
   el.title = `${name}'s card`;
-  el.style.setProperty("--hue", String(hue(name, id)));
   el.append(face(id), h("span", "", name));
   return el;
 }
@@ -6435,8 +6433,10 @@ for (const c of Object.values(chats)) {                // a reply being written 
 }
 {
   const got = await loadCast();
-  for (const p of got.people) people.set(p.id, p);
-  await Promise.all(got.people.map(setFace));        // (the portraits' colors before the first chat is drawn)
+  for (const p of got.people) {
+    people.set(p.id, p);
+    setFace(p);
+  }
   for (const g of got.groups) groups.set(g.id, g);
   renderCast();
 }

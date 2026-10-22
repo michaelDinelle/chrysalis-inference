@@ -426,7 +426,8 @@ export class Ocean {
 
   // `layer`: the room the sea fills (under the top bar, behind the message box), shown while a new chat is. `box`: what
   // the water is quiet around and the butterfly floats above, in the room between it and the layer's top, and `hint` the
-  // line under it (the message box). A device's connect page (setup.ts) names its card and the room the butterfly has.
+  // line under it (the message box). A device's connect page (setup.ts) names its card and the room the butterfly has;
+  // Chrysalis's card (app.ts) no box, the butterfly in the middle of its picture.
   private boxAt: string;
   private hintAt: string;
   private roomAt: string;
@@ -498,12 +499,15 @@ export class Ocean {
     this.layer.append(this.canvas);
     this.resize.observe(this.layer);
     // the message box places the butterfly, the quiet water around it and the dimmest water behind a chat (its column)
-    const box = document.querySelector(this.boxAt);
+    const box = this.boxAt ? document.querySelector(this.boxAt) : null;
     if (box) this.resize.observe(box);
     this.readColors();
     void drawingSdf(720).then((s) => { this.sdf = s; this.uploadSdf(); this.wake(); });
     return true;
   }
+
+  // The layer moved without changing size (scrolled inside an element: the window's own scroll is followed already).
+  place() { this.layout(); }
 
   // A new chat's empty state: the butterfly rises while it is in the page and sinks once the chat has begun.
   butterfly(empty: HTMLElement) {
@@ -568,7 +572,7 @@ export class Ocean {
     const x0 = Math.max(0, Math.floor(r.left * dpr / cw)), y0 = Math.max(0, Math.floor(r.top * dpr / ch));
     this.seen = [x0, y0, Math.min(cols, Math.ceil(r.right * dpr / cw)) - x0, Math.min(rows, Math.ceil(r.bottom * dpr / ch)) - y0];
     // the butterfly over the message box, in the middle of the room above it
-    const box = document.querySelector(this.boxAt)?.getBoundingClientRect();
+    const box = this.boxAt ? document.querySelector(this.boxAt)?.getBoundingClientRect() : undefined;
     const hint = this.hintAt ? document.querySelector(this.hintAt)?.getBoundingClientRect() : undefined;
     const column = box && box.width > 0 ? box : r, top = box && box.width > 0 ? box.top : r.bottom;
     this.box = box && box.width > 0 ? [box.left, box.top, box.right, Math.max(box.bottom, hint?.height ? hint.bottom : 0)] : [-1e4, -1e4, -1e4, -1e4];
