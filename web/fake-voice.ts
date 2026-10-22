@@ -138,22 +138,20 @@ const ready = (ws: Bun.ServerWebSocket<Session>) => ws.send(JSON.stringify({ typ
 
 // hello's and config's asks: a part of the stack by name (loaded, then ready again), the voice, the speed. A model
 // it does not have, or does not have installed, is refused and the one in use kept.
-function ask(ws: Bun.ServerWebSocket<Session>, m: any): boolean {
+function ask(ws: Bun.ServerWebSocket<Session>, m: any) {
   const d = ws.data, stack = { ...d.stack };
   for (const [part, name] of Object.entries(m.stack ?? {}) as [Part, string][]) {
     const model = CATALOG[part]?.find((x) => x.name === name);
     if (!model?.installed) {
       ws.send(JSON.stringify({ type: "error", message: `${name} is ${model ? "not installed" : "unknown"}` }));
-      return false;
+      return;
     }
     stack[part] = name;
   }
-  const switched = stack.tts !== d.stack.tts || stack.stt !== d.stack.stt;
   d.stack = stack;
   if (m.voice && voicesOf(stack.tts).some((v) => v.id === m.voice)) d.voice = m.voice;
   else if (!voicesOf(stack.tts).some((v) => v.id === d.voice)) d.voice = voicesOf(stack.tts)[0]?.id ?? d.voice;
   if (m.speed) d.speed = m.speed;
-  return switched;
 }
 
 function message(ws: Bun.ServerWebSocket<Session>, m: any) {
@@ -164,9 +162,10 @@ function message(ws: Bun.ServerWebSocket<Session>, m: any) {
     ask(ws, m);
     ready(ws);
     d.listening = true;
-  } else if (m.type === "config") {
+  } else if (m.type === "config") {           // ready again after each, as the service is
     d.configs++;
-    if (ask(ws, m)) ready(ws);
+    ask(ws, m);
+    ready(ws);
   } else if (m.type === "catalog") {
     ws.send(JSON.stringify({ type: "catalog", catalog: CATALOG }));
   } else if (m.type === "preview") {

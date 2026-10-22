@@ -189,8 +189,9 @@
           </header>
           <div class="set-body">
             <section class="set-sec">
-              <div class="set-sec-head"><label class="set-title" for="system-input">System prompt</label><button id="system-reset" class="act knob-reset" type="button" title="Back to the default system prompt" aria-label="Restore the default system prompt"></button></div>
-              <textarea id="system-input" rows="2" placeholder="No system prompt" title="Sent as written, {{MODEL}} as the chat's model; empty sends none. The default keeps the model from acting as a coding agent when it doesn't think, and is sent as its tools version in a chat with tools on. A change makes each chat read its history again once."></textarea>
+              <div class="set-sec-head"><span class="set-title">System prompt</span></div>
+              <!-- written on Chrysalis's card, the character the chats without one are with (app.ts, the cast) -->
+              <button id="system-card" class="system-card" type="button" title="The system prompt, with Chrysalis's name, picture and voice"></button>
               <label class="set-switch" title="After the system prompt, how to make artifacts (with an id for each part) and change them in place with edits that hold only what changes"><span>Artifacts the model changes in place</span><button id="artifacts-switch" class="switch" type="button" role="switch" aria-checked="true"></button></label>
               <p id="system-note" class="set-note" hidden></p>
               <button id="sent-open" class="btn small" type="button" title="The open chat's next request, exactly as the backend gets it: the tools, the system prompt and every message">What the model is sent</button>

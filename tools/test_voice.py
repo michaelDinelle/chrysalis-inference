@@ -153,6 +153,18 @@ sample = [m for m in got if kind(m) == "audio"]
 heard = hear(np.concatenate([to16k(m[1], m[0]["rate"]) for m in sample])) if sample else ""
 check("and a voice's sample, as audio of its own", sample and sample[0][0]["id"] == "preview" and got[-1] == {"type": "said", "id": "preview"}
       and wer("Hi, I'm Emma. This is how I sound.", heard) <= 0.2, repr(heard))
+# a reply read aloud (its speaker button): the same kind of session, which speaks with the default voice model unless
+# it names one
+ws.send(json.dumps({"type": "config", "voice": "bf_emma"}))
+said = events(lambda m: kind(m) in ("ready", "error"), 60)[-1]
+read = "**Bees** keep the hive warm in winter.\n\n```\ncode is not read\n```\n\nThey shiver to make heat."
+ws.send(json.dumps({"type": "say", "id": "a1", "text": read}))
+ws.send(json.dumps({"type": "say_end", "id": "a1"}))
+got = events(lambda m: kind(m) in ("said", "error"), 60)
+heard = hear(np.concatenate([to16k(m[1], m[0]["rate"]) for m in got if kind(m) == "audio"] or [np.zeros(1, np.float32)]))
+check("a reply read with no hello: only its voice model", said.get("stack") == {"tts": "kokoro"} and said.get("voice") == "bf_emma"
+      and got[-1] == {"type": "said", "id": "a1"} and wer("Bees keep the hive warm in winter. They shiver to make heat.", heard) <= 0.2,
+      f"{said.get('stack')}: {heard!r}")
 sampled = rss()
 ws.close()
 ws = voice_mode

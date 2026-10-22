@@ -10,7 +10,7 @@ export interface CardData {
   tags?: string[]; creator?: string; character_version?: string; extensions?: Record<string, unknown>; [k: string]: unknown;
 }
 export interface Card { spec?: string; spec_version?: string; data: CardData; [k: string]: unknown }
-export interface Person { id: string; kind: "character" | "persona"; card: Card; image?: Blob; added: number }
+export interface Person { id: string; kind: "character" | "persona" | "assistant"; card: Card; image?: Blob; added: number }
 export interface Group { id: string; name: string; members: string[]; scenario?: string; added: number }
 export interface Voice { tts?: string; name?: string }
 

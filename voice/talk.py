@@ -406,7 +406,7 @@ class Talk:
             self.muted = bool(m.get("on"))
             self.audio.put_nowait(None)
         elif t == "preview":
-            await self.sample(str(m.get("voice", self.voice)), m.get("text"), m.get("tts"))
+            await self.sample(m.get("voice") or self.voice, m.get("text"), m.get("tts"))
         elif t == "catalog":
             await self.send({"type": "catalog", "catalog": self.lib.catalog()})
         else:
@@ -414,6 +414,8 @@ class Talk:
 
     async def configure(self, m):
         want = {**(DEFAULTS if m["type"] == "hello" else {}), **(m.get("stack") or {})}
+        if "tts" not in want and "tts" not in self.names:   # a session that only speaks (a reply read aloud): the default voice
+            want["tts"] = DEFAULTS["tts"]
         if bad := [k for k in want if k not in PARTS]:
             return await self.send({"type": "error", "message": f"no part kind {bad[0]!r} (there are: {', '.join(PARTS)})"})
         loop, t0 = asyncio.get_running_loop(), time.monotonic()
@@ -449,6 +451,7 @@ class Talk:
         samples alone: a sample needs no speech recognition."""
         name = name or self.names.get("tts") or DEFAULTS["tts"]
         tts = self.parts.get("tts") if name == self.names.get("tts") else await self.sampling(name)
+        voice = str(voice or (tts.VOICE if tts else ""))
         v = next((x for x in (tts.voice_list if tts else []) if x["id"] == voice), None)
         if not v:
             return tts and await self.send({"type": "error", "message": f"{name} has no voice {voice!r}"})

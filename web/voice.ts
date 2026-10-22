@@ -267,35 +267,92 @@ export class VoiceClient {
   }
 }
 
-// The voices there are and a voice's sample, apart from voice mode (a character's voice picker): a socket of its own
-// with no microphone, for which the service loads only the voice model a sample needs. It closes when the picker does.
-export class VoiceSampler {
+// The voice service apart from voice mode: the voices it has, a voice's sample (a character's card) and a reply read
+// aloud (its speaker button), on a socket of its own with no microphone, for which the service loads only the voice
+// model it speaks with.
+export class Speaker {
   private ws?: WebSocket;
   private out?: AudioContext;
-  private sound?: AudioBufferSourceNode;
+  private live = new Set<AudioBufferSourceNode>();
+  private end = 0;                                  // the out context's time the last piece scheduled ends
+  private now?: string;                             // what is being said: a part of a reply read, or the sample
+  private reading?: object;                         // the read going on (another read, or stop, ends it)
+  private ids = 0;
   private listed: ((c: VoiceReady["catalog"] | null) => void)[] = [];
+  private readied: ((r: VoiceReady | null) => void)[] = [];
+  private made = new Map<string, () => void>();
+  private quiet: (() => void)[] = [];
   previewed = false;                                // a sample was asked for
   constructor(private failed: (message: string) => void) {}
 
   catalog(): Promise<VoiceReady["catalog"] | null> {
     return new Promise((done) => { this.listed.push(done); this.send({ type: "catalog" }); });
   }
-  // in the click that asked: where audio starts only from a click (Safari), a context made later starts suspended
-  preview(tts: string, voice: string) {
+  preview(tts?: string, voice?: string) {
     this.previewed = true;
-    this.out ??= new AudioContext({ latencyHint: "interactive" });
-    void this.out.resume();
-    this.hush();
-    this.send({ type: "preview", tts, voice });
+    this.stop();
+    this.sound();
+    this.now = PREVIEW;
+    this.send({ type: "preview", ...(tts ? { tts } : {}), ...(voice ? { voice } : {}) });
+  }
+  // A reply read aloud: its parts one after another, each in its own voice or else in the one `base` asks for (what
+  // the service then speaks with is the default it falls back to). The service speaks in one voice at a time, so a
+  // part is asked for once the one before it has all been made; done once the last of it has been heard.
+  async read(parts: { text: string; voice?: { tts?: string; name?: string } }[], base: VoiceAsk, done: () => void) {
+    this.stop();
+    this.sound();
+    const run = (this.reading = {});
+    this.send({ type: "config", ...base });
+    const r = await new Promise<VoiceReady | null>((ok) => this.readied.push(ok));
+    let asked = "";
+    for (const p of parts) {
+      if (this.reading !== run || !r) return;
+      const tts = p.voice?.name ? p.voice.tts ?? r.stack.tts : r.stack.tts, name = p.voice?.name ?? r.voice;
+      const want: VoiceAsk = { ...(tts ? { stack: { tts } } : {}), ...(name ? { voice: name } : {}), speed: base.speed };
+      if (JSON.stringify(want) !== asked) this.send({ type: "config", ...want });
+      asked = JSON.stringify(want);
+      const id = (this.now = `read-${++this.ids}`);
+      const made = new Promise<void>((ok) => this.made.set(id, ok));
+      this.send({ type: "say", id, text: p.text });
+      this.send({ type: "say_end", id });
+      await made;
+    }
+    if (this.reading !== run) return;
+    if (this.live.size) await new Promise<void>((ok) => this.quiet.push(ok));
+    if (this.reading === run) { this.reading = this.now = undefined; done(); }
+  }
+  stop() {
+    if (this.now && this.now !== PREVIEW && this.ws?.readyState === WebSocket.OPEN) this.ws.send(JSON.stringify({ type: "cancel", id: this.now }));
+    this.reading = this.now = undefined;
+    for (const ok of this.made.values()) ok();
+    this.made.clear();
+    for (const src of this.live) {
+      src.onended = null;
+      try { src.stop(); } catch { /* not started */ }
+    }
+    this.live.clear();
+    for (const ok of this.quiet.splice(0)) ok();
+    this.end = 0;
   }
   close() {
-    this.hush();
+    this.stop();
     this.ws?.close();
     void this.out?.close().catch(() => {});
     this.ws = this.out = undefined;
-    for (const done of this.listed.splice(0)) done(null);
+    this.gone();
   }
 
+  // in the click that asked: where audio starts only from a click (Safari), a context made later starts suspended
+  private sound() {
+    this.out ??= new AudioContext({ latencyHint: "interactive" });
+    void this.out.resume();
+  }
+  private gone() {
+    for (const done of this.listed.splice(0)) done(null);
+    for (const done of this.readied.splice(0)) done(null);
+    for (const ok of this.made.values()) ok();
+    this.made.clear();
+  }
   private send(o: object) {
     if (!this.ws || this.ws.readyState > WebSocket.OPEN) {
       const ws = (this.ws = new WebSocket(`${location.protocol === "https:" ? "wss" : "ws"}://${location.host}/api/voice`));
@@ -304,9 +361,11 @@ export class VoiceSampler {
         if (typeof e.data !== "string") return this.play(e.data);
         const m = JSON.parse(e.data);
         if (m.type === "catalog") for (const done of this.listed.splice(0)) done(m.catalog ?? {});
+        else if (m.type === "ready") for (const done of this.readied.splice(0)) done(m);
+        else if (m.type === "said") { this.made.get(m.id)?.(); this.made.delete(m.id); }
         else if (m.type === "error") this.failed(m.message);
       };
-      ws.onclose = () => { if (this.ws === ws) for (const done of this.listed.splice(0)) done(null); };
+      ws.onclose = () => { if (this.ws === ws) this.gone(); };
     }
     const ws = this.ws, text = JSON.stringify(o);
     if (ws.readyState === WebSocket.OPEN) ws.send(text);
@@ -314,17 +373,19 @@ export class VoiceSampler {
   }
   private play(buf: ArrayBuffer) {
     const n = new DataView(buf).getUint32(0, true), h: Chunk = JSON.parse(new TextDecoder().decode(new Uint8Array(buf, 4, n)));
-    if (!this.out || h.id !== PREVIEW) return;
-    const pcm = new Int16Array(buf.slice(4 + n)), ab = this.out.createBuffer(1, Math.max(1, pcm.length), h.rate), ch = ab.getChannelData(0);
+    const ctx = this.out;
+    if (!ctx || h.id !== this.now) return;
+    const pcm = new Int16Array(buf.slice(4 + n)), ab = ctx.createBuffer(1, Math.max(1, pcm.length), h.rate), ch = ab.getChannelData(0);
     for (let i = 0; i < pcm.length; i++) ch[i] = pcm[i] / 32768;
-    this.hush();
-    const src = (this.sound = this.out.createBufferSource());
+    const src = ctx.createBufferSource(), start = Math.max(ctx.currentTime + LEAD, this.end);
     src.buffer = ab;
-    src.connect(this.out.destination);
-    src.start();
-  }
-  private hush() {
-    try { this.sound?.stop(); } catch { /* not started */ }
-    this.sound = undefined;
+    src.connect(ctx.destination);
+    src.start(start);
+    this.end = start + ab.duration;
+    this.live.add(src);
+    src.onended = () => {
+      this.live.delete(src);
+      if (!this.live.size) for (const ok of this.quiet.splice(0)) ok();
+    };
   }
 }

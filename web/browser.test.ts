@@ -67,6 +67,7 @@ const REPLIES: Record<string, string> = {
   "good morning mirela": "*She smiles.* Good morning.",
   "a toast for the hive": "Mirela: *She raises a cup.* To the bees.\nTomas: To the bees!",
   "the same speaker": "Mirela: One.\nMirela: Two.\n\n*She hums.*\nTomas: Three.",
+  "a duet": "Vox: *She sings.* La la.\nAda: Hum.\n\nHum hum.",
   "hall on its line": HALL,
   "gate as an attribute": GATE,
   "rename the sign": '```edit hall\n<h1 id="sign">Goodbye</h1>\n```\n\nRenamed.',
@@ -451,8 +452,9 @@ test("pages labelled as models also label them, the id alone on the block's firs
 // A character card as a PNG (the tests' picture), the names of the cast's rows among the chats, and a row opened
 const card = (name: string, data: object) => cardPng({ spec: "chara_card_v3", spec_version: "3.0", data: { name, ...data } }, new Blob([png], { type: "image/png" }));
 const castRows = (page: Page) => page.$$eval("#conversations .cast-row .cast-name", (r) => r.map((x) => x.textContent!).sort());
-const openRow = (page: Page, name: string) => page.evaluate((name) => [...document.querySelectorAll("#conversations .cast-row")]
-  .find((r) => r.querySelector(".cast-name")!.textContent === name)!.querySelector<HTMLElement>(".cast-main")!.click(), name);
+const inRow = (page: Page, name: string, part: string) => page.evaluate((name, part) => [...document.querySelectorAll("#conversations .cast-row")]
+  .find((r) => r.querySelector(".cast-name")!.textContent === name)!.querySelector<HTMLElement>(part)!.click(), name, part);
+const openRow = (page: Page, name: string) => inRow(page, name, ".cast-main");
 
 test("a character card dropped in joins the cast: a row with their portrait among the chats, a chat that opens with their greeting (the others as versions), their replies with their portrait beside them, which opens their card to read and edit; the card is the system prompt and the persona {{user}}; a continued reply shows no thinking it did not have", async () => {
   const page = await open();
@@ -461,7 +463,7 @@ test("a character card dropped in joins the cast: a row with their portrait amon
     post_history_instructions: "Stay in character." }));
   await (await page.$("input#attach-file"))!.uploadFile(`${dir}/Mirela.png`);          // where any file goes: a card joins the cast
   await page.waitForSelector("#conversations .cast-row img.face");
-  expect([await castRows(page), (await page.$$("#attachments .att")).length]).toEqual([["Mirela"], 0]);
+  expect([await castRows(page), (await page.$$("#attachments .att")).length]).toEqual([["Chrysalis", "Mirela"], 0]);
   expect(await page.$eval("#input", (e) => (e as HTMLTextAreaElement).placeholder)).toBe("Message Mirela");
   expect(await articles(page)).toEqual(["Hello, User."]);
   expect([await pagerOf(page, 0), await page.$eval("#thread .msg.assistant .speaker", (e) => e.textContent)]).toEqual(["1 / 2", "Mirela"]);
@@ -502,7 +504,7 @@ test("a group's replies are the scene, each paragraph its speaker's and one goin
   await Bun.write(`${dir}/Ida.png`, await card("Ida", { description: "{{char}} paints hives." }));
   writeFileSync(`${dir}/Hive.json`, JSON.stringify({ spec: "chrysalis_group", name: "Hive", members: ["Mirela", "Tomas"], scenario: "Market day." }));
   await (await page.$("input#cast-file"))!.uploadFile(`${dir}/Mirela.png`, `${dir}/Tomas.png`, `${dir}/Hive.json`);
-  await page.waitForFunction(() => document.querySelectorAll("#conversations .cast-row").length === 3);
+  await page.waitForFunction(() => document.querySelectorAll("#conversations .cast-row").length === 4);   // and Chrysalis
   await openRow(page, "Hive");
   await page.waitForSelector("#cast-next:not([hidden])");
   await send(page, "a toast for the hive");
@@ -532,7 +534,7 @@ test("a group's replies are the scene, each paragraph its speaker's and one goin
   await page.waitForFunction(() => document.querySelectorAll("#cast-next button[title$=' next']").length === 3);
   await (await page.$("input#attach-file"))!.uploadFile(`${dir}/Mirela.png`);
   await page.waitForFunction(() => /Mirela is in this chat already/.test(document.querySelector("#toast")?.textContent ?? ""));
-  expect([await castRows(page), (await page.$$("#attachments .att")).length]).toEqual([["Hive", "Ida", "Mirela", "Tomas"], 0]);
+  expect([await castRows(page), (await page.$$("#attachments .att")).length]).toEqual([["Chrysalis", "Hive", "Ida", "Mirela", "Tomas"], 0]);
   // a character's row dragged onto a chat with one character: a group of the two, the chat theirs, what she said hers
   await openRow(page, "Mirela");
   await page.waitForFunction(() => document.querySelector("#thread .speaker")?.textContent === "Mirela");
@@ -544,11 +546,11 @@ test("a group's replies are the scene, each paragraph its speaker's and one goin
   });
   await page.waitForSelector("#cast-next:not([hidden])");
   expect([await castRows(page), await page.$$eval("#cast-next button[title$=' next']", (b) => b.map((x) => (x as HTMLElement).title)), await lines(0)])
-    .toEqual([["Hive", "Ida", "Mirela", "Mirela and Tomas", "Tomas"], ["Mirela next", "Tomas next"], [[`Mirela`, false]]]);
+    .toEqual([["Chrysalis", "Hive", "Ida", "Mirela", "Mirela and Tomas", "Tomas"], ["Mirela next", "Tomas next"], [[`Mirela`, false]]]);
 
   await page.reload({ waitUntil: "load" });                                              // the cast is this device's, not the tab's
   await page.waitForSelector("#conversations .cast-row");
-  expect(await castRows(page)).toEqual(["Hive", "Ida", "Mirela", "Mirela and Tomas", "Tomas"]);
+  expect(await castRows(page)).toEqual(["Chrysalis", "Hive", "Ida", "Mirela", "Mirela and Tomas", "Tomas"]);
   await page.close();
 }, 60_000);
 
@@ -1117,8 +1119,9 @@ test("a model picked while a reply is written is the one the next question asks 
 
 test("a question is kept as it is sent, before its reply begins: the chat left at once stays in the list, and after a reload it holds the question and says its reply never began", async () => {
   const page = await open();
+  let held = true;                                  // (requests after it is let go, a portrait's picture, go as they are)
   await page.setRequestInterception(true);
-  page.on("request", (r) => { if (!(r.method() === "POST" && new URL(r.url()).pathname === "/api/chat")) void r.continue(); });   // its job never begins
+  page.on("request", (r) => { if (held && !(r.method() === "POST" && new URL(r.url()).pathname === "/api/chat")) void r.continue(); });   // its job never begins
   await page.type("#input", "a held question");
   await page.keyboard.press("Enter");
   await page.click("#new-chat");
@@ -1127,6 +1130,7 @@ test("a question is kept as it is sent, before its reply begins: the chat left a
   await page.click(".conv");
   await page.waitForSelector("#thread > article.msg.assistant .error");
   expect(await articles(page)).toEqual(["a held question", "The page was left before this reply began: regenerate it"]);
+  held = false;
   await page.setRequestInterception(false);
   await page.hover('#thread > article[data-i="1"]');
   await page.click('#thread > article[data-i="1"] [data-act="retry"]');
@@ -1274,7 +1278,7 @@ test("a character's voice is picked and heard from their card with voice mode ne
   await (await page.$("input#cast-file"))!.uploadFile(`${dir}/Vox.png`);
   await page.waitForSelector("#conversations .cast-row");
   const n = voiceLog().length;
-  await page.click("#conversations .cast-row .cast-pic");
+  await inRow(page, "Vox", ".cast-pic");
   await page.waitForFunction(() => [...document.querySelectorAll<HTMLOptionElement>("#cast-sheet option")].some((o) => o.value === "other-tts\nbob"), { timeout: 10_000 });
   await page.select("#cast-sheet select", "other-tts\nbob");
   const until = async (ok: () => boolean) => { for (let t = Date.now(); !ok(); await Bun.sleep(50)) if (Date.now() - t > 10_000) throw new Error("timed out"); };
@@ -1290,6 +1294,36 @@ test("a character's voice is picked and heard from their card with voice mode ne
   const asked = voiceLog().slice(m).filter((e) => e.ev === "msg" && (e.type === "hello" || e.type === "config"));
   expect(asked.some((e) => e.voice === "bob" && (e.stack?.tts === "other-tts" || asked.some((x) => x.stack?.tts === "other-tts")))).toBe(true);
   await page.click("#send");
+  await page.close();
+}, 30_000);
+
+test("a reply is read aloud from its speaker button with voice mode never opened (no hello: no microphone, no speech recognition): a group's paragraphs each in their speaker's voice, without their names; the button shows it, and stops it", async () => {
+  const page = await open();
+  await Bun.write(`${dir}/Vox.png`, await card("Vox", { description: "{{char}} sings.", extensions: { chrysalis: { voice: { tts: "other-tts", name: "bob" } } } }));
+  await Bun.write(`${dir}/Ada.png`, await card("Ada", { description: "{{char}} hums." }));
+  writeFileSync(`${dir}/Duet.json`, JSON.stringify({ spec: "chrysalis_group", name: "Duet", members: ["Vox", "Ada"] }));
+  await (await page.$("input#cast-file"))!.uploadFile(`${dir}/Vox.png`, `${dir}/Ada.png`, `${dir}/Duet.json`);
+  await page.waitForFunction(() => document.querySelectorAll("#conversations .cast-row").length === 4);
+  await openRow(page, "Duet");
+  await page.waitForSelector("#cast-next:not([hidden])");
+  await send(page, "a duet");
+  const n = voiceLog().length, button = '#thread > article[data-i="1"] [data-act="speak"]';
+  await page.click(button);
+  await page.waitForSelector(`${button}.on`);
+  await page.waitForFunction((b) => !document.querySelector(`${b}.on`), { timeout: 10_000 }, button);   // heard to the end
+  const s = voiceLog().slice(n).find((e) => e.ev === "msg").s, mine = voiceLog().filter((e) => e.s === s);
+  expect(mine.filter((e) => e.ev === "msg").map((e) => e.type)).toEqual(["config", "config", "say", "say_end", "config", "say", "say_end"]);
+  const says = mine.filter((e) => e.type === "say");
+  expect(says.map((e) => e.text)).toEqual(["*She sings.* La la.", "Hum.\n\nHum hum."]);
+  expect(says.map((x) => [...new Set(mine.filter((e) => e.ev === "chunk" && e.id === x.id).map((e) => `${e.tts}/${e.voice}`))]))
+    .toEqual([["other-tts/bob"], ["fake-tts/plain"]]);                 // hers, then the default the service speaks with
+  // again, and stopped: what is left of it is dropped
+  await page.click(button);
+  await page.waitForSelector(`${button}.on`);
+  await page.click(button);
+  expect(await page.$(`${button}.on`)).toBeNull();
+  const until = async (ok: () => boolean) => { for (let t = Date.now(); !ok(); await Bun.sleep(50)) if (Date.now() - t > 10_000) throw new Error("timed out"); };
+  await until(() => voiceLog().filter((e) => e.s === s).some((e) => e.type === "cancel"));
   await page.close();
 }, 30_000);
 
@@ -1434,7 +1468,7 @@ test("voice mode's note goes before the first question said and again when it ch
   await page.close();
 }, 45_000);
 
-test("What the model is sent shows the next request as Chrysalis gets it: the tools as JSON, the one system prompt, every message; an edited prompt goes as written", async () => {
+test("What the model is sent shows the next request as Chrysalis gets it: the tools as JSON, the one system prompt, every message; a prompt edited on Chrysalis's card goes as written", async () => {
   const page = await open();
   await page.setViewport({ width: 1600, height: 900 });
   await page.click("#tools-btn");
@@ -1460,7 +1494,10 @@ test("What the model is sent shows the next request as Chrysalis gets it: the to
     at = k;
   }
   expect(next.messages[0].content).toContain("The tools offered here are the only ones");
-  await page.$eval("#system-input", (el) => { (el as HTMLTextAreaElement).value = "Be terse, {{MODEL}}."; el.dispatchEvent(new Event("input")); });
+  await page.click("#system-card");                                    // Settings' way to the card that holds it
+  await page.waitForSelector("#cast-sheet:not([hidden]) .card-system textarea");
+  await page.$eval("#cast-sheet .card-system textarea", (el) => { (el as HTMLTextAreaElement).value = "Be terse, {{MODEL}}."; el.dispatchEvent(new Event("input")); });
+  await page.keyboard.press("Escape");
   await send(page, "third");
   expect(lastStream.messages[0]).toEqual({ role: "system", content: `Be terse, Qwen3.8-27B.\n\n${ARTIFACTS_PROMPT}` });
   await page.close();

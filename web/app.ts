@@ -10,13 +10,14 @@ import "katex/dist/katex.min.css";
 import { marked, type Links, type Token, type Tokens } from "marked";
 import { type Attachment, KINDS, attach, dataUrl, fmtBytes, get as getFile, put as putFile, textBlock } from "./files";
 import { type Cand, type Odds, type SamplerKey, type Stage, dryRuns, sample } from "./sampler";
-import { type Part, type VoiceAsk, type VoiceInfo, type VoiceReady, VoiceClient, VoiceSampler } from "./voice";
+import { type Part, type VoiceAsk, type VoiceInfo, type VoiceReady, Speaker, VoiceClient } from "./voice";
 import { type Fix, applyFixes, fixedParts, readHeard } from "./heard";
 import { pointOf, shownWords, unitOf } from "./spoken";
 import { DESCRIPTIONS, type ToolChoice, type WireCall, assistantTurn, noted, toolTurn } from "./wire";
 import { type Block, type Span, type Version, ARTIFACTS_PROMPT, PAGE_DOC, elementById, elementSpans, idOf, artifactOf, infoOf, type Info, markSource, replay, setOpen, withAttr, withBackground,
   withContent, withCopy, withOrder, withPaint, withoutElement, lineDiff } from "./artifacts";
 import { LATEX_CSS, latexToHtml } from "./latex";
+import logo from "./logo.svg";
 import logoThin from "./logo-thin.svg";
 import { type CardData, type Group, type Person, type Voice, cardPng, castPrompt, dropGroup, dropPerson, fill as fillCard, loadCast, readCast, saveGroup, savePerson, speakerOf,
   voiceOf } from "./cast";
@@ -243,17 +244,18 @@ const ICONS = {
   mic: '<rect x="9" y="3" width="6" height="11" rx="3"/><path d="M5.5 11a6.5 6.5 0 0 0 13 0M12 17.5V21"/>',
   phone: '<rect x="6.5" y="2.5" width="11" height="19" rx="2.5"/><path d="M10.5 18.5h3"/>',
   shapes: '<rect x="3.5" y="10.5" width="10" height="10" rx="2"/><circle cx="15.5" cy="8.5" r="5"/>',
+  speak: '<path d="M4 9.5h3.5L12 5.5v13l-4.5-4H4z"/><path d="M15.5 9a4 4 0 0 1 0 6M18 6.5a7.5 7.5 0 0 1 0 11"/>',
   person: '<circle cx="12" cy="8" r="4"/><path d="M4 21c1.5-4 4.5-6 8-6s6.5 2 8 6"/>',
   personAdd: '<circle cx="10" cy="8" r="4"/><path d="M2.5 21c1.4-4 4.2-6 7.5-6 1.6 0 3 .5 4.3 1.3M19 14v6M16 17h6"/>',
   upload: '<path d="M12 15V4M7.5 8.5 12 4l4.5 4.5M5 20h14"/>',
   micOff: '<path d="M15 9.4V6a3 3 0 0 0-5.7-1.3M9 9v2a3 3 0 0 0 4.9 2.3M18.5 11a6.5 6.5 0 0 1-1 3.4M5.5 11a6.5 6.5 0 0 0 10.4 5.2M12 17.5V21M4 4l16 16"/>',
 };
-const TITLES = { copy: "Copy", edit: "Edit", trash: "Delete", tokens: "Token odds", retry: "Regenerate (a new version)" };
+const TITLES = { copy: "Copy", edit: "Edit", trash: "Delete", tokens: "Token odds", retry: "Regenerate (a new version)", speak: "Read aloud" };
 const icon = (name: keyof typeof ICONS) => `<svg class="i" viewBox="0 0 24 24" aria-hidden="true">${ICONS[name]}</svg>`;
 
 const $ = <T extends HTMLElement = HTMLElement>(id: string) => document.getElementById(id) as T;
 const thread = $("thread"), scroller = $("scroller"), input = $<HTMLTextAreaElement>("input"), sendBtn = $<HTMLButtonElement>("send");
-const panel = $("settings"), systemInput = $<HTMLTextAreaElement>("system-input");
+const panel = $("settings");
 // The side panels (the conversations, Settings): one mechanism, in "the side panels" below. A panel's default width
 // is style.css's (widthVar); `preferred` is the width it was given, `width` what the window allows of it.
 interface Pane {
@@ -267,7 +269,7 @@ const pane = (name: string, el: HTMLElement, key: string, besideFrom: number, wi
 };
 const panes = {
   conversations: pane("conversations", $("sidebar"), "b", 761, "--side-open", 208),
-  settings: pane("settings", panel, ",", 1460, "--panel-open", 340, () => { syncSettings(); growSystem(); void loadCatalog(); }),
+  settings: pane("settings", panel, ",", 1460, "--panel-open", 340, () => { syncSettings(); void loadCatalog(); }),
 };
 const PANES = Object.values(panes);
 
@@ -279,7 +281,8 @@ function h<K extends keyof HTMLElementTagNameMap>(tag: K, cls = "", text = ""): 
 }
 
 // The cast (cast.ts): characters from SillyTavern's cards, the user's persona and groups of characters, kept on this
-// device. A character or a group is a row among the chats, where its latest chat would be: its portrait opens its card
+// device, and Chrysalis, the character the chats without one are with (its card holds the system prompt and the
+// default voice: Settings'). Each is a row among the chats, where its latest chat would be: its portrait opens its card
 // (what the card says, edited where it is read, the voice they speak with, export, delete), the rest its latest chat,
 // and the open chat's row lists its chats. A chat with a character opens with its greeting (the card's other greetings
 // are versions of it) and is written as the character, their portrait beside each reply; a group's replies are the
@@ -287,20 +290,22 @@ function h<K extends keyof HTMLElementTagNameMap>(tag: K, cls = "", text = ""): 
 // or picked joins the cast (one already here is that character again); dropped on a chat with characters, it joins
 // that chat too: a group gains them, and a chat with one character becomes a group of them all.
 const people = new Map<string, Person>(), groups = new Map<string, Group>(), faces = new Map<string, string>();
-const ME = "me";                                     // the persona's id: there is one
+const ME = "me", CHRYSALIS = "chrysalis";            // the persona's id and the assistant's: there is one of each
+people.set(CHRYSALIS, { id: CHRYSALIS, kind: "assistant", card: { spec: "chara_card_v2", spec_version: "2.0", data: { name: "Chrysalis" } }, added: 0 });
 const CAST_DRAG = "application/x-chrysalis-cast";    // a character's row dragged onto a chat
 let talking = 0;                                     // "let them talk": the beats a group has left to write on its own
 const persona = () => people.get(ME);
 const userName = () => persona()?.card.data.name.trim() || "User";
-const folderOf = (c: Conversation) => (c.who && (people.has(c.who) || groups.has(c.who)) ? c.who : "");
+const folderOf = (c: Conversation) => (c.who && c.who !== CHRYSALIS && (people.has(c.who) || groups.has(c.who)) ? c.who : "");
+const whoOf = (c: Conversation) => folderOf(c) || CHRYSALIS;
 function castOf(c: Conversation): { members: Person[]; group?: Group } {
   const id = folderOf(c), g = id ? groups.get(id) : undefined;
   if (!id) return { members: [] };
   return g ? { members: g.members.map((m) => people.get(m)).filter((p): p is Person => !!p), group: g } : { members: [people.get(id)!] };
 }
-const chatsOf = (id: string) => Object.values(chats).filter((s) => folderOf(s) === id).sort((a, b) => b.updated - a.updated);
+const chatsOf = (id: string) => Object.values(chats).filter((s) => whoOf(s) === id).sort((a, b) => b.updated - a.updated);
 const hues = new Map<string, number>();            // a portrait's own color (its most colorful pixels' hue), once it is read
-const hue = (s: string, id?: string) => (id && hues.get(id)) ?? [...s].reduce((a, ch) => (a * 31 + ch.charCodeAt(0)) % 360, 7);
+const hue = (s: string, id?: string) => (id && hues.get(id)) ?? (id === CHRYSALIS ? 336 : [...s].reduce((a, ch) => (a * 31 + ch.charCodeAt(0)) % 360, 7));   // (336: the logo's pink)
 async function readHue(p: Person) {
   if (!p.image) return;
   try {
@@ -337,6 +342,14 @@ function face(id: string): HTMLElement {
     s.innerHTML = icon("person");
     return s;
   }
+  if (id === CHRYSALIS) {                            // its butterfly, on a ground of its own (a mark, not a picture)
+    const s = h("span", "face chrysalis"), img = h("img");
+    img.src = logo;
+    img.alt = "";
+    img.draggable = false;
+    s.append(img);
+    return s;
+  }
   const s = h("span", "face initials", name.slice(0, 1).toUpperCase());
   s.style.setProperty("--hue", String(hue(name)));
   return s;
@@ -349,7 +362,7 @@ function setFace(p: Person): Promise<void> {
   hues.delete(p.id);
   return readHue(p);
 }
-const nameOf = (id: string) => groups.get(id)?.name ?? people.get(id)?.card.data.name ?? "";
+const nameOf = (id: string) => groups.get(id)?.name ?? (people.get(id)?.card.data.name.trim() || (id === CHRYSALIS ? "Chrysalis" : ""));
 const names = (ids: string[]) => { const n = ids.map(nameOf); return n.length < 2 ? n.join("") : `${n.slice(0, -1).join(", ")} and ${n.at(-1)}`; };
 
 function renderCast() {
@@ -359,7 +372,7 @@ function renderCast() {
 }
 // A character's or a group's row among the chats: its last words under its name, + a new chat with them
 function castRow(id: string, list: Conversation[]): HTMLElement {
-  const g = groups.get(id), name = nameOf(id), open = folderOf(conv) === id, last = list[0]?.messages.at(-1);
+  const g = groups.get(id), name = nameOf(id), open = whoOf(conv) === id, last = list[0]?.messages.at(-1);
   const row = h("div", `cast-row${open ? " open" : ""}${open && !chats[conv.id] ? " active" : ""}${list.some((s) => runs.has(s.id)) ? " running" : ""}`);
   const pic = h("button", "cast-pic"), main = h("button", "cast-main"), add = h("button", "act cast-new");
   pic.type = main.type = add.type = "button";
@@ -373,7 +386,7 @@ function castRow(id: string, list: Conversation[]): HTMLElement {
   add.innerHTML = icon("plus");
   add.onclick = () => newChat(id);
   row.append(pic, main, add);
-  if (!g) {                                          // onto a chat with characters: they join it
+  if (people.get(id)?.kind === "character") {       // onto a chat with characters: they join it
     row.draggable = true;
     row.ondragstart = (e) => { e.dataTransfer!.setData(CAST_DRAG, id); e.dataTransfer!.effectAllowed = "copy"; };
   }
@@ -383,7 +396,7 @@ function castRow(id: string, list: Conversation[]): HTMLElement {
 function pickFolder(id: string) {
   const last = chatsOf(id)[0];
   if (last && last.id !== conv.id) location.hash = last.id;
-  else if (!last && folderOf(conv) !== id) newChat(id);
+  else if (!last && whoOf(conv) !== id) newChat(id);
   else closeOver(panes.conversations);
 }
 // A new chat with a character opens with the card's greeting; its other greetings are versions of it
@@ -515,7 +528,7 @@ $("cast-file").addEventListener("change", async (e) => {
 // here), export and delete. The user's own card takes a picture, their name and what the characters know of them; a
 // group's shows its members side by side, which of the characters are in it, and its scenario. What is typed is kept
 // as it is.
-let sheetOf = "", sampler: VoiceSampler | undefined;
+let sheetOf = "", sampler: Speaker | undefined;
 function openSheet(id: string) {
   const sheet = $("cast-sheet"), g = groups.get(id);
   if (id === ME && !people.has(ME)) {
@@ -585,6 +598,7 @@ function openSheet(id: string) {
   } else art.append(face(id));
   art.append(h("div", "card-scrim"), title);
   if (person?.image) art.append(btn("card-float card-pic", "Another picture", icon("edit"), () => picture(person)));
+  if (person?.kind === "assistant" && !person.image) art.append(btn("card-float card-pic", "A picture", icon("edit"), () => picture(person)));
   const name = h("input", "card-name");
   name.value = person ? person.card.data.name : g!.name;
   name.placeholder = person?.kind === "persona" ? "Your name" : g ? "The group's name" : "Their name";
@@ -621,6 +635,23 @@ function openSheet(id: string) {
     body.append(voicePick(person, keep), field("Description", "description", "Who they are: looks, past, manner"),
       field("Personality", "personality", "A few words"), field("Scenario", "scenario", "Where and when the chat begins"),
       field("Greeting", "first_mes", "Their first message"), more, acts);
+  } else if (person?.kind === "assistant") {
+    // the system prompt the chats with Chrysalis are sent (Settings')
+    const f = h("label", "card-field card-system"), head = h("span", "card-label", "System prompt");
+    const reset = btn("act card-reset", "Back to the default system prompt", icon("retry"), () => {
+      const before = settings.system;
+      settings.system = DEFAULT_SYSTEM;
+      saveSettings();
+      openSheet(id);
+      toast("The system prompt is back to the default", () => { settings.system = before; saveSettings(); openSheet(id); });
+    });
+    reset.hidden = settings.system === DEFAULT_SYSTEM;
+    const sys = text(settings.system, (v) => { settings.system = v; reset.hidden = v === DEFAULT_SYSTEM; saveSettings(); }, "card-text", "No system prompt");
+    sys.title = "Sent as written, {{MODEL}} as the chat's model; empty sends none. The default keeps the model from acting as a coding agent when "
+      + "it doesn't think, and is sent as its tools version in a chat with tools on. A change makes each chat read its history again once.";
+    head.append(reset);
+    f.append(head, sys);
+    body.append(voicePick(person, keep), f);
   } else if (person) {
     body.append(text(person.card.data.description ?? "", (v) => { person.card.data.description = v; }, "card-text",
       "What the characters should know about you"));
@@ -664,24 +695,27 @@ function openSheet(id: string) {
 }
 // the card's line to the voice service: what goes wrong is said only once a voice was asked to be heard (a service
 // that is not set up is no news to a card opened for its fields)
-const samples = () => (sampler ??= new VoiceSampler((m) => { if (sampler?.previewed) toast(m); }));
+const samples = () => (sampler ??= new Speaker((m) => { if (sampler?.previewed) toast(m); }));
 function closeSheet() {
   $("cast-sheet").hidden = true;
   sheetOf = "";
   sampler?.close();
   sampler = undefined;
 }
-// The voice a character speaks with in voice mode (kept in its card), from the voices the voice service lists (asked
-// for here when voice mode has not listed them yet); a voice picked is heard at once, and ▶ plays the one picked
+// The voice a character speaks with in voice mode (kept in its card; Chrysalis's is Settings', which the others fall
+// back to), from the voices the voice service lists (asked for here when voice mode has not listed them yet); a voice
+// picked is heard at once, and ▶ plays the one picked
 function voicePick(p: Person, keep: () => void) {
   const box = h("div", "card-voice"), sel = h("select"), play = h("button", "act");
+  const assistant = p.kind === "assistant";
   const hear = () => {
-    const [tts, name] = sel.value ? sel.value.split("\n") : [currentVoice().tts, currentVoice().id];
-    if (tts && name) samples().preview(tts, name);
+    const [tts, name] = sel.value ? sel.value.split("\n") : assistant ? [] : [settings.voice?.tts, settings.voice?.name];
+    samples().preview(tts, name);
   };
   const fill = (none_ = "Voices…") => {
-    const mine = voiceOf(p.card.data), models = (voiceCatalog.tts ?? []).filter((m) => m.installed && m.voices?.length);
-    const none = h("option", "", models.length ? "The chat's voice" : none_);
+    const mine = assistant ? { tts: settings.voice?.tts, name: settings.voice?.name } : voiceOf(p.card.data);
+    const models = (voiceCatalog.tts ?? []).filter((m) => m.installed && m.voices?.length);
+    const none = h("option", "", models.length ? (assistant ? "The default voice" : `${nameOf(CHRYSALIS)}'s voice`) : none_);
     none.value = "";
     sel.replaceChildren(none, ...models.map((m) => {
       const group = h("optgroup");
@@ -704,9 +738,14 @@ function voicePick(p: Person, keep: () => void) {
   play.onclick = hear;
   sel.onchange = () => {
     const [tts, name] = sel.value.split("\n");
-    const ext = (p.card.data.extensions ??= {}), own = (ext.chrysalis ??= {}) as { voice?: Voice };
-    if (sel.value) own.voice = { tts, name }; else delete own.voice;
-    keep();
+    if (assistant) {
+      setVoice({ tts: tts || undefined, name: name || undefined });
+      saveSettings();
+    } else {
+      const ext = (p.card.data.extensions ??= {}), own = (ext.chrysalis ??= {}) as { voice?: Voice };
+      if (sel.value) own.voice = { tts, name }; else delete own.voice;
+      keep();
+    }
     if (voice && castOf(voice.c).members.some((m) => m.id === p.id)) pushVoice();
     hear();
   };
@@ -727,7 +766,7 @@ function voicePick(p: Person, keep: () => void) {
 document.addEventListener("pointerdown", (e) => {
   const t = e.target as HTMLElement;
   if (!$("cast-add").hidden && !t.closest("#cast-add, #add-cast")) $("cast-add").hidden = true;
-  if (!$("cast-sheet").hidden && !t.closest("#cast-sheet, .cast-pic, #you, [data-who]")) closeSheet();
+  if (!$("cast-sheet").hidden && !t.closest("#cast-sheet, .cast-pic, #you, #system-card, [data-who]")) closeSheet();
 });
 document.addEventListener("keydown", (e) => {
   if (e.key !== "Escape") return;
@@ -737,7 +776,7 @@ document.addEventListener("keydown", (e) => {
 // a portrait or a name beside a reply opens their card
 thread.addEventListener("click", (e) => {
   const who = (e.target as HTMLElement).closest<HTMLElement>(".speaker, p.line > .who")?.closest<HTMLElement>("[data-who]")?.dataset.who;
-  if (who && people.has(who)) openSheet(who);
+  if (who && (people.has(who) || who === ME)) openSheet(who);
 });
 
 // A group's paragraphs each their speaker's: a line begun with a member's name and a colon starts a paragraph and is
@@ -775,16 +814,19 @@ function speakLine(n: Node | undefined, c: Conversation, before: Node | undefine
   tag.append(face(m.id), h("b", "", name));
   n.prepend(tag);
 }
-// A character's reply: their portrait beside it, their name over it
+// Who wrote a message (a character's or Chrysalis's reply, the user's question): their portrait beside it, their name
+// over it. A group's replies have theirs on each paragraph instead.
 function speakerHead(c: Conversation) {
   const { members, group } = castOf(c);
-  if (group || members.length !== 1) return null;
-  const head = h("div", "speaker"), m = members[0];
-  head.dataset.who = m.id;
-  head.title = `${m.card.data.name}'s card`;
-  head.style.setProperty("--hue", String(hue(m.card.data.name, m.id)));
-  head.append(face(m.id), h("span", "", m.card.data.name));
-  return head;
+  return group ? null : head(members[0]?.id ?? CHRYSALIS);
+}
+function head(id: string) {
+  const el = h("div", "speaker"), name = nameOf(id) || (id === ME ? "You" : "");
+  el.dataset.who = id;
+  el.title = `${name}'s card`;
+  el.style.setProperty("--hue", String(hue(name, id)));
+  el.append(face(id), h("span", "", name));
+  return el;
 }
 
 // Over a group's message box: its members' faces (the next reply is the one clicked's, after what is typed, if
@@ -822,6 +864,55 @@ function replyAs(p: Person, auto = false) {
   void generate(conv, conv.messages.length, p.id);
   renderCastNext();
 }
+// A reply read aloud outside voice mode (its speaker button), in the voice its writer speaks with in voice mode: a
+// group's paragraphs each in their speaker's, without the names they begin with. One at a time: its button again, or
+// another's, stops it, as do another chat and voice mode.
+let reader: Speaker | undefined, reading: Message | undefined, readerIdle = 0;
+function readAloud(m: Message) {
+  const again = reading === m;
+  stopReading();
+  if (!again) {
+    const c = conv, { members, group } = castOf(c), s = settings.voice ?? {};
+    const base: VoiceAsk = { ...(s.tts ? { stack: { tts: s.tts } } : {}), ...(s.name ? { voice: s.name } : {}), speed: s.speed ?? 1 };
+    const parts: { text: string; who?: Person }[] = [];
+    if (!group) parts.push({ text: m.content, who: members[0] });
+    else {
+      const names = members.map((x) => x.card.data.name);
+      let who = m.as ? people.get(m.as) : undefined;
+      for (const para of sceneText(m.content, c).split(/\n{2,}/)) {
+        const said = speakerOf(para, names), last = parts.at(-1);
+        if (said) who = members.find((x) => x.card.data.name === said.name);
+        const text = said ? para.slice(said.rest) : para;
+        if (last && last.who === who) last.text += `\n\n${text}`;
+        else parts.push({ text, who });
+      }
+    }
+    reading = m;
+    clearTimeout(readerIdle);
+    void (reader ??= new Speaker((e) => toast(e))).read(parts.map((x) => ({ text: x.text, voice: x.who && voiceOf(x.who.card.data) })), base, () => {
+      reading = undefined;
+      paintReading();
+    });
+  }
+  paintReading();
+}
+function stopReading() {
+  reader?.stop();
+  reading = undefined;
+  paintReading();
+}
+// the speaker buttons as what is read says; a reader left unused lets go of the service (its voice model with it)
+function paintReading() {
+  for (const b of thread.querySelectorAll<HTMLElement>("[data-act=speak]")) {
+    const on = !!reading && b.closest("article") === views.get(reading)?.el;
+    b.classList.toggle("on", on);
+    b.title = on ? "Stop reading" : TITLES.speak;
+    b.innerHTML = icon(on ? "stop" : "speak");
+  }
+  clearTimeout(readerIdle);
+  if (!reading && reader) readerIdle = window.setTimeout(() => { reader?.close(); reader = undefined; }, 60_000);
+}
+
 // The next beat of a scene left to talk
 function talkOn() {
   const { members, group } = castOf(conv);
@@ -2579,15 +2670,15 @@ function render() {
 function messageView(m: Message, i: number): HTMLElement {
   if (m === editing) return editorView(m, i);
   if (m.role === "assistant") {
-    const v = assistantView(i), head = speakerHead(conv);
-    if (head) v.el.prepend(head);
-    v.el.classList.toggle("cast", !!folderOf(conv));
+    const v = assistantView(i), by = speakerHead(conv);
+    if (by) v.el.prepend(by);
     views.set(m, v);
     paint(v, m, [...runs.values()].find((r) => r.m === m)?.live);
     return v.el;
   }
   const el = h("article", m.fix ? "msg user fix" : "msg user"), foot = h("footer", "msg-foot");
   el.dataset.i = String(i);
+  el.append(head(ME));
   foot.innerHTML = pager(m) + (m.voice ? `<span class="said" title="Said in voice mode">${icon("wave")}</span>` : "")
     + slots([["copy", true], ["edit", !running()], ["trash", !running()]]);
   if (m.note) {                                      // what the app told the model with it: sent, so shown
@@ -3019,7 +3110,8 @@ function paint(v: View, m: Message, live?: Live) {
   const cont = cut ? `<button type="button" class="btn" data-act="cont" title="Continue">${icon("cont")}Continue</button>`
     : `<button type="button" class="act" data-act="cont" title="Continue">${icon("cont")}</button>`;
   v.foot.innerHTML = pager(m) + `<span class="stats">${facts.join(" · ")}</span>` + slots([["cont", last && !busy && canCont, cont], ["retry", !busy]])
-    + slots([["tokens", !!m.id && tokens.has(m.id)], ["copy", true], ["edit", !busy], ["trash", !busy]]);
+    + slots([["tokens", !!m.id && tokens.has(m.id)], ["speak", !!m.content.trim() && !voice, reading === m ? `<button type="button" class="act on" data-act="speak" title="Stop reading">${icon("stop")}</button>` : undefined],
+      ["copy", true], ["edit", !busy], ["trash", !busy]]);
   delete v.foot.dataset.pager;
   v.foot.querySelector("[data-act=tokens]")?.classList.toggle("on", asTokens);
 }
@@ -3292,16 +3384,15 @@ const customized = () => settings.system !== DEFAULT_SYSTEM
   || !!settings.max_tokens || settings.seed !== undefined || !!settings.allow?.length || settings.fetchChars !== undefined
   || Object.keys(settings.voice ?? {}).length > 0;
 
-// The chats with Chrysalis one by one, newest first under their dates; a character's or a group's as one row where its
-// latest would be (castRow), with its chats under it while one of them is open
+// Chrysalis, the characters and the groups, newest first under their dates: each a row where its latest chat would be
+// (castRow), with its chats under it while one of them is open
 function renderList() {
-  const nav = $("conversations"), today = new Date().setHours(0, 0, 0, 0), open = folderOf(conv);
+  const nav = $("conversations"), today = new Date().setHours(0, 0, 0, 0), open = whoOf(conv);
   const group = (t: number) => (t >= today ? "Today" : t >= today - 6 * 864e5 ? "Previous 7 days" : "Older");
   const rows: { at: number; els: HTMLElement[] }[] = [];
-  for (const s of Object.values(chats)) if (!folderOf(s)) rows.push({ at: s.updated, els: [convRow(s)] });
-  for (const x of [...[...people.values()].filter((p) => p.kind === "character"), ...groups.values()]) {
+  for (const x of [...[...people.values()].filter((p) => p.kind !== "persona"), ...groups.values()]) {
     const list = chatsOf(x.id);
-    rows.push({ at: list[0]?.updated ?? x.added, els: [castRow(x.id, list), ...(open === x.id ? list.map((s) => convRow(s, true)) : [])] });
+    rows.push({ at: list[0]?.updated ?? x.added, els: [castRow(x.id, list), ...(open === x.id ? list.map(convRow) : [])] });
   }
   let current = "";
   nav.replaceChildren();
@@ -3310,8 +3401,8 @@ function renderList() {
     nav.append(...r.els);
   }
 }
-function convRow(s: Conversation, inner = false) {
-  const a = h("a", `conv${inner ? " inner" : ""}${s.id === conv.id ? " active" : ""}${runs.has(s.id) ? " running" : ""}`), del = h("button", "conv-del", "×");
+function convRow(s: Conversation) {
+  const a = h("a", `conv${s.id === conv.id ? " active" : ""}${runs.has(s.id) ? " running" : ""}`), del = h("button", "conv-del", "×");
   a.href = `#${s.id}`;
   a.onclick = (e) => { if (!e.defaultPrevented) closeOver(panes.conversations); };   // the open chat too (no hash change)
   del.type = "button";
@@ -3964,6 +4055,7 @@ function tellVoice(v: VoiceMode) {
 
 async function openVoice() {
   if (voice) return;
+  stopReading();
   const mine = () => voice?.client === client;
   const client: VoiceClient = new VoiceClient({
     ready: (r) => {
@@ -4848,6 +4940,7 @@ async function draft() {
 
 function openConversation(id: string) {
   closeVoice();
+  stopReading();
   conv = runs.get(id)?.conv ?? (chats[id] ? structuredClone(chats[id]) : blank());   // a reply being written keeps going
   closeOver(panes.conversations);
   render();
@@ -4858,8 +4951,9 @@ function openConversation(id: string) {
 
 function newChat(who = "") {
   closeVoice();
+  stopReading();
   conv = blank();
-  if (who) {
+  if (who && who !== CHRYSALIS) {
     conv.who = who;
     greet(conv);
   }
@@ -4950,6 +5044,7 @@ thread.addEventListener("click", (e) => {
   if (act.dataset.act === "card" || act.dataset.act === "more") return toggleCard(act);
   if (act.dataset.act === "decide") return void decide(act);
   if (act.dataset.act === "agent-stop") return stopAgent(act, m);
+  if (act.dataset.act === "speak") return readAloud(m);
   if (running()) return;
   if (act.dataset.act === "retry") void generate(conv, i);
   else if (act.dataset.act === "cont") continueReply(m);
@@ -5747,7 +5842,6 @@ function otherRows(down: string): HTMLElement[] {
 const modeOf = (c: Conversation): Mode => (c.effort === "off" ? "fast" : "think");
 let chatMode: Mode | undefined;                     // the Think setting Settings last showed
 const shownMode = (): Mode => modeOf(conv);             // the values Settings shows: those of the chat's Think setting
-let systemEdited = false;
 
 function loadSettings(): Settings {
   const s = load<(Settings & Record<string, unknown>) | null>("settings2", null);
@@ -6162,30 +6256,17 @@ function buildSettings() {
   });
 
 
-  systemInput.addEventListener("input", () => {
-    settings.system = systemInput.value;
-    systemEdited = true;
-    growSystem();
-    saveSettings();
-  });
+  $("system-card").onclick = () => openSheet(CHRYSALIS);
   $("sent-open").onclick = () => void showSent();
   $("sent-close").innerHTML = icon("x");
   $("sent-close").onclick = () => $<HTMLDialogElement>("sent-view").close();
   $("sent-copy").onclick = () => copy($("sent-text").textContent ?? "", $("sent-copy"));
-  $("system-reset").onclick = () => {
-    const before = settings.system;
-    settings.system = DEFAULT_SYSTEM;
-    saveSettings();
-    growSystem();
-    toast("The system prompt is back to the default", () => { settings.system = before; saveSettings(); growSystem(); });
-  };
   $("settings-reset").onclick = () => {
     if (!customized()) return toast("Everything is already at the recommended values");
     const before = structuredClone(settings);
     settings = { v: 4, system: DEFAULT_SYSTEM, think: {}, fast: {} };
     saveSettings();
-    growSystem();
-    toast("Everything is back to the recommended values", () => { settings = before; saveSettings(); growSystem(); });
+    toast("Everything is back to the recommended values", () => { settings = before; saveSettings(); });
   };
   measureScrollbar();
   addEventListener("resize", measureScrollbar);
@@ -6228,11 +6309,6 @@ function measureScrollbar() {
   document.documentElement.style.setProperty("--sb", `${scroller.offsetWidth - scroller.clientWidth}px`);
 }
 
-function growSystem() {
-  systemInput.style.height = "auto";
-  systemInput.style.height = `${Math.min(systemInput.scrollHeight + 2, innerHeight * 0.4)}px`;
-}
-
 const stageRows = new Map<Stage, HTMLElement>();
 function moveStage(stage: Stage, to: number) {
   const order = orderOf(shownMode()).filter((x) => x !== stage);
@@ -6256,8 +6332,7 @@ function placeStages() {
 
 function syncSettings() {
   if (!isOpen(panes.settings)) return;
-  if (document.activeElement !== systemInput && systemInput.value !== settings.system) systemInput.value = settings.system;
-  $("system-reset").classList.toggle("on", settings.system !== DEFAULT_SYSTEM);
+  $("system-card").replaceChildren(face(CHRYSALIS), h("span", "", `On ${nameOf(CHRYSALIS)}'s card`));
   const vp = $<HTMLTextAreaElement>("voice-prompt");
   if (document.activeElement !== vp && vp.value !== voicePrompt()) { vp.value = voicePrompt(); fit(vp); }
   $("voice-prompt-reset").classList.toggle("on", settings.voice?.prompt !== undefined);
@@ -6345,7 +6420,7 @@ await checkTrust();
 void loadCatalog();
 $("to-latest").innerHTML = icon("down");
 $("settings-reset").insertAdjacentHTML("afterbegin", icon("retry"));
-for (const id of ["system-reset", "order-reset", "voice-prompt-reset"]) $(id).innerHTML = icon("retry");
+for (const id of ["order-reset", "voice-prompt-reset"]) $(id).innerHTML = icon("retry");
 buildSettings();
 for (const p of PANES) restorePane(p);
 await refreshStatus();

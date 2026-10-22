@@ -454,7 +454,7 @@ dialog::backdrop { background: rgb(0 0 0 / 0.45); }
 .knob-reset { width: 22px; height: 22px; visibility: hidden; }
 .knob.custom .knob-reset { visibility: visible; }
 .knob-reset .i { width: 13px; height: 13px; }
-.knob-reset.on { visibility: visible; }   /* the system prompt's and the order's, in their headers */
+.knob-reset.on { visibility: visible; }   /* the order's and the voice prompt's, in their headers */
 .knob-track { position: relative; height: 16px; }
 /* every slider (Settings' values, the thinking slider): a 4px track filled to the value (--fill, in --fill-c), a 14px thumb */
 .slider { position: relative; width: 100%; height: 16px; margin: 0; background: none; cursor: pointer; appearance: none; -webkit-appearance: none; }
@@ -928,6 +928,8 @@ label.set-switch { cursor: pointer; }
   object-fit: cover; object-position: 50% 15%; background: var(--hover); color: #fff; font-size: 13px; font-weight: 600; line-height: 1; user-select: none; }
 .face.initials { background: radial-gradient(circle at 32% 28%, hsl(var(--hue) 52% 58%), hsl(var(--hue) 58% 26%)); }
 .face.self { background: var(--hover); color: var(--muted); }
+.face.chrysalis { background: radial-gradient(circle at 34% 28%, #4b1c33, #150a10 72%); }
+.face.chrysalis img { width: 66%; height: auto; filter: drop-shadow(0 0 6px rgb(226 77 133 / 0.35)); }
 .face .i { width: 55%; height: 55%; }
 .face.mosaic { display: grid; gap: 1.5px; background: var(--panel, var(--raised)); }
 .face.mosaic > * { width: 100%; height: 100%; min-width: 0; min-height: 0; border-radius: 0; font-size: 9px; }
@@ -1011,10 +1013,13 @@ label.set-switch { cursor: pointer; }
 .card-member.in { box-shadow: 0 0 0 2px var(--raised), 0 0 0 3.5px var(--accent); }
 .card-section { display: grid; gap: 6px; }
 .card-label { color: var(--faint); font-size: 11px; font-weight: 600; letter-spacing: 0.07em; text-transform: uppercase; }
-/* replies in a chat with characters: the speaker's portrait beside what they say, their name over it in their color; in
-   a group each paragraph is its speaker's, and one going on shows theirs once */
-.msg.assistant.cast { position: relative; padding-left: 56px; }
-.msg.assistant > .speaker { margin-bottom: 4px; font-size: 13.5px; font-weight: 600; }
+/* every message has who wrote it beside it, as a chat with characters has it: their portrait in the margin (a reply's
+   on the left, the user's on the right), their name over it in their color; in a group each paragraph is its
+   speaker's, and one going on shows theirs once */
+.msg.assistant { position: relative; padding-left: 56px; }
+.msg.user { position: relative; padding-right: 56px; }
+.msg > .speaker { margin-bottom: 4px; font-size: 13.5px; font-weight: 600; }
+.msg.user > .speaker .face { left: auto; right: 0; }
 .speaker, p.line > .who { color: light-dark(hsl(var(--hue) 48% 36%), hsl(var(--hue) 62% 74%)); cursor: pointer; }
 .speaker .face { position: absolute; left: 0; top: 0; width: 44px; height: 44px; font-size: 16px; }
 .speaker:hover .face, p.line > .who:hover .face { box-shadow: 0 0 0 2px var(--bg), 0 0 0 3.5px var(--accent); }
@@ -1035,3 +1040,17 @@ p.line > .who .face { position: absolute; left: -56px; top: 1px; width: 44px; he
 .cast-next .talk:hover { color: var(--text); }
 .cast-next .talk.on { border-color: var(--accent); background: var(--accent-soft); color: var(--text); }
 .cast-next .talk .i { width: 12px; height: 12px; }
+@media (max-width: 760px) {
+  .msg.assistant { padding-left: 42px; }
+  .msg.user { padding-right: 42px; }
+  .speaker .face, p.line > .who .face { width: 32px; height: 32px; font-size: 13px; }
+  p.line > .who .face { left: -42px; }
+}
+/* Chrysalis's card: its system prompt, with the way back to the default beside its label */
+.card-system .card-label { display: flex; align-items: center; gap: 6px; }
+.card-reset { width: 20px; height: 20px; }
+.card-reset .i { width: 12px; height: 12px; }
+.system-card { display: flex; align-items: center; gap: 10px; width: 100%; padding: 6px 10px 6px 6px; border: 1px solid var(--line); border-radius: 12px;
+  background: none; color: var(--text); font: inherit; font-size: 13px; text-align: left; cursor: pointer; }
+.system-card:hover { background: var(--hover); }
+.system-card .face { width: 28px; height: 28px; }
