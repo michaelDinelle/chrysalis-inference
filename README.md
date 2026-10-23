@@ -33,7 +33,7 @@ Same PC, same model, Strata's own benchmark prompts.
 <sub>Drawn as it's written. Hover a part and it glows; click and "make this bright red" means that part, and only it
 changes. The gold door is the paint bucket: no model, no wait.</sub>
 
-## Bring your characters
+## Bring your characters from Silly Tavern
 
 <p align="center"><img src="docs/media/characters.webp" width="900" alt="Seraphina's SillyTavern card dropped in: her greeting, a reply in her voice, her card"></p>
 
