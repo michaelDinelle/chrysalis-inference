@@ -1,4 +1,4 @@
-<p align="center"><img src="web/logo.svg" width="84" alt=""></p>
+<p align="center"><img src="docs/media/butterfly.webp" width="300" alt="Chrysalis's butterfly in its sea of characters"></p>
 
 <h1 align="center">Chrysalis</h1>
 
@@ -41,11 +41,19 @@ changes. The gold door is the paint bucket: no model, no wait.</sub>
 Groups write the scene together, each speaker with their own face. Seraphina is SillyTavern's sample character
 (AGPL-3.0), so this one recording is under their license.</sub>
 
+## On your phone, over real HTTPS
+
+<p align="center"><img src="docs/media/phone-pairing.png" width="760" alt="A phone connecting: the connect page, the code it shows, then the chat"></p>
+<p align="center"><img src="docs/media/connect-desktop.png" width="520" alt="Connect a device on the computer: the QR code and the phone's code with Allow"></p>
+
+<sub>Scan the QR code, trust this computer once (the page walks each kind of device through it), and allow the code the
+phone shows. Then it's the chat, on HTTPS the phone trusts, from a certificate authority of its own that can vouch for
+nothing outside your network. Only devices you let in get past the connect page.</sub>
+
 ## And
 
 - **Voice mode** that hears you talk over the reply
 - **Tools**, MCP servers and sub-agents
-- Your **phone**, by QR code
 - **Claude Code** and **OpenCode**, through OpenAI and Anthropic APIs
 - The same chat on **llama.cpp, Ollama, LM Studio, KoboldCpp or vLLM**
 - **Qwen3.8-27B** at 100+ tok/s, with its full 262K context
