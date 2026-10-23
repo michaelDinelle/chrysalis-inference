@@ -1,0 +1,232 @@
+{
+ "rows": [
+  {
+   "id": "performance-short-r1",
+   "phase": "performance",
+   "case_id": "short",
+   "ttft_s": 0.376,
+   "total_s": 6.42,
+   "decode_tps": 84.55,
+   "out_tokens": 512,
+   "passed": false
+  },
+  {
+   "id": "performance-prompt-4k-r1",
+   "phase": "performance",
+   "case_id": "prompt-4k",
+   "ttft_s": 5.439,
+   "total_s": 11.13,
+   "decode_tps": 89.79,
+   "out_tokens": 512,
+   "passed": false
+  },
+  {
+   "id": "performance-prompt-16k-r1",
+   "phase": "performance",
+   "case_id": "prompt-16k",
+   "ttft_s": 20.01,
+   "total_s": 25.324,
+   "decode_tps": 96.15,
+   "out_tokens": 512,
+   "passed": false
+  },
+  {
+   "id": "performance-short-r2",
+   "phase": "performance",
+   "case_id": "short",
+   "ttft_s": 0.385,
+   "total_s": 5.539,
+   "decode_tps": 90.6,
+   "out_tokens": 468,
+   "passed": false
+  },
+  {
+   "id": "performance-prompt-4k-r2",
+   "phase": "performance",
+   "case_id": "prompt-4k",
+   "ttft_s": 5.45,
+   "total_s": 10.391,
+   "decode_tps": 103.41,
+   "out_tokens": 512,
+   "passed": false
+  },
+  {
+   "id": "performance-prompt-16k-r2",
+   "phase": "performance",
+   "case_id": "prompt-16k",
+   "ttft_s": 20.016,
+   "total_s": 24.976,
+   "decode_tps": 103.02,
+   "out_tokens": 512,
+   "passed": false
+  },
+  {
+   "id": "performance-short-r3",
+   "phase": "performance",
+   "case_id": "short",
+   "ttft_s": 0.398,
+   "total_s": 4.531,
+   "decode_tps": 102.33,
+   "out_tokens": 424,
+   "passed": false
+  },
+  {
+   "id": "performance-prompt-4k-r3",
+   "phase": "performance",
+   "case_id": "prompt-4k",
+   "ttft_s": 5.46,
+   "total_s": 10.455,
+   "decode_tps": 102.3,
+   "out_tokens": 512,
+   "passed": false
+  },
+  {
+   "id": "performance-prompt-16k-r3",
+   "phase": "performance",
+   "case_id": "prompt-16k",
+   "ttft_s": 20.014,
+   "total_s": 26.006,
+   "decode_tps": 85.28,
+   "out_tokens": 512,
+   "passed": false
+  },
+  {
+   "id": "sanity-I1",
+   "phase": "sanity",
+   "case_id": "I1",
+   "ttft_s": 0.392,
+   "total_s": 0.853,
+   "decode_tps": 117.36,
+   "out_tokens": 55,
+   "passed": true
+  },
+  {
+   "id": "sanity-I2",
+   "phase": "sanity",
+   "case_id": "I2",
+   "ttft_s": 0.413,
+   "total_s": 1.045,
+   "decode_tps": 118.59,
+   "out_tokens": 76,
+   "passed": true
+  },
+  {
+   "id": "sanity-I3",
+   "phase": "sanity",
+   "case_id": "I3",
+   "ttft_s": 0.413,
+   "total_s": 1.031,
+   "decode_tps": 132.59,
+   "out_tokens": 83,
+   "passed": true
+  },
+  {
+   "id": "sanity-I4",
+   "phase": "sanity",
+   "case_id": "I4",
+   "ttft_s": 0.375,
+   "total_s": 0.711,
+   "decode_tps": 118.81,
+   "out_tokens": 41,
+   "passed": true
+  },
+  {
+   "id": "sanity-R1",
+   "phase": "sanity",
+   "case_id": "R1",
+   "ttft_s": 5.459,
+   "total_s": 6.178,
+   "decode_tps": 100.21,
+   "out_tokens": 73,
+   "passed": true
+  },
+  {
+   "id": "sanity-R2",
+   "phase": "sanity",
+   "case_id": "R2",
+   "ttft_s": 5.456,
+   "total_s": 6.038,
+   "decode_tps": 113.35,
+   "out_tokens": 67,
+   "passed": true
+  },
+  {
+   "id": "sanity-R3",
+   "phase": "sanity",
+   "case_id": "R3",
+   "ttft_s": 20.043,
+   "total_s": 20.52,
+   "decode_tps": 111.15,
+   "out_tokens": 54,
+   "passed": true
+  },
+  {
+   "id": "sanity-R4",
+   "phase": "sanity",
+   "case_id": "R4",
+   "ttft_s": 20.233,
+   "total_s": 21.598,
+   "decode_tps": 105.51,
+   "out_tokens": 145,
+   "passed": true
+  },
+  {
+   "id": "sanity-T1",
+   "phase": "sanity",
+   "case_id": "T1",
+   "ttft_s": 0.951,
+   "total_s": 1.296,
+   "decode_tps": 127.69,
+   "out_tokens": 45,
+   "passed": true
+  },
+  {
+   "id": "sanity-T2",
+   "phase": "sanity",
+   "case_id": "T2",
+   "ttft_s": 0.954,
+   "total_s": 1.593,
+   "decode_tps": 117.32,
+   "out_tokens": 76,
+   "passed": true
+  },
+  {
+   "id": "sanity-T3",
+   "phase": "sanity",
+   "case_id": "T3",
+   "ttft_s": 0.972,
+   "total_s": 1.603,
+   "decode_tps": 131.68,
+   "out_tokens": 84,
+   "passed": true
+  },
+  {
+   "id": "sanity-T4",
+   "phase": "sanity",
+   "case_id": "T4",
+   "ttft_s": 0.958,
+   "total_s": 1.579,
+   "decode_tps": 122.39,
+   "out_tokens": 77,
+   "passed": true
+  }
+ ],
+ "summary": {
+  "short": {
+   "ttft_s": 0.385,
+   "decode_tps": 90.6,
+   "total_s": 5.539
+  },
+  "prompt-4k": {
+   "ttft_s": 5.45,
+   "decode_tps": 102.3,
+   "total_s": 10.455
+  },
+  "prompt-16k": {
+   "ttft_s": 20.014,
+   "decode_tps": 96.15,
+   "total_s": 25.324
+  },
+  "sanity_passed": "12/12"
+ }
+}

@@ -1,0 +1,50 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="860" height="554" viewBox="0 0 860 554" font-family="-apple-system,Segoe UI,Helvetica,Arial,sans-serif">
+<rect x="250" y="14" width="12" height="12" rx="3" fill="#e24d85"/><text x="268" y="25" font-size="13" fill="#efe4e7">Chrysalis</text>
+<rect x="400" y="14" width="12" height="12" rx="3" fill="#8a8a8a"/><text x="418" y="25" font-size="13" fill="#efe4e7">Strata IQ3_S</text>
+<rect x="550" y="14" width="12" height="12" rx="3" fill="#5d5d5d"/><text x="568" y="25" font-size="13" fill="#efe4e7">Strata Q2_0</text>
+<text x="0" y="78" font-size="15" font-weight="600" fill="#efe4e7">Reads a 16K-token prompt</text>
+<text x="0" y="98" font-size="12" fill="#9c8e92">lower is better</text>
+<rect x="250" y="60" width="133.6" height="16" rx="4" fill="#e24d85"/>
+<text x="391.6" y="72.5" font-size="12.5" fill="#efe4e7" font-weight="600">5.9 s</text>
+<rect x="250" y="81" width="470.0" height="16" rx="4" fill="#8a8a8a"/>
+<text x="728.0" y="93.5" font-size="12.5" fill="#9c8e92" font-weight="400">20.9 s</text>
+<rect x="250" y="102" width="450.7" height="16" rx="4" fill="#5d5d5d"/>
+<text x="708.7" y="114.5" font-size="12.5" fill="#9c8e92" font-weight="400">20.0 s</text>
+<line x1="0" x2="860" y1="140" y2="140" stroke="#2d2628"/>
+<text x="0" y="176" font-size="15" font-weight="600" fill="#efe4e7">Reads a 100K-token prompt</text>
+<text x="0" y="196" font-size="12" fill="#9c8e92">lower is better</text>
+<rect x="250" y="158" width="137.6" height="16" rx="4" fill="#e24d85"/>
+<text x="395.6" y="170.5" font-size="12.5" fill="#efe4e7" font-weight="600">38.3 s</text>
+<rect x="250" y="179" width="470.0" height="16" rx="4" fill="#8a8a8a"/>
+<text x="728.0" y="191.5" font-size="12.5" fill="#9c8e92" font-weight="400">131 s</text>
+<rect x="250" y="200" width="465.9" height="16" rx="4" fill="#5d5d5d"/>
+<text x="723.9" y="212.5" font-size="12.5" fill="#9c8e92" font-weight="400">130 s</text>
+<line x1="0" x2="860" y1="238" y2="238" stroke="#2d2628"/>
+<text x="0" y="274" font-size="15" font-weight="600" fill="#efe4e7">Answers a follow-up at 100K</text>
+<text x="0" y="294" font-size="12" fill="#9c8e92">lower is better</text>
+<rect x="250" y="256" width="171.3" height="16" rx="4" fill="#e24d85"/>
+<text x="429.3" y="268.5" font-size="12.5" fill="#efe4e7" font-weight="600">1.0 s</text>
+<rect x="250" y="277" width="470.0" height="16" rx="4" fill="#8a8a8a"/>
+<text x="728.0" y="289.5" font-size="12.5" fill="#9c8e92" font-weight="400">2.8 s</text>
+<rect x="250" y="298" width="442.1" height="16" rx="4" fill="#5d5d5d"/>
+<text x="700.1" y="310.5" font-size="12.5" fill="#9c8e92" font-weight="400">2.6 s</text>
+<line x1="0" x2="860" y1="336" y2="336" stroke="#2d2628"/>
+<text x="0" y="372" font-size="15" font-weight="600" fill="#efe4e7">Error vs the full model (KL)</text>
+<text x="0" y="392" font-size="12" fill="#9c8e92">lower is better</text>
+<rect x="250" y="354" width="79.7" height="16" rx="4" fill="#e24d85"/>
+<text x="337.7" y="366.5" font-size="12.5" fill="#efe4e7" font-weight="600">0.032</text>
+<rect x="250" y="375" width="137.2" height="16" rx="4" fill="#8a8a8a"/>
+<text x="395.2" y="387.5" font-size="12.5" fill="#9c8e92" font-weight="400">0.055</text>
+<rect x="250" y="396" width="470.0" height="16" rx="4" fill="#5d5d5d"/>
+<text x="728.0" y="408.5" font-size="12.5" fill="#9c8e92" font-weight="400">0.187</text>
+<line x1="0" x2="860" y1="434" y2="434" stroke="#2d2628"/>
+<text x="0" y="470" font-size="15" font-weight="600" fill="#efe4e7">Writes</text>
+<text x="0" y="490" font-size="12" fill="#9c8e92">higher is better</text>
+<rect x="250" y="452" width="224.5" height="16" rx="4" fill="#e24d85"/>
+<text x="482.5" y="464.5" font-size="12.5" fill="#9c8e92" font-weight="400">45.9 tok/s</text>
+<rect x="250" y="473" width="305.8" height="16" rx="4" fill="#8a8a8a"/>
+<text x="563.8" y="485.5" font-size="12.5" fill="#9c8e92" font-weight="400">62.5 tok/s</text>
+<rect x="250" y="494" width="470.0" height="16" rx="4" fill="#5d5d5d"/>
+<text x="728.0" y="506.5" font-size="12.5" fill="#efe4e7" font-weight="600">96.2 tok/s</text>
+
+</svg>

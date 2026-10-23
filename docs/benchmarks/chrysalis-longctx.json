@@ -1,0 +1,40 @@
+[
+ {
+  "trial": 1,
+  "long": {
+   "ttft_s": 38.259,
+   "decode_tps": 46.48,
+   "prompt_tokens": 98878,
+   "completion_tokens": 512,
+   "answer": "-based dataset:\n\n```text\n[trial 1]\nrecord000001: alpha beta gamma delta epsilon zeta eta theta.\nrecord000002: alpha beta gamma delta epsilon zeta eta theta.\n...\nrecord005200: alpha beta gamma delta epsilon zeta eta theta.\n```\n\n## Structure\n\nEach record line has this shape:\n\n```text\nrecord<6-digit ID",
+   "thinking_chars": 1618
+  },
+  "followup": {
+   "ttft_s": 1.004,
+   "decode_tps": 60.41,
+   "prompt_tokens": 100556,
+   "completion_tokens": 204,
+   "answer": "The last record now is:\n\n```text\nrecord005260\n```\n\nWith the added records `record005201` through `record005260`, the full set runs from:\n\n```text\nrecord000001\n```\n\nto:\n\n```text\nrecord005260\n```\n\nSo there are now **5,260 records** in total.",
+   "thinking_chars": 365
+  }
+ },
+ {
+  "trial": 2,
+  "long": {
+   "ttft_s": 38.429,
+   "decode_tps": 51.98,
+   "prompt_tokens": 98878,
+   "completion_tokens": 512,
+   "answer": "pha beta gamma delta epsilon zeta eta theta.\n```\n\nWhere:\n\n- `record` is a fixed literal prefix.\n- `NNNNNN` is a six-digit zero-padded numeric ID, from `000001` through `005200`.\n- `:` separates the record ID from the payload.\n- The payload is always the same sequence:\n\n```text\nalpha beta gamma delta",
+   "thinking_chars": 1546
+  },
+  "followup": {
+   "ttft_s": 1.047,
+   "decode_tps": 56.77,
+   "prompt_tokens": 100556,
+   "completion_tokens": 70,
+   "answer": "The last record now is:\n\n```text\nrecord005260\n```",
+   "thinking_chars": 169
+  }
+ }
+]

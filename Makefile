@@ -27,7 +27,7 @@ build/sampler_cases: tools/sampler_cases.cpp engine/sampler.h
 test_web: build/sampler_cases
 	cd web && bun test
 
-# the web UI with llama.cpp, Ollama, LM Studio, KoboldCpp and vLLM, for real, each started in turn on the CPU (README:
+# the web UI with llama.cpp, Ollama, LM Studio, KoboldCpp and vLLM, for real, each started in turn on the CPU (docs/DETAILS.md:
 # Rebuilding has where they come from)
 test_backends:
 	cd web && bun test --timeout 1200000 ./backends.check.ts

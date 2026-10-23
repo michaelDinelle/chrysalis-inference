@@ -1,5 +1,5 @@
 // The web server (server.ts) with the backends people run, for real: llama.cpp, Ollama, LM Studio, KoboldCpp and vLLM,
-// each installed in data/backends (README: Rebuilding) and started here in turn on the CPU, with the same small
+// each installed in data/backends (docs/DETAILS.md: Rebuilding) and started here in turn on the CPU, with the same small
 // model, Qwen3.5-2B (pictures, tools, thinking that turns off). Each is connected by its address as a person pastes it,
 // and asked what the page asks: a reply with its thinking apart from its answer, one with thinking off, a tool call run
 // on a real MCP server (fake-mcp.ts) and answered from its result, a picture. llama.cpp runs with a key: one it refuses,

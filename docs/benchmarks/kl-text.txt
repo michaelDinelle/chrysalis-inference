@@ -1,0 +1,41 @@
+The ferry left Halvard at dawn, as it had every day for forty years, and Ingrid Maas watched it go from the window of the harbour office with a cup of coffee she had forgotten to drink. The fog was thin that morning, more a suggestion than a wall, and through it she could see the green light on the breakwater blinking its patient rhythm: three seconds on, five seconds off, the same since her father had kept the office and his father before him. She had meant to leave the island twice. The first time she had been nineteen and the mainland had seemed like the only place where anything could happen; the second time she had been forty-one and newly widowed, and the island had seemed like the only place where nothing could. Both times she had packed a suitcase, and both times the suitcase had gone back into the cupboard under the stairs, where it still sat, dusty and expectant, like a dog that has learned not to ask for walks.
+
+Today there was a letter on her desk that she had not opened. The stamp was foreign and the handwriting was her brother's, cramped and leaning to the left as if every word were walking into a strong wind. She knew what it would say. He would ask, again, whether she had thought about selling the office, whether she had considered how much the harbour authority would pay for the building and the slipway, whether she understood that the ferry would not run forever. She understood. She had understood for a long time. What he never understood was that the office was not a building to her but a vantage point, a place from which the whole small world of the island could be watched and, in some modest way, kept.
+
+A Bloom filter is a probabilistic data structure that answers one question very quickly: is this item possibly in the set, or definitely not in it? It does this with a fixed array of m bits, all starting at zero, and k independent hash functions. To add an item, you compute its k hashes, take each modulo m, and set the bits at those positions to one. To test an item, you compute the same k positions and check them. If any of those bits is zero, the item was never added, because adding it would have set that bit. If all of them are one, the item was probably added, but it might not have been: other items may have set those same bits by coincidence. This is the false positive, and it is the price of the structure's compactness. There are no false negatives.
+
+The false positive rate depends on three numbers: the size of the bit array m, the number of hash functions k, and the number of items n inserted so far. After n insertions, the probability that a particular bit is still zero is roughly e to the power of minus k times n over m. A test returns a false positive when all k of its bits happen to be one, so the rate is approximately one minus that probability, raised to the power k. For a given m and n, the rate is smallest when k is about m over n times the natural logarithm of two. In practice this means that about ten bits per item, with seven hash functions, gives a false positive rate near one percent, regardless of how large the items themselves are.
+
+Here is a small implementation in Python that uses double hashing to derive k positions from two base hashes:
+
+```python
+import hashlib
+
+class BloomFilter:
+    def __init__(self, m: int, k: int):
+        self.m, self.k = m, k
+        self.bits = bytearray((m + 7) // 8)
+
+    def _positions(self, item: str):
+        digest = hashlib.sha256(item.encode("utf-8")).digest()
+        h1 = int.from_bytes(digest[:8], "little")
+        h2 = int.from_bytes(digest[8:16], "little") | 1
+        for i in range(self.k):
+            yield (h1 + i * h2) % self.m
+
+    def add(self, item: str) -> None:
+        for p in self._positions(item):
+            self.bits[p // 8] |= 1 << (p % 8)
+
+    def __contains__(self, item: str) -> bool:
+        return all(self.bits[p // 8] & (1 << (p % 8)) for p in self._positions(item))
+
+
+if __name__ == "__main__":
+    seen = BloomFilter(m=9_600, k=7)
+    for word in ["harbour", "ferry", "breakwater", "slipway"]:
+        seen.add(word)
+    print("ferry" in seen, "lighthouse" in seen)
+```
+
+Because the second hash is forced to be odd, it is coprime with any power of two, so when m is a power of two the k positions are all distinct. Deleting items is not supported: clearing a bit could remove other items that share it. A counting Bloom filter replaces each bit with a small counter to allow deletion, at the cost of several times the memory.

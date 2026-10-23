@@ -1522,7 +1522,7 @@ def make_handler(state, ready):
 
 def seed_of(body):
     """The request's seed, or a random one. Either way the response carries it (top-level `seed`; when streaming,
-    in the finish_reason chunk), so any reply can be drawn again (README: Decode)."""
+    in the finish_reason chunk), so any reply can be drawn again (docs/DETAILS.md: Decode)."""
     seed = body.get("seed")
     if seed is None:
         return random.getrandbits(32)                # fits a JavaScript number exactly

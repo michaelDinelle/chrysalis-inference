@@ -13,7 +13,7 @@ import urllib.request
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 FIX = json.load(open(os.path.join(ROOT, "tools/opencode2.json")))
-README = open(os.path.join(ROOT, "README.md")).read()
+README = open(os.path.join(ROOT, "docs/DETAILS.md")).read()
 
 
 def system(date="Sat Oct 17 2026", cwd="/home/omarchy", git=False):
@@ -126,7 +126,7 @@ def main():
             for c in r["msg"]["tool_calls"]:
                 msgs.append({"role": "tool", "tool_call_id": c["id"], "content": text})
         else:
-            msgs.append({"role": "user", "content": f"Here is part of README.md:\n{text}\nReply with just OK."})
+            msgs.append({"role": "user", "content": f"Here is part of DETAILS.md:\n{text}\nReply with just OK."})
         time.sleep(0.025)
         r = post(a.url, request(a.model, msgs, 10 + k))
         rows.append(row(f"agent step {k + 1} (+{len(text)} chars)", r, server_recent(a.url)))

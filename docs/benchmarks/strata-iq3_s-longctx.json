@@ -1,0 +1,40 @@
+[
+ {
+  "trial": 1,
+  "long": {
+   "ttft_s": 131.232,
+   "decode_tps": 57.27,
+   "prompt_tokens": 98878,
+   "completion_tokens": 512,
+   "answer": "t\n\n- Each ID starts with the literal prefix `record`.\n- The numeric part is zero-padded to 6 digits.\n- IDs appear sequentially from:\n\n```text\nrecord000001\n```\n\nthrough:\n\n```text\nrecord005200\n```\n\nSo the ID format is effectively:\n\n```text\nrecord + 6-digit zero-padded number\n```\n\nor, in a printf-style",
+   "thinking_chars": 1349
+  },
+  "followup": {
+   "ttft_s": 2.939,
+   "decode_tps": 65.34,
+   "prompt_tokens": 100217,
+   "completion_tokens": 116,
+   "answer": "The last record ID is now:\n\n```text\nrecord005260\n```",
+   "thinking_chars": 347
+  }
+ },
+ {
+  "trial": 2,
+  "long": {
+   "ttft_s": 130.767,
+   "decode_tps": 63.76,
+   "prompt_tokens": 98878,
+   "completion_tokens": 512,
+   "answer": "",
+   "thinking_chars": 1676
+  },
+  "followup": {
+   "ttft_s": 2.689,
+   "decode_tps": 59.25,
+   "prompt_tokens": 100037,
+   "completion_tokens": 512,
+   "answer": "The records have a uniform, predictable structure:\n\n```text\nrecord000001: alpha beta gamma delta epsilon zeta eta theta.\n```\n\n### Structure of each record\n\n1. **ID field**\n   - Format: `record` followed by a 7-digit",
+   "thinking_chars": 1620
+  }
+ }
+]

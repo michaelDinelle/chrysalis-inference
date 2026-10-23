@@ -1,0 +1,7 @@
+{
+ "reference": "llama.cpp on Unsloth's Q8_0 of Qwen3.8-Flash-Next, every position's logits",
+ "texts": {"long": "docs/benchmarks/kl-text.txt (1,082 tokens: prose, a technical explanation, Python)", "short": "tools_fn/compare_fn.py's TEXT (166 tokens)"},
+ "chrysalis": {"how": "tools_fn/compare_fn.py, the decode path (one token at a time, as replies are written)", "long": {"mean_kl": 0.0317, "top1": 0.928}, "short": {"mean_kl": 0.0147}},
+ "strata_iq3_s": {"how": "llama.cpp (data/llama.cpp, CPU) on Strata's own model files, every position", "long": {"mean_kl": 0.0546, "top1": 0.909}, "short": {"mean_kl": 0.0292, "top1": 0.958}},
+ "strata_q2_0": {"how": "llama.cpp (data/llama.cpp, CPU) on Strata's own model files, every position", "long": {"mean_kl": 0.1870, "top1": 0.841}, "short": {"mean_kl": 0.0758, "top1": 0.910}}
+}

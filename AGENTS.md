@@ -1,6 +1,6 @@
 # Chrysalis Inference: notes for coding agents
 
-README.md says what Chrysalis is, how it is built and what it measures. This file is how to change it.
+README.md shows what Chrysalis is; docs/DETAILS.md says how it is built and what it measures. This file is how to change it.
 
 ## Comments
 
@@ -39,7 +39,7 @@ a stale comment steers people and agents wrong. `make lint` catches the mechanic
   (its Anthropic and Responses APIs through those SDKs, which data/venv has; held answers and strict tool calls,
   thinking budgets, PDFs, videos, a long prompt read beside a reply), its next-token distributions against llama.cpp's,
   and pictures and videos: preprocessing, positions and the vision tower against transformers, prompts with pictures
-  against llama.cpp; the transformers references need data/ref-venv, see README Rebuilding), `make test_fn` (Flash-Next
+  against llama.cpp; the transformers references need data/ref-venv, see docs/DETAILS.md Rebuilding), `make test_fn` (Flash-Next
   kernels) and `make test_fn_model` (the Flash-Next model in-process: generation and snapshots, the server, llama.cpp's
   logits, pictures and videos).
 - Flash-Next takes ~47 GiB of system RAM, in Chrysalis or in-process, and more as its expert pool moves (until 4 GB is left). Check MemAvailable before loading it, and run it
