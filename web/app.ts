@@ -2975,7 +2975,7 @@ async function renderConnect() {
   }
   if (!p.lan) {
     const note = h("p", "set-note");
-    note.append("Chrysalis is on this computer only. Run ", h("code", "", "chrysalis.sh start --host 0.0.0.0"), " in a terminal to let your phone and other devices on this network in.");
+    note.append("Chrysalis is on this computer only. Run ", h("code", "", "chrysalis.sh --host 0.0.0.0"), " in a terminal to let your phone and other devices on this network in.");
     box.dataset.key = "";
     return void box.replaceChildren(note);
   }

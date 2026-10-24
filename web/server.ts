@@ -651,7 +651,6 @@ img.src = ${JSON.stringify(checkUrl(req))} + "?t=" + Date.now();
       }),
     },
     "/api/chrysalis/stop": { POST: guarded(async () => (await engineCall("/chrysalis/unload").catch(() => {}), new Response(null, { status: 204 }))) },
-    "/api/quit": { POST: here(json(async () => (setTimeout(() => process.kill(process.pid, "SIGTERM"), 50), new Response(null, { status: 204 })))) },
   },
   websocket: {
     open(ws) {

@@ -279,7 +279,7 @@ async function check() {
     asking = false;
     setUp(false);
     $("sub").innerHTML = "This device cannot reach Chrysalis's trust check (port " + new URL(CHECK).port + "). On the computer running Chrysalis, "
-      + "<code>chrysalis.sh start --host 0.0.0.0</code> lets it through the firewall.";
+      + "<code>chrysalis.sh --host 0.0.0.0</code> lets it through the firewall.";
     say("Cannot reach this computer", "bad");
     timer = setTimeout(check, 1500);
     return;
@@ -297,16 +297,11 @@ async function check() {
     .then((x) => x.json()).catch(() => null);
   if (r?.in) return opening("Trusted. Opening Chrysalis…");
   if (!r?.code) return again("Could not ask to join");
-  $("sub").innerHTML = "Allow this device on your computer: <b>Connect a device</b>, the phone at the top of the chat, shows this code.";
+  $("sub").innerHTML = "Allow this device on your computer: Chrysalis's terminal asks with this code, and <b>Connect a device</b>, the phone at the top of the chat, shows it.";
   $("code").textContent = r.code.slice(0, 3) + " " + r.code.slice(3);
   $("code").hidden = false;
   say("Waiting for you to allow it…");
-  const aside = document.createElement("div");
-  aside.className = "aside";
-  aside.innerHTML = 'Or in a terminal there:<span class="copyable"><code></code><button type="button" class="copy">Copy</button></span>';
-  aside.querySelector("code").textContent = "chrysalis.sh allow " + r.code;
-  copies(aside);
-  $("after").replaceChildren(aside);
+  $("after").replaceChildren();
   for (;;) {
     await sleep(1500);
     const got = await fetch("/pair/ask/" + r.secret).then((x) => x.json()).catch(() => null);

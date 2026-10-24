@@ -64,20 +64,20 @@ With an RX 7900 XTX, XT or GRE. Linux:
 
 ```sh
 curl -fsSL https://github.com/michaelDinelle/chrysalis-inference/releases/latest/download/chrysalis-linux-x86_64.tar.gz | tar -xz
-chrysalis/chrysalis.sh start
+chrysalis/chrysalis.sh
 ```
 
 Nothing is installed: Chrysalis is that folder. The first start downloads the 27B (16 GB) and prints the chat's
 address; it runs in that terminal, and Ctrl+C stops it. With 64 GB of RAM, Flash-Next follows in the background.
 
-Your laptop and phone use it too: `chrysalis.sh start --host 0.0.0.0` puts it on your network. A laptop runs the same
+Your laptop and phone use it too: `chrysalis.sh --host 0.0.0.0` puts it on your network. A laptop runs the same
 Chrysalis, finds yours by itself, and asks in both terminals with the same code: answer y on each, once, and its apps
 use your GPU at `http://127.0.0.1:8080`, as if it were there. A phone scans the QR code, trusts Chrysalis once, and gets the chat. No RX 7900 at all? You get the chat
 alone, for Ollama, LM Studio or llama.cpp.
 
-A Mac is such a laptop: the same two lines with `chrysalis-macos-arm64.tar.gz`; after that, `chrysalis/Chrysalis.app` starts it.
+A Mac is such a laptop: the same two lines with `chrysalis-macos-arm64.tar.gz`; after that, `chrysalis/Chrysalis.app` opens it in Terminal.
 
-Windows: double-click [chrysalis.wsl](https://github.com/michaelDinelle/chrysalis-inference/releases/latest/download/chrysalis.wsl) (with WSL on: `wsl --install` as an administrator, once). Then Chrysalis is in the Start menu: its window is Chrysalis, asks there, and closing it stops it.
+Windows: double-click [chrysalis.wsl](https://github.com/michaelDinelle/chrysalis-inference/releases/latest/download/chrysalis.wsl) (with WSL on: `wsl --install` as an administrator, once). Then Chrysalis is in the Start menu: its window is Chrysalis, asks there, and closing it stops it. On your network instead: `wsl -d Chrysalis --cd ~ -- chrysalis/chrysalis.sh --host 0.0.0.0` in PowerShell.
 
 Docker, for the API alone (`http://localhost:8080/v1`):
 
