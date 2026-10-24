@@ -1,5 +1,0 @@
--xhip
---offload-arch=gfx1100
---rocm-path=/home/omarchy/chrysalis-inference/data/rocm
--std=c++20
--O3

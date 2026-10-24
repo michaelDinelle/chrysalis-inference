@@ -1,7 +1,3 @@
-// Voice mode's microphone, in the audio thread: mixed to mono and posted as 20 ms of 16 kHz int16 at a time, what the
-// speech service reads. A context at 16 kHz (voice.ts asks for one; the browser resamples) passes samples through;
-// at another rate (Firefox gives a microphone only at the device's) each output sample is the mean of the input samples
-// its span covers, a box filter that keeps speech's band and drops most of what would alias.
 class Capture extends AudioWorkletProcessor {
   constructor() {
     super();

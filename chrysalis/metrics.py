@@ -1,6 +1,3 @@
-"""Prometheus metrics (GET /metrics, text format 0.0.4): counters of the replies Chrysalis wrote, and gauges of its state read
-when scraped. Rates come from the counters (decode tok/s: rate(chrysalis_completion_tokens_total) /
-rate(chrysalis_decode_seconds_total); tokens per step, the drafts' gain: completion tokens / decode steps)."""
 import threading
 
 TTFT_BUCKETS = (0.05, 0.1, 0.25, 0.5, 1, 2.5, 5, 10, 30, 60, 120, 300)
@@ -31,8 +28,8 @@ class Metrics:
 
     def __init__(self):
         self.lock = threading.Lock()
-        self.counts = {}                       # (name, labels tuple) -> value
-        self.ttft = {}                         # model -> [bucket counts..., count, sum]
+        self.counts = {}
+        self.ttft = {}
 
     def add(self, name, value=1, **labels):
         key = (name, tuple(sorted(labels.items())))
@@ -40,7 +37,6 @@ class Metrics:
             self.counts[key] = self.counts.get(key, 0) + value
 
     def reply(self, model, info, steps, finish):
-        """One reply's numbers (Server.run's info)."""
         self.add("chrysalis_replies_total", model=model, finish=finish)
         self.add("chrysalis_prompt_tokens_total", info["prompt_tokens"], model=model)
         self.add("chrysalis_prompt_cached_tokens_total", info["cached_tokens"], model=model)
@@ -56,7 +52,6 @@ class Metrics:
             h[-1] += info["ttft"]
 
     def render(self, gauges):
-        """The text exposition: the counters, the TTFT histogram, then gauges: [(name, help, [(labels, value)])]."""
         out = []
         with self.lock:
             counts, ttft = dict(self.counts), {m: list(h) for m, h in self.ttft.items()}

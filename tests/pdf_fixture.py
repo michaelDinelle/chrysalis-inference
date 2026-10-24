@@ -1,10 +1,7 @@
-"""PDFs for the document tests, written by hand (no PDF library): pages of white Helvetica text, which only the text layer
-has, or of a picture filling the page, which only the drawn page has."""
 import zlib
 
 
 def pdf(pages):
-    """A PDF of letter-sized pages: ("text", str) set in white Helvetica, or ("image", PIL image) as the whole page."""
     objs = {1: b"<< /Type /Catalog /Pages 2 0 R >>", 3: b"<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>"}
     kids, n = [], 4
     for kind, val in pages:

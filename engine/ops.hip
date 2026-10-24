@@ -1,6 +1,6 @@
 #include "kernels.h"
 
-__device__ __forceinline__ float block_sum(float v, float *red) {   // blockDim.x == 256
+__device__ __forceinline__ float block_sum(float v, float *red) {
     v = warp_sum(v);
     if ((threadIdx.x & 31) == 0) red[threadIdx.x >> 5] = v;
     __syncthreads();
@@ -10,7 +10,6 @@ __device__ __forceinline__ float block_sum(float v, float *red) {   // blockDim.
     return s;
 }
 
-// One block per row: out = x * rsqrt(mean(x^2) + eps) * w, written as any of fp32 / fp16 / int8 blocks.
 __global__ __launch_bounds__(256) void k_rmsnorm(const float *x, const float *w, int n, int ldx, int ldo,
                                                   float *of, half *oh, QAct oq) {
     __shared__ float red[8];
@@ -19,7 +18,7 @@ __global__ __launch_bounds__(256) void k_rmsnorm(const float *x, const float *w,
     for (int i = threadIdx.x; i < n; i += 256) ss += xr[i] * xr[i];
     const float inv = rsqrtf(block_sum(ss, red) / n + EPS);
     const size_t o = (size_t)blockIdx.x * ldo;
-    for (int i = threadIdx.x; i < n; i += 256) {      // 256 threads = 8 waves -> each wave covers whole 32-blocks
+    for (int i = threadIdx.x; i < n; i += 256) {
         const float v = xr[i] * inv * w[i];
         if (of) of[o + i] = v;
         if (oh) oh[o + i] = __float2half(v);
@@ -35,8 +34,6 @@ void rmsnorm(const float *x, const float *w, int T, int n, int ldx, int ldo, flo
     k_rmsnorm<<<T, 256, 0, st>>>(x, w, n, ldx, ldo, of, oh, oq);
 }
 
-// Decode-path RMSNorm (row length D, T <= 8 rows): D/256 blocks per row each reduce the whole row
-// (cheap, L2-resident) and normalize their own 256 elements, so the norm is one short, wide launch.
 __global__ __launch_bounds__(256) void k_norm_rows(const float *x, const float *w, float *of, half *oh, QAct oq) {
     __shared__ float red[8];
     const float *xr = x + (size_t)blockIdx.y * D;
@@ -58,7 +55,6 @@ void norm_rows(const float *x, const float *w, int T, float *of, half *oh, QAct 
     k_norm_rows<<<dim3(D / 256, T), 256, 0, st>>>(x, w, of, oh, oq);
 }
 
-// g = silu(g) * u in place, for the prefill FFN (gate/up come from separate fp16 GEMMs).
 __global__ void k_swiglu_h(half *g, const half *u, int64_t n) {
     const int64_t i = blockIdx.x * (int64_t)blockDim.x + threadIdx.x;
     if (i < n) g[i] = __float2half(silu(__half2float(g[i])) * __half2float(u[i]));
@@ -67,7 +63,6 @@ void swiglu_h(half *g, const half *u, int64_t n, hipStream_t st) {
     k_swiglu_h<<<(n + 255) / 256, 256, 0, st>>>(g, u, n);
 }
 
-// y[t][i] (+)= x[t][i] for a [T][n] fp16 matrix into fp32 with row stride ldy.
 __global__ void k_store_f16(const half *x, int n, float *y, int ldy, int accumulate) {
     const int i = blockIdx.x * blockDim.x + threadIdx.x, t = blockIdx.y;
     if (i >= n) return;
@@ -79,9 +74,6 @@ void store_f16(const half *x, int n, int T, float *y, int ldy, bool accumulate, 
     k_store_f16<<<dim3((n + 255) / 256, T), 256, 0, st>>>(x, n, y, ldy, accumulate);
 }
 
-// Top-k over vocabulary rows: two passes of bitonic sorts in LDS.
-// Pass 1: each block sorts a 4096-wide slice of one row and keeps its best TOPK.
-// Pass 2: one block per row merges the candidates and keeps the global best TOPK.
 
 template <int N>
 __device__ void bitonic_desc(float *v, int *ix) {
@@ -131,7 +123,6 @@ __global__ __launch_bounds__(512) void k_topk2(const float *cv, const int *ci, i
     for (int i = threadIdx.x; i < TOPK; i += blockDim.x) { ov[row * TOPK + i] = v[i]; oi[row * TOPK + i] = ix[i]; }
 }
 
-// logits [T][ld] -> out values/ids [T][TOPK]; scratch needs T * ceil(n/SLICE) * TOPK floats + ints.
 void topk(const float *logits, int T, int n, int ld, float *scratch_v, int *scratch_i, float *ov, int *oi, hipStream_t st) {
     const int nb = (n + SLICE - 1) / SLICE;
     if (nb * TOPK > SLICE) FAIL("topk: too many candidates");
@@ -139,8 +130,6 @@ void topk(const float *logits, int T, int n, int ld, float *scratch_v, int *scra
     k_topk2<<<T, 512, 0, st>>>(scratch_v, scratch_i, nb * TOPK, ov, oi);
 }
 
-// Tokens a grammar does not allow (bit t % 32 of word t / 32 clear: llguidance's bitmask) drop out of rows of logits, each
-// row with its own mask (a held answer's step verifies several positions), so topk then finds the allowed candidates.
 __global__ void k_mask_logits(float *logits, const uint32_t *mask, int n) {
     const int i = blockIdx.x * blockDim.x + threadIdx.x;
     logits += (size_t)blockIdx.y * n;
@@ -151,7 +140,6 @@ void mask_logits(float *logits, const uint32_t *mask, int n, int rows, hipStream
     k_mask_logits<<<dim3((n + 255) / 256, rows), 256, 0, st>>>(logits, mask, n);
 }
 
-// Greedy pick for drafts: argmax of each row, written to a device token buffer.
 __global__ __launch_bounds__(1024) void k_argmax(const float *logits, int n, int ld, int *out) {
     __shared__ float bv[32];
     __shared__ int bi[32];

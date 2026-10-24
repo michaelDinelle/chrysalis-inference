@@ -1,7 +1,3 @@
-"""Request admission (chrysalis/server.py: admit, Turnstile, Lanes) with threads and no engine: a side request (a session's
-title) that comes first and waits its turn at the GPU keeps no agent request out of a lane, and still runs once they
-are done.
-Usage: tests/test_lanes.py"""
 import os, sys, threading, time
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
@@ -26,7 +22,7 @@ def agent(k, work=0.6):
     admit(lanes, gpu, False, t)
     waited[k] = time.time() - t
     end = time.time() + work
-    while time.time() < end:                         # its reply's passes: the GPU taken and given back (Batcher)
+    while time.time() < end:
         gpu.acquire(True)
         time.sleep(0.01)
         gpu.release(True)
@@ -37,7 +33,7 @@ def agent(k, work=0.6):
 
 threads = [threading.Thread(target=title)] + [threading.Thread(target=agent, args=(k,)) for k in range(3)]
 threads[0].start()
-time.sleep(0.008)                                    # OpenCode sends a session's title 8 ms before its turn
+time.sleep(0.008)
 for t in threads[1:]:
     t.start()
 for t in threads:

@@ -1,10 +1,3 @@
-// Fetch URL, the built-in tool: GETs an http(s) address and returns it as text the model reads well (a page as compact
-// markdown: its title, headings, paragraphs, lists, links, tables and code, without scripts, styles and navigation),
-// with the final URL and the HTTP status. The web server runs on the user's machine and may be reachable from the LAN,
-// so a model (or a page it read) must not reach what only this machine can: an address that resolves to a loopback,
-// private, link-local or otherwise non-public IP is refused, at every redirect, unless the config file allows it
-// ("fetch": {"allowPrivate": true}, or a list of addresses and CIDR blocks). The check runs in the connection's own
-// DNS lookup, on the addresses it then connects to, so a name that answers differently the second time gets nowhere.
 import { lookup as dnsLookup } from "node:dns";
 import http from "node:http";
 import https from "node:https";
@@ -15,7 +8,6 @@ import type { Source, Tool } from "./tools";
 
 const MAX_REDIRECTS = 5, MAX_BYTES = 4 << 20, DEFAULT_TIMEOUT_S = 20, DEFAULT_CHARS = 20_000;
 
-// Addresses as 128-bit numbers, IPv4 as IPv4-mapped IPv6 (::ffff:a.b.c.d).
 function toBig(ip: string): bigint | null {
   ip = ip.replace(/^\[|\]$/g, "").replace(/%.*$/, "");
   if (isIP(ip) === 4) return 0xffff00000000n | BigInt(ip.split(".").reduce((a, o) => a * 256 + Number(o), 0));
@@ -36,9 +28,6 @@ const block = (cidr: string): [bigint, number] | null => {
   return Number.isInteger(n) && n >= 0 && n <= 128 ? [x, n] : null;
 };
 const inBlock = (x: bigint, [base, len]: [bigint, number]) => len === 0 || x >> BigInt(128 - len) === base >> BigInt(128 - len);
-// Not the public internet (IANA's special-purpose registries): this host, private networks, shared and link-local
-// space, documentation and benchmarking ranges, multicast, reserved. NAT64 and 6to4 addresses carry an IPv4 address,
-// which is judged instead.
 const NON_PUBLIC = ["0.0.0.0/8", "10.0.0.0/8", "100.64.0.0/10", "127.0.0.0/8", "169.254.0.0/16", "172.16.0.0/12", "192.0.0.0/24",
   "192.0.2.0/24", "192.88.99.0/24", "192.168.0.0/16", "198.18.0.0/15", "198.51.100.0/24", "203.0.113.0/24", "224.0.0.0/4", "240.0.0.0/4",
   "::/96", "100::/64", "2001::/23", "2001:db8::/32", "fc00::/7", "fe80::/10", "fec0::/10", "ff00::/8"].map((c) => block(c)!);
@@ -52,7 +41,7 @@ export function isPublic(ip: string): boolean {
   return !NON_PUBLIC.some((b) => inBlock(x, b));
 }
 
-type Policy = true | [bigint, number][];            // every address, or public ones and these blocks
+type Policy = true | [bigint, number][];
 const allowed = (ip: string, policy: Policy) => policy === true || isPublic(ip) || (toBig(ip) !== null && policy.some((b) => inBlock(toBig(ip)!, b)));
 const refused = (host: string, ip: string) => Object.assign(new Error(
   `${host === ip ? ip : `${host} (${ip})`} is not a public address: Fetch URL reaches public addresses only (the config file's "fetch": {"allowPrivate": ...} can allow others)`),
@@ -116,12 +105,9 @@ const AUTO = new Set(["p", "li", "tr", "td", "th", "dt", "dd", "option"]);
 const TAG = /<!--[\s\S]*?-->|<![^>]*>|<\?[\s\S]*?\?>|<(\/?)([a-zA-Z][\w:-]*)((?:[^>"']|"[^"]*"|'[^']*')*)>|[^<]+|</g;
 const attr = (attrs: string, name: string) => attrs.match(new RegExp(`(?:^|\\s)${name}\\s*=\\s*(?:"([^"]*)"|'([^']*)'|([^\\s>]+))`, "i"))?.slice(1).find((x) => x !== undefined);
 
-// A page as compact markdown. Inside <main> (or <article>s) only, when the page has one: the rest is the site's
-// header, menus and footer.
 export function htmlText(html: string, base: string): { title: string; text: string } {
   const lower = html.toLowerCase(), title = decode(html.match(/<title[^>]*>([\s\S]*?)<\/title>/i)?.[1] ?? "").replace(/\s+/g, " ").trim();
   const scoped = /<main[\s>]|role\s*=\s*["']?main/.test(lower) ? "main" : /<article[\s>]/.test(lower) ? "article" : "";
-  // at: where its text starts in `out` (a link or quote is rewritten once it closes); n: an <ol>'s items so far
   const stack: { tag: string; skip: boolean; scope: boolean; at: number; href?: string; n: number }[] = [];
   let out = "", skip = 0, inScope = scoped ? 0 : 1, pre = 0;
   const brk = (s: string) => { if (!skip && inScope) out = out.replace(/[ \t]+$/, "") + s; };
@@ -172,7 +158,7 @@ export function htmlText(html: string, base: string): { title: string; text: str
       else if (e.tag === "a" && !skip && inScope && e.href && !/^\s*(javascript:|#)/i.test(e.href)) {
         const label = out.slice(e.at).trim();
         let href = decode(e.href);
-        try { href = new URL(href, base).href; } catch { /* left as written */ }
+        try { href = new URL(href, base).href; } catch {  }
         if (label) out = `${out.slice(0, e.at)}[${label}](${href})`;
       }
       if (e.skip) skip--;
@@ -181,14 +167,14 @@ export function htmlText(html: string, base: string): { title: string; text: str
   };
   for (const m of html.matchAll(TAG)) {
     const [whole, slash, rawTag, attrs] = m;
-    if (!rawTag) { if (whole[0] !== "<" || whole === "<") emit(decode(whole)); continue; }   // (not comments, doctypes)
+    if (!rawTag) { if (whole[0] !== "<" || whole === "<") emit(decode(whole)); continue; }
     const tag = rawTag.toLowerCase();
     if (slash) { close(tag); continue; }
     if (AUTO.has(tag) || BLOCK.has(tag)) {
       const top = stack.at(-1)?.tag;
       if (top === "p" || (AUTO.has(tag) && top === tag)) close(top!);
     }
-    if (RAW.has(tag)) {                               // its content is not markup (or not text): jump past its end
+    if (RAW.has(tag)) {
       const end = lower.indexOf(`</${tag}`, m.index! + whole.length);
       TAG.lastIndex = end < 0 ? html.length : lower.indexOf(">", end) + 1 || html.length;
       continue;

@@ -1,19 +1,3 @@
-// Loading: GGUF file -> VRAM with every step overlapped.
-//
-// What a load waits on, measured on this machine: from a runtime-suspended GPU, hipInit spends ~0.65 s waking it;
-// after a wake the kernel clears VRAM as it hands it out (~11 ms/GB); pinning host memory costs ~70 ms/GB and
-// stalls other HIP calls while it runs; the file is usually in the page cache, and when it is not the disk streams
-// ~4.9 GB/s. So:
-//  * a prefetch thread reads whatever part of the file is not cached, in load order, starting while the GPU wakes;
-//  * writer threads copy the tensors, in file order, into a staging ring in VRAM through the large BAR: CPU
-//    non-temporal stores reach ~20-23 GB/s over PCIe and read host memory once, where pinned buffers plus DMA
-//    would read it three times. The GPU relayouts every piece into place as soon as it lands;
-//  * helper threads allocate VRAM meanwhile: the weights in ~1 GB slabs ahead of the pipeline, then the activation
-//    buffers and the KV pool;
-//  * pinned host memory (embeddings, snapshot buffers) and the first kernel launches wait for warmup(), which the
-//    server runs after it starts listening.
-// The KV pool takes all VRAM left over, including the staging ring's once the weights are in: that part becomes a
-// second segment whose pages get ids relative to the first (page ids index from kv_pool, see add_kv_memory).
 #include "model.h"
 #include "gguf.h"
 #include <algorithm>
@@ -28,21 +12,19 @@
 
 namespace {
 
-constexpr size_t PIECE = 32 << 20;     // staging unit: large enough to amortize launches, small enough to pipeline
-constexpr size_t RING = 256 << 20;     // staging ring, 8 pieces in flight
-constexpr size_t SLAB = 1 << 30;       // the weights are allocated in slabs of about this size
-constexpr int WRITERS = 3;             // one nearly saturates the BAR; the others cover page faults and waits
+constexpr size_t PIECE = 32 << 20;
+constexpr size_t RING = 256 << 20;
+constexpr size_t SLAB = 1 << 30;
+constexpr int WRITERS = 3;
 
 double now() { return std::chrono::duration<double>(std::chrono::steady_clock::now().time_since_epoch()).count(); }
 
-template <typename T> void wait_for(const std::atomic<T> &a, T v) {   // until a >= v (futex wait, no polling)
+template <typename T> void wait_for(const std::atomic<T> &a, T v) {
     for (T cur = a.load(std::memory_order_acquire); cur < v; cur = a.load(std::memory_order_acquire))
         a.wait(cur, std::memory_order_acquire);
 }
 template <typename T> void publish(std::atomic<T> &a, T v) { a.store(v, std::memory_order_release); a.notify_all(); }
 
-// 16-byte non-temporal stores: into write-combined VRAM these reach the PCIe limit from one thread (AVX2 stores
-// do not), and they keep the copy out of the CPU caches. dst is 64-byte aligned.
 void stream_copy(uint8_t *dst, const uint8_t *src, size_t n) {
     size_t i = 0;
     for (; i + 64 <= n; i += 64)
@@ -52,33 +34,30 @@ void stream_copy(uint8_t *dst, const uint8_t *src, size_t n) {
     _mm_sfence();
 }
 
-struct Job {                           // one tensor
+struct Job {
     enum Kind { QUANT, VEC, ALPHA, BETA, GDN_A, GDN_DT } kind;
     const GGUFTensor *t;
-    QTensor *q = nullptr;              // QUANT: the tensor; ALPHA, BETA: the layer's ab tensor (alpha | beta rows)
-    float **vec = nullptr;             // VEC: the pointer to set
-    QTensor made{};                    // what this job created in the arena
-    int gl = 0;                        // GDN_A, GDN_DT: recurrent layer
-    bool carve = false;                // creates its tensor in the arena (QUANT, VEC, the first of ALPHA/BETA)
+    QTensor *q = nullptr;
+    float **vec = nullptr;
+    QTensor made{};
+    int gl = 0;
+    bool carve = false;
     int slab = -1;
     size_t off = 0, bytes = 0;
-    int unit = 4;                      // pieces are multiples of this: a quant block, or one float
+    int unit = 4;
 };
-struct Piece { int job; size_t src, len, ring; int dep; };   // src: offset in the tensor's data; dep: previous user of the ring bytes
+struct Piece { int job; size_t src, len, ring; int dep; };
 
 int block_bytes(int type) { return type == Q8_0 ? 34 : type == Q6_K ? 210 : type == IQ4_XS ? 136 : 4; }
 
-}  // namespace
+}
 
-// Adds [p, p + bytes) (at least one page) to the KV pool before any page is in use. Kernels address page `id` at
-// kv_pool + id * KV_PAGE, so a later segment's pages get the ids that land inside it; if it lies below the pool, the
-// base moves down by whole pages and the existing ids shift up.
 void Engine::add_kv_memory(uint8_t *p, size_t bytes) {
     uint8_t *base = kv_pool ? kv_pool : p;
     size_t shift = 0;
     if (p < base) {
         shift = (size_t)(base - p) / KV_PAGE;
-        base -= shift * KV_PAGE;                       // now p <= base < p + KV_PAGE <= p + bytes
+        base -= shift * KV_PAGE;
     }
     const size_t first = p > base ? ((size_t)(p - base) + KV_PAGE - 1) / KV_PAGE : 0;
     const size_t last = (size_t)(p + bytes - base) / KV_PAGE;
@@ -87,13 +66,11 @@ void Engine::add_kv_memory(uint8_t *p, size_t bytes) {
     kv_pool = base;
     for (int &id : free_pages) id += (int)shift;
     for (size_t i = first; i < last; i++) free_pages.push_back((int)i);
-    std::sort(free_pages.begin(), free_pages.end(), std::greater<int>());   // pops from the back: low ids first
+    std::sort(free_pages.begin(), free_pages.end(), std::greater<int>());
     n_pages = (int)free_pages.size();
     page_ref.assign(free_pages.empty() ? 0 : free_pages.front() + 1, 0);
 }
 
-// Load progress for chrysalis_load_progress (another thread polls it while chrysalis_init runs): weight bytes handed to
-// the GPU, then warmup (phase 2) and done (3).
 static std::atomic<size_t> load_done{0}, load_total{0};
 static std::atomic<int> load_phase{0};
 float load_progress() {
@@ -109,7 +86,7 @@ void Engine::load(const std::string &path, int max_seqs, size_t reserve_bytes) {
     if (!g.open(path.c_str())) FAIL("cannot open %s", path.c_str());
     if (g.ints["qwen35.block_count"] != NL + 1 || g.ints["qwen35.embedding_length"] != D)
         FAIL("%s is not a Qwen3.8-27B GGUF with an MTP layer", path.c_str());
-    {   // the embeddings go to pinned host memory in warmup(): remember where they are
+    {
         const GGUFTensor *t = g.get("token_embd.weight");
         if (!t || t->type != IQ4_XS) FAIL("token embeddings must be IQ4_XS");
         model_path = path;
@@ -117,7 +94,6 @@ void Engine::load(const std::string &path, int max_seqs, size_t reserve_bytes) {
         embd.type = IQ4_XS; embd.rows = (int)t->ne[1]; embd.cols = (int)t->ne[0];
     }
 
-    // The plan (CPU only): which tensor goes where, in file order.
     std::vector<Job> jobs;
     auto get = [&](const std::string &name) {
         const GGUFTensor *t = g.get(name);
@@ -161,7 +137,6 @@ void Engine::load(const std::string &path, int max_seqs, size_t reserve_bytes) {
     vec(p + "nextn.shared_head_norm.weight", head_norm);
     std::sort(jobs.begin(), jobs.end(), [](const Job &a, const Job &b) { return a.t->data < b.t->data; });
 
-    // arena slabs: what each job creates, sized like make_qtensor carves it
     std::vector<size_t> slab_bytes;
     std::vector<const QTensor *> abs_made;
     for (Job &j : jobs) {
@@ -185,7 +160,6 @@ void Engine::load(const std::string &path, int max_seqs, size_t reserve_bytes) {
         j.off = slab_bytes.back();
         slab_bytes.back() += j.bytes;
     }
-    // pieces, their place in the staging ring, and which earlier piece must be done with those bytes first
     std::vector<Piece> pieces;
     size_t head = 0, total_bytes = 0;
     for (int ji = 0; ji < (int)jobs.size(); ji++) {
@@ -207,10 +181,9 @@ void Engine::load(const std::string &path, int max_seqs, size_t reserve_bytes) {
     const int n = (int)pieces.size();
     load_total = total_bytes;
 
-    // Prefetch: pull the file into the page cache in load order (a no-op when it is cached).
-    std::atomic<size_t> prefetched{0};      // file offset up to which the data is in the page cache
+    std::atomic<size_t> prefetched{0};
     const size_t lo = jobs.front().t->data - g.base, hi = jobs.back().t->data - g.base + jobs.back().t->nbytes;
-    size_t disk_bytes = 0;                  // read from disk (the rest was in the page cache)
+    size_t disk_bytes = 0;
     std::thread prefetch([&] {
         const int fd = ::open(path.c_str(), O_RDONLY);
         std::vector<unsigned char> resident(PIECE / 4096 + 2);
@@ -232,21 +205,18 @@ void Engine::load(const std::string &path, int max_seqs, size_t reserve_bytes) {
         ::close(fd);
     });
 
-    // Waking a runtime-suspended GPU is most of hipInit.
     CK(hipInit(0));
     CK(hipSetDevice(0));
     CK(hipFree(nullptr));
     const double t_gpu = now();
     hipDeviceProp_t prop;
     CK(hipGetDeviceProperties(&prop, 0));
-    // CPU-writable VRAM needs the large BAR; without it the ring is pinned host memory the kernels read over PCIe
     uint8_t *ring;
     if (prop.isLargeBar) CK(hipExtMallocWithFlags((void **)&ring, RING, hipDeviceMallocFinegrained));
     else CK(hipHostMalloc(&ring, RING));
     std::vector<hipEvent_t> done(n);
     for (hipEvent_t &e : done) CK(hipEventCreateWithFlags(&e, hipEventDisableTiming));
 
-    // The writers fill the ring from now on; the rest of the setup overlaps their first lap.
     std::atomic<int> next{0}, submitted{0};
     std::vector<std::atomic<uint8_t>> filled(n);
     std::vector<std::thread> writers;
@@ -263,14 +233,11 @@ void Engine::load(const std::string &path, int max_seqs, size_t reserve_bytes) {
             publish(filled[i], (uint8_t)1);
         }
     });
-    // streams before the allocation thread starts: HIP serializes stream creation behind its hipMalloc calls
     CK(hipStreamCreateWithFlags(&st, hipStreamNonBlocking));
     CK(hipStreamCreateWithFlags(&cst, hipStreamNonBlocking));
     CK(hipEventCreateWithFlags(&staged, hipEventDisableTiming));
     CK(hipEventCreateWithFlags(&copied, hipEventDisableTiming));
     CK(hipEventRecord(copied, cst));
-    // The first launch from a source file loads its code object, which HIP does under the lock the allocation
-    // thread keeps taking (65-180 ms then): load relayout.hip's now, alone (~1 ms).
     f32_to_f16(nullptr, nullptr, 0, st);
     CK(hipStreamSynchronize(st));
     std::atomic<int> slabs_ready{0}, gdn_ready{0};
@@ -289,8 +256,6 @@ void Engine::load(const std::string &path, int max_seqs, size_t reserve_bytes) {
         for (size_t b : slab_bytes) weight_bytes += b;
         alloc_buffers(max_seqs);
         CK(hipMalloc(&lt_ws, lt_ws_size));
-        // the KV pool: everything left but the reserve (the staging ring joins it once the weights are in), in
-        // ~1 GB chunks: an allocation holds a HIP lock while the kernel clears it, which stalls the pipeline's calls
         size_t free_b, total_b;
         CK(hipMemGetInfo(&free_b, &total_b));
         for (size_t left = (free_b - std::min(free_b, reserve_bytes)) / KV_PAGE; left;) {
@@ -302,11 +267,10 @@ void Engine::load(const std::string &path, int max_seqs, size_t reserve_bytes) {
         }
     });
 
-    // This thread hands each piece to the GPU in order.
     for (int i = 0; i < n; i++) {
         const Piece &pc = pieces[i];
         Job &j = jobs[pc.job];
-        if (pc.src == 0) {                  // first piece: the destination must exist
+        if (pc.src == 0) {
             if (j.carve) {
                 wait_for(slabs_ready, j.slab + 1);
                 Arena a;
@@ -339,8 +303,6 @@ void Engine::load(const std::string &path, int max_seqs, size_t reserve_bytes) {
         CK(hipEventRecord(done[i], st));
         publish(submitted, i + 1);
         load_done += pc.len;
-        // Drop this piece's page mappings now (the page cache keeps the data): tearing down 4M pages in the final
-        // munmap would take ~0.4 s.
         const uintptr_t a = (uintptr_t)(j.t->data + pc.src) & ~uintptr_t(4095);
         const uintptr_t e = ((uintptr_t)(j.t->data + pc.src + pc.len) + 4095) & ~uintptr_t(4095);
         madvise((void *)a, e - a, MADV_DONTNEED);
@@ -353,7 +315,6 @@ void Engine::load(const std::string &path, int max_seqs, size_t reserve_bytes) {
     if (prop.isLargeBar) CK(hipFree(ring));
     else CK(hipHostFree(ring));
 
-    // the staging ring's VRAM joins the KV pool
     vram.join();
     if (prop.isLargeBar) {
         size_t free_b, total_b;
@@ -369,11 +330,6 @@ void Engine::load(const std::string &path, int max_seqs, size_t reserve_bytes) {
             t1 - t0, t_gpu - t0, total_bytes / 1e9, total_bytes / 1e9 / (t_weights - t_gpu), disk_bytes / 1e9);
 }
 
-// Run once after load, before the first request (the server holds its GPU lock meanwhile). Pinning host memory
-// stalls concurrent HIP calls, so it happens here rather than during the load: the token embeddings (pinned host
-// memory the GPU reads over PCIe, which saves 0.7 GB of VRAM; relayouted on the CPU straight from the file, while
-// the snapshot buffers get pinned) and 8 snapshot slots (153 MB each, ~10 ms per slot otherwise paid by a request).
-// The first kernel launches load the remaining code objects (~70 ms).
 void Engine::warmup() {
     if (embd.q) return;
     load_phase = 2;
@@ -382,12 +338,11 @@ void Engine::warmup() {
     const size_t ne = (size_t)embd.rows * embd.cols, nb = ne / 256;
     CK(hipHostMalloc(&embd.q, ne / 2)); CK(hipHostMalloc(&embd.sc, ne / 64));
     CK(hipHostMalloc(&embd.sh, nb * 2)); CK(hipHostMalloc(&embd.d, nb * 2));
-    // IQ4_XS block (136 bytes): d (2) | scales_h (2) | scales_l (4) | quants (128), split into the arrays relayout() makes
     std::vector<std::thread> th;
     const int nt = 4;
     for (int w = 0; w < nt; w++) th.emplace_back([&, w] {
         const int fd = ::open(model_path.c_str(), O_RDONLY);
-        constexpr size_t CHUNK = 7710;                  // blocks per read (~1 MB)
+        constexpr size_t CHUNK = 7710;
         std::vector<uint8_t> buf(CHUNK * 136);
         const size_t b0 = nb * w / nt, b1 = nb * (w + 1) / nt;
         for (size_t b = b0; b < b1; b += CHUNK) {
@@ -407,8 +362,7 @@ void Engine::warmup() {
     for (Snap &sn : snaps)
         if (!sn.host) CK(hipHostMalloc(&sn.host, state_bytes()));
     for (std::thread &t : th) t.join();
-    if (!lt) hipblasLtCreate(&lt);                      // prefill chunks over GEMM_Q_MAX tokens use hipBLASLt
-    // A server's cache holds every sequence slot by now, all still empty: borrow one and leave it empty again.
+    if (!lt) hipblasLtCreate(&lt);
     int id = seq_new();
     const bool borrowed = id < 0;
     if (borrowed) id = 0;
@@ -421,27 +375,25 @@ void Engine::warmup() {
     fprintf(stderr, "chrysalis: warmed up in %.2f s\n", now() - t0);
 }
 
-// Activation buffers (prefill chunks of umax tokens, decode batches of up to 8) and the sequence slots. GEMM tiles
-// read up to 63 rows past a chunk, so umax is a multiple of 64.
 void Engine::alloc_buffers(int max_seqs) {
     umax = (umax + 63) / 64 * 64;
     const size_t U = umax;
     {
         size_t need = 0;
         auto add = [&](size_t bytes) { need += (bytes + 255) & ~size_t(255); };
-        add(U * 4); add(U * D * 4 * 3);                    // tokens, x, hfin, mtp_h
-        add(U * 16384 * 4); add(U * NKV * HD * 4 * 2);     // proj, k, v
-        add(U * GK * GD * 4 * 2); add(U * GV * GD * 4 * 2); // qn, kn, vc, o
-        add(U * 2 * D * 2); add((size_t)FF * D * 2);       // hh, deq
-        add(U * NH * HD * 2 * 2); add(U * FF * 2 * 2);     // Q16, mix, ffn_g, ffn_u
-        add(U * 2 * NH * HD * 2);                          // gemm16 (widest non-FFN projection)
-        add(8 * FF * 4); add(8 * VOCAB * 4);               // act, logits
-        add((size_t)MAX_SPLITS * 8 * NH * HD * 4); add((size_t)MAX_SPLITS * 8 * NH * 2 * 4);   // attention split partials
-        add(8 * 2 * D * 5 / 4 * 3);                        // int8 activations + scales
-        add(8 * 64 * TOPK * 8 * 2);                        // top-k
-        add(48 * 8 * (QKV + GK * GD + GV * GD + 2 * GV) * 4);   // verify-batch GDN inputs
-        add(8 * D * 4 * 2); add(64);                       // mtp_x small, drafts
-        add(U * sizeof(half *)); add(U * 3 * 4);           // a prefill chunk's image rows, M-RoPE positions
+        add(U * 4); add(U * D * 4 * 3);
+        add(U * 16384 * 4); add(U * NKV * HD * 4 * 2);
+        add(U * GK * GD * 4 * 2); add(U * GV * GD * 4 * 2);
+        add(U * 2 * D * 2); add((size_t)FF * D * 2);
+        add(U * NH * HD * 2 * 2); add(U * FF * 2 * 2);
+        add(U * 2 * NH * HD * 2);
+        add(8 * FF * 4); add(8 * VOCAB * 4);
+        add((size_t)MAX_SPLITS * 8 * NH * HD * 4); add((size_t)MAX_SPLITS * 8 * NH * 2 * 4);
+        add(8 * 2 * D * 5 / 4 * 3);
+        add(8 * 64 * TOPK * 8 * 2);
+        add(48 * 8 * (QKV + GK * GD + GV * GD + 2 * GV) * 4);
+        add(8 * D * 4 * 2); add(64);
+        add(U * sizeof(half *)); add(U * 3 * 4);
         barena.init(need + (1 << 20));
     }
     b.tokens = barena.get<int>(U);
@@ -465,7 +417,6 @@ void Engine::alloc_buffers(int max_seqs) {
     b.mtp_x = barena.get<float>(8 * D); b.draft = barena.get<int>(16);
     b.img = barena.get<const half *>(U); b.rpos = barena.get<int>(U * 3);
 
-    // sequence slots: the recurrent state stays resident
     CK(hipMalloc(&stage_state, state_bytes()));
     seqs.resize(max_seqs);
     const size_t ssm_bytes = (size_t)48 * GV * GD * GD * 4, conv_bytes = (size_t)48 * QKV * 3 * 4;

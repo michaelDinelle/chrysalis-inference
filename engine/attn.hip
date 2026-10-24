@@ -1,10 +1,3 @@
-// Full-attention layers (16 of 64, plus the MTP layer): q/k RMSNorm + partial RoPE + paged int8
-// KV-cache writes, WMMA flash-attention kernels for prefill and for decode / verify, and the combine
-// step that merges key splits and applies the sigmoid output gate.
-//
-// Query rows of a KV group are numbered r = t * 6 + j (token t, q head 6g + j), so a 16-row WMMA tile
-// mixes heads and tokens freely. Both kernels compute S^T = K Q^T and O^T = V^T P^T, which keeps each
-// lane on a single query row.
 #include "kernels.h"
 #include <algorithm>
 #include <initializer_list>
@@ -13,7 +6,6 @@ __device__ __forceinline__ const uint8_t *kv_head(const KVRef &kv, int layer, in
     return kv.pool + (size_t)kv.pages[pos / PAGE] * KV_PAGE + (size_t)layer * KV_LAYER + (size_t)head * KV_HEAD;
 }
 
-// 16 consecutive keys (from slot0, a multiple of 16) of one V dimension, as signed 5-bit values.
 __device__ __forceinline__ void v5_load16(const uint8_t *blk, int dim, int slot0, int8_t out[16]) {
     const uint2 lo = *(const uint2 *)(blk + VLO_OFF + dim * (PAGE / 2) + slot0 / 2);
     const uint32_t hi = *(const uint16_t *)(blk + VHI_OFF + dim * (PAGE / 8) + slot0 / 8);
@@ -22,11 +14,6 @@ __device__ __forceinline__ void v5_load16(const uint8_t *blk, int dim, int slot0
         out[i] = (int8_t)((((i < 8 ? lo.x : lo.y) >> (4 * (i % 8))) & 15) | (((hi >> i) & 1) << 4)) - 16;
 }
 
-// Decode A fragments with packed fp16 arithmetic (the decode kernel is bound by these instructions, not by WMMA).
-// V: 16 consecutive keys of one dimension, in key order VPERM (nibble pairs k, k+4 share a 32-bit word): each pair is
-// one and-or into fp16 1024 + q (q = nibble + 16 * high bit), then one packed subtract of 1040.
-// K: 16 int8 values times their block scale: bytes biased to unsigned, spread into fp16 lanes 1024 + u by v_perm, then
-// an exact packed subtract (1152) and one rounding multiply, the same values as (_Float16)k * s.
 __device__ constexpr int VPERM[16] = {0, 4, 1, 5, 2, 6, 3, 7, 8, 12, 9, 13, 10, 14, 11, 15};
 union Frag { h16 h; uint32_t u[8]; };
 __device__ __forceinline__ h16 v5_frag_raw(uint2 lo, uint32_t hb) {
@@ -51,12 +38,9 @@ __device__ __forceinline__ h16 k8_frag(int4 kr, _Float16 s) {
     return (f.h - (_Float16)1152) * s;
 }
 
-// Normalized 256-point Walsh-Hadamard transform across a block of 256 threads (one value per thread).
-// It is its own inverse; V is rotated before 5-bit quantization (spreading outlier channels evenly) and
-// the attention output is rotated back.
 __device__ __forceinline__ float fwht256(float x, float *buf) {
     const int i = threadIdx.x;
-    {                                                  // within a wave
+    {
         float o;
         o = lane_xor<1>(x); x = (i & 1) ? o - x : x + o;
         o = lane_xor<2>(x); x = (i & 2) ? o - x : x + o;
@@ -64,7 +48,7 @@ __device__ __forceinline__ float fwht256(float x, float *buf) {
         o = lane_xor<8>(x); x = (i & 8) ? o - x : x + o;
         o = lane_xor<16>(x); x = (i & 16) ? o - x : x + o;
     }
-    for (int h = 32; h < 256; h <<= 1) {               // across waves
+    for (int h = 32; h < 256; h <<= 1) {
         buf[i] = x;
         __syncthreads();
         const float o = buf[i ^ h];
@@ -84,9 +68,6 @@ __device__ __forceinline__ float block_sum256(float v, float *red) {
     return s;
 }
 
-// grid (NH + 2*NKV jobs, T), 256 threads = one head dim each.
-// M-RoPE (Qwen3.8's interleaved sections [11, 11, 10]): of the 32 frequency pairs, f % 3 == 1 (f < 33) turn with the
-// row position, f % 3 == 2 (f < 30) with the column, the rest with the sequence position; text has all three equal.
 __global__ __launch_bounds__(256) void k_attn_prep(const float *qg, const float *kin, const float *vin, const float *qnw,
                                                    const float *knw, int pos0, int rope0, const int *rpos, KVRef kv, int layer, half *Q16) {
     __shared__ float red[8], buf[HD];
@@ -99,7 +80,7 @@ __global__ __launch_bounds__(256) void k_attn_prep(const float *qg, const float 
         x *= rsqrtf(block_sum256(x * x, red) / HD + EPS) * (job < NH ? qnw : knw)[i];
         if (i < ROT) buf[i] = x;
         __syncthreads();
-        if (i < ROT) {               // NeoX-style pairs (i, i + 32) over the first 64 dims
+        if (i < ROT) {
             const int f = i % (ROT / 2);
             const int sec = f % 3 == 1 && f < 33 ? 1 : f % 3 == 2 && f < 30 ? 2 : 0;
             const int rp = rpos ? rpos[t * 3 + sec] : rope0 + t;
@@ -109,7 +90,7 @@ __global__ __launch_bounds__(256) void k_attn_prep(const float *qg, const float 
         }
     }
     if (job < NH) {
-        Q16[((size_t)t * NH + job) * HD + i] = __float2half(x * 0.0625f);   // folds 1/sqrt(256)
+        Q16[((size_t)t * NH + job) * HD + i] = __float2half(x * 0.0625f);
         return;
     }
     const bool isv = job >= NH + NKV;
@@ -120,7 +101,7 @@ __global__ __launch_bounds__(256) void k_attn_prep(const float *qg, const float 
         const float d = amax / 127.0f;
         ((int8_t *)blk)[slot * HD + i] = (int8_t)__float2int_rn(d > 0 ? x / d : 0.0f);
         if ((i & 31) == 0) ((half *)(blk + KS_OFF))[slot * (HD / 32) + i / 32] = __float2half(d);
-    } else {                                 // 5-bit: nibble and high bit go to bit planes shared with other tokens
+    } else {
         x = fwht256(x, buf);
         const float d = warp_max(fabsf(x)) / 15.0f;
         const uint32_t u = (uint32_t)(__float2int_rn(d > 0 ? x / d : 0.0f) + 16);
@@ -141,22 +122,17 @@ void attn_prep(const float *qg, const float *k, const float *v, const float *qnw
     k_attn_prep<<<dim3(NH + 2 * NKV, T), 256, 0, st>>>(qg, k, v, qnw, knw, pos0, rope0, rpos, kv, layer, Q16);
 }
 
-constexpr int QLD = HD + 8;   // padded LDS row (halves) for K tiles
-constexpr int VLD = 16 + 8;   // padded LDS row for the transposed V tile
+constexpr int QLD = HD + 8;
+constexpr int VLD = 16 + 8;
 
-// Prefill attention: AW waves (16-row query tiles each) share 32-key stages of K and V^T dequantized
-// into LDS; each Q fragment (read from L1) feeds two WMMAs, and the accumulators are rescaled only when
-// a row's running max actually grows. A stage's raw K/V bytes are loaded into registers during the previous
-// stage's softmax and P.V (after its Q loads: vector loads complete in order), so the DRAM latency hides
-// behind WMMA work instead of stalling every stage.
-constexpr int KST = 32;                       // keys per LDS stage
-constexpr int VLD32 = KST + 8;                // padded LDS row for the transposed V stage
+constexpr int KST = 32;
+constexpr int VLD32 = KST + 8;
 
 template <int AW>
-struct AttnRaw {                              // one thread's share of a stage's raw K/V bytes
+struct AttnRaw {
     static constexpr int NT = AW * 32, KJ = (KST * 8 + NT - 1) / NT, VJ = (HD * 2 + NT - 1) / NT;
-    int4 k[KJ][2]; float kd[KJ];              // K: one 32-dim block of one key per job (int8), its scale
-    uint2 vlo[VJ]; uint32_t vhi[VJ]; int4 vs[VJ][2];   // V^T: 16 keys of one dim per job (5-bit), their scales
+    int4 k[KJ][2]; float kd[KJ];
+    uint2 vlo[VJ]; uint32_t vhi[VJ]; int4 vs[VJ][2];
     __device__ void load(const uint8_t *page, int slot0, int nvalid, int tid) {
 #pragma unroll
         for (int j = 0; j < KJ; j++) {
@@ -183,7 +159,7 @@ struct AttnRaw {                              // one thread's share of a stage's
         for (int j = 0; j < KJ; j++) {
             const int job = tid + j * NT, kk = job >> 3, blk = job & 7;
             if (job < KST * 8) {
-                const _Float16 d = (_Float16)kd[j];  // exact (an fp16 scale): k8_frag gives (_Float16)k * d, rounded once
+                const _Float16 d = (_Float16)kd[j];
                 *(h16 *)&Ks[kk][blk * 32] = k8_frag(k[j][0], d);
                 *(h16 *)&Ks[kk][blk * 32 + 16] = k8_frag(k[j][1], d);
             }
@@ -227,13 +203,13 @@ __global__ __launch_bounds__(AW * 32) void k_attn(AttnArgs a) {
     for (int d = 0; d < 16; d++) acc[d] = f8{};
 
     AttnRaw<AW> raw;
-    if (kbeg < kend) raw.load(kv_head(a.kv, a.layer, g, kbeg), kbeg % PAGE, kend - kbeg, tid);   // 32 keys never straddle a page
+    if (kbeg < kend) raw.load(kv_head(a.kv, a.layer, g, kbeg), kbeg % PAGE, kend - kbeg, tid);
     for (int k0 = kbeg; k0 < kend; k0 += KST) {
         __syncthreads();
         raw.store(Ks, Vt, kend - k0, tid);
         __syncthreads();
 
-        f8 s0 = {}, s1 = {};                                      // S^T[key 2i+hi (+16)][row r16]
+        f8 s0 = {}, s1 = {};
 #pragma unroll
         for (int d = 0; d < 16; d++) {
             const h16 q = *(const h16 *)(qrow + d * 16);
@@ -265,7 +241,7 @@ __global__ __launch_bounds__(AW * 32) void k_attn(AttnArgs a) {
             rs += p0[i] + p1[i];
         }
         l += rs + lane_xor<16>(rs);
-        h16 P0, P1;                                               // P^T[key][row r16] for keys 0-15 and 16-31
+        h16 P0, P1;
 #pragma unroll
         for (int i = 0; i < 8; i++) {
             const float o0 = lane_xor<16>(p0[i]), o1 = lane_xor<16>(p1[i]);
@@ -279,7 +255,7 @@ __global__ __launch_bounds__(AW * 32) void k_attn(AttnArgs a) {
         }
     }
 
-    if (!valid) return;                                           // acc[dt][i] = O^T[dim 16dt+2i+hi][row r16]
+    if (!valid) return;
     const size_t row = (size_t)(myrow / 6) * NH + g * 6 + myrow % 6;
     if (a.partial) {
         float *po = a.part_o + ((size_t)blockIdx.z * a.T * NH + row) * HD;
@@ -303,27 +279,21 @@ __global__ __launch_bounds__(AW * 32) void k_attn(AttnArgs a) {
         }
 }
 
-// Decode / verify attention (T <= 8, 6T query rows in NT tiles of 16): one 256-thread workgroup (8 waves) per (key split,
-// kv head), keys in stages of 128 (two pages). Per stage, wave w computes S^T = K Q^T for keys 16w..16w+15 of the stage
-// (its K rows read straight from memory, int8 -> fp16 with the block scale) for all query rows; the waves agree on each
-// row's running max through LDS and publish P^T (fp16); then wave w accumulates O^T = V^T P^T for its own 32 dims (one V
-// scale block, folded into P) over all 128 keys. Every K/V byte is read once for all query rows, and a wave keeps 32
-// dims of output per tile (16 registers) instead of 256. Writes unnormalized partials that k_attn_combine merges.
-constexpr int DST = 128;                      // keys per decode stage
-constexpr int DEC_PAGES = 64;                 // page table entries a decode workgroup caches (split_len <= 4096 keys)
-constexpr int DEC_SPLITS = 128;               // key splits per kv head at long contexts (fewer: longer workgroups, fewer partials)
+constexpr int DST = 128;
+constexpr int DEC_PAGES = 64;
+constexpr int DEC_SPLITS = 128;
 template <int NT>
 __global__ __launch_bounds__(256) __attribute__((amdgpu_waves_per_eu(NT == 3 ? 4 : 8))) void k_attn_dec(AttnArgs a) {
     constexpr int R = 16 * NT;
     __shared__ _Float16 Qs[R][HD + 8];
     __shared__ float rmx[8][R];
-    __shared__ _Float16 Ps[8][R][16 + 8];     // P^T per key tile: [tile][row][16 fragment slots, keys VPERM]
-    __shared__ int pg[DEC_PAGES];             // the split's pages
+    __shared__ _Float16 Ps[8][R][16 + 8];
+    __shared__ int pg[DEC_PAGES];
     const int split = blockIdx.x, g = blockIdx.y, tid = threadIdx.x;
     const int w = tid / 32, lane = tid % 32, r16 = lane % 16, hi = lane / 16;
     const int nrows = a.T * 6;
     const int kbeg = split * a.split_len, kend = min(a.pos0 + a.T, kbeg + a.split_len);
-    for (int i = tid; i < R * (HD / 8); i += 256) {      // the group's query rows (row t * 6 + j: token t, head 6g + j)
+    for (int i = tid; i < R * (HD / 8); i += 256) {
         const int r = i / (HD / 8), c = i % (HD / 8);
         int4 v = {0, 0, 0, 0};
         if (r < nrows) v = *(const int4 *)(a.Q16 + ((size_t)(r / 6) * NH + g * 6 + r % 6) * HD + c * 8);
@@ -345,10 +315,9 @@ __global__ __launch_bounds__(256) __attribute__((amdgpu_waves_per_eu(NT == 3 ? 4
 
     for (int k0 = kbeg; k0 < kend; k0 += DST) {
         const int pi = (k0 - kbeg) / PAGE;
-        const uint8_t *pp[2];                                // the stage's two pages (wave-uniform)
+        const uint8_t *pp[2];
         pp[0] = a.kv.pool + (size_t)__builtin_amdgcn_readfirstlane(pg[pi]) * KV_PAGE + head_off;
         pp[1] = k0 + PAGE < kend ? a.kv.pool + (size_t)__builtin_amdgcn_readfirstlane(pg[pi + 1]) * KV_PAGE + head_off : pp[0];
-        // all of the stage's loads first: this wave's V dims over the 8 key tiles, then its K tile
         uint2 vlo[8][2];
         uint32_t vhi[8][2];
 #pragma unroll
@@ -362,7 +331,7 @@ __global__ __launch_bounds__(256) __attribute__((amdgpu_waves_per_eu(NT == 3 ? 4
                 vhi[kt][dt] = k0 + 16 * kt < kend ? *(const uint16_t *)(page + VHI_OFF + dim * (PAGE / 8) + slot0 / 8) : 0u;
             }
         }
-        const int kt0 = k0 + 16 * w;                         // this wave's key tile
+        const int kt0 = k0 + 16 * w;
         f8 sc[NT];
 #pragma unroll
         for (int rt = 0; rt < NT; rt++) sc[rt] = f8{};
@@ -383,7 +352,7 @@ __global__ __launch_bounds__(256) __attribute__((amdgpu_waves_per_eu(NT == 3 ? 4
             }
         }
 #pragma unroll
-        for (int rt = 0; rt < NT; rt++) {                    // mask, this wave's row maxima
+        for (int rt = 0; rt < NT; rt++) {
             float mx = -INFINITY;
 #pragma unroll
             for (int i = 0; i < 8; i++) {
@@ -396,7 +365,7 @@ __global__ __launch_bounds__(256) __attribute__((amdgpu_waves_per_eu(NT == 3 ? 4
         }
         __syncthreads();
 #pragma unroll
-        for (int rt = 0; rt < NT; rt++) {                    // the stage's row max, P^T of this wave's keys to LDS
+        for (int rt = 0; rt < NT; rt++) {
             float M = m[rt];
 #pragma unroll
             for (int ww = 0; ww < 8; ww++) M = fmaxf(M, rmx[ww][rt * 16 + r16]);
@@ -407,24 +376,24 @@ __global__ __launch_bounds__(256) __attribute__((amdgpu_waves_per_eu(NT == 3 ? 4
             for (int i = 0; i < 8; i++) { p[i] = M == -INFINITY ? 0.0f : __expf(sc[rt][i] - M); rs += p[i]; }
             l[rt] = l[rt] * alpha + rs + lane_xor<16>(rs);
             acc[rt][0] *= alpha; acc[rt][1] *= alpha;
-            float P16[16];                                   // row r16's keys 0..15 (the partner lane has the other parity)
+            float P16[16];
 #pragma unroll
             for (int i = 0; i < 8; i++) {
                 const float o = lane_xor<16>(p[i]);
                 P16[2 * i] = hi ? o : p[i];
                 P16[2 * i + 1] = hi ? p[i] : o;
             }
-            h16 Ph;                                          // lane hi writes fragment slots 8hi .. 8hi+7 (keys VPERM)
+            h16 Ph;
 #pragma unroll
             for (int j = 0; j < 8; j++) Ph[j] = (_Float16)(hi ? P16[VPERM[8 + j]] : P16[VPERM[j]]);
             *(uint4 *)&Ps[w][rt * 16 + r16][8 * hi] = *(const uint4 *)&Ph;
         }
         __syncthreads();
 #pragma unroll
-        for (int kt = 0; kt < 8; kt++) {                     // O^T for dims 32w + 16dt + r16 over the stage's keys
+        for (int kt = 0; kt < 8; kt++) {
             if (k0 + 16 * kt >= kend) break;
             const half *vs = (const half *)(pp[kt / 4] + VS_OFF) + w * PAGE + (kt % 4) * 16;
-            h16 vsp;                                         // the keys' V scales in fragment order
+            h16 vsp;
 #pragma unroll
             for (int i = 0; i < 16; i++) vsp[i] = (_Float16)__half2float(vs[VPERM[i]]);
             h16 B[NT];
@@ -438,7 +407,6 @@ __global__ __launch_bounds__(256) __attribute__((amdgpu_waves_per_eu(NT == 3 ? 4
             }
         }
     }
-    // partials: O^T rows of this wave's dims; the row sums add up over the waves
 #pragma unroll
     for (int rt = 0; rt < NT; rt++) if (hi == 0) rmx[w][rt * 16 + r16] = l[rt];
     __syncthreads();
@@ -462,8 +430,6 @@ __global__ __launch_bounds__(256) __attribute__((amdgpu_waves_per_eu(NT == 3 ? 4
     }
 }
 
-// Merge key splits, apply the output gate, write fp16 (prefill) and/or int8 blocks (decode). One workgroup per row:
-// thread s weighs split s (running max and sum across the splits), then thread d sums dimension d over the splits.
 __global__ __launch_bounds__(256) void k_attn_combine(const float *part_o, const float *part_ml, int nsplit, int rows,
                                                       const float *qg, half *oh, QAct oq) {
     __shared__ float buf[HD], ws[MAX_SPLITS], red[8], part[8][HD];
@@ -478,7 +444,7 @@ __global__ __launch_bounds__(256) void k_attn_combine(const float *part_o, const
     const float wt = ms == -INFINITY ? 0.0f : __expf(ms - M);
     if (d < nsplit) ws[d] = wt;
     const float L = block_sum256(d < nsplit ? wt * part_ml[((size_t)d * rows + row) * 2 + 1] : 0.0f, red);
-    {                                                   // wave v sums splits v, v + 8, ... for all dims (8 per lane)
+    {
         const int v = d / 32, ln = d % 32;
         float4 a0 = {0, 0, 0, 0}, a1 = {0, 0, 0, 0};
 #pragma unroll 4
@@ -506,14 +472,11 @@ __global__ __launch_bounds__(256) void k_attn_combine(const float *part_o, const
     }
 }
 
-// Full attention for T query tokens at positions pos0.. (keys 0 .. pos0+T-1 must already be cached).
-// Sets split_len itself (whatever the caller passed) and always merges the splits in k_attn_combine: fp16 and/or
-// int8 output for decode / verify, fp16 only for prefill.
 void attention(AttnArgs a, half *oh, QAct oq, hipStream_t st) {
     const int ntiles = (a.T * 6 + 15) / 16;
     const int nkeys = a.pos0 + a.T;
     a.out_h = oh;
-    if (a.T <= 8) {                       // decode / verify: up to DEC_SPLITS workgroups per kv head, whole stages each
+    if (a.T <= 8) {
         const int nst = (nkeys + DST - 1) / DST;
         const int target = std::min(DEC_SPLITS, nst);
         if ((nst + target - 1) / target * DST > DEC_PAGES * PAGE) FAIL("attention: %d keys exceed the decode page cache", nkeys);
@@ -524,7 +487,7 @@ void attention(AttnArgs a, half *oh, QAct oq, hipStream_t st) {
         if (ntiles == 1) k_attn_dec<1><<<grid, 256, 0, st>>>(a);
         else if (ntiles == 2) k_attn_dec<2><<<grid, 256, 0, st>>>(a);
         else k_attn_dec<3><<<grid, 256, 0, st>>>(a);
-    } else {                              // prefill: big workgroups share K/V stages; split keys if too few
+    } else {
         if (oq.q) FAIL("attention: prefill writes fp16 output");
         const int aw = ntiles >= 384 ? 16 : ntiles >= 96 ? 8 : 4;
         const int wgs = (ntiles + aw - 1) / aw * NKV;

@@ -1,14 +1,3 @@
-"""Qwen3.8 chat format: prompt rendering straight to token ids, and streaming output parsing.
-
-Rendering follows the model's chat_template.jinja exactly, with two deliberate differences:
-  * message content is tokenized without matching special tokens, so a file that contains
-    "<|im_end|>" stays text instead of ending the turn;
-  * assistant turns that Chrysalis generated are replayed as the exact token ids it produced, so every
-    request in an agent loop extends the cached sequence instead of diverging from it.
-A picture renders as <|vision_start|>, its image tokens (one per merged 2 x 2 patch block, as the processor expands
-<|image_pad|>; ids naming the picture, engine/model.h) and <|vision_end|>; a video as the processor expands <|video_pad|>:
-each frame pair's time ("<1.5 seconds>") and its tokens between markers of its own, inside the video's.
-"""
 import functools
 import json
 import re
@@ -44,19 +33,16 @@ VOLATILE = re.compile(r"^(Today's date:|You are powered by the model|Here is som
 
 
 def split_static(text):
-    """Split a system prompt before its per-session part (OpenCode's date and environment block), at a line
-    start so the tokenization is unchanged. The head is identical across projects and days."""
     m = VOLATILE.search(text)
     return (text[:m.start()], text[m.start():]) if m and m.start() > 0 else (text, "")
 
 
 def tojson(x):
-    """Jinja `tojson` as transformers defines it for chat templates."""
     return json.dumps(x, ensure_ascii=False)
 
 
 class Content(str):
-    """Text that came from a message (as opposed to template literals)."""
+    pass
 
 
 class Tokens:
@@ -67,9 +53,6 @@ class Tokens:
         self.eos = {self.id["<|im_end|>"], self.id["<|endoftext|>"]}
 
     def encode_run(self, run):
-        """Tokenize adjacent text pieces like the reference tokenizer does, except that special-token strings
-        inside Content are cut after their first character so they can never become control tokens.
-        Memoized: every request re-sends the whole conversation, but only its new messages need tokenizing."""
         return self._encode_run(tuple((isinstance(p, Content), p) for p in run))
 
     @functools.lru_cache(maxsize=4096)
@@ -92,7 +75,6 @@ class Tokens:
         return tuple(out)
 
     def encode(self, pieces, marks=()):
-        """pieces: text (str / Content) or token ids. Returns ids and the token offsets of `marks` (piece indices)."""
         ids, offsets, run, marks = [], [], [], sorted(marks)
         mi = 0
         for idx, p in enumerate(list(pieces) + [None]):
@@ -116,21 +98,16 @@ class Tokens:
 
 
 class Picture(NamedTuple):
-    """An image part: its URL and the most pixels it asks to be resized to (None: as the request or server says)."""
     url: str
     max_pixels: int | float | None = None
 
 
 class Clip(NamedTuple):
-    """A video part: its URL and the frames a second to take of it (None: chrysalis/vision.py's)."""
     url: str
     fps: int | float | None = None
 
 
 def parts(content):
-    """A message's content as ("text", str), ("image", Picture) and ("video", Clip) parts, in order (OpenAI's image_url
-    parts, with detail "low" or a max_pixels as qwen-vl-utils takes it; video_url parts, as vLLM takes them, with an fps;
-    or the template's image and video items)."""
     if content is None:
         return []
     if isinstance(content, str):
@@ -156,12 +133,10 @@ def parts(content):
 
 
 def text_of(content):
-    """The text of a message's content (its pictures left out)."""
     return "".join(v for k, v in parts(content) if k == "text")
 
 
 def call_args(tc):
-    """OpenAI tool call -> (name, ordered dict of arguments)."""
     fn = tc.get("function", tc)
     args = fn.get("arguments", {})
     if isinstance(args, str):
@@ -173,8 +148,6 @@ def call_args(tc):
 
 
 def message_key(msg, reasoning=True):
-    """Identity of an assistant turn as the client echoes it back (ignores formatting). With the reasoning, so turns
-    that said and called the same (an "OK", a repeated tool call) stay apart; without it for clients that drop it."""
     calls = [(n, json.dumps(a, sort_keys=True, ensure_ascii=False)) for n, a in map(call_args, msg.get("tool_calls") or [])]
     r = msg.get("reasoning_content")
     r = r.strip() if reasoning and isinstance(r, str) else ""
@@ -183,14 +156,10 @@ def message_key(msg, reasoning=True):
 
 class Renderer:
     def __init__(self, tok: Tokens, replay, images=None):
-        self.t, self.replay = tok, replay       # replay: message_key -> (thinking, generated ids without stop token)
-        # images: a Picture -> its image token ids, a Clip -> (time, image token ids) per frame pair; None: no vision
-        # tower (a note instead)
+        self.t, self.replay = tok, replay
         self.images = images
 
     def content(self, content, images=None):
-        """Pieces of a message's content: text and pictures in order, the whole trimmed at its ends as the template trims
-        the rendered string (a picture's markers are not whitespace, so text beside a picture keeps its spaces)."""
         segs, images = [], images or self.images
         vs, ve = self.t.id["<|vision_start|>"], self.t.id["<|vision_end|>"]
         for kind, val in parts(content):
@@ -216,11 +185,6 @@ class Renderer:
 
     def render(self, messages, tools=None, enable_thinking=True, effort="xhigh", preserve_thinking=True, think_reply=None,
                images=None):
-        """Returns (token ids, marks): token offsets of cache points -- "tools" (end of the tool block, shared by
-        every session; None without tools), "system" (end of the system turn), "messages" (start of each
-        later turn) and "prompt" (start of the generation prompt). think_reply=False: the conversation as with
-        enable_thinking, but a reply without thinking. images: this request's pictures and videos as the renderer's own
-        takes them (else that one)."""
         T, S = self.t, self.t.id
         ri = EFFORT.get(effort, EFFORT["xhigh"]) if enable_thinking else ""
         pieces, marks = [], []
@@ -316,7 +280,6 @@ PARAM = re.compile(r"<parameter=([^>\n]+)>\n?(.*?)\n?</parameter>\s*(?=<paramete
 
 
 def parse_call(body, schemas):
-    """'\n<function=NAME>\n<parameter=K>\nV\n</parameter>\n</function>\n' -> (name, args dict)."""
     m = re.search(r"<function=([^>\n]+)>", body)
     if not m:
         return None
@@ -337,14 +300,13 @@ def parse_call(body, schemas):
 
 
 class OutputParser:
-    """Turns generated token ids into reasoning / content text and tool calls, incrementally."""
 
     def __init__(self, tok: Tokens, thinking=True, schemas=None):
         self.t, self.s = tok, tok.id
         self.state = "reasoning" if thinking else "content"
-        self.pending = []            # undecoded ids (incomplete UTF-8)
-        self.pending_lp = []         # their log probs: (logprob, alternatives), when asked for
-        self.call = None             # ids inside <tool_call> ... </tool_call>
+        self.pending = []
+        self.pending_lp = []
+        self.call = None
         self.calls = []
         self.schemas = schemas or {}
         self.content_started = False
@@ -366,13 +328,9 @@ class OutputParser:
         if self.state not in ("reasoning", "content"):
             return
         (self.reasoning if self.state == "reasoning" else self.content).append(text)
-        # A piece is usually one token; a character split over tokens is one piece, with their joint probability
-        # and the first one's alternatives.
         out.append((self.state, text, {"token": text, "logprob": sum(x[0] for x in lp), "top_logprobs": lp[0][1]} if lp else None))
 
     def feed(self, ids, lps=None):
-        """Returns a list of events: ("reasoning", text, logprob), ("content", text, logprob), ("tool_call", (name, args)).
-        lps: each id's (logprob, alternatives), or None; a text event's logprob is then an OpenAI logprobs entry."""
         out = []
         for n, i in enumerate(ids):
             if self.call is not None:
@@ -401,13 +359,12 @@ class OutputParser:
         return out
 
     def raw(self):
-        """The reasoning and content so far, unstripped (what a client has from the stream)."""
         return "".join(self.reasoning), "".join(self.content)
 
     def finish(self):
         out = []
         self._flush(out)
-        if self.pending:                          # bytes that never formed valid UTF-8: emit as-is
+        if self.pending:
             self.pending.append(self.s["<|endoftext|>"])
             text = self.t.decode(self.pending[:-1]).rstrip("\ufffd")
             self.pending = []
@@ -421,17 +378,13 @@ class OutputParser:
 
 
 class StopText:
-    """OpenAI's `stop`: the answer ends where the first of these strings to be completed (character by character)
-    begins, so how the text is split into pieces does not matter. Only the answer is searched: a stop string in the
-    reasoning would end a reply before it starts. Answer text that may begin one is held back until the next pieces
-    tell. Events of other kinds pass straight through, after the held text: a stop string never spans one."""
 
     def __init__(self, stops):
         self.stops = [s for s in stops if s]
-        self.held = []               # content events, in order
-        self.hit = False             # a stop string was found: nothing more is let through
-        self.matched = None          # which one
-        self.content = []            # the answer text let through
+        self.held = []
+        self.hit = False
+        self.matched = None
+        self.content = []
 
     def feed(self, events):
         out = []
@@ -446,7 +399,7 @@ class StopText:
             text = "".join(e[1] for e in self.held)
             found = [(i + len(s), i, s) for s in self.stops if (i := text.find(s)) >= 0]
             if found:
-                _, at, self.matched = min(found)             # completed first; of those, the longest
+                _, at, self.matched = min(found)
                 out += self._take(at, split=True)
                 self.held, self.hit = [], True
                 break
@@ -455,16 +408,13 @@ class StopText:
         return out
 
     def flush(self):
-        """At the end of the reply (or before another kind of event): what is held is the answer's."""
         return self._take(sum(len(e[1]) for e in self.held), split=False)
 
     def _take(self, n, split):
-        """The held events making up the first n characters; split: cut the one that straddles n (its log prob entry
-        then spells the part kept)."""
         out = []
         while self.held and (len(self.held[0][1]) <= n or split and n > 0):
             ev = self.held.pop(0)
-            if len(ev[1]) > n:                           # an entry's token is its event's text (OutputParser._flush)
+            if len(ev[1]) > n:
                 ev = (ev[0], ev[1][:n], dict(ev[2], token=ev[1][:n]) if len(ev) > 2 and ev[2] else None)
             out.append(ev)
             self.content.append(ev[1])

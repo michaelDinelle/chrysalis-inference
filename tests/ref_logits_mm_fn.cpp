@@ -1,7 +1,3 @@
-// Reference logits from llama.cpp for a Flash-Next prompt with pictures, as tests/ref_logits_mm.cpp (text tokens by id,
-// image tokens as given embeddings, which llama.cpp's n-gram block hashes as <|image_pad|>, every token at its M-RoPE
-// position) on the Q8_0 source run as tests/ref_logits_fn.cpp runs it (CPU, a layer-by-layer prefetcher).
-// Build: make build_fn/ref_logits_mm_fn. Usage: ref_logits_mm_fn model-00001-of-N.gguf tokens.i32 pos.i32 embd.f32 out.f32
 #include "llama.h"
 #include "../engine_fn/gguf.h"
 #include <cstdio>
@@ -11,7 +7,7 @@
 #include <vector>
 
 struct Range { int fd; size_t off, len; };
-static std::map<int, std::vector<Range>> layer_ranges;   // layer -> byte ranges of its tensors
+static std::map<int, std::vector<Range>> layer_ranges;
 static int prefetched = -1;
 
 static void advise(int layer, int how) {
@@ -19,12 +15,11 @@ static void advise(int layer, int how) {
     if (it == layer_ranges.end()) return;
     for (const Range &r : it->second) posix_fadvise(r.fd, (off_t)r.off, (off_t)r.len, how);
 }
-static void ahead(int done) {                    // layer `done` finished: read ahead three layers, drop it
+static void ahead(int done) {
     for (int l = std::max(prefetched + 1, done + 1); l <= done + 3; l++) { advise(l, POSIX_FADV_WILLNEED); prefetched = l; }
     if (done >= 0) advise(done, POSIX_FADV_DONTNEED);
 }
 
-// the eval callback asks for each layer's output ("l_last-N"): the CPU computes up to it, then reports it here
 static bool on_eval(struct ggml_tensor *t, bool ask, void *) {
     const char *n = ggml_get_name(t);
     if (strncmp(n, "l_last-", 7) != 0) return false;
@@ -45,7 +40,6 @@ int main(int argc, char **argv) {
     const float *embd = (const float *)eb.data();
     const int n = (int)(tb.size() / 4);
     if ((int)(pb.size() / 4) != 3 * n) { fprintf(stderr, "positions do not match the tokens\n"); return 1; }
-    // tensor byte ranges per layer, from every split of the model
     std::string first = argv[1];
     const size_t at = first.find("-00001-of-");
     const int nsplit = at == std::string::npos ? 1 : atoi(first.c_str() + at + 10);
@@ -64,16 +58,15 @@ int main(int argc, char **argv) {
     auto mp = llama_model_default_params();
     mp.n_gpu_layers = 0;
     static ggml_backend_dev_t no_devices[] = {nullptr};
-    mp.devices = no_devices;                     // CPU only: no GPU backend at all
+    mp.devices = no_devices;
     llama_model *model = llama_model_load_from_file(argv[1], mp);
-    // drop what the load-time readahead left in the cache (mostly the last layers), then start at layer 0
     for (auto &[l, _] : layer_ranges) advise(l, POSIX_FADV_DONTNEED);
     ahead(-1);
     auto cp = llama_context_default_params();
     cp.n_ctx = (size_t)n + 16;
     cp.n_batch = cp.n_ubatch = (size_t)n;
     cp.cb_eval = on_eval;
-    cp.op_offload = false;            // by default big batches copy each (disk-backed) weight to the GPU from one thread
+    cp.op_offload = false;
     cp.n_threads = cp.n_threads_batch = 16;
     cp.cb_eval_user_data = nullptr;
     llama_context *ctx = llama_init_from_model(model, cp);
@@ -81,7 +74,7 @@ int main(int argc, char **argv) {
     std::vector<float> logits((size_t)n * nv);
     llama_batch_ext *b = llama_batch_ext_init(ctx);
     int used = 0;
-    for (int i = 0; i < n;) {                    // runs of text and of image tokens, each its own batch
+    for (int i = 0; i < n;) {
         const bool img = toks[i] >= (1 << 30);
         int j = i;
         while (j < n && (toks[j] >= (1 << 30)) == img) j++;
@@ -100,7 +93,7 @@ int main(int argc, char **argv) {
             }
             llama_batch_ext_set_output_logits(b, idx, true);
         }
-        prefetched = -1;                         // each batch streams the layers from the start again
+        prefetched = -1;
         ahead(-1);
         if (llama_process(ctx, LLAMA_PROCESS_TYPE_DECODE, b)) { fprintf(stderr, "decode failed\n"); return 1; }
         for (int k = i; k < j; k++) {

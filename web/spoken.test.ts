@@ -1,6 +1,3 @@
-// The words the page counts as a spoken reply's (spoken.ts) are the words voice mode's service reads of it (speakable,
-// voice/talk.py, through data/voice-venv: `make voice`), one for one, so the place the page shows as reached is the place
-// the voice has reached. (A picture's alt text is read and not shown as words: neither counts it.)
 import { expect, test } from "bun:test";
 import { pointOf, shownWords, unitOf } from "./spoken";
 
@@ -12,8 +9,8 @@ const REPLIES = [
 ];
 
 test("the words counted as a reply's are the words its voice reads, in order", () => {
-  const py = Bun.spawnSync([`${import.meta.dir}/../data/voice-venv/bin/python`, "-I", "-c",
-    "import json, sys; sys.path.insert(0, sys.argv[1]); from voice.talk import speakable; print(json.dumps([speakable(t) for t in json.load(sys.stdin)]))",
+  const py = Bun.spawnSync([`${import.meta.dir}/../data/venv/bin/python`, "-I", "-c",
+    "import json, sys; sys.path.insert(0, sys.argv[1]); from chrysalis.voice.talk import speakable; print(json.dumps([speakable(t) for t in json.load(sys.stdin)]))",
     `${import.meta.dir}/..`], { stdin: Buffer.from(JSON.stringify(REPLIES)) });
   expect(py.exitCode).toBe(0);
   const read: string[] = JSON.parse(py.stdout.toString());

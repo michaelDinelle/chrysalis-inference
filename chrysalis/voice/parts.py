@@ -1,19 +1,9 @@
-"""The voice service's parts, each kind behind one small interface and named in PARTS (a session picks them by name):
-  vad   FRAME (samples at 16 kHz), state() -> a session's own state, prob(state, frame) -> P(speech)
-  stt   stream(terms="") -> a stream: feed(pcm) -> the whole text so far when its reading at a pause changed it, else
-        None; finish() -> final text; peek(seconds=None) -> the text of the last seconds (or all) decoded now, apart from the stream. terms:
-        the conversation's words to listen for, "/" between them (terms())
-  turn  prob(audio) -> P(the user's turn is over), given the turn's audio up to now
-  tts   rate, voices() -> [{id, label, lang, gender}] (a classmethod: it loads nothing), VOICE (the default),
-        synth(text, voice, speed) -> float32 mono at rate
-A loaded part is shared by the sessions using it; what a session changes lives in its own state or stream. A part's
-models are its FILES in data/voice/<DIR>/, fetched by `voice/setup.sh DIR`."""
-import collections, ctypes, gc, os, re, threading, wave
+import collections, ctypes, gc, os, re, shutil, tarfile, tempfile, threading, urllib.request, wave
 
 import numpy as np
 import onnxruntime as ort
 
-ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 DATA = os.path.join(ROOT, "data", "voice")
 PARTS = {"vad": {}, "stt": {}, "turn": {}, "tts": {}}
 RATE = 16000
@@ -31,11 +21,47 @@ class Missing(RuntimeError):
     pass
 
 
+SHERPA = "https://github.com/k2-fsa/sherpa-onnx/releases/download"
+SOURCES = {
+    "silero": [("https://github.com/snakers4/silero-vad/raw/v6.2.3/src/silero_vad/data/silero_vad_16k_op15.onnx", "silero_vad.onnx")],
+    "smart-turn": [("https://huggingface.co/pipecat-ai/smart-turn-v3/resolve/main/smart-turn-v3.2-cpu.onnx", "smart-turn-v3.2-cpu.onnx")],
+    "kokoro": [("https://github.com/thewh1teagle/kokoro-onnx/releases/download/model-files-v1.0/kokoro-v1.0.int8.onnx", "kokoro-v1.0.int8.onnx"),
+               ("https://github.com/thewh1teagle/kokoro-onnx/releases/download/model-files-v1.0/voices-v1.0.bin", "voices-v1.0.bin")],
+    "parakeet-110m": f"{SHERPA}/asr-models/sherpa-onnx-nemo-parakeet_tdt_transducer_110m-en-36000-int8.tar.bz2",
+    "kitten": f"{SHERPA}/tts-models/kitten-micro-en-v0_8.tar.bz2",
+    "supertonic": f"{SHERPA}/tts-models/sherpa-onnx-supertonic-3-tts-int8-2026-05-11.tar.bz2",
+    "pocket": f"{SHERPA}/tts-models/sherpa-onnx-pocket-tts-int8-2026-01-26.tar.bz2",
+}
+
+
+def fetch(name):
+    src, dest = SOURCES[name], os.path.join(DATA, name)
+    os.makedirs(DATA, exist_ok=True)
+    tmp = tempfile.mkdtemp(dir=DATA, prefix=".fetch.")
+    try:
+        if isinstance(src, str):
+            with urllib.request.urlopen(src) as r, tarfile.open(fileobj=r, mode="r|bz2") as t:
+                t.extractall(tmp, filter="data")
+            (inner,) = os.listdir(tmp)
+            shutil.rmtree(dest, ignore_errors=True)
+            os.rename(os.path.join(tmp, inner), dest)
+        else:
+            os.makedirs(dest, exist_ok=True)
+            for url, n in src:
+                if not os.path.exists(os.path.join(dest, n)):
+                    urllib.request.urlretrieve(url, os.path.join(tmp, n))
+                    os.replace(os.path.join(tmp, n), os.path.join(dest, n))
+    finally:
+        shutil.rmtree(tmp, ignore_errors=True)
+
+
 def files(cls):
     paths = [os.path.join(DATA, cls.DIR, n) for n in cls.FILES]
-    for p in paths:
-        if not os.path.exists(p):
-            raise Missing(f"{cls.label} is not installed ({p} is missing): run voice/setup.sh {cls.DIR}")
+    if not all(os.path.exists(p) for p in paths):
+        try:
+            fetch(cls.DIR)
+        except OSError as e:
+            raise Missing(f"{cls.label} could not be downloaded: {e}") from e
     return paths
 
 
@@ -47,11 +73,7 @@ def session(path, threads, spin=False):
     o = ort.SessionOptions()
     o.intra_op_num_threads, o.inter_op_num_threads = threads, 1
     o.execution_mode = ort.ExecutionMode.ORT_SEQUENTIAL
-    # Pool threads that spin between a run's parallel steps take cores Flash-Next's CPU experts use; speech synthesis
-    # spins all the same: it is what the user waits for (Kokoro's "Sure!" 173 ms instead of 198 at 4 threads)
     o.add_session_config_entry("session.intra_op.allow_spinning", "1" if spin else "0")
-    # ONNX Runtime's arena keeps the largest activations it ever held (Kokoro: +604 MB after a dozen sentences); without
-    # it, and with trim() after a run, Kokoro holds +176 MB, ~5% slower
     o.enable_cpu_mem_arena = False
     return ort.InferenceSession(path, o, providers=["CPUExecutionProvider"])
 
@@ -63,12 +85,10 @@ except (OSError, AttributeError):
 
 
 def trim():
-    """Gives the memory a run freed back to the system (glibc keeps it otherwise)."""
     if _malloc_trim:
         _malloc_trim(0)
 
 
-# A word the system's dictionary lacks, said in the conversation, is a name worth listening for ("Qwen", "Pygame")
 DICTS = ("/usr/share/dict/words", "/usr/share/dict/cracklib-small")
 _words = None
 
@@ -83,10 +103,6 @@ def words():
 
 
 def terms(text):
-    """The names and terms in conversation text that speech recognition should listen for, as written: words with
-    capitals inside or with digits (PyTorch, JSON, RS3; "Qwen3.8-27B" gives "Qwen"), words the dictionary lacks
-    (Pygame, Kokoro), and capitalized names joined by hyphens as a phrase ("Flash-Next": "Flash Next"). They come from
-    the chat, so there is no list to keep; without a dictionary only the first kind are found."""
     known, out = words(), []
     for tok in re.findall(r"[A-Za-z0-9][A-Za-z0-9.'+\-]*[A-Za-z0-9]|[A-Za-z]", text):
         parts = [p for p in tok.strip(".'").split("-") if p]
@@ -111,7 +127,6 @@ def terms(text):
 
 @part("vad", "silero")
 class Silero:
-    """Silero VAD v6, 16 kHz: each call sees 512 new samples after the previous call's last 64."""
     label, DIR, FILES, FRAME = "Silero VAD v6", "silero", ("silero_vad.onnx",), 512
 
     def __init__(self, threads):
@@ -130,25 +145,15 @@ class Silero:
 
 @part("stt", "parakeet-110m")
 class Parakeet:
-    """Parakeet 110M (a NeMo transducer, English), offline, fed as a stream: Silero splits the speech at pauses and each
-    finished piece is read while the user goes on, so a turn's end leaves only its last piece; the pieces so far are
-    the partial. Its search favors the conversation's terms (HOT): on 124 sentences in 4 voices, "Qwen" right in 20 of
-    20 (greedy: 0; Kroko, a streaming zipformer, at best 8 with any score that kept its other words), its terms in 89%
-    (greedy 45%), and no term heard in a sentence that did not say it ("When will the game", beside "Qwen"); at 2.0 it
-    heard 4 such."""
     label, DIR = "Parakeet 110M (English)", "parakeet-110m"
     FILES = ("encoder.int8.onnx", "decoder.int8.onnx", "joiner.int8.onnx", "tokens.txt")
     HOT = 1.5
-    # A piece ends at 0.3 s of quiet, or at 9 s: a look (talk.py) reads the piece under way again, ~0.03 s a second
     PAUSE, LONGEST = int(0.3 * RATE), 9 * RATE
-    # Quiet after which the piece is read, ahead of its pause: a turn ends at 0.2 s of silence (talk.py), and its last
-    # piece read only then made the wait after speech 349 ms (median of five questions), 264 read here
     EARLY = int(0.1 * RATE)
 
     def __init__(self, threads):
         import sherpa_onnx
         enc, dec, join, tokens = files(type(self))
-        # its pieces as sherpa splits the terms into them: each scored alike, so a term is spelled in the fewest
         vocab = os.path.join(os.path.dirname(tokens), "terms.vocab")
         if not os.path.exists(vocab):
             with open(tokens) as f, open(vocab + ".tmp", "w") as out:
@@ -170,7 +175,7 @@ class ParakeetStream:
     def __init__(self, m, terms=""):
         self.m, self.vst, self.done, self.piece, self.spare = m, m.vad.state(), [], [], np.zeros(0, np.float32)
         self.voiced, self.quiet, self.n, self.terms = False, 0, 0, terms
-        self.early = None                               # the piece's text, read once its speech stopped (EARLY)
+        self.early = None
         self.told = ""
 
     def read(self, pcm):
@@ -213,8 +218,6 @@ class ParakeetStream:
         return " ".join(self.done)
 
     def peek(self, seconds=None):
-        """The piece under way read now (its words otherwise wait for its pause), after the pieces so far; with
-        seconds, only that much of it."""
         x = np.concatenate(self.piece) if self.voiced and self.piece else np.zeros(0, np.float32)
         if self.early is not None and not seconds:
             now = self.early
@@ -224,7 +227,6 @@ class ParakeetStream:
 
 
 def mel_filters(n_mels=80, n_fft=400, sr=RATE):
-    """Slaney-scale triangles with Slaney's area normalization: Whisper's (librosa's) filter bank."""
     def mel(f):
         f = np.asarray(f, np.float64)
         return np.where(f < 1000, 3 * f / 200, 15 + np.log(np.maximum(f, 1e-10) / 1000) * 27 / np.log(6.4))
@@ -239,11 +241,10 @@ def mel_filters(n_mels=80, n_fft=400, sr=RATE):
 
 
 def whisper_features(x, filters):
-    """WhisperFeatureExtractor's log-mel of x, normalized to zero mean and unit variance first (do_normalize)."""
     x = (x - x.mean()) / np.sqrt(x.var() + 1e-7)
     x = np.pad(x, 200, mode="reflect")
     frames = np.lib.stride_tricks.sliding_window_view(x, 400)[::160]
-    window = 0.5 - 0.5 * np.cos(2 * np.pi * np.arange(400) / 400)          # periodic Hann
+    window = 0.5 - 0.5 * np.cos(2 * np.pi * np.arange(400) / 400)
     power = np.abs(np.fft.rfft(frames * window, axis=1)) ** 2
     spec = np.log10(np.maximum(filters @ power.T, 1e-10))[:, :-1]
     return ((np.maximum(spec, spec.max() - 8) + 4) / 4).astype(np.float32)
@@ -251,7 +252,6 @@ def whisper_features(x, filters):
 
 @part("turn", "smart-turn")
 class SmartTurn:
-    """Smart Turn v3.2: the last 8 s of the turn, zero-padded at the start, as Whisper log-mel features."""
     label, DIR, FILES, SPAN = "Smart Turn v3.2", "smart-turn", ("smart-turn-v3.2-cpu.onnx",), 8 * RATE
 
     def __init__(self, threads):
@@ -267,7 +267,6 @@ class SmartTurn:
 @part("tts", "kokoro")
 class Kokoro:
     label, DIR, FILES, VOICE = "Kokoro 82M", "kokoro", ("kokoro-v1.0.int8.onnx", "voices-v1.0.bin"), "af_heart"
-    # a voice id's first letter is its language and its second the voice's gender (af_heart: American English, female)
     LANGS = {"a": ("en-US", "en-us"), "b": ("en-GB", "en-gb"), "e": ("es", "es"), "f": ("fr", "fr-fr"), "h": ("hi", "hi"),
              "i": ("it", "it"), "j": ("ja", "ja"), "p": ("pt", "pt-br"), "z": ("zh", "cmn")}
 
@@ -291,7 +290,6 @@ class Kokoro:
 
 
 class SherpaTts:
-    """A sherpa-onnx OfflineTts model; its voices are speaker numbers, SPEAKERS of them."""
     VOICE, LANG = "0", "en-US"
 
     def __init__(self, threads):
@@ -345,7 +343,6 @@ class Supertonic(SherpaTts):
 
 @part("tts", "pocket")
 class Pocket(SherpaTts):
-    """Pocket TTS clones the voice of a reference recording: its voices are the WAV files in its test_wavs."""
     label, DIR, VOICE, STEPS = "Pocket TTS (voice cloning)", "pocket", "bria", 5
     FILES = ("lm_flow.int8.onnx", "lm_main.int8.onnx", "encoder.onnx", "decoder.int8.onnx", "text_conditioner.onnx",
              "vocab.json", "token_scores.json")
@@ -377,14 +374,10 @@ DEFAULTS = {"vad": "silero", "stt": "parakeet-110m", "turn": "smart-turn", "tts"
 
 
 class Library:
-    """The parts sessions use, loaded by name the first time one asks and each warmed up with one run (an ONNX
-    session's first run is the slow one); a part no session holds any more is dropped, so a switch frees what it
-    leaves. The VAD and the STT keep up with the microphone on a thread each, beside speech synthesis; the turn model
-    and synthesis take `threads` each, as one runs while the other waits (a turn's end, then the reply)."""
 
     def __init__(self, threads):
         self.threads, self.lock, self.loaded, self.users = threads, threading.Lock(), {}, collections.Counter()
-        self.loading = collections.defaultdict(threading.Lock)     # one per part: different parts load side by side
+        self.loading = collections.defaultdict(threading.Lock)
 
     def catalog(self):
         def entry(kind, cls):
@@ -395,7 +388,6 @@ class Library:
         return {kind: [entry(kind, cls) for cls in PARTS[kind].values()] for kind in PARTS}
 
     def get(self, kind, name):
-        """The part, loaded if it is not yet (call it off the event loop); held until release()."""
         if name not in PARTS[kind]:
             raise Missing(f"there is no {kind} named {name!r} (there are: {', '.join(PARTS[kind])})")
         key = kind, name

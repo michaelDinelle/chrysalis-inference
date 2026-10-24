@@ -1,12 +1,6 @@
-"""In-process server checks: a client that disconnects mid-stream (OpenCode's Esc, a Stop button) leaves the
-prompt cache consistent with the engine, and the conversation can continue from the partial reply. A seed
-reproduces a reply, whichever cached state the prompt is served from. Anthropic's Messages API and OpenAI's Responses
-API answer their official SDKs (data/venv has them) with what those SDKs' own types accept.
-  python tests/test_server.py [--use qwen3.8-flash-next]   (default: the 27B)"""
 import atexit, os, shutil, sys, tempfile
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, ROOT)
-# shared prefixes are kept on disk: from empty, on disk rather than in a RAM-backed /tmp (0.5 GB), gone afterwards
 os.makedirs(os.path.join(ROOT, "build"), exist_ok=True)
 os.environ["CHRYSALIS_SNAPSHOTS"] = tempfile.mkdtemp(prefix="snapshots-", dir=os.path.join(ROOT, "build"))
 atexit.register(shutil.rmtree, os.environ["CHRYSALIS_SNAPSHOTS"], True)
@@ -19,9 +13,6 @@ fails = 0
 
 
 def pin(engine):
-    """Flash-Next's cold experts' CPU / GPU split held fixed, as tests/compare_fn.py does: the same numbers on every
-    load (its own split settles on timings and its expert pool follows the replies, so a seed would not redraw a reply
-    across a reload)."""
     if hasattr(engine.lib, "chrysalis_tune"):
         import ctypes as C
         engine.lib.chrysalis_tune.restype, engine.lib.chrysalis_tune.argtypes = C.c_double, [C.c_char_p, C.c_double]
@@ -52,10 +43,10 @@ for kind, val, *_ in gen:
     partial += val if kind == "content" else ""
     if len(partial) > 60:
         break
-gen.close()                                   # what the HTTP handler does when the client goes away
+gen.close()
 check("aborted stream: cache matches engine", *consistent())
 
-partial = partial[:partial.rstrip().rfind(" ")]   # the client keeps what it received; end on a whole number
+partial = partial[:partial.rstrip().rfind(" ")]
 messages = [question, {"role": "assistant", "content": partial}, {"role": "user", "content": "Stop. What was the last number you wrote?"}]
 answer, info = "", None
 for kind, val, *_ in srv.chat({"model": MODEL + "-fast", "messages": messages, "temperature": 0}):
@@ -64,8 +55,6 @@ for kind, val, *_ in srv.chat({"model": MODEL + "-fast", "messages": messages, "
     elif kind == "done":
         info = val
 last = partial.split()[-1]
-# The partial reply re-tokenizes differently from what was generated, so this resumes from the snapshot taken
-# where the reply began, not from the aborted slot (whose recurrent state includes tokens the client never saw).
 check("follow-up resumes from the cache", info["cached_tokens"] > 0, f"cached {info['cached_tokens']} of {info['prompt_tokens']}")
 check("follow-up knows where the reply stopped", last in answer, f"last {last!r}, answer {answer.strip()[:60]!r}")
 check("after follow-up: cache matches engine", *consistent())
@@ -85,7 +74,6 @@ poem = [{"role": "user", "content": "Write a four-line poem about a chrysalis."}
 a, ia = reply({"messages": poem, "seed": 7})
 b, ib = reply({"messages": poem, "seed": 7})
 check("same seed: same reply (served from cache)", a == b and ib["cached_tokens"] > 0, f"cached {ib['cached_tokens']}, seed {ib['seed']}")
-# A stop string from the middle of that reply: the same seed writes the same reply up to where the string begins.
 stop = a[len(a) // 2:len(a) // 2 + 3]
 s_text, s_info = reply({"messages": poem, "seed": 7, "stop": ["\u2603", stop]})
 check("stop string: the answer ends where it begins", s_text == a[:a.find(stop)] and s_info["finish_reason"] == "stop",
@@ -95,20 +83,16 @@ check("another seed: another reply", c != a, repr(c[:40]))
 d, idd = reply({"messages": poem})
 e, _ = reply({"messages": poem, "seed": idd["seed"]})
 check("unseeded reply reports a seed that redraws it", d == e, f"seed {idd['seed']}")
-# The second turn first extends the live sequence that still holds the first reply (drawn again just before),
-# then is served again from the snapshot taken at its prompt. The presence penalty (1.5 without thinking) must
-# count this reply's tokens only, or the two would differ.
 reply({"messages": poem, "seed": 7})
 turn2 = poem + [{"role": "assistant", "content": a}, {"role": "user", "content": "Now one about a butterfly."}]
 f, i_live = reply({"messages": turn2, "seed": 9})
 g, i_snap = reply({"messages": turn2, "seed": 9})
-served = ia["prompt_tokens"] < i_live["cached_tokens"] < i_snap["cached_tokens"]   # past the first reply, then a later snapshot
+served = ia["prompt_tokens"] < i_live["cached_tokens"] < i_snap["cached_tokens"]
 check("second turn: live sequence = snapshot", f == g and served,
       f"cached {i_live['cached_tokens']} then {i_snap['cached_tokens']} of {i_snap['prompt_tokens']}")
 
 
 def run(body):
-    """All of a request's events: prefix (continued replies), text with log probs, done."""
     out = {"prefix": None, "content": "", "lp": [], "info": None}
     for ev in srv.chat({"model": MODEL + "-fast", **body}):
         if ev[0] == "prefix":
@@ -122,25 +106,21 @@ def run(body):
     return out
 
 
-# Log probs: one entry per piece of text, the alternatives first by probability.
 names = [{"role": "user", "content": "Suggest a name for a cat, then say why in one sentence."}]
 r = run({"messages": names, "seed": 3, "max_tokens": 10, "logprobs": True, "top_logprobs": 4})
 alts = r["lp"][0]["top_logprobs"] if r["lp"] else []
 check("log probs: entries spell the reply", "".join(e["token"] for e in r["lp"]) == r["content"] and len(alts) == 4
       and all(alts[i]["logprob"] >= alts[i + 1]["logprob"] for i in range(3)), repr(r["content"][:40]))
-# Continue a reply cut at its length limit: Chrysalis restates it and goes on from its exact tokens (a cache hit).
 cut = {"role": "assistant", "content": r["content"]}
 c = run({"messages": names + [cut], "continue_final_message": True, "seed": 4, "max_tokens": 40})
 check("continue: from the reply's own tokens", c["prefix"] == {"reasoning_content": "", "content": r["content"]}
       and c["info"]["cached_tokens"] >= r["info"]["prompt_tokens"] and len(c["content"]) > 0,
       f"cached {c['info']['cached_tokens']} of {c['info']['prompt_tokens']}, +{c['content'][:30]!r}")
-# Rewrite from the first token with its second alternative.
 alt = alts[1]
 w = run({"messages": names + [{"role": "assistant", "content": ""}], "continue_final_message": True, "chrysalis_original": cut,
          "chrysalis_append_token": alt["id"], "seed": 4, "max_tokens": 20})
 check("rewrite from an alternative token", w["prefix"]["content"] == alt["token"].lstrip("\n") and len(w["content"]) > 0,
       f"{w['prefix']['content']!r} + {w['content'][:30]!r}")
-# An aside (the web UI's draft of the user's next message) leaves the conversation's cache as it was.
 convo = names + [{"role": "assistant", "content": r["content"] + c["content"]}]
 run({"messages": convo + [{"role": "user", "content": "Write my next message."}], "chrysalis_aside": True, "max_tokens": 20})
 n = run({"messages": convo + [{"role": "user", "content": "Another one?"}], "max_tokens": 10})
@@ -148,9 +128,6 @@ check("aside: the conversation stays cached", n["info"]["cached_tokens"] >= c["i
       f"cached {n['info']['cached_tokens']} of {n['info']['prompt_tokens']}")
 
 
-# Parallel requests: two replies written at the same time share passes (chrysalis/server.py Batcher) and come out as each does
-# alone (greedy: as many drafts each as alone, the same logits). Flash-Next gives a reply one draft in a shared pass, so
-# here its replies alone take one too.
 import threading
 asks = [[{"role": "user", "content": "Name three rivers in Europe and one fact about each."}],
         [{"role": "user", "content": "Explain in four sentences why the sky is blue."}]]
@@ -168,7 +145,6 @@ check("parallel requests: together = alone", both == alone and srv.batcher.share
 
 
 def reply_odds(body):
-    """A reply's text and each of its tokens' log probs (OpenAI's: the token, its own and the top alternatives')."""
     text, odds = "", []
     for kind, val, *rest in srv.chat({"model": MODEL + "-fast", "max_tokens": 60, **body}):
         if kind == "content":
@@ -177,7 +153,6 @@ def reply_odds(body):
     return text, odds
 
 
-# With log probs (the web UI asks for them with every reply) they share passes too, each with the odds it has alone
 odds = {"temperature": 0, "max_tokens": 120, "logprobs": True, "top_logprobs": 5}
 alone = [reply_odds({"messages": q, **odds}) for q in asks]
 shared, both = srv.batcher.shared, [None, None]
@@ -189,9 +164,6 @@ check("parallel requests with log probs: together = alone", both == alone and sr
       f"{srv.batcher.shared - shared} passes shared, {[len(o) for _, o in both]} tokens with their odds")
 check("after them: cache matches engine", *consistent())
 
-# A long prompt read while another reply is being written (Server.prefill): after each prefill chunk the GPU goes back to
-# the reply for as long as the chunk took, so the reply keeps coming (its longest pause about a chunk's read, where it
-# would wait for the whole prompt), and the prompt's own reply is the one it gets read alone (the same chunks).
 import time
 import numpy as np
 chunk = srv.umax or MODELS[MODEL]["chunk"]
@@ -202,7 +174,6 @@ long_ask = [{"role": "user", "content": "\n".join(lines) + "\n\nWhich dock did s
 
 
 def cold():
-    """Nothing cached: the next prompt is read from its start."""
     for en in srv.cache.entries:
         srv.engine.free_snapshot(en.snap)
     srv.cache.entries.clear()
@@ -241,9 +212,6 @@ check("a long prompt read beside a reply", during == alone and inside and gap < 
 check("after it: cache matches engine", *consistent())
 
 
-# An answer held to a JSON schema (response_format): property names nobody would pick, a prompt that invites prose. What
-# comes back must parse and validate (jsonschema, not the grammar engine Chrysalis uses), with or without reasoning
-# first; without the schema the same prompt gets prose.
 import json, jsonschema
 shape = {"type": "object", "additionalProperties": False, "required": ["zq_city", "temp_c", "tags"],
          "properties": {"zq_city": {"type": "string"}, "temp_c": {"type": "number"},
@@ -270,17 +238,10 @@ for name, body in (("no reasoning", held), ("after reasoning", {**held, "model":
           f"{r['content'].strip()[:70]!r}" if valid is True else valid)
 free = run({"messages": prose, "seed": 3, "max_tokens": 60})
 check("response_format: without it, prose", not free["content"].lstrip().startswith("{"), repr(free["content"][:40]))
-# Its steps verify drafts, the grammar's forced tokens and the MTP head's guesses (Engine.generate_masked): one token a
-# step without them, 2.55 with them (measured, the answer above).
 check("response_format: steps of several tokens", steps >= 1.5, f"{steps:.2f} tokens a step")
 check("after the held answers: cache matches engine", *consistent())
 
 
-# Tool calls held to their tool's schema (chrysalis/structured.py): a parameter name nobody would guess, an enum, a
-# bounded integer. Every call must parse and validate (jsonschema), whether tool_choice demands one on a prompt that
-# asks for none ("required"), names a tool the prompt does not want, or the strict tool is called in a free answer. The
-# 27B writes that last call right by itself (even asked for 30 days, or for a parameter of another name: measured), so
-# there it is the held path that is checked: a call that comes back whole, its values typed.
 odd = {"type": "function", "function": {"name": "zq_forecast", "description": "A weather forecast.", "strict": True,
        "parameters": {"type": "object", "additionalProperties": False, "required": ["zq_place", "units", "days"],
                       "properties": {"zq_place": {"type": "string"}, "units": {"enum": ["metric_si", "imperial_us"]},
@@ -322,16 +283,12 @@ r = answer_of({"model": MODEL, "messages": paris, "tools": [odd, note], "max_tok
 check("a strict tool in a free answer: valid calls", r["calls"] and all(map(valid, r["calls"])), repr(r["calls"])[:80])
 check("after the held calls: cache matches engine", *consistent())
 
-# A thinking budget (thinking_budget; Anthropic's budget_tokens below): the reasoning ends at it with the words Qwen3's
-# technical report closes it with, and the answer follows. Unbounded, this problem takes the model past 4,000 tokens.
 pell = [{"role": "user", "content": "Find all integer solutions of x^2 - 7y^2 = 1 with 0 < x < 10000. Work it through carefully."}]
 r = answer_of({"model": MODEL, "messages": pell, "thinking_budget": 200, "max_tokens": 2500, "seed": 1})
 n = len(srv.tok.full.encode(r["reasoning"], add_special_tokens=False).ids)
 check("thinking_budget: reasoning closed there, then the answer", n <= 200 + len(srv.close_thinking()) + 4
       and r["reasoning"].rstrip().endswith("directly now.") and len(r["content"]) > 20, f"{n} reasoning tokens; {r['content'][:40]!r}")
 
-# A reply never ends inside its thinking: an end of turn drawn there closes the reasoning for the model, which answers.
-# Drawn here on purpose: the reply's first step gives the end of turn in place of what the model drew.
 step = srv.batcher.step
 
 
@@ -347,8 +304,6 @@ check("an end of turn in the thinking: the answer comes", srv.batcher.step is st
 check("after the thinking it closed: cache matches engine", *consistent())
 
 
-# Anthropic's Messages API and OpenAI's Responses API over HTTP, through their official SDKs; every response and every
-# streamed event is also validated strictly against the SDKs' own types (the SDKs parse leniently).
 import base64, json, threading, time
 import anthropic, httpx, openai
 from pydantic import TypeAdapter
@@ -367,7 +322,6 @@ ask = [{"role": "user", "content": "What is the weather in Paris right now? Use 
 
 
 def sse(path, body):
-    """A streamed request's events as (name, data), straight off the wire."""
     out = []
     with httpx.stream("POST", base + path, json={**body, "stream": True}, timeout=300) as r:
         name = None
@@ -401,7 +355,7 @@ kinds = [d["content_block"]["type"] for n, d in evs if n == "content_block_start
 check("Messages: a stream (thinking, a tool call)", not bad and names[0] == "message_start" and names[-1] == "message_stop"
       and names.count("content_block_start") == names.count("content_block_stop") and kinds[:1] == ["thinking"] and "tool_use" in kinds
       and evs[-2][1]["delta"]["stop_reason"] == "tool_use" and all(n == d["type"] for n, d in evs), (bad[:1] or [kinds])[0])
-with claude.messages.stream(**body) as st:            # the SDK puts the same stream back together
+with claude.messages.stream(**body) as st:
     final = st.get_final_message()
 use = next((b for b in final.content if b.type == "tool_use"), None)
 check("Messages: the SDK assembles the stream", use is not None and use.name == "get_weather" and "paris" in json.dumps(use.input).lower(),
@@ -435,8 +389,6 @@ if srv.pictures:
         {"type": "image", "source": {"type": "base64", "media_type": "image/jpeg", "data": photo}},
         {"type": "text", "text": "What is this front page's headline? Just the headline."}]}])
     check("Messages: a picture", "moon" in pic.content[0].text.lower(), repr(pic.content[0].text[:60]))
-    # The photo read at fewer pixels: the official processor's grids at 512 x 512 pixels (tests/test_vision.py) make it
-    # 13 x 18 tokens where 15 x 20, asked for by the image part (detail "low") or by the request (max_pixels).
     url = "data:image/jpeg;base64," + photo
 
     def read(part, **extra):
@@ -449,8 +401,6 @@ if srv.pictures:
     check("a picture read at fewer pixels", full - low == 300 - 13 * 18 and asked == low and "moon" in said.lower(),
           f"prompt {full} tokens, {low} at detail low, {asked} at max_pixels 262144; {said[:40]!r}")
 
-    # A PDF (chrysalis/documents.py), its pages as pictures and as their text, through each API's way of attaching one. The code
-    # is set in white (only the text layer has it), the vault number drawn as a picture (only the page's image has it).
     from PIL import Image, ImageDraw, ImageFont
     from pdf_fixture import pdf
 
@@ -471,8 +421,6 @@ if srv.pictures:
         {"type": "input_file", "file_data": "data:application/pdf;base64," + doc, "filename": "vault.pdf"}, {"type": "input_text", "text": q}]}])
     check("Responses: a PDF file", "4217" in rr.output_text and "9314" in rr.output_text, repr(rr.output_text[:60]))
 
-    # A video (chrysalis/vision.py): frames taken 2 a second, each pair read as a picture with its time before it. A red circle
-    # for two seconds, then a blue square and "CHRYSALIS 58": what came first, and what follows.
     import subprocess
     enc = subprocess.Popen(["ffmpeg", "-v", "error", "-f", "rawvideo", "-pix_fmt", "rgb24", "-s", "640x360", "-r", "10", "-i", "-",
                             "-c:v", "libx264", "-pix_fmt", "yuv420p", "-f", "mp4", "-movflags", "frag_keyframe+empty_moov", "-"],
@@ -534,8 +482,6 @@ except (ValueError, jsonschema.ValidationError) as e:
 check("Responses: text.format holds the answer", valid is True and fmt.text.format.type == "json_schema",
       repr(fmt.output_text[:50]) if valid is True else valid)
 
-# A streamed chat reply says its prompt's length once the prompt is read, before its first token (chrysalis_prompt: a
-# client's live count of the context), the count its usage gives at the end; OpenAI's SDK reads the stream as before.
 chunks = []
 with httpx.stream("POST", base + "/v1/chat/completions", json={"model": MODEL, "messages": ask, "max_tokens": 40, "stream": True},
                   timeout=300) as r:
@@ -551,10 +497,6 @@ except Exception as e:
     n = repr(e)[:80]
 check("chat stream: the SDK reads it", isinstance(n, int) and n > 2, str(n))
 
-# /metrics (chrysalis/metrics.py) as Prometheus's own parser reads it: a reply moves the counters by what its usage
-# says, a request Chrysalis refuses counts as an error. On Flash-Next the PCIe link Chrysalis reports
-# (chrysalis/link.py) bounds the DMA rate the engine measures, and the rate comes near it: a reading of the card's own
-# switch (16 GT/s x16) would be twice too fast.
 from prometheus_client.parser import text_string_to_metric_families
 from chrysalis import link
 
@@ -576,22 +518,18 @@ check("metrics: a reply's tokens", moved("chrysalis_completion_tokens_total", mo
 check("metrics: a refused request", moved("chrysalis_http_errors_total", status="400") == 1)
 now, dma = link.status(srv.link_dev), m1.get(("chrysalis_dma_bytes_per_second", ()))
 if srv.engine.expert_stats():
-    lanes = now and now["gts"] * 1e9 * now["width"] * (0.8 if now["gts"] < 8 else 128 / 130) / 8   # bytes/s, line encoding
+    lanes = now and now["gts"] * 1e9 * now["width"] * (0.8 if now["gts"] < 8 else 128 / 130) / 8
     check("metrics: the PCIe link bounds the DMA rate", bool(now and dma and 0.25 * lanes < dma <= lanes),
           f"link {now and now['gts']} GT/s x{now and now['width']} ({lanes and lanes / 1e9:.1f} GB/s), DMA {dma and dma / 1e9:.1f} GB/s")
 httpd.shutdown()
 
 
-# Sleep, as chrysalis/sleep.py calls it on logind's signals: the reply being written ends at its next step, the GPU's
-# memory is freed, and after the wake the model is back (a seed draws the same reply from the empty cache).
 from chrysalis.sleep import vram_used
 
-# A tool block is a prefix every session shares: kept on disk, the wake below reads it back instead of prefilling it.
 tooled = {"messages": [{"role": "user", "content": "What is the weather in Oslo? Answer in one word if you can."}], "seed": 5,
           "tools": [{"type": "function", "function": {"name": weather["name"], "description": weather["description"],
                                                       "parameters": weather["input_schema"]}}]}
 def answer(body):
-    """A reply's text and tool calls, and its info."""
     out, info = [], None
     for kind, val, *_ in srv.chat({"model": MODEL + "-fast", "max_tokens": 60, **body}):
         if kind in ("content", "tool_call"):
@@ -603,7 +541,7 @@ def answer(body):
 
 t_before, i_before = answer(tooled)
 disk = srv.cache.disk
-while disk and any(t is None for t in dict(disk.index).values()):   # its file is written by a thread
+while disk and any(t is None for t in dict(disk.index).values()):
     time.sleep(0.05)
 events = []
 writer = threading.Thread(target=lambda: events.extend(srv.chat({"model": MODEL + "-fast", "messages": [question], "temperature": 0})))
@@ -626,8 +564,6 @@ if disk:
     t_after, i_after = answer(tooled)
     check("wake: the tool block read back from disk", i_after["cached_tokens"] > 0 and t_after == t_before and t_after,
           f"cached {i_after['cached_tokens']} of {i_after['prompt_tokens']} ({len(os.listdir(disk.dir))} files), {str(t_after)[:50]}")
-# a release fetches Flash-Next after the 27B: until its file is here, a request naming it is served by the model loaded,
-# with nothing tried to load
 other = next(m for m in MODELS if m != MODEL)
 kept = MODELS[other]["path"]
 MODELS[other]["path"] = "data/models/not-downloaded-yet.gguf"

@@ -1,5 +1,3 @@
-// The host sampler, shared by both engines. A row holds the likeliest SAMPLE_N tokens with their logits; penalties
-// (presence, DRY) adjust them, then top K, temperature, top P and min P act in the order a request picks.
 #pragma once
 #include <algorithm>
 #include <cmath>
@@ -7,23 +5,20 @@
 #include <random>
 #include <vector>
 
-constexpr int SAMPLE_N = 64;                         // = TOPK of both engines: candidates per row
+constexpr int SAMPLE_N = 64;
 enum Stage : int { STAGE_TOP_K, STAGE_TEMPERATURE, STAGE_TOP_P, STAGE_MIN_P, STAGES };
 
-// Also the C API's layout (ctypes mirrors it in chrysalis/engine.py): plain fields only, in this order.
 struct Sampling {
     float temperature = 1.0f, top_p = 0.95f, min_p = 0.0f, presence_penalty = 0.0f;
     int top_k = 20, n_draft = 3;
-    int ban = -1;                                    // a token never drawn (-1: none): <tool_call> when a request offers no tools
-    float dry_multiplier = 0.0f, dry_base = 1.75f;   // DRY, off at 0
+    int ban = -1;
+    float dry_multiplier = 0.0f, dry_base = 1.75f;
     int dry_allowed_length = 2;
     int order[STAGES] = {STAGE_TOP_K, STAGE_TEMPERATURE, STAGE_TOP_P, STAGE_MIN_P};
-    int lookup = 0;                                  // drafts copied from earlier in the conversation, at most (0: off)
-    int halt = -1;                                   // a token that ends a step once emitted, as an end of turn does (-1: none):
-                                                     // </think> before an answer Chrysalis constrains token by token (chrysalis_draw)
+    int lookup = 0;
+    int halt = -1;
 };
 
-// The current reply's tokens, in order (DRY) and as a set (presence penalty: a lookup, not a scan of the reply).
 struct Seen {
     std::vector<int> list;
     std::vector<uint8_t> mask;
@@ -39,13 +34,9 @@ struct Seen {
     bool has(int t) const { return (size_t)t < mask.size() && mask[t]; }
 };
 
-// DRY ("don't repeat yourself", p-e-w): a candidate that would continue a run of tokens the context already holds is
-// penalized by multiplier * base^(run - allowed length), where run counts the tokens before it that match the end
-// of the context. Sequence breakers (tokens holding a newline, ':', '"' or '*', set by the server) end a run. The
-// context is the prompt's tail (Seq::ctx) followed by the reply so far.
-constexpr size_t DRY_RANGE = 32768;                  // tokens looked back over
-constexpr int DRY_MAX_RUN = 48;                      // longer runs are penalized like this one (already ~1e11)
-inline std::vector<uint8_t> dry_breakers;            // by token id
+constexpr size_t DRY_RANGE = 32768;
+constexpr int DRY_MAX_RUN = 48;
+inline std::vector<uint8_t> dry_breakers;
 
 inline void dry_runs(const std::vector<int> &ctx, const std::vector<int> &reply, std::vector<std::pair<int, int>> &runs) {
     runs.clear();
@@ -56,7 +47,7 @@ inline void dry_runs(const std::vector<int> &ctx, const std::vector<int> &reply,
     const size_t lo = n > DRY_RANGE ? n - DRY_RANGE : 0;
     const int last = at(n - 1);
     if (breaker(last)) return;
-    for (size_t i = n - 1; i-- > lo;) {              // each earlier occurrence of the last token
+    for (size_t i = n - 1; i-- > lo;) {
         if (at(i) != last) continue;
         const int next = at(i + 1);
         if (breaker(next)) continue;
@@ -85,7 +76,7 @@ inline Dist make_dist(const float *v, const int *ids, const Sampling &sp, const 
     std::pair<float, int> c[SAMPLE_N];
     int nc = 0;
     for (int i = 0; i < SAMPLE_N; i++) {
-        if (ids[i] == sp.ban) continue;                 // not a candidate at all (so not a fallback either)
+        if (ids[i] == sp.ban) continue;
         float x = v[i] - pen[i];
         if (sp.presence_penalty != 0 && seen.has(ids[i])) x -= sp.presence_penalty;
         c[nc++] = {x, ids[i]};
@@ -93,9 +84,6 @@ inline Dist make_dist(const float *v, const int *ids, const Sampling &sp, const 
     std::sort(c, c + nc, [](auto &a, auto &b) { return a.first > b.first; });
     Dist d;
     if (sp.temperature <= 0) { d.n = 1; d.id[0] = c[0].second; d.p[0] = 1; return d; }
-    // Every stage keeps a prefix of the sorted candidates, so `n` says what is left. Top P and min P judge the
-    // probabilities at the temperature applied so far (1 until the temperature stage); the reply is drawn at the
-    // temperature. P holds the probabilities at temperature pt, normalized over the first pn candidates.
     int n = nc, pn = 0;
     float t = 1.0f, pt = -1.0f, P[SAMPLE_N];
     auto probs = [&](float temp) {
@@ -113,7 +101,7 @@ inline Dist make_dist(const float *v, const int *ids, const Sampling &sp, const 
             for (int i = 0; i < n; i++) { cum += P[i]; if (cum >= sp.top_p) { n = i + 1; break; } }
             break;
         }
-        case STAGE_MIN_P: {                             // a ratio to the likeliest: any normalization will do
+        case STAGE_MIN_P: {
             if (pt != t) probs(t);
             int m = 1;
             while (m < n && P[m] >= sp.min_p * P[0]) m++;
@@ -140,7 +128,7 @@ inline float prob(const Dist &d, int tok) {
     return 0;
 }
 
-inline int draw_without(Dist d, int tok, std::mt19937_64 &rng) {   // residual distribution after rejecting tok
+inline int draw_without(Dist d, int tok, std::mt19937_64 &rng) {
     double sum = 0;
     for (int i = 0; i < d.n; i++) { if (d.id[i] == tok) d.p[i] = 0; sum += d.p[i]; }
     if (sum <= 0) return d.id[0];

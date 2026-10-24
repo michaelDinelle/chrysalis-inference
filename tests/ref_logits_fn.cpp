@@ -1,8 +1,3 @@
-// Reference logits from llama.cpp for a token sequence: writes float32 [n][vocab] (all positions).
-// Flash-Next variant: the Q8_0 source (188 GB with the n-gram table) runs on the CPU from the page cache. It does not
-// fit in RAM, and llama.cpp's load-time readahead of the whole file just thrashes, so a layer-by-layer prefetcher
-// follows the computation: the next layers' tensors are read ahead (POSIX_FADV_WILLNEED) and finished layers dropped.
-// Build: make build_fn/ref_logits_fn. Usage: ref_logits_fn model-00001-of-N.gguf tokens.bin out.bin [n_gpu_layers]
 #include "llama.h"
 #include "../engine_fn/gguf.h"
 #include <cstdio>
@@ -12,7 +7,7 @@
 #include <vector>
 
 struct Range { int fd; size_t off, len; };
-static std::map<int, std::vector<Range>> layer_ranges;   // layer -> byte ranges of its tensors
+static std::map<int, std::vector<Range>> layer_ranges;
 static int prefetched = -1;
 
 static void advise(int layer, int how) {
@@ -20,12 +15,11 @@ static void advise(int layer, int how) {
     if (it == layer_ranges.end()) return;
     for (const Range &r : it->second) posix_fadvise(r.fd, (off_t)r.off, (off_t)r.len, how);
 }
-static void ahead(int done) {                    // layer `done` finished: read ahead three layers, drop it
+static void ahead(int done) {
     for (int l = std::max(prefetched + 1, done + 1); l <= done + 3; l++) { advise(l, POSIX_FADV_WILLNEED); prefetched = l; }
     if (done >= 0) advise(done, POSIX_FADV_DONTNEED);
 }
 
-// the eval callback asks for each layer's output ("l_last-N"): the CPU computes up to it, then reports it here
 static bool on_eval(struct ggml_tensor *t, bool ask, void *) {
     const char *n = ggml_get_name(t);
     if (strncmp(n, "l_last-", 7) != 0) return false;
@@ -39,7 +33,6 @@ int main(int argc, char **argv) {
     std::vector<llama_token> toks;
     for (int t; fread(&t, 4, 1, f) == 1;) toks.push_back(t);
     fclose(f);
-    // tensor byte ranges per layer, from every split of the model
     std::string first = argv[1];
     const size_t at = first.find("-00001-of-");
     const int nsplit = at == std::string::npos ? 1 : atoi(first.c_str() + at + 10);
@@ -58,16 +51,15 @@ int main(int argc, char **argv) {
     auto mp = llama_model_default_params();
     mp.n_gpu_layers = argc > 4 ? atoi(argv[4]) : 0;
     static ggml_backend_dev_t no_devices[] = {nullptr};
-    if (mp.n_gpu_layers == 0) mp.devices = no_devices;   // CPU only: no GPU backend at all
+    if (mp.n_gpu_layers == 0) mp.devices = no_devices;
     llama_model *model = llama_model_load_from_file(argv[1], mp);
-    // drop what the load-time readahead left in the cache (mostly the last layers), then start at layer 0
     for (auto &[l, _] : layer_ranges) advise(l, POSIX_FADV_DONTNEED);
     ahead(-1);
     auto cp = llama_context_default_params();
     cp.n_ctx = toks.size() + 16;
     cp.n_batch = cp.n_ubatch = toks.size();
     cp.cb_eval = on_eval;
-    cp.op_offload = false;            // by default big batches copy each (disk-backed) weight to the GPU from one thread
+    cp.op_offload = false;
     cp.n_threads = cp.n_threads_batch = 16;
     cp.cb_eval_user_data = nullptr;
     llama_context *ctx = llama_init_from_model(model, cp);

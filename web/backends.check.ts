@@ -1,21 +1,12 @@
-// The web server (server.ts) with the backends people run, for real: llama.cpp, Ollama, LM Studio, KoboldCpp and vLLM,
-// each installed in data/backends and started here in turn on the CPU, with the same small
-// model, Qwen3.5-2B (pictures, tools, thinking that turns off). Each is connected by its address as a person pastes it,
-// and asked what the page asks: a reply with its thinking apart from its answer, one with thinking off, a tool call run
-// on a real MCP server (fake-mcp.ts) and answered from its result, a picture. llama.cpp runs with a key: one it refuses,
-// and the key never shown to a page. The page itself, in headless Chromium, connects to llama.cpp and chats with it.
-// `make test_backends`; a backend that is not installed fails its tests.
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
 import { existsSync, mkdtempSync, rmSync, readFileSync, statSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { deflateSync } from "node:zlib";
 import puppeteer from "puppeteer-core";
 
-// Everything a run writes (certificates, logs, browser profiles), in one folder of its own that goes when the run ends:
-// /tmp can be memory, and a run's browser profiles alone are hundreds of MB.
 const RUN = mkdtempSync(`${tmpdir()}/chrysalis-test-`);
 
-process.env.NODE_TLS_REJECT_UNAUTHORIZED = "0";          // the web server's own authority, made for this run
+process.env.NODE_TLS_REJECT_UNAUTHORIZED = "0";
 const DATA = `${import.meta.dir}/../data`, B = `${DATA}/backends`, GGUF = `${B}/models/qwen3.5-2b-gguf`, KEY = "chrysalis-test-key";
 const LMS = `${process.env.HOME}/.lmstudio/bin/lms`;
 const MINUTES = (n: number) => n * 60_000;
@@ -30,7 +21,6 @@ const BACKENDS: Spec[] = [
       "--no-mmproj-offload", "-ngl", "0", "-c", "16384", "--host", "127.0.0.1", "--port", "18180", "--api-key", KEY]) },
   { name: "Ollama", port: 18181, model: "qwen3.5:2b", ready: "/", thinkingOff: "none",
     start: () => spawn([`${B}/ollama/bin/ollama`, "serve"], { OLLAMA_HOST: "127.0.0.1:18181", OLLAMA_MODELS: `${B}/ollama-models` }) },
-  // LM Studio's own service runs its server: started and stopped through its CLI
   { name: "LM Studio", port: 18182, model: "qwen3.5-2b", ready: "/v1/models", thinkingOff: "none",
     start: () => {
       for (const args of [["server", "stop"], ["unload", "--all"], ["load", "qwen3.5-2b", "--gpu", "off", "-c", "16384", "-y"], ["server", "start", "--port", "18182"]])
@@ -38,21 +28,15 @@ const BACKENDS: Spec[] = [
       return undefined;
     },
     stop: () => { Bun.spawnSync([LMS, "server", "stop"]); Bun.spawnSync([LMS, "unload", "--all"]); } },
-  // KoboldCpp and vLLM think as the model's chat template does unless they are started to (Qwen3.5-2B's does not, and
-  // vLLM then files the answer as thinking); no reasoning_effort turns it on. KoboldCpp writes "(Reasoning budget
-  // exceeded)" as the thinking of a reply sent reasoning_effort "none".
   { name: "KoboldCpp", port: 18183, model: "koboldcpp/Qwen3.5-2B-Q8_0", ready: "/v1/models", thinkingOff: "stub",
     start: () => spawn([`${B}/koboldcpp/koboldcpp`, "--model", `${GGUF}/Qwen3.5-2B-Q8_0.gguf`, "--mmproj", `${GGUF}/mmproj-Qwen3.5-2B-BF16.gguf`,
       "--contextsize", "16384", "--host", "127.0.0.1", "--port", "18183", "--jinja", "--jinjathink", "true", "--skiplauncher", "--quiet"]) },
-  // the flags Qwen's model card gives for vLLM's tool calls and thinking; no profiling of the vision tower, which takes
-  // over 10 minutes on the CPU
   { name: "vLLM", port: 18184, model: "qwen3.5-2b", ready: "/v1/models", thinkingOff: "none",
     start: () => spawn([`${B}/vllm/venv/bin/vllm`, "serve", `${B}/models/qwen3.5-2b-hf`, "--served-model-name", "qwen3.5-2b", "--host", "127.0.0.1",
       "--port", "18184", "--max-model-len", "16384", "--enable-auto-tool-choice", "--tool-call-parser", "qwen3_coder", "--reasoning-parser", "qwen3",
       "--default-chat-template-kwargs", '{"enable_thinking": true}', "--skip-mm-profiling"], { VLLM_CPU_KVCACHE_SPACE: "4" }) },
 ];
 
-// a 64 x 64 PNG, all red
 const RED = (() => {
   const crc = (b: Uint8Array) => { let c = ~0; for (const x of b) { c ^= x; for (let k = 0; k < 8; k++) c = (c >>> 1) ^ (0xedb88320 & -(c & 1)); } return ~c >>> 0; };
   const chunk = (type: string, data: Uint8Array) => {
@@ -74,7 +58,6 @@ let web: Bun.Subprocess<"ignore", "pipe", "inherit">, base = "", check = "";
 beforeAll(async () => {
   web = Bun.spawn([process.execPath, "server.ts"], {
     cwd: import.meta.dir, stdout: "pipe", stderr: "inherit",
-    // no Chrysalis: nothing listens at its address
     env: { ...process.env, PORT: "0", CHRYSALIS_URL: "http://127.0.0.1:9", CHRYSALIS_HOST: "127.0.0.1", NODE_ENV: "production",
       CHRYSALIS_MCP_CONFIG: `${dir}/mcp.json`, CHRYSALIS_TLS_DIR: tls, CHRYSALIS_CHECK_PORT: "0" },
   });
@@ -91,7 +74,6 @@ beforeAll(async () => {
 afterAll(() => { web?.kill(); rmSync(RUN, { recursive: true, force: true }); });
 
 const connect = (url: string, key?: string) => fetch(`${base}/api/backend`, { method: "POST", headers: json, body: JSON.stringify({ url, ...(key ? { key } : {}) }) });
-// A streamed reply as the page asks for one (its job's events), gathered: thinking, answer, tool events, rounds, usage
 async function reply(body: object) {
   const r = await fetch(`${base}/api/chat`, { method: "POST", headers: json, body: JSON.stringify({ stream: true, stream_options: { include_usage: true }, ...body }) });
   expect(r.status).toBe(200);
@@ -133,7 +115,7 @@ for (const b of BACKENDS) {
         if (Date.now() > deadline) throw new Error(`${b.name} did not start`);
         await Bun.sleep(1000);
       }
-      expect((await connect(`localhost:${b.port}`, b.key)).status).toBe(200);   // each test can run alone
+      expect((await connect(`localhost:${b.port}`, b.key)).status).toBe(200);
     }, MINUTES(16));
     afterAll(() => { proc?.kill(); b.stop?.(); });
 
@@ -189,7 +171,7 @@ for (const b of BACKENDS) {
         await fetch(`${check}/check.gif?n=${nonce}`);
         const asked = await fetch(`${base}/pair/ask`, { method: "POST", headers: json, body: JSON.stringify({ nonce, name: "Linux · Chrome" }) });
         const cookie = asked.headers.get("set-cookie")!.split(";")[0].split("=");
-        expect((await connect("127.0.0.1:9")).status).toBe(200);       // back on Chrysalis's address: the page connects llama.cpp itself
+        expect((await connect("127.0.0.1:9")).status).toBe(200);
         const browser = await puppeteer.launch({ executablePath: process.env.CHROMIUM ?? "/usr/bin/chromium", headless: true,
           args: ["--no-sandbox", "--ignore-certificate-errors"] });
         try {
@@ -197,10 +179,9 @@ for (const b of BACKENDS) {
           await ctx.setCookie({ name: cookie[0], value: cookie[1], domain: "127.0.0.1", path: "/", secure: true, httpOnly: true, sameSite: "Strict" });
           const page = await ctx.newPage();
           page.on("pageerror", (e) => { throw e; });
-          // (it polls 4 times a second meanwhile: Chrysalis's address answers nothing, while this machine's Chrysalis unit runs)
           await page.goto(`${base}/`, { waitUntil: "load" });
           await page.waitForSelector("#backend:not([hidden])");
-          expect(await page.$eval("#backend-url", (e) => (e as HTMLInputElement).value)).toBe("http://127.0.0.1:9/v1");   // where it is connected
+          expect(await page.$eval("#backend-url", (e) => (e as HTMLInputElement).value)).toBe("http://127.0.0.1:9/v1");
           await page.click("#backend-url", { count: 3 });
           await page.type("#backend-url", `localhost:${b.port}`);
           await page.type("#backend-key", b.key!);

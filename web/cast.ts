@@ -1,8 +1,3 @@
-// Characters as SillyTavern's cards hold them (Character Card V2 and V3: the card's JSON in base64 in a PNG's tEXt chunk,
-// "chara" or "ccv3", or the JSON as a file), the user's (a card like any other: kind says only which one is them) and
-// groups of characters (a small file of our own: SillyTavern keeps none). They live in this browser's IndexedDB, on this
-// device: never on the server. A card is kept whole, so exporting it loses nothing this chat does not use (a lorebook,
-// another app's extensions); the voice picked for it is kept in it too (extensions.chrysalis.voice).
 
 export interface CardData {
   name: string; description?: string; personality?: string; scenario?: string; first_mes?: string; mes_example?: string;
@@ -11,7 +6,6 @@ export interface CardData {
 }
 export interface Card { spec?: string; spec_version?: string; data: CardData; [k: string]: unknown }
 export interface Person { id: string; kind: "character" | "persona" | "assistant"; card: Card; image?: Blob; added: number }
-// members: the characters' ids; missing: names its file gave with no card here yet (shown, and in once theirs comes)
 export interface Group { id: string; name: string; members: string[]; missing?: string[]; scenario?: string; added: number }
 export interface Voice { tts?: string; name?: string }
 
@@ -38,7 +32,6 @@ function chunks(b: Uint8Array): Chunk[] {
   }
   return out;
 }
-// tEXt: a Latin-1 keyword, a zero byte, the text (here base64, so ASCII)
 const textChunk = (c: Chunk) => {
   const z = c.data.indexOf(0);
   return z < 0 ? null : { key: String.fromCharCode(...c.data.subarray(0, z)), text: String.fromCharCode(...c.data.subarray(z + 1)) };
@@ -46,7 +39,6 @@ const textChunk = (c: Chunk) => {
 const fromBase64 = (s: string) => dec.decode(Uint8Array.from(atob(s.replace(/\s+/g, "")), (ch) => ch.charCodeAt(0)));
 const toBase64 = (s: string) => { let bin = ""; for (const x of enc.encode(s)) bin += String.fromCharCode(x); return btoa(bin); };
 
-// A card as V2 and V3 both have it (V3 is V2's fields and more): a version 1 card (the fields at the top level) is wrapped
 function asCard(j: any): Card | null {
   if (!j || typeof j !== "object") return null;
   const data = j.spec === "chara_card_v2" || j.spec === "chara_card_v3" ? j.data : !("data" in j) && typeof j.name === "string" ? j : null;
@@ -55,13 +47,11 @@ function asCard(j: any): Card | null {
   return data === j ? { spec: "chara_card_v2", spec_version: "2.0", data: { ...data } } : j;
 }
 
-// What a dropped or picked file is: a character's card (a PNG with one in it, or a card's JSON), a group (our file), or
-// neither (an ordinary picture or file, which a message takes as an attachment)
 export async function readCast(f: File): Promise<{ card: Card; image?: Blob } | { group: { name: string; members: string[]; scenario?: string } } | null> {
   const b = new Uint8Array(await f.slice(0, 64 << 20).arrayBuffer());
   if (isPng(b)) {
     const texts = chunks(b).filter((c) => c.type === "tEXt").map(textChunk).filter((t) => !!t);
-    const raw = texts.find((t) => t.key === "ccv3") ?? texts.find((t) => t.key === "chara");   // V3 when it has both
+    const raw = texts.find((t) => t.key === "ccv3") ?? texts.find((t) => t.key === "chara");
     if (!raw) return null;
     try {
       const card = asCard(JSON.parse(fromBase64(raw.text)));
@@ -78,8 +68,6 @@ export async function readCast(f: File): Promise<{ card: Card; image?: Blob } | 
   } catch { return null; }
 }
 
-// The card as a PNG for any app that reads them: its picture (as a PNG) with the card in both chunks, "ccv3" and, for apps
-// that only read V2, "chara"
 export async function cardPng(card: Card, image?: Blob): Promise<Blob> {
   let png = image && isPng(new Uint8Array(await image.slice(0, 8).arrayBuffer())) ? new Uint8Array(await image.arrayBuffer()) : null;
   if (!png) png = new Uint8Array(await (await asPng(image)).arrayBuffer());
@@ -101,7 +89,6 @@ export async function cardPng(card: Card, image?: Blob): Promise<Blob> {
   }
   return new Blob(parts as BlobPart[], { type: "image/png" });
 }
-// A picture as a PNG (a JPEG or WebP one, drawn again), or a plain square when there is none
 async function asPng(image?: Blob): Promise<Blob> {
   const canvas = document.createElement("canvas");
   if (image) {
@@ -116,15 +103,10 @@ async function asPng(image?: Blob): Promise<Blob> {
   return new Promise((ok) => canvas.toBlob((b) => ok(b!), "image/png"));
 }
 
-// {{char}} and {{user}} (and version 1's <BOT> and <USER>) in a card's text, as SillyTavern fills them
 export const fill = (text: string, char: string, user: string) =>
   text.replace(/\{\{char\}\}|<BOT>/gi, char).replace(/\{\{user\}\}|<USER>/gi, user);
 const examples = (s: string) => s.replace(/^\s*<START>\s*$/gim, "").trim();
 
-// The system prompt of a chat with characters (Chrysalis's too): the chat's own (base: a card's own system prompt is
-// kept in it, not sent), then what each card says of who it is (with the group's scenario in place of theirs), the
-// user's as any character's. Nothing in it changes from turn to turn, so every reply reads it from Chrysalis's cache.
-// With several, the reply is the scene: each line its speaker's name and a colon (app.ts sceneText).
 export function castPrompt(base: string, cast: CardData[], user: CardData, scenario?: string): string {
   const one = cast.length === 1, out: string[] = [base];
   if (!one) out.push(`This is a scene with ${list(cast.map((c) => c.name))}. Write it one paragraph per line, each beginning with the ` +
@@ -134,14 +116,12 @@ export function castPrompt(base: string, cast: CardData[], user: CardData, scena
     !scenario && c.scenario?.trim() ? `Scenario: ${c.scenario.trim()}` : "", c.mes_example?.trim() ? `How ${c.name} talks:\n${examples(c.mes_example)}` : ""].filter(Boolean);
   for (const c of cast) out.push(fill([one ? "" : `## ${c.name}`, ...about(c)].filter(Boolean).join("\n\n"), c.name, user.name));
   if (scenario?.trim()) out.push(`Scenario: ${scenario.trim()}`);
-  // the user's own text is filled last: its {{char}} is the one they talk to, as in SillyTavern's persona
   const you = about(user);
   if (you.length) out.push([one ? "" : `## ${user.name}`, ...you].filter(Boolean).join("\n\n"));
   return fill(out.filter(Boolean).join("\n\n"), cast[0]?.name ?? "", user.name);
 }
 const list = (names: string[]) => names.length < 2 ? names.join("") : `${names.slice(0, -1).join(", ")} and ${names.at(-1)}`;
 
-// Who speaks a scene's paragraph: one of the cast's names at its start, then a colon (models also bold the name)
 export function speakerOf(text: string, names: string[]): { name: string; rest: number } | null {
   for (const name of [...names].sort((a, b) => b.length - a.length)) {
     const m = text.match(new RegExp(`^\\s*(?:\\*\\*)?${name.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}(?:\\*\\*)?\\s*:(?:\\*\\*)?\\s*`));
@@ -150,7 +130,6 @@ export function speakerOf(text: string, names: string[]): { name: string; rest: 
   return null;
 }
 
-// This device's cast, in IndexedDB of its own (the tab's files are another database, deleted with the tab)
 const ask = <T>(r: IDBRequest<T>) => new Promise<T>((ok, fail) => { r.onsuccess = () => ok(r.result); r.onerror = () => fail(r.error); });
 const db: Promise<IDBDatabase | null> = new Promise((resolve) => {
   try {
@@ -164,9 +143,8 @@ const db: Promise<IDBDatabase | null> = new Promise((resolve) => {
   } catch { resolve(null); }
 });
 const store = async (name: "people" | "groups", mode: IDBTransactionMode) => (await db)?.transaction(name, mode).objectStore(name);
-// null: this browser keeps no cast (no IndexedDB), which is not the same as an empty one
 export async function loadCast(): Promise<{ people: Person[]; groups: Group[] } | null> {
-  const d = await db, t = d?.transaction(["people", "groups"], "readonly");   // one transaction: it ends at the first await
+  const d = await db, t = d?.transaction(["people", "groups"], "readonly");
   if (!t) return null;
   const [people, groups] = await Promise.all([ask(t.objectStore("people").getAll()), ask(t.objectStore("groups").getAll())]);
   return { people: people as Person[], groups: groups as Group[] };

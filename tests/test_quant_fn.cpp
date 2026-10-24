@@ -1,5 +1,3 @@
-// Checks the Flash-Next engine's GEMV, small-batch GEMM and dequantization for every weight format it uses
-// against ggml's own quantizer and dequantizer (so the block encodings are exactly llama.cpp's).
 #include "../engine_fn/kernels.h"
 #include "ggml.h"
 #include <cmath>
@@ -28,7 +26,7 @@ int main() {
         {GGML_TYPE_IQ4_NL, IQ4_NL, 256, 640}, {GGML_TYPE_Q8_0, Q8_0, 256, 2560}, {GGML_TYPE_Q8_0, Q8_0, 512, 320},
         {GGML_TYPE_Q6_K, Q6_K, 256, 2560}, {GGML_TYPE_IQ4_XS, IQ4_XS, 256, 2560},
         {GGML_TYPE_Q3_K, Q3_K, 256, 2560}, {GGML_TYPE_Q2_K, Q2_K, 256, 2560},
-        {GGML_TYPE_Q3_K, Q3_K, 1024, 4096}, {GGML_TYPE_Q2_K, Q2_K, 1024, 4096},   // split-K GEMV
+        {GGML_TYPE_Q3_K, Q3_K, 1024, 4096}, {GGML_TYPE_Q2_K, Q2_K, 1024, 4096},
     };
     for (const Case &c : cases) {
         printf("%s %dx%d\n", ggml_type_name(c.gt), c.rows, c.cols);
@@ -41,7 +39,6 @@ int main() {
         ggml_quantize_chunk(c.gt, w.data(), raw.data(), 0, c.rows, c.cols, imat.data());
         std::vector<float> wd(n);
         for (int r = 0; r < c.rows; r++) ggml_get_type_traits(c.gt)->to_float(raw.data() + r * rs, wd.data() + (size_t)r * c.cols, c.cols);
-        // device tensor via the relayout the loader uses
         const size_t mark = a.used;
         QTensor W = make_qtensor(a, c.type, c.rows, c.cols);
         uint8_t *draw = a.get(raw.size());
@@ -53,7 +50,6 @@ int main() {
         std::vector<float> dqf(n); std::vector<double> wdd(n);
         for (size_t i = 0; i < n; i++) { dqf[i] = __half2float(dqh[i]); wdd[i] = wd[i]; }
         check("dequant vs ggml to_float", dqf.data(), wdd.data(), n, 2e-3);
-        // GEMV, T = 1..8 (int8 activations, so the tolerance covers their rounding)
         for (int T : {1, 3, 8}) {
             std::vector<float> x((size_t)T * c.cols);
             for (auto &v : x) v = nd(rng);
@@ -74,7 +70,6 @@ int main() {
             char what[64]; snprintf(what, sizeof what, "gemv T=%d", T);
             check(what, y.data(), ref.data(), y.size(), 1.5e-2);
         }
-        // small-batch GEMM with fp16 inputs (K a multiple of 256 only)
         if (c.cols % 256 == 0) for (int T : {16, 40, 64}) {
             std::vector<float> x((size_t)T * c.cols);
             for (auto &v : x) v = nd(rng);

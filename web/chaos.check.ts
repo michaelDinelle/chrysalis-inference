@@ -1,12 +1,3 @@
-// The chat with Chrysalis for real, used the odd ways people use it: a reply followed through reloads, chat switches
-// and a closed tab; several chats and tabs writing at once; Stop, regenerate and edit mid-reply; a chat deleted while
-// it is written; settings, tools and a 3D page handled while replies stream; the controls hammered; other programs
-// taking memory meanwhile; Chrysalis restarted under a reply. Each test checks what the person sees (every reply whole,
-// nothing left spinning, no errors in the page or the web server) and what Chrysalis did (each reply's decode speed in
-// its log, its expert pool's mirror within its cap). The web server is one of the run's own (its certificates and the
-// devices it lets in in a folder that goes with the run, the test MCP server's tools), so nothing of the person's
-// changes. Needs Chrysalis running Flash-Next on this machine (one test restarts it): `make test_chaos`. Speeds are
-// printed, not checked (tests/compare_fn.py checks that decode reads nothing of the model file).
 import { afterAll, beforeAll, expect, test } from "bun:test";
 import { mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
@@ -14,11 +5,10 @@ import { deflateSync } from "node:zlib";
 import puppeteer, { type Browser, type BrowserContext, type Page } from "puppeteer-core";
 
 const RUN = mkdtempSync(`${tmpdir()}/chrysalis-chaos-`);
-process.env.NODE_TLS_REJECT_UNAUTHORIZED = "0";          // the run's own web server, with an authority made for it
+process.env.NODE_TLS_REJECT_UNAUTHORIZED = "0";
 const CHRYSALIS = "http://127.0.0.1:8080", MIN = 60_000;
 const CHAT_ARGS = ["--no-sandbox", "--ignore-certificate-errors"];
 
-// a 64 x 64 PNG, all red
 const RED = (() => {
   const crc = (b: Uint8Array) => { let c = ~0; for (const x of b) { c ^= x; for (let k = 0; k < 8; k++) c = (c >>> 1) ^ (0xedb88320 & -(c & 1)); } return ~c >>> 0; };
   const chunk = (type: string, data: Uint8Array) => {
@@ -34,7 +24,7 @@ const RED = (() => {
 })();
 
 let web: Bun.Subprocess<"ignore", "pipe", "pipe">, base = "", key = "", browser: Browser;
-const problems: string[] = [];                          // page errors, console errors, the web server's errors
+const problems: string[] = [];
 const serverLog: string[] = [];
 
 beforeAll(async () => {
@@ -79,7 +69,6 @@ async function open(ctx?: BrowserContext): Promise<Page> {
   const page = await (ctx ?? await context()).newPage();
   await page.setViewport({ width: 1280, height: 900 });
   page.on("pageerror", (e) => problems.push(`page: ${(e as Error).message}`));
-  // (not what an artifact's own code says in its sandbox: three.js asking for WebXR, which the frame does not allow)
   page.on("console", (m) => {
     const from = m.location()?.url ?? "";
     if (m.type() === "error" && !/\/sandbox$|^blob:/.test(from) && !/^Permissions policy violation: xr-spatial-tracking/.test(m.text())) problems.push(`console: ${m.text()}`);
@@ -88,7 +77,6 @@ async function open(ctx?: BrowserContext): Promise<Page> {
   await page.waitForSelector("#input");
   return page;
 }
-// The thinking bar of the open chat (Off, Low, Medium, Max)
 async function thinking(page: Page, level: string) {
   for (let k = 0; k < 4; k++) {
     const now = await page.$eval("#energy", (e) => e.getAttribute("aria-valuetext"));
@@ -104,8 +92,6 @@ async function ask(page: Page, text: string) {
   await page.type("#input", text);
   await page.keyboard.press("Enter");
 }
-// The open chat's last reply as it reads: its text, an artifact's too (a document is drawn in a shadow root), but not
-// the artifacts' captions or the code blocks' heads
 function replyText(): string {
   const arts = document.querySelectorAll("#thread > article.msg.assistant"), body = arts[arts.length - 1]?.querySelector(":scope > .markdown");
   let out = "";
@@ -122,8 +108,7 @@ function replyText(): string {
   return out.replace(/\s+/g, " ").trim();
 }
 const lastReply = (page: Page) => page.evaluate(replyText);
-const reload = (page: Page) => page.reload({ waitUntil: "load" });     // (a reply being followed keeps the network busy)
-// A wait that, if it runs out, leaves what the page showed (CHAOS_DUMP, a folder: its screenshot and text)
+const reload = (page: Page) => page.reload({ waitUntil: "load" });
 async function until(page: Page, what: string, wait: () => Promise<unknown>) {
   try { await wait(); } catch (e) {
     const dump = process.env.CHAOS_DUMP;
@@ -135,22 +120,19 @@ async function until(page: Page, what: string, wait: () => Promise<unknown>) {
     throw new Error(`${what}: ${(e as Error).message}`);
   }
 }
-// until the open chat's reply has written this much
 const longer = (page: Page, chars: number, timeout = 3 * MIN) => until(page, `a reply of ${chars} characters`,
   () => page.waitForFunction(`(${replyText.toString()})().length >= ${chars}`, { timeout }));
 const writing = (page: Page, chars = 80) => longer(page, chars);
 const idle = (page: Page, timeout = 5 * MIN) => until(page, "the reply's end",
   () => page.waitForFunction(() => document.querySelector("#send")?.getAttribute("aria-label") === "Send", { timeout }));
-// a chat of the list by its place (the list is drawn anew as chats change, so no element is held across clicks)
 const openChat = (page: Page, k: number) => page.evaluate((i) => (document.querySelectorAll(".conv")[i] as HTMLElement).click(), k);
 
-// Chrysalis's own account of the replies since `since` (its log): tokens written, decode tok/s, how each ended
 interface Logged { gen: number; tps: number; finish: string; stopped: boolean }
 function chrysalisReplies(since: number): Logged[] {
   const out = Bun.spawnSync(["journalctl", "--user", "-u", "chrysalis", "--since", `@${Math.floor(since / 1000)}`, "-o", "short-unix", "--no-pager"]).stdout.toString();
   const got: Logged[] = [];
   for (const l of out.split("\n")) {
-    if (!(parseFloat(l) * 1000 >= since)) continue;                   // (--since has whole seconds)
+    if (!(parseFloat(l) * 1000 >= since)) continue;
     const m = l.match(/\| gen (\d+) ([\d.]+) tok\/s [\d.]+\/step \| (\w+)/);
     if (m) got.push({ gen: +m[1], tps: +m[2], finish: m[3], stopped: false });
     const s = l.match(/stopped by the client after (\d+) tokens/);
@@ -161,7 +143,6 @@ function chrysalisReplies(since: number): Logged[] {
 async function experts() {
   return (await (await fetch(`${CHRYSALIS}/chrysalis/stats`)).json()).experts as { mirrored: number; mirror_cap: number; decode_picks: number; decode_picks_in_pool: number };
 }
-// Nothing went wrong that the person would see or the web server would log; the pool's mirror within its cap
 async function healthy(label: string) {
   const x = await experts();
   expect(x.mirrored).toBeLessThanOrEqual(x.mirror_cap);
@@ -181,7 +162,7 @@ test("a reply is followed through a reload, a new chat and back, and a second re
   await longer(page, before.length + 1, MIN);
   await idle(page);
   const after = await lastReply(page);
-  expect(after.startsWith(before.slice(0, 200))).toBe(true);           // the same reply, followed on
+  expect(after.startsWith(before.slice(0, 200))).toBe(true);
   expect(after.length).toBeGreaterThan(1500);
 
   await ask(page, "Now write a 400-word story about a fox in the snow.");
@@ -215,7 +196,6 @@ test("three chats write at once, a fourth waits its turn, and another tab writes
   await ask(other, "Explain in about 250 words how a refrigerator works.");
   await page.waitForFunction(() => !document.querySelector(".conv.running"), { timeout: 10 * MIN, polling: 1000 });
   await idle(other, 10 * MIN);
-  // each chat: its question and a whole reply
   const n = await page.$$eval(".conv", (c) => c.length);
   expect(n).toBe(4);
   for (let k = 0; k < n; k++) {
@@ -237,14 +217,14 @@ test("Stop, regenerate and edit while replies are written leave every version wh
   await thinking(page, "Off");
   await ask(page, "Write a 600-word essay about the history of bridges.");
   await writing(page, 200);
-  await page.keyboard.press("Escape");                                  // Stop
+  await page.keyboard.press("Escape");
   await idle(page, 30_000);
   const cut = await lastReply(page);
   expect(cut.length).toBeGreaterThan(200);
   await page.hover("#thread > article[data-i='1']");
-  await page.click("#thread > article[data-i='1'] [data-act='retry']");   // a second version
+  await page.click("#thread > article[data-i='1'] [data-act='retry']");
   await writing(page, 150);
-  await page.click("#send");                                            // ■ stops it too
+  await page.click("#send");
   await idle(page, 30_000);
   expect(await page.$eval("#thread > article[data-i='1'] .pager-n", (p) => p.textContent)).toBe("2 / 2");
   await page.hover("#thread > article[data-i='0']");
@@ -256,7 +236,7 @@ test("Stop, regenerate and edit while replies are written leave every version wh
   await idle(page);
   expect(await page.$eval("#thread > article[data-i='0'] .pager-n", (p) => p.textContent)).toBe("2 / 2");
   expect((await lastReply(page)).length).toBeGreaterThan(40);
-  await page.click("#thread > article[data-i='0'] [data-act='prev']");  // back to the first question and its cut replies
+  await page.click("#thread > article[data-i='0'] [data-act='prev']");
   await page.waitForFunction(() => document.querySelector("#thread > article[data-i='1'] .pager-n")?.textContent === "2 / 2", { timeout: 5000 });
   await healthy("stop, regenerate, edit");
   await page.close();
@@ -272,7 +252,7 @@ test("a chat deleted while it is written stops its reply at Chrysalis, and the c
   await thinking(page, "Off");
   await ask(page, "Write a 300-word story about a lost umbrella.");
   await page.waitForFunction(() => document.querySelectorAll(".conv.running").length === 2, { timeout: 30_000 });
-  await page.evaluate((href) => {                                      // its ×, then Delete
+  await page.evaluate((href) => {
     const del = document.querySelector<HTMLElement>(`.conv[href="${href}"] .conv-del`)!;
     del.click(); del.click();
   }, doomed);
@@ -282,7 +262,7 @@ test("a chat deleted while it is written stops its reply at Chrysalis, and the c
   await Bun.sleep(1500);
   const r = chrysalisReplies(t0);
   console.log("deleted mid-reply:", r.map((x) => `${x.gen} tokens ${x.finish}`).join("; "));
-  expect(r.some((x) => x.stopped)).toBe(true);                          // the deleted chat's reply ended early
+  expect(r.some((x) => x.stopped)).toBe(true);
   await healthy("delete mid-reply");
   await page.close();
 }, 10 * MIN);
@@ -293,7 +273,7 @@ test("settings, panels, the window's size and the models list changed while a re
   await ask(page, "Write a 500-word story about a library that only opens at night.");
   await writing(page, 100);
   await page.click("#settings-toggle");
-  await page.waitForFunction(() => {                                  // the panel slid in (its parts have their boxes)
+  await page.waitForFunction(() => {
     const r = document.querySelector("#theme-pick button")?.getBoundingClientRect();
     return !!r && r.width > 0 && r.right <= innerWidth && !document.getAnimations().some((a) => a.playState === "running" && (a.effect as KeyframeEffect)?.target instanceof Element && (a.effect as KeyframeEffect).target!.closest("#settings"));
   }, { timeout: 10_000 });
@@ -317,7 +297,7 @@ test("settings, panels, the window's size and the models list changed while a re
   await Bun.sleep(500);
   await page.setViewport({ width: 1280, height: 900 });
   await page.focus("#energy");
-  await page.keyboard.press("ArrowRight");                              // the next reply's thinking, not this one's
+  await page.keyboard.press("ArrowRight");
   await idle(page);
   expect((await lastReply(page)).length).toBeGreaterThan(1500);
   const settings = () => page.evaluate(() => [document.documentElement.dataset.theme ?? "", document.querySelector("#sea-switch")?.getAttribute("aria-checked") ?? ""]);
@@ -347,7 +327,7 @@ test("tools: a call followed through a reload, one that asks first answered afte
   await ask(page, "Save a note with the write_note tool saying 'buy milk'.");
   await page.waitForSelector('[data-act="decide"][data-decision="once"]', { timeout: 2 * MIN });
   await reload(page);
-  await page.waitForSelector('[data-act="decide"][data-decision="once"]', { timeout: 30_000 });   // still asking
+  await page.waitForSelector('[data-act="decide"][data-decision="once"]', { timeout: 30_000 });
   await page.click('[data-act="decide"][data-decision="once"]');
   await idle(page);
   expect(await page.$$eval(".tool-card", (c) => c.map((x) => x.textContent ?? "").join(" "))).toMatch(/done/i);
@@ -365,13 +345,12 @@ test("a 3D page asked for and handled while it is written: Edit, clicks and keys
   const page = await open();
   await thinking(page, "Off");
   await ask(page, "Make a three.js scene of a vampire countess's bedroom as a single HTML page.");
-  // (an artifact's canvas when the model names the page, as asked; a page of the reply's when it gives no name)
   await until(page, "the page's frame", () => page.waitForSelector("iframe.page-frame", { timeout: 4 * MIN }));
   const named = !!(await page.$(".art-canvas iframe.page-frame"));
   const frame = await page.$("iframe.page-frame");
   const box = (await frame!.boundingBox())!;
-  expect(box.height).toBeGreaterThan(300);                              // the room, not a strip, while it is written
-  await page.click(".art-canvas [data-art=edit]").catch(() => {});      // (no tools on a page still being written)
+  expect(box.height).toBeGreaterThan(300);
+  await page.click(".art-canvas [data-art=edit]").catch(() => {});
   await page.mouse.click(box.x + box.width / 2, box.y + box.height / 2);
   await page.keyboard.press("Delete");
   await page.keyboard.down("Control"); await page.keyboard.press("z"); await page.keyboard.up("Control");
@@ -384,7 +363,7 @@ test("a 3D page asked for and handled while it is written: Edit, clicks and keys
   const inner = (await f!.contentFrame())!;
   await inner.waitForFunction(() => !!document.querySelector("canvas"), { timeout: 30_000 });
   console.log(`3D page: ${named ? "an artifact" : "a page with no name"}`);
-  if (named) {                                                          // and the hand tools work on it now that it is whole
+  if (named) {
     await page.click(".art-canvas [data-art=edit]");
     await page.waitForSelector(".art-canvas .art-tools", { timeout: 5000 });
     await page.keyboard.press("Escape");
@@ -398,11 +377,11 @@ test("the controls hammered: Enter held on an empty box, a question sent twice f
   const page = await open();
   await thinking(page, "Off");
   await page.click("#input");
-  for (let k = 0; k < 10; k++) await page.keyboard.press("Enter");     // nothing to send
+  for (let k = 0; k < 10; k++) await page.keyboard.press("Enter");
   expect(await page.$$eval("#thread > article", (a) => a.length)).toBe(0);
   await page.type("#input", "Count from 1 to 40, one number per line.");
   await page.keyboard.press("Enter");
-  await page.keyboard.press("Enter");                                   // a second press as the first is sent
+  await page.keyboard.press("Enter");
   await writing(page, 20);
   expect(await page.$$eval("#thread .msg.user", (a) => a.length)).toBe(1);
   await idle(page);
@@ -411,11 +390,11 @@ test("the controls hammered: Enter held on an empty box, a question sent twice f
   for (let k = 0; k < 6; k++) await page.keyboard.press("Escape");
   for (let k = 0; k < 4; k++) await page.click("#send").catch(() => {});
   await idle(page, 30_000);
-  const long = "The quick brown fox jumps over the lazy dog. ".repeat(1500);    // ~15K tokens pasted
+  const long = "The quick brown fox jumps over the lazy dog. ".repeat(1500);
   await page.$eval("#input", (t, v) => { (t as HTMLTextAreaElement).value = v; t.dispatchEvent(new Event("input", { bubbles: true })); }, long + "\nHow many times does 'fox' appear above? Just guess.");
   await page.keyboard.press("Enter");
   await Bun.sleep(1500);
-  await page.keyboard.press("Escape");                                  // stopped while the prompt is read
+  await page.keyboard.press("Escape");
   await idle(page, MIN);
   await ask(page, "Say hello in five languages.");
   await idle(page);
@@ -439,14 +418,13 @@ test("two chats' replies are written whole while another program takes the memor
     return tpsOf(r);
   };
   const calm = await run("no other program");
-  // (more would put the desktop under systemd-oomd's pressure limit, which kills whole programs)
   const free = +readFileSync("/proc/meminfo", "utf8").match(/MemAvailable:\s+(\d+)/)![1] * 1024, take = Math.min(8e9, free - 2e9);
   expect(take).toBeGreaterThan(2e9);
   const hog = Bun.spawn(["systemd-run", "--user", "--scope", "-q", "python3", "-c",
     `import time\nb = bytearray(${Math.round(take)})\nfor i in range(0, len(b), 4096): b[i] = 1\nprint('held', flush=True)\ntime.sleep(900)`], { stdout: "pipe" });
   try {
     const r = hog.stdout.getReader();
-    await r.read();                                                     // held
+    await r.read();
     const squeezed = await run(`${(take / 1e9).toFixed(1)} GB held by another program`);
     const mean = (a: number[]) => a.reduce((s, x) => s + x, 0) / a.length;
     expect([calm.length, squeezed.length]).toEqual([2, 2]);
@@ -473,7 +451,7 @@ test("Chrysalis restarted under a reply: the reply says it was cut off, nothing 
   await ask(page, "In one sentence, what is a train?");
   await idle(page, 3 * MIN);
   expect((await lastReply(page)).length).toBeGreaterThan(20);
-  problems.splice(0).forEach((p) => console.log("while Chrysalis restarted:", p));   // its outage may log errors; none after
+  problems.splice(0).forEach((p) => console.log("while Chrysalis restarted:", p));
   await ask(page, "In one sentence, what is a boat?");
   await idle(page, 2 * MIN);
   await healthy("restart");
@@ -556,12 +534,11 @@ test("a tab closed while its reply is written: the reply runs out at Chrysalis, 
   await writing(page, 100);
   await page.close();
   const fresh = await open(ctx);
-  expect(await fresh.$$eval(".conv", (c) => c.length)).toBe(0);        // a tab's chats are its own
+  expect(await fresh.$$eval(".conv", (c) => c.length)).toBe(0);
   await thinking(fresh, "Off");
   await ask(fresh, "In one sentence, what is a paper boat?");
   await idle(fresh, 3 * MIN);
   expect((await lastReply(fresh)).length).toBeGreaterThan(20);
-  // the closed tab's story, written to its end (titles are replies of 24 tokens at most)
   for (let k = 0; k < 60 && !chrysalisReplies(t0).some((x) => x.finish === "stop" && x.gen > 250); k++) await Bun.sleep(1000);
   expect(chrysalisReplies(t0).some((x) => x.finish === "stop" && x.gen > 250)).toBe(true);
   await healthy("closed tab");
@@ -584,13 +561,13 @@ test("the model switched to the 27B while a Flash-Next reply is written, then ba
   await pick(/27B/);
   await thinking(page, "Off");
   await ask(page, "In two sentences, what is a moth?");
-  await idle(page, 10 * MIN);                                           // the switch waits for the reply being written
+  await idle(page, 10 * MIN);
   expect((await lastReply(page)).length).toBeGreaterThan(20);
   const model = async () => (await (await fetch(`${CHRYSALIS}/chrysalis/stats`)).json()).model;
   expect(await model()).toBe("qwen3.8-27b");
   await page.click(".conv:not(.active)");
   await page.waitForFunction(() => document.querySelectorAll("#thread > article.msg.assistant").length === 1, { timeout: 10_000 });
-  expect((await lastReply(page)).length).toBeGreaterThan(100);          // the Flash-Next reply, whole or cut, but there
+  expect((await lastReply(page)).length).toBeGreaterThan(100);
   await pick(/Flash/);
   await thinking(page, "Off");
   await ask(page, "In two sentences, what is a lamp?");

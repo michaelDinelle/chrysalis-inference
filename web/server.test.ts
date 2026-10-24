@@ -1,10 +1,3 @@
-// The web server (server.ts) against a fake Chrysalis: a streamed reply is a job that runs to its end whatever its page
-// does, any page can follow it again from an event's position, only Stop ends it early (and stops Chrysalis's request),
-// and a request addressed to another site's name is refused (DNS rebinding). With tools, a reply is rounds: the fake
-// Chrysalis plays a script of tool calls, which server.ts runs on real MCP servers (fake-mcp.ts, over stdio and
-// Streamable HTTP, through the SDK) and on the built-in Fetch URL against local sites, and sends back. Voice mode's
-// socket goes to a speech service (fake-voice.ts) the server starts with the first socket and stops once idle. Nothing
-// here reaches the real Chrysalis or systemd.
 import { afterAll, beforeAll, expect, test } from "bun:test";
 import { mkdtempSync, rmSync, readFileSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
@@ -15,22 +8,13 @@ import mdns from "multicast-dns";
 import { advertise, discover } from "./link";
 import { fingerprint, lanAddresses, webTls } from "./tls";
 
-// Everything a run writes (certificates, logs, browser profiles), in one folder of its own that goes when the run ends:
-// /tmp can be memory, and a run's browser profiles alone are hundreds of MB.
 const RUN = mkdtempSync(`${tmpdir()}/chrysalis-test-`);
 
-// Each server here is HTTPS with an authority of its own, made in a folder of each run's (TLS): what checks
-// certificates is openssl here and the browsers in browser.test.ts, not these requests
 process.env.NODE_TLS_REJECT_UNAUTHORIZED = "0";
 const TLS = () => mkdtempSync(`${RUN}/tls-`);
 
 const CHUNKS = 12, GAP_MS = 20;
 let chrysalisAborted = 0;
-// A tool script, as the user's message: "run ", the rounds as JSON (each the calls Chrysalis answers with, or its
-// text), and a line that makes the message unique. Each round is told by the assistant turns the request already holds;
-// every request a script gets is kept.
-// A voice reply's rounds also say the calls Chrysalis makes when held to the tools' grammar (forced). wait: ms before
-// Chrysalis answers at all, as it reads a long prompt before its first event.
 interface Round { calls?: { name: string; args: string }[]; text?: string; gap?: number; forced?: { name: string; args: string }[]; broken?: boolean; wait?: number }
 const seen = new Map<string, any[]>();
 const enc = new TextEncoder();
@@ -43,7 +27,6 @@ const fake = Bun.serve({
     if (path === "/chrysalis/stats") return Response.json({ model: "fake-model" });
     if (path !== "/v1/chat/completions") return new Response("not found", { status: 404 });
     const body = await req.json();
-    // a continued reply's start is not one of its rounds; what was said, without a note before it
     const prefix = body.continue_final_message ? body.messages.at(-1) : undefined;
     const said: string = String(body.messages.find((m: any) => m.role === "user")?.content ?? "").replace(/^\[[\s\S]*?\]\n\n/, "");
     const script: Round[] | undefined = said.startsWith("run ") ? JSON.parse(said.slice(4).split("\n")[0]) : undefined;
@@ -62,7 +45,7 @@ const fake = Bun.serve({
       return new Response(new ReadableStream({
         async pull(ctl) {
           await Bun.sleep(r.gap ?? 2);
-          if (r.broken && i === chunks.length - 1) return ctl.error(new Error("Chrysalis dropped the connection"));   // as an exception in Chrysalis does
+          if (r.broken && i === chunks.length - 1) return ctl.error(new Error("Chrysalis dropped the connection"));
           if (i < chunks.length) ctl.enqueue(sse({ choices: [chunks[i++]] }));
           else {
             ctl.enqueue(sse({ choices: [], usage: { prompt_tokens: 100 + k, completion_tokens: 10 } }));
@@ -83,7 +66,6 @@ const fake = Bun.serve({
   },
 });
 
-// Sites for Fetch URL: one on 127.0.0.1, one on 127.0.0.2 (both this machine, both refused unless the config allows them).
 const PAGE = `<!doctype html><html><head><title>Chrysalis &amp; tools</title><script>alert("no")</script><style>p{}</style></head><body>
 <nav><a href="/">Home</a></nav><main><h1>Fetched</h1><p>A <a href="/docs">link</a> and <code>code</code>.</p><ul><li>one</li><li>two</li></ul>
 <pre>let x = 1;</pre></main><footer>Copyright</footer></body></html>`;
@@ -99,7 +81,6 @@ const site = Bun.serve({
   },
 });
 const inner = Bun.serve({ hostname: "127.0.0.2", port: 0, fetch: () => new Response("the secret", { headers: { "Content-Type": "text/plain" } }) });
-// An MCP server over Streamable HTTP (stateless: a server per request, as the SDK does it).
 const mcpHttp = Bun.serve({
   hostname: "127.0.0.1", port: 0,
   async fetch(req) {
@@ -139,7 +120,7 @@ beforeAll(async () => {
 });
 afterAll(() => { web.kill(); fake.stop(true); site.stop(true); inner.stop(true); mcpHttp.stop(true); rmSync(RUN, { recursive: true, force: true }); });
 
-async function* events(res: Response) {   // a job's events as [position, data]
+async function* events(res: Response) {
   const reader = res.body!.getReader(), dec = new TextDecoder();
   let buf = "";
   for (;;) {
@@ -175,7 +156,7 @@ test("a page that goes away leaves the reply running; following from a position 
   let seen = 0;
   for await (const _ of events(res)) if (++seen === 3) break;
   ctrl.abort();
-  await Bun.sleep(GAP_MS * (CHUNKS + 5));   // the reply ends with no page following it
+  await Bun.sleep(GAP_MS * (CHUNKS + 5));
   const rest = await all(await fetch(`${base}/api/chat/${job}?from=3`));
   expect(rest[0][0]).toBe(3);
   expect(deltas(rest)).toEqual(Array.from({ length: CHUNKS - 3 }, (_, i) => `t${i + 3}`));
@@ -262,7 +243,6 @@ test("a reply, and what starts or allows tools, must come as JSON: another site'
   expect((await fetch(`${base}/api/chat/x/tool/y`, { method: "POST", body: '{"decision":"once"}', headers: form })).status).toBe(415);
 });
 
-// A reply with tools: the script as the question, the chat's tool choice, the tools allowed without asking.
 type Ev = Record<string, any>;
 let asked = 0;
 const ask = (script: Round[], tools: Record<string, { off?: string[] }> = { "mcp:fake": {} }, more: object = {}) => {
@@ -281,7 +261,7 @@ const decide = (job: string, call: string, decision: string) =>
 
 test("an MCP server starts when a reply first needs it; its call and result go back to Chrysalis exactly as Chrysalis wrote them", async () => {
   expect((await sourceOf("mcp:fake")).state).toBe("idle");
-  const args = '{"text":  "hi" }';                     // spaced as no serializer would: it must come back as it went
+  const args = '{"text":  "hi" }';
   const { said, res } = ask([{ calls: [{ name: "fake__echo", args }] }, { text: "Done." }], { "mcp:fake": {}, fetch: {} });
   const got = await collect(await res);
   const [first, second] = seen.get(said)!;
@@ -307,12 +287,11 @@ test("several calls in a round run side by side, and their results go back in th
   const t = Date.now(), got = await collect(await res);
   expect(results(seen.get(said)![1])).toEqual(["slept", "echo: b"]);
   const done = toolEvents(got).filter((e) => e.state === "done").map((e) => e.id);
-  expect(done).toEqual(["call_0_1", "call_0_0"]);        // the quick one finished first
+  expect(done).toEqual(["call_0_1", "call_0_0"]);
   expect(Date.now() - t).toBeLessThan(2000);
 }, 30_000);
 
 test("a tool that is not read-only waits for the user: allow once runs it, deny does not, always stops asking", async () => {
-  // once
   let { said, res } = ask([{ calls: [{ name: "fake__write_note", args: '{"text": "first"}' }] }, { text: "ok" }]);
   let r = await res, job = r.headers.get("X-Chrysalis-Job")!, got: Ev[] = [];
   for await (const e of parsed(r)) {
@@ -320,7 +299,7 @@ test("a tool that is not read-only waits for the user: allow once runs it, deny 
     if (e.tool?.state === "approval") {
       expect(e.tool).toMatchObject({ id: "call_0_0", title: "write_note", readOnly: false });
       await Bun.sleep(200);
-      expect(seen.get(said)!.length).toBe(1);             // nothing goes on while it waits
+      expect(seen.get(said)!.length).toBe(1);
       expect((await decide(job, "call_0_0", "once")).status).toBe(204);
     }
   }
@@ -328,7 +307,6 @@ test("a tool that is not read-only waits for the user: allow once runs it, deny 
   expect(results(seen.get(said)![1])).toEqual(["saved: first"]);
   expect((await decide(job, "call_0_0", "once")).status).toBe(409);
 
-  // deny
   ({ said, res } = ask([{ calls: [{ name: "fake__write_note", args: '{"text": "second"}' }] }, { text: "ok" }]));
   r = await res;
   job = r.headers.get("X-Chrysalis-Job")!;
@@ -338,7 +316,6 @@ test("a tool that is not read-only waits for the user: allow once runs it, deny 
   expect(results(seen.get(said)![1])[0]).toContain("The user declined this call");
   expect(readFileSync(LOG, "utf8")).not.toContain("wrote second");
 
-  // always: the reply's next call to it runs without asking
   const note = (t: string) => ({ calls: [{ name: "fake__write_note", args: JSON.stringify({ text: t }) }] });
   ({ said, res } = ask([note("third"), note("fourth"), { text: "ok" }]));
   r = await res;
@@ -348,7 +325,6 @@ test("a tool that is not read-only waits for the user: allow once runs it, deny 
   expect(toolEvents(got).map((t) => t.state)).toEqual(["approval", "running", "done", "running", "done"]);
   expect(results(seen.get(said)![2])).toEqual(["saved: third", "saved: fourth"]);
 
-  // allowed with the request (the page's "Always allow" setting)
   ({ said, res } = ask([note("fifth"), { text: "ok" }], { "mcp:fake": {} }, { allow: ["fake__write_note"] }));
   got = await collect(await res);
   expect(toolEvents(got).map((t) => t.state)).toEqual(["running", "done"]);
@@ -398,7 +374,7 @@ test("a page that follows a reply with tools again from any event gets all the r
   const slow = (n: number) => ({ calls: [{ name: "fake__echo", args: `{"text": "${n}"}` }], gap: 30 });
   const { res } = ask([slow(1), slow(2), { text: "end", gap: 30 }]);
   const r = await res, job = r.headers.get("X-Chrysalis-Job")!, early: (readonly [number, string])[] = [];
-  for await (const e of events(r)) { early.push(e); if (early.length === 7) break; }   // gone in the middle of round 0
+  for await (const e of events(r)) { early.push(e); if (early.length === 7) break; }
   await r.body!.cancel().catch(() => {});
   const rest = await all(await fetch(`${base}/api/chat/${job}?from=7`));
   const whole = await all(await fetch(`${base}/api/chat/${job}?from=0`));
@@ -441,11 +417,10 @@ test("tool names are valid, unique function names, prefixed by their server; the
   expect(by["mcp:broken"].state).toBe("failed");
   expect(by["mcp:broken"].error).toMatch(/ENOENT|nonexistent|not found/i);
   expect(by["mcp:off"].state).toBe("disabled");
-  expect(by["mcp:narrow"].tools.map((t: any) => t.name)).toEqual(["echo"]);       // its config's "tools" only
+  expect(by["mcp:narrow"].tools.map((t: any) => t.name)).toEqual(["echo"]);
   expect(by["mcp:plain"]).toMatchObject({ state: "failed", error: '"url" must be https (plain http only to this machine)' });
   expect(by["mcp:fake"].detail).toBe(`${process.execPath} fake-mcp.ts`);
-  expect(JSON.stringify(sources)).not.toContain(LOG);                  // a server's environment stays here
-  // a Streamable HTTP server's tools run like the others
+  expect(JSON.stringify(sources)).not.toContain(LOG);
   const { said, res } = ask([{ calls: [{ name: "web__echo", args: '{"text": "over http"}' }] }, { text: "ok" }], { "mcp:web": {} });
   await collect(await res);
   expect(results(seen.get(said)![1])).toEqual(["echo: over http"]);
@@ -512,7 +487,7 @@ test("Fetch URL gives a long page in parts the model can ask for, within the cha
     expect(head).toContain(`call fetch_url again with start=${end} to read on`);
     const next = (await run({ start: end })).split("\n\n")[1];
     expect(next).toBe(page.slice(end, end + next.length));
-    const plain = await run({}, 0);                                       // no length asked for: 20,000 at a time
+    const plain = await run({}, 0);
     expect(plain.length).toBeLessThanOrEqual(20_000);
     expect(plain).toContain(" of 50,000: call fetch_url again with start=");
   } finally {
@@ -521,9 +496,7 @@ test("Fetch URL gives a long page in parts the model can ask for, within the cha
   }
 }, 30_000);
 
-// Bun's WebSocket takes request headers (an Origin, as a browser sends one); the DOM's type does not know them.
 const Socket = WebSocket as unknown as new (url: string, o: { headers?: Record<string, string> }) => WebSocket;
-// A server of its own, with voice mode's service set up as `env` says.
 async function voiceServer(env: Record<string, string>) {
   const proc = Bun.spawn([process.execPath, "server.ts"], {
     cwd: import.meta.dir, stdout: "pipe", stderr: "inherit",
@@ -551,12 +524,12 @@ test("voice: only this server's own pages get a socket; it starts the service, p
   try {
     expect(await outcome(v.socket("http://evil.example"))).toBe("closed");
     expect(await outcome(v.socket())).toBe("closed");
-    expect(events()).toEqual([]);                    // a refused socket starts nothing
+    expect(events()).toEqual([]);
     const s = v.socket(v.url), got: (string | ArrayBuffer)[] = [];
     s.binaryType = "arraybuffer";
     s.onmessage = (e) => got.push(e.data);
     expect(await outcome(s)).toBe("open");
-    s.send(JSON.stringify({ type: "hello", voice: "silent" }));   // before the service listens: held until it does
+    s.send(JSON.stringify({ type: "hello", voice: "silent" }));
     for (let k = 0; k < 10; k++) s.send(new Int16Array(320).buffer);
     s.send(JSON.stringify({ type: "say", id: "r1", text: "one two three four" }));
     s.send(JSON.stringify({ type: "say_end", id: "r1" }));
@@ -577,7 +550,7 @@ test("voice: only this server's own pages get a socket; it starts the service, p
   }
 }, 20_000);
 
-test("voice: a speech service that cannot start says how to install one", async () => {
+test("voice: a speech service that cannot start says so", async () => {
   const v = await voiceServer({ CHRYSALIS_VOICE_CMD: JSON.stringify(["/nonexistent/chrysalis-voice"]) });
   try {
     const s = v.socket(v.url), got: string[] = [];
@@ -585,15 +558,12 @@ test("voice: a speech service that cannot start says how to install one", async 
     expect(await outcome(s)).toBe("open");
     expect(await until(() => s.readyState === WebSocket.CLOSED)).toBe(true);
     expect(JSON.parse(got[0])).toMatchObject({ type: "error" });
-    expect(JSON.parse(got[0]).message).toContain("make voice");
+    expect(JSON.parse(got[0]).message).toContain("The voice service did not start");
   } finally {
     v.proc.kill();
   }
 });
 
-// The web server on the network (CHRYSALIS_HOST 0.0.0.0), with its certificates and devices in `dir`: its chat's URLs
-// (this machine's first, then each address's), and each address's trust check and link. Requests from here to an address
-// stand in for other devices' unless `self` (this machine at its own address, as it is).
 async function onNetwork(dir = TLS(), self = false) {
   const ips = lanAddresses();
   expect(ips.length).toBeGreaterThan(0);
@@ -615,7 +585,6 @@ async function onNetwork(dir = TLS(), self = false) {
   const checks = [...out.matchAll(/chrysalis check: (\S+)/g)].map(strip);
   return { proc, dir, ips, urls: [...out.matchAll(/chrysalis web: (\S+)/g)].map(strip), checks, links: [...out.matchAll(/chrysalis link: (\S+)/g)].map(strip) };
 }
-// the certificate a TLS server at ip:port shows, and openssl's verdict on it against the authority in `ca`
 function shown(ip: string, port: string, ca: string) {
   const out = Bun.spawnSync(["openssl", "s_client", "-connect", `${ip}:${port}`, "-verify_return_error", "-verify_ip", ip, "-CAfile", ca],
     { stdin: new Uint8Array(), stdout: "pipe", stderr: "pipe" }).stdout.toString();
@@ -629,14 +598,12 @@ test("on the network (CHRYSALIS_HOST 0.0.0.0): each address gets HTTPS whose cer
     expect(urls).toEqual([`http://127.0.0.1:${port}`, ...ips.map((ip) => `https://${ip}:${port}`)]);
     const ca = await (await fetch(`${urls[0]}/chrysalis-ca.crt`)).text();
     writeFileSync(`${dir}/ca-served.pem`, ca);
-    // openssl checks the chain: Bun's BoringSSL has no IP name constraints ("unsupported name constraint type"), the
-    // browsers' verifiers do
     const tlsCheck = (ip: string, ...with_: string[]) => Bun.spawnSync(["openssl", "s_client", "-connect", `${ip}:${port}`, "-verify_return_error",
       "-verify_ip", ip, ...with_], { stdin: new Uint8Array(), stdout: "pipe", stderr: "pipe" });
     for (const u of urls.slice(1)) {
       const ip = new URL(u).hostname, good = tlsCheck(ip, "-CAfile", `${dir}/ca-served.pem`);
       expect(good.stdout.toString()).toContain("Verify return code: 0 (ok)");
-      expect(tlsCheck(ip).exitCode).not.toBe(0);                           // nothing vouches for it without the authority
+      expect(tlsCheck(ip).exitCode).not.toBe(0);
       expect((await fetch(`${u}/`, { tls: { rejectUnauthorized: false } })).status).toBe(200);
       expect(await fetch(`${u.replace("https:", "http:")}/`).then((r) => `plain ${r.status}`, () => "refused")).toBe("refused");
     }
@@ -647,19 +614,16 @@ test("on the network (CHRYSALIS_HOST 0.0.0.0): each address gets HTTPS whose cer
     expect(verify.exitCode).not.toBe(0);
     expect(verify.stdout.toString() + verify.stderr.toString()).toContain("permitted subtree violation");
 
-    // A device without a key, at each address: the connect page in the chat's place, and the authority as the devices
-    // take it, checked against openssl's reading of the authority and Python's of Apple's profile format
     const der = Bun.spawnSync(["openssl", "x509", "-in", `${dir}/ca.pem`, "-outform", "DER"]).stdout;
     const fingerprint = Bun.spawnSync(["openssl", "x509", "-in", `${dir}/ca.pem`, "-noout", "-fingerprint", "-sha256"]).stdout.toString().trim().split("=")[1];
     const insecure = { tls: { rejectUnauthorized: false } };
-    const chatJs = (await (await fetch(`${urls[0]}/`)).text()).match(/src="(\/[^"]+\.js)"/)![1];      // the chat's bundle, as this machine gets it
+    const chatJs = (await (await fetch(`${urls[0]}/`)).text()).match(/src="(\/[^"]+\.js)"/)![1];
     for (const [k, u] of urls.slice(1).entries()) {
       const page = await fetch(`${u}/`, insecure);
       expect([page.status, page.headers.get("content-type"), page.headers.get("cache-control")]).toEqual([200, "text/html; charset=utf-8", "no-store"]);
       const html = await page.text();
       expect([html.includes("<title>Connect to Chrysalis</title>"), html.includes(chatJs), html.includes(JSON.stringify(`${checks[k]}/check.gif`))]).toEqual([true, false, true]);
       expect([(await fetch(`${u}${chatJs}`, insecure)).status, (await fetch(`${urls[0]}${chatJs}`)).status]).toEqual([404, 200]);
-      // another address opened in a browser goes to the connect page
       const other = await fetch(`${u}/pair`, { ...insecure, redirect: "manual", headers: { "Sec-Fetch-Mode": "navigate" } });
       expect([other.status, other.headers.get("location")]).toEqual([302, "/"]);
       const profile = await fetch(`${u}/chrysalis.mobileconfig`, insecure);
@@ -676,7 +640,6 @@ test("on the network (CHRYSALIS_HOST 0.0.0.0): each address gets HTTPS whose cer
       expect([firefox.headers.get("content-type"), Buffer.from(await firefox.arrayBuffer()).equals(Buffer.from(der))]).toEqual(["application/x-x509-ca-cert", true]);
       const gif = await fetch(`${checks[k]}/check.gif`, { tls: { rejectUnauthorized: false } });
       expect([gif.status, gif.headers.get("content-type")]).toEqual([200, "image/gif"]);
-      // the trust check's certificate: the same authority's, not the chat's (a warning clicked past for the chat's covers that one only)
       const atCheck = shown(ips[k], new URL(checks[k]).port, `${dir}/ca-served.pem`), atChat = shown(ips[k], port, `${dir}/ca-served.pem`);
       expect([atCheck.ok, atChat.ok, !!atCheck.cert && atCheck.cert !== atChat.cert]).toEqual([true, true, true]);
     }
@@ -708,8 +671,6 @@ test("on the network only the devices this computer let in get past the pages, a
   try {
     const [here, net] = first.urls, check = first.checks[0], insecure = { tls: { rejectUnauthorized: false } };
     const asked = (path: string, init: RequestInit = {}) => fetch(`${net}${path}`, { ...insecure, redirect: "manual", ...init });
-    // a browser that trusts the authority gets through the trust check (no server can tell how a client checked a
-    // certificate, and this one checks none: the browser test has browsers that do)
     const through = (base: string, query = "", cookie = "") => fetch(`${base}/check.gif${query}`, { ...insecure, headers: cookie ? { cookie } : {} });
     const ask = (nonce: string) => asked("/pair/ask", { method: "POST", body: JSON.stringify({ nonce, name: "Test phone" }), headers: json });
     const answer = (secret: string) => asked(`/pair/ask/${secret}`);
@@ -721,7 +682,6 @@ test("on the network only the devices this computer let in get past the pages, a
       ws.onerror = () => done("refused");
     });
 
-    // without a key: the connect page, not what it talks to
     const connecting = async (cookie = "", base = net) => (await (await fetch(`${base}/`, { ...insecure, headers: cookie ? { cookie } : {} })).text())
       .includes("<title>Connect to Chrysalis</title>");
     expect(await connecting()).toBe(true);
@@ -729,9 +689,8 @@ test("on the network only the devices this computer let in get past the pages, a
       (await asked("/api/chat", { method: "POST", body: JSON.stringify({ stream: true, messages: [] }), headers: json })).status,
       (await asked("/api/chrysalis/stop", { method: "POST" })).status]).toEqual([401, 401, 401, 401, 401]);
     expect(await voice()).toBe("refused");
-    expect((await fetch(`${here}/api/status`)).status).toBe(200);             // this machine needs none
+    expect((await fetch(`${here}/api/status`)).status).toBe(200);
 
-    // asking takes a nonce that came through the trust check, once
     const n = nonce();
     expect((await ask(n)).status).toBe(403);
     expect((await through(check, `?n=${n}`)).status).toBe(200);
@@ -740,7 +699,6 @@ test("on the network only the devices this computer let in get past the pages, a
     expect((await ask(n)).status).toBe(403);
     expect(await (await answer(secret)).json()).toEqual({ state: "waiting" });
 
-    // only this computer allows, by the code the device shows (as it shows it, "482 913", too)
     expect((await asked("/api/pair/allow", { method: "POST", body: JSON.stringify({ code }), headers: json })).status).toBe(401);
     expect((await (await fetch(`${here}/api/pair`)).json()).waiting.map((a: any) => [a.code, a.name, a.allowed])).toEqual([[code, "Test phone", false]]);
     expect((await local("/api/pair/allow", { code: code === "000000" ? "111111" : "000000" })).status).toBe(404);
@@ -749,33 +707,26 @@ test("on the network only the devices this computer let in get past the pages, a
     expect(await got.clone().json()).toEqual({ state: "allowed" });
     const set = got.headers.get("set-cookie")!, cookie = set.split(";")[0], key = cookie.split("=")[1];
     expect(set.split(/;\s*/).slice(1).filter((a) => /^(Secure|HttpOnly|SameSite=Strict)$/.test(a)).sort()).toEqual(["HttpOnly", "SameSite=Strict", "Secure"]);
-    expect((await answer(secret)).status).toBe(404);                          // its key, once
+    expect((await answer(secret)).status).toBe(404);
     const status = await asked("/api/status", { headers: { cookie } });
-    expect([status.status, status.headers.get("set-cookie")?.split(";")[0]]).toEqual([200, cookie]);   // set again as it is used
+    expect([status.status, status.headers.get("set-cookie")?.split(";")[0]]).toEqual([200, cookie]);
     expect([(await asked("/api/tools", { headers: { cookie } })).status, await voice(cookie)]).toEqual([200, "open"]);
-    expect(await connecting(cookie)).toBe(false);                            // the chat itself
-    // a browser keeps using a connection it went past the warning on, and shows the page as not secure on it after it
-    // trusts Chrysalis: the connect page's answers close theirs (curl asks twice on one connection where it may)
+    expect(await connecting(cookie)).toBe(false);
     const twice = (path: string, ...args: string[]) => Bun.spawnSync(["curl", "-sk", "-v", ...args, "-o", "/dev/null", `${net}${path}`, ...args, "-o", "/dev/null", `${net}${path}`],
       { stderr: "pipe" }).stderr.toString().match(/Re-?using existing/) !== null;
     expect([twice("/"), twice("/pair/ask", "-H", "Content-Type: application/json", "-d", "{}"), twice("/chrysalis-ca.crt"), twice("/", "-H", `Cookie: ${cookie}`)])
       .toEqual([false, false, false, true]);
     expect(readFileSync(`${dir}/devices.json`, "utf8")).not.toContain(key);
-    // nor where replies come from: a device that could point this server at any address would read what only it reaches
     expect((await asked("/api/backend", { method: "POST", body: JSON.stringify({ url: "http://127.0.0.1:1/v1" }), headers: { ...json, cookie } })).status).toBe(403);
     expect((await (await asked("/api/status", { headers: { cookie } })).json()).backend.chrysalis).toBe(true);
 
-    // a device denied is not let in
     const m = nonce();
     await through(check, `?n=${m}`);
     const denied = await (await ask(m)).json();
-    // (nor can a device let in let others in: only this computer's screen does)
     expect((await asked("/api/pair/allow", { method: "POST", body: JSON.stringify({ code: denied.code }), headers: { ...json, cookie } })).status).toBe(403);
     expect((await local("/api/pair/deny", { code: denied.code })).status).toBe(204);
     expect((await answer(denied.secret)).status).toBe(404);
 
-    // After a restart the trust check's certificate is new, and the browser shows again that it trusts Chrysalis before
-    // the gate lets it through (its page is told to check)
     const before = shown(ips[0], new URL(check).port, `${dir}/ca.pem`).cert;
     proc.kill();
     await proc.exited;
@@ -798,9 +749,6 @@ test("on the network only the devices this computer let in get past the pages, a
   }
 });
 
-// A computer without the engine, on this machine and the network (link.ts): CHRYSALIS_URL is where its link answers for
-// Chrysalis. Its chat's URL, its folder, and that address.
-// the records a Chrysalis answers the network's question for the service with, the one whose link authority is fp
 function announcement(fp: string): Promise<{ name: string; type: string; ttl?: number }[]> {
   return new Promise((done) => {
     const m = mdns(), got: { name: string; type: string; ttl?: number }[] = [];
@@ -844,13 +792,11 @@ test("a computer without the engine finds this one on the network, and is not fo
   const pair = (to: string) => fetch(`${lap.url}/api/link`, { method: "POST", headers: json, body: JSON.stringify({ fp: to }) });
   const shownHere = async () => (await (await fetch(`${here}/api/pair`)).json()).waiting.map((a: { code: string; kind: string }) => [a.code, a.kind]);
   try {
-    // the first question on the network gets an answer
     await Bun.sleep(300);
     expect((await discover()).map((f) => f.fp)).toContain(fp);
     expect((await until((s) => s.found.some((f: { fp: string }) => f.fp === fp))).found.map((f: { fp: string }) => f.fp)).toContain(fp);
     const announced = (await discover()).map((f) => f.fp), itself = fingerprint(readFileSync(`${lap.dir}/link-ca.pem`, "utf8"));
     expect([announced.includes(fp), announced.includes(itself)]).toEqual([true, false]);
-    // its records live a while: one whose TTL is 0 is a goodbye (RFC 6762, 10.1), which Bonjour drops
     const records = await announcement(fp);
     expect([records.map((r) => r.type).sort().join(), records.filter((r) => !(r.ttl! > 0))]).toEqual([expect.stringContaining("PTR,SRV,TXT"), []]);
     await pair(fp);
@@ -859,7 +805,6 @@ test("a computer without the engine finds this one on the network, and is not fo
     expect((await fetch(`${here}/api/pair/allow`, { method: "POST", headers: json, body: JSON.stringify({ code }) })).status).toBe(200);
     expect((await until((s) => !!s.linked)).linked).toBeTruthy();
 
-    // the laptop's apps ask Chrysalis's address there, whatever key they bring, as on this computer
     expect(await (await fetch(`${lap.chrysalis}/chrysalis/stats`)).json()).toEqual({ model: "fake-model" });
     const completion = (headers: Record<string, string> = {}, signal?: AbortSignal) => fetch(`${lap.chrysalis}/v1/chat/completions`,
       { method: "POST", body: JSON.stringify({ stream: true, messages: [] }), headers: { ...json, ...headers }, signal });
@@ -870,26 +815,21 @@ test("a computer without the engine finds this one on the network, and is not fo
     ctrl.abort();
     for (let t = Date.now(); chrysalisAborted === aborts && Date.now() - t < 3000; ) await Bun.sleep(50);
     expect(chrysalisAborted).toBe(aborts + 1);
-    // its key opens the link and nothing else here: not the chat, nor its tools; and the link opens to no one without one
     const { key } = JSON.parse(readFileSync(`${lap.dir}/link.json`, "utf8")), bearer = { authorization: `Bearer ${key}` };
     expect([(await fetch(`${net}/api/status`, { headers: bearer })).status, (await fetch(`${net}/api/tools`, { headers: bearer })).status,
       (await fetch(`${door}/chrysalis/stats`)).status, (await fetch(`${door}/chrysalis/stats`, { headers: bearer })).status]).toEqual([401, 401, 401, 200]);
     expect(readFileSync(`${desk.dir}/devices.json`, "utf8")).not.toContain(key);
 
-    // a nonce other than the one committed to gets no code
     const sha = (s: string) => createHash("sha256").update(s).digest("hex");
     const asked = await (await fetch(`${door}/link/ask`, { method: "POST", headers: json, body: JSON.stringify({ name: "Another", commit: sha("one") }) })).json();
     expect((await fetch(`${door}/link/reveal`, { method: "POST", headers: json, body: JSON.stringify({ secret: asked.secret, nonce: "two" }) })).status).toBe(404);
 
-    // removed here: the laptop's next request is turned away, and it forgets the link
     const listed = (await (await fetch(`${here}/api/pair`)).json()).devices;
     expect(listed.map((d: { kind: string }) => d.kind)).toEqual(["computer"]);
     await fetch(`${here}/api/pair/${listed[0].id}`, { method: "DELETE" });
     expect((await fetch(`${lap.chrysalis}/chrysalis/stats`)).status).toBe(401);
     expect((await state()).linked).toBeUndefined();
 
-    // One in between, with a link authority of its own, passes the laptop's asks on to this computer as they are: the
-    // laptop's code comes from the authority it was shown, this computer's from its own
     const mid = webTls(TLS());
     const relay = async (req: Request) => fetch(`${door}${new URL(req.url).pathname}`,
       { method: req.method, headers: json, body: req.method === "POST" ? await req.text() : undefined });
@@ -917,7 +857,6 @@ test("the page hears Chrysalis is off where its address takes a connection and n
   const mute = Bun.listen({ hostname: "127.0.0.1", port: 0, socket: { data() {} } }), run = mkdtempSync(`${RUN}/run-`);
   const proc = Bun.spawn([process.execPath, "server.ts"], {
     cwd: import.meta.dir, stdout: "pipe", stderr: "inherit",
-    // a systemd of its own, which has no Chrysalis unit: offline, not loading
     env: { ...process.env, PORT: "0", CHRYSALIS_URL: `http://127.0.0.1:${mute.port}`, NODE_ENV: "production", CHRYSALIS_MCP_CONFIG: CONFIG,
       CHRYSALIS_TLS_DIR: TLS(), XDG_RUNTIME_DIR: run, DBUS_SESSION_BUS_ADDRESS: `unix:path=${run}/bus` },
   });
@@ -937,8 +876,6 @@ test("the page hears Chrysalis is off where its address takes a connection and n
   }
 });
 
-// chrysalis.sh's way in on a computer where nothing of Chrysalis has run yet: a systemd of its own, empty (as a first
-// start finds it), where stopping what is not there must not end the script (set -e)
 test("chrysalis.sh stop where nothing runs, as a first start moves the chat, says Chrysalis stopped and succeeds", () => {
   const run = mkdtempSync(`${RUN}/run-`);
   const r = Bun.spawnSync(["bash", `${import.meta.dir}/../chrysalis.sh`, "stop"], {
@@ -979,9 +916,6 @@ test("a reply whose stream from Chrysalis breaks off says so, rather than that C
   expect(got.filter((e) => e.error).map((e) => e.error.message)).toEqual(["Chrysalis's reply broke off (Chrysalis's log has why)"]);
 });
 
-// Voice turns (chrysalis_voice): the page's check beside the chat says whether a tool is needed (chrysalis_voice.tool);
-// the fake Chrysalis plays a script's text and the calls it makes when held to the tools' grammar. A note before what
-// was said speaks of searches itself.
 const NOTE = "[The user is talking to you by voice. Only speak of a search once the call has returned.]\n\n";
 const voiceAsk = (script: Round[], tool: boolean, then = "") => {
   const said = `run ${JSON.stringify(script)}\n${++asked} ${then}`;
@@ -997,7 +931,7 @@ test("voice: a check that calls for a tool makes the reply start with a call hel
   expect([forced.tool_choice, forced.logprobs, forced.chrysalis_voice]).toEqual(["required", false, undefined]);
   const [line, done] = contents(got);
   expect([done, contents(got).length]).toEqual(["Done.", 2]);
-  expect(line).toMatch(/^\S.*\.$/);                             // the spoken line the server writes before the call
+  expect(line).toMatch(/^\S.*\.$/);
   expect(toolEvents(got).map((t) => t.state)).toEqual(["running", "done"]);
   expect(after.messages.slice(-2)).toEqual([
     { role: "assistant", content: line, tool_calls: [{ id: "call_0_0", type: "function", function: { name: "fake__echo", arguments: '{"text": "x"}' } }] },
@@ -1021,7 +955,7 @@ test("voice: a reply begun ahead runs no tool until the page says it stands (go)
       chrysalis_voice: { tool: false, ahead: true }, messages: [{ role: "user", content: NOTE + said }], chrysalis_web: { tools: { "mcp:fake": {} }, route: true } }) });
     const got: Ev[] = [], done = (async () => { for await (const e of parsed(res)) got.push(e); })();
     for (const t = Date.now(); !got.some((e) => e.choices?.[0]?.finish_reason === "tool_calls") && Date.now() - t < 5000; ) await Bun.sleep(10);
-    await Bun.sleep(300);                                           // the round's calls are in: held, nothing runs
+    await Bun.sleep(300);
     expect([got.some((e) => e.choices?.[0]?.finish_reason === "tool_calls"), toolEvents(got)]).toEqual([true, []]);
     return { job: res.headers.get("X-Chrysalis-Job")!, got, done };
   };
@@ -1040,7 +974,7 @@ test("voice: what was said decides an ask (\"search\"), not the note before it",
   const got = await collect(await asked.res);
   expect(seen.get(asked.said)![0].tool_choice).toBe("required");
   expect(contents(got).slice(-1)).toEqual(["Found."]);
-  const other = voiceAsk([{ text: "Paris." }], false, "the capital of France");   // the note speaks of a search; what was said does not
+  const other = voiceAsk([{ text: "Paris." }], false, "the capital of France");
   await collect(await other.res);
   expect(seen.get(other.said)!.map((b) => b.tool_choice)).toEqual([undefined]);
 }, 30_000);
@@ -1054,5 +988,5 @@ test("the preview of a reply's request is what Chrysalis is then sent for it, to
   expect(preview.body.tools.map((t: any) => t.function.name)).toEqual(["fake__big", "fake__echo", "fake__get_weather", "fake__slow", "fake__write_note", "fetch_url"]);
   const voiced = await (await fetch(`${base}/api/preview`, { method: "POST", headers: json, body: JSON.stringify({ ...body, chrysalis_voice: { tool: false } }) })).json();
   expect([voiced.voice, voiced.body.chrysalis_voice, preview.voice]).toEqual([true, undefined, false]);
-  expect((await fetch(`${base}/api/preview`, { method: "POST", body: JSON.stringify(body) })).status).toBe(415);   // JSON only, as /api/chat
+  expect((await fetch(`${base}/api/preview`, { method: "POST", body: JSON.stringify(body) })).status).toBe(415);
 }, 30_000);

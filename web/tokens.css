@@ -1,30 +1,25 @@
-/* The look, the chat's and a device's setup pages' (style.css, setup.ts): each color a light-dark() pair, light first.
-   Before theme.ts runs they follow the system's scheme; then <html data-theme> holds the one in use (the system's, or
-   one chosen in Settings), and the few values that are not colors follow it. */
 :root {
   color-scheme: light dark;
   --bg: light-dark(#fcf8f9, #121010);
   --panel: light-dark(#f6eff0, #171413);
-  /* the dark #171413: #1f1b19 over a large area (the message box) made an LG monitor driven by a Mac flicker and keep a
-     ghost image; this color tested clean in the same place */
   --raised: light-dark(#ffffff, #171413);
   --hover: light-dark(#ede2e5, #292224);
   --line: light-dark(#e5d6da, #2d2628);
   --text: light-dark(#1d181a, #efe4e7);
   --muted: light-dark(#6e6164, #9c8e92);
   --faint: light-dark(#a39497, #6b5f62);
-  --accent: #e24d85;                               /* the logo's pink */
+  --accent: #e24d85;
   --accent-hi: light-dark(#b43366, #f982a8);
   --accent-soft: light-dark(rgb(226 77 133 / 0.11), rgb(226 77 133 / 0.14));
-  --heat-1: light-dark(#a85771, #ea99b0);          /* the thinking levels, soft to vivid: Low, Medium, Max */
+  --heat-1: light-dark(#a85771, #ea99b0);
   --heat-2: #e24d85;
   --heat-3: light-dark(#bb1562, #ff619a);
-  --quote: light-dark(#b45309, #e18a24);           /* speech in a chat: SillyTavern's orange, darker to read on light */
+  --quote: light-dark(#b45309, #e18a24);
   --ok: #6ccf8e;
   --warn: #e8b04a;
   --danger: #f2706b;
   --code: light-dark(#faf3f4, #0d0b0b);
-  --paper: light-dark(#ffffff, #f5eef0);           /* SVG figures: a light page, dimmed so it does not glare in the dark */
+  --paper: light-dark(#ffffff, #f5eef0);
   --shadow: 0 12px 40px rgb(0 0 0 / 0.38);
   --t-keyword: light-dark(#bb1562, #f982a8);
   --t-string: light-dark(#4d7c0f, #a9d37e);
@@ -35,7 +30,7 @@
   --t-meta: light-dark(#0f766e, #8fbab2);
   --sans: ui-sans-serif, system-ui, -apple-system, "Segoe UI", "Noto Sans", sans-serif;
   --mono: "JetBrains Mono", "CaskaydiaMono Nerd Font", "Cascadia Code", ui-monospace, monospace;
-  --aurora-sky: #1f0f29;                           /* a night sky in either look, as T3 Code's nightly art is */
+  --aurora-sky: #1f0f29;
   --aurora-pink: #ff6aa2;
   --aurora-violet: #8e6bff;
   --aurora-mint: #57e0c8;

@@ -1,4 +1,3 @@
-// Minimal read-only GGUF parser: memory-maps the file and indexes tensors by name.
 #pragma once
 #include <cstdint>
 #include <cstring>
@@ -21,24 +20,24 @@ struct GGUF {
     std::map<std::string, GGUFTensor> tensors;
     std::map<std::string, int64_t> ints;
     std::map<std::string, std::string> strs;
-    std::map<std::string, std::vector<int64_t>> arrs;   // integer array metadata
+    std::map<std::string, std::vector<int64_t>> arrs;
     uint8_t *base = nullptr;
     size_t size = 0;
-    int fd = -1;                              // kept open for drop()
+    int fd = -1;
 
     static size_t type_bytes(int type, int64_t n) {
         switch (type) {
-            case 0: return n * 4;                // F32
-            case 1: return n * 2;                // F16
-            case 6: return n / 32 * 22;          // Q5_0
-            case 8: return n / 32 * 34;          // Q8_0
-            case 20: return n / 32 * 18;         // IQ4_NL
-            case 26: return n * 4;               // I32
-            case 30: return n * 2;               // BF16
-            case 14: return n / 256 * 210;       // Q6_K
-            case 23: return n / 256 * 136;       // IQ4_XS
-            case 10: return n / 256 * 84;        // Q2_K
-            case 11: return n / 256 * 110;       // Q3_K
+            case 0: return n * 4;
+            case 1: return n * 2;
+            case 6: return n / 32 * 22;
+            case 8: return n / 32 * 34;
+            case 20: return n / 32 * 18;
+            case 26: return n * 4;
+            case 30: return n * 2;
+            case 14: return n / 256 * 210;
+            case 23: return n / 256 * 136;
+            case 10: return n / 256 * 84;
+            case 11: return n / 256 * 110;
             default: return 0;
         }
     }
@@ -61,8 +60,8 @@ struct GGUF {
         for (uint64_t i = 0; i < n_kv; i++) {
             std::string key = rs();
             uint32_t t; rd(t);
-            if (t == 8) { strs[key] = rs(); continue; }           // string
-            if (t == 9) {                                         // array
+            if (t == 8) { strs[key] = rs(); continue; }
+            if (t == 9) {
                 uint32_t at; uint64_t n; rd(at); rd(n);
                 if (at == 8) for (uint64_t j = 0; j < n; j++) rs();
                 else if (at == 11 || at == 10) { std::vector<int64_t> v(n); memcpy(v.data(), p, n * 8); arrs[key] = v; p += n * 8; }
@@ -101,7 +100,6 @@ struct GGUF {
         return it == tensors.end() ? nullptr : &it->second;
     }
 
-    // evict a range of the mapping from the page cache once it has been copied out (keeps the cache for the n-gram table)
     void drop(const void *p, size_t n) const {
         const size_t off = (size_t)((const uint8_t *)p - base) & ~size_t(4095);
         madvise(base + off, n + ((const uint8_t *)p - base - off), MADV_DONTNEED);

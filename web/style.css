@@ -6,17 +6,11 @@ body { margin: 0; background: var(--bg); color: var(--text); font: 15px/1.6 var(
 button { font: inherit; color: inherit; cursor: pointer; }
 .i { width: 18px; height: 18px; flex: none; fill: none; stroke: currentColor; stroke-width: 2; stroke-linecap: round; stroke-linejoin: round; }
 
-/* The side panels: the conversations (left) and Settings (right), one mechanism.
-   Beside the chat a panel is a grid column whose width is an animated length, and the chat column reads the same
-   lengths for its place, so the grid and the column move together, frame for frame. Over the chat (where app.ts finds
-   too little room: data-over) it slides in on top. Its content keeps its width either way: it slides, it is never
-   squeezed. Its width is its own (its inner edge resizes it); these are the defaults, and app.ts keeps them within
-   what the window allows. */
 @property --side-w { syntax: "<length>"; inherits: true; initial-value: 0px; }
 @property --panel-w { syntax: "<length>"; inherits: true; initial-value: 0px; }
 :root { --side-open: 272px; --panel-open: 380px; --pane-ease: 0.26s cubic-bezier(0.2, 0.7, 0.2, 1); --bar-h: 52px;
   --toggle-size: 28px; --toggle-inset: 12px; --toggle-room: calc(var(--toggle-size) + 2 * var(--toggle-inset)); }
-@media (max-width: 639px) { :root { --toggle-size: 32px; } }     /* a finger's size where windows are a phone's */
+@media (max-width: 639px) { :root { --toggle-size: 32px; } }
 #app { --side-w: 0px; --panel-w: 0px; display: grid; grid-template-columns: var(--side-w) minmax(0, 1fr) var(--panel-w); height: 100dvh;
   transition: --side-w var(--pane-ease), --panel-w var(--pane-ease); }
 #app:has(> #sidebar[data-open]:not([data-over])) { --side-w: var(--side-open); }
@@ -33,21 +27,17 @@ button { font: inherit; color: inherit; cursor: pointer; }
 .pane[data-over][data-side="right"] { right: 0; transform: translateX(100%); }
 .pane[data-over][data-open] { transform: none; box-shadow: var(--shadow); }
 .no-anim #app, .no-anim .pane, .no-anim .pane-toggle .chev { transition: none !important; }
-/* the head: as tall as the chat's top bar (one line runs under all three), with room for the toggle in its corner */
 .pane-head { display: flex; flex: none; align-items: center; gap: 8px; height: var(--bar-h); border-bottom: 1px solid var(--line); }
 .pane[data-side="left"] .pane-head { padding: 0 12px 0 var(--toggle-room); }
 .pane[data-side="right"] .pane-head { padding: 0 var(--toggle-room) 0 20px; }
-/* the toggle: fixed in its corner, above a panel over the chat; open, a chevron points the way it closes */
 .act.pane-toggle { position: fixed; top: calc((var(--bar-h) - var(--toggle-size)) / 2); z-index: 45; width: var(--toggle-size); height: var(--toggle-size); border-radius: 8px; }
-.act.pane-toggle .i { width: 16px; height: 16px; }   /* (over .act's 28px and 15px, which come later) */
+.act.pane-toggle .i { width: 16px; height: 16px; }
 .pane-toggle[data-side="left"] { left: var(--toggle-inset); }
 .pane-toggle[data-side="right"] { right: var(--toggle-inset); }
 .pane-toggle .chev { opacity: 0; transition: opacity 0.2s, transform 0.2s; }
 .pane-toggle[data-side="left"] .chev { transform: translateX(2px); }
 .pane-toggle[data-side="right"] .chev { transform: translateX(-2px); }
 .pane-toggle[aria-expanded="true"] .chev { opacity: 1; transform: none; }
-/* the inner edge, beside the chat: drag it to resize the panel, double-click it for the default width. Inside the
-   panel, so it never covers the chat's scrollbar (nor the list's, nor the stage grips). */
 .pane-rail { position: absolute; top: 0; bottom: 0; z-index: 1; width: 6px; cursor: col-resize; touch-action: none; }
 .pane[data-side="left"] .pane-rail { right: 0; }
 .pane[data-side="right"] .pane-rail { left: 0; }
@@ -60,9 +50,6 @@ button { font: inherit; color: inherit; cursor: pointer; }
 .pane-resizing, .pane-resizing * { cursor: col-resize !important; user-select: none !important; }
 
 .brand { font-size: 16px; font-weight: 600; letter-spacing: 0.015em; white-space: nowrap; }
-/* the panels' heads: an aurora behind the name, after T3 Code's nightly sidebar art (a night sky, its light and a few
-   stars, fading into the panel). In the light it stays night, ending at the line under the head (a dark sky fading
-   into a light panel turns grey), and the heads' text and their panels' toggles turn light over it. */
 .pane-head { position: relative; }
 .pane-head > :not(.aurora) { position: relative; text-shadow: 0 0 2px var(--panel), 0 0 10px var(--panel); }
 .aurora { position: absolute; inset: 0; width: 100%; height: 100%; mask-image: linear-gradient(#000 55%, transparent 92%); }
@@ -78,9 +65,9 @@ button { font: inherit; color: inherit; cursor: pointer; }
 .conv:hover { background: var(--hover); color: var(--text); }
 .conv.active { background: var(--accent-soft); color: var(--text); }
 .conv-title { flex: 1; overflow: hidden; white-space: nowrap; text-overflow: ellipsis; }
-.conv.running .conv-title::before { content: ""; display: inline-block; width: 6px; height: 6px; margin-right: 7px; border-radius: 50%; background: var(--accent); vertical-align: 1px; animation: pulse 1.2s ease-in-out infinite; }   /* a reply being written */
+.conv.running .conv-title::before { content: ""; display: inline-block; width: 6px; height: 6px; margin-right: 7px; border-radius: 50%; background: var(--accent); vertical-align: 1px; animation: pulse 1.2s ease-in-out infinite; }
 .conv-del { display: none; padding: 0 6px; border: 0; border-radius: 6px; background: none; color: var(--faint); font-size: 13px; line-height: 22px; }
-.conv:hover .conv-del, .conv-del.armed { display: block; }   /* in place of how long ago */
+.conv:hover .conv-del, .conv-del.armed { display: block; }
 .conv-del:hover, .conv-del.armed { color: var(--danger); }
 .side-foot { display: flex; flex: none; gap: 6px; padding-top: 8px; border-top: 1px solid var(--line); }
 .side-foot .btn { height: 34px; color: var(--muted); font-size: 13px; }
@@ -98,12 +85,9 @@ button { font: inherit; color: inherit; cursor: pointer; }
 .model-check .i { width: 16px; height: 16px; }
 
 main { display: flex; flex-direction: column; min-height: 0; grid-column: 2; }
-/* the toggles' corners are kept clear while no panel's head is under them: the gutter grows as a panel closes */
 .topbar { display: flex; flex: none; align-items: center; gap: 10px; height: var(--bar-h); border-bottom: 1px solid var(--line);
   padding: 0 max(18px, var(--toggle-room) - var(--panel-w)) 0 max(18px, var(--toggle-room) - var(--side-w)); }
 .topbar h1 { flex: 1 1 0; min-width: 0; margin: 0; overflow: hidden; font-size: 15px; font-weight: 600; white-space: nowrap; text-overflow: ellipsis; }
-/* where replies come from, out in the open: a dot (answering, not, or off this machine's networks), the address the web
-   server is connected to and its key; Connect once either is changed, and what came of it under them */
 .backend { position: relative; display: flex; flex: 0 1 auto; align-items: center; gap: 6px; min-width: min-content; margin: 0; }
 .backend[hidden] { display: none; }
 .backend .dot { width: 7px; height: 7px; }
@@ -116,8 +100,6 @@ main { display: flex; flex-direction: column; min-height: 0; grid-column: 2; }
 .backend-key { width: 104px; }
 @media (max-width: 900px) { .backend-url { width: 200px; } .backend-key { width: 88px; } }
 .backend-key[hidden], .backend .btn[hidden] { display: none; }
-/* a phone's bar: the key only while the address is being changed (the bar's other buttons out of its way meanwhile),
-   the address as narrow as it can be read */
 @media (max-width: 560px) {
   .backend-url { width: 140px; }
   .backend-key { width: 84px; }
@@ -129,8 +111,6 @@ main { display: flex; flex-direction: column; min-height: 0; grid-column: 2; }
   box-shadow: var(--shadow); color: var(--muted); font-size: 12.5px; line-height: 1.45; }
 .backend-note[hidden] { display: none; }
 .backend-note.error { color: var(--warn); }
-/* buttons: one look for every labeled button (Settings, New chat, Reset all settings, Cancel, Undo); the main action
-   of a form adds .primary. Icon buttons are .act, choices .segmented. */
 .btn { position: relative; display: inline-flex; align-items: center; justify-content: center; gap: 7px; height: 32px; padding: 0 12px; border: 1px solid var(--line);
   border-radius: 9px; background: var(--raised); color: var(--text); font-size: 13px; white-space: nowrap; }
 .btn:has(> .i) { padding-left: 10px; }
@@ -139,13 +119,10 @@ main { display: flex; flex-direction: column; min-height: 0; grid-column: 2; }
 .btn.primary { border-color: var(--accent); background: var(--accent); color: #fff; font-weight: 600; }
 .btn.primary:hover { border-color: var(--accent-hi); background: var(--accent-hi); }
 #scroller { flex: 1; overflow-y: auto; }
-/* The chat column keeps the place it has with Settings closed (centered) as far as the room beside Settings allows, so
-   opening it moves nothing when there is room and only slides the column when there is not (never re-wraps it). */
 .thread { max-width: 800px; margin: 0 auto 0 max(0px, min((100vw - var(--side-w) - var(--sb, 0px) - 800px) / 2, 100% - 824px)); padding: 28px 24px 16px; }
 
 .msg { margin-bottom: 22px; }
 .msg.user { display: flex; flex-direction: column; align-items: flex-end; }
-/* attached files: chips in the message box (with a remove button) and above a sent message (pictures as pictures) */
 .attachments { display: flex; flex-wrap: wrap; gap: 6px; margin: -2px 0 10px -6px; }
 .att { display: inline-flex; align-items: center; gap: 8px; max-width: 280px; height: 42px; padding: 0 6px 0 4px; border: 1px solid var(--line); border-radius: 10px; background: var(--panel); font-size: 13px; }
 .att img, .att-icon { flex: none; width: 34px; height: 34px; border-radius: 7px; object-fit: cover; }
@@ -159,8 +136,6 @@ main { display: flex; flex-direction: column; min-height: 0; grid-column: 2; }
 .composer-box.dropping { border-color: var(--accent); box-shadow: 0 0 0 3px var(--accent-soft), var(--shadow); }
 .svg-zoom-paper > img { display: block; max-width: 92vw; max-height: 88vh; }
 .bubble { max-width: min(85%, 640px); padding: 10px 15px; border: 1px solid var(--line); border-radius: 18px 18px 6px 18px; background: var(--raised); white-space: pre-wrap; overflow-wrap: anywhere; }
-/* a reply's text in a bubble as the user's is, from its portrait's side: as wide as its text, the column at most, and
-   all of it for what takes the width it is given (a canvas, code, a table, a figure, display math) */
 .msg.assistant > .markdown, .msg.assistant .round > .markdown { box-sizing: border-box; width: fit-content; max-width: 100%; padding: 10px 15px;
   border: 1px solid var(--line); border-radius: 18px 18px 18px 6px; background: var(--raised); }
 .msg.assistant > .markdown:empty, .msg.assistant .round > .markdown:empty { display: none; }
@@ -172,9 +147,9 @@ main { display: flex; flex-direction: column; min-height: 0; grid-column: 2; }
 .msg-note summary::-webkit-details-marker { display: none; }
 .msg-note summary:hover, .msg-note[open] summary { color: var(--muted); }
 .msg-note-text { margin-top: 6px; padding: 8px 11px; border: 1px dashed var(--line); border-radius: 10px; color: var(--muted); text-align: left; white-space: pre-wrap; }
-.msg.user .msg-foot > .act { opacity: 0; transition: opacity 0.15s; }   /* (the version pager stays in view) */
+.msg.user .msg-foot > .act { opacity: 0; transition: opacity 0.15s; }
 .msg.user:hover .msg-foot > .act, .msg.user:focus-within .msg-foot > .act { opacity: 1; }
-.stats { flex: 1 1 auto; min-width: 0; margin-right: 6px; font: 11.5px var(--mono); }   /* pushes the actions to their fixed places */
+.stats { flex: 1 1 auto; min-width: 0; margin-right: 6px; font: 11.5px var(--mono); }
 .act.ghost { visibility: hidden; }
 .msg-foot .act { flex: none; }
 .act { display: inline-grid; place-items: center; width: 28px; height: 28px; border: 0; border-radius: 7px; background: none; color: var(--muted); }
@@ -206,13 +181,10 @@ main { display: flex; flex-direction: column; min-height: 0; grid-column: 2; }
 .markdown h3 { font-size: 1.1em; }
 .markdown a { color: var(--accent-hi); text-underline-offset: 2px; }
 .markdown strong { font-weight: 650; }
-/* a chat's speech and narration as SillyTavern sets them: quotes (their marks in the text) in color, italics muted,
-   italics inside a quote the quote's */
 :is(.markdown, .bubble) em { color: var(--muted); }
 :is(.markdown, .bubble) q { color: var(--quote); }
 :is(.markdown, .bubble) q::before, :is(.markdown, .bubble) q::after { content: none; }
 :is(.markdown, .bubble) q em { color: inherit; }
-/* KaTeX sets math at 1.21em, a size up from the text around it */
 .markdown .katex { font-size: 1.1em; }
 .markdown .katex-display { margin: 0.8em 0; overflow-x: auto; overflow-y: hidden; padding: 2px 0; }
 .markdown :not(pre) > code { padding: 0.12em 0.38em; border-radius: 5px; background: var(--hover); font: 0.87em var(--mono); }
@@ -227,8 +199,6 @@ main { display: flex; flex-direction: column; min-height: 0; grid-column: 2; }
 .copy, .code-act { padding: 3px 9px; border: 0; border-radius: 6px; background: none; color: var(--muted); font: 12px var(--sans); }
 .copy:hover, .code-act:hover { background: var(--hover); color: var(--text); }
 .code-acts { display: flex; gap: 2px; }
-/* SVG figures: the picture on its own paper (generated drawings assume a light page), sized to the drawing, with a
-   quiet caption bar; the code replaces the picture on demand */
 .svg-fig { margin: 0.9em 0; }
 .svg-paper { width: fit-content; max-width: 100%; box-sizing: border-box; padding: 14px; border: 1px solid var(--line); border-radius: 12px; background: var(--paper); }
 .svg-bar { display: flex; flex-wrap: wrap; align-items: center; gap: 2px 12px; min-height: 26px; margin-top: 4px; color: var(--faint); font: 12px var(--sans); }
@@ -251,9 +221,7 @@ main { display: flex; flex-direction: column; min-height: 0; grid-column: 2; }
 .svg-zoom[open] { display: grid; place-items: center; }
 .svg-zoom::backdrop { background: rgb(0 0 0 / 0.72); }
 .svg-zoom-paper { padding: 20px; border-radius: 14px; background: var(--paper); }
-/* HTML pages from replies: a white page (what pages assume), as wide as the column */
 .page-frame { display: block; width: 100%; border: 1px solid var(--line); border-radius: 12px; background: #fff; color-scheme: light; }
-/* a page rewritten loads in a second frame over the first, shown once it has loaded */
 .page-paper { position: relative; }
 .page-frame.next { position: absolute; top: 0; left: 0; opacity: 0; pointer-events: none; }
 .page-fig.show-code .page-paper { display: none; }
@@ -266,7 +234,7 @@ main { display: flex; flex-direction: column; min-height: 0; grid-column: 2; }
 .copy.done { color: var(--ok); }
 .code pre { margin: 0; padding: 12px 16px; overflow-x: auto; }
 .code code { font: 13px/1.6 var(--mono); }
-.markdown code, .stats { font-variant-ligatures: none; }   /* show == and -> as typed */
+.markdown code, .stats { font-variant-ligatures: none; }
 
 .hljs-comment, .hljs-quote { color: var(--faint); font-style: italic; }
 .hljs-keyword, .hljs-selector-tag, .hljs-literal, .hljs-doctag { color: var(--t-keyword); }
@@ -280,12 +248,6 @@ main { display: flex; flex-direction: column; min-height: 0; grid-column: 2; }
 .hljs-emphasis { font-style: italic; }
 .hljs-strong { font-weight: 700; }
 
-/* the sea (ocean.ts, its canvas placed by it): everything under the top bar, the message box floating on it; the sea,
-   the thread and the message box are each positioned, so each paints over the one before it in the page. In a new chat
-   the thread and the message box's margins let clicks through to the water; behind a chat (main[data-sea], Settings)
-   the thread keeps them all. Where no canvas can be drawn on, a new chat shows the logo alone in the middle instead, as large
-   as the room allows with a margin, drawn a weight lighter (logo-thin.svg: the original's strokes read too heavy there)
-   with a slow glow */
 .sea { position: absolute; inset: var(--bar-h) 0 0; display: none; overflow: hidden; }
 main[data-sea] > .sea, main:has(.thread > .empty) > .sea { display: block; }
 .sea > .ocean { position: absolute; touch-action: manipulation; }
@@ -299,14 +261,11 @@ main:has(.thread > .empty) .composer-box { pointer-events: auto; }
 @keyframes glow { 50% { filter: drop-shadow(0 0 60px rgb(226 77 133 / 0.22)); } }
 @media (prefers-reduced-motion: reduce) { .empty > .logo { animation: none; } }
 
-/* thinking: an energy bar of four stops, Off to Max, in view in the message box. A 10px capsule and an 18px thumb on a
-   stop; filled to the thumb, and the fill grows more vivid to the right: Low a soft rose, Medium the logo's pink,
-   which flows, Max its most vivid (it flows faster, a shine sweeps it, sparks rise from it) */
 [data-heat=off] { --heat: var(--muted); }
 [data-heat=low] { --heat: var(--heat-1); }
 [data-heat=medium] { --heat: var(--heat-2); }
 [data-heat=max] { --heat: var(--heat-3); }
-.think-ctl { flex: none; width: 196px; margin-left: 4px; }   /* the thinking bar and its stops (not .thinking: that is a reply's Thoughts) */
+.think-ctl { flex: none; width: 196px; margin-left: 4px; }
 .energy { --t: 18px; position: relative; height: 22px; cursor: pointer; outline: none; touch-action: none; }
 .energy-track { position: absolute; inset: 6px 0; overflow: hidden; border-radius: 999px; background: var(--hover); box-shadow: inset 0 1px 2px rgb(0 0 0 / 0.25); }
 .energy-fill { position: absolute; top: 0; bottom: 0; left: 0; overflow: hidden; width: calc(var(--t) + (100% - var(--t)) * var(--v, 0) / 3); border-radius: inherit;
@@ -317,7 +276,7 @@ main:has(.thread > .empty) .composer-box { pointer-events: auto; }
   var(--heat-2) 87.5%, #ca3571 100%) 0 0 / 200% 100%; animation: flow 7s linear infinite; }
 [data-heat=max] .energy-fill { background: linear-gradient(90deg, #ad105a 0%, var(--heat-2) 12.5%, #fcc2d1 25%, var(--heat-3) 37.5%, #ad105a 50%, var(--heat-2) 62.5%,
   #fcc2d1 75%, var(--heat-3) 87.5%, #ad105a 100%) 0 0 / 200% 100%; animation: flow 2.8s linear infinite; }
-@keyframes flow { to { background-position: 100% 0; } }   /* half the 200% image: the pattern repeats there, so the loop has no seam */
+@keyframes flow { to { background-position: 100% 0; } }
 .energy-shine { position: absolute; inset: 0; opacity: 0; background: linear-gradient(100deg, transparent 35%, rgb(255 255 255 / 0.55) 50%, transparent 65%) no-repeat;
   background-size: 45% 100%; }
 [data-heat=max] .energy-shine { opacity: 1; animation: shine 2.4s ease-in-out infinite; }
@@ -334,7 +293,6 @@ main:has(.thread > .empty) .composer-box { pointer-events: auto; }
 .energy:hover .energy-thumb, .energy.dragging .energy-thumb { transform: scale(1.08); }
 [data-heat=max] .energy-thumb { box-shadow: 0 1px 2px rgb(0 0 0 / 0.35), 0 0 12px 2px rgb(255 97 154 / 0.55); }
 .energy:focus-visible .energy-thumb { box-shadow: 0 1px 2px rgb(0 0 0 / 0.35), 0 0 0 3px color-mix(in srgb, var(--accent) 50%, transparent); }
-/* the stops' names under the bar, the current one in its heat */
 .energy-stops { position: relative; height: 13px; }
 .energy-stops button { position: absolute; top: 0; left: calc(9px + (100% - 18px) * var(--k) / 3); padding: 0 2px; border: 0; background: none; color: var(--faint);
   font: 10.5px/13px var(--sans); translate: -50% 0; transition: color 0.15s; }
@@ -342,8 +300,6 @@ main:has(.thread > .empty) .composer-box { pointer-events: auto; }
 .energy-stops button:last-child { right: -2px; left: auto; translate: 0; }
 .energy-stops button:hover { color: var(--text); }
 .energy-stops button.on { color: var(--heat); font-weight: 600; }
-/* the model: its name beside the send button with the engine's state (a dot; the load's progress), opening the
-   models (a flat list) and the engine's line (context, cache, Unload or Load) over the box */
 .model-btn { display: inline-flex; align-items: center; gap: 5px; height: 30px; padding: 0 7px 0 10px; border: 0; border-radius: 9px; background: none; color: var(--muted);
   font-size: 13px; white-space: nowrap; }
 .model-btn:hover, .model-btn.open { background: var(--hover); color: var(--text); }
@@ -361,7 +317,6 @@ main:has(.thread > .empty) .composer-box { pointer-events: auto; }
 @starting-style { .model-pop { opacity: 0; translate: 0 4px; } }
 .model-pop[hidden] { display: none; }
 @media (prefers-reduced-motion: reduce) { .energy-fill, .energy-shine, .spark { animation: none !important; } }
-/* back to the end of the chat, over the message box while the page is away from it */
 .to-latest { position: absolute; top: -46px; left: 50%; width: 34px; height: 34px; border: 1px solid var(--line); border-radius: 50%; background: var(--raised);
   color: var(--text); box-shadow: var(--shadow); transform: translateX(-50%); }
 .to-latest:hover { border-color: var(--faint); background: var(--raised); }
@@ -377,7 +332,7 @@ main:has(.thread > .empty) .composer-box { pointer-events: auto; }
 .segmented button { padding: 3px 10px; border: 0; border-radius: 999px; background: none; color: var(--muted); }
 .segmented button:hover { color: var(--text); }
 .segmented button[aria-checked="true"] { background: var(--accent-soft); color: var(--accent-hi); }
-.meter { display: flex; flex-wrap: wrap; justify-content: flex-end; min-width: 0; height: 1.5em; margin-left: auto; overflow: hidden; color: var(--faint); font: 11.5px/1.5 var(--mono); }   /* gives way first in a narrow chat: a part that does not fit wraps out of sight */
+.meter { display: flex; flex-wrap: wrap; justify-content: flex-end; min-width: 0; height: 1.5em; margin-left: auto; overflow: hidden; color: var(--faint); font: 11.5px/1.5 var(--mono); }
 .meter > span { min-width: 0; overflow: hidden; white-space: nowrap; text-overflow: ellipsis; }
 .meter > span + span::before { content: "·"; margin: 0 0.7ch; }
 .send { display: grid; place-items: center; width: 36px; height: 36px; flex: none; border: 0; border-radius: 50%; background: var(--accent); color: #fff; }
@@ -386,7 +341,6 @@ main:has(.thread > .empty) .composer-box { pointer-events: auto; }
 .hint { max-width: 800px; margin: 8px auto 0 max(0px, min((100vw - var(--side-w) - 48px - 800px) / 2, 100% - 800px)); color: var(--faint); font-size: 11.5px; text-align: center; }
 
 
-/* dialogs: a picture at full size */
 dialog { padding: 20px; border: 1px solid var(--line); border-radius: 16px; background: var(--raised); color: var(--text); box-shadow: var(--shadow); }
 dialog::backdrop { background: rgb(0 0 0 / 0.45); }
 
@@ -405,16 +359,15 @@ dialog::backdrop { background: rgb(0 0 0 / 0.45); }
 .set-foot { padding: 11px 20px; border-top: 1px solid var(--line); }
 
 
-/* the odds: a row per name, a bar for its odds now with a tick where the model had them, the sampler's cuts on them */
 .odds { margin: 0 0 12px; padding: 10px 12px 8px; border: 1px solid var(--line); border-radius: 12px; background: var(--bg); }
 .odd-head { overflow: hidden; height: 18px; margin-bottom: 6px; color: var(--faint); font-size: 12px; white-space: nowrap; text-overflow: ellipsis; }
 .odd-line { color: var(--muted); font: 12px/18px var(--mono); }
 .odd-line span { border-radius: 3px; }
 .odd-line .run, .odd-line .echo { padding: 1px 0; }
 .odd-line .faint { color: var(--faint); }
-.odd-line .used { color: var(--text); text-decoration: underline dotted color-mix(in srgb, var(--text) 60%, transparent); text-underline-offset: 3px; }   /* presence */
-.odd-line .run { background: var(--accent-soft); }                                    /* the run DRY sees, both times */
-.odd-line .echo { background: color-mix(in srgb, var(--accent) 30%, transparent); color: var(--accent-hi); }   /* what followed it */
+.odd-line .used { color: var(--text); text-decoration: underline dotted color-mix(in srgb, var(--text) 60%, transparent); text-underline-offset: 3px; }
+.odd-line .run { background: var(--accent-soft); }
+.odd-line .echo { background: color-mix(in srgb, var(--accent) 30%, transparent); color: var(--accent-hi); }
 .odd-line .caret { display: inline-block; width: 6px; height: 13px; margin-left: 3px; vertical-align: -2px; background: color-mix(in srgb, var(--accent) 70%, transparent); }
 .odd-rows { position: relative; display: grid; gap: 2px; }
 .odd { display: grid; grid-template-columns: 64px minmax(0, 1fr) 40px; align-items: center; gap: 8px; height: 18px; font-size: 12.5px; }
@@ -422,7 +375,7 @@ dialog::backdrop { background: rgb(0 0 0 / 0.45); }
 .odd-track { position: relative; height: 18px; }
 .odd-track i { position: absolute; top: 5px; left: 0; height: 8px; border-radius: 3px; transition: width 0.14s ease-out; }
 .odd-bar { background: var(--accent); }
-.odd-base { display: none; box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--faint) 75%, transparent); }   /* a cut name's old bar */
+.odd-base { display: none; box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--faint) 75%, transparent); }
 .odd.cut .odd-base { display: block; }
 .odd-tick { position: absolute; top: 3px; width: 1.5px; height: 12px; margin-left: -1px; background: color-mix(in srgb, var(--text) 55%, transparent); transition: left 0.14s ease-out; }
 .odd.cut .odd-tick { display: none; }
@@ -434,7 +387,6 @@ dialog::backdrop { background: rgb(0 0 0 / 0.45); }
 .odd.rest .odd-word { color: var(--muted); text-decoration: none; }
 .odd.at .odd-word { color: var(--accent-hi); }
 .odd.at .odd-tick { background: var(--text); }
-/* min P: a line at its share of the likeliest name (track: after the 64px names and 8px gap, before the 40px shares) */
 .odd-min { position: absolute; top: -3px; bottom: -3px; left: calc(72px + (100% - 120px) * var(--at, 0)); border-left: 1px dashed var(--muted); opacity: 0;
   transition: left 0.14s ease-out, opacity 0.14s; pointer-events: none; }
 .odd-min.on { opacity: 1; }
@@ -448,7 +400,6 @@ dialog::backdrop { background: rgb(0 0 0 / 0.45); }
 
 .knobs { display: grid; gap: 4px; }
 .knob { position: relative; display: grid; grid-template-columns: 84px minmax(0, 1fr) 68px 22px; align-items: center; gap: 8px; min-height: 28px; --fill-c: var(--faint); }
-/* the stage rows' grip, in the margin: drag a row to change the order the sampler applies them in */
 .grip { position: absolute; top: 50%; left: -14px; display: grid; place-items: center; width: 12px; height: 22px; margin-top: -11px; padding: 0; border: 0; border-radius: 4px;
   background: none; color: var(--faint); cursor: grab; opacity: 0; touch-action: none; transition: opacity 0.12s; }
 .grip .i { width: 12px; height: 12px; }
@@ -466,9 +417,8 @@ dialog::backdrop { background: rgb(0 0 0 / 0.45); }
 .knob-reset { width: 22px; height: 22px; visibility: hidden; }
 .knob.custom .knob-reset { visibility: visible; }
 .knob-reset .i { width: 13px; height: 13px; }
-.knob-reset.on { visibility: visible; }   /* the order's and the voice prompt's, in their headers */
+.knob-reset.on { visibility: visible; }
 .knob-track { position: relative; height: 16px; }
-/* every slider (Settings' values, the thinking slider): a 4px track filled to the value (--fill, in --fill-c), a 14px thumb */
 .slider { position: relative; width: 100%; height: 16px; margin: 0; background: none; cursor: pointer; appearance: none; -webkit-appearance: none; }
 .slider::-webkit-slider-runnable-track { height: 4px; border-radius: 4px; background: linear-gradient(to right, var(--fill-c) var(--fill), var(--hover) var(--fill)); }
 .slider::-moz-range-track { height: 4px; border-radius: 4px; background: linear-gradient(to right, var(--fill-c) var(--fill), var(--hover) var(--fill)); }
@@ -477,7 +427,6 @@ dialog::backdrop { background: rgb(0 0 0 / 0.45); }
 .slider:active::-webkit-slider-thumb { transform: scale(1.15); }
 .slider:focus-visible { outline: none; }
 .slider:focus-visible::-webkit-slider-thumb { box-shadow: 0 0 0 3px var(--slider-bg, var(--panel)), 0 0 0 5px color-mix(in srgb, var(--accent) 60%, transparent); }
-/* the recommended value: a notch under the slider, which the thumb covers while it sits there */
 .knob-rec { position: absolute; top: 3px; left: calc(7px + (100% - 14px) * var(--at, 0)); width: 2px; height: 10px; margin-left: -1px; border-radius: 1px; background: var(--muted); }
 .knob-more { display: grid; gap: 4px; margin-left: 4px; padding-left: 10px; border-left: 2px solid var(--line); }
 .knob-more.off { opacity: 0.45; }
@@ -499,7 +448,6 @@ main { position: relative; }
 .msg.assistant .msg-foot .act { opacity: 0; transition: opacity 0.15s; }
 .msg.assistant:hover .msg-foot .act, .msg.assistant:focus-within .msg-foot .act, .msg.assistant:last-child .msg-foot .act { opacity: 1; }
 @media (hover: none) { .msg .msg-foot .act, .msg.user .msg-foot > .act { opacity: 1; } }
-/* a message's versions: "‹ 2 / 3 ›" at the start of its footer, quiet, always in view (only where there are several) */
 .pager { display: inline-flex; flex: none; align-items: center; margin-right: 6px; color: var(--muted); font: 11.5px var(--mono); font-variant-numeric: tabular-nums; }
 .msg .msg-foot .pager .act { width: 24px; height: 24px; opacity: 1; }
 .pager .act:disabled { cursor: default; opacity: 0.35 !important; background: none; color: var(--muted); }
@@ -538,8 +486,6 @@ main { position: relative; }
 .draft[hidden] { display: none; }
 #composer.drafting #input { color: var(--muted); }
 
-/* voice mode: a button beside Send, then, as Grok has it, a pill in the same row: the message box stays, so what is said
-   is written into the chat above it as it is said, and the box can still take typing */
 .voice { display: grid; place-items: center; width: 36px; height: 36px; flex: none; border: 0; border-radius: 50%; background: var(--hover); color: var(--text); }
 .voice:hover { background: var(--accent-soft); color: var(--accent-hi); }
 .voice .i { width: 17px; height: 17px; }
@@ -549,7 +495,6 @@ main { position: relative; }
 .voice-dots { display: flex; align-items: center; justify-content: center; gap: 3px; width: 44px; height: 24px; padding: 0; border: 0; border-radius: 12px; background: none; cursor: default; }
 .voice-pill:is([data-phase="speaking"], [data-phase="thinking"]) .voice-dots { cursor: pointer; }
 .voice-pill:is([data-phase="speaking"], [data-phase="thinking"]) .voice-dots:hover { background: var(--hover); }
-/* each dot a bar the level stretches (app.ts paintVoice sets --h): a still dot is a round 3 px */
 .voice-dots i { display: block; width: 3px; height: calc(3px + var(--h, 0) * 14px); border-radius: 2px; background: var(--accent); opacity: var(--o, 1); }
 .voice-pill[data-phase="speaking"] .voice-dots i { background: var(--accent-hi); }
 .voice-pill:is([data-phase="muted"], [data-phase="starting"]) .voice-dots i { background: var(--faint); }
@@ -558,12 +503,10 @@ main { position: relative; }
 .voice-mic:hover { background: var(--hover); color: var(--text); }
 .voice-mic.on { background: var(--text); color: var(--bg); }
 .voice-mic .i { width: 14px; height: 14px; }
-/* under the box: the state in words (an error in red), where the keys' hint is when voice mode is off */
 .voice-hint-line, #composer.voicing .hint-text { display: none; }
 #composer.voicing .voice-hint-line { display: inline; }
 #composer[data-phase="error"] #voice-status { color: var(--danger); }
 #composer[data-phase="error"] .voice-keys { display: none; }
-/* the voice and its voice model beside the pill, like the model's name beside Send, its list opening above the box the same way */
 .voice-pick { gap: 4px; }
 .voice-pick-name { max-width: 120px; overflow: hidden; color: var(--text); text-overflow: ellipsis; white-space: nowrap; }
 .voice-pick-model { max-width: 110px; overflow: hidden; color: var(--faint); font-size: 12px; text-overflow: ellipsis; white-space: nowrap; }
@@ -572,7 +515,6 @@ main { position: relative; }
 #voice-list { display: grid; gap: 2px; }
 .voice-model { display: grid; gap: 3px; padding: 9px 10px 3px; color: var(--muted); font-size: 11.5px; font-weight: 600; letter-spacing: 0.06em; text-transform: uppercase; }
 .voice-model.missing { opacity: 0.55; }
-.voice-hint { color: var(--faint); font: 11px var(--mono); letter-spacing: 0; text-transform: none; user-select: all; }
 .voice-group { padding: 6px 10px 2px; color: var(--faint); font-size: 11.5px; }
 .voice-row { display: flex; align-items: center; gap: 2px; }
 .voice-row .voice-item { flex: 1; padding: 6px 10px; }
@@ -580,13 +522,10 @@ main { position: relative; }
 .voice-play .i { width: 12px; height: 12px; }
 .voice-meta { padding: 5px 10px 3px; color: var(--faint); font: 11px var(--mono); }
 .voice-meta:empty { display: none; }
-/* the words being said, before the turn ends: grey, and in their own color once checked for what was misheard */
 .msg.ghost .bubble { border-style: dashed; color: var(--muted); }
 .msg.ghost .bubble .checked { color: var(--text); transition: color 0.25s; }
-/* a question said aloud is grey until its check is in, then its own color */
 .msg.user .bubble { transition: color 0.25s; }
 .msg.user.unsettled .bubble { color: var(--muted); }
-/* a spoken reply's words not heard yet (app.ts paintSpoken) */
 ::highlight(voice-unspoken) { color: var(--muted); }
 .bubble .fixed { text-decoration: underline dotted color-mix(in srgb, var(--accent) 70%, transparent); text-underline-offset: 3px; cursor: help; }
 .msg.ghost .bubble::after { content: ""; display: inline-block; width: 6px; height: 6px; margin-left: 6px; border-radius: 50%; background: var(--accent); vertical-align: middle; animation: pulse 1.2s ease-in-out infinite; }
@@ -598,7 +537,6 @@ main { position: relative; }
 @media (max-width: 639px) { #composer.voicing .hint { display: block; } .voice-pick-model { display: none; } }
 @media (prefers-reduced-motion: reduce) { .msg.ghost .bubble::after { animation: none; } }
 
-/* a reply's tool rounds, in order: each round's thinking and text, then a card per call it made */
 .round { margin-bottom: 10px; }
 .round > .markdown:not(:empty) { margin-bottom: 8px; }
 .tool-cards { display: grid; gap: 6px; }
@@ -635,8 +573,6 @@ main { position: relative; }
 .notes:not(:empty) { display: grid; gap: 4px; margin-top: 8px; }
 .note { color: var(--muted); font-size: 12.5px; }
 .note::before { content: "· "; color: var(--accent); }
-/* a sub-agent's card (app.ts, paintAgent): its head two lines, the task's label and what it is doing now; open, the task as
-   given, its work (rounds and cards as a reply's), its answer, and Stop for it alone */
 .agent-card[data-state="running"] { border-color: color-mix(in srgb, var(--accent) 30%, var(--line)); }
 .agent-head { min-height: 50px; padding: 7px 10px; }
 .agent-text { display: grid; flex: 1; gap: 1px; min-width: 0; }
@@ -657,7 +593,6 @@ main { position: relative; }
 @media (max-width: 639px) { .agent-meta { display: none; } }
 @media (prefers-reduced-motion: reduce) { .tool-card .tool-state::before { animation: none !important; } }
 
-/* Tools in the message box: a wrench with how many tools this chat has on, opening them by source */
 .tools-btn { position: relative; display: inline-grid; flex: none; place-items: center; width: 32px; height: 30px; padding: 0; border: 0; border-radius: 9px; background: none;
   color: var(--faint); }
 .tools-btn .i { width: 16px; height: 16px; }
@@ -702,7 +637,6 @@ main { position: relative; }
 .tp-code { margin: 6px 0; padding: 6px 8px; overflow-x: auto; border-radius: 8px; background: var(--code); font: 11px/1.45 var(--mono); white-space: pre-wrap; overflow-wrap: anywhere; }
 .tp-foot { display: flex; justify-content: flex-end; padding: 6px 4px 2px; border-top: 1px solid var(--line); margin-top: 4px; }
 .btn.small { height: 26px; padding: 0 10px; font-size: 12px; }
-/* a switch: a pill with a knob, the accent when on */
 .switch { position: relative; flex: none; width: 32px; height: 18px; padding: 0; border: 0; border-radius: 999px; background: var(--hover);
   box-shadow: inset 0 0 0 1px var(--line); transition: background-color 0.15s; }
 .switch::after { content: ""; position: absolute; top: 2px; left: 2px; width: 14px; height: 14px; border-radius: 50%; background: var(--muted); transition: translate 0.15s, background-color 0.15s; }
@@ -710,11 +644,9 @@ main { position: relative; }
 .switch[aria-checked="true"]::after { background: #fff; translate: 14px 0; }
 .switch:disabled { cursor: default; opacity: 0.4; }
 @media (prefers-reduced-motion: reduce) { .switch, .switch::after { transition: none; } }
-/* in the tools of a chat: Fetch URL's page length under it, and the tools let run without asking */
 .tp-src > .knob { margin: 0 8px 6px 38px; grid-template-columns: 80px minmax(0, 1fr) 60px 22px; }
 .tp-allow { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; margin: 8px 8px 2px; }
 .tp-allow-label { margin-right: 2px; color: var(--faint); font-size: 12px; }
-/* What the model is sent: the next request as Chrysalis gets it, read-only */
 .sent-view { width: min(860px, 94vw); max-height: 88vh; padding: 16px 18px; }
 .sent-view[open] { display: grid; grid-template-rows: auto auto minmax(0, 1fr); gap: 8px; }
 .sent-view::backdrop { background: rgb(0 0 0 / 0.6); }
@@ -726,7 +658,6 @@ main { position: relative; }
 .set-note { margin: 8px 0 0; color: var(--faint); font-size: 12px; line-height: 1.45; }
 .set-switch { display: flex; align-items: center; justify-content: space-between; gap: 12px; min-height: 30px; font-size: 13.5px; }
 label.set-switch { cursor: pointer; }
-/* Connect a device: the QR code a phone scans, the code to type, the devices let in */
 .connect-view { width: min(560px, 94vw); padding: 16px 18px 18px; }
 .connect-view::backdrop { background: rgb(0 0 0 / 0.6); }
 .connect-body { display: grid; gap: 16px; margin-top: 12px; }
@@ -762,29 +693,23 @@ label.set-switch { cursor: pointer; }
 .chip:hover { border-color: var(--danger); }
 .chip:hover .i { color: var(--danger); }
 
-#app:has(> #settings[data-open][data-over]) .toast { left: calc(50% - 190px); }   /* in what Settings leaves of the chat */
+#app:has(> #settings[data-open][data-over]) .toast { left: calc(50% - 190px); }
 @media (prefers-reduced-motion: reduce) { #app, .pane, .pane-toggle .chev { transition: none; } }
 
 @keyframes pulse { 50% { opacity: 0.3; } }
 
-/* narrow screens (the conversations slide over the chat: app.ts) */
 @media (max-width: 760px) {
   .thread { padding: 20px 16px 12px; }
   #composer { padding: 0 10px 10px; }
   .hint, .meter { display: none; }
 }
-/* a phone: the thinking bar takes a line of its own under the buttons (in one row they overflowed it) */
 @media (max-width: 560px) {
   .composer-row { flex-wrap: wrap; row-gap: 6px; }
   .think-ctl { order: 1; flex: 1 0 100%; width: auto; margin: 0 2px; }
   .model-btn { margin-left: auto; }
 }
-/* another backend: what is left unset is its own value, not sent (a dimmed slider); Chrysalis's sampler order and the
-   odds charts drawn with its sampler do not apply */
 .knob.unset .slider, .knob.unset .knob-rec { opacity: 0.35; }
 .other-backend .odds, .other-backend .grip, .other-backend #order-reset { display: none; }
-/* Artifacts: a figure or code block a reply named (its name and version in its caption, how an edit's changes went
-   under it, the edit's own text a click away), the shelf they float on, and what the pointer points at in them */
 .art-label { color: var(--muted); font: 12px var(--mono); white-space: nowrap; }
 .art-step { display: inline-flex; align-items: center; gap: 2px; }
 .art-step button { width: 22px; height: 22px; padding: 0; border: 0; border-radius: 6px; background: none; color: var(--muted); font: 14px/1 var(--sans); }
@@ -792,7 +717,6 @@ label.set-switch { cursor: pointer; }
 .art-step button:disabled { opacity: 0.3; cursor: default; }
 .art-step.single button { display: none; }
 .svg-fig.drawing .art-step button { visibility: hidden; }
-/* a version the canvas has moved on from: a quiet line where it was made */
 .art-line { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; width: fit-content; max-width: 100%; margin: 0.6em 0; padding: 5px 6px 5px 12px;
   border: 1px dashed var(--line); border-radius: 10px; }
 .art-later { color: var(--faint); font: 12px var(--mono); }
@@ -800,7 +724,6 @@ label.set-switch { cursor: pointer; }
 .art-acts button { padding: 3px 8px; border: 0; border-radius: 6px; background: none; color: var(--muted); font: 12px var(--sans); }
 .art-acts button:hover { background: var(--hover); color: var(--text); }
 .art-line .art-fail, .art-line .art-changes { flex-basis: 100%; margin-top: 2px; }
-/* a canvas in edit mode: its tools in a row over it, in the chat's own look, and the canvas outlined */
 .art-tools { display: none; position: sticky; top: 8px; z-index: 5; flex-wrap: wrap; align-items: center; gap: 4px 8px; margin: 0 0 8px; padding: 4px;
   border: 1px solid var(--line); border-radius: 12px; background: color-mix(in srgb, var(--raised) 90%, transparent); backdrop-filter: blur(10px);
   box-shadow: 0 4px 18px rgb(0 0 0 / 0.12); color: var(--muted); font: 12.5px/1.3 var(--sans); text-align: left; }
@@ -824,13 +747,11 @@ label.set-switch { cursor: pointer; }
 :is(.svg-paper, .page-paper, .doc-paper, .shelf-paper).editing { outline: 2px solid var(--accent); outline-offset: 2px; }
 .page-paper { border-radius: 12px; }
 [data-art=edit][aria-pressed=true], [data-shelf=edit][aria-pressed=true] { color: var(--accent-hi); }
-/* what a version changed: its source's lines taken out and put in */
 .diff code { display: flex; flex-direction: column; font: 12.5px/1.5 var(--mono); }
 .diff span { padding: 0 6px; white-space: pre-wrap; overflow-wrap: anywhere; }
 .diff-add { background: rgb(46 160 67 / 0.16); } .diff-del { background: rgb(248 81 73 / 0.16); }
 .diff-same { color: var(--muted); } .diff-gap { color: var(--faint); font-style: italic; }
 .diff-count { margin-right: 6px; } .diff-plus { color: #2ea043; } .diff-minus { color: #e5534b; }
-/* code being changed by hand, and a document on its page */
 .code.editing pre { outline: 1.5px solid var(--accent); outline-offset: -1.5px; border-radius: 0 0 12px 12px; }
 .code.editing code { outline: none; caret-color: var(--accent); }
 .doc-paper { max-width: 100%; overflow: hidden; border: 1px solid var(--line); border-radius: 12px; }
@@ -897,13 +818,11 @@ label.set-switch { cursor: pointer; }
 .point-chip::before { content: "→ "; color: var(--accent); }
 .msg.user.fix .bubble { border-style: dashed; background: none; color: var(--muted); font-size: 13px; }
 
-/* The cast (app.ts): characters and groups as rows among the chats, their portraits opening their cards */
 .cast-add[hidden], .cast-sheet[hidden], .cast-next[hidden] { display: none; }
 .side-top { display: flex; flex: none; gap: 6px; }
 .side-top #new-chat { flex: 1; }
 .side-top #add-cast { flex: none; width: 36px; padding: 0; justify-content: center; color: var(--muted); }
 .side-top #add-cast:hover { color: var(--text); }
-/* a folder: its head (the portrait, the name with its arrow, + on hover), then its chats on a line down from the portrait */
 .folder { margin-bottom: 2px; }
 .cast-row { display: flex; align-items: center; gap: 10px; padding: 4px 4px 4px 5px; border-radius: 12px; color: var(--muted); }
 .cast-row:hover { background: var(--hover); color: var(--text); }
@@ -930,7 +849,6 @@ label.set-switch { cursor: pointer; }
 .side-foot .you .face { width: 28px; height: 28px; font-size: 11px; }
 .you-name { overflow: hidden; white-space: nowrap; text-overflow: ellipsis; }
 .side-foot #import, .side-foot #export-all { flex: none; width: 32px; padding: 0; justify-content: center; }
-/* a face: a portrait, initials on the name's own color, a group's members in one circle */
 .face { position: relative; display: grid; place-items: center; width: 34px; height: 34px; flex: none; overflow: hidden; border-radius: 50%;
   object-fit: cover; object-position: 50% 15%; background: var(--hover); color: #fff; font-size: 13px; font-weight: 600; line-height: 1; user-select: none; }
 .face.initials { background: radial-gradient(circle at 32% 28%, hsl(var(--hue) 52% 58%), hsl(var(--hue) 58% 26%)); }
@@ -950,8 +868,6 @@ label.set-switch { cursor: pointer; }
   font: inherit; font-size: 13.5px; text-align: left; cursor: pointer; }
 .cast-add button:hover { background: var(--hover); }
 .cast-add .i { width: 16px; height: 16px; color: var(--muted); }
-/* the sheet is the character's card: the portrait at its own shape (it gives height before the face: what is cut is the
-   bottom) with the name on it, then what the card says, each field edited where it is read; it scrolls under its close */
 .cast-sheet { position: fixed; z-index: 40; display: flex; flex-direction: column; width: min(320px, calc(100vw - 24px)); max-height: calc(100dvh - 72px);
   overflow: hidden; border: 1px solid var(--line); border-radius: 20px; background: var(--raised); box-shadow: 0 24px 60px -18px rgb(0 0 0 / 0.55), var(--shadow); }
 .card-scroll { min-height: 0; overflow-y: auto; overscroll-behavior: contain; scrollbar-width: thin; }
@@ -959,8 +875,6 @@ label.set-switch { cursor: pointer; }
 .card-art > .card-file, .card-file > img, .card-file > .face, .card-art > .strips, .card-art > .card-sea { position: absolute; inset: 0; width: 100%; height: 100%; border-radius: 0; }
 .card-file > img { object-fit: cover; object-position: 50% 0; }
 .card-file > .face { font-size: 72px; }
-/* Chrysalis's sea: the butterfly in the room above the name (whole, inside the picture's edges), the water fading into
-   the card under it */
 .card-art:has(> .card-sea) { background: var(--bg); }
 .card-sea { overflow: hidden; }
 .card-sea > .ocean { position: absolute; touch-action: manipulation; }
@@ -991,7 +905,6 @@ label.set-switch { cursor: pointer; }
   font: inherit; font-size: 12.5px; text-overflow: ellipsis; }
 .card-voice .act { flex: none; }
 .card-voice .act .i { width: 13px; height: 13px; }
-/* a field reads as text and is edited where it is: a ground under it while pointed at, a ring while typed in */
 .card-field { display: grid; gap: 3px; }
 .card-text { box-sizing: border-box; width: calc(100% + 14px); min-height: 0; margin: 0 -7px; padding: 5px 7px; border: 1px solid transparent; border-radius: 9px;
   background: none; color: var(--text); font: inherit; font-size: 13.5px; line-height: 1.5; resize: none; overflow: hidden; transition: background 120ms, border-color 120ms; }
@@ -1021,9 +934,6 @@ label.set-switch { cursor: pointer; }
 .card-member > .face.initials { font-size: 16px; }
 .card-section { display: grid; gap: 6px; }
 .card-label { color: var(--faint); font-size: 11px; font-weight: 600; letter-spacing: 0.07em; text-transform: uppercase; }
-/* every message has who wrote it beside it, as a chat with characters has it: their portrait in the margin (a reply's
-   on the left, the user's on the right), their name over it; in a group each paragraph is its
-   speaker's, and one going on shows theirs once */
 .msg.assistant { position: relative; padding-left: 56px; }
 .msg.user { position: relative; padding-right: 56px; }
 .msg > .speaker { margin-bottom: 4px; font-size: 13.5px; font-weight: 600; }
@@ -1036,8 +946,7 @@ p.line { position: relative; }
 p.line:not(.same):not(:first-child) { margin-top: 1.1em; }
 p.line > .who { display: block; margin-bottom: 2px; font-size: 13.5px; }
 p.line > .who b { font-weight: 600; }
-p.line > .who .face { position: absolute; left: -72px; top: 1px; width: 44px; height: 44px; font-size: 16px; }   /* (past the bubble's edge) */
-/* a group's message box: who speaks next, and letting them talk */
+p.line > .who .face { position: absolute; left: -72px; top: 1px; width: 44px; height: 44px; font-size: 16px; }
 .cast-next { display: flex; align-items: center; gap: 6px; margin: -3px 0 8px; }
 .cast-next > span { margin-right: 2px; color: var(--faint); font-size: 11.5px; }
 .cast-next > button:not(.talk) { position: relative; display: grid; place-items: center; padding: 0; border: 0; border-radius: 50%; background: none; cursor: pointer; }

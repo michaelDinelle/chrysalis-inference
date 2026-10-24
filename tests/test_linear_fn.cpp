@@ -1,6 +1,3 @@
-// Engine::linear on long passes (T > GEMM_Q_MAX: weights dequantized to fp16 in row blocks of b.deq, then hipBLASLt)
-// against gemm_q (dequantized in registers) on the same random weights: matrices wider than one block (q | gate,
-// 12288 x 2560) and narrower ones, fp32 and fp16 output, store and accumulate.
 #include "../engine_fn/model.h"
 #include "ggml.h"
 #include <cmath>

@@ -1,4 +1,3 @@
-"""Chrysalis command line: `python -m chrysalis serve` starts the OpenAI-compatible server."""
 import argparse
 import os
 
@@ -38,13 +37,10 @@ def main():
         if not a.model:
             from . import get
             get.fetch(a.use)
-        # Start what takes longest first: the GPU wakes and the weights load while the rest of Python starts up.
         import threading
         from . import link
         from .engine import load_async, wake_gpus
         dev = link.device()
-        # a restart for the link: the GPU has to suspend to train it again; one kept awake (a display on it, another
-        # process) cannot be, so the check only says how it came up
         if dev and os.environ.get(link.TRY) and not link.wait_suspended(dev):
             os.environ[link.TRY] = str(a.link_tries)
         wake_gpus()
@@ -52,7 +48,7 @@ def main():
         if node:
             def check():
                 try:
-                    os.close(os.open(node, os.O_RDWR))     # returns once the GPU is awake, its link trained
+                    os.close(os.open(node, os.O_RDWR))
                 except OSError:
                     return
                 link.check(dev, a.link_tries)

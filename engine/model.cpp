@@ -20,7 +20,7 @@ int Engine::seq_new() {
 void Engine::seq_reset(Seq &s) {
     for (int p : s.pages) page_release(p);
     s.n = 0; s.pos = 0; s.pending = -1; s.pages.clear(); s.seen.clear(); s.top_v.clear(); s.top_i.clear();
-    s.look.clear();                              // a new sequence drafts from its own conversation, not the slot's last
+    s.look.clear();
     s.rng.seed(std::random_device{}());
     CK(hipMemsetAsync(s.ssm, 0, (size_t)48 * GV * GD * GD * 4, st));
     CK(hipMemsetAsync(s.conv, 0, (size_t)48 * QKV * 3 * 4, st));
@@ -53,17 +53,13 @@ void Engine::page_release(int p) {
     if (--page_ref[p] == 0) free_pages.push_back(p);
 }
 
-// Make s cover n_tokens, with exclusive ownership of every page written from position `from` on
-// (pages shared with snapshots or other sequences are copied first).
 void Engine::ensure_pages(Seq &s, int n_tokens, int from) {
     const int need = (n_tokens + PAGE - 1) / PAGE;
     int dirty = (int)s.pages.size();
-    int shared = 0;                         // check capacity first so a failure leaves s untouched
+    int shared = 0;
     for (int i = from / PAGE; i < dirty && i < need; i++) shared += page_ref[s.pages[i]] > 1;
     if ((int)free_pages.size() < need - dirty + shared) throw std::runtime_error("out of KV pages");
     while ((int)s.pages.size() < need) {
-        // Fresh pages start zeroed: masked slots are multiplied by zero, but WMMA rounding still depends on
-        // their values (1 ulp), so stale data from earlier sequences would make results history-dependent.
         const int p = page_alloc();
         CK(hipMemsetAsync(kv_pool + (size_t)p * KV_PAGE, 0, KV_PAGE, st));
         s.pages.push_back(p);
@@ -80,7 +76,6 @@ void Engine::ensure_pages(Seq &s, int n_tokens, int from) {
         CK(hipMemcpyAsync(s.d_pages + dirty, s.pages.data() + dirty, (need - dirty) * 4, hipMemcpyHostToDevice, st));
 }
 
-// Snapshots: recurrent state copied to pinned host memory, KV pages shared copy-on-write.
 
 int Engine::snapshot(int id) {
     Seq &s = seqs.at(id);
@@ -95,8 +90,6 @@ int Engine::snapshot(int id) {
     if (s.pending < 0) { sn.top_v = s.top_v; sn.top_i = s.top_i; } else { sn.top_v.clear(); sn.top_i.clear(); }
     sn.pages.assign(s.pages.begin(), s.pages.begin() + (s.n + PAGE - 1) / PAGE);
     for (int p : sn.pages) page_ref[p]++;
-    // Copy the state into a device staging buffer (fast, keeps the compute stream moving), then to host
-    // memory on the copy stream. The staging buffer is reused once the previous host copy has finished.
     const size_t ssm = (size_t)48 * GV * GD * GD * 4, conv = (size_t)48 * QKV * 3 * 4;
     CK(hipStreamWaitEvent(st, copied, 0));
     CK(hipMemcpyAsync(stage_state, s.ssm, ssm, hipMemcpyDeviceToDevice, st));
@@ -112,8 +105,8 @@ int Engine::snapshot(int id) {
 void Engine::restore(int id, int snap) {
     Seq &s = seqs.at(id);
     Snap &sn = snaps.at(snap);
-    if (!sn.used) throw std::runtime_error("restore of a freed snapshot");   // its pages may belong to others by now
-    CK(hipStreamWaitEvent(st, copied, 0));      // the snapshot's host copy may still be in flight
+    if (!sn.used) throw std::runtime_error("restore of a freed snapshot");
+    CK(hipStreamWaitEvent(st, copied, 0));
     for (int p : s.pages) page_release(p);
     s.pages = sn.pages;
     for (int p : s.pages) page_ref[p]++;
@@ -129,9 +122,6 @@ void Engine::restore(int id, int snap) {
     CK(hipMemcpyAsync(s.h_last, h + ssm + conv, D * 4, hipMemcpyHostToDevice, st));
 }
 
-// A snapshot as bytes, for a later run of the same model and build (chrysalis/cache.py keeps the prefixes every session shares
-// on disk): a header, the next token's candidates when it ends a prompt, the recurrent state, then its KV pages as they
-// sit in the pool. SNAP_MAGIC names this layout; a change to the KV or state layout needs a new one.
 struct SnapHeader { char magic[8]; uint64_t kv_page, state; int32_t n, pos, n_top, n_pages; };
 static const char SNAP_MAGIC[8] = {'K', 'I', 'L', 'N', 'S', 'N', 'P', '1'};
 
@@ -143,8 +133,8 @@ size_t Engine::snap_bytes(int snap) const {
 void Engine::snap_export(int snap, uint8_t *dst) {
     const Snap &sn = snaps.at(snap);
     if (!sn.used) throw std::runtime_error("export of a freed snapshot");
-    CK(hipStreamSynchronize(st));               // the pages' last writes
-    CK(hipStreamSynchronize(cst));              // the state's host copy
+    CK(hipStreamSynchronize(st));
+    CK(hipStreamSynchronize(cst));
     SnapHeader h;
     memcpy(h.magic, SNAP_MAGIC, 8);
     h.kv_page = KV_PAGE; h.state = state_bytes(); h.n = sn.n; h.pos = sn.pos;
@@ -161,7 +151,6 @@ void Engine::snap_export(int snap, uint8_t *dst) {
     CK(hipStreamSynchronize(cst));
 }
 
-// Returns the new snapshot's id, -1 for bytes of another layout (or cut short), -2 when the pool lacks the pages.
 int Engine::snap_import(const uint8_t *src, size_t bytes) {
     SnapHeader h;
     if (bytes < sizeof h) return -1;
@@ -186,7 +175,7 @@ int Engine::snap_import(const uint8_t *src, size_t bytes) {
         CK(hipMemcpyAsync(kv_pool + (size_t)pg * KV_PAGE, p, KV_PAGE, hipMemcpyHostToDevice, st));
         p += KV_PAGE;
     }
-    CK(hipStreamSynchronize(st));               // src is the caller's to free once this returns
+    CK(hipStreamSynchronize(st));
     sn.n = h.n;
     sn.pos = h.pos;
     sn.used = true;
@@ -196,16 +185,13 @@ int Engine::snap_import(const uint8_t *src, size_t bytes) {
 void Engine::snap_free(int snap) {
     Snap &sn = snaps.at(snap);
     if (!sn.used) throw std::runtime_error("double free of a snapshot");
-    CK(hipStreamSynchronize(st));            // pending copies into sn.host must finish before reuse
+    CK(hipStreamSynchronize(st));
     CK(hipStreamSynchronize(cst));
     for (int p : sn.pages) page_release(p);
     sn.pages.clear();
     sn.used = false;
 }
 
-// y = x W^T for prefill (x fp16 [T][ldx], W fp16 [N][K]) with hipBLASLt (~95 TFLOPS on gfx1100 vs ~60
-// for rocBLAS). Its fp16-output kernels are the fast ones, so fp32 results go through an fp16 scratch and
-// a convert/accumulate pass. Plans (descriptors and the fastest algorithm, engine/lt_tune.h) are kept per shape.
 Engine::LtPlan &Engine::lt_plan(int N, int K, int T, int ldx, int ldd, bool c32, const half *W, const half *x, void *d) {
     const auto key = std::make_tuple(N, K, T, ldx, ldd, (int)c32);
     auto it = lt_plans.find(key);
@@ -217,15 +203,13 @@ void Engine::gemm(const half *W, int N, int K, const half *x, int ldx, int T, vo
     const float alpha = 1.0f, beta = 0.0f;
     half *dst = y_f16 && !accumulate ? (half *)y : b.gemm16;
     const int ldd = dst == y ? ldy : N;
-    const int Tp = std::min(umax, (T + 63) / 64 * 64);   // padded rows (ignored downstream) let plans be reused
+    const int Tp = std::min(umax, (T + 63) / 64 * 64);
     LtPlan &p = lt_plan(N, K, Tp, ldx, ldd, false, W, x, dst);
     if (hipblasLtMatmul(lt, p.desc, &alpha, W, p.a, x, p.b, &beta, dst, p.c, dst, p.c, &p.algo, lt_ws, lt_ws_size, st) != HIPBLAS_STATUS_SUCCESS)
         FAIL("hipblasLtMatmul failed (%dx%dx%d)", N, K, T);
     if (dst != y) store_f16(b.gemm16, N, T, (float *)y, ldy, accumulate, st);
 }
 
-// y = x W^T with fp32 output, for the small projections whose results must not be rounded to fp16 (hipBLASLt's
-// fp32-output kernels are the slow ones, so only those).
 void Engine::gemm32(const half *W, int N, int K, const half *x, int ldx, int T, float *y, int ldy) {
     const float alpha = 1.0f, beta = 0.0f;
     const int Tp = std::min(umax, (T + 63) / 64 * 64);
@@ -246,8 +230,6 @@ void Engine::linear(const QTensor &W, int T, const QAct &qin, const half *hin, i
     }
 }
 
-// Residual projection x += W.in, then normalize x with `next` (weights of the following norm) into
-// b.hq/b.hh for the next block; `nf` additionally receives fp32 output. Fused into one GEMV when decoding.
 void Engine::residual(const QTensor &W, int T, const QAct &qin, const half *hin, int ldin, float *x, const float *next, float *nf) {
     if (T <= 8) {
         gemv(W, qin, T, x, D, GEMV_ADD, st);
@@ -348,8 +330,6 @@ void Engine::ffn_block(const Layer &w, int T, float *x, const float *next, float
     }
 }
 
-// The residual stream stays normalized for the next block: every block's last projection also
-// produces the normalized input of the following one (b.hq for GEMVs, b.hh for GEMMs).
 void Engine::forward(Seq &s, int T, bool verify, int rope0, bool rpos, bool img) {
     ensure_pages(s, s.n + T, s.n);
     embed(embd, b.tokens, img ? b.img : nullptr, T, b.x, st);
@@ -361,11 +341,9 @@ void Engine::forward(Seq &s, int T, bool verify, int rope0, bool rpos, bool img)
         const bool last = l == NL - 1;
         ffn_block(L[l], T, b.x, last ? out_norm : L[l + 1].attn_norm, last ? b.hfin : nullptr);
     }
-    if (T <= 8 && !verify) gdn_conv_commit(s.conv, b.v_raw, T, 8 * QKV, 48, st);   // decode: advance conv states
+    if (T <= 8 && !verify) gdn_conv_commit(s.conv, b.v_raw, T, 8 * QKV, 48, st);
 }
 
-// The decode pass of several sequences' rows (their tokens in b.tokens, in order): a verify part keeps its recurrent
-// inputs for the commit, the others advance their conv states here.
 void Engine::forward_parts(const Part *p, int np, int T) {
     for (int i = 0; i < np; i++) ensure_pages(*p[i].s, p[i].s->n + p[i].T, p[i].s->n);
     embed(embd, b.tokens, nullptr, T, b.x, st);
@@ -380,11 +358,9 @@ void Engine::forward_parts(const Part *p, int np, int T) {
         if (!p[i].verify) gdn_conv_commit(p[i].s->conv, b.v_raw + (size_t)p[i].off * QKV, p[i].T, 8 * QKV, 48, st);
 }
 
-// MTP block over pairs (token at pos0+t, final hidden of pos0+t-1). For T <= 8 its output hidden goes
-// to b.mtp_x (fp32, chained into the next draft) and b.hq (input of the LM head).
 void Engine::mtp_forward(Seq &s, int T, int pos0, const float *h_prev, const int *tokens, int rope0, bool rpos, bool img) {
     const bool small = T <= 8;
-    float *xm = small ? b.mtp_x : b.mtp_h;          // large T: h_prev (= b.mtp_h) is consumed before xm is written
+    float *xm = small ? b.mtp_x : b.mtp_h;
     embed(embd, tokens, img ? b.img : nullptr, T, b.x, st);
     rmsnorm(b.x, enorm, T, D, D, 2 * D, nullptr, b.hh, small ? b.hq : NO_Q, st);
     rmsnorm(h_prev, hnorm, T, D, D, 2 * D, nullptr, b.hh + D, small ? QAct{b.hq.q + D, b.hq.d + D / 32} : NO_Q, st);
@@ -408,7 +384,6 @@ void Engine::lm_head(const QAct &in, int T, int rows) {
 void Engine::prefill(int id, const int *tokens, const int *pos3, int n) {
     if (!embd.q) FAIL("prefill before warmup(): the token embeddings are not loaded");
     Seq &s = seqs.at(id);
-    // Image tokens resolve to their rows before anything runs, so a bad one leaves the sequence as it was.
     std::vector<const half *> rows(n, nullptr);
     bool any_img = false;
     for (int i = 0; i < n; i++) {
@@ -433,7 +408,7 @@ void Engine::prefill(int id, const int *tokens, const int *pos3, int n) {
         const int rope0 = s.pos;
         forward(s, T, false, rope0, pos3, img);
         mtp_catch_up(s, T, s.n, rope0, pos3, img);
-        if (done + T == n) {   // top-k logits for the next token
+        if (done + T == n) {
             quant_act(b.hfin + (size_t)(T - 1) * D, D, b.hq, st);
             lm_head(b.hq, 1, VOCAB);
             topk(b.logits, 1, VOCAB, VOCAB, b.tsv, b.tsi, b.topv, b.topi, st);
@@ -443,7 +418,7 @@ void Engine::prefill(int id, const int *tokens, const int *pos3, int n) {
         }
         CK(hipMemcpyAsync(s.h_last, b.hfin + (size_t)(T - 1) * D, D * 4, hipMemcpyDeviceToDevice, st));
         s.n += T;
-        if (pos3)                    // the text after a picture goes on from its largest position
+        if (pos3)
             for (int i = done * 3; i < (done + T) * 3; i++) s.pos = std::max(s.pos, pos3[i] + 1);
         else
             s.pos += T;
@@ -452,8 +427,6 @@ void Engine::prefill(int id, const int *tokens, const int *pos3, int n) {
     CK(hipStreamSynchronize(st));
 }
 
-// A picture's embeddings for its image tokens (IMG_BASE + slot * IMG_ROWS + row): the vision tower runs in the activation
-// arena, idle between calls. -1: too large for the arena (or more rows than an image token can name).
 int Engine::image_encode(int slot, const float *patches, int gh, int gw, int frames) {
     const int rows = gh * gw / 4;
     if (slot < 0 || slot >= (INT32_MAX - IMG_BASE) / IMG_ROWS || rows > IMG_ROWS || vision.scratch_need(gh * gw) > barena.cap) return -1;
@@ -466,9 +439,6 @@ int Engine::image_encode(int slot, const float *patches, int gh, int gw, int fra
     return vision.encode(patches, gh, gw, im.rows, barena.base, barena.cap, st, frames) ? 0 : -1;
 }
 
-// Run the MTP block over the T tokens just processed at pos0.., pairing each with the previous
-// position's final hidden state, so the MTP layer's KV cache tracks the sequence.
-// off: the sequence's first row in the pass (generate_batch).
 void Engine::mtp_catch_up(Seq &s, int T, int pos0, int rope0, bool rpos, bool img, int off) {
     CK(hipMemcpyAsync(b.mtp_h, s.h_last, D * 4, hipMemcpyDeviceToDevice, st));
     if (T > 1) CK(hipMemcpyAsync(b.mtp_h + D, b.hfin + (size_t)off * D, (size_t)(T - 1) * D * 4, hipMemcpyDeviceToDevice, st));
@@ -480,15 +450,9 @@ static void keep_row(const float *v, const int *i, float *rows_v, int *rows_i, i
     std::copy(i, i + TOPK, rows_i + (size_t)at * TOPK);
 }
 
-// One speculative step for several sequences at once (parallel requests): their pending tokens and MTP drafts go
-// through the model in one pass, which reads the weights once for all of them, while each keeps its own attention,
-// recurrent state, acceptance and commit, as in generate(). The pass holds 8 rows, shared out as drafts (two sequences:
-// 3 each; five or more: none). Prompt lookup stays with steps of one sequence. out: max_out tokens per sequence, counts:
-// how many each emitted, rows_v / rows_i (optional) their candidates as generate() gives them, max_out rows a sequence.
-// Out of KV pages, it throws before drawing anything.
 void Engine::generate_batch(int n, const int *ids, const Sampling *sps, int *out, int max_out, int *counts, float *rows_v,
                             int *rows_i) {
-    int need = 0;                                    // pages for 8 more tokens each, before anything is drawn
+    int need = 0;
     for (int i = 0; i < n; i++) {
         const Seq &s = seqs.at(ids[i]);
         const int last = (s.n + 8 + PAGE - 1) / PAGE;
@@ -496,7 +460,7 @@ void Engine::generate_batch(int n, const int *ids, const Sampling *sps, int *out
         for (int pg = s.n / PAGE; pg < (int)s.pages.size() && pg < last; pg++) need += page_ref[s.pages[pg]] > 1;
     }
     if (need > (int)free_pages.size()) throw std::runtime_error("out of KV pages");
-    std::vector<int> act;                            // the sequences that go through the model
+    std::vector<int> act;
     for (int i = 0; i < n; i++) {
         Seq &s = seqs.at(ids[i]);
         const Sampling &sp = sps[i];
@@ -520,7 +484,7 @@ void Engine::generate_batch(int n, const int *ids, const Sampling *sps, int *out
     std::vector<Part> parts;
     std::vector<int> k(n, 0), q(n, 0);
     int T = 0;
-    for (int i : act) {                              // drafts with the MTP head into b.draft, each sequence its rows
+    for (int i : act) {
         Seq &s = seqs.at(ids[i]);
         k[i] = std::max(0, std::min({sps[i].n_draft, per - 1, max_out - counts[i] - 1}));
         q[i] = s.n;
@@ -545,7 +509,7 @@ void Engine::generate_batch(int n, const int *ids, const Sampling *sps, int *out
     CK(hipMemcpyAsync(drafts.data(), b.draft, T * 4, hipMemcpyDeviceToHost, st));
     for (const Part &p : parts) mtp_catch_up(*p.s, p.T, p.pos0, p.rope0, false, false, p.off);
     CK(hipStreamSynchronize(st));
-    for (size_t j = 0; j < parts.size(); j++) {      // accept, draw the next token, commit: as generate() does
+    for (size_t j = 0; j < parts.size(); j++) {
         const int i = act[j];
         const Part &p = parts[j];
         Seq &s = *p.s;
@@ -588,8 +552,6 @@ void Engine::generate_batch(int n, const int *ids, const Sampling *sps, int *out
     }
 }
 
-// One speculative step. Emits the pending token (if newly sampled), accepted drafts and one more token.
-// rows_v / rows_i (optional): each emitted token's row, the SAMPLE_N candidates it was drawn from (log probs).
 int Engine::generate(int id, const Sampling &sp, int *out, int max_out, float *rows_v, int *rows_i) {
     if (max_out < 1) return 0;
     Seq &s = seqs.at(id);
@@ -601,7 +563,7 @@ int Engine::generate(int id, const Sampling &sp, int *out, int max_out, float *r
         if (rows_v) keep_row(s.top_v.data(), s.top_i.data(), rows_v, rows_i, nout);
         out[nout++] = s.pending;
         if (sp.lookup > 0) s.look.push(s.pending);
-        if (is_eos(s.pending) || s.pending == sp.halt || nout == max_out) return nout;   // a step below emits at least one more
+        if (is_eos(s.pending) || s.pending == sp.halt || nout == max_out) return nout;
     }
     const int room = std::min(7, max_out - nout - 1);
     int copied[8] = {s.pending};
@@ -610,8 +572,6 @@ int Engine::generate(int id, const Sampling &sp, int *out, int max_out, float *r
     const int q = s.n;
     ensure_pages(s, q + k + 1, q);
 
-    // 1. draft k tokens: copied from earlier in the conversation, else with the MTP head (greedy, on the GPU, no host
-    // round trips)
     CK(hipMemcpyAsync(b.draft, copied, (nl + 1) * 4, hipMemcpyHostToDevice, st));
     for (int i = 0; i < k && nl == 0; i++) {
         mtp_forward(s, 1, q + i, i == 0 ? s.h_last : b.mtp_x, b.draft + i, s.pos + i);
@@ -621,11 +581,8 @@ int Engine::generate(int id, const Sampling &sp, int *out, int max_out, float *r
     return verify(s, sp, k, false, out, nout, rows_v, rows_i);
 }
 
-// Steps 2-5 of a speculative step, b.draft holding the pending token and k drafts; masked: each position's logits keep only
-// the tokens d_mask's row for it allows (generate_masked).
 int Engine::verify(Seq &s, const Sampling &sp, int k, bool masked, int *out, int nout, float *rows_v, int *rows_i) {
     const int q = s.n;
-    // 2. verify pending + drafts with the full model
     const int T = k + 1;
     CK(hipMemcpyAsync(b.tokens, b.draft, T * 4, hipMemcpyDeviceToDevice, st));
     forward(s, T, k > 0, s.pos);
@@ -637,18 +594,16 @@ int Engine::verify(Seq &s, const Sampling &sp, int k, bool masked, int *out, int
     CK(hipMemcpyAsync(tv.data(), b.topv, T * TOPK * 4, hipMemcpyDeviceToHost, st));
     CK(hipMemcpyAsync(ti.data(), b.topi, T * TOPK * 4, hipMemcpyDeviceToHost, st));
     CK(hipMemcpyAsync(drafts.data(), b.draft, T * 4, hipMemcpyDeviceToHost, st));
-    // 3. MTP catch-up on the verified pairs (independent of acceptance; rejected rows get overwritten)
     mtp_catch_up(s, T, q, s.pos);
     CK(hipStreamSynchronize(st));
 
-    // 4. accept drafts (rejection sampling against greedy drafts is lossless) and draw the next token
     int a = 0, next = -1;
     for (; a < k; a++) {
         const Dist d = make_dist(&tv[a * TOPK], &ti[a * TOPK], sp, s.seen, s.ctx);
         const int tok = drafts[a + 1];
         const float pa = prob(d, tok);
         if (std::uniform_real_distribution<float>(0, 1)(s.rng) < pa) {
-            if (is_eos(tok) || tok == sp.halt) { next = tok; break; }   // stays pending, like a sampled one; the step ends
+            if (is_eos(tok) || tok == sp.halt) { next = tok; break; }
             if (rows_v) keep_row(&tv[a * TOPK], &ti[a * TOPK], rows_v, rows_i, nout);
             out[nout++] = tok; s.seen.push(tok);
             if (sp.lookup > 0) s.look.push(tok);
@@ -663,7 +618,6 @@ int Engine::verify(Seq &s, const Sampling &sp, int k, bool masked, int *out, int
     s.seen.push(next);
     if (sp.lookup > 0) s.look.push(next);
 
-    // 5. commit the recurrent state to the accepted prefix (pending + a drafts)
     if (k > 0) {
         GdnScanArgs sa{};
         sa.S = s.ssm; sa.S_layer = (size_t)GV * GD * GD;
@@ -686,9 +640,6 @@ uint32_t *Engine::mask_rows() {
     return d_mask;
 }
 
-// Drafts for a held answer's next step (chrysalis/server.py): `fixed` first, the tokens its grammar forces next, then the MTP
-// head's guesses going on after them; with none forced, a copy from earlier in the conversation where one matches (as
-// generate() drafts). At most max_k in all, into out; returns how many.
 int Engine::draft(int id, const Sampling &sp, const int *fixed, int nfixed, int max_k, int *out) {
     Seq &s = seqs.at(id);
     if (s.pending < 0) FAIL("draft: no pending token");
@@ -705,7 +656,7 @@ int Engine::draft(int id, const Sampling &sp, const int *fixed, int nfixed, int 
         CK(hipMemcpyAsync(b.draft, copied, (nf + 1) * 4, hipMemcpyHostToDevice, st));
         for (int i = 0; i < k; i++) {
             mtp_forward(s, 1, q + i, i == 0 ? s.h_last : b.mtp_x, b.draft + i, s.pos + i);
-            if (i < nf) continue;                    // a forced token: the head only runs over it
+            if (i < nf) continue;
             lm_head(b.hq, 1, DRAFT_VOCAB);
             argmax(b.logits, 1, DRAFT_VOCAB, VOCAB, b.draft + i + 1, st);
         }
@@ -716,10 +667,6 @@ int Engine::draft(int id, const Sampling &sp, const int *fixed, int nfixed, int 
     return k;
 }
 
-// One step of a held answer: the pending token and drafts[0..k) verified with each position's logits masked to the tokens
-// its grammar allows there (masks: k + 1 rows of VOCAB / 32 words, as chrysalis_masked_top's), then accepted and drawn
-// as generate() does: the rejection sampling stays exact for the masked distribution, a draft the grammar refuses being
-// one it never accepts.
 int Engine::generate_masked(int id, const Sampling &sp, const int *drafts, int k, const uint32_t *masks, int *out, int max_out) {
     if (max_out < 1) return 0;
     Seq &s = seqs.at(id);

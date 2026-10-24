@@ -1,10 +1,6 @@
-// LaTeX documents as the chat shows them (latex.ts), against what LaTeX itself makes of them: the numbers it gives
-// sections, equations, tables, figures, theorems and references, what \ref and \cite then print, and each block's
-// place in the source, which pointing and retyping use.
 import { expect, test } from "bun:test";
 import { latexToHtml } from "./latex";
 
-// The document's text as read, without KaTeX's MathML copy: blocks apart, a number in a heading apart from its title
 const textOf = (html: string) => html.replace(/<span class="katex-mathml">[\s\S]*?<\/math><\/span>/g, "")
   .replace(/<\/?(p|div|h\d|li|td|tr|table|figcaption|header|section|article|nav|figure|dt|dd|ol|ul|blockquote)\b[^>]*>|<\/span>(?=[^<]*<\/h\d)/g, " ")
   .replace(/<[^>]+>/g, "").replace(/&#(\d+);/g, (_m, n) => String.fromCharCode(Number(n))).replace(/[\s\u200b]+/g, " ").trim();

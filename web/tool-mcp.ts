@@ -1,21 +1,13 @@
-// MCP servers as tool sources, through the official SDK: stdio ({command, args, env, cwd}) and Streamable HTTP
-// ({url, headers}), as Claude Desktop's and Claude Code's config files write them. A server starts the first time a
-// chat turns it on (or Retry, or a reply that needs it) and keeps running; when it fails or goes away it is started
-// again after 1, 2, 4 ... up to 60 s. "tools": [names] keeps only those of a server's tools, whatever it lists (a
-// remote server can change its list at any time, and its own read-only marks decide what runs without asking). A
-// remote URL must be https, its headers often holding a key: plain http reaches only this machine.
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StdioClientTransport, getDefaultEnvironment } from "@modelcontextprotocol/sdk/client/stdio.js";
 import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/streamableHttp.js";
 import { ToolListChangedNotificationSchema } from "@modelcontextprotocol/sdk/types.js";
 import { DEFAULT_MAX_CHARS, DEFAULT_TIMEOUT_S, type Source, type Tool } from "./tools";
 
-const CONNECT_MS = 30_000;                          // npx fetching a server's package the first time takes a while
+const CONNECT_MS = 30_000;
 const LOOPBACK = /^(localhost|127(\.\d{1,3}){3}|\[::1\])$/i;
 const strings = (x: unknown) => (x && typeof x === "object" ? Object.fromEntries(Object.entries(x).filter(([, v]) => typeof v === "string")) as Record<string, string> : {});
 
-// An MCP result as text: the model gets text parts as they are; pictures and audio are named, not shown (a chat's
-// stored history keeps text only).
 function text(r: any): string {
   const parts = (Array.isArray(r?.content) ? r.content : []).map((p: any) =>
     p.type === "text" ? p.text

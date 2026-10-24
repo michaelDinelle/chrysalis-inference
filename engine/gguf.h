@@ -1,4 +1,3 @@
-// Minimal read-only GGUF parser: memory-maps the file and indexes tensors by name.
 #pragma once
 #include <cstdint>
 #include <cstring>
@@ -18,17 +17,17 @@ struct GGUFTensor {
 
 struct GGUF {
     std::map<std::string, GGUFTensor> tensors;
-    std::map<std::string, int64_t> ints;      // integer metadata (for sanity checks)
+    std::map<std::string, int64_t> ints;
     uint8_t *base = nullptr;
     size_t size = 0;
 
     static size_t type_bytes(int type, int64_t n) {
         switch (type) {
-            case 0: return n * 4;                // F32
-            case 1: return n * 2;                // F16
-            case 8: return n / 32 * 34;          // Q8_0
-            case 14: return n / 256 * 210;       // Q6_K
-            case 23: return n / 256 * 136;       // IQ4_XS
+            case 0: return n * 4;
+            case 1: return n * 2;
+            case 8: return n / 32 * 34;
+            case 14: return n / 256 * 210;
+            case 23: return n / 256 * 136;
             default: return 0;
         }
     }
@@ -52,8 +51,8 @@ struct GGUF {
         for (uint64_t i = 0; i < n_kv; i++) {
             std::string key = rs();
             uint32_t t; rd(t);
-            if (t == 8) { rs(); continue; }                       // string
-            if (t == 9) {                                         // array
+            if (t == 8) { rs(); continue; }
+            if (t == 9) {
                 uint32_t at; uint64_t n; rd(at); rd(n);
                 if (at == 8) for (uint64_t j = 0; j < n; j++) rs();
                 else p += n * scalar_size[at];

@@ -1,7 +1,3 @@
-// An MCP server for the tests (server.test.ts, browser.test.ts), on the official SDK's server side: over stdio when run
-// (`bun fake-mcp.ts`), or as fakeMcp() for a Streamable HTTP endpoint. Its tools cover what Chrysalis's web server must
-// handle: a read-only one, one that asks first, one that takes its time (and notes being cancelled in
-// $FAKE_MCP_LOG), one with a long result, and one whose name is not a valid function name.
 import { appendFileSync } from "node:fs";
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";

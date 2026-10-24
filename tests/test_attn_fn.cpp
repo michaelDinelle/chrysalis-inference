@@ -1,9 +1,3 @@
-// QSA checks on random data: (0) the attention's M-RoPE turns a picture's queries (and keys) as the host does; (1) sparse
-// attention over every visible block equals dense attention (context <= 2048 cells, where the top-512 selection is
-// everything); (2) the GPU's top-512 block selection equals a CPU reference computed from the same pooled keys and
-// indexer queries; pooled keys equal ones built on the host, each turned with the M-RoPE position of its block's first
-// cell. The cells sit at M-RoPE positions: text, then a picture whose rows and
-// columns are far apart, then text far from its cell index, so a key turned with the wrong position shows.
 #include "../engine_fn/kernels.h"
 #include <algorithm>
 #include <cmath>
@@ -12,8 +6,6 @@
 
 static float h2f(half h) { return __half2float(h); }
 
-// Which of a cell's three positions (t, h, w) each frequency pair turns with: transformers'
-// Qwen4ExpTextRotaryEmbedding.recomposition_frequencies, mrope_section [11, 11, 10] (H takes 1:33:3, W 2:30:3).
 static std::vector<int> mrope_sections() {
     std::vector<int> sec(ROT / 2, 0);
     const int section[3] = {11, 11, 10};
@@ -32,7 +24,6 @@ int main() {
     int *dpg; CK(hipMalloc(&dpg, pages * 4)); CK(hipMemcpy(dpg, pg.data(), pages * 4, hipMemcpyHostToDevice));
     KVRef kv{pool, dpg};
     const int layer = 3;
-    // fill the cache: K/V and the indexer keys of every cell, in chunks
     const int C = 256;
     std::vector<float> qg((size_t)C * NH * 2 * HD), k((size_t)C * NKV * HD), v((size_t)C * NKV * HD), kr((size_t)C * IDX_D), qr((size_t)C * IDX_H * IDX_D);
     std::vector<float> ones(HD, 1.0f);
@@ -41,13 +32,9 @@ int main() {
     CK(hipMalloc(&dkr, kr.size() * 4)); CK(hipMalloc(&dqr, qr.size() * 4)); CK(hipMalloc(&dones, HD * 4));
     CK(hipMalloc(&dQ16, (size_t)C * NH * HD * 2)); CK(hipMalloc(&dq16, (size_t)C * IDX_H * IDX_D * 2));
     CK(hipMemcpy(dones, ones.data(), HD * 4, hipMemcpyHostToDevice));
-    // the sequence's tail (raw indexer keys of its incomplete block) and the per-pass raw key buffer
     half *tail, *praw;
     CK(hipMalloc(&tail, IDX_TAIL * 2)); CK(hipMalloc(&praw, (size_t)C * IDX_D * 2));
-    // every raw indexer key fed in, to build the reference pooled keys
     std::vector<float> all_kr((size_t)N * IDX_D);
-    // every cell's M-RoPE position: text, a 30 x 40 picture from cell 1500 (rows 3 apart, columns 7), then text 600 behind
-    // its cell, as text after a picture is (positions stay small: fp32 angles of large ones differ between host and GPU)
     std::vector<int> P3((size_t)N * 3);
     for (int c = 0; c < N; c++) {
         const int img = c - 1500;
@@ -59,7 +46,6 @@ int main() {
     }
     int *dP3; CK(hipMalloc(&dP3, P3.size() * 4)); CK(hipMemcpy(dP3, P3.data(), P3.size() * 4, hipMemcpyHostToDevice));
     auto tail_of = [&](int p0) { const int c = p0 / KPOOL * KPOOL; return Pos3{P3[c * 3], P3[c * 3 + 1], P3[c * 3 + 2]}; };
-    // passes of uneven sizes (so blocks straddle passes and the tail carries cells over), the cache filled to N
     std::vector<int> sizes;
     for (int p0 = 0, i = 0; p0 < N; i++) { const int T = std::min({C, N - p0, (int)(37 + 61 * (i % 4) + (i % 3))}); sizes.push_back(T); p0 += T; }
     for (int p0 = 0, si = 0; p0 < N; p0 += sizes[si++]) {
@@ -75,8 +61,6 @@ int main() {
     }
     CK(hipStreamSynchronize(st));
     int fails = 0;
-    // (0) the attention's own M-RoPE: queries of picture cells (rows and columns far from the cell index) against the host
-    // turning them; keys go through the same lines. Layer 0: the checks below read layer 3's cache.
     {
         const int c0 = 1537, T = 200;
         for (auto &x : qg) x = nd(rng);
@@ -105,13 +89,12 @@ int main() {
         printf("M-RoPE queries of %d picture cells vs the host: max diff %.2e %s\n", T, worst, worst < 1e-3 ? "ok" : "FAIL");
         fails += worst >= 1e-3;
     }
-    // (1) dense vs sparse-all at position P (context P+1 <= 2048 cells); P = 1997: a tail block with a later cell to mask
     for (const int P : {1999, 1997}) {
         for (auto &x : qg) x = nd(rng); for (auto &x : k) x = nd(rng); for (auto &x : v) x = nd(rng);
         CK(hipMemcpy(dqg, qg.data(), (size_t)NH * 2 * HD * 4, hipMemcpyHostToDevice));
         CK(hipMemcpy(dk, k.data(), (size_t)NKV * HD * 4, hipMemcpyHostToDevice));
         CK(hipMemcpy(dv, v.data(), (size_t)NKV * HD * 4, hipMemcpyHostToDevice));
-        attn_prep(dqg, dk, dv, dones, dones, 1, P, P, nullptr, kv, layer, dQ16, st);   // overwrite cell P as the query token
+        attn_prep(dqg, dk, dv, dones, dones, 1, P, P, nullptr, kv, layer, dQ16, st);
         float *po, *pml; half *o1, *o2;
         CK(hipMalloc(&po, (size_t)PART_ROWS * NH * HD * 4)); CK(hipMalloc(&pml, (size_t)PART_ROWS * NH * 2 * 4));
         CK(hipMalloc(&o1, NH * HD * 2)); CK(hipMalloc(&o2, NH * HD * 2));
@@ -132,8 +115,6 @@ int main() {
         printf("dense vs sparse (all %d blocks%s): rel diff %.2e %s\n", B, (P + 1) % KPOOL ? " + tail" : "", rel, rel < 5e-3 ? "ok" : "FAIL");
         fails += rel >= 5e-3;
     }
-    // (1b) sparse, many tokens at once (the prefill path) vs one token at a time (the decode path, checked above): random
-    // ascending block subsets of different sizes, the token's own incomplete tail block (causal within it), -1 padding
     {
         const int T = 37, P0 = 5900;
         for (auto &x : qg) x = nd(rng); for (auto &x : k) x = nd(rng); for (auto &x : v) x = nd(rng);
@@ -149,7 +130,7 @@ int main() {
             const int n = std::min({vis, SEL_BLOCKS, 100 + 13 * t});
             std::sort(blocks.begin(), blocks.begin() + n);
             for (int i = 0; i < n; i++) sel[(size_t)t * (SEL_BLOCKS + 1) + i] = blocks[i];
-            if ((p + 1) % KPOOL) sel[(size_t)t * (SEL_BLOCKS + 1) + n] = vis;   // the tail block holds cells up to p
+            if ((p + 1) % KPOOL) sel[(size_t)t * (SEL_BLOCKS + 1) + n] = vis;
         }
         float *po, *pml; half *oa, *o1;
         CK(hipMalloc(&po, (size_t)PART_ROWS * NH * HD * 4)); CK(hipMalloc(&pml, (size_t)PART_ROWS * NH * 2 * 4));
@@ -174,13 +155,10 @@ int main() {
         printf("sparse, %d tokens at once vs one at a time (random block lists, tails): rel diff %.2e %s\n", T, rel, rel < 2e-3 ? "ok" : "FAIL");
         fails += rel >= 2e-3;
     }
-    // (2) selection at a long context: GPU vs CPU over the same pooled keys
     {
-        const int G = 4, P0 = N - G;                     // queries at the last G positions
+        const int G = 4, P0 = N - G;
         for (auto &x : qr) x = nd(rng);
         CK(hipMemcpy(dqr, qr.data(), (size_t)G * IDX_H * IDX_D * 4, hipMemcpyHostToDevice));
-        // indexer queries for the last G cells: a speculative pass over them (no tail update), raw keys as before, so
-        // the pooled key of a block it completes comes out as it was
         CK(hipMemcpy(dkr, all_kr.data() + (size_t)P0 * IDX_D, (size_t)G * IDX_D * 4, hipMemcpyHostToDevice));
         idx_prep(dkr, dqr, dones, dones, G, P0, 0, dP3 + 3 * P0, tail_of(P0), kv, layer, tail, praw, false, dq16, st);
         const int nblk = N / KPOOL;
@@ -188,7 +166,7 @@ int main() {
         CK(hipMalloc(&score, (size_t)G * nblk * 4)); CK(hipMalloc(&dsel, (size_t)G * (SEL_BLOCKS + 1) * 4));
         uint32_t *dhist; CK(hipMalloc(&dhist, (size_t)G * 1024 * 4));
         idx_select(dq16, P0, G, nblk, kv, layer, score, dhist, dsel, st);
-        {   // idx_select picks exactly what the reference idx_select_ref picks, for every query and several context lengths
+        {
             int *rsel; CK(hipMalloc(&rsel, (size_t)G * (SEL_BLOCKS + 1) * 4));
             int bad = 0;
             for (int pos_end : {300, 2047, 2049, 4000, N}) {
@@ -200,7 +178,7 @@ int main() {
                 CK(hipMemcpy(a2.data(), rsel, a2.size() * 4, hipMemcpyDeviceToHost));
                 for (size_t k = 0; k < a1.size(); k++) bad += a1[k] != a2[k];
             }
-            {   // all scores tied (zero query): both must take the first 512 visible blocks in order
+            {
                 half *zq; CK(hipMalloc(&zq, (size_t)G * IDX_H * IDX_D * 2)); CK(hipMemset(zq, 0, (size_t)G * IDX_H * IDX_D * 2));
                 idx_select(zq, P0, G, nblk, kv, layer, score, dhist, dsel, st);
                 std::vector<int> a1((size_t)G * (SEL_BLOCKS + 1)), a2(a1.size());
@@ -218,8 +196,6 @@ int main() {
         CK(hipMemcpy(sel.data(), dsel, sel.size() * 4, hipMemcpyDeviceToHost));
         std::vector<half> q16((size_t)G * IDX_H * IDX_D);
         CK(hipMemcpy(q16.data(), dq16, q16.size() * 2, hipMemcpyDeviceToHost));
-        // pooled keys back from the pages, checked against pooled keys built on the host from every raw key (fp16, mean,
-        // RMS norm, rotation to the block's first cell's position)
         const std::vector<int> sec = mrope_sections();
         std::vector<half> pk((size_t)nblk * IDX_D);
         int pool_bad = 0;
@@ -268,7 +244,6 @@ int main() {
             std::vector<int> inter;
             std::set_intersection(want.begin(), want.end(), gotv.begin(), gotv.end(), std::back_inserter(inter));
             same = (int)inter.size();
-            // blocks that differ must tie with the threshold score (float rounding between CPU and GPU sums)
             const float thr = sc[std::min(nvis, SEL_BLOCKS) - 1].first;
             for (int i = 0; i < SEL_BLOCKS; i++) {
                 if (std::binary_search(want.begin(), want.end(), gotv[i])) continue;

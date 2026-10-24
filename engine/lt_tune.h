@@ -1,14 +1,3 @@
-// hipBLASLt's first suggestion for a shape is often not its fastest on gfx1100, so a shape's first 64 suggestions are timed
-// once on the real buffers (plan) and the fastest kept, and the file CHRYSALIS_LT_CACHE names (chrysalis/engine.py:
-// data/cache/hipblaslt.txt) remembers the choice by device, library version and shape: a machine times each shape once
-// (0.3-0.6 s a shape). Measured against the first suggestions, per pass: the 27B's 2048-token prefill chunks 1337 ms where
-// 1388, 1000 tokens 710 where 818; Flash-Next's 1000 tokens 620 where 714 (longer prompts wait on its CPU experts). Asking
-// for more than 64 never found one more than 1.5% faster. Every suggestion measured gave the same bits run after run (none
-// splits K with atomics), so the choice changes speed, not repeatability; suggestions differ from each other by a rounding
-// here and there. The vision tower keeps the first suggestions (tune = false): tuned it was 1.5% faster (1080p: 245 ms
-// where 249, its attention taking 146), and those roundings carried through its 27 blocks moved its most sensitive tokens
-// further from transformers' on every test picture (the photo's relative error 1.14% where 0.80%). CHRYSALIS_LT_TUNE=0
-// takes the first suggestions everywhere, to measure.
 #pragma once
 #include <hip/hip_runtime.h>
 #include <hipblaslt/hipblaslt.h>
@@ -30,7 +19,7 @@ struct Plan { hipblasLtMatmulDesc_t desc; hipblasLtMatrixLayout_t a, b, c; hipbl
 
 struct Known {
     std::mutex mu;
-    std::map<std::string, int> pick;                 // key -> place in the heuristic's list, which is the same each time
+    std::map<std::string, int> pick;
     Known() {
         if (const char *path = getenv("CHRYSALIS_LT_CACHE"))
             if (FILE *f = fopen(path, "r")) {
@@ -47,7 +36,6 @@ struct Known {
 
 inline Known &known() { static Known k; return k; }
 
-// The device and its compute units (a 7900 XT is a gfx1100 too) and hipBLASLt's version.
 inline const std::string &device(hipblasLtHandle_t lt) {
     static const std::string d = [lt] {
         int dev = 0, ver = 0;
@@ -61,9 +49,6 @@ inline const std::string &device(hipblasLtHandle_t lt) {
     return d;
 }
 
-// D[T][N] = B[T][K] A[N][K]^T (column-major, as hipBLASLt sees it: D = A^T B): A and B fp16, B's rows ldb apart, D fp16 or
-// fp32 (d32) with rows ldd apart, fp32 accumulation. The suggestions are timed on the caller's buffers, D included, at
-// beta 0: the caller's own run overwrites what they leave.
 inline Plan plan(hipblasLtHandle_t lt, int N, int K, int T, int ldb, int ldd, bool d32, const void *A, const void *B,
                  void *D, void *ws, size_t ws_bytes, hipStream_t st, bool tune = true) {
     Plan p;
@@ -99,16 +84,12 @@ inline Plan plan(hipblasLtHandle_t lt, int N, int K, int T, int ldb, int ldd, bo
         return p;
     }
 
-    // A burst of one run each (after the run that loads the kernel) picks finalists, then each finalist runs back to back
-    // long enough for the card's power limit to act: a long prefill holds this card at its 301 W cap, where a kernel
-    // faster in a burst may draw more and run slower (measured: 2170 MHz where the first suggestion's ran at 2420, the
-    // pass 2% slower; the ranking in back-to-back runs held from 30 ms to 1.6 s). hipBLASLt's first is always a finalist.
     const float one = 1.0f, zero = 0.0f;
     auto run = [&](int i) {
         return hipblasLtMatmul(lt, p.desc, &one, A, p.a, B, p.b, &zero, D, p.c, D, p.c, &res[i].algo, ws, ws_bytes, st)
             == HIPBLAS_STATUS_SUCCESS;
     };
-    if (!run(0)) return p;                           // the caller's own run reports it
+    if (!run(0)) return p;
     hipEvent_t e0, e1;
     (void)hipEventCreate(&e0);
     (void)hipEventCreate(&e1);
@@ -121,7 +102,7 @@ inline Plan plan(hipblasLtHandle_t lt, int N, int K, int T, int ldb, int ldd, bo
         (void)hipEventElapsedTime(&t, e0, e1);
         return std::max(t, 1e-3f) / reps;
     };
-    for (int r = std::max(2, (int)(LEAD_MS / timed(0, 1))); r > 0; r--) run(0);   // clocks up before the burst
+    for (int r = std::max(2, (int)(LEAD_MS / timed(0, 1))); r > 0; r--) run(0);
     std::vector<float> burst(n, 1e30f);
     for (int i = 0; i < n; i++)
         if (run(i)) burst[i] = timed(i, 1);
@@ -151,4 +132,4 @@ inline Plan plan(hipblasLtHandle_t lt, int N, int K, int T, int ldb, int ldd, bo
     return p;
 }
 
-}  // namespace lt_tune
+}

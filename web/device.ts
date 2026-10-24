@@ -1,7 +1,3 @@
-// The connect page's backdrop (setup.ts): the chat's sea of characters filling the window, its butterfly above the page's
-// card as it is above the message box in a new chat. When the page goes on to the chat (the device is let in) the
-// butterfly dives into the water, as it does when a chat begins. Where no canvas
-// can be drawn on, the logo stands where the butterfly would.
 import logo from "./logo-thin.svg";
 import { Ocean } from "./ocean";
 

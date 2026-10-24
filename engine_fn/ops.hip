@@ -1,6 +1,6 @@
 #include "kernels.h"
 
-__device__ __forceinline__ float block_sum(float v, float *red) {   // blockDim.x == 256
+__device__ __forceinline__ float block_sum(float v, float *red) {
     v = warp_sum(v);
     if ((threadIdx.x & 31) == 0) red[threadIdx.x >> 5] = v;
     __syncthreads();
@@ -10,7 +10,6 @@ __device__ __forceinline__ float block_sum(float v, float *red) {   // blockDim.
     return s;
 }
 
-// One block per row: out = x * rsqrt(mean(x^2) + eps) * w, written as any of fp32 / fp16 / int8 blocks.
 __global__ __launch_bounds__(256) void k_rmsnorm(const float *x, const float *w, int n, int ldx, int ldo,
                                                   float *of, half *oh, QAct oq) {
     __shared__ float red[8];
@@ -19,7 +18,7 @@ __global__ __launch_bounds__(256) void k_rmsnorm(const float *x, const float *w,
     for (int i = threadIdx.x; i < n; i += 256) ss += xr[i] * xr[i];
     const float inv = rsqrtf(block_sum(ss, red) / n + EPS);
     const size_t o = (size_t)blockIdx.x * ldo;
-    for (int i = threadIdx.x; i < n; i += 256) {      // 256 threads = 8 waves -> each wave covers whole 32-blocks
+    for (int i = threadIdx.x; i < n; i += 256) {
         const float v = xr[i] * inv * w[i];
         if (of) of[o + i] = v;
         if (oh) oh[o + i] = __float2half(v);
@@ -35,7 +34,6 @@ void rmsnorm(const float *x, const float *w, int T, int n, int ldx, int ldo, flo
     k_rmsnorm<<<T, 256, 0, st>>>(x, w, n, ldx, ldo, of, oh, oq);
 }
 
-// g = silu(g) * u in place, for the prefill FFN (gate/up come from separate fp16 GEMMs).
 __global__ void k_swiglu_h(half *g, const half *u, int64_t n) {
     const int64_t i = blockIdx.x * (int64_t)blockDim.x + threadIdx.x;
     if (i < n) g[i] = __float2half(silu(__half2float(g[i])) * __half2float(u[i]));
@@ -44,7 +42,6 @@ void swiglu_h(half *g, const half *u, int64_t n, hipStream_t st) {
     k_swiglu_h<<<(n + 255) / 256, 256, 0, st>>>(g, u, n);
 }
 
-// y[t][i] (+)= x[t][i] for a [T][n] fp16 matrix into fp32 with row stride ldy.
 __global__ void k_store_f16(const half *x, int n, float *y, int ldy, int accumulate) {
     const int i = blockIdx.x * blockDim.x + threadIdx.x, t = blockIdx.y;
     if (i >= n) return;
@@ -56,9 +53,6 @@ void store_f16(const half *x, int n, int T, float *y, int ldy, bool accumulate, 
     k_store_f16<<<dim3((n + 255) / 256, T), 256, 0, st>>>(x, n, y, ldy, accumulate);
 }
 
-// Top-k over vocabulary rows: two passes of bitonic sorts in LDS.
-// Pass 1: each block sorts a 4096-wide slice of one row and keeps its best TOPK.
-// Pass 2: one block per row merges the candidates and keeps the global best TOPK.
 
 template <int N>
 __device__ void bitonic_desc(float *v, int *ix) {
@@ -108,7 +102,6 @@ __global__ __launch_bounds__(512) void k_topk2(const float *cv, const int *ci, i
     for (int i = threadIdx.x; i < TOPK; i += blockDim.x) { ov[row * TOPK + i] = v[i]; oi[row * TOPK + i] = ix[i]; }
 }
 
-// logits [T][ld] -> out values/ids [T][TOPK]; scratch needs T * ceil(n/SLICE) * TOPK floats + ints.
 void topk(const float *logits, int T, int n, int ld, float *scratch_v, int *scratch_i, float *ov, int *oi, hipStream_t st) {
     const int nb = (n + SLICE - 1) / SLICE;
     if (nb * TOPK > SLICE) FAIL("topk: too many candidates");
@@ -116,8 +109,6 @@ void topk(const float *logits, int T, int n, int ld, float *scratch_v, int *scra
     k_topk2<<<T, 512, 0, st>>>(scratch_v, scratch_i, nb * TOPK, ov, oi);
 }
 
-// Tokens a grammar does not allow (bit t % 32 of word t / 32 clear: llguidance's bitmask) drop out of rows of logits, each
-// row with its own mask (a held answer's step verifies several positions), so topk then finds the allowed candidates.
 __global__ void k_mask_logits(float *logits, const uint32_t *mask, int n) {
     const int i = blockIdx.x * blockDim.x + threadIdx.x;
     logits += (size_t)blockIdx.y * n;
@@ -128,7 +119,6 @@ void mask_logits(float *logits, const uint32_t *mask, int n, int rows, hipStream
     k_mask_logits<<<dim3((n + 255) / 256, rows), 256, 0, st>>>(logits, mask, n);
 }
 
-// Greedy pick for drafts: argmax of each row, written to a device token buffer.
 __global__ __launch_bounds__(1024) void k_argmax(const float *logits, int n, int ld, int *out) {
     __shared__ float bv[32];
     __shared__ int bi[32];
@@ -147,16 +137,7 @@ void argmax(const float *logits, int T, int n, int ld, int *out, hipStream_t st)
     k_argmax<<<T, 1024, 0, st>>>(logits, n, ld, out);
 }
 
-// Hyper-connections.
-// The residual is HC parallel streams [T][HC][D]. Before each block (token mixer, MoE) and before the LM head:
-//   xn_s   = rmsnorm(res_s) * gamma_s                       (gamma folded to 1 + w by the converter)
-//   lo     = silu((W_down xn) / HC)                         (10240 -> 320)
-//   gate   = W_up lo                                        (320 -> 10240)
-//   mixed  = mean_s(xn_s * sigmoid(gate_s))                 -> the block input [T][D]
-//   inject = W_inject xn                                    (10240 -> HC), and after the block:
-//   res_s += 2 sigmoid(inject_s / HC) * block_out
 
-// res[t][s][:] = x[t][:] (the stream starts as HC copies of the token embedding)
 __global__ void k_hc_init(const float *x, float *res) {
     const int i = blockIdx.x * blockDim.x + threadIdx.x, t = blockIdx.y;
     if (i >= D) return;
@@ -168,7 +149,6 @@ void hc_init(const float *x, float *res, int T, hipStream_t st) {
     k_hc_init<<<dim3(D / 256, T), 256, 0, st>>>(x, res);
 }
 
-// grouped RMSNorm: one block per (stream, token); writes any of fp32 / fp16 / int8 blocks of xn [T][HCD]
 __global__ __launch_bounds__(256) void k_hc_norm(const float *res, const float *gamma, float *of, half *oh, QAct oq) {
     __shared__ float red[8];
     const int s = blockIdx.x, t = blockIdx.y;
@@ -191,9 +171,8 @@ void hc_norm(const float *res, const float *gamma, int T, float *of, half *oh, Q
     k_hc_norm<<<dim3(HC, T), 256, 0, st>>>(res, gamma, of, oh, oq);
 }
 
-// lo = silu(lo / HC) in place (fp32 [T][HCR]), plus int8 blocks or fp16 for the up projection
 __global__ void k_hc_lo(float *lo, int64_t n, half *oh, QAct oq) {
-    const int64_t i = blockIdx.x * (int64_t)blockDim.x + threadIdx.x;   // one wave per 32-block: n % 32 == 0
+    const int64_t i = blockIdx.x * (int64_t)blockDim.x + threadIdx.x;
     const float v = i < n ? silu(lo[i] * (1.0f / HC)) : 0.0f;
     if (i < n) { lo[i] = v; if (oh) oh[i] = __float2half(v); }
     if (oq.q) {
@@ -207,7 +186,6 @@ void hc_lo(float *lo, int T, half *oh, QAct oq, hipStream_t st) {
     k_hc_lo<<<(n + 255) / 256, 256, 0, st>>>(lo, n, oh, oq);
 }
 
-// mixed[t][i] = mean_s xn[t][s][i] * sigmoid(gate[t][s][i]); fp32 / fp16 / int8 blocks out
 __global__ __launch_bounds__(256) void k_hc_mix(const float *xn, const float *gate, float *of, half *oh, QAct oq) {
     const int i = blockIdx.x * 256 + threadIdx.x, t = blockIdx.y;
     float v = 0;
@@ -230,7 +208,6 @@ void hc_mix(const float *xn, const float *gate, int T, float *of, half *oh, QAct
     k_hc_mix<<<dim3(D / 256, T), 256, 0, st>>>(xn, gate, of, oh, oq);
 }
 
-// res[t][s][i] += 2 sigmoid(inject[t][s] / HC) * out[t][i]   (out may be the sum of several parts: out2 optional)
 __global__ __launch_bounds__(256) void k_hc_combine(float *res, const float *inject, const float *out, const float *out2, int ld_inject) {
     const int i = blockIdx.x * 256 + threadIdx.x, t = blockIdx.y;
     const float o = out[(size_t)t * D + i] + (out2 ? out2[(size_t)t * D + i] : 0.0f);
@@ -244,7 +221,6 @@ void hc_combine(float *res, const float *inject, int ld_inject, const float *out
     k_hc_combine<<<dim3(D / 256, T), 256, 0, st>>>(res, inject, out, out2, ld_inject);
 }
 
-// MTP eh_proj input rows: out[t][s] = [e[t] ; xn[t][s]]   ([T][HC][2D], fp32 or fp16)
 __global__ __launch_bounds__(256) void k_mtp_pack(const float *e, const float *xn, float *out, half *out_h) {
     const int i = blockIdx.x * 256 + threadIdx.x, s = blockIdx.y, t = blockIdx.z;
     const float v = i < D ? e[(size_t)t * D + i] : xn[((size_t)t * HC + s) * D + i - D];
@@ -256,25 +232,20 @@ void mtp_pack(const float *e, const float *xn, int T, float *out, half *out_h, h
     k_mtp_pack<<<dim3(2 * D / 256, HC, T), 256, 0, st>>>(e, xn, out, out_h);
 }
 
-// Fused HC mixer at decode (T <= 4 tokens): two kernels instead of norm / down / lo / up / inject / mix.
 __device__ __forceinline__ int dot16i(int4 w, int4 x, int acc) {
     return dot4(w.w, x.w, dot4(w.z, x.z, dot4(w.y, x.y, dot4(w.x, x.x, acc))));
 }
 
-// mix_down: every workgroup recomputes the grouped norms (inv = rsqrt(mean res^2 + eps) per token and stream; res is
-// 40 KB per token, an L2 read) and quantizes xn = res * inv * gamma into LDS (int8 per 32), then each wave takes one
-// row: the 320 rows of W_down -> lo, then the 4 rows of W_inject -> inject. Block 0 also stores inv for mix_up.
-constexpr int MIX_WG = 1024;                             // big workgroups: each normalizes / quantizes the residual once for 32 rows
+constexpr int MIX_WG = 1024;
 template <int T>
 __global__ __launch_bounds__(MIX_WG) void k_mix_down(const float *res, const float *gamma, QTensor down, QTensor inj,
                                                   float *lo, float *inject, int ld_inject, float *inv_out) {
     __shared__ int4 xq4[T][HCD / 16];
     __shared__ float xd[T][HCD / 32];
-    constexpr int NW = MIX_WG / 32;                      // waves: one row each
+    constexpr int NW = MIX_WG / 32;
     __shared__ float part[NW][T * HC];
     __shared__ float inv[T * HC];
     const int tid = threadIdx.x, wave = tid / 32, lane = tid % 32;
-    // 1. sums of squares per (token, stream)
     float ss[T * HC] = {};
 #pragma unroll
     for (int t = 0; t < T; t++)
@@ -293,7 +264,6 @@ __global__ __launch_bounds__(MIX_WG) void k_mix_down(const float *res, const flo
         if (blockIdx.x == 0) inv_out[tid] = inv[tid];
     }
     __syncthreads();
-    // 2. xn -> int8 blocks in LDS (a wave per block of 32)
     int8_t *xq = (int8_t *)xq4;
 #pragma unroll
     for (int t = 0; t < T; t++)
@@ -305,7 +275,6 @@ __global__ __launch_bounds__(MIX_WG) void k_mix_down(const float *res, const flo
             if (lane == 0) xd[t][blk] = d;
         }
     __syncthreads();
-    // 3. one row per wave: W_down's 320 rows -> lo, then W_inject's 4 -> inject
     const int row = blockIdx.x * NW + wave;
     const QTensor *W = row < HCR ? &down : &inj;
     const int r = row < HCR ? row : row - HCR;
@@ -329,8 +298,6 @@ __global__ __launch_bounds__(MIX_WG) void k_mix_down(const float *res, const flo
     }
 }
 
-// mix_up: a workgroup takes 64 positions i x 4 streams = 256 rows of W_up (row s * D + i, K = 320), one per thread, on
-// silu(lo / HC) quantized in LDS; then mixed[i] = mean_s xn[s][i] * sigmoid(gate[s][i]) -> fp32, fp16 and int8 blocks.
 template <int T>
 __global__ __launch_bounds__(256) void k_mix_up(const float *lo, QTensor up, const float *res, const float *gamma, const float *inv,
                                                 float *mx, half *hh, QAct hq) {
@@ -339,7 +306,7 @@ __global__ __launch_bounds__(256) void k_mix_up(const float *lo, QTensor up, con
     __shared__ float g[T][HC][64];
     const int tid = threadIdx.x, wave = tid / 32, lane = tid % 32, i0 = blockIdx.x * 64;
     int8_t *lq = (int8_t *)lq4;
-    for (int k = wave; k < T * HCR / 32; k += 8) {                // silu(lo / HC) -> int8 blocks
+    for (int k = wave; k < T * HCR / 32; k += 8) {
         const int t = k / (HCR / 32), blk = k % (HCR / 32);
         const float v = silu(lo[(size_t)t * HCR + blk * 32 + lane] * (1.0f / HC));
         const float d = warp_max(fabsf(v)) / 127.0f;

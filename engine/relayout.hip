@@ -1,11 +1,7 @@
-// Relayout at load time: raw GGUF blocks (in the staging ring) -> the aligned arrays of make_qtensor. A source file
-// of its own: the first launch from a file loads that file's whole code object (~40 ms for quant.hip's GEMVs), and the
-// loader wants this one to be small.
 #include "kernels.h"
 #include <algorithm>
 #include <vector>
 
-// Each SoA array is one fixed byte range of every GGUF block; copy a range with one thread per 4 bytes.
 __global__ void k_copy_range(const uint8_t *raw, int block_bytes, int off, int len, uint8_t *out, int64_t nblocks) {
     const int64_t i = blockIdx.x * (int64_t)blockDim.x + threadIdx.x, words = len / 4;
     if (len == 2) {
@@ -13,12 +9,11 @@ __global__ void k_copy_range(const uint8_t *raw, int block_bytes, int off, int l
         return;
     }
     if (i >= nblocks * words) return;
-    const uint8_t *src = raw + (i / words) * block_bytes + off + (i % words) * 4;   // at least 2-byte aligned
+    const uint8_t *src = raw + (i / words) * block_bytes + off + (i % words) * 4;
     const uint16_t *s16 = (const uint16_t *)src;
     ((uint32_t *)out)[i] = s16[0] | ((uint32_t)s16[1] << 16);
 }
 
-// Blocks b0 .. b0 + nb of the tensor, read from raw (which starts at block b0); nb < 0: the whole tensor.
 void relayout(const QTensor &t, const uint8_t *raw_dev, hipStream_t st, int64_t b0, int64_t nb) {
     const int64_t n = (int64_t)t.rows * t.cols;
     struct Range { int off, len; uint8_t *out; };
@@ -40,5 +35,5 @@ __global__ void k_f32_to_f16(const float *in, half *out, int64_t n) {
     if (i < n) out[i] = __float2half(in[i]);
 }
 void f32_to_f16(const float *in, half *out, int64_t n, hipStream_t st) {
-    k_f32_to_f16<<<std::max<int64_t>(1, (n + 255) / 256), 256, 0, st>>>(in, out, n);   // n = 0: just loads this code object
+    k_f32_to_f16<<<std::max<int64_t>(1, (n + 255) / 256), 256, 0, st>>>(in, out, n);
 }

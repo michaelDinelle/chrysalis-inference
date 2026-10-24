@@ -1,8 +1,3 @@
-// The page in a real browser (headless Chromium) against a fake Chrysalis that streams canned replies: TeX typeset and
-// prices left alone, Mermaid diagrams drawn, a reply's HTML page run in its sandbox where it reaches nothing, attached
-// files (pictures, PDFs, videos, texts) sent as Chrysalis expects them and kept across a reload, chats carried through
-// export and import, versions of messages and replies, tools (an MCP server, fake-mcp.ts, that server.ts runs), voice
-// mode against a scripted speech service (fake-voice.ts) with Chromium's fake microphone, and a new chat's sea.
 import { afterAll, beforeAll, expect, test } from "bun:test";
 import { existsSync, mkdirSync, mkdtempSync, rmSync, readFileSync, readdirSync, unlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
@@ -10,36 +5,23 @@ import puppeteer, { type Browser, type Page } from "puppeteer-core";
 import { ARTIFACTS_PROMPT } from "./artifacts";
 import { cardPng } from "./cast";
 
-// Everything a run writes (certificates, logs, browser profiles), in one folder of its own that goes when the run ends:
-// /tmp can be memory, and a run's browser profiles alone are hundreds of MB.
 const RUN = mkdtempSync(`${tmpdir()}/chrysalis-test-`);
 import { deflateSync } from "node:zlib";
 
-// The servers on the network here are HTTPS with an authority of their own, made in a folder of each run's: the test's
-// own requests take any certificate. What checks certificates is the network test's browsers, which do as a person's do;
-// the chat here is plain HTTP, as on this machine.
 process.env.NODE_TLS_REJECT_UNAUTHORIZED = "0";
 const CHAT_ARGS = ["--no-sandbox", "--ignore-certificate-errors"];
 
-// An artifact and edits to it, as the artifact instructions ask for them (artifacts.ts): a picture with ids, an edit by
-// a whole element and by a search, one whose search is not in the picture, and the answer to its being asked again.
 const PANDA = '```svg panda\n<svg viewBox="0 0 100 100" xmlns="http://www.w3.org/2000/svg">\n  <rect id="background" width="100" height="100" fill="#ffffff"/>\n' +
   '  <ellipse id="coat" cx="50" cy="60" rx="30" ry="25" fill="#ffffff" stroke="#222222"/>\n  <g id="burger">\n    <rect x="35" y="50" width="30" height="10" fill="#8b4513"/>\n  </g>\n</svg>\n```\n\nHere he is.';
 const RED_COAT = '```edit panda\n<ellipse id="coat" cx="50" cy="60" rx="30" ry="25" fill="#d32f2f" stroke="#222222"/>\n<<<<<<< SEARCH\nfill="#ffffff"/>\n' +
   '=======\nfill="#fff3cd"/>\n>>>>>>> REPLACE\n```\n\nRed now.';
-// A page with a script: what it holds (the count) is kept when its look changes, and starts over when its script does.
 const COUNTER = '```html counter\n<!doctype html>\n<html><head><title>Counter</title>\n<style>\n  body { font: 16px sans-serif; margin: 0; padding: 16px; }\n' +
   '  #inc { background: #eeeeee; padding: 8px 14px; }\n  .card { padding: 12px; }\n</style></head>\n<body>\n<h1 id="title">Clicks</h1>\n' +
   '<section class="card" id="card">\n  <p id="count">0</p>\n  <button id="inc">Add</button>\n</section>\n<p id="note">Press the button.</p>\n' +
   '<script>\nlet n = 0;\ndocument.getElementById("inc").onclick = () => { n += 1; document.getElementById("count").textContent = n; };\n' +
   'document.body.dataset.ran = "yes";\n</script>\n</body></html>\n```\n\nA counter.';
-// A LaTeX document and an edit to it, and code
 const PAPER = '```latex paper\n\\documentclass{article}\n\\title{Rods}\n\\begin{document}\n\\maketitle\n\\section{Heat}\nThe rod cools as\n' +
   '\\begin{equation}\n  u_t = -\\alpha u_{xx}\n\\end{equation}\nwhich is Fourier\'s law.\n\nA second paragraph.\n\\end{document}\n```\n\nThe paper.';
-// (the scene named as models name one, by what it is: a page all the same, its edits by id)
-// 3D: three.js as a module by address with addons (by an import map's names and by address, each importing "three"
-// itself: the same three, or its Vector3 is another), as the classic build older pages load, and an A-Frame scene; each
-// from its usual CDN address, which no page can reach
 const CUBE = '```html cube\n<!doctype html>\n<html><head><title>Cube</title>\n<script type="importmap">{"imports":{"three/addons/":"https://unpkg.com/three@0.160.0/examples/jsm/"}}</script>\n' +
   '</head><body style="margin:0">\n<script type="module">\nimport * as THREE from "https://unpkg.com/three@0.160.0/build/three.module.js";\n' +
   'import { OrbitControls } from "three/addons/controls/OrbitControls.js";\nimport { RoundedBoxGeometry } from "https://cdn.jsdelivr.net/npm/three@0.158.0/examples/jsm/geometries/RoundedBoxGeometry.js";\n' +
@@ -47,7 +29,6 @@ const CUBE = '```html cube\n<!doctype html>\n<html><head><title>Cube</title>\n<s
   'const scene = new THREE.Scene(), camera = new THREE.PerspectiveCamera(50, 1.5, 0.1, 100);\ncamera.position.z = 3;\n' +
   'scene.add(new THREE.Mesh(new RoundedBoxGeometry(1, 1, 1, 4, 0.1), new THREE.MeshNormalMaterial()));\nconst controls = new OrbitControls(camera, renderer.domElement);\n' +
   'renderer.render(scene, camera);\ndocument.body.dataset.three = THREE.REVISION + " " + (controls.target instanceof THREE.Vector3);\n</script>\n</body></html>\n```';
-// (the old one made to its window as most scenes are: its canvas sized to the window in the flow, its title absolute over it)
 const OLD_CUBE = '```html old\n<!doctype html>\n<html><head><title>Old</title>\n<style>body { margin: 0; overflow: hidden; }\n' +
   '#title { position: absolute; top: 10px; width: 100%; text-align: center; color: #c33; }</style>\n' +
   '<script src="https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.min.js" integrity="sha512-dLxUelApnYxpLt6K2iomGngnHO83iUvZytA3YjDUCjT0HDOHKXnVYdf3hU4JjM8uEhxf9nD1/ey98U3t2vZ0qQ==" crossorigin="anonymous"></script>\n' +
@@ -59,8 +40,6 @@ const SCENE = '```aframe scene\n<!doctype html>\n<html><head><title>Scene</title
   '<a-scene id="world" embedded style="width: 100%; height: 300px" vr-mode-ui="enabled: false" loading-screen="enabled: false">\n' +
   '  <a-box id="box" position="0 1.4 -3" color="#4CC3D9"></a-box>\n  <a-sky id="sky" color="#ECECEC"></a-sky>\n</a-scene>\n' +
   '<script>window.started = Math.random();</script>\n</body></html>\n```';
-// (pages labelled as Flash-Next also labels them: the id alone on the block's first line, the reply ending with the fence
-// still open; the id as an attribute; none at all)
 const HALL = '```html\nhall\n<!doctype html>\n<html><head><title>Hall</title></head><body><h1 id="sign">Welcome</h1></body></html>\n';
 const GATE = '```html id="gate"\n<!doctype html>\n<html><head><title>Gate</title></head><body><p id="note">Open</p></body></html>\n```\n\nThe gate.';
 const REPLIES: Record<string, string> = {
@@ -107,7 +86,6 @@ const REPLIES: Record<string, string> = {
     "</script>\n</body></html>\n```\n\nAfter the page.\n",
 };
 const enc = new TextEncoder();
-// a 2 x 2 PNG, red / blue
 const png = (() => {
   const crc = (b: Uint8Array) => { let c = ~0; for (const x of b) { c ^= x; for (let k = 0; k < 8; k++) c = (c >>> 1) ^ (0xedb88320 & -(c & 1)); } return ~c >>> 0; };
   const chunk = (type: string, data: Uint8Array) => {
@@ -121,19 +99,16 @@ const png = (() => {
   return Buffer.concat([Buffer.from([137, 80, 78, 71, 13, 10, 26, 10]), chunk("IHDR", ihdr), chunk("IDAT", deflateSync(rows)), chunk("IEND", new Uint8Array())]);
 })();
 
-// Questions that make the fake Chrysalis call a tool (in its first round, then answer once the result is in), or write slowly.
 const TOOL_ASKS: Record<string, { name: string; args: string }> = {
   "tool echo": { name: "fake__echo", args: '{"text":  "hello"}' },
   "tool note": { name: "fake__write_note", args: '{"text": "n1"}' },
 };
-// A question that hands two tasks to sub-agents at once. Each task is one of the questions above, so each sub-agent calls
-// the fake MCP server's tool (the note's asks first) and answers with what it said.
 const AGENT_TASKS = [{ description: "Echo a word", prompt: "tool echo" }, { description: "Write a note", prompt: "tool note" }];
-let lastStream: any = null, probes = 0, callIds = 0, chrysalisStopped = 0;  // probes: requests a sandboxed page got through to a server
-const streams: any[] = [], streamAt: number[] = [];  // every streamed request Chrysalis got, and when
-const checks: any[] = [];                            // every check of what speech recognition heard (app.ts CHECK)
-let loaded = "qwen3.8-27b";                           // the model on the GPU: a switch takes 3 s (as Chrysalis's, which waits
-let loading: Promise<void> | null = null;             // for the replies being written first), reporting the old one meanwhile
+let lastStream: any = null, probes = 0, callIds = 0, chrysalisStopped = 0;
+const streams: any[] = [], streamAt: number[] = [];
+const checks: any[] = [];
+let loaded = "qwen3.8-27b";
+let loading: Promise<void> | null = null;
 const fake = Bun.serve({
   hostname: "127.0.0.1",
   port: 0,
@@ -151,7 +126,6 @@ const fake = Bun.serve({
     const prefix = body.continue_final_message ? body.messages.at(-1) : undefined;
     if (!body.stream && /^You fix speech recognition errors/.test(body.messages[0]?.content)) {
       checks.push(body);
-      // "pie game" was misheard; its check takes 1 s (the turn ends first), and one of words that begin "wait" 2 s
       const heard = String(body.messages.at(-1).content).split("Transcript: ").at(-1)!;
       await Bun.sleep(heard.startsWith("wait") ? 2000 : heard.includes("pie game") ? 1000 : 0);
       return Response.json({ choices: [{ message: { content: heard.includes("pie game") ? "pie game => Pygame\ntool: no" : "-" }, finish_reason: "stop" }] });
@@ -162,14 +136,10 @@ const fake = Bun.serve({
     streamAt.push(Date.now());
     req.signal.addEventListener("abort", () => chrysalisStopped++);
     const at = body.messages.findLastIndex((m: any) => m.role === "user"), last = body.messages[at];
-    // what the user said, without the app's note to the model before it (voice mode's)
-    // (none: a chat a character's greeting begins, warmed for voice mode before anything is said)
     const said = !last ? "" : (typeof last.content === "string" ? last.content : last.content.map((p: any) => p.text ?? "").join("")).replace(/^\[[^\]]*\]\n\n/, "");
     const round = body.messages.slice(at).filter((m: any) => m.role === "assistant" && m !== prefix).length, ask = TOOL_ASKS[said];
     const agents = said === "agents" && round === 0 && body.tools?.some((t: any) => t.function.name === "subagent");
     const calls = agents ? AGENT_TASKS.map((a) => ({ name: "subagent", args: JSON.stringify(a) })) : ask && body.tools && round === 0 ? [ask] : [];
-    // the hand-off is thought through, not said: the reply's last word before the calls is its thinking. A reply asked
-    // of one of a group ("[Name next.]") is theirs, thought through first.
     const next = /\[(.+) next\.\]$/.exec(said)?.[1];
     const think = agents ? "Two separate tasks: each goes to a sub-agent." : next ? `${next} has the floor.` : "";
     const text = agents ? "" : next ? `${next}: I go on.` : calls.length ? "Let me check." : ask ? `The tool said: ${body.messages.at(-1).content}` : said === "agents"
@@ -180,8 +150,6 @@ const fake = Bun.serve({
     return new Response(new ReadableStream({
       async pull(ctl) {
         await Bun.sleep(gap);
-        // a continued reply restates itself first, as Chrysalis does (a reply with no thinking has a line break for
-        // it), and the prompt's length comes once it is read
         if (!restated) {
           restated = true;
           return ctl.enqueue(enc.encode(`data: ${JSON.stringify({ choices: [{ delta: { chrysalis_prefix: { reasoning_content: prefix.reasoning_content || "\n", content: prefix.content } } }] })}\n\n`));
@@ -233,9 +201,7 @@ beforeAll(async () => {
 }, 30_000);
 afterAll(async () => { await browser?.close(); web.kill(); fake.stop(true); rmSync(RUN, { recursive: true, force: true }); });
 
-// a browser context of its own: this machine's browser, which needs no key
 const chatContext = (b = browser) => b.createBrowserContext();
-// Each page in a browser context of its own: what one test leaves in localStorage (the last chat's tools) stays there.
 async function open(): Promise<Page> {
   const page = await (await chatContext()).newPage();
   await page.setViewport({ width: 1200, height: 900 });
@@ -259,14 +225,12 @@ test("the context in the message box counts up while a reply is written (the pro
   const early = await used();
   await page.waitForFunction(() => /w20 /.test(document.querySelector(".msg.assistant")?.textContent ?? ""));
   const later = await used();
-  expect([early > 10, later > early]).toEqual([true, true]);    // the fake's prompt is 10 tokens
+  expect([early > 10, later > early]).toEqual([true, true]);
   await page.waitForSelector(".msg.assistant .stats");
-  expect(await used()).toBe(30);                                // its usage: 10 read, 20 written
+  expect(await used()).toBe(30);
   await page.close();
 }, 30_000);
 
-// The canvas in view and still: after a reply the chat may still be scrolling to it, and a point measured before it stops
-// is somewhere else by the time it is clicked
 async function still(page: Page) {
   await page.$eval(".art-canvas", (e) => e.scrollIntoView({ block: "center" }));
   await page.waitForFunction(() => new Promise<boolean>((done) => {
@@ -274,7 +238,6 @@ async function still(page: Page) {
     requestAnimationFrame(() => requestAnimationFrame(() => done(s.scrollTop === at)));
   }));
 }
-// The canvas's picture, as drawn: an element's attribute
 const fill = (page: Page, id: string, attr = "fill") => page.$eval(".art-canvas .svg-paper", (p, id, attr) =>
   p.shadowRoot!.querySelector(`[id="${id}"]`)?.getAttribute(attr as string) ?? null, id, attr);
 
@@ -306,29 +269,25 @@ test("the canvas's tools change the picture by hand, with no model: the paint bu
   await send(page, "draw the panda");
   await still(page);
   const n0 = streams.length;
-  // a point on an element: its middle, or (fy) that far down it
   const inPaper = (sel: string, fy = 0.5) => page.$eval(".art-canvas .svg-paper", (p, sel, fy) => {
     const r = p.shadowRoot!.querySelector(sel as string)!.getBoundingClientRect();
     return { x: r.x + r.width / 2, y: r.y + r.height * (fy as number) };
   }, sel, fy);
   const tools = (sel: string) => page.click(`.art-canvas .art-tools ${sel}`);
   const caption = () => page.$eval(".art-canvas .art-label", (l) => l.textContent);
-  // nothing changes by hand until Edit: a click points, Delete deletes nothing
-  const coat = await inPaper("#coat", 0.85);                                  // below the burger, which lies over its middle
+  const coat = await inPaper("#coat", 0.85);
   await page.mouse.click(coat.x, coat.y);
   await page.keyboard.press("Delete");
   expect([await page.$eval("#pointing", (e) => e.textContent), await fill(page, "coat"), await caption()]).toEqual(["Pointing at panda · #coat", "#ffffff", "panda · v1"]);
   await page.keyboard.press("Escape");
-  // Edit, then Fill, its color picked
   await page.click(".art-canvas [data-art=edit]");
   await page.$eval(".art-canvas .art-tools input", (i) => {
     (i as HTMLInputElement).value = "#00aa00";
     i.dispatchEvent(new Event("input"));
   });
-  const coatNow = await inPaper("#coat", 0.85);                               // (the toolbar above it moved it down)
+  const coatNow = await inPaper("#coat", 0.85);
   await page.mouse.click(coatNow.x, coatNow.y);
   expect([await fill(page, "coat"), await caption()]).toEqual(["#00aa00", "panda · v2 · your edit, not sent yet"]);
-  // select the burger, drag it 20 px right
   await tools("[data-tool=select]");
   const burger = await inPaper("#burger rect");
   await page.mouse.click(burger.x, burger.y);
@@ -341,7 +300,6 @@ test("the canvas's tools change the picture by hand, with no model: the paint bu
   await page.mouse.up();
   const shifted = await fill(page, "burger", "transform");
   expect(shifted).toMatch(/^translate\(\d+(\.\d+)? 0\)$/);
-  // and from its bottom-right corner, half again as big (about the corner across from it)
   const se = await inPaper(".sel i[data-h=se]"), nw = await inPaper(".sel i[data-h=nw]");
   await page.mouse.move(se.x, se.y);
   await page.mouse.down();
@@ -349,14 +307,11 @@ test("the canvas's tools change the picture by hand, with no model: the paint bu
   await page.mouse.up();
   const moved = await fill(page, "burger", "transform");
   expect(moved).toMatch(/^translate\(-?\d+(\.\d+)? -?\d+(\.\d+)?\) scale\(1\.(4|5)\d*\)$/);
-  // Delete takes it out, Undo brings it back
   await page.keyboard.press("Delete");
   expect(await page.$eval(".art-canvas .svg-paper", (p) => p.shadowRoot!.querySelector("#burger"))).toBeNull();
   await tools("[data-do=undo]");
-  // (the changes not sent yet are one version, the user's: Undo steps back through them)
   expect([await fill(page, "burger", "transform"), await caption()]).toEqual([moved, "panda · v2 · your edit, not sent yet"]);
-  expect(streams.length).toBe(n0);                                          // no model in any of it
-  // the next question carries it as it now is; the model's edit changes that
+  expect(streams.length).toBe(n0);
   await send(page, "red coat");
   const asked = lastStream.messages.at(-1).content as string;
   expect([asked.includes("The user changed panda by hand since your last reply. As it is now:"), asked.includes('fill="#00aa00"'),
@@ -366,19 +321,15 @@ test("the canvas's tools change the picture by hand, with no model: the paint bu
   await page.close();
 }, 30_000);
 
-// The page artifact's frame (the one shown, not one still loading a rewrite), and a point on an element in it
 const pageFrame = async (page: Page) => (await page.waitForSelector(".art-canvas iframe.page-frame:not(.next)"))!.contentFrame();
-// (once the frame has taken the page's height: a part just put back is in the page before the frame grows to show it)
 async function inPage(page: Page, sel: string) {
   for (let k = 0; ; k++) {
     const box = (await (await page.$(".art-canvas iframe.page-frame:not(.next)"))!.boundingBox())!;
     const r = await (await pageFrame(page)).$eval(sel, (e) => { const r = e.getBoundingClientRect(); return { x: r.x + r.width / 2, y: r.y + r.height / 2 }; });
-    if (r.y < box.height - 2 || k === 40) return { x: box.x + 1 + r.x, y: box.y + 1 + r.y };   // past the frame's border
+    if (r.y < box.height - 2 || k === 40) return { x: box.x + 1 + r.x, y: box.y + 1 + r.y };
     await Bun.sleep(50);
   }
 }
-// A tool of the page's picked (in edit mode: Edit first if it is not on), and on in the page, which hears of it a moment
-// later; Done leaves edit mode, the page its own again
 async function pageTool(page: Page, sel: string) {
   if (!(await page.$(".art-canvas .art-tools.on"))) await page.click(".art-canvas [data-art=edit]");
   await page.click(`.art-canvas .art-tools ${sel}`);
@@ -395,7 +346,6 @@ test("a page artifact is drawn as it is written, its script waiting, and runs on
   const done = await page.$$eval(".msg .stats", (s) => s.length);
   await page.type("#input", "steady counter page");
   await page.keyboard.press("Enter");
-  // its heading is in while the reply is still being written, and its script has not run
   const frame = await pageFrame(page);
   await frame.waitForSelector("#title", { timeout: 10_000 });
   expect([await page.$$eval(".msg .stats", (s) => s.length), await frame.$eval("body", (b) => b.dataset.ran ?? "")]).toEqual([done, ""]);
@@ -405,12 +355,10 @@ test("a page artifact is drawn as it is written, its script waiting, and runs on
   await still(page);
   for (let k = 0; k < 3; k++) await frame.click("#inc");
   expect(await frame.$eval("#count", (c) => c.textContent)).toBe("3");
-  // the button turns blue and the count gets a class in the page as it is: the count it shows stays
   await send(page, "blue button");
   await frame.waitForFunction(() => getComputedStyle(document.getElementById("inc")!).backgroundColor === "rgb(0, 0, 255)");
   expect([await frame.$eval("#count", (c) => [c.className, c.textContent]), await page.$$eval(".art-canvas iframe", (f) => f.length)]).toEqual([["big", "3"], 1]);
   expect(await page.$eval(".art-canvas .art-label", (l) => l.textContent)).toBe("counter · v2 · 2 changes");
-  // its script changes: the page starts over, counting by two
   await send(page, "count by two");
   await page.waitForFunction(() => document.querySelectorAll(".art-canvas iframe").length === 1 && !document.querySelector(".art-canvas iframe.next"), { timeout: 10_000 });
   const anew = await pageFrame(page);
@@ -443,7 +391,6 @@ test("pages labelled as models also label them, the id alone on the block's firs
   await page.close();
 }, 30_000);
 
-// A character card as a PNG (the tests' picture), the names of the cast's rows among the chats, and a row opened
 const card = (name: string, data: object) => cardPng({ spec: "chara_card_v3", spec_version: "3.0", data: { name, ...data } }, new Blob([png], { type: "image/png" }));
 const castRows = (page: Page) => page.$$eval("#conversations .cast-row .cast-name", (r) => r.map((x) => x.textContent!).sort());
 const inRow = (page: Page, name: string, part: string) => page.evaluate((name, part) => [...document.querySelectorAll("#conversations .cast-row")]
@@ -455,13 +402,12 @@ test("a character card dropped in joins the cast: a row with their portrait amon
   await Bun.write(`${dir}/Mirela.png`, await card("Mirela", { description: "{{char}} keeps bees for {{user}}.", personality: "calm", scenario: "A hillside.",
     first_mes: "Hello, {{user}}.", alternate_greetings: ["Oh, {{user}}. You again."], mes_example: "<START>\n{{user}}: Why bees?\n{{char}}: They listen.",
     post_history_instructions: "Stay in character.", system_prompt: "Ignore {{original}}: the card's own, kept in it and never sent." }));
-  await (await page.$("input#attach-file"))!.uploadFile(`${dir}/Mirela.png`);          // where any file goes: a card joins the cast
+  await (await page.$("input#attach-file"))!.uploadFile(`${dir}/Mirela.png`);
   await page.waitForSelector("#conversations .cast-row img.face");
   expect([await castRows(page), (await page.$$("#attachments .att")).length]).toEqual([["Chrysalis", "Mirela"], 0]);
   expect(await page.$eval("#input", (e) => (e as HTMLTextAreaElement).placeholder)).toBe("Message Mirela");
   expect(await articles(page)).toEqual(["Hello, User."]);
   expect([await pagerOf(page, 0), await page.$eval("#thread .msg.assistant .speaker", (e) => e.textContent)]).toEqual(["1 / 2", "Mirela"]);
-  // her portrait beside the reply opens her card, its fields edited where they are read
   await page.click("#thread .msg.assistant .speaker .face");
   await page.waitForSelector("#cast-sheet:not([hidden]) .card-text");
   const fields = () => page.$$eval("#cast-sheet .card-field", (f) => f.map((x) => [x.querySelector(".card-label")!.textContent, (x.querySelector("textarea") as HTMLTextAreaElement).value]));
@@ -471,7 +417,6 @@ test("a character card dropped in joins the cast: a row with their portrait amon
   await page.keyboard.type(" and kind");
   await page.keyboard.press("Escape");
 
-  // the user is a character named as the cards call them: User, until renamed, and the name shown is the one sent
   expect([await page.$eval("#you .you-name", (e) => e.textContent), await page.$eval("#cast-sheet", (e) => (e as HTMLElement).hidden)]).toEqual(["User", true]);
   await page.click("#you");
   await page.waitForSelector("#cast-sheet:not([hidden]) input.card-name");
@@ -487,7 +432,6 @@ test("a character card dropped in joins the cast: a row with their portrait amon
   expect(one.slice(1)).toEqual([{ role: "user", content: "[The scene begins.]" }, { role: "assistant", content: "Hello, User." },
     { role: "user", content: "good morning mirela\n\n[Stay in character.]" }]);
   expect(await page.$$eval("#thread .msg.assistant .speaker", (s) => s.map((x) => x.textContent))).toEqual(["Mirela", "Mirela"]);
-  // written on: Chrysalis restates a reply that did not think with a line break for its thinking, which is not shown
   await page.$eval('#thread > article[data-i="2"] [data-act="cont"]', (b) => (b as HTMLElement).click());
   await page.waitForFunction(() => /Good morning\..*Good morning\./.test(document.querySelector('#thread > article[data-i="2"] .markdown')?.textContent ?? ""));
   await untilIdle(page);
@@ -533,7 +477,6 @@ test("the user is a character like any other: a portrait opens its card and clos
   const look = await page.evaluate(() => {
     const at = (s: string) => document.querySelector(s)!.getBoundingClientRect(), mine = at(".msg.user .bubble"), hers = at(".msg.assistant > .markdown");
     const style = (s: string) => { const c = getComputedStyle(document.querySelector(s)!); return [c.borderTopWidth, c.backgroundColor, c.paddingLeft]; };
-    // each bubble beside its writer's portrait, the same way from either side
     return { sides: [hers.left - at(".msg.assistant .speaker .face").right, at(".msg.user .speaker .face").left - mine.right],
       bubbles: [style(".msg.user .bubble"), style(".msg.assistant > .markdown")] };
   });
@@ -546,7 +489,6 @@ test("the user is a character like any other: a portrait opens its card and clos
   await page.close();
 }, 40_000);
 
-// A PNG's tEXt chunks, read here (not with cast.ts): keyword -> text, and its pixels' chunk
 function pngText(b: Uint8Array) {
   const v = new DataView(b.buffer, b.byteOffset), out: Record<string, string> = {};
   let idat = "";
@@ -570,7 +512,7 @@ test("a card's portrait is the card's file, named for them and as it is now: a c
   await page.click("#cast-sheet .card-field textarea");
   await page.keyboard.press("End");
   await page.keyboard.type(" Twelve hives.");
-  await Bun.sleep(600);                                           // past the card's keeping (300 ms), and its file made again
+  await Bun.sleep(600);
   await page.click("#cast-sheet a.card-file");
   for (const t = Date.now(); !existsSync(`${saved}/Mirela.png`); await Bun.sleep(50)) if (Date.now() - t > 10_000) throw new Error(`not saved: ${readdirSync(saved)}`);
   await Bun.sleep(200);
@@ -578,7 +520,6 @@ test("a card's portrait is the card's file, named for them and as it is now: a c
   const v3 = JSON.parse(Buffer.from(got.text.ccv3 ?? "", "base64").toString()), v2 = JSON.parse(Buffer.from(got.text.chara ?? "", "base64").toString());
   expect([readdirSync(saved), v3.data.name, v3.data.description, v2.data.description]).toEqual([["Mirela.png"], "Mirela", "{{char}} keeps bees. Twelve hives.", "{{char}} keeps bees. Twelve hives."]);
   expect(got.idat).toBe(pngText(png).idat);
-  // the picture shown is that file
   expect(await page.$eval("#cast-sheet a.card-file", (a) => [(a as HTMLAnchorElement).download, a.querySelector("img")!.src === (a as HTMLAnchorElement).href]))
     .toEqual(["Mirela.png", true]);
   await page.close();
@@ -591,12 +532,12 @@ test("the conversations are folders, Chrysalis's and each character's: a folder 
   await (await page.$("input#attach-file"))!.uploadFile(`${dir}/Mirela.png`);
   await page.waitForFunction(() => document.querySelector("#thread .speaker")?.textContent === "Mirela");
   await send(page, "good morning mirela");
-  const folders = () => page.$$eval("#conversations .folder", (f) => f.map((x) => [x.querySelector(".cast-name")!.textContent,   // (its chats' titles change as they are named)
+  const folders = () => page.$$eval("#conversations .folder", (f) => f.map((x) => [x.querySelector(".cast-name")!.textContent,
     x.classList.contains("open") ? `open: ${x.querySelectorAll(".conv").length}` : `closed: ${x.querySelector(".cast-count")?.textContent}`]));
   expect(await folders()).toEqual([["Mirela", "open: 1"], ["Chrysalis", "open: 1"]]);
-  await openRow(page, "Chrysalis");                                    // closed: how many chats it holds
+  await openRow(page, "Chrysalis");
   expect(await folders()).toEqual([["Mirela", "open: 1"], ["Chrysalis", "closed: 1"]]);
-  await openRow(page, "Chrysalis");                                    // open again, and left open in Mirela's chat
+  await openRow(page, "Chrysalis");
   await page.click("#conversations .folder:first-child .conv");
   expect(await folders()).toEqual([["Mirela", "open: 1"], ["Chrysalis", "open: 1"]]);
   await openRow(page, "Mirela");
@@ -623,10 +564,9 @@ test("a character deleted takes their chats with them (none become Chrysalis's),
   await page.click("#cast-sheet .card-acts .icon");
   await page.waitForFunction(() => /^Mirela deleted, with 1 chat/.test(document.querySelector("#toast")?.textContent ?? ""));
   expect([await kept(), await folders(), await page.$$eval("#thread .speaker", (s) => s.length)]).toEqual([["chrysalis"], ["Chrysalis: 1"], 0]);
-  await page.click("#toast .btn");                                     // Undo
+  await page.click("#toast .btn");
   await page.waitForFunction(() => document.querySelectorAll("#conversations .folder").length === 2);
   expect((await kept()).sort()).toEqual(["chrysalis", mirela].sort());
-  // deleted in another tab (the cast is this device's, the chats this tab's): here, her chat goes when the page opens again
   await page.evaluate((id) => new Promise<void>((done) => {
     const open = indexedDB.open("chrysalis-cast", 1);
     open.onsuccess = () => { const t = open.result.transaction("people", "readwrite"); t.objectStore("people").delete(id); t.oncomplete = () => { open.result.close(); done(); }; };
@@ -651,7 +591,7 @@ test("a group whose file names characters with no card here yet shows them all (
   await page.waitForSelector("#cast-sheet:not([hidden]) .card-member.waiting");
   expect(await page.$$eval("#cast-sheet .strips > *", (s) => s.length)).toBe(2);
   await page.keyboard.press("Escape");
-  await (await page.$("input#cast-file"))!.uploadFile(`${dir}/Bea.png`);   // hers comes: she is in
+  await (await page.$("input#cast-file"))!.uploadFile(`${dir}/Bea.png`);
   await page.waitForFunction(() => document.querySelectorAll("#conversations .folder").length === 4);
   expect(await tiles()).toEqual(["picture", "picture"]);
   await openRow(page, "Duo");
@@ -670,7 +610,7 @@ test("a group's replies are the scene, each paragraph its speaker's and one goin
   await Bun.write(`${dir}/Ida.png`, await card("Ida", { description: "{{char}} paints hives." }));
   writeFileSync(`${dir}/Hive.json`, JSON.stringify({ spec: "chrysalis_group", name: "Hive", members: ["Mirela", "Tomas"], scenario: "Market day." }));
   await (await page.$("input#cast-file"))!.uploadFile(`${dir}/Mirela.png`, `${dir}/Tomas.png`, `${dir}/Hive.json`);
-  await page.waitForFunction(() => document.querySelectorAll("#conversations .cast-row").length === 4);   // and Chrysalis
+  await page.waitForFunction(() => document.querySelectorAll("#conversations .cast-row").length === 4);
   await openRow(page, "Hive");
   await page.waitForSelector("#cast-next:not([hidden])");
   await send(page, "a toast for the hive");
@@ -678,30 +618,26 @@ test("a group's replies are the scene, each paragraph its speaker's and one goin
   expect(await lines(1)).toEqual([["Mirela", false], ["Tomas", false]]);
   expect(await page.$$eval("#thread p.line", (p) => p.map((x) => x.textContent))).toEqual(["MirelaShe raises a cup. To the bees.", "TomasTo the bees!"]);
   expect([lastStream.stop, lastStream.messages[0].content.includes("Scenario: Market day."), lastStream.messages[0].content.includes("A hillside.")])
-    .toEqual([["\nUser:", "\n**User"], true, false]);                                // the group's scenario in place of theirs
+    .toEqual([["\nUser:", "\n**User"], true, false]);
   await send(page, "the same speaker");
   expect(await lines(3)).toEqual([["Mirela", false], ["", true], ["", true], ["Tomas", false]]);
 
-  // a face: the next reply is theirs, told to the model before it thinks (not begun for it, which would skip that)
   await page.click('#cast-next button[title="Tomas next"]');
   await untilIdle(page);
   expect([lastStream.continue_final_message, lastStream.reasoning_effort !== undefined, lastStream.messages.at(-1)])
     .toEqual([undefined, true, { role: "user", content: "[Tomas next.]" }]);
   expect([await lines(4), await page.$eval('#thread > article[data-i="4"] .thought', (t) => t.textContent)]).toEqual([[["Tomas", false]], "Tomas has the floor."]);
-  // let them talk: four replies, each asked of one of them, never the last to speak
   const n0 = streams.length;
   await page.click("#cast-next .talk");
   await page.waitForFunction(() => !!document.querySelector("#cast-next .talk:not(.on)")
     && document.querySelector("#send")?.getAttribute("aria-label") === "Send", { timeout: 20_000 });
   expect(streams.slice(n0).map((b) => b.messages.at(-1))).toEqual(["Mirela", "Tomas", "Mirela", "Tomas"].map((n) => ({ role: "user", content: `[${n} next.]` })));
 
-  // a card dropped on the group's chat: she joins it, and is one character however often she is dropped
   await (await page.$("input#attach-file"))!.uploadFile(`${dir}/Ida.png`);
   await page.waitForFunction(() => document.querySelectorAll("#cast-next button[title$=' next']").length === 3);
   await (await page.$("input#attach-file"))!.uploadFile(`${dir}/Mirela.png`);
   await page.waitForFunction(() => /Mirela is in this chat already/.test(document.querySelector("#toast")?.textContent ?? ""));
   expect([await castRows(page), (await page.$$("#attachments .att")).length]).toEqual([["Chrysalis", "Hive", "Ida", "Mirela", "Tomas"], 0]);
-  // a character's row dragged onto a chat with one character: a group of the two, the chat theirs, what she said hers
   await openRow(page, "Mirela");
   await page.waitForFunction(() => document.querySelector("#thread .speaker")?.textContent === "Mirela");
   await page.evaluate(() => {
@@ -714,7 +650,7 @@ test("a group's replies are the scene, each paragraph its speaker's and one goin
   expect([await castRows(page), await page.$$eval("#cast-next button[title$=' next']", (b) => b.map((x) => (x as HTMLElement).title)), await lines(0)])
     .toEqual([["Chrysalis", "Hive", "Ida", "Mirela", "Mirela and Tomas", "Tomas"], ["Mirela next", "Tomas next"], [[`Mirela`, false]]]);
 
-  await page.reload({ waitUntil: "load" });                                              // the cast is this device's, not the tab's
+  await page.reload({ waitUntil: "load" });
   await page.waitForSelector("#conversations .cast-row");
   expect(await castRows(page)).toEqual(["Chrysalis", "Hive", "Ida", "Mirela", "Mirela and Tomas", "Tomas"]);
   await page.close();
@@ -729,7 +665,6 @@ test("a page's tools change it by hand, with no model, in the page as it runs: S
   const n0 = streams.length, caption = () => page.$eval(".art-canvas .art-label", (l) => l.textContent);
   await frame.click("#inc");
   await frame.click("#inc");
-  // Text: the heading retyped where it is
   await pageTool(page, "[data-tool=text]");
   let at = await inPage(page, "#title");
   await page.mouse.click(at.x, at.y);
@@ -738,13 +673,11 @@ test("a page's tools change it by hand, with no model, in the page as it runs: S
   await page.keyboard.press("Enter");
   await page.waitForFunction(() => /your edit/.test(document.querySelector(".art-canvas .art-label")?.textContent ?? ""));
   expect([await frame.$eval("#title", (t) => t.textContent), await caption()]).toEqual(["Clicks so far", "counter · v2 · your edit, not sent yet"]);
-  // the paint bucket: the card's background
   await pickColor(page, "#00aa00");
   await (await pageFrame(page)).waitForFunction(() => (window as any).__chrysalis.mode === "bucket");
   at = await inPage(page, "#card");
-  await page.mouse.click(at.x, at.y - 30);                               // on the card, above its button
+  await page.mouse.click(at.x, at.y - 30);
   await frame.waitForFunction(() => getComputedStyle(document.getElementById("card")!).backgroundColor === "rgb(0, 170, 0)");
-  // Select: the note pointed at, Delete takes it out, Undo brings it back
   await pageTool(page, "[data-tool=select]");
   at = await inPage(page, "#note");
   await page.mouse.click(at.x, at.y);
@@ -753,7 +686,6 @@ test("a page's tools change it by hand, with no model, in the page as it runs: S
   await frame.waitForFunction(() => !document.getElementById("note"));
   await page.click(".art-canvas .art-tools [data-do=undo]");
   await frame.waitForFunction(() => !!document.getElementById("note"));
-  // all of it in the page as it ran: the count it held stays, and nothing went to the model
   expect([await frame.$eval("#count", (c) => c.textContent), await frame.$eval("#title", (t) => t.textContent), streams.length]).toEqual(["2", "Clicks so far", n0]);
   at = await inPage(page, "#note");
   await page.mouse.click(at.x, at.y);
@@ -766,7 +698,6 @@ test("a page's tools change it by hand, with no model, in the page as it runs: S
   await page.close();
 }, 40_000);
 
-// A document's shadow root, and a point on a block in it
 const docRoot = (page: Page) => page.$eval(".art-canvas .doc-paper", (p) => !!p.shadowRoot);
 const inDoc = (page: Page, text: string) => page.$eval(".art-canvas .doc-paper", (p, text) => {
   const el = [...p.shadowRoot!.querySelectorAll<HTMLElement>("[data-at]")].findLast((e) => e.textContent!.includes(text as string))!;
@@ -781,13 +712,11 @@ test("a LaTeX artifact reads as a document; pointing at a paragraph quotes its s
   expect(await docRoot(page)).toBe(true);
   const shown = () => page.$eval(".art-canvas .doc-paper", (p) => p.shadowRoot!.querySelector(".doc-body")!.textContent!.replace(/\s+/g, " "));
   expect(await shown()).toMatch(/Rods.*1\s*Heat.*The rod cools as.*\(1\).*which is Fourier’s law\..*A second paragraph\./);
-  // pointed at, the paragraph's source goes with the question
   let at = await inDoc(page, "A second paragraph");
   await page.mouse.click(at.x, at.y);
   expect(await page.$eval("#pointing", (e) => e.textContent)).toBe("Pointing at paper · “A second paragraph.”");
   await send(page, "capital of France");
   expect(lastStream.messages.at(-1).content).toBe("[The user is pointing at this part of the artifact paper:\nA second paragraph.]\n\ncapital of France");
-  // retyped where it is (in edit mode): the source changes there, and the document shows it
   const n0 = streams.length;
   await page.click(".art-canvas [data-art=edit]");
   await still(page);
@@ -803,7 +732,6 @@ test("a LaTeX artifact reads as a document; pointing at a paragraph quotes its s
   await page.waitForFunction(() => /bold/.test(document.querySelector(".art-canvas .doc-paper")!.shadowRoot!.querySelector(".doc-body")!.textContent!));
   expect([await page.$eval(".art-canvas .doc-paper", (p) => p.shadowRoot!.querySelector("strong")?.textContent), streams.length,
     await page.$eval(".art-canvas .art-label", (l) => l.textContent)]).toEqual(["bold", n0, "paper · v2 · your edit, not sent yet"]);
-  // the model's edit: what it changed, line by line
   await send(page, "fix the sign");
   expect(await page.$eval(".art-canvas .art-label", (l) => l.textContent)).toBe("paper · v3 · 1 change");
   await page.click(".art-canvas [data-art=changes]");
@@ -860,7 +788,6 @@ test("code is changed by hand where it is shown: Edit, type, Done; the change is
 
 test("3D pages load three.js and A-Frame from their usual addresses, which they cannot reach: three as a module with addons by an import map's names and by address, and the classic build older pages load", async () => {
   const page = await open();
-  // the least height each page's frame has shown, from when it is on screen
   await page.evaluate(() => {
     const low = (window as any).low = new Map<Element, number>();
     const look = () => {
@@ -875,14 +802,11 @@ test("3D pages load three.js and A-Frame from their usual addresses, which they 
     await frame.waitForFunction(() => !!document.body?.dataset.three, { timeout: 10_000 });
     expect(await frame.$eval("body", (b) => b.dataset.three)).toBe(want);
   }
-  // the scene made to its window (only its title is in it until its script runs) has the column's room from the start,
-  // while it is written and when its canvas is made; the cube, drawn at its own size, then has its own
   await page.waitForFunction(() => (document.querySelectorAll(".art-canvas iframe.page-frame")[1] as HTMLElement).offsetHeight >= 400, { timeout: 5_000 });
   const wide = await page.$$eval(".art-canvas iframe.page-frame", (f) => [f[1].clientWidth, f[1].offsetHeight, (window as any).low.get(f[1]), f[0].offsetHeight]);
   expect(Math.abs(wide[1] - Math.round(wide[0] * 0.62))).toBeLessThan(4);
   expect(wide[2]).toBeGreaterThan(wide[1] - 4);
   expect(wide[3]).toBeLessThan(260);
-  // the cube was drawn
   const frame = (await (await page.$$(".art-canvas iframe.page-frame"))[0].contentFrame());
   const lit = await frame.$eval("canvas", (c) => {
     const g = (c as HTMLCanvasElement).getContext("webgl2")!, px = new Uint8Array(4);
@@ -901,7 +825,6 @@ test("an A-Frame scene is pointed into: the entity under the pointer is the one 
   await frame.waitForFunction(() => (document.querySelector("a-scene") as any)?.renderStarted, { timeout: 15_000 });
   await still(page);
   const started = await frame.evaluate(() => (window as any).started);
-  // where the box is drawn, in the chat's page
   const boxAt = async () => {
     const box = (await (await page.$(".art-canvas iframe.page-frame:not(.next)"))!.boundingBox())!;
     const p = await frame.evaluate(() => {
@@ -916,7 +839,6 @@ test("an A-Frame scene is pointed into: the entity under the pointer is the one 
   await page.mouse.move(at.x, at.y);
   await page.mouse.click(at.x, at.y);
   await page.waitForFunction(() => document.getElementById("pointing")!.textContent === "Pointing at scene · #box");
-  // the sky is what lies beyond it
   await page.mouse.click(at.x, at.y - 120);
   await page.waitForFunction(() => document.getElementById("pointing")!.textContent === "Pointing at scene · #sky");
   await pickColor(page, "#ff8800");
@@ -946,7 +868,7 @@ test("an edit that does not apply in full is asked for again, once, with the art
   expect(await page.$$eval(".art-fail", (f) => f.map((x) => x.textContent).filter(Boolean))).toEqual(["Not applied: its SEARCH text is not in it"]);
   expect(await page.$eval(".art-canvas[data-v='3'] .svg-paper", (p) => p.shadowRoot!.querySelector("#burger rect")?.getAttribute("fill"))).toBe("#0000ff");
   await Bun.sleep(500);
-  expect(await page.$$eval(".msg", (m) => m.length)).toBe(6);              // and no more
+  expect(await page.$$eval(".msg", (m) => m.length)).toBe(6);
   await page.close();
 }, 30_000);
 
@@ -1002,9 +924,9 @@ test("a chat reads as SillyTavern sets it: speech in quotes in its orange, the m
   const reply = await look(".msg.assistant .markdown"), mine = await look(".msg.user .bubble");
   expect(reply.quotes).toEqual(['"Good morning,"', '"Did you sleep well?"', '"It\'s still open', "«bonjour»"]);
   expect(reply.marks).toEqual(Array(4).fill("none none"));
-  expect([reply.breaks, reply.quote, reply.quoteEm]).toEqual([3, "rgb(225, 138, 36)", "rgb(225, 138, 36)"]);   // ST's Dark Lite quote color
+  expect([reply.breaks, reply.quote, reply.quoteEm]).toEqual([3, "rgb(225, 138, 36)", "rgb(225, 138, 36)"]);
   expect([reply.em === reply.text, reply.em === reply.quote]).toEqual([false, false]);
-  expect(reply.said).toContain('well?"\nThe kettle sings.\n"It');   // a break keeps its newline in the text, where voice mode counts words
+  expect(reply.said).toContain('well?"\nThe kettle sings.\n"It');
   expect(mine.html).toBe('<em>knocks</em> <q>"Is <strong>the kettle</strong> on?"</q> and `ls "x"` &lt;b&gt;as typed&lt;/b&gt;');
   expect([mine.quote, mine.em, mine.marks]).toEqual([reply.quote, reply.em, ["none none"]]);
   await send(page, "write the letter");
@@ -1090,7 +1012,7 @@ test("attached files go to Chrysalis as images, PDFs, videos and fenced text, st
   expect(lastStream.messages.find((m: any) => m.role === "user").content).toEqual(content);
   await page.click("#export");
   const file = await (async () => { for (let k = 0; k < 50; k++) { const f = readdirSync(dir).find((x) => x.endsWith(".chrysalis.json")); if (f) return f; await Bun.sleep(100); } })();
-  const other = await open();                            // another tab: its own conversations and files
+  const other = await open();
   await (await other.$("input#import-file"))!.uploadFile(`${dir}/${file}`);
   await other.waitForFunction(() => (document.querySelector(".msg-files img") as HTMLImageElement | null)?.naturalWidth === 2);
   await send(other, "and once more");
@@ -1129,8 +1051,8 @@ test("the Tools popover turns servers and single tools on and off for this chat,
   await page.waitForSelector(sw("mcp:fake"));
   const rows = await page.$$eval(`${pop} .tp-src`, (r) => r.map((x) => [x.querySelector(".tp-name")!.textContent, x.querySelector(".tp-sub")!.textContent]));
   expect(rows).toEqual([["Fetch URL", "Reads web pages at public addresses"], ["Sub-agents", "Hands tasks to agents that work side by side"],
-    ["fake", "Not started"], ["broken", "Not started"]]);                 // the built-in ones, then the servers as the config file lists them
-  await page.click(sw("mcp:fake"));                                       // starts the server, every tool on
+    ["fake", "Not started"], ["broken", "Not started"]]);
+  await page.click(sw("mcp:fake"));
   await page.waitForFunction(() => document.querySelector('#tools-pop [data-src="mcp:fake"]')?.closest(".tp-src")?.querySelector(".tp-sub")?.textContent === "5 of 5 tools on",
     { timeout: 20_000 });
   expect(await badge(page)).toEqual(["5", "Tools: 5 on in this chat"]);
@@ -1143,11 +1065,11 @@ test("the Tools popover turns servers and single tools on and off for this chat,
   await page.click(sw("fetch"));
   expect(await badge(page)).toEqual(["5", "Tools: 5 on in this chat"]);
   const pageLength = () => page.$$eval(`${pop} .tp-src`, (r) => r.map((x) => x.querySelector(".knob label")?.textContent ?? "").filter(Boolean));
-  expect(await pageLength()).toEqual(["Page length"]);                  // Fetch URL's, under it while it is on
+  expect(await pageLength()).toEqual(["Page length"]);
   await page.click(sw("fetch"));
   expect(await pageLength()).toEqual([]);
   await page.click(sw("fetch"));
-  await page.click(sw("mcp:broken"));                                     // a server that cannot start says why, with Retry
+  await page.click(sw("mcp:broken"));
   await page.waitForSelector(`${pop} .tp-err [data-do="retry"][data-src="mcp:broken"]`, { timeout: 20_000 });
   expect(await page.$eval(`${pop} .tp-err`, (e) => e.textContent)).toMatch(/ENOENT|nonexistent|not found/i);
   await page.click(sw("mcp:broken"));
@@ -1161,7 +1083,7 @@ test("the Tools popover turns servers and single tools on and off for this chat,
     `and there are no files or projects to explore. Use a tool when it helps; otherwise answer directly.\n\n${ARTIFACTS_PROMPT}`);
   const first = await page.evaluate(() => location.hash);
 
-  await page.click("#new-chat");                                          // a new chat starts from the last choice
+  await page.click("#new-chat");
   expect(await badge(page)).toEqual(["5", "Tools: 5 on in this chat"]);
   await page.click("#tools-btn");
   await page.waitForSelector(sw("fetch"));
@@ -1173,7 +1095,7 @@ test("the Tools popover turns servers and single tools on and off for this chat,
   expect(lastStream.tools).toBeUndefined();
   expect(lastStream.messages[0].content).toBe(`You are Qwen3.8-27B, running locally in Chrysalis Inference. There are no tools or files in this chat. Answer directly.\n\n${ARTIFACTS_PROMPT}`);
 
-  await page.goto(`${base}/${first}`, { waitUntil: "networkidle0" });   // the first chat, after a reload: its own choice
+  await page.goto(`${base}/${first}`, { waitUntil: "networkidle0" });
   await page.waitForFunction(() => document.querySelector("#tools-btn .tools-n")?.textContent === "5", { timeout: 10_000 });
   await page.close();
 }, 60_000);
@@ -1197,7 +1119,7 @@ test("a tool call is a card where it happened; it opens to its arguments and res
   expect(body.text).toEqual(["Arguments", '{\n  "text": "hello"\n}', "Result", "echo: hello"]);
   expect(await page.$eval(".tool-card .tool-head", (b) => b.getAttribute("aria-expanded"))).toBe("true");
 
-  const round1 = streams.at(-1);                                          // what the tool's round sent Chrysalis
+  const round1 = streams.at(-1);
   await send(page, "and then");
   const sent = lastStream.messages;
   expect(JSON.stringify(sent.slice(0, round1.messages.length))).toBe(JSON.stringify(round1.messages));
@@ -1228,16 +1150,16 @@ test("a tool that asks first shows the call with Allow once, Always allow and De
   expect(streams.at(-1).messages.at(-1).content).toContain("The user declined this call");
   expect(readFileSync(LOG, "utf8").match(/wrote n1/g)?.length).toBe(1);
   expect(await answer("always")).toBe("done");
-  await send(page, "tool note");                                          // allowed now: it runs without asking
+  await send(page, "tool note");
   expect(await page.$$eval(".msg.assistant .tool-card", (c) => c.at(-1)!.getAttribute("data-state"))).toBe("done");
   expect(readFileSync(LOG, "utf8").match(/wrote n1/g)?.length).toBe(3);
-  await page.click("#tools-btn");                                          // the tools of the chat list it; a click makes it ask again
+  await page.click("#tools-btn");
   await page.waitForSelector("#tools-pop .tp-allow .chip");
   expect(await page.$$eval("#tools-pop .tp-allow .chip", (c) => c.map((x) => x.textContent))).toEqual(["fake__write_note"]);
   await page.click("#tools-pop .tp-allow .chip");
   await page.waitForFunction(() => !document.querySelector("#tools-pop .tp-allow"));
   await page.keyboard.press("Escape");
-  await page.type("#input", "tool note");                                 // and so it does
+  await page.type("#input", "tool note");
   await page.keyboard.press("Enter");
   await page.waitForSelector('.tool-card[data-state="approval"] .tool-ask:not([hidden])', { timeout: 20_000 });
   await page.close();
@@ -1258,17 +1180,14 @@ test("sub-agents: two tasks handed off at once get a card each that says what it
   const ask = async () => {
     await page.type("#input", "agents");
     await page.keyboard.press("Enter");
-    await page.waitForSelector('.agent-card .tool-card[data-state="approval"] .tool-ask:not([hidden])', { timeout: 20_000 });   // its card opened
+    await page.waitForSelector('.agent-card .tool-card[data-state="approval"] .tool-ask:not([hidden])', { timeout: 20_000 });
   };
   const done = (n: number) => page.waitForFunction((k) => document.querySelectorAll(".msg .stats").length > k, { timeout: 20_000 }, n);
-  // the tool results the reply's last round read: those after the question
   const results = () => { const m = streams.at(-1).messages; return m.slice(m.findLastIndex((x: any) => x.role === "user")).filter((x: any) => x.role === "tool").map((x: any) => x.content); };
 
-  // the note's sub-agent waits for the user, and is stopped alone: the reply goes on with the other's answer
   await ask();
   const asking = await cards();
   expect(asking.map((c) => c.label)).toEqual(["Echo a word", "Write a note"]);
-  // the reply's own thinking ended with its calls: it is not shown as thinking while its sub-agents work
   expect(await page.evaluate(() => {
     const t = [...[...document.querySelectorAll(".msg.assistant")].at(-1)!.querySelectorAll("details.thinking")].find((d) => !d.closest(".round, .agent-card"))!;
     return [t.querySelector("summary")!.textContent, t.classList.contains("live")];
@@ -1283,24 +1202,21 @@ test("sub-agents: two tasks handed off at once get a card each that says what it
   expect(stopped).toStartWith("Stopped before it finished: the user stopped it.");
   expect(readFileSync(LOG, "utf8")).not.toContain("wrote n1");
 
-  // allowed in its card, it runs; each sub-agent's request had the other tools and its own prompt, and the reply got
-  // their answers, not their work
   const before = await page.$$eval(".msg .stats", (s) => s.length);
   await ask();
   await page.click('.agent-card .tool-card[data-state="approval"] [data-decision="once"]');
   await done(before);
   const end = await cards();
   expect(end.map((c) => c.state)).toEqual(["done", "done"]);
-  expect(end.map((c) => c.meta)).toEqual(["1 tool · 40 tokens", "1 tool · 40 tokens"]);   // two rounds of the fake's 20
+  expect(end.map((c) => c.meta)).toEqual(["1 tool · 40 tokens", "1 tool · 40 tokens"]);
   expect(readFileSync(LOG, "utf8").match(/wrote n1/g)?.length).toBe(1);
   expect(results()).toEqual(end.map((c) => c.now));
-  const subs = streams.filter((b) => /^You are a sub-agent/.test(b.messages[0].content)).slice(-4);   // side by side: in either order
+  const subs = streams.filter((b) => /^You are a sub-agent/.test(b.messages[0].content)).slice(-4);
   expect(subs.map((b) => [b.messages[1].content, b.tools.map((t: any) => t.function.name).includes("subagent"), "logprobs" in b]).sort()).toEqual([
     ["tool echo", false, false], ["tool echo", false, false], ["tool note", false, false], ["tool note", false, false]]);
   const last = await page.evaluate(() => (([...document.querySelectorAll(".msg.assistant")].at(-1) as HTMLElement).querySelector(":scope > .markdown") as HTMLElement).innerText);
   expect(last).toBe(`The sub-agents said: ${results().join(" | ")}`);
 
-  // open, a card shows the task, its work and its answer; after a reload, all of it is still there
   await page.evaluate(() => ([...[...document.querySelectorAll(".msg.assistant")].at(-1)!.querySelectorAll(".agent-card .agent-head")][0] as HTMLElement).click());
   const body = await page.evaluate(() => {
     const b = [...[...document.querySelectorAll(".msg.assistant")].at(-1)!.querySelectorAll(".agent-card")][0].querySelector(".agent-body") as HTMLElement;
@@ -1328,14 +1244,14 @@ test("a model picked while a reply is written is the one the next question asks 
     await page.click("#model-btn");
     await page.waitForSelector("#model-pop .model-item");
     await page.evaluate(() => [...document.querySelectorAll<HTMLElement>("#model-pop .model-item")].find((b) => /Flash/.test(b.textContent ?? ""))!.click());
-    await Bun.sleep(1000);                                                // the page's status polls meanwhile: still the 27B
+    await Bun.sleep(1000);
     const n = streams.length;
     await page.type("#input", "which model");
     await page.keyboard.press("Enter");
     await untilIdle(page);
     expect(streams.slice(n).filter((b) => b.messages.at(-1).content === "which model").map((b) => b.model)).toEqual(["qwen3.8-flash-next"]);
   } finally {
-    await loading;                                                        // (its switch done, the 27B again for the tests after)
+    await loading;
     loaded = "qwen3.8-27b";
     await page.close();
   }
@@ -1343,9 +1259,9 @@ test("a model picked while a reply is written is the one the next question asks 
 
 test("a question is kept as it is sent, before its reply begins: the chat left at once stays in the list, and after a reload it holds the question and says its reply never began", async () => {
   const page = await open();
-  let held = true;                                  // (requests after it is let go, a portrait's picture, go as they are)
+  let held = true;
   await page.setRequestInterception(true);
-  page.on("request", (r) => { if (held && !(r.method() === "POST" && new URL(r.url()).pathname === "/api/chat")) void r.continue(); });   // its job never begins
+  page.on("request", (r) => { if (held && !(r.method() === "POST" && new URL(r.url()).pathname === "/api/chat")) void r.continue(); });
   await page.type("#input", "a held question");
   await page.keyboard.press("Enter");
   await page.click("#new-chat");
@@ -1367,16 +1283,16 @@ test("regenerate and edit make versions; the pager switches them and shows each 
   const page = await open();
   await send(page, "one");
   await send(page, "two");
-  expect(await pagerOf(page, 1)).toBe("");                                // one version: no pager
+  expect(await pagerOf(page, 1)).toBe("");
   await page.hover('#thread > article[data-i="1"]');
-  await page.click('#thread > article[data-i="1"] [data-act="retry"]');   // a new version of the first reply
+  await page.click('#thread > article[data-i="1"] [data-act="retry"]');
   await untilIdle(page);
   expect(await articles(page)).toEqual(["one", "You said: one"]);
   expect(await pagerOf(page, 1)).toBe("2 / 2");
   await page.click('#thread > article[data-i="1"] [data-act="prev"]');
   expect(await articles(page)).toEqual(["one", "You said: one", "two", "You said: two"]);
   expect(await pagerOf(page, 1)).toBe("1 / 2");
-  expect(await page.evaluate(() => (document.activeElement as HTMLElement)?.dataset.act)).toBe("next");   // the focus stays on the pager
+  expect(await page.evaluate(() => (document.activeElement as HTMLElement)?.dataset.act)).toBe("next");
 
   await page.hover('#thread > article[data-i="0"]');
   await page.click('#thread > article[data-i="0"] [data-act="edit"]');
@@ -1387,22 +1303,22 @@ test("regenerate and edit make versions; the pager switches them and shows each 
   await untilIdle(page);
   expect(await articles(page)).toEqual(["uno", "You said: uno"]);
   expect(await pagerOf(page, 0)).toBe("2 / 2");
-  await page.focus('#thread > article[data-i="0"] [data-act="prev"]');    // by keyboard
+  await page.focus('#thread > article[data-i="0"] [data-act="prev"]');
   await page.keyboard.press("Enter");
   expect(await articles(page)).toEqual(["one", "You said: one", "two", "You said: two"]);
   expect([await pagerOf(page, 0), await pagerOf(page, 1)]).toEqual(["1 / 2", "1 / 2"]);
 
-  await page.reload({ waitUntil: "networkidle0" });                       // the tree and what is shown are kept
+  await page.reload({ waitUntil: "networkidle0" });
   expect(await articles(page)).toEqual(["one", "You said: one", "two", "You said: two"]);
-  await send(page, "three");                                              // only the path on screen goes to Chrysalis
+  await send(page, "three");
   expect(lastStream.messages.filter((m: any) => m.role !== "system").map((m: any) => m.content))
     .toEqual(["one", "You said: one", "two", "You said: two", "three"]);
 
-  await page.hover('#thread > article[data-i="0"]');                      // deleting a version shows the next one
+  await page.hover('#thread > article[data-i="0"]');
   await page.click('#thread > article[data-i="0"] [data-act="trash"]');
   expect(await articles(page)).toEqual(["uno", "You said: uno"]);
   expect(await pagerOf(page, 0)).toBe("");
-  await page.click("#toast .btn");                                        // Undo
+  await page.click("#toast .btn");
   expect(await articles(page)).toEqual(["one", "You said: one", "two", "You said: two", "three", "You said: three"]);
   expect(await pagerOf(page, 0)).toBe("1 / 2");
   await page.close();
@@ -1416,11 +1332,11 @@ test("a reply being written in a version that is not on screen goes on, and show
   await page.hover('#thread > article[data-i="1"]');
   await page.click('#thread > article[data-i="1"] [data-act="retry"]');
   await page.waitForFunction(() => /w3/.test(document.querySelector('#thread > article[data-i="1"] .markdown')?.textContent ?? ""), { timeout: 10_000 });
-  await page.click('#thread > article[data-i="1"] [data-act="prev"]');    // away from it while it is written
+  await page.click('#thread > article[data-i="1"] [data-act="prev"]');
   expect(await reply()).toBe(whole);
   await Bun.sleep(1200);
   expect(await reply()).toBe(whole);
-  await page.click('#thread > article[data-i="1"] [data-act="next"]');    // back: it has gone on meanwhile
+  await page.click('#thread > article[data-i="1"] [data-act="next"]');
   expect((await reply()).split(" ").length).toBeGreaterThan(15);
   await page.waitForFunction(() => document.querySelector('#thread > article[data-i="1"] .stats')?.textContent?.includes("tok/s"), { timeout: 20_000 });
   expect(await reply()).toBe(whole);
@@ -1455,7 +1371,7 @@ test("export and import keep versions and tool rounds, and the imported chat res
   await other.click('#thread > article[data-i="1"] [data-act="prev"]');
   expect((await articles(other)).length).toBe(2);
 
-  const old = `${into}/old.json`;                                         // from before versions and tools
+  const old = `${into}/old.json`;
   writeFileSync(old, JSON.stringify({ chrysalis: "chats", version: 1, exported: "2026-01-01T00:00:00.000Z", conversations: [{ id: "x", title: "Old", updated: 1, effort: "low",
     messages: [{ role: "user", content: "old q" }, { role: "assistant", content: "old a", reasoning: "hm", stats: { ttft: 1, tps: 2, tokens: 3, prompt: 4, cached: 0 } }] }] }));
   const third = await open();
@@ -1468,20 +1384,14 @@ test("export and import keep versions and tool rounds, and the imported chat res
   for (const p of [page, other, third]) await p.close();
 }, 90_000);
 
-// Voice mode. Each page asks the fake speech service for a voice whose script it plays (fake-voice.ts); its log has
-// what the page sent it, session by session.
-// the voice note as Settings shows it
 const noteShown = async (page: Page) => (await openSettings(page), page.$eval("#voice-prompt", (e) => (e as HTMLTextAreaElement).value));
 const sent = (b: any) => b.messages;
 const voiceLog = (): any[] => { try { return readFileSync(VOICE_LOG, "utf8").trim().split("\n").filter(Boolean).map((l) => JSON.parse(l)); } catch { return []; } };
 const voicePages: Page[] = [];
-// A page in voice mode with the script's voice and its own system prompt (none by default, the artifact instructions
-// left out too, so a request is its messages). first: what the page does before voice mode opens; keepPointer: voice
-// mode opened without moving the pointer
 async function voicePage(script: string, o: { system?: string; first?: (page: Page) => Promise<void>; keepPointer?: boolean } = {}) {
   const page = await (await chatContext()).newPage();
   voicePages.push(page);
-  await page.setViewport({ width: 1600, height: 900 });            // Settings beside the chat (from 1460 px), so it stays open while the dock is used
+  await page.setViewport({ width: 1600, height: 900 });
   page.on("pageerror", (e) => { throw e; });
   await page.evaluateOnNewDocument((v, system) => {
     if (!sessionStorage.getItem("settings2")) sessionStorage.setItem("settings2", JSON.stringify({ system, think: {}, fast: {}, voice: { name: v }, artifacts: false }));
@@ -1511,7 +1421,7 @@ test("a character's voice is picked and heard from their card with voice mode ne
   expect(own().filter((e) => e.ev === "msg").map((e) => [e.type, e.tts, e.voice])).toEqual([["catalog", undefined, undefined], ["preview", "other-tts", "bob"]]);
   await until(() => own().some((e) => e.ev === "chunk"));
   await page.keyboard.press("Escape");
-  await until(() => own().some((e) => e.ev === "close"));                              // the card's socket goes with it
+  await until(() => own().some((e) => e.ev === "close"));
   const m = voiceLog().length;
   await page.click("#voice");
   await page.waitForFunction(() => document.querySelector("#voice-status")?.textContent === "Listening", { timeout: 10_000 });
@@ -1534,14 +1444,13 @@ test("a reply is read aloud from its speaker button with voice mode never opened
   const n = voiceLog().length, button = '#thread > article[data-i="1"] [data-act="speak"]';
   await page.click(button);
   await page.waitForSelector(`${button}.on`);
-  await page.waitForFunction((b) => !document.querySelector(`${b}.on`), { timeout: 10_000 }, button);   // heard to the end
+  await page.waitForFunction((b) => !document.querySelector(`${b}.on`), { timeout: 10_000 }, button);
   const s = voiceLog().slice(n).find((e) => e.ev === "msg").s, mine = voiceLog().filter((e) => e.s === s);
   expect(mine.filter((e) => e.ev === "msg").map((e) => e.type)).toEqual(["config", "config", "say", "say_end", "config", "say", "say_end"]);
   const says = mine.filter((e) => e.type === "say");
   expect(says.map((e) => e.text)).toEqual(["*She sings.* La la.", "Hum.\n\nHum hum."]);
   expect(says.map((x) => [...new Set(mine.filter((e) => e.ev === "chunk" && e.id === x.id).map((e) => `${e.tts}/${e.voice}`))]))
-    .toEqual([["other-tts/bob"], ["fake-tts/plain"]]);                 // hers, then the default the service speaks with
-  // again, and stopped: what is left of it is dropped
+    .toEqual([["other-tts/bob"], ["fake-tts/plain"]]);
   await page.click(button);
   await page.waitForSelector(`${button}.on`);
   await page.click(button);
@@ -1554,7 +1463,6 @@ test("a reply is read aloud from its speaker button with voice mode never opened
 test("voice mode: what is said shows as it is said, becomes the question, and the reply is spoken as it is written", async () => {
   const n0 = streams.length, c0 = checks.length;
   const { page, session } = await voicePage("plain");
-  // the message box stays (it can still take typing), with the pill in its row and Send become "End voice mode"
   expect(await page.$eval(".composer-box", (el) => el.getBoundingClientRect().height > 0 && !!(el as HTMLElement).offsetParent)).toBe(true);
   expect(await page.$eval("#input", (el) => (el as HTMLTextAreaElement).offsetHeight > 0)).toBe(true);
   expect(await page.$eval("#send", (el) => el.getAttribute("aria-label"))).toBe("End voice mode");
@@ -1565,25 +1473,20 @@ test("voice mode: what is said shows as it is said, becomes the question, and th
   expect(await page.$('#thread > article[data-i="0"] .said')).not.toBeNull();
   await page.waitForFunction(() => /^voice \d\.\d\d s/.test(document.querySelector('#thread > article[data-i="1"] .stats')?.textContent ?? ""), { timeout: 10_000 });
   const note = await noteShown(page);
-  expect(sent(lastStream)).toEqual([{ role: "user", content: `[${note}]\n\nhello there` }]);   // the note, before what was said
-  // what was heard was checked first, at temperature 0 in a conversation of its own, and nothing of it is in the reply's
+  expect(sent(lastStream)).toEqual([{ role: "user", content: `[${note}]\n\nhello there` }]);
   expect(lastStream.continue_final_message).toBeUndefined();
   const check = checks.findLast((b) => b.messages.at(-1).content === "Transcript: hello there");
   expect([check?.temperature, check?.stream, check?.model, check?.messages.length]).toEqual([0, undefined, "qwen3.8-27b-fast", 2]);
-  // the words checked are those speech recognition settled ("hello" was a look's, as it was said)
   expect(checks.slice(c0).map((b) => b.messages.at(-1).content)).toEqual(["Transcript: hello there"]);
-  // it thinks as the chat's bar says (a new chat's: Max)
   expect(await page.$eval("#energy", (e) => e.getAttribute("aria-valuetext"))).toBe("Max");
   expect([lastStream.model, lastStream.reasoning_effort]).toEqual(["qwen3.8-27b", "xhigh"]);
-  // opening voice mode had Chrysalis read the chat first (a new one's question stands in), so the first turn is an
-  // append
   const mine = streams.slice(n0), warm = mine.findIndex((b) => b.max_tokens === 1);
   expect(mine[warm]?.messages).toEqual([{ role: "user", content: "Hi" }]);
-  expect(mine[warm]?.model).toBe(lastStream.model);                 // as the reply it reads ahead for
+  expect(mine[warm]?.model).toBe(lastStream.model);
   expect(warm).toBeLessThan(mine.findIndex((b) => sent(b).at(-1)?.content.endsWith("hello there")));
   expect(await replyText(page, 1)).toBe("You said: hello there");
   expect(await page.$eval('#thread > article[data-i="0"] .msg-note summary', (e) => e.textContent)).toBe("Voice mode note");
-  expect(await page.$eval('#thread > article[data-i="0"] .msg-note-text', (e) => e.checkVisibility())).toBe(false);   // closed until asked
+  expect(await page.$eval('#thread > article[data-i="0"] .msg-note-text', (e) => e.checkVisibility())).toBe(false);
   await page.click('#thread > article[data-i="0"] .msg-note summary');
   expect(await page.$eval('#thread > article[data-i="0"] .msg-note-text', (e) => [e.textContent, e.checkVisibility()])).toEqual([note, true]);
   const log = session(), says = log.filter((e) => e.type === "say"), id = says[0].id;
@@ -1592,7 +1495,6 @@ test("voice mode: what is said shows as it is said, becomes the question, and th
   expect(log.findIndex((e) => e.type === "say_end" && e.id === id)).toBeGreaterThan(log.findLastIndex((e) => e.type === "say"));
   await page.waitForFunction(() => document.querySelector("#voice-status")?.textContent === "Listening", { timeout: 10_000 });
   expect(session().filter((e) => e.type === "playback").map((e) => e.playing)).toEqual([true, false]);
-  // speech recognition is told the conversation, for its names: the model's, then the chat as it grows
   const told = session().filter((e) => e.type === "context").map((e) => e.text);
   expect(told[0]).toMatch(/^Qwen3\.8-27B\n/);
   expect(told.at(-1)).toMatch(/hello there\nYou said: hello there$/);
@@ -1610,7 +1512,7 @@ test("voice mode: a question said with the pointer on a part of an artifact poin
     await page.mouse.move(at.x, at.y);
   } });
   await page.waitForFunction(() => document.querySelector('#thread > article[data-i="2"] .bubble')?.textContent === "make this orange", { timeout: 10_000 });
-  await page.waitForSelector('#thread > article[data-i="3"] .stats', { timeout: 10_000 });   // its reply written
+  await page.waitForSelector('#thread > article[data-i="3"] .stats', { timeout: 10_000 });
   expect(sent(lastStream).at(-1).content).toContain('The user is pointing at the part #burger of the artifact panda:\n<g id="burger">');
   expect(await page.$eval('#thread > article[data-i="2"] .point-chip', (e) => e.textContent)).toBe("panda · #burger");
   expect(await page.$eval(".art-canvas[data-v='2'] .svg-paper", (p) => p.shadowRoot!.querySelector("#burger rect")?.getAttribute("fill"))).toBe("#ff8c00");
@@ -1620,7 +1522,7 @@ test("voice mode: talking over a reply silences it, stops Chrysalis's request, a
   const stopped = chrysalisStopped, { page, session } = await voicePage("story");
   await page.waitForFunction(() => document.querySelector('#thread > article[data-i="0"] .bubble')?.textContent === "slow story", { timeout: 10_000 });
   for (const t = Date.now(); !session().some((e) => e.ev === "interrupt") && Date.now() - t < 10_000; ) await Bun.sleep(10);
-  const talked = Date.now();                       // Chrysalis's request stops with the speech, not when the next words come in
+  const talked = Date.now();
   for (; chrysalisStopped === stopped && Date.now() - talked < 3000; ) await Bun.sleep(10);
   expect(chrysalisStopped).toBe(stopped + 1);
   expect(Date.now() - talked).toBeLessThan(500);
@@ -1629,14 +1531,11 @@ test("voice mode: talking over a reply silences it, stops Chrysalis's request, a
   expect(kept.length).toBeGreaterThan(0);
   expect(kept.length).toBeLessThan(full.length);
   expect(full.startsWith(kept)).toBe(true);
-  // cut at the word it was on (whole words), within the pieces sent before the user talked
   const before = chunks.map((c) => c.text).join("").trimEnd(), ends = chunks.map((c) => chunks.filter((x) => x.to <= c.to).map((x) => x.text).join("").trimEnd());
-  expect([full[kept.length] === " ", kept.length <= before.length, ends.includes(kept)]).toEqual([true, true, false]);   // not at a piece's end
+  expect([full[kept.length] === " ", kept.length <= before.length, ends.includes(kept)]).toEqual([true, true, false]);
   await page.waitForFunction(() => document.querySelector('#thread > article[data-i="2"] .bubble')?.textContent === "and then", { timeout: 10_000 });
   await page.waitForFunction(() => /voice/.test(document.querySelector('#thread > article[data-i="3"] .stats')?.textContent ?? ""), { timeout: 10_000 });
-  // the kept reply as Chrysalis is sent it again: only what was heard
   expect(sent(lastStream).filter((m: any) => m.role === "assistant").map((m: any) => m.content)).toEqual([`${kept} — [cut off: the user talked over this reply]`]);
-  // the next question's check has the one before it and what the reply said of it
   expect(checks.findLast((b) => b.messages.at(-1).content.endsWith("Transcript: and then"))?.messages.at(-1).content)
     .toBe(`The user said before: slow story\nThe assistant said: ${kept}\nTranscript: and then`);
   await page.close();
@@ -1651,15 +1550,15 @@ test("voice mode: a reply's words not heard yet are grey, and turn their own col
     const grey = range?.toString().trim() ?? null, mid = range && getComputedStyle(range.startContainer.parentElement!).color;
     return { all, grey, said: grey === null ? null : all.slice(0, all.length - grey.length).trim(), mid };
   });
-  await Bun.sleep(500);                                           // into its first pieces, past the output's latency
+  await Bun.sleep(500);
   const a = await heard();
   await Bun.sleep(700);
   const b = await heard();
   expect(a.grey && b.grey && a.said && b.said).toBeTruthy();
   expect([b.all.startsWith(a.said!), b.all.startsWith(b.said!), b.said!.length > a.said!.length]).toEqual([true, true, true]);
-  expect(/^(w\d+ )*w\d+$/.test(b.said!)).toBe(true);                         // whole words
+  expect(/^(w\d+ )*w\d+$/.test(b.said!)).toBe(true);
   await page.waitForFunction(() => document.querySelector("#voice-status")?.textContent === "Listening", { timeout: 15_000 });
-  expect(await page.evaluate(() => (CSS as any).highlights.has("voice-unspoken"))).toBe(false);   // all of it heard
+  expect(await page.evaluate(() => (CSS as any).highlights.has("voice-unspoken"))).toBe(false);
   await page.close();
 }, 30_000);
 
@@ -1679,11 +1578,11 @@ test("voice mode's note goes before the first question said and again when it ch
   await page.waitForFunction(() => /^voice /.test(document.querySelector('#thread > article[data-i="5"] .stats')?.textContent ?? ""), { timeout: 15_000 });
   await openSettings(page);
   await page.$eval("#voice-prompt", (el, v) => { (el as HTMLTextAreaElement).value = v; el.dispatchEvent(new Event("input")); }, CHANGED);
-  await page.$eval("#knob-voice_speed", (el) => { (el as HTMLInputElement).value = "1.2"; el.dispatchEvent(new Event("change")); });   // the script's next line waits for a config
+  await page.$eval("#knob-voice_speed", (el) => { (el as HTMLInputElement).value = "1.2"; el.dispatchEvent(new Event("change")); });
   await page.waitForFunction(() => /^voice /.test(document.querySelector('#thread > article[data-i="7"] .stats')?.textContent ?? ""), { timeout: 15_000 });
   await page.click("#send");
   await send(page, "typed again");
-  const asked = streams.slice(n0).filter((b) => b.max_tokens !== 1);   // not the warm-up when voice mode opened
+  const asked = streams.slice(n0).filter((b) => b.max_tokens !== 1);
   expect(asked.map((b) => sent(b).at(-1).content)).toEqual(["typed first", `[${note}]\n\nfirst question`, "second question",
     `[${CHANGED}]\n\nthird question`, "[The user is typing again and reads your replies.]\n\ntyped again"]);
   expect(asked.every((b) => JSON.stringify(b.messages[0]) === JSON.stringify({ role: "system", content: "Be brief." }))).toBe(true);
@@ -1709,7 +1608,7 @@ test("What the model is sent shows the next request as Chrysalis gets it: the to
   const shown = await page.$eval("#sent-text", (e) => e.textContent!);
   await page.keyboard.press("Escape");
   await send(page, "second");
-  const next = lastStream;                                       // what Chrysalis got next: all of the view, then the new question
+  const next = lastStream;
   expect(shown).toContain(JSON.stringify(next.tools, null, 2));
   let at = 0;
   for (const m of next.messages.slice(0, -1)) {
@@ -1721,7 +1620,6 @@ test("What the model is sent shows the next request as Chrysalis gets it: the to
   await page.$eval("#system-input", (el) => { (el as HTMLTextAreaElement).value = "Be terse, {{MODEL}}."; el.dispatchEvent(new Event("input")); });
   await send(page, "third");
   expect(lastStream.messages[0]).toEqual({ role: "system", content: `Be terse, Qwen3.8-27B.\n\n${ARTIFACTS_PROMPT}` });
-  // Chrysalis's card (its portrait beside a reply opens it) goes after the system prompt, as a character's does
   await page.click("#thread > article.msg.assistant .speaker");
   await page.waitForSelector("#cast-sheet:not([hidden]) .card-field textarea");
   const typeIn = async (label: string, text: string) => {
@@ -1733,14 +1631,12 @@ test("What the model is sent shows the next request as Chrysalis gets it: the to
   await page.keyboard.press("Escape");
   await send(page, "fourth");
   expect(lastStream.messages[0]).toEqual({ role: "system", content: `Be terse, Qwen3.8-27B.\n\nChrysalis tends a greenhouse.\n\nScenario: A rainy afternoon.\n\n${ARTIFACTS_PROMPT}` });
-  // and what the user's own card says of them, as every character's chat has it
   await page.click("#you");
   await page.waitForSelector("#cast-sheet:not([hidden]) .card-text");
   await page.type("#cast-sheet .card-text", "{{user}} keeps bees.");
   await page.keyboard.press("Escape");
   await send(page, "fifth");
   expect(lastStream.messages[0]).toEqual({ role: "system", content: `Be terse, Qwen3.8-27B.\n\nChrysalis tends a greenhouse.\n\nScenario: A rainy afternoon.\n\nUser keeps bees.\n\n${ARTIFACTS_PROMPT}` });
-  // its greeting opens a new chat with it, a user turn going first as in every chat a character begins
   await page.click("#thread > article.msg.assistant .speaker");
   await page.waitForSelector("#cast-sheet:not([hidden]) .card-field textarea");
   await typeIn("Greeting", "Hello, {{user}}.");
@@ -1754,8 +1650,6 @@ test("What the model is sent shows the next request as Chrysalis gets it: the to
 
 test("the theme is the system's until Settings chooses one, which overrides it and is kept across a reload; System follows the system's scheme as it changes", async () => {
   const page = await open();
-  // the page's background, by its luminance, once it has settled (a change of the system's scheme reaches the page on
-  // its next frame): dark under 60, light over 200
   const bg = async (want: "dark" | "light") => {
     const lum = () => page.evaluate(() => {
       const [r, g, b] = getComputedStyle(document.body).backgroundColor.match(/[\d.]+/g)!.map(Number);
@@ -1772,7 +1666,7 @@ test("the theme is the system's until Settings chooses one, which overrides it a
   expect(await bg("light")).toBeGreaterThan(200);
   await openSettings(page);
   await page.click('#theme-pick [data-theme="dark"]');
-  expect(await bg("dark")).toBeLessThan(60);                     // chosen over the system's light
+  expect(await bg("dark")).toBeLessThan(60);
   await page.reload({ waitUntil: "networkidle0" });
   expect(await bg("dark")).toBeLessThan(60);
   expect(await page.$eval('#theme-pick [aria-checked="true"]', (b) => (b as HTMLElement).dataset.theme)).toBe("dark");
@@ -1798,7 +1692,7 @@ test("voice picker: the voice models' voices by language and gender; a pick swit
   expect(await page.$eval("#voice-pick .voice-pick-name", (el) => el.textContent)).toBe("Pick");
   await page.click("#voice-pick");
   const rows = await page.$$eval("#voice-list > *", (els) => els.map((e) => [e.className, e.textContent]));
-  expect(rows.filter(([c]) => c.startsWith("voice-model"))).toEqual([["voice-model", "Fake TTS"], ["voice-model", "Other TTS"], ["voice-model missing", "Big TTSvoice/setup.sh big-tts"]]);
+  expect(rows.filter(([c]) => c.startsWith("voice-model"))).toEqual([["voice-model", "Fake TTS"], ["voice-model", "Other TTS"], ["voice-model missing", "Big TTSDownload"]]);
   expect(rows.filter(([c]) => c === "voice-group").map(([, t]) => t)).toEqual(["American English · Female", "British English · Male", "Spanish · Female", "American English · Male"]);
   expect(await page.$$eval("#voice-pop .voice-item", (els) => els.map((e) => (e as HTMLElement).dataset.voice))).toEqual(
     ["plain", "pie", "story", "long", "merge", "join", "ahead", "onward", "checking", "silent", "pick", "notes", "point", "echo"].map((v) => `fake-tts/${v}`).concat(["other-tts/ana", "other-tts/bob"]));
@@ -1811,7 +1705,6 @@ test("voice picker: the voice models' voices by language and gender; a pick swit
   const log = session(), after = log.slice(log.findIndex((e) => e.type === "config")).filter((e) => e.ev === "chunk");
   expect(after.length).toBeGreaterThan(0);
   expect(new Set(after.map((e) => `${e.tts}/${e.voice}`))).toEqual(new Set(["other-tts/bob"]));
-  // one value, two views: the dock's picker and Settings show it, and Settings changing it is the dock's change too
   expect(await page.$eval("#voice-pick .voice-pick-name", (el) => el.textContent)).toBe("Bob");
   expect(await stored(page)).toEqual({ tts: "other-tts", name: "bob" });
   await openSettings(page);
@@ -1820,7 +1713,6 @@ test("voice picker: the voice models' voices by language and gender; a pick swit
   await page.waitForFunction(() => document.querySelector("#voice-pick .voice-pick-name")?.textContent === "Ana");
   expect(await settled(() => configs().length === 2)).toBe(true);
   expect(configs()[1]).toEqual({ stack: undefined, voice: "ana", speed: undefined });
-  // a pick from the dock is undone like any setting
   await page.click("#voice-pick");
   await page.click('#voice-pop [data-voice="fake-tts/echo"]');
   await page.waitForFunction(() => (document.querySelector("#voice-name") as HTMLSelectElement)?.value === JSON.stringify(["fake-tts", "echo"]));
@@ -1843,14 +1735,14 @@ test("voice picker: a voice's play button plays its sample, apart from any reply
   expect(log.filter((e) => e.type === "playback").map((e) => e.playing)).toEqual([true, false]);
   expect(log.some((e) => e.type === "say" || e.type === "config")).toBe(false);
   expect(await page.$$eval("#thread > article", (els) => els.length)).toBe(0);
-  await page.waitForFunction(() => document.querySelector("#voice-status")?.textContent === "Listening", { timeout: 3000 });   // (drawn on the next frame)
+  await page.waitForFunction(() => document.querySelector("#voice-status")?.textContent === "Listening", { timeout: 3000 });
   expect(await page.$eval("#voice-pick .voice-pick-name", (el) => el.textContent)).toBe("Silent");
   expect(await page.$eval("#voice-pop", (el) => (el as HTMLElement).hidden)).toBe(false);
   await page.close();
 }, 30_000);
 
 test("voice mode: mute stops the microphone's audio; ending it closes the socket, and the service stops once idle", async () => {
-  for (const p of voicePages.splice(0)) if (!p.isClosed()) await p.close();   // earlier tests' voice sockets, open if they failed
+  for (const p of voicePages.splice(0)) if (!p.isClosed()) await p.close();
   const { page, session } = await voicePage("silent");
   const frames = () => session().filter((e) => e.ev === "frames").at(-1)?.n ?? 0;
   for (let t = Date.now(); frames() < 20 && Date.now() - t < 5000; ) await Bun.sleep(50);
@@ -1875,8 +1767,6 @@ test("voice mode: mute stops the microphone's audio; ending it closes the socket
   await page.close();
 }, 30_000);
 
-// A browser past the warning, as a person clicks it: Chromium's interstitial, and Firefox's (its buttons in a shadow root,
-// the second one live after a moment)
 async function pastWarning(page: Page, firefox: boolean) {
   if (firefox) {
     await page.waitForSelector("net-error-card >>> #advanced-button", { timeout: 10_000 });
@@ -1890,9 +1780,6 @@ async function pastWarning(page: Page, firefox: boolean) {
     await page.click("#proceed-link");
   }
 }
-// A device's browsers, under `home`, trusting the authority in `tlsDir`, as one that went through its connect page's
-// steps does: Chromium's store ($HOME/.pki/nssdb), and a Firefox profile's, which has its store from Firefox's first run
-// (an empty one here). The profile, for Firefox to run with.
 function trusting(home: string, tlsDir: string) {
   const profile = `${home}/.mozilla/firefox/test.default`, chromium = `${home}/.pki/nssdb`;
   for (const db of [profile, chromium]) {
@@ -1905,12 +1792,11 @@ function trusting(home: string, tlsDir: string) {
 
 test("past the chat's warning on the network, a device gets the connect page and none of the chat: it offers each kind of device the way its system trusts the authority, Chromium downloads it, and nothing reaches the server; trusting the authority, Chromium and Firefox each show their own code on the same page, which this computer's Connect a device allows, and the chat opens there", async () => {
   const tlsDir = mkdtempSync(`${RUN}/tls-`);
-  // the server on the network, on the ports given (0: any), and what it printed once its trust check listens
   const start = async (ports = { PORT: "0", CHRYSALIS_CHECK_PORT: "0" }) => {
     const proc = Bun.spawn([process.execPath, "server.ts"], {
       cwd: import.meta.dir, stdout: "pipe", stderr: "inherit",
       env: { ...process.env, ...ports, CHRYSALIS_URL: `http://127.0.0.1:${fake.port}`, CHRYSALIS_HOST: "0.0.0.0", NODE_ENV: "production", CHRYSALIS_LINK_PORT: "0",
-        CHRYSALIS_SELF_AS_NETWORK: "1",                                // this machine's browsers stand in for other devices
+        CHRYSALIS_SELF_AS_NETWORK: "1",
         CHRYSALIS_MCP_CONFIG: `${dir}/mcp.json`, CHRYSALIS_TLS_DIR: tlsDir },
     });
     let out = "";
@@ -1925,8 +1811,6 @@ test("past the chat's warning on the network, a device gets the connect page and
   const others: Browser[] = [];
   try {
     const here = out.match(/chrysalis web: (\S+)/)![1], chat = out.match(/chrysalis web: (https:\/\/(?!127\.)\S+)/)![1];
-    // browsers as a person's: Chromium and Firefox, each with a store of its own (`home`), and a Chromium that trusts nothing
-    // of Chrysalis's
     const launch = (firefox: boolean, home = "", args: string[] = []) => puppeteer.launch(firefox
       ? { browser: "firefox", executablePath: process.env.FIREFOX ?? "/usr/bin/firefox", headless: true, userDataDir: home || mkdtempSync(`${RUN}/fx-`) }
       : { executablePath: process.env.CHROMIUM ?? "/usr/bin/chromium", headless: true, args: ["--no-sandbox", ...args], ...(home ? { env: { ...process.env, HOME: home } } : {}) });
@@ -1948,13 +1832,11 @@ test("past the chat's warning on the network, a device gets the connect page and
       await pastWarning(page, false);
       await setUp(page);
       offered[kind] = await page.$eval(".go", (a) => a.getAttribute("href"));
-      // each device's steps end in trusting the authority
       while (!(await page.$eval("#on", (e) => (e as HTMLElement).hidden))) await page.click("#on");
       expect(await page.$eval("#count", (e) => e.textContent)).toMatch(/ · Trust$/);
-      if (kind === "android") {                                   // a browser that does not trust it stays here
+      if (kind === "android") {
         await Bun.sleep(2000);
         expect(page.url()).toBe(chat);
-        // the page floats on the chat's sea, the butterfly above its card (not the logo, which stands there without it)
         const stage = await page.$eval("#stage", (e) => { const b = e.getBoundingClientRect(); return { x: b.x, y: b.y, width: b.width, height: b.height }; });
         expect([(await look(page, stage)).pink > 1500, await page.$eval("#stage", (e) => e.childElementCount)]).toEqual([true, 0]);
       }
@@ -1963,8 +1845,6 @@ test("past the chat's warning on the network, a device gets the connect page and
     expect(offered).toEqual({ iphone: "/chrysalis.mobileconfig", android: "/chrysalis-ca.crt", firefox: "/chrysalis-ca-firefox.crt",
       mac: "/chrysalis.mobileconfig", windows: "/chrysalis-ca.crt" });
     const waiting = async () => (await (await fetch(`${here}api/pair`)).json()).waiting;
-    // a firewall that drops the trust check's port, as the browser sees it: no answer at all. The page says so, rather
-    // than checking for ever.
     {
       const page = await (await plain.createBrowserContext()).newPage();
       await page.goto(chat).catch(() => {});
@@ -1972,16 +1852,13 @@ test("past the chat's warning on the network, a device gets the connect page and
       await setUp(page);
       await page.setRequestInterception(true);
       page.on("request", (r) => { if (!r.url().includes("/check.gif")) void r.continue(); });
-      await page.reload({ waitUntil: "domcontentloaded" });             // "load" waits on the image held back
+      await page.reload({ waitUntil: "domcontentloaded" });
       await page.waitForFunction(() => /Cannot reach/.test(document.getElementById("status")!.textContent!), { timeout: 10_000 });
       expect([await page.$eval("#status", (e) => (e as HTMLElement).hidden), await page.$eval("#sub", (e) => e.textContent)])
         .toEqual([false, expect.stringContaining("chrysalis.sh start --host 0.0.0.0")]);
       await page.close();
     }
 
-    // Past the chat's warning, without trusting the authority: the connect page in the chat's place, none of the chat, and
-    // nothing reaches the server; Chromium keeps the certificate it offers (it holds back a plain-HTTP page's downloads,
-    // asking first). Chromium without WebGL, 3D or a GPU: its sea is drawn by the CPU.
     for (const firefox of [false, true]) {
       const home = firefox ? "" : mkdtempSync(`${RUN}/untrusting-`);
       const b = await launch(firefox, home, ["--disable-3d-apis"]);
@@ -2001,7 +1878,6 @@ test("past the chat's warning on the network, a device gets the connect page and
         const kept = `${home}/Downloads/chrysalis-ca.crt`;
         for (let t = Date.now(); !existsSync(kept) && Date.now() - t < 5000; ) await Bun.sleep(100);
         expect(existsSync(kept) && readFileSync(kept, "utf8")).toBe(readFileSync(`${tlsDir}/ca.pem`, "utf8"));
-        // then the next step alone: the certificate manager's address to copy (no page may open it), with no download
         await page.waitForFunction(() => document.getElementById("go")!.hidden, { timeout: 3000 });
         expect(await page.$eval("#now", (e) => [e.querySelector(".copyable code")?.textContent, !!e.querySelector(".copy")]))
           .toEqual(["chrome://certificate-manager/localcerts/usercerts", true]);
@@ -2009,13 +1885,10 @@ test("past the chat's warning on the network, a device gets the connect page and
       expect(await waiting()).toEqual([]);
     }
 
-    // This computer's browser gets the chat at once, over plain HTTP. Trusting the authority, as a device does once its
-    // connect page's steps are done, Chromium's and Firefox's connect page at the chat's address shows the device's code;
-    // Connect a device here shows the same code, Allow lets that device in, and the chat opens there.
     const local = await (await browser.createBrowserContext()).newPage();
     await local.goto(here, { waitUntil: "load" });
     await local.waitForSelector("#input", { timeout: 15_000 });
-    await local.waitForSelector("#connect:not([hidden])");                 // shown once the page's first status says it is this computer
+    await local.waitForSelector("#connect:not([hidden])");
     await local.click("#connect");
     await local.waitForSelector("#connect-view .dev-qr");
     expect(await local.$eval("#connect-view .dev-qr", (img) => (img as HTMLImageElement).naturalWidth > 0)).toBe(true);
@@ -2027,10 +1900,10 @@ test("past the chat's warning on the network, a device gets the connect page and
       const page = await b.newPage();
       await page.goto(chat, { waitUntil: "load" });
       await page.waitForFunction(() => !(document.getElementById("code") as HTMLElement).hidden, { timeout: 10_000 });
-      expect(await page.$eval("#setup", (e) => (e as HTMLElement).hidden)).toBe(true);     // nothing to set up
+      expect(await page.$eval("#setup", (e) => (e as HTMLElement).hidden)).toBe(true);
       const code = await page.$eval("#code", (e) => e.textContent!);
       expect(code).toMatch(/^\d{3} \d{3}$/);
-      expect(await page.$eval("#after .copyable code", (e) => e.textContent)).toBe(`chrysalis.sh allow ${code.replace(" ", "")}`);   // to copy
+      expect(await page.$eval("#after .copyable code", (e) => e.textContent)).toBe(`chrysalis.sh allow ${code.replace(" ", "")}`);
       await local.waitForFunction((c) => [...document.querySelectorAll("#connect-view .dev-ask-code")].some((e) => e.textContent === c), { timeout: 5000 }, code);
       expect(await local.$$eval("#connect-view .dev-ask .dev-name", (n) => n.map((e) => e.textContent))).toEqual([name]);
       await local.evaluate((c) => [...document.querySelectorAll("#connect-view .dev-ask")]
@@ -2038,22 +1911,20 @@ test("past the chat's warning on the network, a device gets the connect page and
       await page.waitForFunction((c) => location.href === c, { timeout: 15_000 }, chat);
       await page.waitForSelector("#input");
       await Bun.sleep(1000);
-      expect([page.url(), await page.$eval("#connect", (e) => e.checkVisibility())]).toEqual([chat, false]);   // only this computer lets devices in
+      expect([page.url(), await page.$eval("#connect", (e) => e.checkVisibility())]).toEqual([chat, false]);
       await local.waitForFunction((n) => (document.querySelector("#connect-view .dev-joined")?.textContent ?? "").includes(`${n} is connected`), { timeout: 5000 }, name);
       if (!firefox) chrome = page;
     }
     expect(await local.$$eval("#connect-view .dev-item .dev-name", (n) => n.map((e) => e.textContent)))
       .toEqual(["Linux · Chrome", "Linux · Firefox"]);
 
-    // A restart (every deploy) forgets each browser's check: an open chat checks again by itself and carries on, with no
-    // trip through the pairing page (which would reload it)
     await chrome!.evaluate(() => { (window as any).stayed = true; });
     const port = (re: RegExp) => new URL(out.match(re)![1]).port;
     const ports = { PORT: port(/chrysalis web: (\S+)/), CHRYSALIS_CHECK_PORT: port(/chrysalis check: (\S+)/) };
     lan.kill();
     await lan.exited;
     ({ proc: lan, out } = await start(ports));
-    await Bun.sleep(9000);                                        // the page's status poll (every 4 s) finds the gate asking
+    await Bun.sleep(9000);
     expect(await chrome!.evaluate(async () => [(window as any).stayed, location.pathname, (await fetch("/api/status")).status])).toEqual([true, "/", 200]);
   } finally {
     for (const b of others) await b.close().catch(() => {});
@@ -2061,7 +1932,6 @@ test("past the chat's warning on the network, a device gets the connect page and
   }
 }, 120_000);
 
-// The service's log of a session: the replies the page asked it to speak (by id, their text) and the ones it cancelled.
 const spokenOf = (log: any[]) => {
   const said = new Map<string, string>();
   for (const e of log.filter((x) => x.type === "say")) said.set(e.id, (said.get(e.id) ?? "") + e.text);
@@ -2084,10 +1954,9 @@ test("voice mode: a question shows grey as it was heard until its check is in, t
   expect(sent(lastStream).at(-1).content).toMatch(/\n\nlets do a snake game in Pygame$/);
   expect(JSON.stringify(lastStream)).not.toMatch(/=>|pie game/);
   expect(await replyText(page, 1)).toBe("You said: lets do a snake game in Pygame");
-  // the reply begun at the turn, on the words as heard: its speech cancelled, unheard (the page held it)
   const replies = streams.slice(n0).filter((b) => b.max_tokens !== 1).map((b) => sent(b).at(-1).content.split("\n\n").at(-1));
   expect(replies).toEqual(["lets do a snake game in pie game", "lets do a snake game in Pygame"]);
-  expect(checks.slice(c0).map((b) => b.messages.at(-1).content)).toEqual(["Transcript: lets do a snake game in pie game"]);   // once
+  expect(checks.slice(c0).map((b) => b.messages.at(-1).content)).toEqual(["Transcript: lets do a snake game in pie game"]);
   const { said, cancelled } = spokenOf(session());
   expect([...said].filter(([id]) => !cancelled.has(id)).map(([, t]) => t)).toEqual(["You said: lets do a snake game in Pygame"]);
   expect([...said].filter(([id]) => cancelled.has(id)).map(([, t]) => t)).toEqual(["You said: lets do a snake game in pie game"]);
@@ -2102,7 +1971,6 @@ test("voice mode: words said while a question is still being checked join it, an
   expect(await page.$eval('#thread > article[data-i="0"] .bubble', (e) => e.textContent)).toBe("wait lets do a snake game in Pygame");
   expect(await page.$$eval("#thread > article.msg:not(.ghost)", (els) => els.length)).toBe(2);
   expect(await replyText(page, 1)).toBe("You said: wait lets do a snake game in Pygame");
-  // the replies begun before the question stood were cancelled unheard
   const replies = streams.slice(n0).filter((b) => b.max_tokens !== 1);
   expect(sent(replies.at(-1)).at(-1).content.split("\n\n").at(-1)).toBe("wait lets do a snake game in Pygame");
   const { said, cancelled } = spokenOf(session());
@@ -2115,11 +1983,10 @@ test("voice mode: a reply begins at a pause the turn waits out, unseen and unhea
   await page.waitForFunction(() => /^voice /.test(document.querySelector('#thread > article[data-i="1"] .stats')?.textContent ?? ""), { timeout: 15_000 });
   const log = session(), turned = turnAt(log), mine = streams.slice(n0).map((b, i) => [b, streamAt[n0 + i]]).filter(([b]) => b.max_tokens !== 1);
   expect(mine.length).toBe(1);
-  expect(mine[0][1]).toBeLessThan(turned);                           // Chrysalis was asked before the turn ended
-  // the reply was shown and heard only after: its first playback after the turn, and its text all spoken by then
+  expect(mine[0][1]).toBeLessThan(turned);
   const played = log.findIndex((e) => e.type === "playback" && e.playing), turnIx = log.findIndex((e) => e.ev === "sent" && e.type === "turn");
   expect(played).toBeGreaterThan(turnIx);
-  expect(log.slice(0, turnIx).some((e) => e.ev === "chunk")).toBe(true);   // spoken ahead, held by the page
+  expect(log.slice(0, turnIx).some((e) => e.ev === "chunk")).toBe(true);
   expect(await replyText(page, 1)).toBe("Paris.");
   expect(await page.$$eval("#thread > article.msg", (els) => els.length)).toBe(2);
   await page.close();
@@ -2130,13 +1997,11 @@ test("voice mode: a reply begun at a pause is dropped unheard when the user goes
   await page.waitForFunction(() => /^voice /.test(document.querySelector('#thread > article[data-i="1"] .stats')?.textContent ?? ""), { timeout: 15_000 });
   const replies = streams.slice(n0).filter((b) => b.max_tokens !== 1).map((b) => sent(b).at(-1).content.split("\n\n").at(-1));
   expect(replies).toEqual(["slow what is the", "slow what is the capital of France"]);
-  expect(chrysalisStopped).toBe(stopped + 1);                            // still being written (slowly) when the user went on
+  expect(chrysalisStopped).toBe(stopped + 1);
   expect(await page.$eval('#thread > article[data-i="0"] .bubble', (e) => e.textContent)).toBe("slow what is the capital of France");
   expect(await page.$$eval("#thread > article.msg", (els) => els.length)).toBe(2);
-  // the pause's reply was spoken into the page's hold and cancelled there; the question's is the one heard
   const log = session(), { said, cancelled } = spokenOf(log);
   expect([...said.keys()].map((id) => cancelled.has(id))).toEqual([true, false]);
-  // dropped as the user went on, not at the turn
   expect(log.findIndex((e) => e.type === "cancel")).toBeLessThan(log.findIndex((e) => e.ev === "sent" && e.type === "turn"));
   await page.close();
 }, 30_000);
@@ -2157,14 +2022,14 @@ test("voice mode: it says it is listening once the microphone gives audio, not w
   const page = await (await chatContext()).newPage();
   await page.evaluateOnNewDocument(() => {
     sessionStorage.setItem("settings2", JSON.stringify({ system: "", think: {}, fast: {}, voice: { name: "silent" }, artifacts: false }));
-    const ask = navigator.mediaDevices.getUserMedia.bind(navigator.mediaDevices);   // a phone's microphone, slow to open
+    const ask = navigator.mediaDevices.getUserMedia.bind(navigator.mediaDevices);
     navigator.mediaDevices.getUserMedia = async (c) => { await new Promise((r) => setTimeout(r, 1500)); return ask(c); };
   });
   await page.goto(`${base}/`, { waitUntil: "networkidle0" });
   const hellos = () => voiceLog().filter((e) => e.ev === "msg" && e.type === "hello").length, n0 = hellos();
   await page.click("#voice");
   for (const t = Date.now(); hellos() === n0 && Date.now() - t < 1000; ) await Bun.sleep(20);
-  await Bun.sleep(300);                                          // the service is ready (the fake loads nothing); the microphone is not
+  await Bun.sleep(300);
   expect([hellos() > n0, await page.$eval("#voice-status", (e) => e.textContent)]).toEqual([true, "Starting voice…"]);
   await page.waitForFunction(() => document.querySelector("#voice-status")?.textContent === "Listening", { timeout: 5000 });
   await page.close();
@@ -2178,18 +2043,13 @@ test("voice mode: the thinking bar is the chat's, one setting for spoken and wri
   await page.keyboard.press("ArrowLeft");
   expect(await bar()).toEqual(["Medium", "Thinking: Medium"]);
   await openSettings(page);
-  expect(await page.$(".voice-think")).toBeNull();                // no thinking of voice mode's own
-  await page.click("#send");                                    // ■: ends voice mode
+  expect(await page.$(".voice-think")).toBeNull();
+  await page.click("#send");
   expect(await bar()).toEqual(["Medium", "Thinking: Medium"]);
   await page.close();
 }, 30_000);
 
-// A part of the page's screenshot, counted: its pink pixels (the butterfly is drawn in the accent, the sea in a grey),
-// its faintly pink ones (any pink tint, however dim), its lit ones (anything drawn on the dark page), those close to
-// `like` (a CSS color) and those that differ from `before` (an earlier shot of the same part). The PNGs are decoded by
-// the page itself (an image drawn into a 2D canvas), so the test needs no image library.
 async function look(page: Page, clip: { x: number; y: number; width: number; height: number }, before = "", like = "") {
-  // (not beyond the viewport: that resizes the window for the shot, which ends a panel's slide at once)
   const png = Buffer.from(await page.screenshot({ clip, encoding: "binary", captureBeyondViewport: false })).toString("base64");
   const counts = await page.evaluate(async (src, prev, like) => {
     const read = async (s: string) => {
@@ -2211,7 +2071,7 @@ async function look(page: Page, clip: { x: number; y: number; width: number; hei
     for (let i = 0; i < d.length; i += 4) {
       if (d[i] > 90 && d[i] - d[i + 1] > 50) pink++;
       if (d[i] - d[i + 1] > 12 && d[i] > d[i + 2]) tint++;
-      if (d[i] + d[i + 1] + d[i + 2] > 100) lit++;                   // the page is #121010
+      if (d[i] + d[i + 1] + d[i + 2] > 100) lit++;
       if (like && Math.abs(d[i] - lr) + Math.abs(d[i + 1] - lg) + Math.abs(d[i + 2] - lb) < 60) close++;
       if (b && Math.abs(d[i] - b[i]) + Math.abs(d[i + 1] - b[i + 1]) + Math.abs(d[i + 2] - b[i + 2]) > 30) changed++;
     }
@@ -2220,8 +2080,6 @@ async function look(page: Page, clip: { x: number; y: number; width: number; hei
   return { png, ...counts };
 }
 
-// Where WebGL2 is missing the CPU draws the sea (ocean.ts): the same picture, held here to WebGL2's, in a window and on a
-// phone (whose small butterfly is drawn bolder). Reduced motion draws one frame, the same instant in both.
 test("the sea drawn by the CPU, in a browser without WebGL, is the sea WebGL2 draws: the same water, the same butterfly, in a window and on a phone", async () => {
   const shots: Record<string, Awaited<ReturnType<typeof look>>> = {};
   for (const [name, flag] of [["gpu", "--enable-unsafe-swiftshader"], ["cpu", "--disable-3d-apis"]] as const) {
@@ -2252,15 +2110,12 @@ test("the sea drawn by the CPU, in a browser without WebGL, is the sea WebGL2 dr
   }
 }, 90_000);
 
-// The sea needs WebGL2, which headless Chromium here gets only from SwiftShader on request: a browser of its own, so the
-// other tests run without its frames (costly when rendered in software) and with the plain logo in a new chat.
 test("a new chat is the butterfly in a sea under the message box too, never blanked by a side panel sliding shut; a click on the water makes ripples and keeps the message box focused, and with reduced motion draws nothing; a pointer resting on the water draws it no more often than the water alone does", async () => {
   const gl = await puppeteer.launch({ executablePath: process.env.CHROMIUM ?? "/usr/bin/chromium", headless: true, args: [...CHAT_ARGS, "--enable-unsafe-swiftshader"] });
   try {
     for (const motion of ["no-preference", "reduce"] as const) {
-      const page = await (await chatContext(gl)).newPage();     // its own storage: the panel starts open
+      const page = await (await chatContext(gl)).newPage();
       page.on("pageerror", (e) => { throw e; });
-      // the frames the sea draws: its cells pass, counted
       await page.evaluateOnNewDocument(() => {
         const get = HTMLCanvasElement.prototype.getContext;
         (window as any).seaFrames = 0;
@@ -2284,7 +2139,6 @@ test("a new chat is the butterfly in a sea under the message box too, never blan
       for (const end = Date.now() + 5000; pink <= 800 && Date.now() < end; await Bun.sleep(100)) pink = (await look(page, middle)).pink;
       expect(pink).toBeGreaterThan(800);
 
-      // the conversations panel closes: slowed down, so that shots land while the chat widens (reduced motion has no slide)
       const open = sea.x, left = () => page.$eval(".sea", (e) => e.getBoundingClientRect().left);
       if (motion !== "reduce") await page.addStyleTag({ content: ":root { --pane-ease: 4s linear !important; }" });
       await page.click("#conversations-toggle");
@@ -2298,13 +2152,10 @@ test("a new chat is the butterfly in a sea under the message box too, never blan
       }
       await page.waitForFunction(() => document.querySelector(".sea")!.getBoundingClientRect().left === 0);
       sea = await rect(".sea"); box = await rect(".composer-box");
-      // the sea beside the message box, where a click reaches the water
       const beside = { x: sea.x + 40, y: box.y, width: box.x - sea.x - 80, height: box.height };
       expect((await look(page, beside)).lit).toBeGreaterThan(150);
       expect(await page.evaluate((x, y) => document.elementFromPoint(x, y)?.className, beside.x + 20, box.y + box.height / 2)).toBe("ocean");
 
-      // a click in the open water left of the butterfly, against the same stretch of water on the right: the current
-      // drifts in both, the ripples only near the click. The pointer rests there first, so its light is already lit.
       await page.focus("#input");
       const at = { x: sea.x + 90, y: (sea.y + box.y) / 2 }, near = { x: at.x - 70, y: at.y - 80, width: 140, height: 160 };
       const far = { ...near, x: sea.x + sea.width - 90 - 70 };
@@ -2319,7 +2170,6 @@ test("a new chat is the butterfly in a sea under the message box too, never blan
       if (motion === "reduce") expect([near1.changed, far1.changed]).toEqual([0, 0]);
       else {
         expect(near1.changed).toBeGreaterThan(2 * far1.changed + 500);
-        // once the ripples are gone: as many frames with the pointer resting on the water as with it on the message box
         const frames = async () => { const n = await page.evaluate(() => (window as any).seaFrames); await Bun.sleep(2000); return await page.evaluate(() => (window as any).seaFrames) - n; };
         await Bun.sleep(5200);
         const resting = await frames();
@@ -2357,23 +2207,22 @@ test("the sea stays behind a chat, the butterfly sunk into it and every click th
     expect(full).toBeGreaterThan(800);
 
     await send(page, "capital of France");
-    await Bun.sleep(1500);                                         // the butterfly sinks into the water
+    await Bun.sleep(1500);
     const column = await rect("#thread"), margin = { x: sea.x + 40, y: sea.y + 60, width: column.x - sea.x - 80, height: 300 };
     const sunk = await look(page, middle);
-    expect(sunk.pink).toBeLessThan(50);                            // its bold glyphs gone,
-    expect(sunk.tint).toBeGreaterThan(300);                        // its shape faintly pink in the water
+    expect(sunk.pink).toBeLessThan(50);
+    expect(sunk.tint).toBeGreaterThan(300);
     expect((await look(page, margin)).lit).toBeGreaterThan(150);
     const hit = (x: number, y: number) => page.evaluate((x, y) => document.elementFromPoint(x, y)?.closest("#scroller, .sea")?.id, x, y);
     const reply = await rect(".msg.assistant .markdown");
     expect([await hit(reply.x + 5, reply.y + reply.height / 2), await hit(margin.x + 20, margin.y + 20)]).toEqual(["scroller", "scroller"]);
 
-    // a new chat raises it out of the water: part of the way in the first shot after the click, all of it soon after
     await page.click("#new-chat");
     const rising = (await look(page, middle)).pink;
     expect([rising < 0.7 * full, await risen(0.9 * full) > 0.9 * full]).toEqual([true, true]);
 
     await page.click(".conv");
-    await page.click("#settings-toggle");                         // (the chat narrows while Settings is open)
+    await page.click("#settings-toggle");
     await page.click("#sea-switch");
     await page.click("#settings-toggle");
     await page.waitForFunction((x) => document.getElementById("thread")!.getBoundingClientRect().x === x, {}, column.x);
@@ -2383,7 +2232,6 @@ test("the sea stays behind a chat, the butterfly sunk into it and every click th
     await page.reload({ waitUntil: "networkidle0" });
     expect(await page.$eval("#sea-switch", (b) => b.getAttribute("aria-checked"))).toBe("false");
 
-    // the light theme: the butterfly's bright cores in the light theme's own (a deep pink where the dark's is near white)
     const cores = async () => (await look(page, middle, "", "var(--accent-hi)")).close;
     await openSettings(page);
     await page.click('#theme-pick [data-theme="light"]');

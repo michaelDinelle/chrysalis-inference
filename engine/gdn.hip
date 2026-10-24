@@ -1,18 +1,11 @@
-// Gated DeltaNet layers (48 of 64): causal conv + gates, the recurrent delta-rule scan, gated RMSNorm.
-//
-// Per value head h (key head h % 16), with the state S stored column-major (S[j][i], i = key dim):
-//   S = exp(g) S;  delta_j = beta (v_j - sum_i S_ij k_i);  S_ij += k_i delta_j;  o_j = sum_i S_ij q_i / sqrt(128)
-// where k, q are L2-normalized, g = A * softplus(alpha + dt_bias) and beta = sigmoid(b).
 #include "kernels.h"
 
 __device__ __forceinline__ float softplus(float x) { return x > 20.0f ? x : log1pf(__expf(x)); }
 
-// Depthwise causal conv (kernel 4) over T tokens + SiLU, then L2 norm for q/k heads.
-// raw [T][QKV] -> qn, kn [T][GK][GD], vc [T][GV][GD]. state [QKV][3] holds the previous 3 inputs.
 __global__ __launch_bounds__(128) void k_gdn_conv(const float *raw, int T, const float *w, float *state, int update,
                                                   float *qn, float *kn, float *vc) {
     __shared__ float red[4];
-    const int head = blockIdx.x, i = threadIdx.x;            // heads: 16 q, 16 k, 48 v
+    const int head = blockIdx.x, i = threadIdx.x;
     const int c = head * GD + i;
     const float w0 = w[c * 4], w1 = w[c * 4 + 1], w2 = w[c * 4 + 2], w3 = w[c * 4 + 3];
     float s0 = state[c * 3], s1 = state[c * 3 + 1], s2 = state[c * 3 + 2];
@@ -34,8 +27,6 @@ __global__ __launch_bounds__(128) void k_gdn_conv(const float *raw, int T, const
     if (update) { state[c * 3] = s0; state[c * 3 + 1] = s1; state[c * 3 + 2] = s2; }
 }
 
-// Prefill version: blocks of 16 tokens run in parallel (each reads its 3 predecessors from raw or the
-// old state), then k_gdn_conv_state saves the last 3 inputs as the new state.
 __global__ __launch_bounds__(128) void k_gdn_conv_par(const float *raw, int T, const float *w, const float *state,
                                                       float *qn, float *kn, float *vc) {
     __shared__ float red[4];
@@ -70,8 +61,6 @@ void gdn_conv(const float *raw, int T, const float *w, float *state, bool update
     k_gdn_conv_state<<<(QKV + 255) / 256, 256, 0, st>>>(raw, T, state);
 }
 
-// Recompute the conv state after a verify pass: the last 3 inputs of [old state, accepted tokens].
-// One launch covers all GDN layers (states and raw inputs are stored per layer, contiguously).
 __global__ void k_gdn_conv_commit(float *state, const float *raw, int n, int raw_layer_stride) {
     const int c = blockIdx.x * blockDim.x + threadIdx.x, layer = blockIdx.y;
     if (c >= QKV) return;
@@ -88,11 +77,6 @@ void gdn_conv_commit(float *state, const float *raw, int n, int raw_layer_stride
 
 
 
-// The delta-rule scan. Grid (GV heads, 4 column blocks, layers); 128 threads = 32 columns x 4 row-quarters.
-// State stays in registers across tokens; k, q, v and the gates of CT tokens at a time are staged in LDS
-// (rows padded so the 4 row-quarters hit different banks; CT = 16 keeps every workgroup of a layer resident at once,
-// where 32 left a second wave of workgroups). out == nullptr skips outputs (commit);
-// write_state=0 leaves S untouched (verify).
 constexpr int CT = 16, PADQ = 36;
 __global__ __launch_bounds__(128) void k_gdn_scan(GdnScanArgs a) {
     __shared__ __attribute__((aligned(16))) float ks[CT][4 * PADQ], qs[CT][4 * PADQ];
@@ -124,7 +108,7 @@ __global__ __launch_bounds__(128) void k_gdn_scan(GdnScanArgs a) {
         for (int t = 0; t < n; t++) {
             const float decay = dec[t], beta = bet[t];
             const float *kp = &ks[t][part * PADQ];
-            float k4[4] = {};                            // 4 partial sums: a short dependency chain per token
+            float k4[4] = {};
 #pragma unroll
             for (int i = 0; i < 32; i++) k4[i % 4] += s[i] * kp[i];
             float kv = (k4[0] + k4[1]) + (k4[2] + k4[3]);
@@ -139,7 +123,7 @@ __global__ __launch_bounds__(128) void k_gdn_scan(GdnScanArgs a) {
                 for (int i = 0; i < 32; i++) o4[i % 4] += s[i] * qp[i];
                 float o = (o4[0] + o4[1]) + (o4[2] + o4[3]);
                 o += lane_xor<1>(o); o += lane_xor<2>(o);
-                if (part == 0) a.out[((size_t)(t0 + t) * GV + h) * GD + j] = o * 0.08838834764831845f;   // 1/sqrt(128)
+                if (part == 0) a.out[((size_t)(t0 + t) * GV + h) * GD + j] = o * 0.08838834764831845f;
             }
         }
     }
@@ -153,7 +137,6 @@ void gdn_scan(const GdnScanArgs &a, int nlayers, hipStream_t st) {
     k_gdn_scan<<<dim3(GV, GD / 32, nlayers), 128, 0, st>>>(a);
 }
 
-// Gated RMSNorm per value head: y = rmsnorm(o) * w * silu(z). Writes fp16 and/or int8 blocks.
 __global__ __launch_bounds__(128) void k_gdn_out(const float *o, const float *z, const float *w, half *oh, QAct oq) {
     __shared__ float red[4];
     const size_t idx = ((size_t)blockIdx.y * GV + blockIdx.x) * GD + threadIdx.x;
@@ -174,16 +157,12 @@ void gdn_out(const float *o, const float *z, const float *w, int T, half *oh, QA
     k_gdn_out<<<dim3(GV, T), 128, 0, st>>>(o, z, w, oh, oq);
 }
 
-// Decode / verify path (T <= 8): one 512-thread workgroup per value head runs alpha/beta, the conv,
-// L2 norms, the scan (state in registers) and the gated norm, writing int8 input for ssm_out.
-// The conv state is never written here (gdn_conv_commit does it after all layers); verify mode also
-// leaves the recurrent state untouched and records k, v and the gates for a later commit.
 __global__ __launch_bounds__(512) void k_gdn_step(GdnStepArgs a) {
     __shared__ float qs[8][GD], ks[8][GD], vs[8][GD], os[8][GD];
     __shared__ float red[16][16], gates[8][2], rms[8];
     const int h = blockIdx.x, kh = h % GK, tid = threadIdx.x, warp = tid / 32, lane = tid % 32, T = a.T;
 
-    float pa[8] = {}, pb[8] = {};                                  // alpha / beta projections (fp16 dot products)
+    float pa[8] = {}, pb[8] = {};
     const half2 *wa = (const half2 *)(a.Wab + (size_t)h * D), *wb = (const half2 *)(a.Wab + (size_t)(GV + h) * D);
     for (int i = tid; i < D / 2; i += 512) {
         const float2 fa = __half22float2(wa[i]), fb = __half22float2(wb[i]);
@@ -206,7 +185,7 @@ __global__ __launch_bounds__(512) void k_gdn_step(GdnStepArgs a) {
         if (a.verify) { a.ab_out[tid * 2 * GV + h] = al; a.ab_out[tid * 2 * GV + GV + h] = be; }
     }
 
-    if (tid < 3 * GD) {                                            // conv + silu: this head's q, k, v channels
+    if (tid < 3 * GD) {
         const int which = tid / GD, i = tid % GD;
         const int c = which == 0 ? kh * GD + i : which == 1 ? GK * GD + kh * GD + i : 2 * GK * GD + h * GD + i;
         const float w0 = a.conv_w[c * 4], w1 = a.conv_w[c * 4 + 1], w2 = a.conv_w[c * 4 + 2], w3 = a.conv_w[c * 4 + 3];
@@ -218,10 +197,9 @@ __global__ __launch_bounds__(512) void k_gdn_step(GdnStepArgs a) {
             dst[t][i] = silu(w0 * s0 + w1 * s1 + w2 * s2 + w3 * x);
             s0 = s1; s1 = s2; s2 = x;
         }
-        // the new conv state is written later by gdn_conv_commit: three heads read each q/k channel here
     }
     __syncthreads();
-    for (int r = warp; r < 2 * T; r += 16) {                       // L2-normalize q and k rows
+    for (int r = warp; r < 2 * T; r += 16) {
         float *row = (r & 1) ? ks[r / 2] : qs[r / 2];
         float4 v = *(float4 *)&row[lane * 4];
         const float inv = rsqrtf(warp_sum(v.x * v.x + v.y * v.y + v.z * v.z + v.w * v.w) + EPS);
@@ -237,7 +215,7 @@ __global__ __launch_bounds__(512) void k_gdn_step(GdnStepArgs a) {
         }
     }
 
-    const int j = tid / 4, part = tid % 4;                         // scan: 128 columns x 4 row quarters
+    const int j = tid / 4, part = tid % 4;
     float *Sj = a.S + ((size_t)h * GD + j) * GD + part * 32;
     float st[32];
 #pragma unroll
@@ -262,7 +240,7 @@ __global__ __launch_bounds__(512) void k_gdn_step(GdnStepArgs a) {
     }
     __syncthreads();
 
-    if (warp < T) {                                                // gated RMSNorm, int8 out for ssm_out
+    if (warp < T) {
         float4 v = *(float4 *)&os[warp][lane * 4];
         const float ss = warp_sum(v.x * v.x + v.y * v.y + v.z * v.z + v.w * v.w);
         if (lane == 0) rms[warp] = rsqrtf(ss / GD + EPS);

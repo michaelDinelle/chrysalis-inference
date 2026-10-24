@@ -1,36 +1,29 @@
-// Voice mode's audio and its line to the speech service: the microphone goes out as 16 kHz int16 frames, the speech
-// comes back as chunks played back to back, over one WebSocket (/api/voice, which server.ts hands to whatever stack
-// runs behind it). It knows the protocol, not the chat: app.ts says what to speak and is told what was said.
 export type Part = "vad" | "stt" | "turn" | "tts";
 export interface VoiceInfo { id: string; label: string; lang: string; gender: string }
-// A model the service knows: one it can load (installed), or one it would need set up first (hint: how).
 export interface ModelInfo { name: string; label: string; installed: boolean; hint?: string; voices?: VoiceInfo[] }
 export interface VoiceReady {
   stack: Partial<Record<Part, string>>; catalog: Partial<Record<Part, ModelInfo[]>>; voices: VoiceInfo[]; voice: string; speed: number;
   sample_rate: number; load_ms: number;
 }
-// What the page asks the service for (hello, config): parts of the stack by name, the voice, its speed.
 export interface VoiceAsk { stack?: Partial<Record<Part, string>>; voice?: string; speed?: number }
-export const PREVIEW = "preview";                   // the id of a voice's sample, beside any reply
+export const PREVIEW = "preview";
 export interface VoiceHandlers {
   ready?(r: VoiceReady): void;
-  speech?(on: boolean): void;                       // the user started or paused speaking
-  partial?(text: string, settled: boolean): void;   // the turn's words so far (settled: read at a pause, which only more speech changes)
-  pause?(text: string): void;                       // the turn waits for more: its words, which are its turn's if no more come
-  turn?(text: string, waitMs: number): void;        // the user is done: the turn's words
-  interrupt?(): void;                               // the user talks over the reply (its sound has already stopped)
-  // a chunk of reply `id` began to sound: its text is [from, to) of the reply (code points), its speech lasts `secs`
-  // from `at` (performance.now(), as it reaches the ear)
+  speech?(on: boolean): void;
+  partial?(text: string, settled: boolean): void;
+  pause?(text: string): void;
+  turn?(text: string, waitMs: number): void;
+  interrupt?(): void;
   spoken?(id: string, from: number, to: number, at: number, secs: number): void;
-  audible?(id: string, latencyMs?: number): void;   // the reply's first sound; with a turn before it, the time from the end of that speech
-  played?(id: string): void;                        // the reply's last sound ended, or it had nothing to say
+  audible?(id: string, latencyMs?: number): void;
+  played?(id: string): void;
   playing?(on: boolean): void;
   error?(message: string): void;
-  closed?(): void;                                  // the service's side went away
+  closed?(): void;
 }
 interface Chunk { id: string; seq: number; text: string; from: number; to: number; rate: number; secs?: number }
 
-const LEAD = 0.03;                                  // s from a chunk's arrival to its start when nothing plays: the audio thread's room
+const LEAD = 0.03;
 
 export class VoiceClient {
   private ws?: WebSocket;
@@ -41,35 +34,31 @@ export class VoiceClient {
   private outLevel?: AnalyserNode;
   private micLevel?: AnalyserNode;
   private samples = new Float32Array(512);
-  private end = 0;                                  // the out context's time the last scheduled chunk ends
+  private end = 0;
   private live = new Map<AudioBufferSourceNode, string>();
   private timers = new Set<number>();
-  private said = new Set<string>();                 // replies whose audio has all been sent
-  private dropped = new Set<string>();              // replies stopped: chunks still on their way are not played
+  private said = new Set<string>();
+  private dropped = new Set<string>();
   private heard = new Set<string>();
   private sent = new Set<string>();
-  private turnAt?: { t: number; wait: number };     // the last turn, until a reply answers it
+  private turnAt?: { t: number; wait: number };
   private answers = new Map<string, { t: number; wait: number }>();
   private shut = false;
-  private early: ArrayBuffer[] = [];               // microphone frames from before the socket opened
-  private held = new Map<string, ArrayBuffer[]>(); // replies spoken ahead: their chunks, unplayed until let go
-  private told?: string;                          // the conversation as last given (context), sent again on open
+  private early: ArrayBuffer[] = [];
+  private held = new Map<string, ArrayBuffer[]>();
+  private told?: string;
   playing = false;
   muted = false;
-  hearing = false;                                  // the microphone gives audio: from now on what is said is heard
+  hearing = false;
 
   constructor(private on: VoiceHandlers) {}
 
-  // The socket first (the service loads its models meanwhile), then the microphone: the user hears nothing until the
-  // service is ready, and speaks only once the page says it is listening.
   async open(ask: VoiceAsk) {
     this.out = new AudioContext({ latencyHint: "interactive" });
     this.gain = this.out.createGain();
     this.outLevel = this.out.createAnalyser();
     this.outLevel.fftSize = 512;
     this.gain.connect(this.outLevel).connect(this.out.destination);
-    // A faint noise (-80 dB, not heard) keeps the output playing between replies: Bluetooth headphones and some Macs'
-    // outputs sleep on digital silence and wake on the next sound, swallowing its first syllable
     const hush = this.out.createBuffer(1, this.out.sampleRate, this.out.sampleRate), data = hush.getChannelData(0);
     for (let i = 0; i < data.length; i++) data[i] = (Math.random() * 2 - 1) * 1e-4;
     const keep = this.out.createBufferSource();
@@ -87,8 +76,6 @@ export class VoiceClient {
     };
     ws.onmessage = (e) => (typeof e.data === "string" ? this.event(JSON.parse(e.data)) : this.chunk(e.data));
     ws.onclose = () => { if (!this.shut) this.on.closed?.(); };
-    // The microphone's context is made now, in the click that opened voice mode: where audio starts only from a click
-    // (Safari) one made after the wait for the microphone may start suspended. Its worklet loads meanwhile.
     let ctx = (this.mic = new AudioContext({ sampleRate: 16000, latencyHint: "interactive" })), src: MediaStreamAudioSourceNode;
     let worklet = ctx.audioWorklet.addModule("/voice-worklet.js");
     void ctx.resume();
@@ -96,7 +83,7 @@ export class VoiceClient {
     if (this.shut) return this.release();
     try {
       src = ctx.createMediaStreamSource(this.stream);
-    } catch {                                       // Firefox: the microphone only at the device's rate; the worklet resamples
+    } catch {
       void ctx.close();
       ctx = this.mic = new AudioContext({ latencyHint: "interactive" });
       worklet = ctx.audioWorklet.addModule("/voice-worklet.js");
@@ -104,13 +91,11 @@ export class VoiceClient {
     }
     await worklet;
     const node = new AudioWorkletNode(ctx, "chrysalis-capture"), sink = ctx.createGain();
-    sink.gain.value = 0;                            // a worklet runs only on a path to the destination; it is silent
+    sink.gain.value = 0;
     this.micLevel = ctx.createAnalyser();
     this.micLevel.fftSize = 512;
     src.connect(node).connect(sink).connect(ctx.destination);
     src.connect(this.micLevel);
-    // what is said before the socket opens goes once it does (the service keeps it while its models load), so the
-    // first words are heard however soon they come
     node.port.onmessage = (e) => {
       this.hearing = true;
       if (this.muted) return;
@@ -138,8 +123,6 @@ export class VoiceClient {
     this.sent.add(id);
     this.send({ type: "say", id, text });
   }
-  // A reply spoken before it is known to stand (app.ts, Ahead): its audio is kept, not played, until go, and cancel
-  // drops it on both sides. Let go, it answers the last turn.
   hold(id: string) { this.held.set(id, []); }
   go(id: string) {
     const kept = this.held.get(id);
@@ -155,7 +138,6 @@ export class VoiceClient {
     this.send({ type: "cancel", id });
   }
   done(id: string) { this.send({ type: "say_end", id }); }
-  // The conversation's text, for the service to listen for its names and terms from the next turn on.
   context(text: string) {
     if (text === this.told) return;
     this.told = text;
@@ -163,7 +145,6 @@ export class VoiceClient {
   }
   config(ask: VoiceAsk) { this.send({ type: "config", ...ask }); }
 
-  // A voice's sample: a new one replaces the one playing; it is not a reply, so nothing waits for it.
   preview(voice: string, text?: string) {
     for (const [src, id] of this.live) if (id === PREVIEW) { src.onended = null; src.stop(); this.live.delete(src); }
     for (const set of [this.dropped, this.said, this.heard]) set.delete(PREVIEW);
@@ -177,13 +158,11 @@ export class VoiceClient {
     this.send({ type: "mute", on });
   }
 
-  // Barge-in from this side (a click, Esc): silent at once, and the service drops what it had left to say.
   stop() {
     this.halt();
     this.send({ type: "cancel" });
   }
 
-  // The sound now: the microphone's while listening, the speech's while speaking (RMS, 0..1).
   levels() { return { mic: this.rms(this.micLevel), out: this.rms(this.outLevel) }; }
   private rms(a?: AnalyserNode) {
     if (!a) return 0;
@@ -212,8 +191,6 @@ export class VoiceClient {
     } else if (e.type === "error") this.on.error?.(String(e.message ?? "The voice service failed"));
   }
 
-  // [uint32 LE header length][header JSON][int16 LE PCM]: scheduled right after what is already queued, so the
-  // chunks play gapless as long as they come faster than they last (a reply's speech is written several times faster).
   private chunk(buf: ArrayBuffer) {
     const n = new DataView(buf).getUint32(0, true), h: Chunk = JSON.parse(new TextDecoder().decode(new Uint8Array(buf, 4, n)));
     const ctx = this.out;
@@ -250,7 +227,7 @@ export class VoiceClient {
     for (const id of this.sent) this.dropped.add(id);
     for (const src of this.live.keys()) {
       src.onended = null;
-      try { src.stop(); } catch { /* not started */ }
+      try { src.stop(); } catch {  }
     }
     this.live.clear();
     for (const t of this.timers) clearTimeout(t);
@@ -267,24 +244,22 @@ export class VoiceClient {
   }
 }
 
-// The voice service apart from voice mode: the voices it has, a voice's sample (a character's card) and a reply read
-// aloud (its speaker button), on a socket of its own with no microphone, for which the service loads only the voice
-// model it speaks with.
 export class Speaker {
   private ws?: WebSocket;
   private out?: AudioContext;
   private live = new Set<AudioBufferSourceNode>();
-  private end = 0;                                  // the out context's time the last piece scheduled ends
-  private now?: string;                             // what is being said: a part of a reply read, or the sample
-  private reading?: object;                         // the read going on (another read, or stop, ends it)
+  private end = 0;
+  private now?: string;
+  private reading?: object;
   private ids = 0;
   private listed: ((c: VoiceReady["catalog"] | null) => void)[] = [];
   private readied: ((r: VoiceReady | null) => void)[] = [];
   private made = new Map<string, () => void>();
   private quiet: (() => void)[] = [];
-  previewed = false;                                // a sample was asked for
+  previewed = false;
   constructor(private failed: (message: string) => void) {}
 
+  get(tts: string) { this.send({ type: "get", tts }); }
   catalog(): Promise<VoiceReady["catalog"] | null> {
     return new Promise((done) => { this.listed.push(done); this.send({ type: "catalog" }); });
   }
@@ -295,9 +270,6 @@ export class Speaker {
     this.now = PREVIEW;
     this.send({ type: "preview", ...(tts ? { tts } : {}), ...(voice ? { voice } : {}) });
   }
-  // A reply read aloud: its parts one after another, each in its own voice or else in the one `base` asks for (what
-  // the service then speaks with is the default it falls back to). The service speaks in one voice at a time, so a
-  // part is asked for once the one before it has all been made; done once the last of it has been heard.
   async read(parts: { text: string; voice?: { tts?: string; name?: string } }[], base: VoiceAsk, done: () => void) {
     this.stop();
     this.sound();
@@ -328,7 +300,7 @@ export class Speaker {
     this.made.clear();
     for (const src of this.live) {
       src.onended = null;
-      try { src.stop(); } catch { /* not started */ }
+      try { src.stop(); } catch {  }
     }
     this.live.clear();
     for (const ok of this.quiet.splice(0)) ok();
@@ -342,7 +314,6 @@ export class Speaker {
     this.gone();
   }
 
-  // in the click that asked: where audio starts only from a click (Safari), a context made later starts suspended
   private sound() {
     this.out ??= new AudioContext({ latencyHint: "interactive" });
     void this.out.resume();

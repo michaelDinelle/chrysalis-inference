@@ -4,10 +4,7 @@ README.md shows what Chrysalis is. This file is how to change it.
 
 ## Comments
 
-Comments say why: a constraint, a hardware or library quirk, a measured reason, a data layout, an invariant the code
-cannot show. Don't restate names or signatures, narrate steps, label sections, or record history ("was", "new",
-"no longer", what an earlier version did). When a change makes a comment wrong, fix or delete it in the same change:
-a stale comment steers people and agents wrong. `make lint` catches the mechanical cases (tests/lint_comments.py).
+None: no comments or docstrings anywhere in the repo, in any language, including code inside strings.
 
 ## Tests
 
@@ -26,10 +23,10 @@ a stale comment steers people and agents wrong. `make lint` catches the mechanic
 - CPU only: `make build/test_sampler && build/test_sampler`, `data/venv/bin/python tests/test_cache.py`,
   `data/venv/bin/python tests/test_lanes.py` (requests in flight, sub-agents beside a session's title),
   `data/venv/bin/python tests/test_chat.py`, `data/venv/bin/python tests/test_documents.py` (which PDF pages are
-  pictured), `make build_fn/test_cpujob_fn && build_fn/test_cpujob_fn`, `make test_voice` (the voice service: its features against
-  transformers', turns, echo and barge-in over its WebSocket; `make voice` first), `make test_web` (the web UI's sampler against
+  pictured), `make build/test_cpujob_fn && build/test_cpujob_fn`, `make test_voice` (the voice service: its features against
+  transformers', turns, echo and barge-in over its WebSocket), `make test_web` (the web UI's sampler against
   the engine's, its server against a fake Chrysalis, the page in headless Chromium, and Firefox past and trusting the network's
-  certificate; certutil makes their trust), `make lint`.
+  certificate; certutil makes their trust).
 - With Chrysalis running Flash-Next: `make test_chaos` (the chat for real, used oddly: replies through reloads, closed
   tabs and chat switches, several at once, Stop / regenerate / edit mid-reply, tools, settings, a 3D page, memory taken
   by another program; it restarts Chrysalis and switches models, so ask first, as for stopping it).

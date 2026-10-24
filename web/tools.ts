@@ -1,8 +1,3 @@
-// The tools a reply can call, whatever provides them: the built-in Fetch URL (tool-fetch.ts) and Sub-agents
-// (tool-agent.ts), and the MCP servers in the config file (tool-mcp.ts). Each provider is a Source of Tools behind the interfaces below; server.ts only talks to
-// this file. The config file is the only place a server's command, URL or environment comes from: the page (no logins,
-// and on the LAN after `chrysalis.sh start --host 0.0.0.0`) can list sources, start, retry and reload them, never define one, or it
-// could run any command on this machine.
 import { readFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { agentSource } from "./tool-agent";
@@ -10,28 +5,27 @@ import { fetchSource } from "./tool-fetch";
 import { mcpSource } from "./tool-mcp";
 
 export interface Tool {
-  name: string;                                     // the source's own name for it
-  title: string;                                    // what the page calls it
+  name: string;
+  title: string;
   description: string;
-  parameters: Record<string, unknown>;              // JSON schema of its arguments
-  readOnly: boolean;                                // changes nothing anywhere: runs without asking
+  parameters: Record<string, unknown>;
+  readOnly: boolean;
   run(args: Record<string, unknown>, ctx: { signal: AbortSignal; maxChars: number }): Promise<string>;
 }
 export type State = "idle" | "connecting" | "connected" | "failed" | "disabled";
 export interface Source {
-  id: string;                                       // "fetch", "agents", or "mcp:" and the server's name in the config
+  id: string;
   label: string; kind: "fetch" | "agent" | "mcp";
-  prefix: string;                                   // of its tools' function names ("" for the built-in one)
-  detail: string;                                   // what it runs or reaches, for the page to show
-  spec: string;                                     // its config, to tell a changed one on reload
+  prefix: string;
+  detail: string;
+  spec: string;
   state: State; error?: string; tools: Tool[];
   timeoutMs: number; maxChars: number;
-  chars?: number;                                   // what a call gives at a time when the chat asks for no other amount
-  connect(): Promise<void>;                         // starts it if it is not running; settles once it runs or failed
+  chars?: number;
+  connect(): Promise<void>;
   close(): Promise<void>;
-  onChange?: () => void;                            // set by the registry: the tool list changed
+  onChange?: () => void;
 }
-// A tool as offered to the model, under a function name unique among every source's.
 export interface Named { fn: string; tool: Tool; source: Source }
 
 export const CONFIG = process.env.CHRYSALIS_MCP_CONFIG ?? `${homedir()}/.config/chrysalis/mcp.json`;
@@ -41,10 +35,7 @@ let sources: Source[] = [];
 let configError: string | undefined;
 let names = new Map<string, Named>();
 
-// OpenAI's function names (and Qwen's tool format) take letters, digits, _ and -, up to 64.
 export const clean = (s: string) => s.replace(/[^A-Za-z0-9_-]+/g, "_").replace(/^_+|_+$/g, "") || "tool";
-// The function names, from scratch whenever a tool list changes: sources by id, tools by name, so the same tools get
-// the same names, in the same order (the order is the prompt's tools block, which Chrysalis caches).
 function rename() {
   const next = new Map<string, Named>();
   for (const source of [...sources].sort((a, b) => (a.id < b.id ? -1 : a.id > b.id ? 1 : 0)))
@@ -86,8 +77,6 @@ export async function closeAll() {
   await Promise.all(sources.map((s) => s.close()));
 }
 
-// What the page shows: every source with its state and tools (and their function names). Never a server's
-// environment or headers, nor a URL's query: they hold tokens, and the page may be open on another device.
 export function catalog() {
   const fnOf = new Map([...names.values()].map((n) => [n.tool, n.fn]));
   return {
@@ -102,8 +91,6 @@ export function catalog() {
 
 export const source = (id: string) => sources.find((s) => s.id === id);
 
-// The tools a chat has switched on, sorted by function name (so by source, then tool). Sources not running yet are
-// started (and waited for); one that cannot start is left out, with a note saying so.
 export async function select(choice: Record<string, { off?: string[] }>): Promise<{ tools: Named[]; notes: string[] }> {
   const on = sources.filter((s) => choice[s.id] && s.state !== "disabled");
   await Promise.all(on.map((s) => s.connect()));
@@ -116,7 +103,6 @@ export async function select(choice: Record<string, { off?: string[] }>): Promis
 export const openai = (n: Named, description?: string) =>
   ({ type: "function", function: { name: n.fn, description: description ?? n.tool.description, parameters: n.tool.parameters } });
 
-// A tool's run, held to its source's time limit and result size: a longer result is cut, and says so.
 export async function run(n: Named, args: Record<string, unknown>, signal: AbortSignal, maxChars?: number): Promise<string> {
   const limit = Math.min(maxChars ?? n.source.chars ?? n.source.maxChars, n.source.maxChars);
   const timeout = AbortSignal.timeout(n.source.timeoutMs);

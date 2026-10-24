@@ -1,13 +1,7 @@
-"""Two more APIs over the same chat completions: Anthropic's Messages (POST /v1/messages: Claude Code, the Anthropic SDKs)
-and OpenAI's Responses (POST /v1/responses: Codex, the newer OpenAI SDKs). A request becomes a chat completions body for
-Server.chat, and its events (reasoning and answer text, tool calls, the final info) become the API's response or its
-stream of server-sent events. Bad requests raise ValueError (the server answers 400)."""
 import json
 import time
 import uuid
 
-# Anthropic's thinking budget as Chrysalis's reasoning effort: under 2,048 tokens "low", under 8,192 "medium", else
-# "xhigh"
 BUDGET_EFFORT = ((2048, "low"), (8192, "medium"))
 
 
@@ -16,18 +10,14 @@ def _id(prefix):
 
 
 def _content(parts):
-    """Chat content from parts: a string when they are all text (how tool results and plain messages read best)."""
     if all(p["type"] == "text" for p in parts):
         return "".join(p["text"] for p in parts)
     return parts
 
 
-# Anthropic Messages
 
 
 def _image_url(source):
-    """An Anthropic image source as an image_url (base64 as a data URL; a URL as it is, which Chrysalis refuses: it
-    reads only pictures sent inline)."""
     if source.get("type") == "base64":
         return f"data:{source.get('media_type') or 'image/png'};base64,{source.get('data') or ''}"
     return source.get("url") or ""
@@ -53,13 +43,10 @@ def _parts(blocks, where):
 
 
 def _kept(d, *keys):
-    """Chrysalis's own fields of a part that it passes through (chrysalis/documents.py page_pictures)."""
     return {k: d[k] for k in keys if k in d}
 
 
 def _document(b):
-    """An Anthropic document block as chat parts: a PDF (base64) as a file part chrysalis/documents.py reads, plain text
-    or content blocks as text, with its title and context."""
     src, title = b.get("source") or {}, b.get("title") or "document"
     head = [{"type": "text", "text": f"{b['context']}\n"}] if b.get("context") else []
     if src.get("type") == "base64":
@@ -74,8 +61,6 @@ def _document(b):
 
 
 def messages_body(req):
-    """An Anthropic Messages request as a chat completions body. A final assistant message is a prefill: the reply
-    goes on from it (continue_final_message)."""
     msgs = []
     system = req.get("system")
     if system:
@@ -94,7 +79,7 @@ def messages_body(req):
                 elif kind == "tool_use":
                     calls.append({"id": b.get("id"), "type": "function",
                                   "function": {"name": b.get("name"), "arguments": json.dumps(b.get("input") or {}, ensure_ascii=False)}})
-                elif kind != "redacted_thinking":        # another model's encrypted reasoning: nothing Chrysalis can read
+                elif kind != "redacted_thinking":
                     raise ValueError(f"Chrysalis cannot read a {kind} block in an assistant message")
             msg = {"role": "assistant", "content": "".join(text)}
             if thinking:
@@ -103,7 +88,7 @@ def messages_body(req):
                 msg["tool_calls"] = calls
             msgs.append(msg)
         elif role == "user":
-            pending = []                                 # tool results become tool messages, in their place
+            pending = []
             for b in blocks:
                 if b.get("type") == "tool_result":
                     if pending:
@@ -166,8 +151,7 @@ def _stop_reason(info):
 
 
 def messages_stream(events, model):
-    """(event name, data) for each server-sent event of a streamed Messages reply. events: Server.chat's."""
-    msg_id, index, open_kind = _id("msg_"), -1, None   # the open content block's index and type
+    msg_id, index, open_kind = _id("msg_"), -1, None
 
     def block_stop():
         return "content_block_stop", {"type": "content_block_stop", "index": index}
@@ -209,7 +193,6 @@ def messages_stream(events, model):
 
 
 def messages_result(events, model):
-    """A Messages reply in one piece."""
     content, info = [], None
     for ev in events:
         kind = ev[0]
@@ -222,7 +205,7 @@ def messages_result(events, model):
             content.append({"type": "tool_use", "id": _id("toolu_"), "name": ev[1][0], "input": ev[1][1]})
         elif kind == "done":
             info = ev[1]
-    for b in content:                                    # as the chat completions reply: no blank lines around a part
+    for b in content:
         if b["type"] in ("thinking", "text"):
             b[b["type"]] = b[b["type"]].strip()
     content = [b for b in content if b["type"] == "tool_use" or b[b["type"]]]
@@ -231,7 +214,6 @@ def messages_result(events, model):
             "usage": _anthropic_usage(info, info["completion_tokens"])}
 
 
-# OpenAI Responses
 
 
 def _input_parts(content, role):
@@ -260,14 +242,12 @@ def _input_parts(content, role):
 
 
 def responses_body(req, history=None):
-    """A Responses request as a chat completions body. history: the stored conversation previous_response_id names
-    (its instructions are not carried over, as the API says)."""
     msgs = [dict(m) for m in history or []]
     if req.get("instructions"):
         msgs.insert(0, {"role": "system", "content": req["instructions"]})
     items = req.get("input")
     items = [{"role": "user", "content": items}] if isinstance(items, str) else items or []
-    turn = None                                          # the assistant message the latest output items make up
+    turn = None
 
     def assistant(fresh=False):
         nonlocal turn
@@ -288,7 +268,7 @@ def responses_body(req, history=None):
                 msgs.append({"role": "system" if role == "developer" else role, "content": _input_parts(it.get("content"), role)})
             else:
                 raise ValueError(f"unknown role {role!r}")
-        elif kind == "reasoning":                        # starts a turn unless it opens the one being made
+        elif kind == "reasoning":
             t = assistant(fresh=turn is not None and bool(turn["content"] or turn["tool_calls"]))
             t["reasoning_content"] += "".join(c.get("text") or "" for c in it.get("content") or []) or \
                 "".join(s.get("text") or "" for s in it.get("summary") or [])
@@ -343,13 +323,12 @@ def responses_body(req, history=None):
 
 
 class ResponseBuilder:
-    """A Responses reply from Server.chat's events: its output items as they grow, and the response object."""
 
     def __init__(self, req, model, count_tokens):
         self.req, self.model, self.count = req, model, count_tokens
         self.id, self.created = _id("resp_"), int(time.time())
         self.output, self.seq = [], 0
-        self.reply = {"role": "assistant", "content": "", "reasoning_content": "", "tool_calls": []}   # for the store
+        self.reply = {"role": "assistant", "content": "", "reasoning_content": "", "tool_calls": []}
 
     def response(self, status, info=None):
         reasoning = self.reply["reasoning_content"]
@@ -376,10 +355,9 @@ class ResponseBuilder:
         return kind, {"type": kind, "sequence_number": self.seq - 1, **data}
 
     def events(self, events):
-        """(event name, data) for each server-sent event; the last is response.completed (or .incomplete)."""
         yield self.event("response.created", response=self.response("in_progress"))
         yield self.event("response.in_progress", response=self.response("in_progress"))
-        item, text = None, []                            # the open reasoning or message item and its text so far
+        item, text = None, []
 
         def close():
             nonlocal item
@@ -439,18 +417,16 @@ class ResponseBuilder:
                 yield self.event("response.incomplete" if status == "incomplete" else "response.completed", response=self.response(status, ev[1]))
 
     def result(self, events):
-        """The response object in one piece."""
         last = None
         for name, data in self.events(events):
             last = data
         resp = last["response"]
-        for it in resp["output"]:                        # as the chat completions reply: no blank lines around a part
+        for it in resp["output"]:
             for part in it.get("content") or []:
                 part["text"] = part["text"].strip()
         return resp
 
     def history(self, body):
-        """The conversation after this reply, for a later previous_response_id (the instructions left out)."""
         msgs = [m for i, m in enumerate(body["messages"]) if not (i == 0 and m["role"] == "system" and self.req.get("instructions"))]
         reply = {k: v for k, v in self.reply.items() if v or k == "content"}
         reply["content"] = reply["content"].strip()

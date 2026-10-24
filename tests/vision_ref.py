@@ -1,22 +1,7 @@
-"""The official references for tests/test_vision.py, run in data/ref-venv (torch on the CPU, transformers):
-  vision_ref.py processor IMAGE OUT.npz [MAX_PIXELS]
-                                             transformers' Qwen2VLImageProcessor (preprocessor_config.json, the same for
-                                             both models; max_pixels as given): pixel_values as [patches][768] (one of
-                                             the two identical frames) and the grid
-  vision_ref.py tower IN.npz OUT.npy [fn]    the vision model in fp32 with Qwen's own weights (each model's first shard:
-                                             Qwen3_5VisionModel for the 27B, Qwen4ExpVisionModel for Flash-Next, fn), on
-                                             patches [n][768] and grid: the merged embeddings [n / 4][width]; a video's
-                                             (patches [pairs * n][1536], grid (pairs, rows, columns)) likewise
-  vision_ref.py video IN.npz OUT.npz         transformers' Qwen3VLVideoProcessor with Chrysalis's settings (chrysalis/vision.py) on
-                                             all of a video's frames (IN: frames [n][h][w][3] uint8, fps): the frames it
-                                             takes, pixel_values_videos and the grid, and Qwen3VLProcessor's expansion of
-                                             <|video_pad|> (its timestamps)
-  vision_ref.py rope IN.npz OUT.npy          Qwen3.5's get_rope_index for token types (0 text, 2 video) and video grids:
-                                             M-RoPE positions [n][3]"""
-import json, sys, types
+import json, os, sys, types
 import numpy as np
 
-ROOT = __file__.rsplit("/tools/", 1)[0]
+ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 cmd, src, dst = sys.argv[1:4]
 if cmd == "processor":
     from PIL import Image
@@ -48,9 +33,9 @@ elif cmd == "tower":
                                                      if k.startswith("model.visual.")}, strict=False)
     assert not unexpected and all("rotary" in m for m in missing), (missing, unexpected)
     z = np.load(src)
-    if z["patches"].shape[1] == 1536:                # a video's frame pairs
+    if z["patches"].shape[1] == 1536:
         pv, grid = torch.from_numpy(z["patches"]).contiguous(), torch.tensor([[int(g) for g in z["grid"]]])
-    else:                                            # a picture: two identical frames
+    else:
         pv = torch.from_numpy(z["patches"]).reshape(-1, 3, 1, 16, 16).expand(-1, -1, 2, -1, -1).reshape(-1, 1536).contiguous()
         grid = torch.tensor([[1, int(z["grid"][0]), int(z["grid"][1])]])
     with torch.no_grad():

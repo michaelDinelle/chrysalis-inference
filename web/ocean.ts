@@ -1,65 +1,39 @@
-// The chat's backdrop: an ocean of characters under everything below the top bar, the message box floating on it. In a
-// new chat it holds the butterfly, drawn in the same characters and shaded like a lit tube, its light tinting the water
-// near it, and a click sends ripples across it in a shape (heart, ring, butterfly, star, flower) that bend the current
-// as they pass. Once the chat has begun the butterfly sinks into the water, where its shape stays faintly, and the sea
-// lies dimmed behind the messages, dimmest under their column; a new chat raises it again. The sea is a slow current (domain-warped noise over a swell). All of it is two WebGL2 passes: one
-// fragment per character cell works out what that cell shows (pass 1, a cols x rows texture), then each screen pixel
-// draws its cell's glyph from an atlas rendered at the screen's own pixel size (pass 2), so the CPU only sets uniforms.
-// Where WebGL2 is missing (a browser without a GPU, or with WebGL off) the same two passes run on the CPU instead, into a
-// 2D canvas: the same sea in any browser, drawn less often (Cpu below).
 import logo from "./logo-thin.svg";
 import { isDark, onTheme } from "./theme";
 
-// Glyph rows of the atlas: the sea's (light to dense, none that join into lines across a row) and the butterfly's in
-// bold (edge to core). The orders follow measured ink in JetBrains Mono, so a gradient of values reads as an even
-// gradient of glyphs.
 const SEA = " ·~≈+*#";
 const TUBE = "·:+*≈#%@";
 const ROW = 32;
-// The sea's cell, CSS px: small enough for the butterfly's strokes to be a few glyphs wide.
 const CELL_W = 6, CELL_H = 11, FONT_PX = 10;
-// The drawing's viewBox (logo.svg's), and its stroke half-width in those units (logo-thin.svg's strokes: 70% of
-// logo.svg's 32.18).
 const VIEW_W = 660, VIEW_H = 473, HALF_STROKE = 11.26;
-// A small butterfly (a phone's) is drawn bolder, its strokes at least this half-width, CSS px (three glyphs wide, about
-// logo.svg's own weight there): as thin as a large one's, they broke into scattered marks.
 const MIN_HALF_STROKE = 9;
 const strokes = (w: number) => { const half = HALF_STROKE * w / VIEW_W; return { half: Math.max(half, MIN_HALF_STROKE), bold: Math.max(0, MIN_HALF_STROKE - half) }; };
-// Click waves, in the order clicks cycle through them (the shader's kinds), each WAVE_LIFE s long; a drag leaves a wake
-// (WAKE), small swells WAKE_LIFE s long.
 const PATTERNS = [1, 0, 2, 3, 4];
 const WAKE = 9, MAX_RIPPLES = 16, WAVE_LIFE = 5, WAKE_LIFE = 2;
-// The pointer's light comes and goes with this time constant, s (at every frame rate alike)
 const HOVER = 0.033;
-// The butterfly sinks into the water as a chat begins and rises out of it in a new chat, quickest at first (out of the
-// way of the chat's first words) and settling: these are their time constants, s (most of the way in three).
 const SINK = 0.34, RISE = 0.26;
 
 const VERT = `#version 300 es
 void main() { vec2 p = vec2((gl_VertexID << 1) & 2, gl_VertexID & 2); gl_Position = vec4(p * 2.0 - 1.0, 0.0, 1.0); }`;
 
-// Pass 1. Simplex noise: Ian McEwan and Stefan Gustavson's (Ashima Arts, MIT), its permutations and its choice of each
-// corner's gradient in integers: in floats, rounding decided the 7 of 49 gradients on the fold (|x| + |y| = 1) one way
-// on one GPU and the other way on another, and so the sea differed between machines and from the CPU's port. Shapes:
-// Inigo Quilez's 2D distance functions (heart, five-point star), MIT.
 const CELLS = `#version 300 es
 precision highp float;
 uniform vec2 uGrid, uCell;
-uniform vec4 uView;         // the part of the sea on screen: left, top, right, bottom, CSS px from the window's corner
-uniform vec4 uBox;          // the message box and the hint under it, likewise
-uniform vec2 uLane;         // the chat's column (the message box's): left and right, likewise
-uniform float uFlyOn;       // the butterfly: 1 in a new chat, 0 sunk into the water behind a chat
+uniform vec4 uView;
+uniform vec4 uBox;
+uniform vec2 uLane;
+uniform float uFlyOn;
 uniform float uTime, uMotion;
-uniform int uWaves;         // the waves live now (Ocean.waves), two vectors each: x, y (CSS px), kind, height; size, wavelength
+uniform int uWaves;
 uniform vec4 uWave[${2 * MAX_RIPPLES}];
-uniform vec3 uFly;          // the drawing's width, its strokes' half-width and how much a small one's are thickened, CSS px
-uniform vec2 uCenter;       // the butterfly's middle, CSS px
-uniform sampler2D uSdf;     // distance to the drawing in texels, negative inside
+uniform vec3 uFly;
+uniform vec2 uCenter;
+uniform sampler2D uSdf;
 uniform vec2 uSdfSize;
-uniform vec3 uPointer;      // x, y (CSS px), presence 0..1
+uniform vec3 uPointer;
 out vec4 o;
 
-ivec4 permute(ivec4 x) { return ((x * 34 + 1) * x) % 289; }   // under 2^31 for x below 578: no wrap
+ivec4 permute(ivec4 x) { return ((x * 34 + 1) * x) % 289; }
 vec4 taylorInvSqrt(vec4 r) { return 1.79284291400159 - 0.85373472095314 * r; }
 float snoise(vec3 v) {
   const vec2 C = vec2(1.0 / 6.0, 1.0 / 3.0);
@@ -74,8 +48,6 @@ float snoise(vec3 v) {
   vec3 x3 = x0 - 1.0 + 3.0 * C.xxx;
   ivec3 n = ivec3(mod(i, 289.0)), n1 = ivec3(i1), n2 = ivec3(i2);
   ivec4 p = permute(permute(permute(n.z + ivec4(0, n1.z, n2.z, 1)) + n.y + ivec4(0, n1.y, n2.y, 1)) + n.x + ivec4(0, n1.x, n2.x, 1));
-  // the gradient: a point of a 7 x 7 grid over the square (x, y = (4k - 13) / 14), folded in where it is outside the
-  // diamond |x| + |y| < 1
   ivec4 j = p % 49, xi = 4 * (j / 7) - 13, yi = 4 * (j % 7) - 13;
   vec4 x = vec4(xi) / 14.0;
   vec4 y = vec4(yi) / 14.0;
@@ -99,8 +71,6 @@ float snoise(vec3 v) {
 }
 float fbm(vec3 p) { return 0.6 * snoise(p) + 0.28 * snoise(p * 2.03 + 17.0) + 0.12 * snoise(p * 4.1 + 41.0); }
 
-// The current: noise pushed around by noise (domain warping) reads as slowly stirred water, and its ridges (where
-// the noise crosses zero) are thin bright ribbons, like light on the floor of a pool. A swell rolls under it.
 float sea(vec2 p, float t) {
   vec2 s = p * 0.0038;
   vec2 q = vec2(fbm(vec3(s, t * 0.04)), fbm(vec3(s + vec2(5.2, 1.3), t * 0.04)));
@@ -131,7 +101,6 @@ float sdStar5(vec2 p, float r, float rf) {
   return length(p - ba * h) * sign(p.y * ba.x - p.x * ba.y);
 }
 
-// Distance to the drawing, CSS px (negative inside its strokes), the drawing centered on c at width w.
 float flyAt(vec2 p, vec2 c, float w) {
   float h = w * ${VIEW_H / VIEW_W};
   vec2 uv = (p - c) / vec2(w, h) + 0.5;
@@ -139,8 +108,6 @@ float flyAt(vec2 p, vec2 c, float w) {
   return texture(uSdf, uv).r * (w / uSdfSize.x);
 }
 
-// A wave's shape: signed distance from its front, CSS px, the shape grown to size r around the click. The unit heart
-// has its point at the origin and is about 1.1 tall: flipped upright, it is centered on the click, about 1.4 r wide.
 float shapeAt(float kind, vec2 d, float r) {
   if (kind < 0.5 || kind > 8.5) return length(d) - r;
   if (kind < 1.5) return sdHeart(vec2(d.x, -d.y) / r * 0.8 + vec2(0.0, 0.55)) * r / 0.8;
@@ -150,7 +117,6 @@ float shapeAt(float kind, vec2 d, float r) {
   return length(d) - r * (0.78 + 0.22 * cos(6.0 * a));
 }
 
-// The water's height: each wave a short train of crests, at its front and behind it.
 float waves(vec2 p) {
   float sum = 0.0;
   for (int i = 0; i < uWaves; i++) {
@@ -161,13 +127,10 @@ float waves(vec2 p) {
   }
   return sum;
 }
-// as the butterfly sinks its bold glyphs give way to the water's, unevenly (patches and single cells), and rise back
-// the same way
 float grain(vec2 p, vec2 cell) {
   return 0.999 * (0.65 * (0.5 + 0.5 * snoise(vec3(p * 0.018, 5.0))) + 0.35 * fract(sin(dot(cell, vec2(12.9898, 78.233))) * 43758.5453));
 }
 
-// Distance outside the message box (and the hint under it), CSS px.
 float boxAt(vec2 p) {
   vec2 q = abs(p - 0.5 * (uBox.xy + uBox.zw)) - 0.5 * (uBox.zw - uBox.xy) + 20.0;
   return length(max(q, 0.0)) + min(max(q.x, q.y), 0.0) - 20.0;
@@ -177,8 +140,6 @@ void main() {
   vec2 cell = vec2(gl_FragCoord.x - 0.5, uGrid.y - 0.5 - gl_FragCoord.y);
   vec2 p = (cell + 0.5) * uCell;
   float t = uTime * uMotion;
-  // what is seen through the water is bent by its slope: the current's ribbons, and the butterfly a little. (Each
-  // noise below only where it shows: the cells pass's cost is its noise.)
   float w = 0.0;
   vec2 slope = vec2(0.0);
   if (uWaves > 0) {
@@ -186,7 +147,6 @@ void main() {
     slope = vec2(waves(p + vec2(3.0, 0.0)) - w, waves(p + vec2(0.0, 3.0)) - w) / 3.0;
   }
   float breathe = 1.0 + 0.018 * sin(t * 0.9) * uMotion;
-  // sunk, the current pushes the butterfly's strokes about
   float sunk = smoothstep(0.0, 1.0, 1.0 - uFlyOn);
   vec2 drift = sunk > 0.0 ? sunk * 6.0 * vec2(snoise(vec3(p * 0.011, t * 0.12)), snoise(vec3(p * 0.011 + 31.0, t * 0.12))) : vec2(0.0);
   vec2 q = uCenter + (p - uCenter) / vec2(breathe, 1.0) - slope * 30.0 + drift;
@@ -202,24 +162,18 @@ void main() {
     return;
   }
   float s = sea(p - slope * 90.0, t);
-  // the butterfly's shape in the water, where its glyphs have given way: denser water, faintly pink
   float ghost = 1.0 - smoothstep(-2.0, 6.0, d);
   float gd = max(d, 0.0) / 30.0;
   float glow = exp(-gd * gd) * uFlyOn;
-  // the water right around the butterfly lies still, so its outline stays clean (its light still tints it), and the
-  // water around the message box is dimmer, so the box and the hint under it read as resting on it. Behind a chat the
-  // whole sea is dimmer, and dimmest under the column of text.
   float calm = mix(1.0, mix(0.3, 1.0, smoothstep(3.0, 40.0, d)), uFlyOn);
   float quiet = mix(0.3, 1.0, smoothstep(0.0, 40.0, boxAt(p)));
   quiet *= mix(mix(0.3, 0.65, smoothstep(0.0, 72.0, max(uLane.x - p.x, p.x - uLane.y))), 1.0, uFlyOn);
   float v = clamp(s * calm + ghost * 0.3 + lift * 0.55 + min(w, 0.0) * 0.15 + hover * 0.3, 0.0, 1.0);
   float g = floor(clamp(v * 3.9, 0.0, ${SEA.length - 1}.0));
-  // (the ghost only half as dimmed behind a chat: it stays in sight there, faintly)
   float bright = ((0.05 + 0.46 * v * v + 0.3 * glow + 0.3 * lift + 0.3 * hover) * quiet + 0.2 * ghost * sqrt(quiet)) * edge;
   o = vec4(g / 255.0, clamp(bright, 0.0, 1.0), clamp(glow * 0.85 + ghost * 0.7 + lift * 0.6 + hover * 0.5, 0.0, 1.0), 0.0);
 }`;
 
-// Pass 2: each screen pixel draws its cell's glyph.
 const GLYPHS = `#version 300 es
 precision highp float;
 uniform sampler2D uCells, uAtlas;
@@ -241,7 +195,6 @@ void main() {
 
 type Sdf = { data: Float32Array; w: number; h: number };
 
-// Squared distances to the nearest zero of f, in place along one line (Felzenszwalb and Huttenlocher's transform).
 function edt1(f: Float64Array, n: number, v: Int32Array, z: Float64Array, d: Float64Array) {
   let k = 0;
   v[0] = 0; z[0] = -Infinity; z[1] = Infinity;
@@ -270,7 +223,6 @@ function edt(mask: Uint8Array, w: number, h: number, want: number): Float64Array
   return out;
 }
 
-// The drawing as a signed distance field: texels from its nearest edge, negative inside its strokes.
 async function drawingSdf(width: number): Promise<Sdf> {
   const img = new Image();
   img.src = logo;
@@ -287,14 +239,11 @@ async function drawingSdf(width: number): Promise<Sdf> {
   return { data, w, h };
 }
 
-// The CPU's passes: CELLS line for line (its names and its order), and GLYPHS into the canvas's pixels. Kept in step
-// with the shaders; the browser test holds the two drawings to each other.
 const fract = (x: number) => x - Math.floor(x);
 const clamp = (x: number, a: number, b: number) => Math.min(Math.max(x, a), b);
 const smoothstep = (a: number, b: number, x: number) => { const k = clamp((x - a) / (b - a), 0, 1); return k * k * (3 - 2 * k); };
 const mod289 = (x: number) => x - Math.floor(x / 289) * 289;
 const permute = (x: number) => ((x * 34 + 1) * x) % 289;
-// one corner of a simplex: its gradient from the permutation p (GLSL's j, xi, yi, h, sh, a0/a1) and its falloff
 function corner(p: number, x: number, y: number, z: number): number {
   let m = 0.6 - (x * x + y * y + z * z);
   if (m <= 0) return 0;
@@ -352,7 +301,6 @@ function sdStar5(x: number, y: number, r: number, rf: number): number {
 }
 type Wave = { x: number; y: number; kind: number; amp: number; size: number; len: number };
 
-// The canvas and its 2D context, the cells (pass 1's texture, as bytes) and the glyph atlas's ink (alpha)
 class Cpu {
   cells = new Uint8ClampedArray(0);
   ink = new Uint8ClampedArray(0);
@@ -375,7 +323,6 @@ function compile(gl: WebGL2RenderingContext, frag: string): WebGLProgram {
   return prog;
 }
 
-// A computed color ("rgb(156, 142, 146)"), 0..1 each.
 const rgb = (css: string) => {
   const [r = 136, g = 136, b = 136] = css.match(/[\d.]+/g)?.map(Number) ?? [];
   return [r / 255, g / 255, b / 255];
@@ -385,7 +332,7 @@ export class Ocean {
   canvas = document.createElement("canvas");
   private gl: WebGL2RenderingContext | null = null;
   private cpu: Cpu | null = null;
-  private cost = 0;                                 // the CPU's last frame, s
+  private cost = 0;
   private cellsProg!: WebGLProgram;
   private glyphProg!: WebGLProgram;
   private u = new Map<string, WebGLUniformLocation | null>();
@@ -402,18 +349,18 @@ export class Ocean {
   private dpr = 0;
   private cellPx = [0, 0];
   private view = [0, 0, 0, 0];
-  private seen = [0, 0, 0, 0];                      // the cells the layer shows: column, row, columns, rows
+  private seen = [0, 0, 0, 0];
   private box = [-1e4, -1e4, -1e4, -1e4];
   private lane = [0, 0];
   private center = [0, 0];
   private flyW = 0;
-  private ripples = new Float32Array(MAX_RIPPLES * 4).fill(-1);   // x, y, when, kind (-1: none)
+  private ripples = new Float32Array(MAX_RIPPLES * 4).fill(-1);
   private packed = new Float32Array(MAX_RIPPLES * 8);
   private pattern = 0;
   private t0 = performance.now() / 1000;
   private pointer = [0, 0, 0];
   private presence = 0;
-  private moved = 0;                                // when the pointer last moved over the water
+  private moved = 0;
   private lastWake: [number, number] | null = null;
   private colors = { sea: [0, 0, 0], pink: [0, 0, 0], hi: [0, 0, 0] };
   private drawn = 0;
@@ -421,10 +368,6 @@ export class Ocean {
   private still = matchMedia("(prefers-reduced-motion: reduce)");
   private resize = new ResizeObserver(() => this.layout());
 
-  // `layer`: the room the sea fills (under the top bar, behind the message box), shown while a new chat is. `box`: what
-  // the water is quiet around and the butterfly floats above, in the room between it and the layer's top, and `hint` the
-  // line under it (the message box). A device's connect page (setup.ts) names its card and the room the butterfly has;
-  // Chrysalis's card (app.ts) no box, the butterfly in the middle of its picture.
   private boxAt: string;
   private hintAt: string;
   private roomAt: string;
@@ -435,14 +378,12 @@ export class Ocean {
     this.dress(this.canvas);
     onTheme(() => { this.readColors(); this.wake(); });
     this.still.addEventListener("change", () => this.wake());
-    addEventListener("scroll", () => this.layout(), { passive: true });   // the connect page scrolls its card; the chat's window never scrolls
+    addEventListener("scroll", () => this.layout(), { passive: true });
   }
 
   private dress(c: HTMLCanvasElement) {
     c.className = "ocean";
     c.setAttribute("aria-hidden", "true");
-    // a click on the water keeps the message box's focus: typing goes on where it was. The canvas sits at the
-    // window's corner, so client coordinates are the shader's.
     c.addEventListener("pointerdown", (e) => {
       if (e.button !== 0) return;
       e.preventDefault();
@@ -462,7 +403,6 @@ export class Ocean {
     c.addEventListener("webglcontextrestored", () => { if (this.init()) this.layout(); });
   }
 
-  // WebGL2, else the CPU: a canvas that has had a WebGL context gives no 2D one, so that one is replaced
   private init(): boolean {
     const gl = this.cpu ? null : this.canvas.getContext("webgl2", { premultipliedAlpha: true, antialias: false, alpha: true });
     try {
@@ -490,12 +430,10 @@ export class Ocean {
     return true;
   }
 
-  // Puts the sea in its layer, which the page shows and hides; false where a canvas cannot be drawn on at all.
   start(): boolean {
     if (!this.init()) return false;
     this.layer.append(this.canvas);
     this.resize.observe(this.layer);
-    // the message box places the butterfly, the quiet water around it and the dimmest water behind a chat (its column)
     const box = this.boxAt ? document.querySelector(this.boxAt) : null;
     if (box) this.resize.observe(box);
     this.readColors();
@@ -503,10 +441,8 @@ export class Ocean {
     return true;
   }
 
-  // The layer moved without changing size (scrolled inside an element: the window's own scroll is followed already).
   place() { this.layout(); }
 
-  // A new chat's empty state: the butterfly rises while it is in the page and sinks once the chat has begun.
   butterfly(empty: HTMLElement) {
     this.empty = empty;
     this.wake();
@@ -515,8 +451,6 @@ export class Ocean {
   private live() { return !!(this.gl || this.cpu) && this.shown; }
   private now() { return performance.now() / 1000 - this.t0; }
 
-  // The theme's colors: the sea in --muted, the butterfly in --accent, its light lighter in the dark, deeper in light.
-  // Read as an element's computed color: the variables themselves are light-dark() pairs.
   private readColors() {
     const probe = document.body.appendChild(document.createElement("i"));
     const read = (v: string) => { probe.style.color = `var(${v})`; return rgb(getComputedStyle(probe).color); };
@@ -524,8 +458,6 @@ export class Ocean {
     probe.remove();
   }
 
-  // A new wave takes the slot of one that has ended, else of the one that ends soonest (a drag's wake before a click's
-  // wave): a wave cut off while still high vanishes from one frame to the next.
   private splash(x: number, y: number, kind: number) {
     if (this.still.matches) return;
     let slot = 0, end = Infinity;
@@ -537,10 +469,6 @@ export class Ocean {
     this.wake();
   }
 
-  // The waves live at time t, each a few smooth crests spreading from its click in its shape, quick at first and
-  // slowing as they spread (as a stone's rings do), lower as they go; a drag's wake is the same, smaller and shorter. A
-  // crest is a wavelength (len) of at least 44 px, so that it spans a few rows of 11 px cells: thinner, the grid missed
-  // it in most of them. Worked out here once a frame, for the shader (uWave) and the CPU's passes alike.
   private waves(t: number): Wave[] {
     const out: Wave[] = [];
     for (let i = 0; i < MAX_RIPPLES; i++) {
@@ -566,16 +494,11 @@ export class Ocean {
     gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
   }
 
-  // The grid covers the window from its corner, whole device pixels per cell, and the layer shows the part of it under
-  // the chat. So a side panel sliding open or shut only moves the layer's edge: every character stays where it is on
-  // screen, and the canvas keeps its size (resizing it would blank it until the next frame is drawn: a flicker on
-  // every frame of the slide). The frame is drawn here, before the browser paints the new layout.
   private layout() {
     if (!this.gl && !this.cpu) return;
     const r = this.layer.getBoundingClientRect(), was = this.shown;
     this.shown = r.width >= 40 && r.height >= 40;
     if (!this.shown) return;
-    // the CPU writes every pixel: no more than about 2.5 million of them (a 1440 x 900 window at 2x), scaled up beyond
     const dpr = this.cpu ? Math.max(1, Math.min(devicePixelRatio || 1, Math.sqrt(2.5e6 / (innerWidth * innerHeight)))) : devicePixelRatio || 1;
     const cw = Math.max(1, Math.round(CELL_W * dpr)), ch = Math.max(1, Math.round(CELL_H * dpr));
     const cols = Math.ceil(innerWidth * dpr / cw), rows = Math.ceil(innerHeight * dpr / ch);
@@ -591,13 +514,12 @@ export class Ocean {
     this.view = [r.left, r.top, r.right, r.bottom];
     const x0 = Math.max(0, Math.floor(r.left * dpr / cw)), y0 = Math.max(0, Math.floor(r.top * dpr / ch));
     this.seen = [x0, y0, Math.min(cols, Math.ceil(r.right * dpr / cw)) - x0, Math.min(rows, Math.ceil(r.bottom * dpr / ch)) - y0];
-    // the butterfly over the message box, in the middle of the room above it
     const box = this.boxAt ? document.querySelector(this.boxAt)?.getBoundingClientRect() : undefined;
     const hint = this.hintAt ? document.querySelector(this.hintAt)?.getBoundingClientRect() : undefined;
     const column = box && box.width > 0 ? box : r, top = box && box.width > 0 ? box.top : r.bottom;
     this.box = box && box.width > 0 ? [box.left, box.top, box.right, Math.max(box.bottom, hint?.height ? hint.bottom : 0)] : [-1e4, -1e4, -1e4, -1e4];
     const room = this.roomAt ? document.querySelector(this.roomAt)?.getBoundingClientRect() : undefined;
-    if (room) {                                     // the connect page's: it scrolls, and spans the window's width
+    if (room) {
       this.center = [room.left + room.width / 2, room.top + room.height * 0.5];
       this.flyW = Math.min(room.height * 0.8 * VIEW_W / VIEW_H, r.width * 0.92);
     } else {
@@ -605,9 +527,7 @@ export class Ocean {
       this.flyW = Math.min(column.width * 0.86, (top - r.top) * 0.74 * VIEW_W / VIEW_H, r.width * 0.92);
     }
     this.lane = [column.left, column.right];
-    // the sea showing (again): the butterfly is where it belongs at once, as the sea is
     if (!was) { this.fly = this.empty?.isConnected ? 1 : 0; this.wake(); }
-    // (a resized canvas is blank until drawn; else the CPU leaves it to its loop: a page's scroll would draw every event)
     if (resized || !this.cpu) this.draw();
     else this.wake();
   }
@@ -625,7 +545,6 @@ export class Ocean {
     ctx.textAlign = "center";
     ctx.textBaseline = "middle";
     for (const [row, set, weight] of [[0, SEA, 400], [1, TUBE, 700]] as const) {
-      // a font string the canvas cannot parse is ignored without a word (leaving 10px sans-serif): monospace then
       ctx.font = `${weight} ${FONT_PX * dpr}px ${mono}`;
       if (!ctx.font.includes(`${FONT_PX * dpr}px`)) ctx.font = `${weight} ${FONT_PX * dpr}px monospace`;
       [...set].forEach((g, i) => { if (g !== " ") ctx.fillText(g, (i + 0.5) * cw, (row + 0.5) * ch); });
@@ -669,21 +588,14 @@ export class Ocean {
     return this.u.get(key)!;
   }
 
-  // Runs the loop while the sea is on screen: every frame while something moves fast (a wave, the pointer's light,
-  // the butterfly sinking or rising), 24 a second for the slow current alone in a new chat (on a 144 Hz screen every frame would
-  // be six times the work for nothing to see) and 12 behind a chat, where it is dim and only drifts, once with reduced
-  // motion. requestAnimationFrame stops by itself in a hidden tab.
   private wake() {
     if (this.running) return;
     this.running = true;
     const tick = () => {
       if (!this.live() || !(this.gl ? this.sdfTex : this.sdf)) { this.running = false; return; }
       const t = this.now(), blank = !!this.empty?.isConnected;
-      // (a pointer resting on the water is not: its light stays where it is)
       const busy = this.moved > this.drawn || Math.abs(this.presence - this.pointer[2]) > 0.01 || this.fly !== (blank ? 1 : 0)
         || this.waves(t).length > 0;
-      // the CPU keeps its frames to a quarter of the time (half while something moves fast)
-      // (with reduced motion the one frame drawn now is the frame that stays)
       if (this.still.matches || t - this.drawn >= Math.max(busy ? 0 : 1 / (blank ? 24 : 12), this.cpu ? this.cost * (busy ? 2 : 4) : 0)) this.draw();
       if (this.still.matches) { this.running = false; return; }
       requestAnimationFrame(tick);
@@ -691,7 +603,6 @@ export class Ocean {
     requestAnimationFrame(tick);
   }
 
-  // Both passes only over the cells the layer shows: the rest of the window's grid is under the side panels.
   private draw() {
     const gl = this.gl;
     if (!this.sdf || this.seen[2] <= 0 || this.seen[3] <= 0 || (gl ? !this.cellTex || !this.atlas || !this.sdfTex : !this.cpu?.ink.length)) return;
@@ -699,7 +610,7 @@ export class Ocean {
     const blank = !!this.empty?.isConnected, dt = Math.min(0.1, t - this.drawn);
     this.fly = still ? Number(blank) : this.fly + (Number(blank) - this.fly) * (1 - Math.exp(-dt / (blank ? RISE : SINK)));
     if (Math.abs(Number(blank) - this.fly) < 0.003) this.fly = Number(blank);
-    if (!blank) this.presence = 0;                          // behind a chat the thread has the pointer
+    if (!blank) this.presence = 0;
     this.drawn = t;
     this.pointer[2] += (this.presence - this.pointer[2]) * (1 - Math.exp(-dt / HOVER));
     if (!gl) {
@@ -762,7 +673,6 @@ export class Ocean {
     gl.drawArrays(gl.TRIANGLES, 0, 3);
   }
 
-  // Pass 1 on the CPU (CELLS' main, its uniforms the fields they are set from), over the cells the layer shows
   private cellsCpu(uTime: number, uMotion: number) {
     const cpu = this.cpu!, sdf = this.sdf!, out = cpu.cells, [sx, sy, sw, sh] = this.seen;
     const uCellX = this.cellPx[0] / this.dpr, uCellY = this.cellPx[1] / this.dpr, uFlyOn = this.fly;
@@ -773,7 +683,6 @@ export class Ocean {
     const flyAt = (x: number, y: number, c0: number, c1: number, w: number) => {
       const h = w * VIEW_H / VIEW_W, u = (x - c0) / w + 0.5, v = (y - c1) / h + 0.5;
       if (u < 0 || u > 1 || v < 0 || v > 1) return 1e4;
-      // linear filtering, clamped to the edge, as the texture is sampled
       const fx = u * sdf.w - 0.5, fy = v * sdf.h - 0.5, x0 = Math.floor(fx), y0 = Math.floor(fy), ax = fx - x0, ay = fy - y0;
       const at = (i: number, j: number) => sdf.data[clamp(j, 0, sdf.h - 1) * sdf.w + clamp(i, 0, sdf.w - 1)];
       const d = (at(x0, y0) * (1 - ax) + at(x0 + 1, y0) * ax) * (1 - ay) + (at(x0, y0 + 1) * (1 - ax) + at(x0 + 1, y0 + 1) * ax) * ay;
@@ -835,7 +744,6 @@ export class Ocean {
     }
   }
 
-  // Pass 2 on the CPU (GLYPHS): each shown cell's glyph from the atlas's ink, in its color, into the canvas's pixels
   private glyphsCpu() {
     const cpu = this.cpu!, [sx, sy, sw, sh] = this.seen, [cw, ch] = this.cellPx, W = sw * cw, H = sh * ch;
     if (!cpu.pixels || cpu.pixels.width !== W || cpu.pixels.height !== H) cpu.pixels = new ImageData(W, H);

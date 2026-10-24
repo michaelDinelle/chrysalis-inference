@@ -1,4 +1,3 @@
-// Checks attention prep (norm, RoPE and M-RoPE, int8 KV) + WMMA flash attention + split combine against a CPU reference.
 #include "../engine/kernels.h"
 #include <cmath>
 #include <random>
@@ -6,15 +5,13 @@
 using std::vector;
 
 static float q8(float x, float d) { return d > 0 ? d * std::nearbyint(x / d) : 0.0f; }
-static void fwht(float *x) {   // normalized, self-inverse
+static void fwht(float *x) {
     for (int h = 1; h < HD; h <<= 1)
         for (int i = 0; i < HD; i++) if (!(i & h)) { float a = x[i], b = x[i | h]; x[i] = a + b; x[i | h] = a - b; }
     for (int i = 0; i < HD; i++) x[i] *= 0.0625f;
 }
 static float round_f16(float x) { return (float)(_Float16)x; }
 
-// Which of a token's three M-RoPE positions (t, h, w) each frequency pair turns with: transformers'
-// Qwen3_5TextRotaryEmbedding.recomposition_frequencies, mrope_section [11, 11, 10] (H takes 1:33:3, W 2:30:3).
 static vector<int> mrope_sections() {
     vector<int> sec(ROT / 2, 0);
     const int section[3] = {11, 11, 10};
@@ -23,9 +20,8 @@ static vector<int> mrope_sections() {
     return sec;
 }
 
-struct Ref {   // CPU model of the same math, keeping the dequantized cache
-    vector<float> K, V;   // [pos][NKV][HD]
-    // rpos: null (text: every token at its slot), or per token its (t, h, w)
+struct Ref {
+    vector<float> K, V;
     void prep(const float *qg, const float *k, const float *v, const float *qw, const float *kw, int T, int pos0,
               const int *rpos, vector<float> &Q) {
         static const vector<int> sec = mrope_sections();
@@ -53,8 +49,8 @@ struct Ref {   // CPU model of the same math, keeping the dequantized cache
                 for (int b = 0; b < HD / 32; b++) {
                     float mk = 0, mv = 0;
                     for (int i = 0; i < 32; i++) { mk = fmaxf(mk, fabsf(o[b * 32 + i])); mv = fmaxf(mv, fabsf(vv[b * 32 + i])); }
-                    float dk = round_f16(mk / 127), dv = round_f16(mv / 15), dk0 = mk / 127, dv0 = mv / 15;   // K int8, V 5-bit
-                    for (int i = 0; i < 32; i++) {   // GPU rounds with the fp32 scale, stores the fp16 scale
+                    float dk = round_f16(mk / 127), dv = round_f16(mv / 15), dk0 = mk / 127, dv0 = mv / 15;
+                    for (int i = 0; i < 32; i++) {
                         size_t at = ((size_t)(pos0 + t) * NKV + h) * HD + b * 32 + i;
                         K[at] = dk * (dk0 > 0 ? std::nearbyint(o[b * 32 + i] / dk0) : 0);
                         V[at] = dv * (dv0 > 0 ? std::nearbyint(vv[b * 32 + i] / dv0) : 0);
@@ -93,7 +89,7 @@ int main() {
     std::mt19937 rng(7); std::normal_distribution<float> nd;
     const int maxpos = 36864, npages = maxpos / PAGE;
     uint8_t *pool; CK(hipMalloc(&pool, KV_PAGE * npages));
-    vector<int> pages(npages); for (int i = 0; i < npages; i++) pages[i] = npages - 1 - i;   // non-identity paging
+    vector<int> pages(npages); for (int i = 0; i < npages; i++) pages[i] = npages - 1 - i;
     int *dpages; CK(hipMalloc(&dpages, npages * 4)); CK(hipMemcpy(dpages, pages.data(), npages * 4, hipMemcpyHostToDevice));
     KVRef kv{pool, dpages};
     vector<float> qw(HD), kw(HD); for (auto &x : qw) x = 1 + 0.1f * nd(rng); for (auto &x : kw) x = 1 + 0.1f * nd(rng);
@@ -101,12 +97,8 @@ int main() {
     CK(hipMemcpy(dqw, qw.data(), HD * 4, hipMemcpyHostToDevice)); CK(hipMemcpy(dkw, kw.data(), HD * 4, hipMemcpyHostToDevice));
     Ref ref; int fails = 0, pos = 0;
     struct Case { int T; const char *name; bool check = true; bool mrope = false; };
-    // M-RoPE: a picture of 4 x 5 tokens between text, its rows and columns far apart so a pair turned with the wrong
-    // position shows: (p, p, p) for text, (p0, p0 + 300 r, p0 + 700 c) in the picture
     vector<Case> cases = {{100, "prefill 100"}, {50, "prefill +50"}, {1, "decode"}, {4, "verify 4"}, {8, "verify 8"}, {1, "decode"},
                           {24, "M-RoPE picture", true, true}, {1, "decode after it"}};
-    // then a deep context (prefilled in engine-sized chunks, not checked) where attention() splits the keys many ways:
-    // decode / verify, and a short append on the prefill path (T = 9: 32 key splits at this depth)
     for (int i = 0; i < 16; i++) cases.push_back({2048, "prefill 2048", false});
     for (int t : {1, 2, 3, 4, 8, 5, 1}) cases.push_back({t, "deep decode/verify"});
     cases.push_back({9, "deep append"});
@@ -125,7 +117,7 @@ int main() {
         int *drp = nullptr;
         if (c.mrope) {
             for (int t = 0; t < T; t++) {
-                const int p = pos + t, img = t - 2;   // two text tokens, then the picture
+                const int p = pos + t, img = t - 2;
                 if (img < 0) rp.insert(rp.end(), {p, p, p});
                 else rp.insert(rp.end(), {pos + 2, pos + 2 + 300 * (img / 5), pos + 2 + 700 * (img % 5)});
             }

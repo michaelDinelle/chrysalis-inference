@@ -1,12 +1,5 @@
-// Sub-agents, the built-in tool that hands a task to an agent of its own: a fresh conversation with the chat's other
-// tools that works on it alone and gives back its final answer. server.ts runs it (subagent()): it needs the reply's
-// request, its tool calls' approvals and its events, which a tool's run() is not given, so run() here is never called.
-// The tool takes what OpenCode's subagent takes (a short label shown to the user and a self-contained task), not its
-// background runs or sessions to resume.
 import type { Source, Tool } from "./tools";
 
-// The sub-agent's system prompt: it works for another model, which sees its final message only, and nobody can answer
-// its questions.
 export const SUBAGENT_SYSTEM = "You are a sub-agent, running locally in Chrysalis Inference. Another assistant, in a chat with a "
   + "user, handed you the task below and is waiting for your answer: it sees only your final message. Work on the task with "
   + "your tools until it is done, then reply with a complete answer that stands on its own: what you found, what it rests on, "

@@ -3,16 +3,12 @@
   <head>
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
-    <!-- nothing the page shows (model markdown, SVG figures) may load from or talk to anywhere else (under `bun run dev`
-         this also blocks the dev server's inline tab-hidden beacon: one console message, nothing else changes) -->
     <meta http-equiv="Content-Security-Policy" content="default-src 'self'; img-src 'self' data: blob:; style-src 'self' 'unsafe-inline'; font-src 'self' data:; connect-src 'self'; object-src 'none'; base-uri 'none'; form-action 'self'" />
     <title>Chrysalis Inference</title>
     <link rel="icon" href="./logo.svg" />
     <link rel="stylesheet" href="./style.css" />
   </head>
   <body>
-    <!-- the aurora over both panels' heads (each a <use> of it): curtains of light whose rays are fractal noise
-         stretched upright -->
     <svg class="sprite" aria-hidden="true">
       <defs>
         <linearGradient id="aurora-pink" x1="0" y1="38" x2="0" y2="0" gradientUnits="userSpaceOnUse">
@@ -34,7 +30,6 @@
           <stop offset="0" style="stop-color: var(--aurora-pink)" stop-opacity="0.2" />
           <stop offset="1" style="stop-color: var(--aurora-pink)" stop-opacity="0" />
         </radialGradient>
-        <!-- a curtain's ends fade out, as its rays thin -->
         <linearGradient id="aurora-ends" x1="0" y1="0" x2="1" y2="0">
           <stop offset="0" stop-color="#000" /><stop offset="0.25" stop-color="#fff" />
           <stop offset="0.75" stop-color="#fff" /><stop offset="1" stop-color="#000" />
@@ -74,9 +69,6 @@
       </defs>
     </svg>
     <div id="app">
-      <!-- the side panels: the conversations (left) and Settings (right), alike. Each has a toggle fixed in its top
-           corner, so it never moves; the chat's top bar and the panel's head leave it room. data-open is the state a
-           panel starts in where it sits beside the chat (it is remembered from then on). -->
       <button id="conversations-toggle" class="act pane-toggle" data-side="left" type="button" aria-controls="sidebar" aria-label="Conversations" title="Conversations (Ctrl+B)"></button>
       <aside id="sidebar" class="pane" data-side="left" data-open tabindex="-1">
         <div class="pane-inner">
@@ -91,7 +83,6 @@
             </div>
             <nav id="conversations" aria-label="Conversations"></nav>
             <div class="side-foot">
-              <!-- the user as the characters see them (app.ts, the cast) -->
               <button id="you" class="you" type="button" title="Your card"></button>
               <button id="import" class="btn" type="button" title="Import: chats from files exported here" aria-label="Import chats"></button>
               <button id="export-all" class="btn" type="button" title="Export: every chat of this tab, in one file" aria-label="Export all chats"></button>
@@ -101,7 +92,6 @@
           <div class="pane-rail" role="separator" aria-orientation="vertical"></div>
         </div>
       </aside>
-      <!-- a character's, a group's or the user's own sheet (app.ts, openSheet), beside the conversations -->
       <div id="cast-sheet" class="cast-sheet" role="dialog" aria-label="Character" hidden></div>
       <div id="cast-add" class="cast-add" role="menu" hidden>
         <button type="button" data-add="card" role="menuitem">A character from a card…</button>
@@ -111,7 +101,6 @@
       <main>
         <header class="topbar">
           <h1 id="title">New chat</h1>
-          <!-- where replies come from: the address the web server is connected to, and its key (app.ts renderBackend) -->
           <form id="backend" class="backend" autocomplete="off" hidden>
             <span id="backend-dot" class="dot"></span>
             <input id="backend-url" class="backend-input backend-url" type="text" inputmode="url" spellcheck="false" list="backend-known" aria-label="Backend address" placeholder="http://localhost:11434/v1" />
@@ -125,7 +114,6 @@
           <button id="export" class="act" type="button" title="Export this chat (a file you can import again)" aria-label="Export this chat" hidden></button>
           <button id="connect" class="act" type="button" title="Connect a phone or another device" aria-label="Connect a device" aria-haspopup="dialog" hidden></button>
         </header>
-        <!-- the sea (ocean.ts): everything under the top bar, behind the thread and the message box -->
         <div id="sea" class="sea"></div>
         <div id="scroller"><div id="thread" class="thread"></div></div>
         <form id="composer">
@@ -151,8 +139,6 @@
               <button id="power" class="act power" type="button"></button>
               <button id="draft" class="draft" type="button" hidden></button>
               <button id="voice" class="voice" type="button" title="Voice mode" aria-label="Voice mode"></button>
-              <!-- voice mode, as Grok has it: the message box stays and the chat is written above it as it is said; the
-                   pill's dots move with the voice heard (yours, then the reply's), a click on them talks over the reply -->
               <div id="voice-pill" class="voice-pill" hidden>
                 <button id="voice-dots" class="voice-dots" type="button"><i></i><i></i><i></i><i></i><i></i></button>
                 <button id="voice-mute" class="voice-mic" type="button"></button>
@@ -165,8 +151,6 @@
         </form>
         <div id="toast" class="toast" role="status" aria-live="polite" hidden></div>
       </main>
-      <!-- the shelf: the chat's artifacts in a card that floats over it (moved by its head, sized by its corner): one
-           large, or two side by side, each with its versions (app.ts) -->
       <section id="shelf" class="shelf" aria-label="Artifacts" hidden>
         <header id="shelf-head" class="shelf-head">
           <div id="shelf-tabs" class="shelf-tabs" role="tablist" aria-label="Artifacts"></div>
@@ -179,8 +163,6 @@
           <span class="shelf-acts"><button type="button" data-shelf="edit" aria-pressed="false">Edit</button><button type="button" data-shelf="code">Code</button><button type="button" data-shelf="copy">Copy</button><button type="button" data-shelf="save">Download</button></span>
         </footer>
       </section>
-      <!-- Settings: a panel beside the chat, not a dialog over it, so a change can be tried at once (Regenerate) and
-           compared; every change applies as it is made, and what it shows is exactly what Chrysalis is sent -->
       <button id="settings-toggle" class="act pane-toggle" data-side="right" type="button" aria-controls="settings" aria-label="Settings" title="Settings (Ctrl+,)"></button>
       <aside id="settings" class="pane" data-side="right" aria-label="Settings" tabindex="-1">
         <div class="pane-inner">
@@ -229,13 +211,11 @@
     <div id="tokpop" class="tokpop" role="dialog" aria-label="Alternatives" hidden></div>
     <dialog id="svg-zoom" class="svg-zoom" aria-label="SVG, full size"><div class="svg-zoom-paper"></div></dialog>
     <dialog id="page-zoom" class="page-zoom" aria-label="Page, full size"><div class="page-zoom-box"></div></dialog>
-    <!-- What the model is sent: read-only, from the web server's own build of the next request (/api/preview) -->
     <dialog id="sent-view" class="sent-view" aria-labelledby="sent-title">
       <header class="sent-head"><h2 id="sent-title">What the model is sent</h2><button id="sent-copy" class="btn small" type="button">Copy</button><button id="sent-close" class="act" type="button" aria-label="Close"></button></header>
       <p id="sent-about" class="set-note"></p>
       <pre id="sent-text" class="sent-text"></pre>
     </dialog>
-    <!-- Connect a device: the QR code that sets a phone up and lets it in, and the devices let in (app.ts openConnect) -->
     <dialog id="connect-view" class="connect-view" aria-labelledby="connect-title">
       <header class="sent-head"><h2 id="connect-title">Connect a device</h2><button id="connect-close" class="act" type="button" aria-label="Close"></button></header>
       <div id="connect-body" class="connect-body"></div>

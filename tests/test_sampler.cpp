@@ -1,11 +1,8 @@
-// The host sampler (engine/sampler.h): the default order draws exactly as the sampler before it (fixed stages, a scan
-// of the reply for the presence penalty), stage order and DRY do what they say.
-//   build/test_sampler
 #include "../engine/sampler.h"
 #include <cstdio>
 #include <cstring>
 
-namespace old {   // make_dist as it was (commit 9b7b298)
+namespace old {
 Dist make_dist(const float *v, const int *ids, const Sampling &sp, const std::vector<int> &seen) {
     std::pair<float, int> c[SAMPLE_N];
     int nc = 0;
@@ -35,7 +32,7 @@ Dist make_dist(const float *v, const int *ids, const Sampling &sp, const std::ve
     for (int i = 0; i < d.n; i++) d.p[i] /= sum;
     return d;
 }
-}  // namespace old
+}
 
 static int fails = 0;
 static void check(bool ok, const char *what) {
@@ -46,7 +43,6 @@ static void check(bool ok, const char *what) {
 int main() {
     std::mt19937_64 rng(1);
     std::normal_distribution<float> logit(0, 3);
-    // 1. default order = the old sampler, bit for bit, over random rows, settings and replies
     int same = 0, cases = 20000;
     for (int t = 0; t < cases; t++) {
         float v[SAMPLE_N];
@@ -71,7 +67,6 @@ int main() {
     snprintf(line, sizeof line, "default order = previous sampler (%d/%d bit-identical)", same, cases);
     check(same == cases, line);
 
-    // 2. order: top P before the temperature judges the untempered odds
     float v[SAMPLE_N];
     int ids[SAMPLE_N];
     for (int i = 0; i < SAMPLE_N; i++) { v[i] = -1.0f * i; ids[i] = i; }
@@ -83,19 +78,18 @@ int main() {
     snprintf(line, sizeof line, "temperature last keeps fewer at a high temperature (%d < %d)", last, first);
     check(last < first, line);
 
-    // 3. DRY: the token that would repeat "a b c" after "a b" is penalized; nothing without a repeat
-    std::vector<int> ctx = {7, 1, 2, 3, 9, 9, 1, 2};    // "... a b c ... a b" -> c would repeat a run of 2
+    std::vector<int> ctx = {7, 1, 2, 3, 9, 9, 1, 2};
     Sampling dry;
     dry.top_k = 0; dry.top_p = 1; dry.dry_multiplier = 2; dry.dry_allowed_length = 2;
     for (int i = 0; i < SAMPLE_N; i++) v[i] = 0;
     const Dist d0 = make_dist(v, ids, Sampling{.top_p = 1, .top_k = 0}, {}, ctx), d1 = make_dist(v, ids, dry, {}, ctx);
     check(prob(d1, 3) < prob(d0, 3) * 0.2f && prob(d1, 4) > prob(d0, 4), "DRY penalizes the continuation of a repeated run");
     dry_breakers.assign(16, 0);
-    dry_breakers[2] = 1;                                 // a breaker inside the run ends it
+    dry_breakers[2] = 1;
     const Dist d2 = make_dist(v, ids, dry, {}, ctx);
     check(std::abs(prob(d2, 3) - prob(d0, 3)) < 1e-6f, "a sequence breaker ends the run");
     dry_breakers.clear();
-    Seen reply;                                          // the reply counts as context too
+    Seen reply;
     for (int x : {1, 2}) reply.push(x);
     const Dist d3 = make_dist(v, ids, dry, reply, {7, 1, 2, 3, 9});
     check(prob(d3, 3) < prob(d0, 3) * 0.2f, "DRY sees the prompt's tail followed by the reply");

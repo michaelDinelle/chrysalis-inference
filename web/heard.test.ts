@@ -1,5 +1,3 @@
-// A voice turn's fixes (heard.ts) on what Flash-Next wrote for real transcripts: the misheard words it found are swapped
-// in when they sound like what was heard, the meanings it offered instead are not, and nothing else of the turn changes.
 import { expect, test } from "bun:test";
 import { applyFixes, fixedParts, readHeard, soundsLike } from "./heard";
 

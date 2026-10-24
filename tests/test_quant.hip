@@ -1,6 +1,3 @@
-// Checks the weight relayout, fp16 dequantization, int8 GEMVs and the small-batch GEMM against a plain
-// CPU reference decoded straight from the GGUF bytes, and the GEMVs of different pass sizes against each other.
-//   build/test_quant data/models/chrysalis-mix.gguf
 #include "../engine/kernels.h"
 #include "../engine/gguf.h"
 #include <cmath>
@@ -67,7 +64,6 @@ int main(int argc, char **argv) {
         CK(hipFree(raw)); CK(hipFree(dq));
         W.push_back(t); ref.push_back(std::move(r));
     }
-    // GEMV against CPU float matmul (int8 activations cost ~0.5% relative error)
     std::mt19937 rng(1); std::normal_distribution<float> nd;
     for (int T : {1, 3, 8}) for (int wi = 0; wi < 3; wi++) {
         const QTensor &t = W[wi]; const int K = t.cols, N = t.rows;
@@ -89,9 +85,6 @@ int main(int argc, char **argv) {
         fails += !ok;
         CK(hipFree(dx)); CK(hipFree(dy)); CK(hipFree(qa.q)); CK(hipFree(qa.d));
     }
-    // A row comes out the same whatever the pass's size (up to 4 tokens and from 5 are different kernels): what a pass of
-    // 8 tokens gives its first 4 and its first, bit for bit, against passes of 4 and of 1 (parallel replies and prompt
-    // lookup draw what they would alone only so)
     for (int wi = 0; wi < 3; wi++) {
         const QTensor &t = W[wi]; const int K = t.cols, N = t.rows;
         std::vector<float> x((size_t)8 * K); for (auto &v : x) v = nd(rng);
@@ -109,8 +102,7 @@ int main(int argc, char **argv) {
         fails += !ok;
         CK(hipFree(dx)); CK(hipFree(qa.q)); CK(hipFree(qa.d)); CK(hipFree(y8)); CK(hipFree(y4)); CK(hipFree(y1));
     }
-    // small-batch GEMM (fp16 activations, weights dequantized in registers) against the CPU, on a sample of rows
-    for (int T : {9, 40, 100}) for (int wi = 0; wi < 3; wi++) for (int mode : {0, 1, 2}) {   // fp32 store, fp32 add, fp16 store
+    for (int T : {9, 40, 100}) for (int wi = 0; wi < 3; wi++) for (int mode : {0, 1, 2}) {
         if (mode && T != 40) continue;
         const QTensor &t = W[wi]; const int K = t.cols, N = t.rows;
         std::vector<_Float16> x((size_t)T * K); for (auto &v : x) v = (_Float16)nd(rng);

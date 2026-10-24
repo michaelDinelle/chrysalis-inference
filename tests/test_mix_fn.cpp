@@ -1,6 +1,3 @@
-// The fused decode HC mixer (hc_mix_fused: two kernels) against the six-kernel path (hc_norm, W_down GEMV, hc_lo,
-// W_up GEMV, W_inject GEMV, hc_mix) on random Q8_0 weights and residuals, T = 1..4: mixed output, its int8 blocks, and
-// the inject weights.
 #include "../engine_fn/kernels.h"
 #include <cmath>
 #include <random>
@@ -33,7 +30,7 @@ int main() {
     QTensor down = rand_q8(a, HCR, HCD, rng), up = rand_q8(a, HCD, HCR, rng), inj = rand_q8(a, HC, HCD, rng);
     const int TM = 4;
     std::vector<float> res((size_t)TM * HCD), gamma(HCD);
-    for (size_t i = 0; i < res.size(); i++) res[i] = nd(rng) * (1.0f + (i / D) % HC);   // streams of different scale
+    for (size_t i = 0; i < res.size(); i++) res[i] = nd(rng) * (1.0f + (i / D) % HC);
     for (auto &v : gamma) v = 1.0f + 0.2f * nd(rng);
     float *dres = a.get<float>(res.size()), *dgam = a.get<float>(HCD);
     CK(hipMemcpy(dres, res.data(), res.size() * 4, hipMemcpyHostToDevice)); CK(hipMemcpy(dgam, gamma.data(), HCD * 4, hipMemcpyHostToDevice));
@@ -68,7 +65,7 @@ int main() {
         printf("T=%d: mixed rel diff %.2e, inject rel diff %.2e, int8 values off by >1: %d %s\n", T, rm, ri, qdiff, ok ? "ok" : "FAIL");
         fails += !ok;
     }
-    {   // the output projection fused with the HC update (gemv_hc) against gemv + hc_combine
+    {
         QTensor W = rand_q8(a, D, 6144, rng);
         QAct xq6 = qact((size_t)TM * 6144);
         std::vector<float> x6((size_t)TM * 6144), inj(TM * HC);
@@ -78,7 +75,7 @@ int main() {
         float *r1 = a.get<float>((size_t)TM * HCD), *r2 = a.get<float>((size_t)TM * HCD);
         CK(hipMemcpy(dx6, x6.data(), x6.size() * 4, hipMemcpyHostToDevice)); CK(hipMemcpy(dinj, inj.data(), inj.size() * 4, hipMemcpyHostToDevice));
         quant_act(dx6, (int64_t)x6.size(), xq6, st);
-        {   // the split-K GEMV (this shape takes it) against an exact host computation from the same int8 data
+        {
             std::vector<int8_t> wq((size_t)D * 6144), xq8((size_t)TM * 6144); std::vector<half> wd((size_t)D * 6144 / 32);
             std::vector<float> xdh((size_t)TM * 6144 / 32), yg((size_t)TM * D);
             CK(hipMemcpy(wq.data(), W.q, wq.size(), hipMemcpyDeviceToHost)); CK(hipMemcpy(wd.data(), W.d, wd.size() * 2, hipMemcpyDeviceToHost));

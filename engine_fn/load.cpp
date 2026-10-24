@@ -1,6 +1,3 @@
-// Loading Chrysalis's Flash-Next file (engine_fn/fn_quantize.py): dense weights and hot experts to VRAM (relayout to
-// structure-of-arrays), cold experts to system RAM in GGUF block order for the CPU workers, token embeddings to pinned
-// host memory, the n-gram table memory-mapped from the source file; then buffers, sequences and the KV pool.
 #include "model.h"
 #include <stdexcept>
 #include "gguf.h"
@@ -17,11 +14,8 @@
 
 namespace {
 double now() { return std::chrono::duration<double>(std::chrono::steady_clock::now().time_since_epoch()).count(); }
-// Load progress for chrysalis_load_progress (another thread polls it while chrysalis_init runs): bytes read from the
-// model file, then calibration (phase 1), warmup (2), done (3).
 std::atomic<size_t> load_read{0}, load_total{0};
 std::atomic<int> load_phase{0};
-// src (inside the file's mapping) -> dst, with pread on the file, in 64 MB pieces (counted for the progress)
 void read_file(const GGUF &g, uint8_t *dst, const uint8_t *src, size_t n) {
     off_t off = (off_t)(src - g.base);
     while (n) {
@@ -31,7 +25,7 @@ void read_file(const GGUF &g, uint8_t *dst, const uint8_t *src, size_t n) {
         load_read += (size_t)r;
     }
 }
-}  // namespace
+}
 
 float load_progress() {
     if (load_phase >= 3) return 1.0f;
@@ -40,7 +34,7 @@ float load_progress() {
 }
 
 namespace {
-int physical_cores() {                              // distinct SMT sibling sets
+int physical_cores() {
     std::set<std::string> cores;
     const unsigned n = std::max(1u, std::thread::hardware_concurrency());
     for (unsigned c = 0; c < n; c++) {
@@ -54,11 +48,7 @@ int physical_cores() {                              // distinct SMT sibling sets
 }
 }
 
-// The rates the cold expert split works with, measured here once per load (so nothing is tuned to one machine):
-// the workers' read bandwidth over the cold experts, a worker's VNNI expert rate times the workers, and DMA of
-// expert-sized pieces. The decode GPU share of cold picks follows from the bandwidths.
 void Engine::calibrate() {
-    // CPU read bandwidth: every worker sums its own 64 MB of the cold experts
     const size_t slice = (size_t)64 << 20, nw = std::min<size_t>(n_workers, cold_bytes / slice);
     double best = 1e30;
     for (int rep = 0; rep < 3 && nw; rep++) {
@@ -75,7 +65,6 @@ void Engine::calibrate() {
         best = std::min(best, now() - t0);
     }
     if (nw) cal_cpu_bw = nw * slice / best;
-    // a worker's expert rate on 16 tokens (the VNNI kernel prefill uses), times the workers
     const ColdLayer *c0 = nullptr;
     for (const ColdLayer &c : cold) if (c.n) { c0 = &c; break; }
     if (c0 && vnni_supported() && vnni_formats(*c0)) {
@@ -84,7 +73,6 @@ void Engine::calibrate() {
         std::vector<int32_t> xsum((size_t)n * (D / 16), 16);
         std::vector<const int8_t *> pq(n); std::vector<const float *> ps(n); std::vector<const int32_t *> pc(n);
         for (int i = 0; i < n; i++) { pq[i] = xq.data() + (size_t)i * D; ps[i] = xs.data() + (size_t)i * (D / 32); pc[i] = xsum.data() + (size_t)i * (D / 16); }
-        // all workers at once (all-core clocks, shared memory), two experts each, distinct outputs
         const int per = 2;
         std::vector<std::vector<uint16_t>> outs(n_workers, std::vector<uint16_t>((size_t)n * D));
         double tb = 1e30;
@@ -101,8 +89,7 @@ void Engine::calibrate() {
             tb = std::min(tb, now() - t0);
         }
         cal_cpu_mac = (double)n_workers * per * n * (3.0 * FE * D) / tb;
-    } else cal_cpu_mac = cal_cpu_bw;                 // ggml's dot products: about a MAC per weight byte read
-    // DMA of expert-sized pieces into the staging ring
+    } else cal_cpu_mac = cal_cpu_bw;
     const size_t piece = std::min<size_t>(stage_gu ? stage_gu / STAGE_G : (size_t)1 << 20, cold_bytes / 64);
     hipEvent_t e0, e1;
     CK(hipEventCreate(&e0)); CK(hipEventCreate(&e1));
@@ -122,9 +109,9 @@ void Engine::calibrate() {
 void Engine::load(const std::string &path, int max_seqs, size_t reserve_bytes) {
     const double t0 = now();
     load_read = 0; load_total = 0; load_phase = 0;
-    static GGUF g;                                  // the mapping stays alive: the n-gram path and cold copies use it
+    static GGUF g;
     if (!g.base && !g.open(path.c_str())) FAIL("cannot open %s", path.c_str());
-    for (Layer *w = L; w <= &M; w++) *w = Layer{};  // a reload (after shutdown) starts from clean pointers
+    for (Layer *w = L; w <= &M; w++) *w = Layer{};
     hc_head = HcMix{}; mtp_head = HcMix{};
     if (g.strs["general.architecture"] != "chrysalisfn") FAIL("%s is not a Chrysalis Flash-Next file (engine_fn/fn_quantize.py)", path.c_str());
     auto get = [&](const std::string &name) {
@@ -138,7 +125,7 @@ void Engine::load(const std::string &path, int max_seqs, size_t reserve_bytes) {
     CK(hipStreamCreateWithFlags(&st, hipStreamNonBlocking));
     CK(hipStreamCreateWithFlags(&cst, hipStreamNonBlocking));
     CK(hipStreamCreateWithFlags(&pst, hipStreamNonBlocking));
-    {   // the lookahead's kernels go ahead of the queued token-mixer work: the earlier its prediction, the more the CPU loads
+    {
         int lo = 0, hi = 0;
         CK(hipDeviceGetStreamPriorityRange(&lo, &hi));
         CK(hipStreamCreateWithPriority(&lst, hipStreamNonBlocking, hi));
@@ -154,10 +141,6 @@ void Engine::load(const std::string &path, int max_seqs, size_t reserve_bytes) {
     CK(hipEventCreateWithFlags(&front_copied, hipEventDisableTiming));
     CK(hipEventRecord(copied, cst));
 
-    // Plan the VRAM weights: every dense tensor, the MTP block's experts and the expert pool (common.h slot_view), which
-    // starts out holding each layer's VRAM tier, layer after layer.
-    // layer: the decoder layer a tensor belongs to (-1: global, NL: the MTP block); expert tensors are not prefetched.
-    // b0 >= 0: the tensor goes into *q (the pool, made beforehand) from block b0 on.
     struct Up { const GGUFTensor *t; QTensor *q = nullptr; float **f = nullptr; half **h = nullptr; int layer = -1; bool pf = true;
                 int64_t b0 = -1; };
     std::vector<Up> ups;
@@ -228,7 +211,6 @@ void Engine::load(const std::string &path, int max_seqs, size_t reserve_bytes) {
             hcmix(p + "nextn.hc_head_", mtp_head, false);
         }
     }
-    // sizes: quant tensors as make_qtensor carves them, vectors as they are
     size_t wbytes = 0;
     auto shape = [](const GGUFTensor *t, int &rows, int &cols) { cols = (int)t->ne[0]; rows = (int)(t->ne[1] * t->ne[2] * t->ne[3]); };
     for (Up &u : ups) {
@@ -253,13 +235,10 @@ void Engine::load(const std::string &path, int max_seqs, size_t reserve_bytes) {
     d_fmt = warena.get<uint8_t>(n_slots);
     for (int l = 0; l < NL; l++) { L[l].hot_gate = pool_gate; L[l].hot_up = pool_up; L[l].hot_down = pool_down; L[l].slot_of = d_slot_of + (size_t)l * NE; }
 
-    // Cold experts -> system RAM (hugepages), copied by 8 threads while the VRAM upload below runs: both are reads
-    // of the same file, so together they take about as long as the disk needs for all of it. Per layer: gate / up of
-    // each format group (ffn_{gate,up}_cold0, _cold1; slots of group 0 first), down of all of them (ffn_down_cold).
     enum { G0, U0, G1, U1, DN };
     std::vector<std::array<const GGUFTensor *, 5>> ct(NL);
     std::vector<std::array<size_t, 5>> coff(NL);
-    std::vector<std::tuple<const uint8_t *, size_t, size_t>> copies;   // src, bytes, offset
+    std::vector<std::tuple<const uint8_t *, size_t, size_t>> copies;
     cold.assign(NL, ColdLayer{});
     cold_bytes = 0;
     for (int l = 0; l < NL; l++) {
@@ -296,16 +275,15 @@ void Engine::load(const std::string &path, int max_seqs, size_t reserve_bytes) {
             for (size_t i; (i = next.fetch_add(1)) < copies.size();) {
                 auto [src, n, off] = copies[i];
                 read_file(g, cold_mem + off, src, n);
-                g.drop(src, n);                     // and the file pages: they would push the n-gram table out
+                g.drop(src, n);
             }
         });
     }
-    struct Joiner {                                 // an early exit joins the copy threads
+    struct Joiner {
         std::vector<std::thread> &th;
         ~Joiner() { for (auto &t : th) if (t.joinable()) t.join(); }
     } joiner{cold_th};
 
-    // Upload through pinned staging + a device scratch, relayout on the GPU.
     constexpr size_t STAGE = 64 << 20;
     uint8_t *pin[2], *dev[2];
     hipEvent_t ev[2];
@@ -317,10 +295,8 @@ void Engine::load(const std::string &path, int max_seqs, size_t reserve_bytes) {
     }
     int slot = 0;
     size_t total = 0;
-    // file -> host memory with pread (buffered, sequential: ~5 GB/s from this disk with a few readers; faulting the mapping
-    // in through memcpy got ~4 GB/s)
     auto fetch = [&](uint8_t *dst, const uint8_t *src, size_t len) { read_file(g, dst, src, len); };
-    auto put = [&](const uint8_t *src, size_t n, auto &&consume) {   // copy src[0..n) in pieces; consume(dev, off, len)
+    auto put = [&](const uint8_t *src, size_t n, auto &&consume) {
         for (size_t off = 0; off < n; off += STAGE) {
             const size_t len = std::min(STAGE, n - off);
             CK(hipEventSynchronize(ev[slot]));
@@ -348,7 +324,7 @@ void Engine::load(const std::string &path, int max_seqs, size_t reserve_bytes) {
                 CK(hipEventRecord(ev[slot], st));
                 slot ^= 1;
             }
-            g.drop(u.t->data, u.t->nbytes);          // copied: the page cache need not keep it
+            g.drop(u.t->data, u.t->nbytes);
             total += u.t->nbytes;
         } else {
             uint8_t *d = warena.get(u.t->nbytes);
@@ -360,7 +336,6 @@ void Engine::load(const std::string &path, int max_seqs, size_t reserve_bytes) {
             if (u.h) *u.h = (half *)d;
         }
     }
-    // decode prefetch lists: each decoder layer's dense weights (everything but its hot experts), in load order
     {
         std::vector<std::vector<PrefetchRange>> pr(NL);
         std::vector<std::pair<const void *, size_t>> arrs;
@@ -378,15 +353,13 @@ void Engine::load(const std::string &path, int max_seqs, size_t reserve_bytes) {
         pf_sink = warena.get<unsigned>(1);
         CK(hipMemcpyAsync(pf_ranges, all.data(), all.size() * sizeof(PrefetchRange), hipMemcpyHostToDevice, st));
     }
-    // GDN A / dt_bias contiguous for the all-layer commit
     gdn_A = warena.get<float>((size_t)NGDN * GV);
     gdn_dt = warena.get<float>((size_t)NGDN * GV);
     for (int gl = 0; gl < NGDN; gl++) {
         CK(hipMemcpyAsync(gdn_A + gl * GV, ssm_a[gl], GV * 4, hipMemcpyDeviceToDevice, st));
         CK(hipMemcpyAsync(gdn_dt + gl * GV, ssm_dt[gl], GV * 4, hipMemcpyDeviceToDevice, st));
     }
-    {   // MTP experts are all in VRAM: identity slot map. The decoder layers' maps: the file's VRAM-tier slot h is pool slot
-        // first_slot + h, its RAM-tier slots stay as they are.
+    {
         std::vector<int> id(NE);
         for (int e = 0; e < NE; e++) id[e] = e;
         M.slot_of = warena.get<int>(NE);
@@ -413,14 +386,12 @@ void Engine::load(const std::string &path, int max_seqs, size_t reserve_bytes) {
     for (auto &t : cold_th) t.join();
     cold_th.clear();
     cold_dev.assign(NL, ColdDec{});
-    if (cold_bytes) {                               // the GPU reads cold experts at decode and streams them at prefill
+    if (cold_bytes) {
         CK(hipHostRegister(cold_mem, cold_bytes, hipHostRegisterMapped));
         void *dp;
         CK(hipHostGetDevicePointer(&dp, cold_mem, 0));
         d_cold = (uint8_t *)dp;
     }
-    // The spill mirror (experts.cpp): the file's VRAM-tier tensors laid out as in the file, in memory that holds only the
-    // experts out of the pool. 4 KiB pages, so one expert's pages are freed without its neighbours'.
     const char *hot_names[3] = {"ffn_gate_hot.weight", "ffn_up_hot.weight", "ffn_down_hot.weight"};
     auto page_up = [](size_t n) { return (n + 4095) & ~size_t(4095); };
     spill_bytes = 0;
@@ -434,7 +405,7 @@ void Engine::load(const std::string &path, int max_seqs, size_t reserve_bytes) {
     size_t spill_at = 0;
     for (int l = 0; l < NL; l++) {
         ColdLayer &c = cold[l];
-        if (L[l].n_hot) {                           // the file's VRAM tier, for the CPU while the pool holds no copy
+        if (L[l].n_hot) {
             const std::string p = "blk." + std::to_string(l) + ".";
             const GGUFTensor *t[3] = {get(p + hot_names[0]), get(p + hot_names[1]), get(p + hot_names[2])};
             const uint8_t **mirror[3] = {&c.gate[2], &c.up[2], &c.down2}, **file[3] = {&c.file_gate, &c.file_up, &c.file_down2};
@@ -460,7 +431,6 @@ void Engine::load(const std::string &path, int max_seqs, size_t reserve_bytes) {
     }
     const double t_cold = now();
 
-    // Token embeddings -> pinned host memory (the GPU reads its rows over PCIe).
     {
         const GGUFTensor *t = get("token_embd.weight");
         if (t->type != Q8_0) FAIL("token embeddings must be Q8_0");
@@ -473,7 +443,6 @@ void Engine::load(const std::string &path, int max_seqs, size_t reserve_bytes) {
         CK(hipHostGetDevicePointer(&devp, host, 0));
         embd.type = Q8_0; embd.rows = (int)t->ne[1]; embd.cols = (int)t->ne[0]; embd.q = (uint8_t *)devp;
     }
-    // The n-gram table: memory-map the source file.
     if (!ngram_map) {
         std::string f = g.strs["chrysalisfn.ngram_file"];
         if (f.empty()) FAIL("no n-gram table path in %s", path.c_str());
@@ -492,7 +461,6 @@ void Engine::load(const std::string &path, int max_seqs, size_t reserve_bytes) {
         for (int i = 0; i < 3; i++) ple_mult[i] = (uint64_t)m[i];
         for (int h = 0; h < PLE_HEADS; h++) { ple_off[h] = (uint32_t)o[h]; ple_voc[h] = (uint32_t)v[h]; }
     }
-    // CPU workers for the cold experts.
     {
         auto shared = [](MoeShared *&h, MoeShared *&d) {
             void *p, *dp;
@@ -513,7 +481,7 @@ void Engine::load(const std::string &path, int max_seqs, size_t reserve_bytes) {
     size_t free_b, total_b;
     CK(hipMemGetInfo(&free_b, &total_b));
     const size_t want = free_b > reserve_bytes ? free_b - reserve_bytes : 0;
-    const size_t max_pages = ((size_t)max_ctx * 3 / 2 + PAGE - 1) / PAGE;            // context plus snapshots' pages
+    const size_t max_pages = ((size_t)max_ctx * 3 / 2 + PAGE - 1) / PAGE;
     n_pages = (int)std::min(max_pages, want / KV_PAGE);
     if (n_pages < 64) FAIL("not enough VRAM left for the KV cache");
     CK(hipMalloc(&kv_pool, (size_t)n_pages * KV_PAGE));
@@ -532,11 +500,8 @@ void Engine::load(const std::string &path, int max_seqs, size_t reserve_bytes) {
 }
 
 void Engine::alloc_buffers(int max_seqs) {
-    // U: sub-chunk (attention, gated delta net, mixers, dense GEMMs); S: pass (residual streams, the MoE's inputs, routing
-    // and outputs, its pick batches); T8: decode / verify passes
     const int U = umax, S = smax, T8 = 8;
     const size_t big = (size_t)U * HCD, N = (size_t)S * TOPK_E, P = S, MC = std::min(U, MTP_CHUNK);
-    // cold expert staging, sized for the widest of the file's cold gate/up formats
     stage_gu = stage_soa = 0;
     for (const ColdLayer &c : cold)
         for (int g = 0; g < 3; g++) {
@@ -548,7 +513,6 @@ void Engine::alloc_buffers(int max_seqs) {
         }
     const size_t raw_bytes = 2 * stage_gu + (size_t)STAGE_G * D * (FE / 32 * 18);
     const int nb = (VOCAB + 4095) / 4096;
-    // every device buffer, carved once from a dry arena to size it and then for real
     auto carve = [&](Arena &a) {
         auto qact = [&](size_t n) { QAct q; q.q = a.get<int8_t>(n); q.d = a.get<float>(n / 32 + 1); return q; };
         b.tokens = a.get<int>(S);
@@ -581,7 +545,7 @@ void Engine::alloc_buffers(int max_seqs) {
         b.qidx16 = a.get<half>((size_t)U * IDX_H * IDX_D);
         b.att_h = a.get<half>((size_t)U * NH * HD);
         b.deq = a.get<half>(DEQ_ELEMS);
-        b.gemm16 = a.get<half>((size_t)U * 12288);    // the widest GEMM output: q | gate projection
+        b.gemm16 = a.get<half>((size_t)U * 12288);
         b.xn_q = qact(big);
         b.lo_q = qact((size_t)U * HCR);
         b.hq = qact((size_t)U * D);
@@ -603,7 +567,7 @@ void Engine::alloc_buffers(int max_seqs) {
         b.wts = a.get<float>((size_t)T8 * TOPK_E);
         b.ids = a.get<int>((size_t)T8 * TOPK_E);
         b.hot = a.get<int>((size_t)T8 * TOPK_E);
-        b.y = a.get<float>((size_t)T8 * (TOPK_E + 1) * D);         // + each token's shared expert
+        b.y = a.get<float>((size_t)T8 * (TOPK_E + 1) * D);
         b.moe = a.get<float>((size_t)S * D);
         b.hq_e = qact((size_t)T8 * (TOPK_E + 1) * FE);
         b.d_ple_rows = a.get<uint8_t>((size_t)U * PLE_HEADS * 170);
@@ -618,18 +582,16 @@ void Engine::alloc_buffers(int max_seqs) {
         b.topi = a.get<int>((size_t)T8 * TOPK);
         b.mtp_res = a.get<float>(MC * HCD);
         b.mtp_e = a.get<float>(MC * D);
-        b.mtp_in = a.get<float>((size_t)8 * HC * 2 * D);        // decode only (T * HC <= 8 rows)
+        b.mtp_in = a.get<float>((size_t)8 * HC * 2 * D);
         b.mtp_in_h = a.get<half>(MC * HC * 2 * D);
         b.mtp_in_q = qact((size_t)8 * 2 * D);
         b.draft = a.get<int>(16);
-        // MoE over a pass: router logits per sub-chunk; picks, their weights / positions, batches' tokens per pass
         b.rlog = a.get<float>((size_t)U * NE);
         b.sgT = a.get<float>(S);
         b.wtsT = a.get<float>(N); b.ent_w = a.get<float>(N);
         b.idsT = a.get<int>(N); b.ent_tok = a.get<int>(N); b.pos = a.get<int>(N); b.btok = a.get<int>(N);
-        b.work = a.get<MoeWork>(N / 64 + 2 * NE);         // 64-token tiles of the experts of a pass
+        b.work = a.get<MoeWork>(N / 64 + 2 * NE);
         b.hmoe = a.get<half>((size_t)S * D);
-        // a batch's gathered inputs / outputs; the PLE block's key and conv output (U x HCD fp32, layer 1 only) share them
         const size_t xy = std::max(P * D * 2, (size_t)U * HCD * 4);
         b.Xs = (half *)a.get<uint8_t>(xy); b.Hs = a.get<half>(P * FE); b.Ys = (half *)a.get<uint8_t>(xy);
         b.key = (float *)b.Xs; b.xconv = (float *)b.Ys;
@@ -638,7 +600,7 @@ void Engine::alloc_buffers(int max_seqs) {
             b.sgu[k] = a.get<uint8_t>(2 * stage_soa);
             b.sd_[k] = make_qtensor(a, IQ4_NL, STAGE_G * D, FE);
         }
-        b.img = a.get<const half *>(S);                   // a pass's picture rows and M-RoPE positions
+        b.img = a.get<const half *>(S);
         b.rpos = a.get<int>((size_t)S * 3);
     };
     Arena dry; dry.cap = SIZE_MAX;
@@ -674,14 +636,12 @@ void Engine::alloc_buffers(int max_seqs) {
 void Engine::warmup() {
     load_phase = 2;
     struct Done { ~Done() { load_phase = 3; } } done_;
-    snap_reserve_start();                              // snapshot buffers fault in meanwhile
-    // first launches load the code objects (40-180 ms per source file): a short prefill (the T > 8 path: host routing,
-    // CPU job, staging) and a decode step with a draft, on a scratch sequence, keep that out of the first request
+    snap_reserve_start();
     int id = seq_new();
-    const bool borrowed = id < 0;                   // the server's cache holds every slot (all still empty): borrow slot 0
+    const bool borrowed = id < 0;
     if (borrowed) id = 0;
     std::vector<int> toks(24, 198);
-    const bool on = xc.on;                             // the pool keeps what it holds, and forgets these picks
+    const bool on = xc.on;
     xc.on = false;
     prefill(id, toks.data(), nullptr, (int)toks.size());
     Sampling sp;
@@ -696,7 +656,7 @@ void Engine::warmup() {
     CK(hipMemsetAsync(xc.d_counts, 0, (size_t)NL * NE * 4, st));
     if (borrowed) seq_reset(seqs[0]); else seq_free(id);
     snap_warm = true;
-    snap_reserve_finish();                             // every snapshot slot the server asked for (2 by default)
+    snap_reserve_finish();
 }
 
 void Engine::shutdown() {
@@ -711,7 +671,7 @@ void Engine::shutdown() {
         for (auto &r : snap_regions) if (p >= r.first && (const char *)p < (const char *)r.first + r.second) return true;
         return false;
     };
-    std::vector<void *> own;                                     // buffers made one by one past the reserved count
+    std::vector<void *> own;
     for (Snap &sn : snaps) if (sn.host && !in_region(sn.host)) own.push_back(sn.host);
     for (void *p : snap_spare) if (!in_region(p)) own.push_back(p);
     for (void *p : own) { (void)hipHostUnregister(p); munmap(p, (state_bytes() + (2 << 20) - 1) & ~size_t((2 << 20) - 1)); }

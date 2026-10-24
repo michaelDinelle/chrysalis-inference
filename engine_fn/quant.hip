@@ -2,7 +2,6 @@
 #include <algorithm>
 #include <vector>
 
-// t (rows set) = rows r0.. of W: each array offset by r0 rows' worth of its elements
 void qtensor_rows(QTensor &t, const QTensor &W, int r0) {
     const size_t n = (size_t)r0 * W.cols;
     switch (W.type) {
@@ -19,7 +18,6 @@ void qtensor_rows(QTensor &t, const QTensor &W, int r0) {
     }
 }
 
-// The arrays a tensor occupies (pointer, bytes), as make_qtensor carves them
 void qtensor_arrays(const QTensor &t, std::vector<std::pair<const void *, size_t>> &out) {
     const size_t n = (size_t)t.rows * t.cols;
     auto add = [&](const void *p, size_t bytes) { if (p && bytes) out.push_back({p, bytes}); };
@@ -36,10 +34,7 @@ void qtensor_arrays(const QTensor &t, std::vector<std::pair<const void *, size_t
     }
 }
 
-// Read ranges of VRAM so they land in the Infinity Cache (decode: the next layer's weights, while the CPU computes the
-// current layer's cold experts). A few workgroups walk all the ranges with 8 loads in flight per thread: enough to stream
-// VRAM, without taking the CUs the concurrent MoE kernels need. The xor keeps the loads.
-constexpr int PF_WGS = 8;                         // measured best (fewer starve the stream, more crowd the MoE kernels)
+constexpr int PF_WGS = 8;
 __global__ __launch_bounds__(256) void k_prefetch(const PrefetchRange *r, int n, unsigned *sink) {
     unsigned acc = 0;
     for (int k = 0; k < n; k++) {
@@ -76,35 +71,29 @@ QTensor make_qtensor(Arena &a, int type, int rows, int cols) {
     return t;
 }
 
-// IQ4_XS non-linear codebook, as four little-endian words for v_perm_b32 lookups.
 __device__ __forceinline__ int2 iq4_lookup(uint32_t q) {
-    constexpr uint32_t T0 = 0xBFAD9881u, T1 = 0xF6EADDCFu, T2 = 0x26190D01u, T3 = 0x71594535u;  // -127 ... 113
+    constexpr uint32_t T0 = 0xBFAD9881u, T1 = 0xF6EADDCFu, T2 = 0x26190D01u, T3 = 0x71594535u;
     const uint32_t lo = q & 0x07070707u, hi = (q >> 4) & 0x07070707u;
     const uint32_t a0 = __builtin_amdgcn_perm(T1, T0, lo), a1 = __builtin_amdgcn_perm(T3, T2, lo);
     const uint32_t b0 = __builtin_amdgcn_perm(T1, T0, hi), b1 = __builtin_amdgcn_perm(T3, T2, hi);
     const uint32_t ma = 0x03020100u | ((q & 0x08080808u) >> 1), mb = 0x03020100u | (((q >> 4) & 0x08080808u) >> 1);
     return make_int2(__builtin_amdgcn_perm(a1, a0, ma), __builtin_amdgcn_perm(b1, b0, mb));
 }
-__device__ __forceinline__ int iq4_scale(const QTensor &W, size_t sb, int ib) {   // sb = super-block index
+__device__ __forceinline__ int iq4_scale(const QTensor &W, size_t sb, int ib) {
     return (((W.sc[sb * 4 + (ib >> 1)] >> 4 * (ib & 1)) & 0xf) | (((W.sh[sb] >> 2 * ib) & 3) << 4)) - 32;
 }
-// Q6_K: 4 low bits + 2 high bits, minus 32, for 4 packed bytes at once.
 __device__ __forceinline__ int q6_unpack(uint32_t lo4, uint32_t hi2) {
     const uint32_t x = (lo4 & 0x0F0F0F0Fu) | ((hi2 & 0x03030303u) << 4);
     return (int)((x & 0x1F1F1F1Fu) | ((~x & 0x20202020u) * 7));
 }
-// Q5_0: 4 low nibbles plus their fifth bits (4 bits of qh) -> 4 int8 values in [-16, 15]. The byte-wise
-// subtraction of 16 goes through the sign bit so no byte borrows from its neighbour.
 __device__ __forceinline__ int q5_unpack(uint32_t nib4, uint32_t hb4) {
     const uint32_t hi = ((hb4 & 1u) << 4) | ((hb4 & 2u) << 11) | ((hb4 & 4u) << 18) | ((hb4 & 8u) << 25);
     return (int)((((nib4 & 0x0F0F0F0Fu) | hi | 0x80808080u) - 0x10101010u) ^ 0x80808080u);
 }
-// One 32-weight block of Q5_0 (16 nibble bytes + 32 fifth bits) -> lo (weights 0..15) and hi (16..31) as int8
 __device__ __forceinline__ void q5_block(int4 w, uint32_t qh, int4 &lo, int4 &hi) {
     lo = make_int4(q5_unpack(w.x, qh), q5_unpack(w.y, qh >> 4), q5_unpack(w.z, qh >> 8), q5_unpack(w.w, qh >> 12));
     hi = make_int4(q5_unpack(w.x >> 4, qh >> 16), q5_unpack(w.y >> 4, qh >> 20), q5_unpack(w.z >> 4, qh >> 24), q5_unpack(w.w >> 4, qh >> 28));
 }
-// One 32-weight block of IQ4_NL / IQ4_XS nibbles -> lo (weights 0..15) and hi (16..31) as int8 codebook values
 __device__ __forceinline__ void iq4_block(int4 w, int4 &lo, int4 &hi) {
     const int2 p0 = iq4_lookup(w.x), p1 = iq4_lookup(w.y), p2 = iq4_lookup(w.z), p3 = iq4_lookup(w.w);
     lo = make_int4(p0.x, p1.x, p2.x, p3.x); hi = make_int4(p0.y, p1.y, p2.y, p3.y);
@@ -113,27 +102,18 @@ __device__ __forceinline__ int dot16(int4 w, int4 x, int acc) {
     return dot4(w.w, x.w, dot4(w.z, x.z, dot4(w.y, x.y, dot4(w.x, x.x, acc))));
 }
 __device__ __forceinline__ int sum16(int4 x) { return dot16(make_int4(0x01010101, 0x01010101, 0x01010101, 0x01010101), x, 0); }
-// Q2_K: the 2-bit values at shift 2j of 4 quant bytes, as 4 bytes in [0, 3]
 __device__ __forceinline__ int q2_vals(uint32_t w, int j) { return (int)((w >> (2 * j)) & 0x03030303u); }
-// Q3_K: the same plus the third bit (bit `bit` of the 4 hmask bytes), minus 4: int8 values in [-4, 3]. The byte-wise
-// subtraction goes through the sign bit so no byte borrows from its neighbour.
 __device__ __forceinline__ int q3_vals(uint32_t w, uint32_t hm, int j, int bit) {
     const uint32_t u = ((w >> (2 * j)) & 0x03030303u) | (((hm >> bit) & 0x01010101u) << 2);
     return (int)(((u | 0x80808080u) - 0x04040404u) ^ 0x80808080u);
 }
 
-// Decode GEMV: y[t][row] (+)= W[row] . x[t] for T <= 8 tokens.
-// A wave computes R rows at once (R consecutive rows of one matrix, or the gate and up rows of the
-// FFN), so every activation load is reused R times; lanes stride over 32- or 64-weight chunks.
-// One launch covers up to 3 matrices stacked by rows (e.g. q|k|v) with their own types and outputs.
-// Modes: STORE, ADD (residual stream), GLU: silu(gate) * up quantized straight into the int8 input of
-// the down projection (1024-thread workgroups = 32 rows = one int8 block per token).
 
 template <int QT, int T, int R>
 __device__ __forceinline__ void rows_dot(const QTensor *const W[R], const int row[R], int lane, QAct x, float acc[R][T],
                                          int part = 0, int nparts = 1) {
     const int K = W[0]->cols;
-    const int n32 = K / 32, b32 = part * n32 / nparts, e32 = (part + 1) * n32 / nparts;   // split-K ranges (Q6_K: 64s)
+    const int n32 = K / 32, b32 = part * n32 / nparts, e32 = (part + 1) * n32 / nparts;
     const int n64 = K / 64, b64 = part * n64 / nparts, e64 = (part + 1) * n64 / nparts;
     if constexpr (QT == Q8_0) {
         for (int ch = b32 + lane; ch < e32; ch += 32) {
@@ -194,7 +174,6 @@ __device__ __forceinline__ void rows_dot(const QTensor *const W[R], const int ro
             }
         }
     } else if constexpr (QT == Q3_K || QT == Q2_K) {
-        // chunk ch = weights 32ch..: super-block sb, half n, shift j; its 16-groups g (quant bytes 32n..+15) and g + 1
         for (int ch = b32 + lane; ch < e32; ch += 32) {
             const int sb = ch >> 3, n = (ch >> 2) & 1, j = ch & 3, g = 8 * n + 2 * j;
             int4 lo[R], hi[R]; float s0[R], s1[R], m0[R], m1[R];
@@ -309,8 +288,6 @@ __global__ __launch_bounds__(256) void k_gemv(GemvArgs a) {
         }
 }
 
-// Long rows (K >= 4096) with few of them: 4 waves share a row (each a quarter of K), so twice as many loads are in flight
-// per row; partial sums meet in LDS. ~775 GB/s instead of ~520 on 2560 x 6144 streamed from VRAM.
 constexpr int GEMV_SK = 4;
 template <int QT, int T>
 __global__ __launch_bounds__(256) void k_gemv_sk(GemvArgs a) {
@@ -323,7 +300,7 @@ __global__ __launch_bounds__(256) void k_gemv_sk(GemvArgs a) {
     if (valid) {
         const QTensor *W[1] = {&a.seg[s].W};
         const int rows[1] = {row};
-        rows_dot<QT, T, 1>(W, rows, lane, a.x, acc, wave % GEMV_SK, GEMV_SK);   // one type: fewer registers, more waves
+        rows_dot<QT, T, 1>(W, rows, lane, a.x, acc, wave % GEMV_SK, GEMV_SK);
     }
 #pragma unroll
     for (int t = 0; t < T; t++) { const float v = warp_sum(acc[0][t]); if (lane == 0) part[wave][t] = v; }
@@ -380,7 +357,7 @@ static void gemv_launch(const GemvArgs &a, int rows, hipStream_t st) {
             default: FAIL("gemv: type %d", a.seg[0].W.type);
         }
     }
-    else if (T >= 5) k_gemv<T, 2><<<(rows + 15) / 16, 256, 0, st>>>(a);   // amortize activation loads
+    else if (T >= 5) k_gemv<T, 2><<<(rows + 15) / 16, 256, 0, st>>>(a);
     else k_gemv<T, 1><<<(rows + 7) / 8, 256, 0, st>>>(a);
 }
 
@@ -411,16 +388,6 @@ void gemv_hc(const QTensor &W, QAct x, int T, float *res, const float *inj, hipS
     gemv(a, st);
 }
 
-// Small-batch GEMM: y[t][row] (+)= W[row] . x[t] for prefill chunks of 9..384 tokens.
-// Weights are dequantized in registers straight into WMMA fragments (fp16 x fp16 -> fp32), so a pass
-// reads the quantized weights once instead of writing and re-reading an fp16 copy of every matrix (that
-// costs ~140 ms per forward and dominated short prefills). A workgroup is 4 waves on the same 32 rows and
-// 16*NT tokens, each wave taking a quarter of K; the partial sums are added through LDS.
-//
-// WMMA wants every 16-wide K fragment in both half-waves. Here the lower half produces K 0..7 and the
-// upper half K 8..15 (dequantizing or loading only 8 values per lane), then the halves swap with
-// v_permlanex16. The upper half ends up holding (8..15, 0..7): each half-wave's outputs are computed from
-// its own operands, so a K order that A and B share is exact (checked in tests/test_quant_fn.cpp).
 
 typedef uint32_t u4v __attribute__((ext_vector_type(4)));
 typedef uint32_t u8v __attribute__((ext_vector_type(8)));
@@ -435,7 +402,6 @@ __device__ __forceinline__ h16 join_halves(u4v own) {
     return __builtin_bit_cast(h16, r);
 }
 
-// 8 int8 values times d -> 8 halves. int8 -> fp16 is exact via the bits of 1024 + (q + 128).
 __device__ __forceinline__ u4v to_h8(int2 q, float d) {
     typedef _Float16 h2 __attribute__((ext_vector_type(2)));
     const h2 dd = {(_Float16)d, (_Float16)d}, off = {(_Float16)-1152.0f, (_Float16)-1152.0f};
@@ -449,7 +415,6 @@ __device__ __forceinline__ u4v to_h8(int2 q, float d) {
     return r;
 }
 
-// 8 values q * d - m (Q2_K: unsigned 2-bit values, a scale and a min per 16 weights)
 __device__ __forceinline__ u4v to_h8m(int2 q, float d, float m) {
     typedef _Float16 h2 __attribute__((ext_vector_type(2)));
     const h2 dd = {(_Float16)d, (_Float16)d}, off = {(_Float16)-1152.0f, (_Float16)-1152.0f}, mm = {(_Float16)-m, (_Float16)-m};
@@ -463,7 +428,6 @@ __device__ __forceinline__ u4v to_h8m(int2 q, float d, float m) {
     return r;
 }
 
-// Scale data of one 256-weight super-block of a row, and the scale of its fragment f (weights 16f..16f+15).
 struct SbScales { float d, dm; int4 raw; };
 template <int QT>
 __device__ __forceinline__ SbScales sb_scales(const QTensor &W, int row, int sb) {
@@ -471,7 +435,7 @@ __device__ __forceinline__ SbScales sb_scales(const QTensor &W, int row, int sb)
     if constexpr (QT == IQ4_XS) return {__half2float(W.d[gsb]), 0.0f, make_int4(((const int *)W.sc)[gsb], W.sh[gsb], 0, 0)};
     else if constexpr (QT == Q6_K || QT == Q3_K) return {__half2float(W.d[gsb]), 0.0f, ((const int4 *)W.sc)[gsb]};
     else if constexpr (QT == Q2_K) return {__half2float(W.d[gsb]), __half2float(W.dm[gsb]), ((const int4 *)W.sc)[gsb]};
-    else return {1.0f, 0.0f, ((const int4 *)W.d)[gsb]};           // Q8_0, Q5_0, IQ4_NL: 8 fp16 block scales
+    else return {1.0f, 0.0f, ((const int4 *)W.d)[gsb]};
 }
 template <int QT>
 __device__ __forceinline__ float frag_scale(const SbScales &s, int f) {
@@ -485,24 +449,21 @@ __device__ __forceinline__ float frag_min_q2k(const SbScales &s, int f) {
     const uint32_t w[4] = {(uint32_t)s.raw.x, (uint32_t)s.raw.y, (uint32_t)s.raw.z, (uint32_t)s.raw.w};
     return s.dm * ((w[f >> 2] >> (8 * (f & 3) + 4)) & 0xf);
 }
-// fragment f's 8 values of this lane half as halves
 template <int QT>
 __device__ __forceinline__ u4v frag_h8(int2 q, const SbScales &s, int f) {
     if constexpr (QT == Q2_K) return to_h8m(q, frag_scale<QT>(s, f), frag_min_q2k(s, f));
     else return to_h8(q, frag_scale<QT>(s, f));
 }
 
-// This lane half's 8 int8 values of the 4 fragments in step c (weights 64c..64c+63) of super-block sb, and
-// the fragments' indices (Q6_K interleaves its 16-weight groups, so they are not consecutive).
 template <int QT>
 __device__ __forceinline__ void frags(const QTensor &W, int row, int sb, int c, int hf, int2 q[4], int f[4]) {
     const int K = W.cols;
     if constexpr (QT == IQ4_XS) {
-        const uint8_t *p = W.q + (size_t)row * (K / 2) + sb * 128 + c * 32 + 8 * hf;     // sub-blocks 2c, 2c+1
+        const uint8_t *p = W.q + (size_t)row * (K / 2) + sb * 128 + c * 32 + 8 * hf;
 #pragma unroll
         for (int h = 0; h < 2; h++) {
             const int2 w = *(const int2 *)(p + 16 * h);
-            const int2 a = iq4_lookup(w.x), b = iq4_lookup(w.y);                     // low / high nibbles
+            const int2 a = iq4_lookup(w.x), b = iq4_lookup(w.y);
             q[2 * h] = make_int2(a.x, b.x); q[2 * h + 1] = make_int2(a.y, b.y);
             f[2 * h] = 4 * c + 2 * h; f[2 * h + 1] = 4 * c + 2 * h + 1;
         }
@@ -518,7 +479,6 @@ __device__ __forceinline__ void frags(const QTensor &W, int row, int sb, int c, 
 #pragma unroll
         for (int g = 0; g < 4; g++) f[g] = 8 * h + cc + 2 * g;
     } else if constexpr (QT == Q3_K || QT == Q2_K) {
-        // step c = (half n, k): quant bytes 32n + 16k + 0..15 hold groups 8n + 2j + k at shifts 2j (j = 0..3)
         const int n = c >> 1, k = c & 1;
         const size_t gsb = (size_t)row * (K / 256) + sb;
         const int2 w = *(const int2 *)(W.q + gsb * 64 + 32 * n + 16 * k + 8 * hf);
@@ -534,7 +494,6 @@ __device__ __forceinline__ void frags(const QTensor &W, int row, int sb, int c, 
             for (int j = 0; j < 4; j++) { q[j] = make_int2(q2_vals(w.x, j), q2_vals(w.y, j)); f[j] = 8 * n + 2 * j + k; }
         }
     } else if constexpr (QT == IQ4_NL || QT == Q5_0) {
-        // blocks 2c, 2c+1 (64 weights); in a block the low nibbles are weights 0..15, the high ones 16..31
 #pragma unroll
         for (int h = 0; h < 2; h++) {
             const int blk = sb * 8 + 2 * c + h;
@@ -563,14 +522,14 @@ __global__ __launch_bounds__(128) void k_gemm_q(QTensor W, const half *x, int ld
     __shared__ float red[4][16 * NT][33];
     const int wave = threadIdx.x / 32, l = threadIdx.x % 32, hf = l >> 4, r = l & 15;
     const int row0 = blockIdx.x * 32, t0 = blockIdx.y * 16 * NT, nsb = W.cols / 256, sb1 = (wave + 1) * nsb / 4;
-    const _Float16 *xl = (const _Float16 *)x + (size_t)(t0 + r) * ldx + 8 * hf;   // B fragments: lane = token
+    const _Float16 *xl = (const _Float16 *)x + (size_t)(t0 + r) * ldx + 8 * hf;
     f8 acc[2][NT] = {};
     for (int sb = wave * nsb / 4; sb < sb1; sb++) {
         const SbScales s0 = sb_scales<QT>(W, row0 + r, sb), s1 = sb_scales<QT>(W, row0 + 16 + r, sb);
 #pragma unroll
         for (int c = 0; c < 4; c++) {
             int2 q0[4], q1[4]; int f[4];
-            frags<QT>(W, row0 + r, sb, c, hf, q0, f);                                 // A fragments: lane = row
+            frags<QT>(W, row0 + r, sb, c, hf, q0, f);
             frags<QT>(W, row0 + 16 + r, sb, c, hf, q1, f);
 #pragma unroll
             for (int g = 0; g < 4; g++) {
@@ -626,9 +585,7 @@ void gemm_q(const QTensor &W, const half *x, int ldx, int T, void *y, int ldy, i
     else FAIL("gemm_q: type %d", W.type);
 }
 
-// Dequantization to fp16 (long prefill chunks feed hipBLASLt).
 
-// 16 int8 values times a scale -> 16 halves, written as two 16-byte stores.
 __device__ __forceinline__ void store16(half *o, int4 q, float d) {
     const int8_t *b = (const int8_t *)&q;
     half2 h[8];
@@ -724,7 +681,6 @@ void dequant(const QTensor &W, half *out, hipStream_t st) {
     k_dequant<<<(nchunks + 255) / 256, 256, 0, st>>>(W, out, nchunks);
 }
 
-// Dequantize selected rows (token embeddings) to fp32; an image token's row is its picture's embedding (fp16, host).
 __global__ void k_embed(QTensor W, const int *tokens, const half *const *rows, float *out) {
     const int t = blockIdx.y, K = W.cols;
     if (rows && rows[t]) {
@@ -734,13 +690,13 @@ __global__ void k_embed(QTensor W, const int *tokens, const half *const *rows, f
     const int row = tokens[t];
     for (int c = threadIdx.x; c < K / 32; c += blockDim.x) {
         float *o = out + (size_t)t * K + c * 32;
-        if (W.type == Q8_0) {                                            // Q8_0 rows in GGUF block order (host memory)
+        if (W.type == Q8_0) {
             const uint8_t *blk = W.q + ((size_t)row * (K / 32) + c) * 34;
             const float d = __half2float(__ushort_as_half(*(const uint16_t *)blk));
             for (int j = 0; j < 32; j++) o[j] = d * (int8_t)blk[2 + j];
             continue;
         }
-        const int sb = c >> 3, ib = c & 7;                               // IQ4_XS rows
+        const int sb = c >> 3, ib = c & 7;
         const size_t gsb = (size_t)row * (K / 256) + sb;
         const float dl = __half2float(W.d[gsb]) * iq4_scale(W, gsb, ib);
         const uint32_t *w = (const uint32_t *)(W.q + (size_t)row * (K / 2) + sb * 128 + ib * 16);
@@ -759,10 +715,9 @@ void embed(const QTensor &W, const int *tokens, const half *const *rows, int T, 
     k_embed<<<dim3(1, T), 256, 0, st>>>(W, tokens, rows, out);
 }
 
-// Activation quantization: fp32 -> int8 with one scale per 32 values.
 
 __global__ void k_quant_act(const float *x, int64_t n, QAct out) {
-    const int64_t i = blockIdx.x * (int64_t)blockDim.x + threadIdx.x;   // one lane per value, one wave per block
+    const int64_t i = blockIdx.x * (int64_t)blockDim.x + threadIdx.x;
     const float v = i < n ? x[i] : 0.0f;
     const float amax = warp_max(fabsf(v));
     const float d = amax / 127.0f;
@@ -776,21 +731,11 @@ void quant_act(const float *x, int64_t n, QAct out, hipStream_t st) {
     k_quant_act<<<(n + 255) / 256, 256, 0, st>>>(x, n, out);
 }
 
-// Routed experts at decode (T <= 8 tokens, up to 10 picks each).
-// A tier tensor holds its experts' rows back to back: gate / up [n_experts * FE][D], down [n_experts * D][FE].
-// hot_slot[j] is pick j's slot in the tier (token j / TOPK_E), or -1 when another device computes it.
 
 
-// Decode: the GPU's share of the cold experts, read straight from system RAM.
-// Picks with hot_slot <= -2 (cold slot -2 - hot_slot) are the GPU's: their GGUF blocks come over PCIe from registered
-// host memory. A workgroup copies a tile of whole rows into LDS with 16-byte loads (rows are 16-byte aligned, so every
-// byte crosses the bus once, in full lines) and its waves decode from there. Gate / up come in per-group formats
-// (IQ4_XS, Q3_K, Q2_K), down is IQ4_NL.
-constexpr int CG_ROWS = 8;                        // gate | up rows per tile (8 x up to 1360 B per matrix)
-constexpr int CD_ROWS = 32;                       // down rows per workgroup (32 x 360 B)
+constexpr int CG_ROWS = 8;
+constexpr int CD_ROWS = 32;
 
-// One GGUF-block row of D weights (in LDS) dotted with this lane's activation chunks ch = lane + 32i; xs16: the chunks'
-// sums per 16 values (Q2_K's mins)
 template <int QT>
 __device__ __forceinline__ float aos_dot(const uint8_t *row, int lane, const int8_t *xq, const float *xd, const int (*xs16)[2]) {
     float acc = 0;
@@ -807,22 +752,22 @@ __device__ __forceinline__ float aos_dot(const uint8_t *row, int lane, const int
             acc += dl * xd[ch] * dot16(hi, b, dot16(lo, a, 0));
         } else if constexpr (QT == Q3_K) {
             const int sb = ch >> 3, n = (ch >> 2) & 1, j = ch & 3, g = 8 * n + 2 * j, bit = 4 * n + j;
-            const uint8_t *blk = row + sb * 110;                       // blocks are 2-byte aligned: 16-bit loads
+            const uint8_t *blk = row + sb * 110;
             const uint16_t *h16 = (const uint16_t *)blk, *q16 = (const uint16_t *)(blk + 32 + 32 * n), *s16 = (const uint16_t *)(blk + 96);
             uint32_t qw[8], hw[8];
 #pragma unroll
             for (int k = 0; k < 8; k++) { qw[k] = q16[2 * k] | (uint32_t)q16[2 * k + 1] << 16; hw[k] = h16[2 * k] | (uint32_t)h16[2 * k + 1] << 16; }
             const int4 lo = make_int4(q3_vals(qw[0], hw[0], j, bit), q3_vals(qw[1], hw[1], j, bit), q3_vals(qw[2], hw[2], j, bit), q3_vals(qw[3], hw[3], j, bit));
             const int4 hi = make_int4(q3_vals(qw[4], hw[4], j, bit), q3_vals(qw[5], hw[5], j, bit), q3_vals(qw[6], hw[6], j, bit), q3_vals(qw[7], hw[7], j, bit));
-            const uint32_t l2 = s16[(g & 7) >> 1], h2 = s16[4 + ((g & 3) >> 1)];   // scale bytes of groups g, g + 1
+            const uint32_t l2 = s16[(g & 7) >> 1], h2 = s16[4 + ((g & 3) >> 1)];
             const int sl = 4 * (g >> 3), sh = 2 * (g >> 2);
             const int sc0 = (int)(((l2 >> sl) & 0xf) | (((h2 >> sh) & 3) << 4)) - 32;
             const int sc1 = (int)(((l2 >> (8 + sl)) & 0xf) | (((h2 >> (8 + sh)) & 3) << 4)) - 32;
             const float d = __half2float(__ushort_as_half(*(const uint16_t *)(blk + 108)));
             acc += d * xd[ch] * (float)(sc0 * dot16(lo, a, 0) + sc1 * dot16(hi, b, 0));
-        } else {                                                        // Q2_K
+        } else {
             const int sb = ch >> 3, n = (ch >> 2) & 1, j = ch & 3, g = 8 * n + 2 * j;
-            const uint8_t *blk = row + sb * 84;                         // 4-byte aligned
+            const uint8_t *blk = row + sb * 84;
             const uint32_t *q32 = (const uint32_t *)(blk + 16 + 32 * n);
             const int4 lo = make_int4(q2_vals(q32[0], j), q2_vals(q32[1], j), q2_vals(q32[2], j), q2_vals(q32[3], j));
             const int4 hi = make_int4(q2_vals(q32[4], j), q2_vals(q32[5], j), q2_vals(q32[6], j), q2_vals(q32[7], j));
@@ -838,7 +783,7 @@ __device__ __forceinline__ float aos_dot(const uint8_t *row, int lane, const int
 template <int QT>
 __device__ __forceinline__ void cold_glu(const uint8_t *gate, const uint8_t *up, int slot, int j, QAct x, QAct hq, int4 *tile0,
                                          int4 *tile1, float *act) {
-    constexpr int RB = D / 256 * qbytes_of(QT);  // bytes per row
+    constexpr int RB = D / 256 * qbytes_of(QT);
     const int wave = threadIdx.x / 32, lane = threadIdx.x % 32, t = j / TOPK_E;
     const int8_t *xq = x.q + (size_t)t * D;
     const float *xd = x.d + (size_t)t * (D / 32);
@@ -865,10 +810,8 @@ __device__ __forceinline__ void cold_glu(const uint8_t *gate, const uint8_t *up,
     }
 }
 
-// 32 down rows of a cold pick (IQ4_NL GGUF blocks in RAM): the tile is copied into LDS with 16-byte loads, then 8 waves x 4
-// rows, lanes 0..19 one 18-byte block each
 __device__ __forceinline__ void cold_down(const uint8_t *down, int slot, int j, int r0, QAct hq, const float *wts, float *y, int4 *tile) {
-    constexpr int RB = FE / 32 * 18;              // bytes per IQ4_NL row
+    constexpr int RB = FE / 32 * 18;
     const int wave = threadIdx.x / 32, lane = threadIdx.x % 32;
     const int4 *src = (const int4 *)(down + ((size_t)slot * D + r0) * RB);
     for (int i = threadIdx.x; i < CD_ROWS * RB / 16; i += 256) tile[i] = src[i];
@@ -892,14 +835,9 @@ __device__ __forceinline__ void cold_down(const uint8_t *down, int slot, int j, 
     }
 }
 
-// Decode: all of the GPU's routed picks in two launches (gate | up, then down).
-// blockIdx.y = pick j. Hot picks (hot_slot >= 0: a pool slot, its gate / up in format fmt[slot]) and, when sgate is set,
-// each token's shared expert (pick T * TOPK_E + t, weighted by sg[t]) read VRAM, 8 waves x 4 rows per workgroup; the GPU's
-// share of the cold picks (hot_slot <= -2) reads system RAM over PCIe as above; the CPU's picks (-1) exit. Both kinds run
-// side by side in one launch, so the PCIe-bound cold picks hide the hot ones. hq / y have T * (TOPK_E + 1) rows.
 __global__ __launch_bounds__(256) void k_glu_dec(QTensor gate, QTensor up, const uint8_t *fmt, QTensor sgate, QTensor sup, ColdDec c,
                                                  const int *hot_slot, int T, QAct x, QAct hq) {
-    __shared__ int4 tile[2][CG_ROWS * (D / 256 * 136) / 16];   // cold picks: the widest row format (IQ4_XS)
+    __shared__ int4 tile[2][CG_ROWS * (D / 256 * 136) / 16];
     __shared__ float act[32];
     const int j = blockIdx.y;
     const bool shared = j >= T * TOPK_E;
@@ -915,7 +853,7 @@ __global__ __launch_bounds__(256) void k_glu_dec(QTensor gate, QTensor up, const
         return;
     }
     const int wave = threadIdx.x / 32, lane = threadIdx.x % 32, t = shared ? j - T * TOPK_E : j / TOPK_E;
-    const int f = shared || !fmt ? -1 : fmt[hs];                // the pool: the slot's own rows (slot_view)
+    const int f = shared || !fmt ? -1 : fmt[hs];
     const QTensor G = shared ? sgate : f >= 0 ? slot_view(gate, hs, f) : gate, U = shared ? sup : f >= 0 ? slot_view(up, hs, f) : up;
     const int r0 = f >= 0 ? 0 : hs * FE;
     const QTensor *W[8];
@@ -934,7 +872,7 @@ __global__ __launch_bounds__(256) void k_glu_dec(QTensor gate, QTensor up, const
         if (lane == 0) act[wave * 4 + i] = v;
     }
     __syncthreads();
-    if (wave == 0) {                              // one int8 block of the down projection's input
+    if (wave == 0) {
         const float a = act[lane], d = warp_max(fabsf(a)) / 127.0f;
         hq.q[(size_t)j * FE + blockIdx.x * 32 + lane] = (int8_t)__float2int_rn(d > 0 ? a / d : 0.0f);
         if (lane == 0) hq.d[((size_t)j * FE + blockIdx.x * 32) / 32] = d;
@@ -987,12 +925,7 @@ void moe_cold_dec(const ColdDec &c, const int *hot_slot, int T, QAct x, QAct hq,
     moe_dec(none, none, none, nullptr, none, none, none, &c, hot_slot, T, x, hq, wts, nullptr, y, st);
 }
 
-// Routed experts at prefill: grouped GEMMs over the tokens sorted by expert.
-// Work item w = one expert's run of rows [m0, m0 + n) of the sorted inputs X [entries][D] (fp16). Gate/up: H = silu(X G^T)
-// * (X U^T) (fp16 [entries][FE]); down: Y = w * (H Dn^T) (fp32 [entries][D]). Weights are structure-of-arrays tier
-// tensors (rows of expert `slot` start at slot * FE resp. slot * D); a work item may point at a staging buffer instead.
 
-// per-32-block formats with any K that is a multiple of 64 (the down projection has K = 640)
 template <int QT>
 __device__ __forceinline__ void frags64(const QTensor &W, int row, int ch, int hf, int2 q[4], float s[4]) {
     const int K = W.cols;
@@ -1014,35 +947,29 @@ __device__ __forceinline__ void frags64(const QTensor &W, int row, int ch, int h
     }
 }
 
-constexpr int MOE_TW = 1;                         // token tiles of 16 per wave
-constexpr int MOE_NW_GU = 8, MOE_NW_DN = 16;          // waves per workgroup (gate/up loops over an item's tokens in two
-                                                    // super-tiles; down takes all MOE_ITEM at once): measured best
-// gate/up: MOE_NW_GU waves on 32 rows of gate and up and the work item's tokens (at most MOE_ITEM), 16 * MOE_TW per wave. Per half super-block
-// (128 columns: steps c = 2h, 2h + 1 hold its fragments in every format) the 32 rows are dequantized once into LDS (fp16,
-// natural K order) by all threads, then every wave runs its tokens against them, so a weight is decoded once per work
-// item rather than once per token tile.
-// SLOT: the items' slots are pool slots holding experts of format QT (g0 / u0 the pool's tensors, common.h slot_view).
+constexpr int MOE_TW = 1;
+constexpr int MOE_NW_GU = 8, MOE_NW_DN = 16;
 template <int QT, bool SLOT = false>
 __global__ __launch_bounds__(32 * MOE_NW_GU) __attribute__((amdgpu_waves_per_eu(6))) void k_moe_gateup(QTensor g0, QTensor u0, QTensor g1,
         QTensor u1, const MoeWork *work, const half *X, half *H) {
-    __shared__ _Float16 Ws[2][32][128 + 8];                 // gate | up rows of the current half super-block
+    __shared__ _Float16 Ws[2][32][128 + 8];
     const MoeWork wk = work[blockIdx.y];
     QTensor gs, us;
     if constexpr (SLOT) { gs = slot_view(g0, wk.slot, QT); us = slot_view(u0, wk.slot, QT); }
     const QTensor &G = SLOT ? gs : wk.tier ? g1 : g0, &U = SLOT ? us : wk.tier ? u1 : u0;
     const int tid = threadIdx.x, wave = tid / 32, l = tid % 32, hf = l >> 4, r = l & 15;
     const int row0 = (SLOT ? 0 : wk.slot * FE) + blockIdx.x * 32;
-    for (int tt = 0; tt < wk.n; tt += MOE_NW_GU * 16 * MOE_TW) {   // one pass for the engine's items (at most MOE_ITEM tokens)
+    for (int tt = 0; tt < wk.n; tt += MOE_NW_GU * 16 * MOE_TW) {
     const int nt = min(MOE_NW_GU * 16 * MOE_TW, wk.n - tt), m0 = wk.m0 + tt;
-    const int ntw = min(MOE_TW, (nt - 16 * MOE_TW * wave + 15) / 16);   // wave-uniform: this wave's token tiles
-    const _Float16 *xl[MOE_TW];                             // B: lane = token
+    const int ntw = min(MOE_TW, (nt - 16 * MOE_TW * wave + 15) / 16);
+    const _Float16 *xl[MOE_TW];
 #pragma unroll
     for (int j = 0; j < MOE_TW; j++) xl[j] = (const _Float16 *)X + (size_t)(m0 + min(16 * (MOE_TW * wave + j) + r, nt - 1)) * D;
     f8 ag[MOE_TW][2] = {}, au[MOE_TW][2] = {};
     for (int hs = 0; hs < 2 * (D / 256); hs++) {
         const int sb = hs >> 1, h2 = hs & 1;
 #pragma unroll 1
-        for (int u = tid; u < 2 * 32 * 2 * 2; u += 32 * MOE_NW_GU) {   // (matrix, row, step, half) units: 4 fragments x 8 values each
+        for (int u = tid; u < 2 * 32 * 2 * 2; u += 32 * MOE_NW_GU) {
             const int mat = u >> 7, row = (u >> 2) & 31, c = 2 * h2 + ((u >> 1) & 1), h = u & 1;
             const QTensor &W = mat ? U : G;
             const SbScales sc = sb_scales<QT>(W, row0 + row, sb);
@@ -1070,7 +997,7 @@ __global__ __launch_bounds__(32 * MOE_NW_GU) __attribute__((amdgpu_waves_per_eu(
         __syncthreads();
     }
 #pragma unroll
-    for (int j = 0; j < MOE_TW; j++) {                      // ag[j][i][e]: row 16i + 2e + hf, token 16 (MOE_TW wave + j) + r
+    for (int j = 0; j < MOE_TW; j++) {
         const int t = 16 * (MOE_TW * wave + j) + r;
         if (j >= ntw || t >= nt) continue;
         half *o = H + (size_t)(m0 + t) * FE + blockIdx.x * 32 + hf;
@@ -1082,8 +1009,6 @@ __global__ __launch_bounds__(32 * MOE_NW_GU) __attribute__((amdgpu_waves_per_eu(
     }
 }
 
-// down: MOE_NW_DN waves on 32 rows of Dn and the work item's tokens (at most MOE_ITEM), 16 * MOE_TW per wave; the 32 rows (K = FE) are
-// dequantized once into LDS, as above.
 template <int QT>
 __global__ __launch_bounds__(32 * MOE_NW_DN) void k_moe_down_g(QTensor d0, QTensor d1, const MoeWork *work, const half *H, const float *wts, half *Y) {
     __shared__ _Float16 Ws[32][FE + 8];
@@ -1091,7 +1016,7 @@ __global__ __launch_bounds__(32 * MOE_NW_DN) void k_moe_down_g(QTensor d0, QTens
     const QTensor &W = wk.tier ? d1 : d0;
     const int tid = threadIdx.x, wave = tid / 32, l = tid % 32, hf = l >> 4, r = l & 15;
     const int row0 = wk.slot * D + blockIdx.x * 32;
-    for (int u = tid; u < 32 * (FE / 64) * 2; u += 32 * MOE_NW_DN) {   // (row, 64-chunk, half) units
+    for (int u = tid; u < 32 * (FE / 64) * 2; u += 32 * MOE_NW_DN) {
         const int row = u / (FE / 64 * 2), ch = (u >> 1) % (FE / 64), h = u & 1;
         int2 q[4]; float sc[4];
         frags64<QT>(W, row0 + row, ch, h, q, sc);
@@ -1137,7 +1062,7 @@ void moe_gemm_gateup(const QTensor &g0, const QTensor &u0, const QTensor &g1, co
                      const half *X, half *H, hipStream_t st, int slot_type) {
     if (!nwork) return;
     const dim3 grid(FE / 32, nwork);
-    if (slot_type >= 0 && slot_type != IQ4_XS) {         // an IQ4_XS slot is rows slot * FE.. of the pool, as below
+    if (slot_type >= 0 && slot_type != IQ4_XS) {
         if (g0.type != IQ4_XS) FAIL("moe_gemm_gateup: an expert pool of type %d", g0.type);
         if (slot_type == Q3_K) k_moe_gateup<Q3_K, true><<<grid, 32 * MOE_NW_GU, 0, st>>>(g0, u0, g1, u1, work, X, H);
         else if (slot_type == Q2_K) k_moe_gateup<Q2_K, true><<<grid, 32 * MOE_NW_GU, 0, st>>>(g0, u0, g1, u1, work, X, H);

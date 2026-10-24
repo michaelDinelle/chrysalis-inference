@@ -1,11 +1,3 @@
-// One cold expert for a group of tokens on the CPU with AVX-512 VNNI (prefill, an expert with several tokens).
-// Lanes are tokens: a weight row is decoded once (to bytes and scales), and each of its 4-byte pieces is broadcast
-// against the same piece of 8 or 16 tokens' activations (interleaved so that one register holds it for all of them), so
-// every vpdpbusd does 32 or 64 multiply-adds and block sums need no horizontal adds.
-// vpdpbusd multiplies unsigned by signed bytes, so weights are stored unsigned with an offset that is taken out through
-// each token's sums of its int8 activations: IQ4 codebook values + 128 (per-32 scale s: s * (S - 128 X)); Q3_K values
-// + 4 and Q2_K's unsigned values, per 16 weights with a scale a and an offset b (a * S - b * X: b = 4a for Q3_K, Q2_K's
-// min for Q2_K), where S is the dot product of the stored bytes and X the activations' sum.
 #include "cpu_moe.h"
 #include <immintrin.h>
 #include <algorithm>
@@ -15,23 +7,21 @@
 
 namespace {
 constexpr int D_ = 2560, FE_ = 640;
-constexpr int NB_GU = D_ / 32, NB_DN = FE_ / 32;           // 32-value blocks per gate/up row, per down row
+constexpr int NB_GU = D_ / 32, NB_DN = FE_ / 32;
 alignas(16) const uint8_t KV128[16] = {1, 24, 45, 63, 79, 93, 106, 118, 129, 141, 153, 166, 181, 197, 217, 241};
 
 #define VNNI __attribute__((target("avx512f,avx512bw,avx512vl,avx512vnni,f16c,avx2,fma,bmi2")))
 
-// IQ4_XS row (K values, 136-byte super-blocks) -> bytes (value + 128) and per-32 scales d * (ls - 32)
 VNNI void decode_iq4xs(const uint8_t *row, int K, uint8_t *w, float *ws) {
     const __m256i tbl = _mm256_broadcastsi128_si256(_mm_load_si128((const __m128i *)KV128)), m4 = _mm256_set1_epi8(0x0f);
     for (int sb = 0; sb < K / 256; sb++) {
         const uint8_t *blk = row + sb * 136;
-        // the 8 sub-block scales at once: low 4 bits from scales_l (a nibble each), high 2 from scales_h
         const uint64_t lo4 = _pdep_u64(*(const uint32_t *)(blk + 4), 0x0F0F0F0F0F0F0F0Full);
         const uint64_t hi2 = _pdep_u64(*(const uint16_t *)(blk + 2), 0x0303030303030303ull);
         const __m256i ls = _mm256_cvtepu8_epi32(_mm_cvtsi64_si128((long long)(lo4 | hi2 << 4)));
         _mm256_storeu_ps(ws + sb * 8, _mm256_mul_ps(_mm256_set1_ps(_cvtsh_ss(*(const uint16_t *)blk)),
                                                     _mm256_cvtepi32_ps(_mm256_sub_epi32(ls, _mm256_set1_epi32(32)))));
-        for (int ib = 0; ib < 8; ib += 2) {          // two sub-blocks (2 x 16 bytes of nibbles) per step
+        for (int ib = 0; ib < 8; ib += 2) {
             const __m256i q = _mm256_loadu_si256((const __m256i *)(blk + 8 + 16 * ib));
             const __m256i lo = _mm256_shuffle_epi8(tbl, _mm256_and_si256(q, m4));
             const __m256i hi = _mm256_shuffle_epi8(tbl, _mm256_and_si256(_mm256_srli_epi16(q, 4), m4));
@@ -42,7 +32,6 @@ VNNI void decode_iq4xs(const uint8_t *row, int K, uint8_t *w, float *ws) {
     }
 }
 
-// IQ4_NL row (K values, 18-byte blocks) -> the same two arrays
 VNNI void decode_iq4nl(const uint8_t *row, int K, uint8_t *w, float *ws) {
     const __m128i tbl = _mm_load_si128((const __m128i *)KV128), m4 = _mm_set1_epi8(0x0f);
     for (int b = 0; b < K / 32; b++) {
@@ -54,13 +43,12 @@ VNNI void decode_iq4nl(const uint8_t *row, int K, uint8_t *w, float *ws) {
     }
 }
 
-// Q3_K row (K values, 110-byte super-blocks) -> bytes (value + 4, 0..7), per-16 scales a and offsets b = 4a
 VNNI void decode_q3k(const uint8_t *row, int K, uint8_t *w, float *wa, float *wb) {
     const __m256i m3 = _mm256_set1_epi8(3), one = _mm256_set1_epi8(1);
     for (int sb = 0; sb < K / 256; sb++) {
         const uint8_t *blk = row + sb * 110;
         uint32_t a[3];
-        memcpy(a, blk + 96, 12);                     // the 6-bit scales, unpacked as ggml does
+        memcpy(a, blk + 96, 12);
         const uint32_t s0 = (a[0] & 0x0f0f0f0f) | ((a[2] & 0x03030303) << 4), s1 = (a[1] & 0x0f0f0f0f) | (((a[2] >> 2) & 0x03030303) << 4);
         const uint32_t s2 = ((a[0] >> 4) & 0x0f0f0f0f) | (((a[2] >> 4) & 0x03030303) << 4), s3 = ((a[1] >> 4) & 0x0f0f0f0f) | (((a[2] >> 6) & 0x03030303) << 4);
         const __m512 sc = _mm512_cvtepi32_ps(_mm512_sub_epi32(_mm512_cvtepu8_epi32(_mm_set_epi32((int)s3, (int)s2, (int)s1, (int)s0)), _mm512_set1_epi32(32)));
@@ -70,7 +58,7 @@ VNNI void decode_q3k(const uint8_t *row, int K, uint8_t *w, float *wa, float *wb
         const __m256i hm = _mm256_loadu_si256((const __m256i *)blk);
         for (int n = 0; n < 2; n++) {
             const __m256i q = _mm256_loadu_si256((const __m256i *)(blk + 32 + 32 * n));
-            for (int j = 0; j < 4; j++) {            // weights 128n + 32j + 0..31: quant bytes 32n + 0..31 at shift 2j
+            for (int j = 0; j < 4; j++) {
                 const __m256i lo = _mm256_and_si256(_mm256_srli_epi16(q, 2 * j), m3);
                 const __m256i hb = _mm256_and_si256(_mm256_srli_epi16(hm, 4 * n + j), one);
                 _mm256_storeu_si256((__m256i *)(w + sb * 256 + 128 * n + 32 * j), _mm256_or_si256(lo, _mm256_slli_epi16(hb, 2)));
@@ -79,7 +67,6 @@ VNNI void decode_q3k(const uint8_t *row, int K, uint8_t *w, float *wa, float *wb
     }
 }
 
-// Q2_K row (84-byte super-blocks) -> bytes (0..3), per-16 scales a = d * scale and offsets b = dmin * min
 VNNI void decode_q2k(const uint8_t *row, int K, uint8_t *w, float *wa, float *wb) {
     const __m256i m3 = _mm256_set1_epi8(3);
     for (int sb = 0; sb < K / 256; sb++) {
@@ -97,8 +84,6 @@ VNNI void decode_q2k(const uint8_t *row, int K, uint8_t *w, float *wa, float *wb
     }
 }
 
-// L token lanes of one decoded row: acc[j] = sum_b ws[b] * xs[b][j] * (sum_i (w_i + 128) x_i - 128 * xsum[b][j]).
-// xi: [nb][8][L] dwords (block, 4-byte piece, token); xs: [nb][L] scales; xc: [nb][L] 128 * sums, as int32
 template <int L> struct Lanes;
 template <> struct Lanes<16> {
     using I = __m512i; using F = __m512;
@@ -110,7 +95,6 @@ template <> struct Lanes<16> {
     }
     VNNI static F fzero() { return _mm512_setzero_ps(); }
     VNNI static void store(float *o, F a, F b) { _mm512_store_ps(o, _mm512_add_ps(a, b)); }
-    // per-16 form: a + xs * (a0 * s0 + a1 * s1), and a - (b0 * xf0 + b1 * xf1)
     VNNI static F block16(I s0, I s1, float a0, float a1, const float *xs, F a) {
         const F v = _mm512_fmadd_ps(_mm512_cvtepi32_ps(s1), _mm512_set1_ps(a1), _mm512_mul_ps(_mm512_cvtepi32_ps(s0), _mm512_set1_ps(a0)));
         return _mm512_fmadd_ps(v, _mm512_load_ps(xs), a);
@@ -160,8 +144,6 @@ VNNI inline void row_dot(const uint8_t *w, const float *ws, int nb, const uint32
     V::store(out, a0, a1);
 }
 
-// The per-16 form (Q3_K, Q2_K): acc[j] = sum_b xs[b][j] * (a[2b] S0 + a[2b+1] S1) - sum_h b[h] * xf[h][j], S0 / S1 the dot
-// products of the block's two halves (dwords 0..3 / 4..7), xf [nb*2][L] the per-16 sums times the block scale.
 template <int L>
 VNNI inline void row_dot16(const uint8_t *w, const float *wa, const float *wb, int nb, const uint32_t *xi, const float *xs, const float *xf,
                            float *out) {
@@ -181,12 +163,9 @@ VNNI inline void row_dot16(const uint8_t *w, const float *wa, const float *wb, i
     V::store(out, a0, a1);
 }
 
-// one group of up to L tokens through the whole expert
 template <int L>
 VNNI void group(const ColdLayer &c, int slot, int ng, const int8_t *const *xq, const float *const *xs, const int32_t *const *xsum,
                 const float *w, uint16_t *const *out, VnniScratch &S) {
-    // 1. gate/up activations interleaved: xi[b][k][j], scales xs[b][j], corrections 128 * sum (per 32) and the per-16
-    //    sums times the scale
     const int fmt = c.type_gu[c.grp(slot)];
     for (int b = 0; b < NB_GU; b++) {
         for (int j = 0; j < L; j++) {
@@ -198,13 +177,12 @@ VNNI void group(const ColdLayer &c, int slot, int ng, const int8_t *const *xq, c
         for (int k = 0; k < 8; k++)
             for (int j = 0; j < L; j++) S.xi[(b * 8 + k) * L + j] = j < ng ? *(const uint32_t *)(xq[j] + b * 32 + 4 * k) : 0u;
     }
-    // 2. gate and up rows -> h = silu(g) * u per row and lane (S.h: [640][L])
     alignas(64) float g[16], u[16];
     auto dot_row = [&](const uint8_t *row, float *o) {
-        if (fmt == 23) { decode_iq4xs(row, D_, S.w, S.ws); row_dot<L>(S.w, S.ws, NB_GU, S.xi, S.xs, S.xc, o); }   // IQ4_XS
+        if (fmt == 23) { decode_iq4xs(row, D_, S.w, S.ws); row_dot<L>(S.w, S.ws, NB_GU, S.xi, S.xs, S.xc, o); }
         else {
-            if (fmt == 11) decode_q3k(row, D_, S.w, S.wa, S.wb);                                                  // Q3_K
-            else decode_q2k(row, D_, S.w, S.wa, S.wb);                                                            // Q2_K
+            if (fmt == 11) decode_q3k(row, D_, S.w, S.wa, S.wb);
+            else decode_q2k(row, D_, S.w, S.wa, S.wb);
             row_dot16<L>(S.w, S.wa, S.wb, NB_GU, S.xi, S.xs, S.xf, o);
         }
     };
@@ -213,7 +191,6 @@ VNNI void group(const ColdLayer &c, int slot, int ng, const int8_t *const *xq, c
         dot_row(c.gu_row(true, slot, r), u);
         for (int j = 0; j < L; j++) S.h[r * L + j] = g[j] / (1.0f + expf(-g[j])) * u[j];
     }
-    // 3. h -> int8 per 32 rows per lane, interleaved for the down rows, with scales and 128 * sums
     for (int b = 0; b < NB_DN; b++) {
         float d[16], id[16];
         for (int j = 0; j < L; j++) {
@@ -235,12 +212,10 @@ VNNI void group(const ColdLayer &c, int slot, int ng, const int8_t *const *xq, c
             }
         for (int j = 0; j < L; j++) S.hc[b * L + j] = 128 * sum[j];
     }
-    // 4. down rows -> S.y [2560][L]
     for (int r = 0; r < D_; r++) {
         decode_iq4nl(c.dn_row(slot, r), FE_, S.w, S.ws);
         row_dot<L>(S.w, S.ws, NB_DN, S.hi, S.hs, S.hc, S.y + (size_t)r * L);
     }
-    // 5. per token: its column of S.y, weighted, as an fp16 output row
     alignas(64) float col[16];
     for (int j = 0; j < ng; j++) {
         uint16_t *o = out[j];
@@ -250,7 +225,7 @@ VNNI void group(const ColdLayer &c, int slot, int ng, const int8_t *const *xq, c
         }
     }
 }
-}  // namespace
+}
 
 void VnniScratch::reserve() {
     if (w) return;
@@ -267,14 +242,12 @@ VnniScratch::~VnniScratch() {
 }
 
 bool vnni_supported() { return __builtin_cpu_supports("avx512vnni") && __builtin_cpu_supports("avx512bw") && __builtin_cpu_supports("bmi2"); }
-bool vnni_formats(const ColdLayer &c) {           // gate / up IQ4_XS, Q3_K or Q2_K (ggml types 23, 11, 10), down IQ4_NL (20)
+bool vnni_formats(const ColdLayer &c) {
     for (int g = 0; g < 3; g++)
         if (c.gate[g] && c.type_gu[g] != 23 && c.type_gu[g] != 11 && c.type_gu[g] != 10) return false;
     return c.type_dn == 20;
 }
 
-// Activations of one token for the gate / up rows: int8 per 32 values with a float scale (max |x| / 127), and the sum
-// of each half block's int8 values (for the unsigned-operand corrections).
 VNNI void vnni_quant_x(const float *x, int8_t *q, float *s, int32_t *sum) {
     for (int b = 0; b < NB_GU; b++) {
         const __m512 v0 = _mm512_loadu_ps(x + b * 32), v1 = _mm512_loadu_ps(x + b * 32 + 16);
@@ -290,21 +263,15 @@ VNNI void vnni_quant_x(const float *x, int8_t *q, float *s, int32_t *sum) {
     }
 }
 
-// Decode: one token per pick, many rows.
-// A row's GGUF blocks are decoded straight into 64-byte registers (weights in natural order, unsigned as above) and
-// multiplied with the token's int8 activations by vpdpbusd: each int32 lane holds 4 products of one 16-weight group, so
-// the groups' scales (weight scale times the activation scale of the 32-block) apply as a per-lane vector, and a row
-// needs one horizontal sum. The unsigned offsets come out through the token's per-16 sums (f16: sum times scale).
 namespace {
-VNNI inline __m512i two16(int lo, int hi) {           // shift counts: lo for the low 256 bits' words, hi for the high ones
+VNNI inline __m512i two16(int lo, int hi) {
     return _mm512_inserti64x4(_mm512_castsi256_si512(_mm256_set1_epi16((short)lo)), _mm256_set1_epi16((short)hi), 1);
 }
-VNNI inline __m512i lane_groups(int k) {              // lane l of register k (weights 64k + 4l..) -> group 4k + l / 4
+VNNI inline __m512i lane_groups(int k) {
     return _mm512_set_epi32(4 * k + 3, 4 * k + 3, 4 * k + 3, 4 * k + 3, 4 * k + 2, 4 * k + 2, 4 * k + 2, 4 * k + 2,
                             4 * k + 1, 4 * k + 1, 4 * k + 1, 4 * k + 1, 4 * k, 4 * k, 4 * k, 4 * k);
 }
 
-// Q3_K (110-byte super-blocks): weights + 4 in 0..7 (low 2 bits of qs, third bit of hmask), a = d (scale - 32), offset 4a
 VNNI float dot1_q3k(const uint8_t *row, const int8_t *xq, const float *s16, const float *f16) {
     const __m512i m3 = _mm512_set1_epi8(3), one = _mm512_set1_epi8(1);
     const __m512i cq[2] = {two16(0, 2), two16(4, 6)}, ch[4] = {two16(0, 1), two16(2, 3), two16(4, 5), two16(6, 7)};
@@ -325,7 +292,7 @@ VNNI float dot1_q3k(const uint8_t *row, const int8_t *xq, const float *s16, cons
         for (int n = 0; n < 2; n++) {
             const __m512i q = _mm512_broadcast_i64x4(_mm256_loadu_si256((const __m256i *)(blk + 32 + 32 * n)));
 #pragma unroll
-            for (int kk = 0; kk < 2; kk++) {               // register k = 2n + kk: weights 64k .. 64k + 63
+            for (int kk = 0; kk < 2; kk++) {
                 const int k = 2 * n + kk;
                 const __m512i lo = _mm512_and_si512(_mm512_srlv_epi16(q, cq[kk]), m3);
                 const __m512i hb = _mm512_and_si512(_mm512_srlv_epi16(hm, ch[k]), one);
@@ -338,7 +305,6 @@ VNNI float dot1_q3k(const uint8_t *row, const int8_t *xq, const float *s16, cons
     return _mm512_reduce_add_ps(acc) - 4.0f * _mm512_reduce_add_ps(cor);
 }
 
-// Q2_K (84-byte super-blocks): weights 0..3, a = d * (scale & 15), offset dmin * (scale >> 4)
 VNNI float dot1_q2k(const uint8_t *row, const int8_t *xq, const float *s16, const float *f16) {
     const __m512i m3 = _mm512_set1_epi8(3);
     const __m512i cq[2] = {two16(0, 2), two16(4, 6)};
@@ -367,7 +333,6 @@ VNNI float dot1_q2k(const uint8_t *row, const int8_t *xq, const float *s16, cons
     return _mm512_reduce_add_ps(acc) - _mm512_reduce_add_ps(cor);
 }
 
-// IQ4_XS (136-byte super-blocks), through the prefill decoder: bytes = codebook + 128, per-32 scales
 VNNI float dot1_iq4xs(const uint8_t *row, const int8_t *xq, const float *xs, const int32_t *xsum, VnniScratch &S) {
     decode_iq4xs(row, D_, S.w, S.ws);
     __m512 acc = _mm512_setzero_ps();
@@ -380,7 +345,7 @@ VNNI float dot1_iq4xs(const uint8_t *row, const int8_t *xq, const float *xs, con
     }
     return _mm512_reduce_add_ps(acc) - cor;
 }
-}  // namespace
+}
 
 void vnni_act1(const float *xs, const int32_t *xsum, float *s16, float *f16) {
     for (int g = 0; g < D_ / 16; g++) { s16[g] = xs[g / 2]; f16[g] = xs[g / 2] * (float)xsum[g]; }
@@ -392,7 +357,6 @@ float vnni_dot_gu1(const uint8_t *row, int type, const int8_t *xq, const float *
     S.reserve();
     return dot1_iq4xs(row, xq, xs, xsum, S);
 }
-// h (640 floats, one pick) -> int8 per 32, scales, and the corrections 128 * sum * scale
 VNNI void vnni_quant_h(const float *h, int8_t *q, float *s, float *c) {
     for (int b = 0; b < NB_DN; b++) {
         const __m512 v0 = _mm512_loadu_ps(h + b * 32), v1 = _mm512_loadu_ps(h + b * 32 + 16);
@@ -406,7 +370,6 @@ VNNI void vnni_quant_h(const float *h, int8_t *q, float *s, float *c) {
         c[b] = 128.0f * d * (float)(_mm512_reduce_add_epi32(q0) + _mm512_reduce_add_epi32(q1));
     }
 }
-// one IQ4_NL down row (640 weights, 18-byte blocks) with a pick's quantized h
 VNNI float vnni_dot_dn1(const uint8_t *row, const int8_t *hq, const float *hs, const float *hc) {
     const __m256i tbl = _mm256_broadcastsi128_si256(_mm_load_si128((const __m128i *)KV128)), m4 = _mm256_set1_epi8(0x0f);
     __m512 acc = _mm512_setzero_ps();
@@ -429,9 +392,6 @@ VNNI float vnni_dot_dn1(const uint8_t *row, const int8_t *hq, const float *hs, c
     return _mm512_reduce_add_ps(acc) - cor;
 }
 
-// The expert at cold slot `slot` for n tokens (xq / xs / xsum: their gate/up activations from vnni_quant_x), weights
-// w[i]: out[i][0..2560) = fp16(w[i] * down(silu(gate x_i) * up x_i)). Groups of 16 tokens, the last one 8 lanes wide
-// when it has 8 or fewer.
 void expert_vnni(const ColdLayer &c, int slot, int n, const int8_t *const *xq, const float *const *xs, const int32_t *const *xsum,
                  const float *w, uint16_t *const *out, VnniScratch &S) {
     S.reserve();

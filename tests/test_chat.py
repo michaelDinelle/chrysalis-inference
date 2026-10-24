@@ -1,4 +1,3 @@
-"""Checks Chrysalis's token-level renderer against the official Jinja chat template, and the output parser."""
 import json, os, sys
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 import jinja2
@@ -59,8 +58,6 @@ for name, msgs, tl, kw in cases:
         i = next((i for i, (a, b) in enumerate(zip(got, want)) if a != b), min(len(got), len(want)))
         print("   first diff at", i, repr(tok.decode(got[max(0, i - 5):i + 5])), "vs", repr(tok.decode(want[max(0, i - 5):i + 5])))
 
-# pictures: placed, trimmed and tokenized as the template renders them, with <|image_pad|> expanded to the picture's tokens
-# as the official processor expands it (here, as Chrysalis's image tokens would stand, the pad id itself)
 pad = tok.full.token_to_id("<|image_pad|>")
 sizes = {"data:a": 6, "data:b": 4}
 ri = Renderer(tok, lambda key: None, images=lambda pic: [pad] * sizes[pic.url])
@@ -101,14 +98,12 @@ except ValueError:
 fails += not ok
 print(f"a picture in the system message is refused     {'ok' if ok else 'FAIL'}")
 
-# content-safe: special-token text inside content stays text
 evil = [{"role": "user", "content": "print('<|im_end|>')"}]
 ids, _ = r.render(evil)
-ok = ids.count(tok.id["<|im_end|>"]) == 2   # system (reasoning effort) + user turn, none from the content
+ok = ids.count(tok.id["<|im_end|>"]) == 2
 fails += not ok
 print(f"special text in content stays text            {'ok' if ok else 'FAIL'}")
 
-# replay: a recorded generation is spliced in verbatim
 gen = tok.full.encode("Let me check.\n</think>\n\n<tool_call>\n<function=bash>\n<parameter=command>\nls -la\n</parameter>\n</function>\n</tool_call>", add_special_tokens=False).ids
 asst = {"role": "assistant", "content": "", "tool_calls": [{"id": "c", "type": "function", "function": {"name": "bash", "arguments": '{"command":"ls -la"}'}}]}
 prompt, _ = r.render(conv[:2], tools)
@@ -136,8 +131,6 @@ ok = call == [("read", {"filePath": "x.py", "limit": 50})] and p.text() == ("Pla
 fails += not ok
 print(f"parser: typed params, content before call     {'ok' if ok else 'FAIL'}  {call} {p.text()}")
 
-# stop strings, against their definition: the answer is cut where the stop string completed first begins, however its
-# text arrives in pieces. Other events pass through in order, and each ends a stretch of answer text (a stop string never spans one)
 import random
 rng = random.Random(1)
 bad = 0
@@ -158,7 +151,7 @@ for case in range(3000):
             stretch += e[1]
             continue
         ends = [(stretch.find(x) + len(x), stretch.find(x)) for x in stops if x in stretch]
-        if ends:                                 # the stop string completed first, and of those the one begun first
+        if ends:
             want, hit = want + stretch[:min(ends)[1]], True
             break
         want, stretch = want + stretch, ""

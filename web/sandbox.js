@@ -1,22 +1,8 @@
-// A page from a reply, in its sandbox (server.ts serves this as /sandbox): it shows the page the chat posts, reports its
-// height, and with one of the chat's tools on outlines the element under the pointer and says what was picked, painted
-// or retyped, by the element's data-cx (its place in the source: artifacts.ts, markSource).
-//
-// A page is synced in (the elements the source made, brought to the new source's, what is new fading in) or written
-// (document.write, so its scripts run and its load events fire): the chat decides (app.ts, showPage). Synced in, scripts
-// wait, and what the page's own code made (nodes without data-cx) and the attributes it set stay. document.open() keeps
-// the window and its globals but drops every listener, so this is written into each page it writes and attaches again;
-// its state is on the window.
 (() => {
   const S = (window.__chrysalis ??= { mode: "use", pin: null, prev: null, hover: null, code: document.currentScript?.textContent ?? "" });
   const send = (m) => parent.postMessage(m, "*");
   const html = document.documentElement;
 
-  // The root element's box: its content's height (scrollHeight never reports less than the frame already is). A page made
-  // to the window's size instead (a canvas sized to it, in the flow or laid over it, a layer fixed over it: most 3D
-  // scenes) has no height of its own: it is as tall as its frame, whatever that is, so it says so (fills, with the
-  // window's height) and the chat gives it room. Its code adding such a canvas changes nothing the root's box shows
-  // (fixed) or did not run yet when the root was measured, so what is added is watched too.
   const windowSized = (el) => {
     const r = el.getBoundingClientRect();
     return r.width >= innerWidth * 0.9 && r.height >= innerHeight * 0.9;
@@ -32,11 +18,8 @@
   };
   new ResizeObserver(() => post()).observe(html);
   new MutationObserver(() => { later ||= requestAnimationFrame(() => { later = 0; post(); }); }).observe(html, { childList: true, subtree: true });
-  // after the page's own load listeners (this one is the page's first), which often make its canvas
   addEventListener("load", () => setTimeout(() => post(S.written)));
 
-  // What the tools show, on the root beside the page's head and body (which a sync brings to the source's): the outline
-  // of what is under the pointer, a stronger one round what is picked, and each tool's cursor
   const ui = (tag, css) => {
     const el = document.createElement(tag);
     el.setAttribute("data-chrysalis-ui", "");
@@ -53,8 +36,6 @@
     if (!box.isConnected) html.append(box);
     Object.assign(box.style, { display: "block", left: `${r.left - 3}px`, top: `${r.top - 3}px`, width: `${r.width + 6}px`, height: `${r.height + 6}px` });
   };
-  // An A-Frame scene's entities are drawn by WebGL, not laid out: what is under the pointer is what the scene's camera
-  // sees there (three's raycaster), and an entity's box is its 3D bounds as the camera shows them
   const sceneOf = () => (window.AFRAME && document.querySelector("a-scene")?.camera ? document.querySelector("a-scene") : null);
   function entityAt(e) {
     const scene = sceneOf();
@@ -80,7 +61,7 @@
     const xs = [], ys = [];
     for (const x of [box.min.x, box.max.x]) for (const y of [box.min.y, box.max.y]) for (const z of [box.min.z, box.max.z]) {
       const p = new T.Vector3(x, y, z).project(scene.camera);
-      if (p.z > 1) continue;                               // behind the camera
+      if (p.z > 1) continue;
       xs.push(c.left + ((p.x + 1) / 2) * c.width);
       ys.push(c.top + ((1 - p.y) / 2) * c.height);
     }
@@ -96,12 +77,10 @@
   };
   addEventListener("scroll", show, { passive: true, capture: true });
   addEventListener("resize", show);
-  // a scene moves (its animations, its camera) with nothing scrolled: its outlines follow it each frame a tool is on
   const follow = () => { if (S.mode !== "use" && sceneOf()) { show(); requestAnimationFrame(follow); } };
 
   const partAt = (e) => entityAt(e) ?? (e.target instanceof Element ? e.target.closest("[data-cx]") : null);
   const cxOf = (el) => (el ? Number(el.getAttribute("data-cx")) : null);
-  // Text is retyped in place: only where all of it is the source's (none made by the page's code, no script or picture)
   const retypable = (el) => !el.matches("script,style,textarea,input,select,svg,svg *,canvas,iframe,video,audio,img,html,head") &&
     ![...el.querySelectorAll("*")].some((n) => !n.hasAttribute("data-cx") || n.matches("script,style,svg,canvas,iframe,video,audio"));
   let editing = null, before = "";
@@ -141,8 +120,6 @@
     send({ chrysalisHover: null });
     show();
   });
-  // With a tool on, presses and clicks are the tool's, not the page's (no link followed, no button pressed), but for
-  // those in the text being retyped
   const held = (e) => S.mode !== "use" && !(editing && editing.contains(e.target));
   for (const type of ["pointerdown", "mousedown", "pointerup", "mouseup", "dblclick", "auxclick", "contextmenu", "submit"])
     addEventListener(type, (e) => { if (held(e)) { e.preventDefault(); e.stopImmediatePropagation(); } }, true);
@@ -159,7 +136,6 @@
     else if (el && S.mode === "text") retype(el);
     show();
   }, true);
-  // the tools' keys, for the chat (whose own keydown never sees them: the page has the focus)
   addEventListener("keydown", (e) => {
     if (editing) {
       if (e.key === "Escape") finish(false);
@@ -177,14 +153,8 @@
   }, true);
   addEventListener("focusout", (e) => { if (editing && e.target === editing) finish(true); }, true);
 
-  // Sync: the elements the source made (data-cx) and the text among them, where the source changed (next is the new
-  // source parsed, prev the one the page shows): what it did not change stays as the page's code left it, a count it
-  // wrote, a class it set. A child with an id is matched by it, the rest in order, so what the page holds by id is the
-  // element it was.
   const managed = (el) => [...el.childNodes].filter((n) => n.nodeType === 3 || (n.nodeType === 1 && n.hasAttribute("data-cx")));
   const HELD = "text/chrysalis-held";
-  // A script a sync brings in waits (the page runs its scripts once it is written whole); a script already there is left
-  // as it is: it has run, or a change to its text would run it
   const hold = (node) => {
     if (node.nodeType === 1) for (const s of [node, ...node.querySelectorAll("script")]) if (s.tagName === "SCRIPT") s.type = HELD;
     return node;
@@ -229,14 +199,9 @@
   function sync(src) {
     const parse = (s) => new DOMParser().parseFromString(s, "text/html");
     const next = parse(src), prev = S.prev === null ? null : parse(S.prev);
-    // a head and body the source did not write (a fragment's) are the parser's: their attributes stay
     for (const k of ["head", "body"]) syncEl(document[k], next[k], prev?.[k] ?? null, next[k].hasAttribute("data-cx"));
     S.prev = src;
   }
-  // The libraries the chat hands the page (app.ts, libsOf), each by the address or name the page loads it by: an address
-  // is swapped for a blob: one made here, a name goes in the page's import map (made if it has none). One blob a
-  // library, so a page that names three and loads it by address too gets one three. (No integrity attribute holds: the
-  // code is the chat's copy, not the address's.)
   function withLibs(page, libs) {
     if (!libs) return { page, map: "" };
     const blobs = (S.blobs ??= new Map()), names = {};

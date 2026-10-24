@@ -1,9 +1,3 @@
-// CPU side of the routed experts: the cold experts (GGUF blocks in system RAM) the GPU leaves to it, computed with
-// ggml's dot products or cpu_vnni.cpp's AVX-512 VNNI kernels while the GPU runs the shared expert and the hot experts.
-// Decode: per layer the GPU writes its tokens' MoE inputs and their cold expert picks into pinned host memory and
-// bumps `go`; the workers answer with the weighted sum of those experts and bump `done`, which a GPU kernel spins on.
-// Prefill: the host hands over a MoeJob (the chunk's cold experts that the CPU takes, with their tokens) and the
-// workers write each pick's weighted expert output, in place of the GPU computing it from a copy in VRAM.
 #pragma once
 #include <atomic>
 #include <cstddef>
@@ -11,33 +5,29 @@
 #include <thread>
 #include <vector>
 
-constexpr int MOE_MAX_T = 8;           // tokens per handoff (decode and MTP verify passes)
-constexpr int MOE_MAX_E = 10;          // routed experts per token
-constexpr int VNNI_MIN_TOKENS = 3;     // a prefill expert with fewer tokens takes ggml's per-row dot products (as fast:
-                                       // bandwidth-bound), one with more the VNNI kernel
+constexpr int MOE_MAX_T = 8;
+constexpr int MOE_MAX_E = 10;
+constexpr int VNNI_MIN_TOKENS = 3;
 
-struct MoeShared {                     // pinned, coherent host memory shared with the GPU
-    alignas(64) uint32_t go;           // generation written by the GPU when the inputs below are ready
-    alignas(64) uint32_t done;         // generation written by the CPU when y is ready
+struct MoeShared {
+    alignas(64) uint32_t go;
+    alignas(64) uint32_t done;
     alignas(64) int layer, T;
-    int slot[MOE_MAX_T * MOE_MAX_E];   // cold-tier slot of each pick, -1 for a hot pick (the GPU does those)
-    float w[MOE_MAX_T * MOE_MAX_E];    // router weight of each pick
+    int slot[MOE_MAX_T * MOE_MAX_E];
+    float w[MOE_MAX_T * MOE_MAX_E];
     alignas(64) float x[MOE_MAX_T * 2560];
     alignas(64) float y[MOE_MAX_T * 2560];
 };
 
-struct ColdLayer {                     // one layer's experts outside VRAM, GGUF block order
-    // gate / up in up to three format groups: the RAM tier's (slots below n0, then up to n; down one tensor for both) and,
-    // slots n.. n + n2, the file's VRAM-tier experts (its own down tensor), in RAM only while out of the expert pool
-    // (experts.cpp: the spill mirror, laid out as the file's tensors are, which file_* point at)
+struct ColdLayer {
     const uint8_t *gate[3] = {}, *up[3] = {}, *down = nullptr, *down2 = nullptr;
     const uint8_t *file_gate = nullptr, *file_up = nullptr, *file_down2 = nullptr;
-    int type_gu[3] = {-1, -1, -1}, type_dn = -1;   // ggml types
-    size_t row_gu[3] = {}, row_dn = 0;             // bytes per row
+    int type_gu[3] = {-1, -1, -1}, type_dn = -1;
+    size_t row_gu[3] = {}, row_dn = 0;
     int n0 = 0, n = 0, n2 = 0;
     int grp(int s) const { return s < n0 ? 0 : s < n ? 1 : 2; }
-    int idx(int s) const { return s < n0 ? s : s < n ? s - n0 : s - n; }   // the slot within its group
-    const uint8_t *gu_row(bool is_up, int s, int r) const {   // row r (< 640) of expert s's gate or up matrix
+    int idx(int s) const { return s < n0 ? s : s < n ? s - n0 : s - n; }
+    const uint8_t *gu_row(bool is_up, int s, int r) const {
         const int g = grp(s);
         return (is_up ? up[g] : gate[g]) + ((size_t)idx(s) * 640 + r) * row_gu[g];
     }
@@ -47,35 +37,30 @@ struct ColdLayer {                     // one layer's experts outside VRAM, GGUF
     size_t bytes(int s) const { return 2 * 640 * row_gu[grp(s)] + 2560 * row_dn; }
 };
 
-struct MoeJob {                        // a prefill chunk's cold experts that the CPU computes (all host memory)
+struct MoeJob {
     int layer = 0, T = 0, n_exp = 0;
-    const uint16_t *x = nullptr;       // [T][2560] MoE inputs of the pass (fp16)
-    const int *slot = nullptr;         // [n_exp] cold slot of each expert, in the order the workers take them
-    const int *first = nullptr;        // [n_exp + 1] each expert's range of picks in tok / w / out
-    const int *tok = nullptr;          // [picks] token of each pick
-    const float *w = nullptr;          // [picks] router weight of each pick
-    uint16_t *out = nullptr;           // [picks][2560] fp16: w * expert(x[tok])
+    const uint16_t *x = nullptr;
+    const int *slot = nullptr;
+    const int *first = nullptr;
+    const int *tok = nullptr;
+    const float *w = nullptr;
+    uint16_t *out = nullptr;
 };
 
-// Per-thread buffers of the VNNI expert kernel (cpu_vnni.cpp), 64-byte aligned, allocated on first use.
 struct VnniScratch {
-    uint8_t *w = nullptr; float *ws = nullptr, *wa = nullptr, *wb = nullptr;   // one decoded weight row: unsigned values,
-                                                                       // per-32 scales (IQ4), per-16 scales and offsets (K-quants)
-    uint32_t *xi = nullptr; float *xs = nullptr; int32_t *xc = nullptr;   // a group's gate/up activations, interleaved
-    float *xf = nullptr;                                               // their per-16 sums times the block scale
-    float *h = nullptr; uint32_t *hi = nullptr; float *hs = nullptr; int32_t *hc = nullptr;   // silu(g) * u, then int8
-    float *y = nullptr;                                                // down rows per lane
+    uint8_t *w = nullptr; float *ws = nullptr, *wa = nullptr, *wb = nullptr;
+    uint32_t *xi = nullptr; float *xs = nullptr; int32_t *xc = nullptr;
+    float *xf = nullptr;
+    float *h = nullptr; uint32_t *hi = nullptr; float *hs = nullptr; int32_t *hc = nullptr;
+    float *y = nullptr;
     void reserve();
     ~VnniScratch();
 };
 bool vnni_supported();
-bool vnni_formats(const ColdLayer &c);                                  // the kernel handles this layer's formats
-void vnni_quant_x(const float *x, int8_t *q, float *s, int32_t *sum);   // one token: int8 per 32, scales, sums per 16
+bool vnni_formats(const ColdLayer &c);
+void vnni_quant_x(const float *x, int8_t *q, float *s, int32_t *sum);
 void expert_vnni(const ColdLayer &c, int slot, int n, const int8_t *const *xq, const float *const *xs, const int32_t *const *xsum,
                  const float *w, uint16_t *const *out, VnniScratch &S);
-// decode (one token per pick): a token's per-16 lane vectors from vnni_quant_x's scales and sums ([D/16] each), one
-// gate / up row's dot product with it (ggml type 11 Q3_K, 10 Q2_K, 23 IQ4_XS), a pick's h quantized for the down rows
-// (int8 per 32, scales, corrections), one IQ4_NL down row's dot product with it
 void vnni_act1(const float *xs, const int32_t *xsum, float *s16, float *f16);
 float vnni_dot_gu1(const uint8_t *row, int type, const int8_t *xq, const float *xs, const int32_t *xsum, const float *s16,
                    const float *f16, VnniScratch &S);
@@ -84,55 +69,45 @@ float vnni_dot_dn1(const uint8_t *row, const int8_t *hq, const float *hs, const 
 
 class CpuMoe {
 public:
-    // shared: device-visible host memory (hipHostMalloc coherent); threads: worker count (not pinned: the scheduler
-    // moves a worker off a core that another process is using). pred: the GPU's prediction of the next handoff's picks
-    // (its go = that handoff's generation), whose weights the workers load into their caches while they wait.
     void start(MoeShared *shared, MoeShared *pred, const std::vector<ColdLayer> &layers, int threads);
     void stop();
-    // workers spin on `go` only between arm() and disarm() (decode: the GPU hands over a layer's cold picks every few
-    // hundred microseconds), and sleep otherwise until a prefill job arrives
     void arm();
     void disarm();
-    // prefill: start a job (workers must be armed) and wait for it; the caller enqueues GPU work in between
     void submit(const MoeJob &job);
     void wait();
-    bool use_vnni(int on) { const bool was = vnni; vnni = on && vnni_ok; return was; }   // experiments
+    bool use_vnni(int on) { const bool was = vnni; vnni = on && vnni_ok; return was; }
     ~CpuMoe() { stop(); }
 
 private:
     void worker(int id);
     void prefill_work(int id);
-    void preload(int id, uint32_t real, uint32_t job);   // load this worker's slice of the predicted picks while sh->go is
-                                                         // `real` and no host job came after `job`
+    void preload(int id, uint32_t real, uint32_t job);
     MoeShared *sh = nullptr, *pr = nullptr;
     std::vector<ColdLayer> L;
     std::vector<std::thread> th;
     int n = 0;
     std::atomic<int> armed{0};
-    std::atomic<uint32_t> wake{0};               // bumped by arm(), submit() and stop(): sleeping workers wait on it
+    std::atomic<uint32_t> wake{0};
     std::atomic<bool> quit{false};
-    std::atomic<uint32_t> seen{0};               // last generation the workers finished
+    std::atomic<uint32_t> seen{0};
     std::atomic<int> bar_count{0};
     std::atomic<uint32_t> bar_gen{0};
     void barrier();
-    // scratch shared by the workers within one handoff
-    std::vector<float> gu;                       // [picks][2 * 640] gate | up results
-    // inputs quantized to each gate/up group's dot type (group 1 shares group 0's when the types agree)
-    std::vector<uint8_t> xq[3];                  // [T]
-    std::vector<uint8_t> hq;                     // [picks] silu(g) * u quantized to the down dot type
-    // the VNNI decode path's operands: per token x int8 per 32, scales, per-16 sums and lane vectors; per pick h int8
+    std::vector<float> gu;
+    std::vector<uint8_t> xq[3];
+    std::vector<uint8_t> hq;
     std::vector<int8_t> dxq, dhq; std::vector<float> dxs, ds16, df16, dhs, dhc; std::vector<int32_t> dxsum;
     size_t xq_row[3] = {}, hq_row = 0;
-    int dot_gu[3] = {-1, -1, -1};                // vec_dot types of the gate/up groups
+    int dot_gu[3] = {-1, -1, -1};
     bool dot_same = true;
     MoeJob job;
-    std::atomic<uint32_t> jgen{0};               // bumped by submit()
-    std::atomic<uint64_t> sink_{0};              // keeps the preload's loads
+    std::atomic<uint32_t> jgen{0};
+    std::atomic<uint64_t> sink_{0};
 
-    std::atomic<int> jtok{0}, jexp{0}, jfin{0};  // next token to quantize, next expert, workers finished
-    std::vector<uint8_t> pxq[3];                 // [T] the job's inputs quantized to each group's gate/up dot type
-    std::vector<int8_t> vxq; std::vector<float> vxs; std::vector<int32_t> vxsum;   // [T] int8 per 32 + scales + sums per 16 (VNNI)
+    std::atomic<int> jtok{0}, jexp{0}, jfin{0};
+    std::vector<uint8_t> pxq[3];
+    std::vector<int8_t> vxq; std::vector<float> vxs; std::vector<int32_t> vxsum;
     bool vnni = false, vnni_ok = false;
     struct Scratch { std::vector<float> gu, y; std::vector<uint8_t> hq; VnniScratch v; };
-    std::vector<Scratch> scr;                    // per worker
+    std::vector<Scratch> scr;
 };

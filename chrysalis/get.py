@@ -1,7 +1,3 @@
-"""A model's files from Hugging Face the first time it is wanted: its weights and vision tower, at their MODELS paths
-under data/models, laid out the same in REPO. Hugging Face's client resumes them, and its Xet transfers ran at the
-line's speed here (104 MB/s, where one HTTP stream got 87 and eight ranges at once 96). One bar for the model: the
-client's own are one per file."""
 import os
 import sys
 import time
@@ -13,7 +9,6 @@ ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
 
 def missing(name):
-    """The model's files not here yet, as paths in REPO."""
     spec = MODELS[name]
     return [p.removeprefix("data/models/") for p in (spec["path"], spec["vision"]) if not os.path.exists(os.path.join(ROOT, p))]
 
@@ -26,7 +21,7 @@ def fetch(name):
     from tqdm.auto import tqdm
     try:
         total = sum(i.size for i in HfApi().get_paths_info(REPO, todo)) or 1
-    except Exception as e:                  # a line, not a traceback: no network, the repo not reachable
+    except Exception as e:
         sys.exit(f"  the models' repo cannot be reached ({type(e).__name__}): it tries again as Chrysalis next starts")
     done, t0, last, tty = 0, time.time(), 0.0, sys.stderr.isatty()
 
@@ -53,7 +48,7 @@ def fetch(name):
     try:
         for f in todo:
             hf_hub_download(REPO, f, local_dir=os.path.join(ROOT, "data/models"), tqdm_class=Bar)
-    except Exception as e:                  # no network, a full disk
+    except Exception as e:
         sys.exit(f"\n  the download stopped ({type(e).__name__}): it carries on from where it was as Chrysalis next starts")
     done = total
     draw(end=True)

@@ -1,12 +1,3 @@
-"""The voice service (voice/) on the CPU: its Whisper features against transformers' (data/ref-venv), Smart Turn
-through them on a finished and an unfinished question, and sessions over its WebSocket. A spoken question in: speech
-on, partials, then its turn and transcript; an unfinished one: a pause with its words, which are its turn's. A markdown reply in: audio pieces in order whose texts carry no markup or
-code and whose ranges cover the reply, a short first one, and speech the STT hears as the reply. While a reply plays,
-its own echo in the mic: nothing; another voice over it: an interrupt and that voice's turn. A preview, a reply with no
-text, a switch to another speech model mid-session (and to one that does not exist). Kokoro voices the questions
-(another voice than the replies'); the STT hears the replies. The conversation's names, sent as context, are heard as
-written.
-  data/voice-venv/bin/python tests/test_voice.py       (make test_voice)"""
 import json, os, re, struct, subprocess, sys, tempfile, threading, time, wave
 
 import numpy as np
@@ -14,8 +5,8 @@ import numpy as np
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, ROOT)
 from websockets.sync.client import connect
-from voice.parts import Kokoro, Parakeet, SmartTurn, mel_filters, whisper_features
-from voice.talk import speakable
+from chrysalis.voice.parts import Kokoro, Parakeet, SmartTurn, mel_filters, whisper_features
+from chrysalis.voice.talk import speakable
 
 fails = 0
 
@@ -74,8 +65,6 @@ cut = turn.prob(np.concatenate([gap, say("So I was wondering whether you could m
 check("Smart Turn: a finished question ends the turn", done > 0.5, f"P {done:.3f}")
 check("Smart Turn: a sentence cut off mid-clause does not", cut < 0.5, f"P {cut:.3f}")
 
-# A turn's stream starts with its pre-roll and is finished ~0.3 s after the speech, its last piece read 0.1 s into the
-# silence: its last word must come out, however the speech starts
 last = say("Name a fun weekend activity for two.")
 kept = 0
 for k in range(8):
@@ -84,7 +73,7 @@ for k in range(8):
     kept += s.finish().lower().rstrip(".").endswith("two")
 check("a turn's last word, however it starts", kept == 8, f"{kept}/8")
 
-svc = subprocess.Popen([sys.executable, "-m", "voice"], cwd=ROOT, stdin=subprocess.PIPE, stdout=subprocess.PIPE)
+svc = subprocess.Popen([sys.executable, "-m", "chrysalis.voice"], cwd=ROOT, stdin=subprocess.PIPE, stdout=subprocess.PIPE)
 url = svc.stdout.readline().decode().split()[-1]
 ws = connect(url, compression=None, max_size=None)
 
@@ -93,8 +82,6 @@ sending = threading.Thread()
 
 
 def stream(x, tail=1.5, live=False):
-    """A recording as the page sends it: 20 ms pieces of int16, after and before silence. live: as it is spoken, from
-    a thread of its own, so events() times what arrives meanwhile; returns when x starts, as spoken."""
     global sending
     sending.join() if sending.is_alive() else None
     pcm = (np.clip(np.concatenate([np.zeros(4800, np.float32), x, np.zeros(int(tail * 16000), np.float32)]), -1, 1) * 32767).astype("<i2")
@@ -112,8 +99,6 @@ def stream(x, tail=1.5, live=False):
     return t + 0.3
 
 def events(until, timeout=15.0):
-    """Messages until one passes `until` or the time is up: dicts, and audio as (header, float32 samples). Each one's
-    arrival time goes in `arrived`."""
     out, end = [], time.monotonic() + timeout
     while time.monotonic() < end:
         try:
@@ -139,8 +124,6 @@ def kind(m):
     return "audio" if isinstance(m, tuple) else m["type"]
 
 
-# A character's voice picker: a session of its own with no hello and no microphone. The voices there are, and a voice's
-# sample, which needs that voice's model alone: speech recognition and the rest load with voice mode's hello
 rss = lambda: int(next(l for l in open(f"/proc/{svc.pid}/status") if l.startswith("VmRSS")).split()[1]) // 1024
 voice_mode, ws = ws, connect(url, compression=None, max_size=None)
 ws.send(json.dumps({"type": "catalog"}))
@@ -153,8 +136,6 @@ sample = [m for m in got if kind(m) == "audio"]
 heard = hear(np.concatenate([to16k(m[1], m[0]["rate"]) for m in sample])) if sample else ""
 check("and a voice's sample, as audio of its own", sample and sample[0][0]["id"] == "preview" and got[-1] == {"type": "said", "id": "preview"}
       and wer("Hi, I'm Emma. This is how I sound.", heard) <= 0.2, repr(heard))
-# a reply read aloud (its speaker button): the same kind of session, which speaks with the default voice model unless
-# it names one
 ws.send(json.dumps({"type": "config", "voice": "bf_emma"}))
 said = events(lambda m: kind(m) in ("ready", "error"), 60)[-1]
 read = "**Bees** keep the hive warm in winter.\n\n```\ncode is not read\n```\n\nThey shiver to make heat."
@@ -229,10 +210,10 @@ ws.send(json.dumps({"type": "say_end", "id": "r2"}))
 events(lambda m: kind(m) == "said", 30)
 over = "Actually, could you tell me about penguins instead?"
 voice, echo = say(over, "bf_emma"), spoken[16000:]
-mix = np.zeros(19200 + len(voice), np.float32)       # the reply through the speakers, a voice over it mid-phrase
+mix = np.zeros(19200 + len(voice), np.float32)
 mix[:min(len(mix), len(echo))] += 0.5 * echo[:len(mix)]
 mix[19200:] += voice
-over_at = stream(mix, tail=2.0, live=True) + 1.2    # past the longest silence, should the turn model say "not yet"
+over_at = stream(mix, tail=2.0, live=True) + 1.2
 got = events(lambda m: kind(m) == "turn", 15)
 kinds = [kind(m) for m in got]
 t = next((m for m in got if kind(m) == "turn"), {})
@@ -272,8 +253,6 @@ sending.join()
 ws.close()
 with open(f"/proc/{svc.pid}/status") as f:
     mem = {l.split(":")[0]: int(l.split()[1]) // 1024 for l in f if l.startswith(("VmRSS", "VmHWM"))}
-# Speech that comes before a session has its parts (the user talks as soon as voice mode opens, while a first
-# start's models load) is kept and heard once they are in
 ws = connect(url, compression=None, max_size=None)
 early = "Tell me a joke about penguins."
 stream(say(early), tail=1.5)
@@ -281,8 +260,6 @@ ws.send(json.dumps({"type": "hello"}))
 t = next((m for m in events(lambda m: kind(m) == "turn", 20) if kind(m) == "turn"), {})
 check("what is said before the parts load is heard", wer(early, t.get("text", "")) <= 0.2, repr(t.get("text")))
 
-# Headphones (or the browser's echo cancellation): a reply plays and the mic stays quiet, so speech over it is the
-# user's and needs no words to stop the reply. A session of its own: the one above has heard its echo.
 ws = connect(url, compression=None, max_size=None)
 ws.send(json.dumps({"type": "hello"}))
 events(lambda m: kind(m) == "ready", 60)
@@ -296,8 +273,6 @@ check("a quiet mic: talking over the reply stops it at once", stopped < 0.5, f"{
 ws.send(json.dumps({"type": "playback", "playing": False}))
 t = next((m for m in events(lambda m: kind(m) == "turn", 10) if kind(m) == "turn"), {})
 check("and the words are the turn", "coffee" in t.get("text", "").lower(), repr(t.get("text")))
-# Echo cancellation lets a reply through now and then: the leak puts barge-in back on words, and 2 s of a reply playing
-# unheard after it puts it back on the voice
 leak = "Coffee reached Europe through Venice, and coffee houses opened in Oxford and London soon after. "
 ws.send(json.dumps({"type": "say", "id": "q2", "text": leak}))
 ws.send(json.dumps({"type": "say_end", "id": "q2"}))
@@ -314,9 +289,6 @@ check("a leak of the reply, then 2 s unheard: talking over it stops it at once",
 ws.send(json.dumps({"type": "playback", "playing": False}))
 events(lambda m: kind(m) == "turn", 10)
 
-# A sentence the turn model hears as unfinished: the turn waits out the longest silence, its words go out at the pause
-# before it (a reply begins on them) and are the turn's, as sent; speech that goes on after the pause is one turn. A
-# session of its own: more turns in the one above would move where it looks at their words, and so its barge-in times
 sending.join()
 ws = connect(url, compression=None, max_size=None)
 ws.send(json.dumps({"type": "hello"}))
@@ -335,8 +307,6 @@ kinds, t = [kind(m) for m in got], next((m for m in got if kind(m) == "turn"), {
 check("talking on after a pause: the same turn", "pause" in kinds and "speech" in kinds[kinds.index("pause"):] and kinds.count("turn") == 1
       and wer(whole, t.get("text", "")) <= 0.15, f"{' '.join(dict.fromkeys(kinds))}: {t.get('text')!r}")
 
-# The conversation's names, sent as context, are heard as written: "Qwen" said as people say it ("kwen") is another
-# word without it and the model's name with it, and a sentence that does not say it does not get it
 sending.join()
 ws = connect(url, compression=None, max_size=None)
 ws.send(json.dumps({"type": "hello"}))

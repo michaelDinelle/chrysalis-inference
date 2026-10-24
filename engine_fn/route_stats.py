@@ -1,9 +1,3 @@
-"""Routing statistics of Flash-Next on a corpus: picks per (layer, expert) from Chrysalis's own prefill, saved as
-[48][512] counts. fn_quantize.py can blend them with the imatrix counts when it picks the experts that live in VRAM, so
-the VRAM tier fits the work the model actually does here (coding) rather than only Unsloth's calibration text.
-  python engine_fn/route_stats.py MODEL OUT.npy ROOT:TOKENS [ROOT:TOKENS ...]
-Files under each ROOT (source code and Markdown; build trees, dependencies and data skipped) are sampled at random
-(fixed seed), at most 4,096 tokens each, until the root's token budget is reached; each file is its own sequence."""
 import os
 import random
 import sys
@@ -12,12 +6,12 @@ import numpy as np
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, ROOT)
-from tokenizers import Tokenizer  # noqa: E402
-from chrysalis.engine import Engine  # noqa: E402
-from chrysalis.models import MODELS  # noqa: E402
+from tokenizers import Tokenizer
+from chrysalis.engine import Engine
+from chrysalis.models import MODELS
 
 EXT = {".c", ".cc", ".cpp", ".h", ".hpp", ".hip", ".cu", ".py", ".ts", ".tsx", ".js", ".rs", ".go", ".gml", ".sh", ".md", ".json"}
-SKIP = {"node_modules", ".git", "build", "build_fn", "dist", "target", "__pycache__", "venv", ".venv", "rocm", "models"}
+SKIP = {"node_modules", ".git", "build", "dist", "target", "__pycache__", "venv", ".venv", "rocm", "models"}
 
 
 def files_under(root):

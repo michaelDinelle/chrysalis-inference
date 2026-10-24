@@ -77,14 +77,7 @@ alone, for Ollama, LM Studio or llama.cpp.
 
 A Mac is such a laptop: the same two lines with `chrysalis-macos-arm64.tar.gz`; after that, `chrysalis/Chrysalis.app` starts it.
 
-Windows (PowerShell, as an administrator once, for WSL2):
-
-```powershell
-irm https://github.com/michaelDinelle/chrysalis-inference/releases/latest/download/install.ps1 | iex
-```
-
-Then Chrysalis is in the Start menu (its window is Chrysalis, and closing it stops it), and `chrysalis.sh` is at the
-command line, as on Linux.
+Windows: double-click [chrysalis.wsl](https://github.com/michaelDinelle/chrysalis-inference/releases/latest/download/chrysalis.wsl) (with WSL on: `wsl --install` as an administrator, once). Then Chrysalis is in the Start menu (its window is Chrysalis, and closing it stops it), and `chrysalis.sh` is at the command line, as on Linux.
 
 Docker, for the API alone (`http://localhost:8080/v1`):
 

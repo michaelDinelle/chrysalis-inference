@@ -1,8 +1,3 @@
-"""Compare Chrysalis's next-token distributions with llama.cpp's on the same GGUF (KL divergence, top-1), on the decode,
-prefill and mixed paths. The weights are the same, so what differs is Chrysalis's arithmetic (int8 activations, the
-5-bit V cache): a path fails past its MAX_KL or under MIN_TOP1. The reference, build/cmp/ref.bin, is written by
-build/ref_logits (make build/ref_logits) when it is missing or with --fresh.
-  data/venv/bin/python tests/compare_ref.py [--fresh]"""
 import os, subprocess, sys
 import numpy as np
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
@@ -10,8 +5,6 @@ from tokenizers import Tokenizer
 from chrysalis.engine import Engine
 
 MODEL = "data/models/chrysalis-mix.gguf"
-# mean KL measured 2026-10-18 (deterministic): decode 0.0022, prefill 0.0035, mixed 0.0022; a decode step that forgets
-# twice as fast lands at 0.024
 MAX_KL, MIN_TOP1 = {"decode": 0.004, "prefill": 0.008, "mixed": 0.004}, 0.95
 TEXT = '''<|im_start|>user
 Write a Python function that merges overlapping intervals.<|im_end|>
@@ -61,18 +54,18 @@ def stats(name, pairs, max_kl):
 eng = Engine(MODEL)
 s = eng.new_seq()
 pairs = []
-for i, t in enumerate(ids):                 # decode path: one token at a time
+for i, t in enumerate(ids):
     eng.prefill(s, [t]); pairs.append((i, eng.last_logits()))
 fails = not stats("decode (T=1 per token)", pairs, MAX_KL["decode"])
 eng.free_seq(s)
 
 pairs = []
-for cut in (16, 64, n // 2, n):             # prefill path: chunked GEMMs
+for cut in (16, 64, n // 2, n):
     s = eng.new_seq(); eng.prefill(s, ids[:cut]); pairs.append((cut - 1, eng.last_logits())); eng.free_seq(s)
 fails += not stats("prefill (one chunk)", pairs, MAX_KL["prefill"])
 
 s = eng.new_seq(); eng.prefill(s, ids[:40]); pairs = []
-for i in range(40, n):                      # mixed: prefill then decode on top
+for i in range(40, n):
     eng.prefill(s, [ids[i]]); pairs.append((i, eng.last_logits()))
 fails += not stats("prefill 40 + decode", pairs, MAX_KL["mixed"])
 print("all ok" if not fails else f"{fails} FAILURES")

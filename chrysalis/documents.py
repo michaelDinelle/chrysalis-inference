@@ -1,7 +1,3 @@
-"""Documents attached to a message: a PDF reaches the model as Anthropic's API gives it one, each page both as the vision
-tower sees it and as its text, here as text and picture parts of the message; other files as their text. A long PDF's
-pictures go where the text cannot stand in for them: to every page without text (a scan, a drawing; up to SCANNED), and
-the rest of the budget to its first pages. poppler's pdftotext and pdftoppm read the PDF, in a scratch directory, with a time limit."""
 import base64
 import hashlib
 import os
@@ -11,20 +7,19 @@ import tempfile
 import threading
 from collections import OrderedDict
 
-PAGES_SEEN = 20            # pages with text also given as pictures: ~800 tokens each at LONG_SIDE (a 10-page PDF ~10K with its text)
-SCANNED = 120              # pages without text given as pictures, wherever they are: ~96K tokens, they have nothing else
-BARE = 32                  # characters under which a page's text layer counts as none (a page number, a running head)
-LONG_SIDE = 1024           # pixels along a page picture's longer side: 9-point text stays legible, and it has the text too
+PAGES_SEEN = 20
+SCANNED = 120
+BARE = 32
+LONG_SIDE = 1024
 MAX_PAGES = 1000
-TIMEOUT = 120              # seconds poppler may take over one PDF
+TIMEOUT = 120
 
 
 class DocumentError(ValueError):
-    """A document Chrysalis cannot read."""
+    pass
 
 
 def file_bytes(data):
-    """(bytes, media type) of a file part's data: a data URL or bare base64 (Chrysalis has no file store to look ids up in)."""
     if not isinstance(data, str) or not data:
         raise DocumentError("files must be sent inline, as file_data (a data: URL or base64)")
     media = None
@@ -38,15 +33,11 @@ def file_bytes(data):
 
 
 class Documents:
-    """Expanded documents by content, so a conversation that sends the same PDF every turn renders it to the same parts
-    (the same picture bytes, so the same image tokens and a prompt-cache hit) without reading it again."""
 
     def __init__(self, keep=16):
         self.keep, self.done, self.lock = keep, OrderedDict(), threading.Lock()
 
     def parts(self, data, media, name, pictures, seen=None):
-        """A file's content parts: text and image_url parts (pictures: the model has a vision tower). seen: a PDF's pages
-        with text also given as pictures (default PAGES_SEEN)."""
         key = (hashlib.blake2b(data, digest_size=16).digest(), name, pictures, seen)
         with self.lock:
             if key in self.done:
@@ -67,9 +58,6 @@ class Documents:
         return out
 
     def expand(self, messages, pictures):
-        """messages with each file part (OpenAI's chat completions: {"type": "file", "file": {"file_data", "filename"}};
-        Chrysalis's "page_pictures": a PDF's pages with text also given as pictures) replaced by its document's
-        parts."""
         out = []
         for m in messages:
             content = m.get("content")
@@ -98,8 +86,6 @@ def page_pictures(f):
 
 
 def picked(texts, pages, seen):
-    """The pages (0-based, sorted) given as pictures: every one without text up to SCANNED, then the first of the others
-    up to `seen`."""
     bare = [i for i in range(pages) if len("".join((texts[i] if i < len(texts) else "").split())) < BARE][:SCANNED]
     rest = [i for i in range(pages) if i not in set(bare)][:seen]
     return sorted(bare + rest)
@@ -121,7 +107,7 @@ def pdf_parts(data, name, pictures, seen=PAGES_SEEN):
         drawn = {}
         if pictures:
             want = picked(texts, pages, seen)
-            runs = []                                    # pdftoppm draws a range of pages per run
+            runs = []
             for i in want:
                 if runs and runs[-1][1] == i - 1:
                     runs[-1][1] = i

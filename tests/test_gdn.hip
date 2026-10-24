@@ -1,8 +1,3 @@
-// The Gated DeltaNet scan (gdn_scan) against a CPU recurrence in double precision, in the two ways the engine runs it:
-// a prefill pass of one layer writing its outputs over v in place, and the commit after a verify pass, which advances
-// several layers' states at once from inputs stored with 8-token strides and writes no outputs. Both engines' scans
-// share this shape; tests/test_gdn_fn.cpp runs the same checks on engine_fn's.
-//   build/test_gdn
 #ifndef CHRYSALIS_GDN_KERNELS
 #include "../engine/kernels.h"
 #endif
@@ -10,8 +5,6 @@
 #include <random>
 #include <vector>
 
-// S [GV][GD][GD] (S[h][j][i], i = key dim) advanced over T tokens; out [T][GV][GD] if given. Inputs per token t at
-// t * stride of their row: q, k [GK][GD], v [GV][GD], ab [2 * GV] (alpha | beta).
 static void scan_ref(std::vector<double> &S, const float *q, const float *k, const float *v, const float *ab, const float *A,
                      const float *dt, int T, int qk_stride, int v_stride, int ab_stride, std::vector<double> *out) {
     for (int h = 0; h < GV; h++) {
@@ -44,7 +37,7 @@ static double rel(const std::vector<float> &got, const std::vector<double> &want
 int main() {
     hipStream_t st; CK(hipStreamCreate(&st));
     std::mt19937 rng(5); std::normal_distribution<float> nd;
-    auto rows_l2 = [](std::vector<float> &x) {   // the scan's q and k come L2-normalized per head
+    auto rows_l2 = [](std::vector<float> &x) {
         for (size_t r = 0; r < x.size() / GD; r++) {
             double ss = 0; for (int i = 0; i < GD; i++) ss += x[r * GD + i] * x[r * GD + i];
             for (int i = 0; i < GD; i++) x[r * GD + i] /= sqrt(ss);
@@ -57,7 +50,7 @@ int main() {
         std::vector<float> h(n); CK(hipMemcpy(h.data(), d, n * 4, hipMemcpyDeviceToHost)); return h;
     };
     int fails = 0;
-    {   // prefill: one layer, T not a multiple of the 16-token stage, outputs over v
+    {
         const int T = 100;
         std::vector<float> q((size_t)T * GK * GD), k(q.size()), v((size_t)T * GV * GD), ab((size_t)T * 2 * GV), A(GV), dt(GV),
             S0((size_t)GV * GD * GD);
@@ -77,7 +70,7 @@ int main() {
         printf("prefill, T=%d, outputs over v: outputs rel %.2e, state rel %.2e %s\n", T, ro, rs, ok ? "ok" : "FAIL");
         fails += !ok;
     }
-    {   // commit: several layers' states from the accepted tokens of a verify pass (inputs at 8-token strides), no outputs
+    {
         const int NLC = 3, T = 5, CAP = 8;
         std::vector<float> k((size_t)NLC * CAP * GK * GD), v((size_t)NLC * CAP * GV * GD), ab((size_t)NLC * CAP * 2 * GV),
             A((size_t)NLC * GV), dt(A.size()), S0((size_t)NLC * GV * GD * GD);

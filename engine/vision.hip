@@ -1,22 +1,3 @@
-// Qwen3.8's vision tower (see vision.h): transformers' Qwen3_5VisionModel, on the GPU.
-//
-// Per picture: patch embedding (Conv3d over two identical frames = one matrix over a patch, the frames' weights summed;
-// a video's frame pair goes through it with each frame's own weights)
-// plus the learned 48 x 48 position table resampled to the picture's grid (bilinear, corners aligned); 27 pre-LayerNorm
-// blocks of 16-head attention over all patches (2D rotary embedding: the first half of each pair's frequencies follows
-// the patch's row, the second its column) and a GELU (tanh) MLP; then the merger: LayerNorm, each 2 x 2 block's four
-// patches side by side (4608 values), a GELU (erf) MLP to the language model's width.
-//
-// Numerics: GEMMs take fp16 inputs and accumulate in fp32 (hipBLASLt), and write fp16: its fastest fp32-output kernels
-// take 1.3-1.7x as long on the tower's shapes (2048 rows, measured). fp16 activations are as good as fp32 for what
-// the language model makes of a picture: its predictions move no more than when the official embeddings are rounded to
-// fp16 (tests/test_vision.py), where an fp32-grade tower (activations split into two fp16 halves, emulated) would take
-// twice the time. The residual stream stays fp32, and it reaches ~7,800 (27B) and ~11,400 (Flash-Next) in a few
-// channels, measured, within 6x of fp16's limit: so the GEMMs that add into it (patch embedding, attention output, fc2)
-// are written scaled by 1/16 (alpha) and scaled back in fp32. That moves fp16's range, not its relative precision,
-// except for values under 1e-3, which go subnormal (1e-6 absolute, nothing next to the stream they join). The merger's
-// output is small (up to 286 for the 27B, 0.6 for Flash-Next, whose values would go subnormal if scaled down) and is
-// written as it is.
 #include "vision.h"
 #include <hip/hip_fp16.h>
 #include <algorithm>
@@ -38,13 +19,12 @@ namespace {
 
 constexpr int C = Vision::C, HEADS = Vision::HEADS, HDIM = Vision::HDIM, FFN = Vision::FFN, PIN = Vision::PATCH_IN;
 constexpr int GRID = Vision::GRID, MERGED = Vision::MERGED, LAYERS = Vision::LAYERS;
-constexpr int ROWS = 2048;                  // patches per chunk of the per-patch steps (a multiple of 64: GEMM rows are padded)
-constexpr size_t WS = 32 << 20;             // hipBLASLt workspace
-constexpr float DOWN = 1.0f / 16, UP = 16;  // the scale of fp16 GEMM outputs bound for fp32 sums (see the top)
+constexpr int ROWS = 2048;
+constexpr size_t WS = 32 << 20;
+constexpr float DOWN = 1.0f / 16, UP = 16;
 constexpr size_t al(size_t n) { return (n + 255) & ~size_t(255); }
 constexpr int pad64(int n) { return (n + 63) / 64 * 64; }
 
-// The mmproj GGUF: only what the tower needs (f32 and bf16 tensors; metadata skipped).
 struct File {
     struct T { int type = -1; int64_t ne[4] = {1, 1, 1, 1}; const uint8_t *data = nullptr; };
     std::map<std::string, T> t;
@@ -110,8 +90,7 @@ struct File {
 };
 constexpr int GF32 = 0, GBF16 = 30;
 
-// Where each tensor sits inside its unit (the same in host memory and in a VRAM slot).
-struct EmbedOff { size_t w, w2, b, pos, end; };   // w: a picture's patch kernel; w2: a frame pair's
+struct EmbedOff { size_t w, w2, b, pos, end; };
 struct BlockOff { size_t qkv_w, proj_w, fc1_w, fc2_w, qkv_b, proj_b, fc1_b, fc2_b, ln1_w, ln1_b, ln2_w, ln2_b, end; };
 struct MergeOff { size_t norm_w, norm_b, fc1_w, fc1_b, end; };
 struct OutOff { size_t fc2_w, fc2_b, end; };
@@ -145,7 +124,7 @@ OutOff out_off(int out_dim) {
 typedef _Float16 vh16 __attribute__((ext_vector_type(16)));
 typedef float vf8 __attribute__((ext_vector_type(8)));
 
-__device__ __forceinline__ float xor16(float v) {          // lane i of the other half-wave
+__device__ __forceinline__ float xor16(float v) {
     return __int_as_float(__builtin_amdgcn_permlanex16(__float_as_int(v), __float_as_int(v), 0x76543210, 0xfedcba98, true, false));
 }
 __device__ __forceinline__ float wsum(float v) {
@@ -153,7 +132,6 @@ __device__ __forceinline__ float wsum(float v) {
     return v;
 }
 
-// A patch's (row, column) from its index in merge-block order (the four of each 2 x 2 block together).
 __device__ __forceinline__ int2 patch_rc(int p, int gw) {
     const int blk = p >> 2, in = p & 3, bw = gw >> 1;
     return {(blk / bw) * 2 + (in >> 1), (blk % bw) * 2 + (in & 1)};
@@ -164,8 +142,6 @@ __global__ void k_to_f16(const float *x, half *y, int64_t n) {
     if (i < n) y[i] = __float2half(x[i]);
 }
 
-// x[r0 + t] = patch embedding + its bias + the position table resampled at the patch (transformers'
-// get_vision_interpolation_indices_and_weights: bilinear, align_corners, src = index * 47 / (side - 1) in fp32).
 __global__ __launch_bounds__(256) void k_embed(const half *y, const float *bias, const float *pos, float *x, int r0, int gh, int gw) {
     const int t = blockIdx.x, p = r0 + t;
     const int2 rc = patch_rc(p, gw);
@@ -179,7 +155,6 @@ __global__ __launch_bounds__(256) void k_embed(const half *y, const float *bias,
         x[(size_t)p * C + c] = __half2float(y[(size_t)t * C + c]) * UP + bias[c] + (k00 * p00[c] + k01 * p01[c] + k10 * p10[c] + k11 * p11[c]);
 }
 
-// LayerNorm (biased variance, as torch) of rows of C fp32 values into fp16; one wave per row.
 __global__ __launch_bounds__(256) void k_ln(const float *x, const float *w, const float *b, half *out, int rows, float eps) {
     const int row = blockIdx.x * 8 + threadIdx.x / 32, lane = threadIdx.x % 32;
     if (row >= rows) return;
@@ -199,13 +174,11 @@ __global__ __launch_bounds__(256) void k_ln(const float *x, const float *w, cons
     }
 }
 
-// qkv rows r0 .. r0 + T, in place: + bias; q and k rotated by the patch's row (pair frequencies 0-17) and column
-// (18-35) with inv_freq = 1 / 10000^(2i / 36), pairs (j, j + 36) as rotate_half; q scaled by 1/sqrt(72).
 __global__ __launch_bounds__(256) void k_qkv(half *qkv, const float *bias, int r0, int gw) {
     const int p = r0 + blockIdx.x;
     const int2 rc = patch_rc(p, gw);
     half *row = qkv + (size_t)p * 3 * C;
-    for (int i = threadIdx.x; i < 2 * HEADS * 36; i += 256) {          // a q or k pair
+    for (int i = threadIdx.x; i < 2 * HEADS * 36; i += 256) {
         const int part = i / (HEADS * 36), hj = i % (HEADS * 36), h = hj / 36, j = hj % 36;
         const int d0 = part * C + h * HDIM + j, d1 = d0 + 36;
         const int f = j % 18;
@@ -213,21 +186,19 @@ __global__ __launch_bounds__(256) void k_qkv(half *qkv, const float *bias, int r
         float s, c;
         sincosf((float)(j < 18 ? rc.x : rc.y) * inv, &s, &c);
         const float a = __half2float(row[d0]) + bias[d0], b = __half2float(row[d1]) + bias[d1];
-        const float scale = part == 0 ? 0.11785113019775792f : 1.0f;    // 72^-0.5
+        const float scale = part == 0 ? 0.11785113019775792f : 1.0f;
         row[d0] = __float2half((a * c - b * s) * scale);
         row[d1] = __float2half((b * c + a * s) * scale);
     }
     for (int i = threadIdx.x; i < C; i += 256) row[2 * C + i] = __float2half(__half2float(row[2 * C + i]) + bias[2 * C + i]);
 }
 
-// x[r0 + t] += y[t] (scaled by DOWN) + bias: the residual adds
 __global__ void k_add(float *x, const half *y, const float *bias, int r0, int T) {
     const int64_t i = blockIdx.x * (int64_t)blockDim.x + threadIdx.x;
     if (i >= (int64_t)T * C) return;
     x[(size_t)r0 * C + i] += __half2float(y[i]) * UP + bias[i % C];
 }
 
-// t = GELU(t + bias), in place; erf: the exact GELU (the merger), else the tanh approximation (the blocks' MLPs)
 __global__ void k_gelu(half *t, const float *bias, int64_t n, int cols, int erf_) {
     const int64_t i = blockIdx.x * (int64_t)blockDim.x + threadIdx.x;
     if (i >= n) return;
@@ -237,16 +208,11 @@ __global__ void k_gelu(half *t, const float *bias, int64_t n, int cols, int erf_
     t[i] = __float2half(g);
 }
 
-// out[m0 + t] = y[t] + bias, fp16 into host memory
 __global__ void k_out(const half *y, const float *bias, half *out, int64_t n, int cols, int64_t base) {
     const int64_t i = blockIdx.x * (int64_t)blockDim.x + threadIdx.x;
     if (i < n) out[base + i] = __float2half(__half2float(y[i]) + bias[i % cols]);
 }
 
-// Attention over all n patches, every head (non-causal), WMMA flash attention: AW waves of 16 query rows share 32-key
-// stages of K and V^T in LDS; the head dim is 72, zero-padded to 80 (5 WMMA steps). Q was scaled in k_qkv. The output
-// overwrites the q columns: only the wave that owns a row reads its q, and it holds them in registers from the start.
-// Fragment layouts as in attn.hip: S^T = K Q^T and O^T = V^T P^T keep each lane on one query row.
 constexpr int VD = 80, KST = 32, KLD = VD + 8, VLD = KST + 8;
 template <int AW>
 __global__ __launch_bounds__(AW * 32) void k_attn(half *qkv, int n) {
@@ -258,7 +224,7 @@ __global__ __launch_bounds__(AW * 32) void k_attn(half *qkv, int n) {
     const size_t ld = 3 * C;
     for (int i = tid; i < KST * (VD - HDIM); i += AW * 32) Ks[i / (VD - HDIM)][HDIM + i % (VD - HDIM)] = 0;
     for (int i = tid; i < (VD - HDIM) * KST; i += AW * 32) Vt[HDIM + i / KST][i % KST] = 0;
-    vh16 q[5];                                                         // a row of q is 16-byte aligned, not 32
+    vh16 q[5];
     const half *qp = qkv + (size_t)(valid ? myrow : 0) * ld + head * HDIM;
 #pragma unroll
     for (int d = 0; d < 9; d++) {
@@ -275,7 +241,7 @@ __global__ __launch_bounds__(AW * 32) void k_attn(half *qkv, int n) {
     for (int d = 0; d < 5; d++) acc[d] = vf8{};
     for (int k0 = 0; k0 < n; k0 += KST) {
         __syncthreads();
-        for (int j = tid; j < KST * 9; j += AW * 32) {                // 9 pieces of 8 dims per key
+        for (int j = tid; j < KST * 9; j += AW * 32) {
             const int key = j / 9, piece = j % 9, gk = k0 + key;
             uint4 kv = {0, 0, 0, 0}, vv = {0, 0, 0, 0};
             if (gk < n) {
@@ -289,7 +255,7 @@ __global__ __launch_bounds__(AW * 32) void k_attn(half *qkv, int n) {
             for (int e = 0; e < 8; e++) Vt[piece * 8 + e][key] = ve[e];
         }
         __syncthreads();
-        vf8 s0 = {}, s1 = {};                                          // S^T[key 2i+hi (+16)][row r16]
+        vf8 s0 = {}, s1 = {};
 #pragma unroll
         for (int d = 0; d < 5; d++) {
             s0 = __builtin_amdgcn_wmma_f32_16x16x16_f16_w32(*(const vh16 *)&Ks[r16][d * 16], q[d], s0);
@@ -319,7 +285,7 @@ __global__ __launch_bounds__(AW * 32) void k_attn(half *qkv, int n) {
             rs += p0[i] + p1[i];
         }
         l += rs + xor16(rs);
-        vh16 P0, P1;                                                   // P^T[key][row r16], keys 0-15 and 16-31
+        vh16 P0, P1;
 #pragma unroll
         for (int i = 0; i < 8; i++) {
             const float o0 = xor16(p0[i]), o1 = xor16(p1[i]);
@@ -332,7 +298,7 @@ __global__ __launch_bounds__(AW * 32) void k_attn(half *qkv, int n) {
             acc[d] = __builtin_amdgcn_wmma_f32_16x16x16_f16_w32(*(const vh16 *)&Vt[d * 16 + r16][16], P1, acc[d]);
         }
     }
-    if (!valid) return;                                                // acc[d][i] = O^T[dim 16d+2i+hi][row r16]
+    if (!valid) return;
     const float inv = 1.0f / l;
     half *op = qkv + (size_t)myrow * ld + head * HDIM;
 #pragma unroll
@@ -347,7 +313,7 @@ __global__ __launch_bounds__(AW * 32) void k_attn(half *qkv, int n) {
 uint16_t f16_bits(float f) { const half h = __float2half(f); uint16_t u; memcpy(&u, &h, 2); return u; }
 float bf16_value(uint16_t b) { const uint32_t u = (uint32_t)b << 16; float f; memcpy(&f, &u, 4); return f; }
 
-}  // namespace
+}
 
 void Vision::open(const std::string &p, int out) {
     path = p;
@@ -372,7 +338,6 @@ void Vision::load() {
     if (!f.open(path.c_str())) VFAIL("cannot open %s", path.c_str());
     const size_t total = units.back().off + units.back().bytes;
     VCK(hipHostMalloc(&host, total));
-    // add: a second tensor summed into the first; pair: the two interleaved by colour instead (a frame pair's kernel)
     struct Job { const File::T *t; size_t dst; bool to_f16; int64_t n; const File::T *add = nullptr; bool pair = false; };
     std::vector<Job> jobs;
     auto put = [&](const char *name, int type, std::initializer_list<int64_t> ne, size_t dst) {
@@ -385,7 +350,7 @@ void Vision::load() {
         const EmbedOff o = embed_off();
         const size_t u = units[0].off;
         const File::T &w0 = f.get("v.patch_embd.weight", GF32, {16, 16, 3, C}), &w1 = f.get("v.patch_embd.weight.1", GF32, {16, 16, 3, C});
-        jobs.push_back({&w0, u + o.w, true, (int64_t)C * PIN, &w1});      // the two frames' kernels, summed
+        jobs.push_back({&w0, u + o.w, true, (int64_t)C * PIN, &w1});
         jobs.push_back({&w0, u + o.w2, true, (int64_t)C * PIN, &w1, true});
         put("v.patch_embd.bias", GF32, {C}, u + o.b);
         put("v.position_embd.weight", GF32, {C, GRID * GRID}, u + o.pos);
@@ -430,7 +395,7 @@ void Vision::load() {
             if (jb.t->type == GBF16) {
                 const uint16_t *s = (const uint16_t *)jb.t->data;
                 for (int64_t i = 0; i < jb.n; i++) o[i] = f16_bits(bf16_value(s[i]));
-            } else if (jb.pair) {                    // [C][3][16 * 16] each -> [C][3][2][16 * 16]
+            } else if (jb.pair) {
                 const float *a = (const float *)jb.t->data, *b = (const float *)jb.add->data;
                 for (int64_t i = 0; i < jb.n; i++) {
                     const int64_t c3 = i / 256, px = i % 256;
@@ -464,7 +429,6 @@ size_t Vision::scratch_need(int n) const {
          + al((size_t)std::max(ROWS * C, ROWS / 4 * out_dim) * 2) + al((size_t)ROWS * 2 * PIN * 4);
 }
 
-// y[T][N] = alpha x[T][K] W[N][K]^T: fp16 inputs and output, fp32 accumulation (column-major view: C = A^T B).
 void Vision::gemm(const half *W, int N, int K, const half *x, int ldx, int T, half *y, int ldy, float alpha, void *ws, hipStream_t st) {
     const auto key = std::make_tuple(N, K, T, ldx, ldy);
     auto it = plans.find(key);
@@ -488,12 +452,11 @@ bool Vision::encode(const float *patches, int gh, int gw, half *out, uint8_t *sc
     uint8_t *slot[2] = {take(slot_bytes), take(slot_bytes)};
     float *x = (float *)take((size_t)np * C * 4);
     half *qkv = (half *)take((size_t)np * 3 * C * 2);
-    half *h16 = (half *)take((size_t)ROWS * 2 * PIN * 2);                 // a chunk's activations, or its patches as fp16
+    half *h16 = (half *)take((size_t)ROWS * 2 * PIN * 2);
     half *t16 = (half *)take((size_t)ROWS * FFN * 2);
     half *y16 = (half *)take((size_t)std::max(ROWS * C, ROWS / 4 * out_dim) * 2);
     float *p32 = (float *)take((size_t)ROWS * 2 * PIN * 4);
 
-    // Units go through the two VRAM slots in turn; a unit's copy waits until the unit two before it is done with the slot.
     const int nunits = (int)units.size();
     auto fetch = [&](int u) {
         if (u >= nunits) return;
@@ -508,7 +471,7 @@ bool Vision::encode(const float *patches, int gh, int gw, half *out, uint8_t *sc
     auto chunks = [&](auto fn) { for (int r0 = 0; r0 < n; r0 += ROWS) fn(r0, std::min(ROWS, n - r0)); };
     auto blocks = [](int64_t total) { return (unsigned)((total + 255) / 256); };
 
-    {   // patch embedding and positions
+    {
         VCK(hipStreamWaitEvent(st, copied[0], 0));
         const EmbedOff o = embed_off();
         const int pin = PIN * frames;
@@ -546,7 +509,7 @@ bool Vision::encode(const float *patches, int gh, int gw, half *out, uint8_t *sc
         VCK(hipEventRecord(used[u % 2], st));
         fetch(u + 2);
     }
-    {   // the merger: LayerNorm, a 2 x 2 block's four patches side by side, GELU MLP
+    {
         const int u1 = 1 + LAYERS, u2 = 2 + LAYERS;
         const MergeOff m = merge_off();
         const OutOff q = out_off(out_dim);

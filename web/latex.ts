@@ -1,16 +1,7 @@
-// A LaTeX document as a page shows it: the parts models write (title, sections, lists, math, tables, figures,
-// theorems, footnotes, citations, cross-references) as HTML, and the rest's text. Not latex.js: it stops at the first
-// environment or command it lacks (equation among them, in 0.12.6), and a reply's document should always show.
-// Math goes to KaTeX, which numbers nothing itself here: each numbered equation gets its number as a \tag, so \ref and
-// \eqref find it. Everything else is escaped text and tags made here, so the result can sit in the chat as it is.
-//
-// Each block (a paragraph, heading, equation, list item, table...) carries its place in the source (data-at, data-end),
-// for pointing at it and retyping it there.
 import katex from "katex";
 
 export interface TexOptions { today?: string }
 
-// Math as KaTeX drew it: a document being written is drawn again with each line, its math the same
 const MATH = new Map<string, string>();
 const esc = (s: string) => s.replace(/[&<>"']/g, (c) => `&#${c.charCodeAt(0)};`);
 const ACCENTS: Record<string, string> = { "'": "\u0301", "`": "\u0300", "^": "\u0302", '"': "\u0308", "~": "\u0303", "=": "\u0304", ".": "\u0307",
@@ -25,13 +16,11 @@ const STYLE: Record<string, [string, string]> = { textbf: ["strong", ""], textit
   texttt: ["code", ""], textsc: ["span", "sc"], textsf: ["span", "sf"], textrm: ["span", ""], textup: ["span", ""], textnormal: ["span", ""],
   textmd: ["span", ""], mbox: ["span", ""], text: ["span", ""], hbox: ["span", ""], uline: ["u", ""], sout: ["s", ""], st: ["s", ""],
   textsuperscript: ["sup", ""], textsubscript: ["sub", ""], tiny: ["span", "tiny"], small: ["span", "small"], large: ["span", "large"] };
-// Switches that style the rest of their group: {\bf bold}
 const SWITCH: Record<string, [string, string]> = { bf: ["strong", ""], bfseries: ["strong", ""], it: ["em", ""], itshape: ["em", ""], em: ["em", ""],
   sl: ["em", ""], slshape: ["em", ""], tt: ["code", ""], ttfamily: ["code", ""], sc: ["span", "sc"], scshape: ["span", "sc"], sffamily: ["span", "sf"],
   rmfamily: ["span", ""], normalfont: ["span", ""], tiny: ["span", "tiny"], scriptsize: ["span", "tiny"], footnotesize: ["span", "small"],
   small: ["span", "small"], normalsize: ["span", ""], large: ["span", "large"], Large: ["span", "larger"], LARGE: ["span", "larger"],
   huge: ["span", "huge"], Huge: ["span", "huge"] };
-// Commands with nothing to show (layout, spacing, the preamble's)
 const QUIET = new Set(["centering", "raggedright", "raggedleft", "noindent", "indent", "newpage", "clearpage", "cleardoublepage", "pagebreak", "linebreak",
   "nopagebreak", "smallskip", "medskip", "bigskip", "vfill", "hfill", "par", "protect", "relax", "maketitle", "tableofcontents", "listoffigures",
   "listoftables", "appendix", "frontmatter", "mainmatter", "backmatter", "onecolumn", "twocolumn", "sloppy", "fussy", "nocite", "pagestyle",
@@ -40,7 +29,6 @@ const QUIET = new Set(["centering", "raggedright", "raggedleft", "noindent", "in
   "DeclareMathOperator", "theoremstyle", "title", "author", "date", "thanks", "and", "selectfont", "fontsize", "lstset", "definecolor",
   "captionsetup", "allowdisplaybreaks", "numberwithin", "makeatletter", "makeatother", "hline", "toprule", "midrule", "bottomrule", "cline",
   "cmidrule", "addlinespace", "rowcolor", "arraystretch", "renewenvironment", "newenvironment", "newgeometry", "restoregeometry", "include", "input"]);
-// How many arguments a quiet command takes (its {...} groups, which show nothing either)
 const QUIET_ARGS: Record<string, number> = { vspace: 1, hspace: 1, label: 1, bibliographystyle: 1, usepackage: 1, documentclass: 1, geometry: 1,
   hypersetup: 1, graphicspath: 1, newtheorem: 2, newcommand: 2, renewcommand: 2, providecommand: 2, DeclareMathOperator: 2, theoremstyle: 1,
   title: 1, author: 1, date: 1, thanks: 1, pagestyle: 1, thispagestyle: 1, pagenumbering: 1, setlength: 2, addtolength: 2, setcounter: 2,
@@ -55,7 +43,6 @@ const SECTIONS = ["part", "chapter", "section", "subsection", "subsubsection", "
 const BLOCKS = new Set([...SECTIONS, "[", "begin", "maketitle", "tableofcontents", "appendix", "bibliography", "printbibliography"]);
 const VERBATIM = new Set(["verbatim", "Verbatim", "lstlisting", "minted", "verbatim*", "alltt", "comment"]);
 
-// The end of the group opened at i ({ or [), past escaped braces and nested groups; -1 if it never closes
 function groupEnd(s: string, i: number): number {
   const open = s[i], close = open === "{" ? "}" : "]";
   let depth = 0;
@@ -72,7 +59,6 @@ function groupEnd(s: string, i: number): number {
   return -1;
 }
 const skipSpace = (s: string, i: number) => { while (i < s.length && /[ \t\r\n]/.test(s[i]) && !(s[i] === "\n" && /^\n[ \t]*\n/.test(s.slice(i)))) i++; return i; };
-// The arguments after a command at i: optional ones ([...]) and n groups ({...}); a group may be a single token (\frac12)
 function args(s: string, i: number, n: number, opt = true): { opts: string[]; groups: string[]; end: number } {
   const opts: string[] = [], groups: string[] = [];
   let k = i;
@@ -98,7 +84,6 @@ function args(s: string, i: number, n: number, opt = true): { opts: string[]; gr
   }
   return { opts, groups, end: k };
 }
-// The matching \end{env} for the \begin{env} whose content starts at i: [content end, end past \end{env}]
 function envEnd(s: string, i: number, env: string): [number, number] {
   const re = new RegExp(`\\\\(begin|end)\\s*\\{${env.replace(/[*]/g, "\\*")}\\}`, "g");
   re.lastIndex = i;
@@ -109,8 +94,6 @@ function envEnd(s: string, i: number, env: string): [number, number] {
   }
   return [s.length, s.length];
 }
-// Splits at a separator (\\ for rows, & for cells, \item for items) where it stands at the top level, not in a group or
-// an environment inside
 function splitTop(s: string, sep: "\\\\" | "&" | "\\item"): { text: string; at: number }[] {
   const out: { text: string; at: number }[] = [];
   let depth = 0, env = 0, from = 0;
@@ -144,7 +127,7 @@ class Doc {
   cites = new Map<string, number>();
   notes: string[] = [];
   toc: { level: number; num: string; html: string; id: string }[] = [];
-  lastNum = "";                                         // what a \label refers to: the last number given out
+  lastNum = "";
   equation = 0;
   constructor(public src: string, public opts: TexOptions) {}
 
@@ -164,7 +147,6 @@ class Doc {
     return html;
   }
 
-  // A numbered display: its labels taken out (each row's number is what its label refers to), its rows tagged
   displayMath(env: string, body: string): string {
     const star = env.endsWith("*") || env === "displaymath" || env === "math";
     let name = env.replace(/\*$/, "");
@@ -194,7 +176,6 @@ class Doc {
     return this.math(many ? `\\begin{${name}*}${tagged.join("\\\\")}\\end{${name}*}` : `\\begin{equation*}${tagged[0]}\\end{equation*}`, true);
   }
 
-  // Text with its inline commands, groups and math; at: where it starts in the source
   inline(s: string, depth = 0): string {
     let out = "", k = 0;
     const text = (t: string) => esc(t.replace(/---/g, "—").replace(/--/g, "–").replace(/``/g, "“").replace(/''/g, "”").replace(/`/g, "‘")
@@ -256,7 +237,7 @@ class Doc {
     if (base === "LaTeX") return { html: 'L<span class="tex-a">a</span>T<span class="tex-e">e</span>X', end: at };
     if (base === "TeX") return { html: 'T<span class="tex-e">e</span>X', end: at };
     if (name in STYLE) { const r = a(1, false); return { html: wrap(STYLE[name], this.inline(r.groups[0] ?? "", depth + 1)), end: r.end }; }
-    if (name in SWITCH) return { html: "", end: at };     // a switch outside a group: its text stays plain
+    if (name in SWITCH) return { html: "", end: at };
     if (base === "textcolor" || base === "color" && s[skipSpace(s, at)] === "{") {
       const r = a(base === "color" ? 1 : 2), color = cssColor(r.groups[0] ?? "");
       return base === "color" ? { html: "", end: r.end } : { html: color ? `<span style="color:${color}">${this.inline(r.groups[1] ?? "", depth + 1)}</span>` : this.inline(r.groups[1] ?? "", depth + 1), end: r.end };
@@ -301,12 +282,10 @@ class Doc {
       return { html: this.inline(mine.replace(/#(\d)/g, (_x, d) => r.groups[Number(d) - 1] ?? ""), depth + 1), end: r.end };
     }
     if (QUIET.has(base)) return { html: "", end: a(QUIET_ARGS[base] ?? 0).end };
-    // anything else: its last argument's text, so what it was about still shows
     const r = a(1);
     return { html: r.groups.length ? this.inline(r.groups[0], depth + 1) : "", end: r.end };
   }
 
-  // The body's blocks, from offset at in the source
   blocks(s: string, at: number): string {
     let out = "", k = 0, para = -1;
     const flush = (end: number) => {
@@ -320,7 +299,6 @@ class Doc {
       if (s[k] === "\n" && /^\n[ \t]*\n/.test(s.slice(k))) { flush(k); k = s.slice(k).match(/^\n[ \t]*\n\s*/)![0].length + k; continue; }
       if (s[k] === "\\") {
         const m = s.slice(k).match(/^\\([A-Za-z]+\*?|\[)/), name = m?.[1] ?? "";
-        // the paragraph before a block is read first: a \label in it refers to what came before (a heading)
         if (BLOCKS.has(name.replace(/\*$/, ""))) flush(k);
         const block = BLOCKS.has(name.replace(/\*$/, "")) ? this.block(s, k, name, at) : null;
         if (block) { out += block.html; k = block.end; continue; }
@@ -343,7 +321,6 @@ class Doc {
     return out;
   }
 
-  // A block at k: a heading, an environment, a display; null if what is there is inline
   block(s: string, k: number, name: string, at: number): { html: string; end: number } | null {
     const base = name.replace(/\*$/, ""), pos = (a: number, b: number) => `data-at="${at + a}" data-end="${at + b}"`;
     if (name === "[") {
@@ -494,7 +471,6 @@ function cssColor(c: string): string {
   return hex ? `#${hex[1]}` : "";
 }
 
-// The document's definitions: the title, author and date, the theorems it names, and its macros (for math and text)
 function preamble(doc: Doc, pre: string) {
   const one = (cmd: string) => { const i = pre.search(new RegExp(`\\\\${cmd}\\s*[\\[{]`)); return i < 0 ? null : args(pre, i + cmd.length + 1, 1).groups[0] ?? ""; };
   doc.title = one("title") ?? "";
@@ -512,7 +488,6 @@ function preamble(doc: Doc, pre: string) {
 export function latexToHtml(src: string, opts: TexOptions = {}): string {
   const doc = new Doc(src, opts), begin = src.search(/\\begin\s*\{document\}/);
   preamble(doc, src);
-  // references are numbered as the bibliography lists them, then as cited
   for (const m of src.matchAll(/\\bibitem\s*(?:\[[^\]]*\])?\s*\{([^}]*)\}/g)) if (!doc.cites.has(m[1].trim())) doc.cites.set(m[1].trim(), doc.cites.size + 1);
   let html: string;
   if (begin >= 0) {
@@ -525,7 +500,6 @@ export function latexToHtml(src: string, opts: TexOptions = {}): string {
     kind === "toc" ? toc : kind === "ref" ? esc(doc.labels.get(key) || "??") : String(doc.cites.get(key) ?? "?"))}</article>`;
 }
 
-// The CSS a LaTeX document is drawn with (inside its shadow root): a paper's look, as LaTeX's article class sets it
 export const LATEX_CSS = `:host { display: block; }
 .tex { max-width: 44em; margin: 0 auto; padding: 28px 34px; color: #1d1b1a; background: #fffefb; font: 16px/1.55 "Latin Modern Roman", "CMU Serif", "Computer Modern", Georgia, "Times New Roman", serif; text-align: justify; hyphens: auto; }
 .tex h1 { margin: 0.2em 0 0.4em; font-size: 1.7em; font-weight: normal; text-align: center; line-height: 1.25; }

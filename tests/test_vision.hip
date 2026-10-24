@@ -1,5 +1,3 @@
-// The vision tower alone (engine/vision.hip), for tests/test_vision.py: one picture's patches in, its embeddings out.
-//   test_vision mmproj.gguf out_dim gh gw patches.f32 out.f32    (patches [gh*gw][768], out [gh*gw/4][out_dim])
 #include "../engine/vision.h"
 #include <chrono>
 #include <cstdio>
@@ -21,7 +19,7 @@ int main(int argc, char **argv) {
     hipStream_t st;
     if (hipStreamCreate(&st) != hipSuccess) return 1;
     double best = 1e9;
-    for (int rep = 0; rep < 3; rep++) {                  // the first run loads the weights
+    for (int rep = 0; rep < 3; rep++) {
         const auto t0 = std::chrono::steady_clock::now();
         if (!v.encode(patches.data(), gh, gw, out, scratch, need, st)) return 1;
         const double s = std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count();

@@ -3,5 +3,4 @@ build/
 __pycache__/
 *.pyc
 web/node_modules/
-build_fn/
 /dist

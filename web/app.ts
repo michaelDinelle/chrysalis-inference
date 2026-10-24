@@ -1,8 +1,4 @@
-// Chrysalis web UI: chat with Chrysalis's local models (Qwen3.8-27B, Qwen3.8-Flash-Next). Replies stream in with their reasoning and
-// tool calls and are rendered as markdown with highlighted code; conversations (every version of them) live in this tab's
-// sessionStorage (a reload keeps them, closing the tab ends them). The settings (system prompt, sampling, reply length,
-// seed, tools that run without asking), kept the same way, apply to every conversation.
-import { type Theme, choose, chosen } from "./theme";              // first: the page's look before anything is drawn
+import { type Theme, choose, chosen } from "./theme";
 import DOMPurify from "dompurify";
 import hljs from "highlight.js/lib/common";
 import katex from "katex";
@@ -24,117 +20,85 @@ import { type CardData, type Group, type Person, type Voice, cardPng, castPrompt
 import { Ocean } from "./ocean";
 
 type Effort = "xhigh" | "medium" | "low" | "off";
-// prompt and cached: summed over a reply's rounds (cached: where the backend says, which LM Studio does not); ctx: the
-// context its last round left (prompt + reply)
 interface Stats { ttft: number; tps: number; tokens: number; prompt: number; cached?: number; thought?: number; seed?: number; model?: string; ctx?: number }
-// A tool call as Chrysalis wrote it (WireCall: its id and argument string, kept byte for byte), and what became of it.
 type CallState = "approval" | "running" | "done" | "failed" | "declined" | "stopped";
 interface Call extends WireCall { title?: string; source?: string; readOnly?: boolean; state?: CallState; result?: string; ms?: number; agent?: AgentRun }
-// A sub-agent's work (a call to the Sub-agents tool: server.ts, subagent()), kept with its call: its finished rounds as a
-// reply's are kept, the round it is in, whether Chrysalis has read its prompt yet, and the tokens it has written.
 interface AgentRun { content: string; reasoning: string; calls?: Call[]; rounds?: Round[]; notes?: string[]; read?: boolean; tokens?: number; error?: string }
-// A reply with tools is rounds: each but the last ended in tool calls, whose results the next one read.
 interface Round { content: string; reasoning?: string; calls: Call[] }
-// A conversation is a tree, kept as the path on screen: the first message of a stretch that has other versions holds
-// them, each with the rest of the conversation that followed it (and their own versions further down).
 interface Versions { shown: number; others: Message[][] }
 interface Message {
   id?: string; role: "user" | "assistant"; content: string; reasoning?: string; stats?: Stats; error?: string; stopped?: boolean; job?: string;
-  params?: string;                                  // the sampling values that differed from the recommended ones
-  effort?: Effort;                                  // the thinking setting it was written with (Continue keeps it)
-  as?: string;                                      // a group's reply asked of one of them (their id), as Regenerate asks again
+  params?: string;
+  effort?: Effort;
+  as?: string;
   finish?: string; edited?: boolean;
-  files?: Attachment[];                             // a user message's attached files (their contents: files.ts)
-  rounds?: Round[];                                 // a reply's earlier rounds; content, reasoning and calls are its last
+  files?: Attachment[];
+  rounds?: Round[];
   calls?: Call[];
-  base?: number;                                    // rounds it had before its job began (a reload replays the job's)
-  starting?: boolean;                               // asked for, its job not begun yet (a reload finds it never began)
-  notes?: string[];                                 // what the web server said about the reply (a tool left out, a limit)
+  base?: number;
+  starting?: boolean;
+  notes?: string[];
   versions?: Versions;
-  voice?: boolean;                                  // a question said in voice mode
-  voiceMs?: number;                                 // a spoken reply: from the end of the user's speech to its first sound
-  interrupted?: boolean;                            // talked over: it keeps only what was heard
-  note?: string;                                    // the app's words to the model before a question (voice mode on, off): sent, not shown
-  heard?: Fix[];                                    // a question said aloud: the misheard words fixed in it (what was heard, on hover)
-  point?: string; pointAt?: string;                 // what the user pointed at in an artifact: told the model, and its name shown
-  fix?: boolean;                                    // the app's own question: an edit that did not apply in full, asked again
-  edits?: { id: string; kind: string; src: string }[];   // artifacts the user changed by hand before it, as they left them
+  voice?: boolean;
+  voiceMs?: number;
+  interrupted?: boolean;
+  note?: string;
+  heard?: Fix[];
+  point?: string; pointAt?: string;
+  fix?: boolean;
+  edits?: { id: string; kind: string; src: string }[];
 }
 interface Conversation { id: string; title: string; named?: boolean; updated: number; effort: Effort; messages: Message[]; tools?: ToolChoice["tools"];
-  pending?: Record<string, { kind: string; srcs: string[] }>;   // artifacts changed by hand, not sent yet: each one's source after each change
-  who?: string }                                    // the character or group it is with (the cast)
+  pending?: Record<string, { kind: string; srcs: string[] }>;
+  who?: string }
 type Sampler = Partial<Record<SamplerKey, number>> & { order?: Stage[] };
-type Mode = "think" | "fast";                       // thinking on (Max, Medium, Low) or off: Qwen recommends other values
-// Only what differs from the recommended values is kept, so whatever is left alone follows them. allow: tools that run
-// without asking (by function name); fetchChars: how much of a page Fetch URL gives the model at a time.
+type Mode = "think" | "fast";
 interface Settings {
-  v?: 4;                                            // the settings' shape (loadSettings brings older ones to it)
+  v?: 4;
   system: string; think: Sampler; fast: Sampler; max_tokens?: number; seed?: number; allow?: string[]; fetchChars?: number; voice?: VoiceSettings;
-  artifacts?: false;                                // the artifact instructions (artifacts.ts) left out of the system prompt
+  artifacts?: false;
 }
-// Voice mode's, every one of them (Settings and the dock's voice picker both show these): the voice model (a name from
-// the service's catalog), the voice (an id of that voice model's), its speed, and what its replies are told instead of
-// the system prompt. Left unset: what the service runs when it is not told. They think as the chat's bar says.
 interface VoiceSettings { tts?: string; name?: string; speed?: number; prompt?: string }
-// The tool sources server.ts offers (tools.ts catalog()).
 interface ToolInfo { fn: string; name: string; title: string; description: string; readOnly: boolean }
 interface SourceInfo { id: string; label: string; kind: "fetch" | "agent" | "mcp"; detail: string; state: "idle" | "connecting" | "connected" | "failed" | "disabled"; error?: string; tools: ToolInfo[] }
 interface Catalog { config: string; error?: string; sources: SourceInfo[] }
 interface Status { state: "online" | "loading" | "offline"; build?: string; model?: string; loading?: string; progress?: number; context?: number; kv_tokens?: number; cache?: { free_kv_tokens: number };
-  check?: boolean; here?: boolean; waiting?: number;   // (on the network: check the device's trust again; this computer: devices asking to join)
+  check?: boolean; here?: boolean; waiting?: number;
   backend?: Backend; link?: Linking }
-// A computer without the engine (server.ts, link.ts): the Chrysalis computers found on the network, the pairing under way
-// with the code both screens show, and the one linked; refused: what to do where the system keeps Chrysalis off the
-// network (macOS, until the user allows it)
 interface Linking { linked?: { name: string }; found: { name: string; fp: string }[]; refused?: string;
   pairing?: { name: string; code: string; state: "waiting" | "allowed" | "gone" | "error"; error?: string } }
-// Where replies come from (server.ts, backend.ts): its address, whether it is Chrysalis (it says so of itself) and
-// whether it is this machine's Chrysalis service (whose models the page loads, and which it starts), its models or why
-// it does not answer. key: whether it has one (no page is sent the key itself); remote: off this machine's networks;
-// service: this machine's Chrysalis service's address, the backend until another is set.
 interface Backend { url: string; chrysalis: boolean; service: boolean; key: boolean; remote: boolean; name: string;
   listed?: { ok: true; models: { id: string }[] } | { ok: false; error: string } }
 interface View {
   el: HTMLElement; think: HTMLDetailsElement; summary: HTMLElement; thought: HTMLElement; body: HTMLElement; foot: HTMLElement; shown?: string; blocks?: Blocks;
-  tok?: { reasoning: number; content: number };     // tokens drawn so far, shown as tokens
-  rounds: HTMLElement; calls: HTMLElement; notes: HTMLElement; roundsShown?: number;   // a reply's earlier rounds, its last round's calls
+  tok?: { reasoning: number; content: number };
+  rounds: HTMLElement; calls: HTMLElement; notes: HTMLElement; roundsShown?: number;
 }
-// A token of a reply, with the model's probability for it and its likeliest alternatives (log probs from Chrysalis).
 interface Alt { t: string; p: number; id: number }
 interface Tok { t: string; p: number; alts: Alt[] }
 interface Live { phase: "waiting" | "thinking" | "writing"; since: number; note: string; loading?: boolean }
-// A reply being written. The web server owns it (a job, m.job its id): the page only follows it, so opening another
-// chat, reloading, sleeping or a dropped connection leaves it running, and the page picks it up again from the last
-// event it saw. Only Stop (or deleting the chat) ends it early.
 interface Run {
   conv: Conversation; m: Message; live: Live;
-  at: number;                                       // events of the job seen so far
-  stopping: boolean; gone?: boolean;                // Stop pressed; the chat was deleted
-  usage?: { prompt_tokens: number; completion_tokens: number; cached?: number }; last?: any;   // summed over rounds; the last round's
-  read?: number; written?: number;                  // the round's prompt, once Chrysalis has read it, and its tokens since
+  at: number;
+  stopping: boolean; gone?: boolean;
+  usage?: { prompt_tokens: number; completion_tokens: number; cached?: number }; last?: any;
+  read?: number; written?: number;
   seed?: number; timing?: { start: number; first?: number; answer?: number; last?: number; gen?: number };
-  pick?: Tok;                                       // the alternative a rewrite starts from
+  pick?: Tok;
   frame: number; saved: number;
 }
 
-// Chrysalis keeps one model on the GPU. The picker by Load / Unload chooses it (switching takes 5-20 s); every chat
-// then talks to the model that is loaded.
 const MODELS: [string, string, string][] = [
   ["qwen3.8-27b", "Qwen3.8-27B", "Quickest replies · 4 s to load"],
   ["qwen3.8-flash-next", "Qwen3.8-Flash-Next", "Fast at any length · 20 s to load"],
 ];
-// another backend's model by its id's last part (llama.cpp's is the file's path)
 const modelName = (id?: string) => MODELS.find(([m]) => m === id)?.[1] ?? id?.split("/").pop()?.replace(/\.gguf$/i, "") ?? "";
-// What Chrysalis uses for a value it is not sent, with thinking on and off (DEFAULTS and MAX_OUTPUT in
-// chrysalis/server.py: Qwen's recommended values). Without a seed Chrysalis draws a random one and reports it with the
-// reply.
 const RECOMMENDED: Record<Mode, Record<SamplerKey, number>> = {
   think: { temperature: 1, top_p: 0.95, top_k: 20, min_p: 0, presence_penalty: 0, dry_multiplier: 0, dry_allowed_length: 2, dry_base: 1.75 },
   fast: { temperature: 0.7, top_p: 0.8, top_k: 20, min_p: 0, presence_penalty: 1.5, dry_multiplier: 0, dry_allowed_length: 2, dry_base: 1.75 },
 };
 const MAX_REPLY = 131072;
-const STAGES: Stage[] = ["top_k", "temperature", "top_p", "min_p"];   // Chrysalis's default order (engine/sampler.h)
-// `slider` narrows the slider to the useful part of the range; typing still reaches all of it.
+const STAGES: Stage[] = ["top_k", "temperature", "top_p", "min_p"];
 const SAMPLERS: Record<SamplerKey, { label: string; short: string; min: number; max: number; step: number; slider?: [number, number]; help: string }> = {
   temperature: { label: "Temperature", short: "temp", min: 0, max: 2, step: 0.01, help: "Temperature: under 1 sharpens the odds, over 1 flattens them; 0 always takes the likeliest." },
   top_p: { label: "Top P", short: "top-p", min: 0, max: 1, step: 0.01, help: "Top P: keeps the likeliest tokens until together they reach this share." },
@@ -145,60 +109,24 @@ const SAMPLERS: Record<SamplerKey, { label: string; short: string; min: number; 
   dry_allowed_length: { label: "Allowed run", short: "dry-run", min: 1, max: 20, step: 1, slider: [1, 8], help: "DRY's allowed run: repeats up to this many tokens long go unpenalized." },
   dry_base: { label: "Growth", short: "dry-base", min: 1, max: 4, step: 0.05, slider: [1, 3], help: "DRY's growth: how fast the penalty rises with each token a repeat goes on." },
 };
-// Real odds for the settings to act on: the first word of Qwen3.8-Flash-Next's answer to "Suggest a name for a cat.
-// One word." with thinking off, drawn 2,000 times with the sampler wide open (names drawn twice or more).
 const ODDS: [string, number][] = [["Luna", 703], ["Mochi", 470], ["Whiskers", 312], ["Milo", 182], ["Mittens", 78], ["Shadow", 39],
   ["Miso", 31], ["Whisper", 29], ["Moon", 14], ["Pumpkin", 14], ["Pixel", 13], ["Whisker", 11], ["Willow", 9], ["Muffin", 8], ["Echo", 7],
   ["Momo", 6], ["Jasper", 5], ["Nimbus", 5], ["Nebula", 4], ["Simba", 4], ["Noodle", 3], ["Misty", 3], ["Mocha", 3], ["Mimi", 2],
   ["Munchkin", 2], ["Zephyr", 2], ["Moss", 2]];
-// A list that has started to repeat itself: the reply so far (token, id) and the next token's 64 candidates (token, log
-// prob, id), as Qwen3.8-Flash-Next (thinking off) gave them for "List cat names, separated by commas."
 const LOOP: { reply: [string, number][]; cands: [string, number, number][] } = {
   reply: [["Here",8160],[" are",513],[" some",1010],[" cat",7993],[" names",4874],[":",25],[" Luna",48130],[",",11],[" Milo",81533],[",",11],[" Shadow",23536],[",",11],[" Luna",48130],[",",11],[" Milo",81533],[",",11]],
   cands: [[" Shadow",-0.0896,23536],[" Bella",-3.5744,52670],[" Sim",-4.8584,4319],[" Wh",-4.8871,1190],[" Oliver",-5.0203,29260],[" Luna",-5.2131,48130],[" Cle",-5.7006,34809],[" Felix",-6.2065,54048],[" Charlie",-6.3093,24137],[" Max",-6.3492,7252],[" Leo",-6.3968,35530],[" N",-6.4557,443],[" Chloe",-6.4601,57365],[" Sm",-6.6385,4245],[" and",-6.8932,321],[" Snow",-7.1383,18331],[" Tiger",-7.1712,34560],[" shadow",-7.2331,12098],[" Willow",-7.2804,62177],[" Midnight",-7.311,61432],[" Ginger",-7.3367,65023],[" Bailey",-7.3892,40814],[" T",-7.5099,345],[" C",-7.6189,351],[" Fl",-7.664,2893],[" Belle",-7.6838,48808],[" Daisy",-7.8786,67789],[" Kitty",-7.9955,63947],[" Cookie",-8.0238,23588],[" Pepper",-8.026,50038],[" Jasper",-8.0536,68103],[" B",-8.1631,417],["Shadow",-8.196,22926],[" Stella",-8.2029,72059],[" Oscar",-8.2098,29695],[" Lily",-8.4152,45714],[" O",-8.4355,496],[" Simon",-8.4382,20660],[" Ch",-8.4431,882],[" S",-8.4961,326],[" Shadows",-8.5475,64206],[" Bear",-8.576,23237],[" M",-8.5788,380],[" Whisper",-8.5826,93630],[" Mitt",-8.6306,31539],[" Bell",-8.7311,17349],[" Mist",-8.7477,32969],[" Milo",-8.7748,81533],[" Barn",-8.7777,21722],[" Pumpkin",-8.7798,72693],[" Coco",-8.7924,80506],[" Princess",-8.8369,28330],[" Gus",-8.8442,78575],[" Lucy",-8.8952,42610],[" Olivia",-8.932,57283],[" Sophie",-8.9338,57306],[" Pop",-8.9441,9948],[" Jasmine",-8.9874,78548],[" Buddy",-9.0182,57515],[" Gar",-9.0378,11845],[" J",-9.0965,604],[" K",-9.1184,710],[" Cloud",-9.1404,14388],[" Call",-9.1473,6920]],
 };
-// The default system prompt, an ordinary one: shown in Settings, edited or deleted there. Without it Flash-Next takes
-// some asks for a coding-agent task when it does not think ("design a cute SVG ..." -> "let me first explore the
-// project structure" and calls to list_files / read_file: 16 replies out of 16, and the Q8_0 original as well); with
-// it, 16 of 16 draw.
-// {{MODEL}} is the chat's model by name: told nothing, the model does not know it is Qwen3.8 and says so when asked.
 const DEFAULT_SYSTEM = "You are {{MODEL}}, running locally in Chrysalis Inference. There are no tools or files in this chat. Answer directly.";
-// What the default says instead in a chat with tools on (a prompt the user wrote goes as written); Chrysalis's template
-// writes the tools themselves before it in the system turn (What the model is sent, in Settings, shows them).
 const DEFAULT_SYSTEM_TOOLS = "You are {{MODEL}}, running locally in Chrysalis Inference. The tools offered here are the only ones in this chat, and there are no files or projects to explore. Use a tool when it helps; otherwise answer directly.";
-// the default of builds before {{MODEL}}: settings that still hold it follow the default
 const PLAIN_SYSTEM = "There are no tools or files in this chat. Answer directly.";
-// What voice mode tells the model, in a note before the first question said aloud (and again when it changes): the
-// system prompt stays as it is, so a chat's history is never read again for voice mode and the chat's own prompt and
-// tools still hold (Chrysalis's template allows a system message only first). What speech recognition misheard is fixed
-// before the reply, apart from it (checkOf); what is left the model takes as meant, without remarking on it ("I think
-// you meant 'wrote'"). "Briefly" alone cut an essay asked for to a sentence or two. Told to write no code or markdown, the
-// model wrote code as plain text, which was read out, and held back ("Let me write that for you", then nothing): so what
-// is shown (code blocks, tables) is apart from what is said. The sentence on reasoning lets it work out loud while it
-// already speaks: on Big Bench Audio (Flash-Next, thinking off, spoken questions through Parakeet, as the system prompt)
-// 92.5% of 200 with it, 77.7% of all 1,000 without, where thinking first would hold the first word back by seconds.
 const DEFAULT_VOICE_PROMPT = "The user is talking to you by voice; a word may still be misheard, so take what they most likely meant, by " +
   "how it sounds and by the conversation, without remarking on it. Your reply is read aloud, except code blocks and tables, which are " +
   "shown and not read: speak briefly in plain sentences (but what they ask you to write, such as an essay or a story, in full), put code " +
   "and tables in markdown blocks and say what you put there, and do what is asked rather than asking whether to. When a question needs " +
   "counting or logic, work it out loud in a few short steps, then answer.";
-// The voice note's sentence for a chat with tools on: the server settles whether a voice reply runs a tool (route in
-// server.ts), this keeps the words around a call true to it. The note on the first typed message after voice mode:
-// replies are read again, so markdown is back.
 const VOICE_TOOLS = "Only say you searched or did something once the tool call for it has returned, and never describe results you " +
   "have not received from a tool. When results come back, give the key points briefly, and say the links are on screen rather than reading them.";
-// What speech recognition misheard of a question said aloud, and whether answering it needs a tool: asked at temperature
-// 0 before the reply, in a conversation of its own beside the chat (a voice session's: these instructions, then a turn
-// per question with the one before it and what the assistant had just said), which Chrysalis keeps cached, so a check
-// reads ~40 tokens (~0.3 s on Flash-Next). Nothing of it is part of the chat: asked inside the reply, the model copied
-// the fixes into a later reply's words, where they were shown and read out; told in the chat how to answer a check, it
-// began replies with one; asked beside the chat with all of it, a check took 0.7-1.2 s. Fixes are swaps of the
-// transcript's own words (asked to repeat the whole message, it dropped sentences), by sound (asked by meaning, it made
-// "pie game" "Pong game"); heard.ts makes only those that sound like what was heard. Words that do not fit what the
-// user asks, everyday ones too, and the question before: of 17 misheard transcripts (twice each) 29 came out right
-// where 25 had ("read it" for "write it" fixed), and none of 14 right ones was changed; an example such as "due to" for
-// "do a" was copied into right speech ("Do a the rain"), so the examples are words that are rarely right where they
-// were heard.
 const CHECK = "You fix speech recognition errors in what a user says to {{MODEL}}, a voice assistant running locally in Chrysalis Inference{{TOOLS}}. " +
   "For each transcript, write one line per misheard word or phrase: the transcript's exact words => the words that sound like them " +
   "which the user meant (names spelled right, numbers in digits). Read the transcript against the conversation: words that do not fit " +
@@ -209,14 +137,12 @@ const CHECK = "You fix speech recognition errors in what a user says to {{MODEL}
 const CHECK_TOOLS = " Then a last line, \"tool: yes\" if answering needs a web search or a page (they ask to search, look up or check " +
   "something, or the answer depends on current facts such as news, weather, prices or schedules), else \"tool: no\".";
 const VOICE_OFF = "The user is typing again and reads your replies.";
-// Chrysalis answers a prompt that starts "You are a title generator" as a side request (low priority, no thinking)
 const TITLE_PROMPT = "You are a title generator. Reply with a title of at most six words for the conversation that starts with the user's message below. Reply with the title only.";
 const DRAFT_PROMPT = "Write the next message I would send in this conversation, as me: same voice, same goals, natural and brief. Reply with only that message.";
 const fill = (text: string) => text.replaceAll("{{MODEL}}", modelName(current()) || "a Qwen model");
-// Thinking, a slider in the message box: no thinking (the model's no-thinking mode), then Qwen's three efforts.
 const EFFORTS: Effort[] = ["off", "low", "medium", "xhigh"];
 const LEVEL: Record<Effort, [string]> = { off: ["Off"], low: ["Low"], medium: ["Medium"], xhigh: ["Max"] };
-const HEAT = ["off", "low", "medium", "max"];      // each stop's look, soft to vivid
+const HEAT = ["off", "low", "medium", "max"];
 const ICONS = {
   plus: '<path d="M12 5v14M5 12h14"/>',
   paneLeft: '<rect x="3" y="3" width="18" height="18" rx="3"/><path d="M9 3v18"/><path class="chev" d="M15.5 9 12.5 12l3 3"/>',
@@ -261,8 +187,6 @@ const icon = (name: keyof typeof ICONS) => `<svg class="i" viewBox="0 0 24 24" a
 const $ = <T extends HTMLElement = HTMLElement>(id: string) => document.getElementById(id) as T;
 const thread = $("thread"), scroller = $("scroller"), input = $<HTMLTextAreaElement>("input"), sendBtn = $<HTMLButtonElement>("send");
 const panel = $("settings"), systemInput = $<HTMLTextAreaElement>("system-input");
-// The side panels (the conversations, Settings): one mechanism, in "the side panels" below. A panel's default width
-// is style.css's (widthVar); `preferred` is the width it was given, `width` what the window allows of it.
 interface Pane {
   name: string; el: HTMLElement; toggle: HTMLElement; key: string; beside: MediaQueryList; byDefault: boolean;
   widthVar: string; min: number; def: number; preferred: number; width: number; onOpen?: () => void;
@@ -285,28 +209,16 @@ function h<K extends keyof HTMLElementTagNameMap>(tag: K, cls = "", text = ""): 
   return e;
 }
 
-// The cast (cast.ts): characters from SillyTavern's cards, the user's persona and groups of characters, kept on this
-// device, and Chrysalis, the character the chats without one are with (its card holds the default voice, Settings',
-// and a scenario after the system prompt). Each is a folder of its chats in the conversations, the latest first: its portrait opens
-// its card (what the card says, edited where it is read, the voice they speak with, export, delete), its name opens or
-// closes it, and a folder left open stays open. A chat with a character opens with its greeting (the card's other greetings
-// are versions of it) and is written as the character, their portrait beside each reply; a group's replies are the
-// scene, each paragraph its speaker's, and a face over the message box has the next reply be theirs. A card dropped in
-// or picked joins the cast (one already here is that character again); dropped on a chat with characters, it joins
-// that chat too: a group gains them, and a chat with one character becomes a group of them all.
 const people = new Map<string, Person>(), groups = new Map<string, Group>(), faces = new Map<string, string>();
-const ME = "me", CHRYSALIS = "chrysalis";            // the persona's id and the assistant's: there is one of each
+const ME = "me", CHRYSALIS = "chrysalis";
 people.set(CHRYSALIS, { id: CHRYSALIS, kind: "assistant", card: { spec: "chara_card_v2", spec_version: "2.0", data: { name: "Chrysalis" } }, added: 0 });
-// the user is a character too, named as every card's {{user}} is sent: the one name, shown and sent
 people.set(ME, { id: ME, kind: "persona", card: { spec: "chara_card_v2", spec_version: "2.0", data: { name: "User", description: "" } }, added: 0 });
-const CAST_DRAG = "application/x-chrysalis-cast";    // a character's row dragged onto a chat
-let talking = 0;                                     // "let them talk": the beats a group has left to write on its own
+const CAST_DRAG = "application/x-chrysalis-cast";
+let talking = 0;
 const persona = () => people.get(ME)!;
 const userName = () => nameOf(ME);
-const userCard = () => ({ ...persona().card.data, name: userName() });   // as it is sent: an empty name is "User"
+const userCard = () => ({ ...persona().card.data, name: userName() });
 const folderOf = (c: Conversation) => (c.who && c.who !== CHRYSALIS && (people.has(c.who) || groups.has(c.who)) ? c.who : "");
-// whose folder a chat is in: its character's or group's, Chrysalis's only for a chat with neither (never one whose
-// character is gone: its chats go with it, forget)
 const whoOf = (c: Conversation) => (c.who && c.who !== CHRYSALIS ? c.who : CHRYSALIS);
 function castOf(c: Conversation): { members: Person[]; group?: Group } {
   const id = folderOf(c), g = id ? groups.get(id) : undefined;
@@ -314,10 +226,10 @@ function castOf(c: Conversation): { members: Person[]; group?: Group } {
   return g ? { members: g.members.map((m) => people.get(m)).filter((p): p is Person => !!p), group: g } : { members: [people.get(id)!] };
 }
 const chatsOf = (id: string) => Object.values(chats).filter((s) => whoOf(s) === id).sort((a, b) => b.updated - a.updated);
-const hue = (s: string) => [...s].reduce((a, ch) => (a * 31 + ch.charCodeAt(0)) % 360, 7);   // initials' ground, from the name
+const hue = (s: string) => [...s].reduce((a, ch) => (a * 31 + ch.charCodeAt(0)) % 360, 7);
 function face(id: string): HTMLElement {
   const g = groups.get(id);
-  if (g) {                                           // a group: its members in one circle (two halves, a half and two quarters, four quarters)
+  if (g) {
     const ms = inGroup(g).slice(0, 4), s = h("span", `face mosaic m${Math.max(ms.length, 1)}`);
     s.append(...(ms.length ? ms : [initials("?")]));
     return s;
@@ -330,12 +242,12 @@ function face(id: string): HTMLElement {
     img.draggable = false;
     return img;
   }
-  if (id === ME) {                                   // the user with no picture of their own
+  if (id === ME) {
     const s = h("span", "face self");
     s.innerHTML = icon("person");
     return s;
   }
-  if (id === CHRYSALIS) {                            // its butterfly, on a ground of its own (a mark, not a picture)
+  if (id === CHRYSALIS) {
     const s = h("span", "face chrysalis"), img = h("img");
     img.src = logo;
     img.alt = "";
@@ -350,7 +262,6 @@ function initials(name: string) {
   s.style.setProperty("--hue", String(hue(name)));
   return s;
 }
-// a group's members' faces, those with no card yet as their initials
 const inGroup = (g: Group) => [...g.members.map((m) => face(m)), ...(g.missing ?? []).map((n) => { const f = initials(n); f.title = `${n}: no card yet`; return f; })];
 function setFace(p: Person) {
   const was = faces.get(p.id);
@@ -367,15 +278,12 @@ function renderCast() {
   renderList();
   renderCastNext();
 }
-// The folders open, kept on this device (Chrysalis's to begin with); the open chat's opens with it
 const unfolded = new Set<string>((() => { try { return JSON.parse(pref("unfolded", `["${CHRYSALIS}"]`)) as string[]; } catch { return [CHRYSALIS]; } })());
 function unfold(id: string, open = true) {
   if (open === unfolded.has(id)) return;
   if (open) unfolded.add(id); else unfolded.delete(id);
   setPref("unfolded", JSON.stringify([...unfolded]));
 }
-// A folder's head: the portrait, the name (opening or closing it; with no chats yet, a new one), how many chats it
-// holds while it is closed, + a new chat with them
 function castRow(id: string, list: Conversation[], open: boolean): HTMLElement {
   const g = groups.get(id), name = nameOf(id);
   const row = h("div", `cast-row${list.some((s) => runs.has(s.id)) ? " running" : ""}`);
@@ -399,13 +307,12 @@ function castRow(id: string, list: Conversation[], open: boolean): HTMLElement {
   add.innerHTML = icon("plus");
   add.onclick = () => newChat(id);
   row.append(pic, main, add);
-  if (people.get(id)?.kind === "character") {       // onto a chat with characters: they join it
+  if (people.get(id)?.kind === "character") {
     row.draggable = true;
     row.ondragstart = (e) => { e.dataTransfer!.setData(CAST_DRAG, id); e.dataTransfer!.effectAllowed = "copy"; };
   }
   return row;
 }
-// A folder picked (its card just added): open, at its latest chat or a new one (with a character's greeting)
 function pickFolder(id: string) {
   const last = chatsOf(id)[0];
   unfold(id);
@@ -413,8 +320,6 @@ function pickFolder(id: string) {
   else if (!last && whoOf(conv) !== id) newChat(id);
   else closeOver(panes.conversations);
 }
-// A new chat opens with its writer's greeting, if their card has one; the card's other greetings are versions of it
-// who writes a chat's replies: its character, or Chrysalis for a chat with none; a group's are the scene's, no one's
 function writerOf(c: Conversation): Person | undefined {
   const { members, group } = castOf(c);
   return group ? undefined : members[0] ?? (c.who ? undefined : people.get(CHRYSALIS));
@@ -429,7 +334,6 @@ function greet(c: Conversation) {
   if (all.length > 1) first.versions = { shown: 0, others: all.slice(1).map((t) => [say(t)]) };
   c.messages.push(first);
 }
-// The system prompt of a chat with characters (cast.ts castPrompt), in place of the chat's own and the artifacts'
 function castSystem(c: Conversation) {
   const { members, group } = castOf(c);
   const base = members.length > 1 ? "Write the next part of a fictional scene between {{user}} and these characters."
@@ -437,8 +341,6 @@ function castSystem(c: Conversation) {
   return castPrompt(base, members.map((p) => p.card.data), userCard(), group?.scenario);
 }
 
-// A file that is a card or a group joins the cast (a card already here, by its name and description, is that
-// character again, not another); it gives who it is
 async function adopt(f: File): Promise<string | null> {
   const got = await readCast(f).catch(() => null);
   if (!got) return null;
@@ -459,7 +361,7 @@ async function adopt(f: File): Promise<string | null> {
   people.set(p.id, p);
   setFace(p);
   await savePerson(p);
-  for (const g of groups.values()) if (g.missing?.includes(d.name)) {   // a group that was waiting for them
+  for (const g of groups.values()) if (g.missing?.includes(d.name)) {
     g.members = [...g.members, p.id];
     g.missing = g.missing.filter((n) => n !== d.name);
     if (!g.missing.length) delete g.missing;
@@ -467,8 +369,6 @@ async function adopt(f: File): Promise<string | null> {
   }
   return p.id;
 }
-// Files dropped in, attached or picked: those that are cards join the cast, and (into: dropped or attached) the open
-// chat if it has characters; otherwise the first one's chats open. It gives the files that were not cards.
 async function welcome(files: Iterable<File>, into: boolean): Promise<File[]> {
   const had = new Set([...people.keys(), ...groups.keys()]), ids: string[] = [], rest: File[] = [];
   for (const f of files) {
@@ -480,19 +380,17 @@ async function welcome(files: Iterable<File>, into: boolean): Promise<File[]> {
   else if (ids.length) {
     pickFolder(ids[0]);
     renderCast();
-    if (fresh.length) toast(`${names(fresh)} ${fresh.length > 1 ? "are" : "is"} here`, () => { for (const id of fresh) void forget(id); });   // (no chats yet)
+    if (fresh.length) toast(`${names(fresh)} ${fresh.length > 1 ? "are" : "is"} here`, () => { for (const id of fresh) void forget(id); });
   }
   return rest;
 }
-// Characters brought into the open chat: its group gains them; a chat with one character becomes a group of them all
-// (its replies so far that character's)
 function join(ids: string[]) {
   const c = conv, { members, group } = castOf(c), fresh = [...new Set(ids)].filter((id) => !members.some((m) => m.id === id));
   if (!fresh.length) return toast(`${names(ids)} ${ids.length > 1 ? "are" : "is"} in this chat already`);
   if (group) {
     const before = { members: group.members, name: group.name };
     group.members = [...before.members, ...fresh];
-    if (before.name === names(before.members)) group.name = names(group.members);   // a group named for who is in it still is
+    if (before.name === names(before.members)) group.name = names(group.members);
     void saveGroup(group);
     toast(`${names(fresh)} joined ${before.name}`, () => { Object.assign(group, before); void saveGroup(group); renderCast(); render(); });
   } else {
@@ -514,7 +412,6 @@ function join(ids: string[]) {
   renderCast();
   render();
 }
-// A character or a group deleted takes its chats with it: a chat is theirs, no one else's. Undo brings all of it back.
 async function forget(id: string) {
   const p = people.get(id), g = groups.get(id), name = nameOf(id), gone = Object.values(chats).filter((c) => c.who === id);
   const was = [...groups.values()].filter((x) => x.members.includes(id)).map((x) => ({ x, members: x.members }));
@@ -533,7 +430,6 @@ async function forget(id: string) {
     render();
   } };
 }
-// Chats gone with their character: their replies stop, and the open one gives way to a new chat with Chrysalis
 function dropChats(ids: string[]) {
   for (const id of ids) {
     const r = runs.get(id);
@@ -544,11 +440,8 @@ function dropChats(ids: string[]) {
   if (ids.includes(conv.id) || (conv.who && !folderOf(conv))) newChat();
   else render();
 }
-// a chat whose character or group is not here: one deleted in another tab (its chats went there, these go now), or
-// a chat imported from a device that has them
 const castless = (c: Conversation) => !!c.who && c.who !== CHRYSALIS && !people.has(c.who) && !groups.has(c.who);
 
-// + beside New chat: a card, or a new group
 function openAdd(at: HTMLElement) {
   const menu = $("cast-add"), r = at.getBoundingClientRect();
   menu.hidden = false;
@@ -574,12 +467,6 @@ $("cast-file").addEventListener("change", async (e) => {
   input.value = "";
 });
 
-// A sheet is a card: the portrait at its own shape with the name on it, then what the card says, each field edited
-// where it is read (the four that make a character; the rest under More), the voice they speak with (heard from
-// here), and delete. Everyone's card is the same, the user's and Chrysalis's too (who stay: there is one of each). The
-// portrait is the card as a file: dragged out of the page (or saved as a picture), it is the PNG any app reads. A
-// group's shows its members side by side, which of the characters are in it, its scenario and its file. What is typed
-// is kept as it is.
 let sheetOf = "", sampler: Speaker | undefined, sheetFile: { id: string; url: string } | undefined;
 function openSheet(id: string) {
   const sheet = $("cast-sheet"), g = groups.get(id);
@@ -611,7 +498,7 @@ function openSheet(id: string) {
       keep();
       setFace(p);
       if (sheetFile) URL.revokeObjectURL(sheetFile.url);
-      sheetFile = undefined;                         // (the file with the picture before it)
+      sheetFile = undefined;
       renderCast();
       render();
       openSheet(id);
@@ -640,7 +527,6 @@ function openSheet(id: string) {
     return b;
   };
 
-  // the card's face: the portrait (a group's members side by side), the name on it
   const art = h("div", "card-art"), title = h("div", "card-title"), body = h("div", "card-body"), scroll = h("div", "card-scroll");
   if (g) {
     const strips = h("div", "strips");
@@ -651,8 +537,6 @@ function openSheet(id: string) {
     art.append(cardSea!.layer);
     scroll.addEventListener("scroll", () => cardSea!.ocean.place(), { passive: true });
   } else {
-    // The portrait is the card's file (cardFile), named for them: a click saves it, as do the browser's Save image and
-    // Save link. It is not dragged out: Chromium on Wayland hands a file manager a dragged link only as text.
     const file = h("a", "card-file"), pic = person!.image ? h("img") : face(id);
     file.download = file.title = cardName(id);
     file.draggable = false;
@@ -670,7 +554,7 @@ function openSheet(id: string) {
   if (person) art.append(btn("card-float card-pic", person.image ? "Another picture" : "A picture", icon("edit"), () => picture(person)));
   const name = h("input", "card-name");
   name.value = person ? person.card.data.name : g!.name;
-  name.placeholder = id === ME ? "User" : id === CHRYSALIS ? "Chrysalis" : g ? "The group's name" : "Their name";   // (what an empty one is sent as)
+  name.placeholder = id === ME ? "User" : id === CHRYSALIS ? "Chrysalis" : g ? "The group's name" : "Their name";
   name.ariaLabel = "Name";
   name.spellcheck = false;
   name.oninput = () => {
@@ -718,7 +602,7 @@ function openSheet(id: string) {
         openSheet(id);
       };
       return b;
-    }), ...(g!.missing ?? []).map((n) => {                // in the group, waiting for their card
+    }), ...(g!.missing ?? []).map((n) => {
       const m = h("span", "card-member waiting");
       m.title = `${n}: no card yet (theirs joins the group once it is added)`;
       m.append(initials(n));
@@ -741,8 +625,6 @@ function openSheet(id: string) {
   sheet.style.left = `${Math.max(12, Math.min(side.right + 10, innerWidth - sheet.offsetWidth - 12))}px`;
   sheet.style.top = `${Math.max(12, Math.min(64, innerHeight - sheet.offsetHeight - 12))}px`;
 }
-// Chrysalis's own picture, while it has none of the user's: its butterfly in the sea of characters, as a new chat
-// shows it. One, made the first time the card opens and kept: it draws only while the card shows it.
 let cardSea: { layer: HTMLElement; ocean: Ocean; ok: boolean } | undefined;
 function seaPortrait() {
   if (!seaReady) return false;
@@ -754,11 +636,7 @@ function seaPortrait() {
   }
   return cardSea.ok;
 }
-// the card's line to the voice service: what goes wrong is said only once a voice was asked to be heard (a service
-// that is not set up is no news to a card opened for its fields)
 const samples = () => (sampler ??= new Speaker((m) => { if (sampler?.previewed) toast(m); }));
-// The open card as the file it exports as (cast.ts cardPng), made again as it changes: a drag is given its data as it
-// starts, with no time to make it
 async function cardFile(p: Person) {
   const url = URL.createObjectURL(await cardPng(p.card, p.image));
   if (sheetOf !== p.id) return URL.revokeObjectURL(url);
@@ -778,9 +656,6 @@ function closeSheet() {
   sampler?.close();
   sampler = undefined;
 }
-// The voice a character speaks with in voice mode (kept in its card; Chrysalis's is Settings', which the others fall
-// back to), from the voices the voice service lists (asked for here when voice mode has not listed them yet); a voice
-// picked is heard at once, and ▶ plays the one picked
 function voicePick(p: Person, keep: () => void) {
   const box = h("div", "card-voice"), sel = h("select"), play = h("button", "act");
   const assistant = p.kind === "assistant";
@@ -832,7 +707,7 @@ function voicePick(p: Person, keep: () => void) {
         voiceCatalog = c;
         setPref("voice-catalog", JSON.stringify(c));
       }
-      if (box.isConnected) fill("No voices (run make voice)");
+      if (box.isConnected) fill("No voices");
     });
   }
   box.insertAdjacentHTML("afterbegin", icon("wave"));
@@ -849,17 +724,12 @@ document.addEventListener("keydown", (e) => {
   if (!$("cast-add").hidden) { $("cast-add").hidden = true; e.preventDefault(); }
   else if (!$("cast-sheet").hidden) { closeSheet(); e.preventDefault(); }
 }, true);
-// A portrait (a folder's, the user's, or with a name beside a message) opens their card, or closes it if it is the
-// one open
 document.addEventListener("click", (e) => {
   const id = (e.target as HTMLElement).closest<HTMLElement>("[data-card]")?.dataset.card;
   if (!id) return;
   if (sheetOf === id) closeSheet(); else openSheet(id);
 });
 
-// A group's paragraphs each their speaker's: a line begun with a member's name and a colon starts a paragraph and is
-// theirs (their face and name in place of the name as written); one without goes on with the speaker before it, or
-// for a reply's first, is the one the reply was asked of. A speaker going on shows their face and name only once.
 function sceneText(src: string, c: Conversation) {
   const { members, group } = castOf(c);
   if (!group || !members.length) return src;
@@ -892,8 +762,6 @@ function speakLine(n: Node | undefined, c: Conversation, before: Node | undefine
   tag.append(face(m.id), h("b", "", name));
   n.prepend(tag);
 }
-// Who wrote a message (a character's or Chrysalis's reply, the user's question): their portrait beside it, their name
-// over it. A group's replies have theirs on each paragraph instead.
 function speakerHead(c: Conversation) {
   const w = writerOf(c);
   return w ? head(w.id) : null;
@@ -906,9 +774,6 @@ function head(id: string) {
   return el;
 }
 
-// Over a group's message box: its members' faces (the next reply is the one clicked's, after what is typed, if
-// anything) and "let them talk" (the scene goes on by itself, a few beats, until something is typed or it is stopped:
-// each a reply asked of one of them, not the last to speak)
 function renderCastNext() {
   const box = $("cast-next"), { members, group } = castOf(conv);
   input.placeholder = members.length ? `Message ${group ? group.name : members[0].card.data.name}` : "Message Chrysalis";
@@ -941,9 +806,6 @@ function replyAs(p: Person, auto = false) {
   void generate(conv, conv.messages.length, p.id);
   renderCastNext();
 }
-// A message read aloud outside voice mode (its speaker button), in the voice its writer speaks with in voice mode (the
-// user's own too): a group's paragraphs each in their speaker's, without the names they begin with. One at a time: its button again, or
-// another's, stops it, as do another chat and voice mode.
 let reader: Speaker | undefined, reading: Message | undefined, readerIdle = 0;
 function readAloud(m: Message) {
   const again = reading === m;
@@ -979,7 +841,6 @@ function stopReading() {
   reading = undefined;
   paintReading();
 }
-// the speaker buttons as what is read says; a reader left unused lets go of the service (its voice model with it)
 function paintReading() {
   for (const b of thread.querySelectorAll<HTMLElement>("[data-act=speak]")) {
     const on = !!reading && conv.messages[Number(b.closest<HTMLElement>("article")?.dataset.i)] === reading;
@@ -991,7 +852,6 @@ function paintReading() {
   if (!reading && reader) readerIdle = window.setTimeout(() => { reader?.close(); reader = undefined; }, 60_000);
 }
 
-// The next beat of a scene left to talk
 function talkOn() {
   const { members, group } = castOf(conv);
   if (!talking || running() || !group || !members.length) return;
@@ -1014,16 +874,11 @@ marked.use({
       return `<div class="code"><div class="code-head"><span>${escapeHtml(language || "text")}</span>` +
         `<span class="code-acts">${preview}<button type="button" class="copy">Copy</button></span></div><pre><code class="hljs">${html}</code></pre></div>`;
     },
-    // the newline it stands for stays in the text: voice mode counts words over text nodes (afterWords), and
-    // "one<br>two" would be one word
     br: () => "<br>\n",
   },
 });
 const markdown = (src: string) => DOMPurify.sanitize(marked.parse(src, { async: false }));
 
-// A chat's messages read as SillyTavern shows them: a line break where one was written, and speech in quotes set in
-// its color, the marks kept. A quote ends at its close or at its line's end, as ST closes one left open (one being
-// written is in color as it comes). Documents and tool results are Markdown as written: they are lexed without breaks.
 const QUOTES: Record<string, string> = { '"': '"', "“": "”", "«": "»", "「": "」", "『": "』", "＂": "＂" };
 const chatTokens = (src: string) => marked.lexer(src, { ...marked.defaults, breaks: true });
 marked.use({
@@ -1041,11 +896,6 @@ marked.use({
   }],
 });
 
-// TeX as Qwen writes it: $$ … $$ or \[ … \] on their own lines (display), $ … $ or \( … \) in a line. A $ opens math
-// only before a non-space and closes it only after one, not before a digit, and math never crosses a backtick (a code
-// span's $ is not a closing one), so prices stay text. The lexer leaves a
-// placeholder; KaTeX typesets it once the block is sanitized: its output (with trust off) is safe, and DOMPurify would
-// strip the MathML it carries for screen readers.
 const INLINE_MATH = [/^\$\$([\s\S]+?)\$\$/, /^\\\(([\s\S]+?)\\\)/, /^\$(?![\s$])((?:\\[\s\S]|[^\\$\n`])+?)(?<![\s\\])\$(?!\d)/];
 marked.use({
   extensions: [{
@@ -1073,35 +923,30 @@ function typeset(root: ParentNode) {
     katex.render(el.dataset.tex!, el, { displayMode: el.classList.contains("display"), throwOnError: false, strict: "ignore", output: "htmlAndMathml" });
 }
 
-// A reply renders as its blocks (paragraphs, lists, code blocks, tables...). While it streams, only blocks that changed
-// are rebuilt: finished ones keep their nodes (no re-highlighting; selections and toggles survive), so the work per
-// update is the size of the growing tail, not of the reply. And the tail shows only settled text: whole words, whole
-// code lines and table rows, no half-typed markdown, so nothing flashes and then changes shape.
 interface Blocks { raws: string[]; nodes: Node[][] }
 
 const FENCE = /^ {0,3}(?:`{3,}|~{3,})/gm;
 function settle(src: string): string {
   const nl = src.lastIndexOf("\n"), head = src.slice(0, nl + 1);
   let line = src.slice(nl + 1);
-  if ((src.match(FENCE)?.length ?? 0) % 2) return head;                    // in a code block: its whole lines
+  if ((src.match(FENCE)?.length ?? 0) % 2) return head;
   const prose = src.replace(/^ {0,3}(`{3,}|~{3,})[^]*?^ {0,3}\1.*$/gm, "").replace(/`[^`\n]*`/g, "");
-  if ((prose.match(/\$\$/g)?.length ?? 0) % 2) return src.slice(0, src.lastIndexOf("$$"));   // display math once it closes
+  if ((prose.match(/\$\$/g)?.length ?? 0) % 2) return src.slice(0, src.lastIndexOf("$$"));
   if (prose.lastIndexOf("\\[") > prose.lastIndexOf("\\]")) return src.slice(0, src.lastIndexOf("\\["));
-  if (/^\s*\|/.test(line)) return head;                                   // a table row once it is complete
-  if (/^\s*(?:[#>*+-]|\d+[.)])*\s*$/.test(line)) return head;             // a bare "#", "-", "1." ... line
-  if (!/\s$/.test(line)) line = line.replace(/[A-Za-z0-9À-ɏ'’_-]{1,24}$/, "");   // a word once it ends
+  if (/^\s*\|/.test(line)) return head;
+  if (/^\s*(?:[#>*+-]|\d+[.)])*\s*$/.test(line)) return head;
+  if (!/\s$/.test(line)) line = line.replace(/[A-Za-z0-9À-ɏ'’_-]{1,24}$/, "");
   const text = head + line, p = text.lastIndexOf("\n\n") + 1;
-  let para = text.slice(p)                                                // the paragraph being written:
-    .replace(/!\[[^\]\n]*\]?(?:\([^)\n]*)?$/, "")                         // no half image,
-    .replace(/\[([^\]\n]*)\]\([^)\n]*$/, "$1").replace(/\[([^\]\n]*)$/, "$1")   // a link is its text until it is whole,
-    .replace(/<\/?[A-Za-z][^>\n]*$/, "")                                  // no half HTML tag,
-    .replace(/(?:\*{1,3}|_{1,3}|~{1,2}|`+)$/, "");                        // markers with nothing after them wait;
+  let para = text.slice(p)
+    .replace(/!\[[^\]\n]*\]?(?:\([^)\n]*)?$/, "")
+    .replace(/\[([^\]\n]*)\]\([^)\n]*$/, "$1").replace(/\[([^\]\n]*)$/, "$1")
+    .replace(/<\/?[A-Za-z][^>\n]*$/, "")
+    .replace(/(?:\*{1,3}|_{1,3}|~{1,2}|`+)$/, "");
   const dollars = [...para.replace(/`[^`]*`/g, (c) => " ".repeat(c.length)).matchAll(/(?<![\\$])\$(?!\$)/g)];
-  const lastDollar = dollars.at(-1)?.index ?? 0;                          // inline math once it closes ($5 is a price)
+  const lastDollar = dollars.at(-1)?.index ?? 0;
   if (dollars.length % 2 && !/^\$\d/.test(para.slice(lastDollar))) para = para.slice(0, lastDollar);
   if (para.lastIndexOf("\\(") > para.lastIndexOf("\\)")) para = para.slice(0, para.lastIndexOf("\\("));
-  if ((para.replace(/```[\s\S]*?```/g, "").match(/`/g)?.length ?? 0) % 2) para += "`";   // open code, bold and italics
-  // close, right after the text (a closing mark after a space is not one); a list's bullet and a spaced "a * b" open nothing
+  if ((para.replace(/```[\s\S]*?```/g, "").match(/`/g)?.length ?? 0) % 2) para += "`";
   if ((para.match(/\*\*/g)?.length ?? 0) % 2) para = para.trimEnd() + "**";
   if ((para.replace(/^ {0,3}[*+-] +|`[^`]*`/gm, "").replace(/\*\*|\s\*\s/g, "").match(/\*/g)?.length ?? 0) % 2) para = para.trimEnd() + "*";
   if ((para.match(/~~/g)?.length ?? 0) % 2) para = para.trimEnd() + "~~";
@@ -1110,43 +955,36 @@ function settle(src: string): string {
 
 function htmlNodes(t: Token, links: Links): Node[] {
   const tpl = document.createElement("template");
-  tpl.innerHTML = DOMPurify.sanitize(marked.parser(Object.assign([t], { links })));      // (options here would drop marked.use's renderer)
+  tpl.innerHTML = DOMPurify.sanitize(marked.parser(Object.assign([t], { links })));
   typeset(tpl.content);
   return [...tpl.content.childNodes];
 }
 
-// A node put where it goes. An artifact's canvas moves whole from where it was (moveBefore): a page in it goes on
-// running, as it was, where an iframe taken out and put back would load anew. render() draws the chat into new
-// articles, out of the page until all are drawn: a canvas they take is carried to its place once they are in (carried).
 const place = (into: Node, n: Node, at: Node | null) => {
   if (n.isConnected && into.isConnected && "moveBefore" in into) (into as Element).moveBefore(n, at);
   else into.insertBefore(n, at);
 };
 let carried: { slot: Comment; canvas: HTMLElement; b: Blocks }[] | null = null;
 
-// art: the chat and what holds src (a reply, or one of its rounds), for its artifact blocks' versions
 function renderBlocks(v: { body: HTMLElement; blocks?: Blocks }, src: string, live: boolean, art?: { c: Conversation; holder: object }) {
   if (!v.blocks) { v.body.replaceChildren(); v.blocks = { raws: [], nodes: [] }; }
   const text = art ? sceneText(src, art.c) : src;
   const b = v.blocks, tokens = chatTokens(live ? settle(text) : text), blocks = tokens.filter((t) => t.type !== "space");
   let seen = 0, all: Map<string, Version[]> | undefined;
   const nth = art ? blocks.map((t) => (t.type === "code" && artifactOf(t.lang, t.text) ? seen++ : -1)) : [];
-  // An artifact block as its canvas (its latest version) or a line. The canvas is taken from wherever it is in the chat,
-  // and its old place gets a line (in this reply's own blocks too, so they stay as shown).
   const artNodes = (k: number, old: Node | undefined, drawing: boolean): Node[] => {
     const ver = versionAt(all ??= artifactsOf(art!.c), art!.holder, nth[k]);
     if (!ver) return unknownEdit(blocks[k] as Tokens.Code, tokens.links);
     const list = all.get(ver.id)!, last = list.at(-1)!;
     if (list.findLast((x) => x.block.by !== "user") !== ver) return [artLine(ver, list.length)];
     let canvas = thread.querySelector<HTMLElement>(`.art-canvas[data-art="${CSS.escape(ver.id)}"]`) ?? undefined;
-    const carry = carried && canvas && canvas !== old ? carried : null;   // from the chat as it was drawn before
+    const carry = carried && canvas && canvas !== old ? carried : null;
     if (canvas && canvas !== old && !carry) {
       const was = list[Number(canvas.dataset.made) - 1], line = was ? artLine(was, list.length) : h("span");
       canvas.before(line);
       const j = b.nodes.findIndex((n) => n[0] === canvas);
       if (j >= 0) b.nodes[j] = [line];
     } else if (!canvas && old instanceof HTMLElement && !old.classList.contains("art-line")) canvas = old;
-    // the user's own versions since show here too: their questions hold them, not a canvas
     const el = drawVersion(canvas, last, drawing && last === ver, list.length);
     el.dataset.made = String(ver.v);
     if (!carry || el !== canvas) return [el];
@@ -1165,7 +1003,7 @@ function renderBlocks(v: { body: HTMLElement; blocks?: Blocks }, src: string, li
       : /^mermaid$/i.test(t.lang ?? "") ? [mermaidFigure(old[0], t.text, tail)] : page ? [pageFigure(old[0], t.text)] : htmlNodes(t, tokens.links);
     if (art && t.type === "paragraph") speakLine(now[0], art.c, k ? b.nodes[k - 1]?.[0] : undefined, (art.holder as Message).as);
     b.raws[k] = t.raw;
-    if (now.length === 1 && old.length === 1 && now[0] === old[0]) continue;   // a figure updated in place
+    if (now.length === 1 && old.length === 1 && now[0] === old[0]) continue;
     const at = b.nodes.slice(k).flat()[0] ?? null;
     for (const n of now) place(v.body, n, at);
     for (const n of old) n.parentNode?.removeChild(n);
@@ -1173,7 +1011,6 @@ function renderBlocks(v: { body: HTMLElement; blocks?: Blocks }, src: string, li
   }
   for (const n of b.nodes.slice(blocks.length).flat()) n.parentNode?.removeChild(n);
   b.nodes.length = b.raws.length = blocks.length;
-  // a figure that was drawing at the tail finishes once something follows it (its block no longer changes)
   b.nodes.forEach((n, k) => {
     const f = n[0], t = blocks[k];
     if (!(f instanceof HTMLElement && f.classList.contains("drawing") && !(live && k === blocks.length - 1) && t.type === "code")) return;
@@ -1184,17 +1021,12 @@ function renderBlocks(v: { body: HTMLElement; blocks?: Blocks }, src: string, li
   });
 }
 
-// A code block holding an SVG document (models label it svg, xml or html) shows the picture instead, as a figure that
-// draws itself while it streams: its size is set once the <svg> tag is in (the viewBox), then each element appears,
-// with a short fade, once its tag is complete. The markup is sanitized (no scripts, handlers, foreignObject, external
-// references) and lives in a shadow root, so its styles and ids stay inside it. The code is a click away.
 const SVG_START = /^\s*(?:<\?xml[^>]*\?>\s*)?(?:<!--[\s\S]*?-->\s*|<!DOCTYPE[^>]*>\s*)*<svg[\s>]/i;
 const SVG_SHADOW = ":host { display: block; color: #1f1b1c; } svg { display: block; width: var(--fig-w, 640px); max-width: 100%; height: auto; } " +
   ":host(.zoom) svg { max-width: none; } :host(.fill) { height: 100%; } :host(.fill) svg { width: 100%; height: 100%; max-width: none; }";
 const svgSource = new WeakMap<Element, string>();
 const reducedMotion = matchMedia("(prefers-reduced-motion: reduce)");
 
-// The document as a standalone file: from the root element on, with the namespaces models often leave out.
 function svgFile(text: string) {
   let src = text.trim().replace(/^[\s\S]*?(?=<svg[\s>])/i, "");
   const open = src.match(/^<svg[^>]*>/i)?.[0] ?? "<svg>";
@@ -1204,8 +1036,6 @@ function svgFile(text: string) {
   return root + src.slice(open.length);
 }
 
-// The part of an SVG that has arrived, as a document: up to the last complete tag (text waits for its closing tag),
-// with the elements still open closed. Also mends a finished one that forgot to close something.
 function svgPrefix(text: string): string | null {
   const start = text.search(/<svg[\s>]/i);
   if (start < 0) return null;
@@ -1225,19 +1055,18 @@ function svgPrefix(text: string): string | null {
       const c = s[j];
       if (q) { if (c === q) q = ""; } else if (c === '"' || c === "'") q = c; else if (c === ">") break;
     }
-    if (j >= s.length) break;                                            // a tag still arriving
+    if (j >= s.length) break;
     const m = s.slice(lt, j + 1).match(/^<(\/?)([A-Za-z][\w:.-]*)[^]*?(\/?)>$/);
     if (m && m[1]) {
       const at = stack.lastIndexOf(m[2]);
       if (at >= 0) stack.length = at;
     } else if (m && !m[3]) stack.push(m[2]);
     i = cut = j + 1;
-    if (!stack.length) break;                                            // the root closed: the end
+    if (!stack.length) break;
   }
   return cut ? s.slice(0, cut) + stack.reverse().map((t) => `</${t}>`).join("") : null;
 }
 
-// Only references inside the picture: a link or image may point at #id or a data: image, CSS at nothing outside.
 let svgSanitizing = false;
 const scrubCss = (css: string) => css.replace(/@import[^;]*;?/gi, "").replace(/url\(\s*(['"]?)(?!#|data:image\/)[^)]*\)/gi, "none");
 DOMPurify.addHook("uponSanitizeAttribute", (_node, data) => {
@@ -1252,7 +1081,6 @@ DOMPurify.addHook("uponSanitizeElement", (node, data) => {
 const sameEl = (a: Node, b: Node) => a.nodeType === b.nodeType && (a.nodeType !== 1 || ((a as Element).tagName === (b as Element).tagName
   && (a as Element).attributes.length === (b as Element).attributes.length
   && [...(b as Element).attributes].every((x) => (a as Element).getAttribute(x.name) === x.value)));
-// Bring dst's subtree to src's, touching only what differs; new elements are collected (to fade them in).
 function syncSvg(dst: Element, src: Element, added: Element[]) {
   const a = [...dst.childNodes], b = [...src.childNodes];
   b.forEach((y, i) => {
@@ -1268,7 +1096,6 @@ function syncSvg(dst: Element, src: Element, added: Element[]) {
   for (const x of a.slice(b.length)) x.remove();
 }
 
-// A picture's own <svg>: the shadow root's child, not one nested in what sits beside it (the editor's toolbar has icons)
 const pictureOf = (root: ShadowRoot | null | undefined) => [...(root?.children ?? [])].find((e): e is SVGSVGElement => e instanceof SVGSVGElement);
 function drawSvg(root: ShadowRoot, markup: string | null, fade: boolean): boolean {
   if (!markup) return !!pictureOf(root);
@@ -1281,7 +1108,7 @@ function drawSvg(root: ShadowRoot, markup: string | null, fade: boolean): boolea
   if (!svg) return false;
   const num = (n: string) => /^\s*[\d.]+\s*(px)?\s*$/.test(svg.getAttribute(n) ?? "") ? parseFloat(svg.getAttribute(n)!) : 0;
   const w = num("width"), hh = num("height");
-  if (w && hh && !svg.hasAttribute("viewBox")) svg.setAttribute("viewBox", `0 0 ${w} ${hh}`);   // so it can scale down
+  if (w && hh && !svg.hasAttribute("viewBox")) svg.setAttribute("viewBox", `0 0 ${w} ${hh}`);
   const cur = pictureOf(root), added: Element[] = [];
   if (cur && sameEl(cur, svg)) syncSvg(cur, svg, added);
   else {
@@ -1293,7 +1120,6 @@ function drawSvg(root: ShadowRoot, markup: string | null, fade: boolean): boolea
   return true;
 }
 
-// The figure around a picture: the light page, its caption with the actions, and the code a click away.
 function figureShell(lang: "svg" | "mermaid"): HTMLElement {
   const fig = h("figure", "svg-fig");
   fig.dataset.kind = lang;
@@ -1305,13 +1131,12 @@ function figureShell(lang: "svg" | "mermaid"): HTMLElement {
   return fig;
 }
 
-// fade: what changed fades in (as while it is drawn)
 function svgFigure(old: Node | undefined, text: string, drawing: boolean, fade = drawing): HTMLElement {
   const fig = old instanceof HTMLElement && old.dataset.kind === "svg" ? old : figureShell("svg");
   svgSource.set(fig, text);
   fig.classList.toggle("drawing", drawing);
   const t = performance.now();
-  if (!drawing || t - Number(fig.dataset.drawn ?? 0) > 90) {             // at most ~11 redraws a second while it streams
+  if (!drawing || t - Number(fig.dataset.drawn ?? 0) > 90) {
     fig.dataset.drawn = String(t);
     const ok = drawSvg(fig.querySelector(".svg-paper")!.shadowRoot!, svgPrefix(text), fade);
     fig.classList.toggle("failed", !drawing && !ok);
@@ -1324,14 +1149,12 @@ function svgFigure(old: Node | undefined, text: string, drawing: boolean, fade =
   return fig;
 }
 
-// A drawing as large as what can be seen at once: the column's width, or the scroll area's height less the caption,
-// whichever runs out first, its shape kept. Set when its <svg> tag arrives, so it never changes size while it draws.
 function fitFigure(fig: HTMLElement) {
   const paper = fig.querySelector<HTMLElement>(".svg-paper"), vb = pictureOf(paper?.shadowRoot)?.viewBox.baseVal;
-  if (!paper || !vb || !vb.width || !vb.height) return;               // (a page figure has no picture)
-  const room = thread.clientWidth - 48 - 30;             // the column (the thread's padding), less the paper's padding and border
-  const tall = Math.max(scroller.clientHeight - 74, 320); // the scroll area, less 8 + 6 px of gap, the paper's padding and the caption
-  const natural = fig.dataset.kind === "mermaid" ? vb.width : Infinity;   // a diagram's text stays at its size
+  if (!paper || !vb || !vb.width || !vb.height) return;
+  const room = thread.clientWidth - 48 - 30;
+  const tall = Math.max(scroller.clientHeight - 74, 320);
+  const natural = fig.dataset.kind === "mermaid" ? vb.width : Infinity;
   const w = `${Math.floor(Math.min(room, tall * (vb.width / vb.height), natural))}px`;
   if (paper.style.getPropertyValue("--fig-w") !== w) paper.style.setProperty("--fig-w", w);
 }
@@ -1357,7 +1180,7 @@ function svgAction(btn: HTMLElement) {
     host.attachShadow({ mode: "open" }).innerHTML = `<style>${SVG_SHADOW}</style>`;
     drawSvg(host.shadowRoot!, svgPrefix(picture), false);
     const svg = pictureOf(host.shadowRoot), vb = svg?.viewBox.baseVal;
-    if (svg && vb && vb.width && vb.height) {                           // as large as the window allows, its shape kept
+    if (svg && vb && vb.width && vb.height) {
       const ar = vb.width / vb.height, w = Math.min(innerWidth * 0.94 - 40, (innerHeight * 0.92 - 40) * ar);
       svg.style.width = `${w}px`;
       svg.style.height = `${w / ar}px`;
@@ -1367,17 +1190,11 @@ function svgAction(btn: HTMLElement) {
   }
 }
 
-// A ```mermaid block becomes a diagram in the SVG figure (Code shows its Mermaid source, Download saves the picture).
-// Mermaid is most of the page's code, so it loads with the first diagram. While the block streams, each settled
-// version that parses replaces the picture, a few times a second, so the diagram grows as it is written; a finished
-// block that does not parse shows its source. Labels are SVG text (no HTML in foreignObject, which drawSvg removes).
-const pictures = new WeakMap<Element, string>();      // a diagram's SVG as drawn
+const pictures = new WeakMap<Element, string>();
 const DIAGRAMS: Record<string, string> = { graph: "flowchart", flowchart: "flowchart", sequenceDiagram: "sequence diagram",
   classDiagram: "class diagram", stateDiagram: "state diagram", "stateDiagram-v2": "state diagram", erDiagram: "ER diagram",
   gantt: "Gantt chart", pie: "pie chart", mindmap: "mind map", timeline: "timeline", journey: "user journey", gitGraph: "git graph",
   quadrantChart: "quadrant chart", xychart: "XY chart", "xychart-beta": "XY chart", sankey: "Sankey diagram", "sankey-beta": "Sankey diagram" };
-// Mermaid's own ES module build, served by server.ts: imported by URL, so the page's bundle leaves it out, and it loads
-// each kind of diagram's code when one is first drawn.
 const MERMAID_URL = "/vendor/mermaid/mermaid.esm.min.mjs";
 let mermaidLib: Promise<typeof import("mermaid").default> | undefined, mermaidSeq = 0;
 const loadMermaid = () => mermaidLib ??= (import(MERMAID_URL) as Promise<typeof import("mermaid")>).then(({ default: m }) => {
@@ -1406,7 +1223,7 @@ async function drawMermaid(fig: HTMLElement, text: string, drawing: boolean) {
   const m = await loadMermaid();
   let svg: string | undefined;
   if (await m.parse(text, { suppressErrors: true })) svg = await m.render(`chrysalis-mermaid-${seq}`, text).then((r) => r.svg, () => undefined);
-  if (fig.dataset.seq !== seq) return;                   // a later version is on its way
+  if (fig.dataset.seq !== seq) return;
   if (svg) {
     pictures.set(fig, svg);
     drawSvg(fig.querySelector(".svg-paper")!.shadowRoot!, svg, false);
@@ -1425,32 +1242,16 @@ function captionMermaid(fig: HTMLElement) {
 }
 
 
-// A ```html block holding a whole document is a page once it is written; a fragment is when its Preview is clicked.
-// The page runs in an iframe on /sandbox (server.ts, sandbox.js): its own code runs, but it can reach neither the chat
-// nor the network. It reports its height and the frame takes it, up to what can be seen at once (a taller page scrolls
-// inside). A page sized by the viewport (100vh) reports the frame's own height; one made to the window's size (a 3D
-// scene's canvas) says so, and its frame is fitted to the column (pageFill). Until a page has loaded its frame keeps at
-// least that much: what its scripts draw is not there while it is written, and a scene sizes its canvas to whatever
-// height the frame has when they run.
 const PAGE_LANGS = new Set(["html", "htm"]);
-const previewed = new Set<string>();                  // fragments whose Preview was clicked
-// An artifact is a page by its kind or by what it is (models name one by what is in it: ```aframe scene```)
+const previewed = new Set<string>();
 const isPage = (kind: string, src: string) => PAGE_LANGS.has(kind) || kind === "aframe" || PAGE_DOC.test(src);
 const pageRoom = () => Math.max(scroller.clientHeight - 74, 240);
-const pageStart = () => Math.min(480, pageRoom());     // a page's frame before it reports
-// A page made to its window's size (a 3D scene): the column's width at a landscape screen's shape, within what shows at once
+const pageStart = () => Math.min(480, pageRoom());
 const pageFill = (frame: HTMLElement) => Math.round(Math.min(pageRoom(), Math.max(240, frame.clientWidth * 0.62)));
 addEventListener("resize", () => document.querySelectorAll<HTMLIFrameElement>("iframe.page-frame.fills:not([data-fixed])").forEach((f) => { f.style.height = `${pageFill(f)}px`; }));
 
-// A page is synced into its frame as it is written (each element as it arrives, its scripts waiting), and once it is
-// whole if its scripts are the ones that ran (so what the page holds stays as its look changes: a game's score, what
-// was typed in a form). Else it is written whole, so its scripts run: in its frame if none ran there, else in a new
-// frame over it, shown once it has loaded. sent: the text and whether it was being written; ran: the scripts that ran.
 interface PageFrame { ready: boolean; want?: { lead: string; text: string; live: boolean }; sent?: string; ran?: string; loaded?: boolean; mode?: string; pin?: number | null }
 
-// The libraries a page loads from the web that the chat has (server.ts, vendor3d): three.js (its module, its addons, its
-// classic builds) and A-Frame, by the addresses models write, of any version. A page gets each one's code with it and
-// loads it from a blob: address it makes itself (sandbox.js), so it still reaches nothing.
 const LIBS: [RegExp, (m: RegExpMatchArray) => string][] = [
   [/^(?:https?:)?\/\/[^"'\s]*?\/three(?:@[\w.^~-]+)?\/build\/three\.module(?:\.min)?\.js(?:\?[^"'\s]*)?$|^https?:\/\/(?:esm\.sh|cdn\.skypack\.dev)\/three(?:@[\w.^~-]+)?$|^three$/, () => "three.module.js"],
   [/^(?:https?:)?\/\/[^"'\s]*?\/three(?:\.js)?(?:@[\w.^~-]+|\/r?[\d.]+)?\/(?:build\/)?three(?:\.min)?\.js$/, () => "three.min.js"],
@@ -1462,8 +1263,6 @@ const vendorOf = (spec: string) => {
   for (const [re, path] of LIBS) { const m = spec.match(re); if (m) return path(m); }
   return null;
 };
-// What a page loads that the chat has: each address or name as the page writes it (a script's src, an import, its
-// import map's), and the file it is. An addon imports "three", so a page with one gets three as "three" too.
 function libsOf(src: string): Map<string, string> {
   const out = new Map<string, string>(), specs = new Set<string>();
   for (const m of src.matchAll(/<script\b[^>]*?\ssrc\s*=\s*["']([^"']+)["']/gi)) specs.add(m[1]);
@@ -1494,14 +1293,12 @@ function pageFrame(fixed: boolean): HTMLIFrameElement {
   frame.src = "/sandbox";
   return frame;
 }
-// What a page is drawn on: its frame (two while a new one loads), and on an artifact the tools (pagePointable)
 function pagePaper(fixed: boolean): HTMLElement {
   const paper = h("div", "page-paper");
   paper.append(pageFrame(fixed));
   return paper;
 }
 const frameOf = (paper: Element) => [...paper.querySelectorAll<HTMLIFrameElement>(":scope > iframe.page-frame")].at(-1);
-// What goes before a fragment (none of its elements, so none marked): the doctype, and A-Frame for a scene without it
 function showPage(paper: HTMLElement, text: string, live: boolean) {
   const frame = frameOf(paper)!, lead = (PAGE_DOC.test(text) ? "" : "<!doctype html>") +
     (/<a-scene[\s>]/.test(text) && !/<script\b[^>]*aframe/i.test(text) ? '<script src="https://aframe.io/releases/1.8.0/aframe.min.js"></script>' : "");
@@ -1523,9 +1320,8 @@ function flushPage(frame: HTMLIFrameElement) {
       if (!frame.dataset.fixed) next.style.height = frame.style.height;
       frames.get(next)!.want = want;
       paper.append(next);
-      setTimeout(() => swapIn(next), 3000);               // one whose load never ends (a script that never returns)
+      setTimeout(() => swapIn(next), 3000);
     } else {
-      // what it loads first, then the page
       const libs = write ? libsOf(want.lead + want.text) : new Map<string, string>(), missing = [...new Set(libs.values())].filter((f) => !vendorDone.has(f));
       if (missing.length) {
         void Promise.all(missing.map((f) => fetchVendor(f).then((code) => vendorDone.set(f, code)))).then(() => flushPage(frame));
@@ -1584,7 +1380,6 @@ addEventListener("message", (e) => {
   if (typeof d.chrysalisHeight === "number") {
     if (d.loaded) st.loaded = true;
     if (!frame.dataset.fixed) {
-      // one made to its window takes the room fitted to the column, unless its content goes well past the window
       const fill = d.fills && !(d.chrysalisHeight > (d.view ?? 0) * 1.25);
       frame.classList.toggle("fills", fill);
       const want = fill ? pageFill(frame) : st.loaded ? d.chrysalisHeight : Math.max(pageFill(frame), d.chrysalisHeight);
@@ -1594,13 +1389,12 @@ addEventListener("message", (e) => {
     if (d.loaded) swapIn(frame);
     return;
   }
-  // The tools' messages, taken only while a tool holds the page: its own code could post them too
   if (frame !== frameOf(paper) || pageModeOf(paper) === "use") return;
   if ("chrysalisHover" in d) hovered = pagePoint(paper, d.chrysalisHover);
   else if ("chrysalisPick" in d) {
     pinned = pagePoint(paper, d.chrysalisPick);
     st.pin = pagePin(paper);
-    frame.focus();                                       // the tools' keys (Delete, Ctrl+D) go to the page, which sends them on
+    frame.focus();
     glow();
     renderPointing();
   } else if (typeof d.chrysalisPaint === "number") paintPage(paper, d.chrysalisPaint);
@@ -1611,7 +1405,7 @@ addEventListener("message", (e) => {
 
 function pageAction(btn: HTMLElement) {
   const act = btn.dataset.page;
-  if (act === "preview") {                               // a fragment's code block becomes its page
+  if (act === "preview") {
     const block = btn.closest<HTMLElement>(".code")!, text = block.querySelector("code")?.textContent ?? "";
     const m = conv.messages[Number(block.closest<HTMLElement>("article")?.dataset.i)], b = m && views.get(m)?.blocks;
     previewed.add(text);
@@ -1627,7 +1421,7 @@ function pageAction(btn: HTMLElement) {
     if (code.textContent !== text) code.innerHTML = hljs.highlight(text, { language: "xml", ignoreIllegals: true }).value;
   } else if (act === "copy") copy(text, btn);
   else if (act === "save") download("page.html", text, "text/html");
-  else if (act === "reload") {                           // run anew: a page's scripts start over
+  else if (act === "reload") {
     const paper = fig.querySelector<HTMLElement>(".page-paper")!;
     paper.querySelectorAll(":scope > iframe").forEach((f) => f.remove());
     paper.append(pageFrame(false));
@@ -1640,11 +1434,8 @@ function pageAction(btn: HTMLElement) {
   }
 }
 
-// Artifacts (artifacts.ts): a reply's blocks named ```kind id```, and the edits (```edit id```) that change them in place.
-// A chat's artifacts are its replies' artifact blocks replayed in order: each block makes a version of one. Each text is
-// read once while it stays the same, so as a reply is written only it is read again.
 interface ArtRead { text: string; blocks: { n: number; info: Info; text: string; closed: boolean }[] }
-const artRead = new WeakMap<object, ArtRead>();       // by what holds the text: a reply, or one of its rounds
+const artRead = new WeakMap<object, ArtRead>();
 function artBlocksOf(holder: object, text: string): ArtRead["blocks"] {
   let r = artRead.get(holder);
   if (!r || r.text !== text) {
@@ -1657,7 +1448,6 @@ function artBlocksOf(holder: object, text: string): ArtRead["blocks"] {
   }
   return r.blocks;
 }
-// label: the question each version answers (the shelf shows it)
 function artifactsOf(c: Conversation): Map<string, Version[]> {
   const blocks: Block[] = [], writing = runs.get(c.id)?.m;
   let label = "";
@@ -1680,11 +1470,6 @@ function artifactsOf(c: Conversation): Map<string, Version[]> {
 const versionAt = (all: Map<string, Version[]>, holder: object, n: number) =>
   [...all.values()].flat().find((v) => v.block.at === holder && v.block.n === n);
 
-// An artifact block in a reply. Each artifact has one canvas in the chat, where it was last changed: the block that made
-// its latest version shows it (a picture, a diagram or a page drawn as any is, or its code), and one that made an
-// earlier version is a line naming it. When a reply changes an artifact its canvas moves there, the same figure, so the
-// edit paints into the picture as it stood, each change landing as it is written; the place it left keeps a line. The
-// canvas steps through the versions in place (‹ ›), redrawing only what differs.
 const captionOf = (ver: Version) => {
   const done = (ver.applied ?? []).filter((a) => a.ok).length;
   const changes = ver.block.by === "user" ? ` · your edit${ver.block.at === conv ? ", not sent yet" : ""}` : !ver.applied ? ""
@@ -1704,14 +1489,12 @@ const actButton = (act: string, name: string, label?: string) => {
   return b;
 };
 
-function unknownEdit(t: Tokens.Code, links: Links): Node[] {   // an edit of an artifact the chat does not have
+function unknownEdit(t: Tokens.Code, links: Links): Node[] {
   const info = infoOf(t.lang)!, nodes = htmlNodes(t, links);
   nodes.unshift(h("p", "art-fail", `No artifact “${"edit" in info ? info.from : ""}” comes before this edit, so it changes nothing.`));
   return nodes;
 }
 
-// The canvas: the version drawn as its kind is, into the figure it had (so what is the same stays, and a version being
-// written paints), with its caption. fade: what changed fades in (stepping between versions, as when it is written).
 function drawVersion(prev: HTMLElement | undefined, ver: Version, drawing: boolean, count: number, fade = drawing): HTMLElement {
   const src = ver.src;
   let el: HTMLElement;
@@ -1745,7 +1528,7 @@ function drawVersion(prev: HTMLElement | undefined, ver: Version, drawing: boole
     paper.dataset.pointable = "1";
     (el.dataset.kind === "page" ? pagePointable : el.dataset.kind === "doc" ? docPointable : pointable)(paper);
   }
-  paper?.classList.toggle("busy", drawing);                // no tools on a picture still being written
+  paper?.classList.toggle("busy", drawing);
   if (paper) glow();
   let fail = el.querySelector<HTMLElement>(":scope > .art-fail");
   if (failedOf(ver).length && !fail) el.append(fail = h("p", "art-fail"));
@@ -1754,8 +1537,6 @@ function drawVersion(prev: HTMLElement | undefined, ver: Version, drawing: boole
   return el;
 }
 
-// A version that is not the latest: a line naming it, how its changes went, Open (on the shelf), Changes, and a way to
-// the canvas.
 function artLine(ver: Version, count: number): HTMLElement {
   const el = h("div", "art-line");
   el.dataset.art = ver.id;
@@ -1800,11 +1581,7 @@ function artAction(btn: HTMLElement) {
   btn.textContent = box.hidden ? "Changes" : "Hide changes";
 }
 
-// The shelf: the chat's artifacts in a card that floats over the chat where it was left (moved by its head, sized by its
-// corner, both kept on this device). It shows one artifact large, at its latest version or the one picked, or two side
-// by side (Compare): a version and the one before it, or a copy and the version it was made from. While a reply draws or
-// edits an artifact it shows that one being drawn, unless a version was picked.
-interface Side { id: string; v?: number }           // v: a version picked, or the latest
+interface Side { id: string; v?: number }
 const shelf: { open: boolean; main?: Side; other?: Side; compare: boolean; code: boolean } = { open: false, compare: false, code: false };
 const pickVersion = (all: Map<string, Version[]>, s: Side) => {
   const list = all.get(s.id)!;
@@ -1816,12 +1593,10 @@ function openShelf(id?: string, v?: number) {
   shelf.other = undefined;
   renderShelf();
 }
-// the side beside a version: what it was copied from, else the version before it
 function besideOf(ver: Version): Side | undefined {
   return ver.from ? { id: ver.from.id, v: ver.from.v } : ver.v > 1 ? { id: ver.id, v: ver.v - 1 } : undefined;
 }
 let shelfAt = 0, shelfLater: number | undefined;
-// at most ~10 times a second while a reply writes (each redraw syncs the picture, painting what changed)
 function shelfSoon() {
   if (shelfLater) return;
   const wait = Math.max(0, 100 - (performance.now() - shelfAt));
@@ -1888,8 +1663,6 @@ function shelfSide(): HTMLElement {
   side.append(label, paper);
   return side;
 }
-// One side of the shelf, drawn as its artifact's kind is: a picture or a diagram synced in place (so a version being
-// written paints, and stepping between versions changes only what differs), a page run when it is whole, else its code.
 function paintSide(side: HTMLElement, ver: Version, which: "main" | "other") {
   side.dataset.art = ver.id;
   side.dataset.v = String(ver.v);
@@ -1969,11 +1742,10 @@ function shelfAction(btn: HTMLElement) {
   } else if (act === "copy") copy(ver.src, btn);
   else if (act === "save") download(`${ver.id}.${EXT[ver.kind] ?? "txt"}`, ver.kind === "svg" ? svgFile(ver.src) : ver.src, "text/plain");
 }
-// Where the shelf was left: kept within the window, its size too
 function placeShelf(geo?: { x: number; y: number; w: number; h: number }) {
   const el = $("shelf");
   let g = geo;
-  if (!g) try { g = JSON.parse(pref("shelf-geo", "null")) ?? undefined; } catch { /* the default */ }
+  if (!g) try { g = JSON.parse(pref("shelf-geo", "null")) ?? undefined; } catch {  }
   const w = Math.min(g?.w ?? 560, innerWidth - 24), hh = Math.min(g?.h ?? Math.min(640, innerHeight - 120), innerHeight - 24);
   const x = Math.min(Math.max(g?.x ?? innerWidth - w - 28, 12), innerWidth - w - 12), y = Math.min(Math.max(g?.y ?? 72, 12), innerHeight - hh - 12);
   Object.assign(el.style, { left: `${x}px`, top: `${y}px`, width: `${w}px`, height: `${hh}px` });
@@ -1983,24 +1755,13 @@ function keepShelfPlace() {
   if (r.width && r.height) setPref("shelf-geo", JSON.stringify({ x: Math.round(r.left), y: Math.round(r.top), w: Math.round(r.width), h: Math.round(r.height) }));
 }
 
-// Pointing and the canvas's tools. Over an artifact's picture (in the chat or on the shelf) the part under the pointer
-// glows, the nearest element with an id (else the element itself), and a click selects it. Shown in the message box,
-// the part selected is what the next question points at: the model is told it, quoting it as it is now (in voice mode,
-// the part under the pointer as a question is said: "make this orange"). Changes by hand, with no model in the loop,
-// are the canvas's edit mode (its Edit): a row of tools over it says what a click does, and until then a click only
-// points, so nothing changes by a stray one. On a picture: drag the part selected to move it, a corner to resize it,
-// forward, backward, duplicate, delete, the arrow keys to nudge it; Fill paints whatever shape is clicked. Each change
-// is the source edited where that element is (artifacts.ts), kept at once as the user's next version (editByHand). The
-// glow is a rule beside the picture, never a change to it, so a picture being redrawn keeps it.
 interface Point { art: string; sel: string; partId?: string; markup?: string; tag?: string; paper?: HTMLElement; cx?: number; at?: number; label?: string }
 let hovered: Point | undefined, pinned: Point | undefined;
 let paintColor = pref("paint-color", "#e24d85");
-// Each canvas's own mode and tool (a picture's, a page's, a document's): "view" outside edit mode
 type EditKind = "svg" | "page" | "doc";
 const editMode = (paper: HTMLElement) => paper.dataset.editing === "1" && !paper.classList.contains("busy");
 const toolOf = (paper: HTMLElement) => (editMode(paper) ? paper.dataset.tool ?? "select" : "view");
 const samePoint = (a?: Point, b?: Point) => !!a && !!b && a.art === b.art && a.sel === b.sel;
-// The part at an event: the nearest element with an id, or (leaf: the paint bucket's) the shape itself
 function pointOn(paper: HTMLElement, e: Event, leaf = toolOf(paper) === "fill"): Point | undefined {
   const host = paper.closest<HTMLElement>("[data-art]"), svg = pictureOf(paper.shadowRoot), t = e.composedPath()[0];
   if (!host || !svg || !(t instanceof Element) || t === svg || !svg.contains(t)) return undefined;
@@ -2010,7 +1771,6 @@ function pointOn(paper: HTMLElement, e: Event, leaf = toolOf(paper) === "fill"):
     sel = `> :nth-child(${[...x.parentElement!.children].indexOf(x) + 1}) ${sel}`;
   return { art: host.dataset.art!, sel: part.id ? sel : `:scope ${sel}`.trim(), partId: part.id || undefined, markup: part.outerHTML, tag: part.tagName, paper };
 }
-// A part by its selector (relative to the picture's own <svg>), in a picture, and as a rule beside it
 const partIn = (paper: HTMLElement, sel: string) => pictureOf(paper.shadowRoot)?.querySelector<SVGGraphicsElement>(sel) ?? null;
 const ruleFor = (sel: string) => (sel.startsWith(":scope") ? sel.replace(":scope", ":host > svg") : `:host > svg ${sel}`);
 
@@ -2033,8 +1793,6 @@ const TOOL_ICONS = {
 };
 const toolIcon = (k: keyof typeof TOOL_ICONS) => `<svg viewBox="0 0 24 24" aria-hidden="true">${TOOL_ICONS[k]}</svg>`;
 
-// A canvas's edit mode: a row over it in the chat's own look, its tools named, one line saying what a click does now, or
-// what is selected and what can be done to it, Undo and Done. Sticky, so a tall canvas keeps it in view.
 const TOOLS: Record<EditKind, [string, string, keyof typeof TOOL_ICONS][]> = {
   svg: [["select", "Select", "select"], ["fill", "Fill", "bucket"]],
   page: [["select", "Select", "select"], ["text", "Text", "text"], ["fill", "Fill", "bucket"]],
@@ -2083,7 +1841,6 @@ function addToolbar(paper: HTMLElement, kind: EditKind) {
   paper.before(bar);
   toolbars.set(paper, bar);
 }
-// (one canvas at a time: what a click does is never in doubt)
 function setEditing(paper: HTMLElement, on: boolean) {
   for (const other of document.querySelectorAll<HTMLElement>("[data-editing]")) {
     delete other.dataset.editing;
@@ -2116,8 +1873,6 @@ function syncToolbars() {
   }
 }
 
-// An artifact's picture made pointable and editable: its glow and selection box (inside its shadow root, beside the
-// picture, which drawSvg alone redraws), its toolbar, and the pointer and keys on it.
 function pointable(paper: HTMLElement) {
   const root = paper.shadowRoot!;
   paper.tabIndex = 0;
@@ -2128,8 +1883,6 @@ function pointable(paper: HTMLElement) {
   root.append(style, box);
   addToolbar(paper, "svg");
   const inTools = (e: Event) => e.composedPath().includes(box);
-  // focused for its keys without the scroll a focus brings: a picture partly out of view would move under the pointer
-  // between press and release, and the click land elsewhere
   paper.addEventListener("mousedown", (e) => {
     if (inTools(e)) return;
     e.preventDefault();
@@ -2163,7 +1916,6 @@ function pointable(paper: HTMLElement) {
     e.stopPropagation();
   });
 }
-// Esc lets go of what is selected, then leaves edit mode
 function escape(paper: HTMLElement) {
   if (pinned) {
     pinned = undefined;
@@ -2172,13 +1924,10 @@ function escape(paper: HTMLElement) {
   } else setEditing(paper, false);
 }
 
-// The version a picture shows (an inline canvas, or a side of the shelf), whose source the tools edit
 function shownVersion(paper: HTMLElement): Version | undefined {
   const host = paper.closest<HTMLElement>("[data-art][data-v]");
   return host ? artifactsOf(conv).get(host.dataset.art!)?.[Number(host.dataset.v) - 1] : undefined;
 }
-// An element of the picture as written in its source: by its place among the elements (what the picture was drawn
-// from), else by its id, else by its kind and geometry
 function spanFor(paper: HTMLElement, el: Element, src: string): Span | undefined {
   const svg = pictureOf(paper.shadowRoot)!, drawn = [svg, ...svg.querySelectorAll("*")], k = drawn.indexOf(el);
   const spans = elementSpans(src), from = spans.findIndex((x) => x.tag.toLowerCase() === "svg"), tag = el.tagName.toLowerCase();
@@ -2190,8 +1939,6 @@ function spanFor(paper: HTMLElement, el: Element, src: string): Span | undefined
   const hits = geo.length ? spans.filter((x) => x.tag.toLowerCase() === tag && geo.every((a) => open(x).match(new RegExp(`\\s${a}\\s*=\\s*"([^"]*)"`))?.[1] === el.getAttribute(a))) : [];
   return hits.length === 1 ? hits[0] : undefined;
 }
-// The user's change: the source as they left it, kept at once as the artifact's next version (their own, not sent until
-// the next question) and drawn wherever the artifact is shown
 function editByHand(id: string, base: Version, src: string) {
   if (src === base.src) return;
   ((conv.pending ??= {})[id] ??= { kind: base.kind, srcs: [] }).srcs.push(src);
@@ -2223,7 +1970,6 @@ const fmtTransform = (m: DOMMatrix): string | null => {
   return [r(m.e) || r(m.f) ? `translate(${r(m.e)} ${r(m.f)})` : "", r(m.a) !== 1 ? `scale(${r(m.a)})` : ""].filter(Boolean).join(" ") || null;
 };
 const matrixOf = (el: SVGGraphicsElement) => [...el.transform.baseVal].reduce((m, t) => m.multiply(DOMMatrix.fromMatrix(t.matrix)), new DOMMatrix());
-// An element's transform as the source has it, set (null: taken off)
 function setTransform(paper: HTMLElement, el: Element, t: string | null) {
   const ver = shownVersion(paper), span = ver && spanFor(paper, el, ver.src);
   if (!ver || !span) return void toast("That part could not be found in the artifact's source");
@@ -2233,8 +1979,6 @@ function moveSelected(paper: HTMLElement, dx: number, dy: number) {
   const el = pinned?.paper === paper ? partIn(paper, pinned.sel) : null;
   if (el) setTransform(paper, el, fmtTransform(new DOMMatrix().translate(dx, dy).multiply(matrixOf(el))));
 }
-// A drag on the selection's box moves it, on a corner resizes it about the opposite one; the picture follows the pointer
-// and the change is kept when it is let go
 function dragSelected(paper: HTMLElement, e: PointerEvent) {
   const el = pinned?.paper === paper ? partIn(paper, pinned.sel) : null, box = e.currentTarget as HTMLElement;
   if (!el || e.button !== 0) return;
@@ -2261,7 +2005,7 @@ function dragSelected(paper: HTMLElement, e: PointerEvent) {
   const up = () => {
     box.removeEventListener("pointermove", move);
     if (pre.isIdentity) return;
-    if (was === null) el.removeAttribute("transform"); else el.setAttribute("transform", was);   // the source decides
+    if (was === null) el.removeAttribute("transform"); else el.setAttribute("transform", was);
     setTransform(paper, el, fmtTransform(pre.multiply(cur)));
   };
   box.addEventListener("pointermove", move);
@@ -2286,15 +2030,11 @@ function editSelected(paper: HTMLElement, act: string) {
     editByHand(ver.id, ver, withoutElement(ver.src, span));
   } else if (act === "duplicate") editByHand(ver.id, ver, withCopy(ver.src, span, 12));
   else {
-    if (!pinned!.partId) pinned = undefined;                 // its place among its siblings changes: kept by id only
+    if (!pinned!.partId) pinned = undefined;
     renderPointing();
     editByHand(ver.id, ver, withOrder(ver.src, spans[spans.indexOf(span)], spans, act === "forward"));
   }
 }
-// A page's tools, the picture's turned to a page: outside edit mode it is the page (its own buttons and links); in it,
-// Select (point at a part; move it up or down among its siblings, copy it, delete it), Text (retype it in place) and
-// Fill (an element's background; a shape's fill in an inline picture; an A-Frame entity's color). The page outlines what
-// the pointer is over and says which source element it is (sandbox.js); the change is made to the source, as on a picture.
 const PAGE_MODES: Record<string, string> = { select: "select", text: "text", fill: "bucket" };
 const pageModeOf = (paper: HTMLElement) => PAGE_MODES[toolOf(paper)] ?? "use";
 const pagePin = (paper: HTMLElement) => (pinned?.paper === paper && pinned.cx !== undefined ? pinned.cx : null);
@@ -2318,7 +2058,6 @@ function editPage(paper: HTMLElement, act: string) {
   }
   const src = act === "delete" ? withoutElement(ver.src, span) : act === "duplicate" ? withCopy(ver.src, span)
     : act === "up" || act === "down" ? withOrder(ver.src, span, spans, act === "down") : ver.src;
-  // what was picked stays picked where it can be found: by its id, else (a copy goes after it) where it was
   const at = was.partId ? elementSpans(src).findIndex((x) => idOf(src.slice(x.start, x.openEnd)) === was.partId)
     : act === "duplicate" ? was.cx! : -1;
   pinned = undefined;
@@ -2333,7 +2072,6 @@ function paintPage(paper: HTMLElement, cx: number) {
   let inPicture = false;
   for (let p = span.parent; p >= 0 && !inPicture; p = spans[p].parent) inPicture = spans[p].tag.toLowerCase() === "svg";
   const open = ver.src.slice(span.start, span.openEnd), mat = open.match(/\smaterial\s*=\s*"([^"]*)"/)?.[1];
-  // an A-Frame entity's color is its material's (a primitive's color attribute sets that too)
   const entity = /^a-/i.test(span.tag) && (mat === undefined ? withAttr(open, "color", paintColor)
     : withAttr(open, "material", /(^|;)\s*color\s*:/.test(mat) ? mat.replace(/((?:^|;)\s*color\s*:)[^;]*/, `$1 ${paintColor}`) : `${mat.trim() ? `${mat.replace(/;?\s*$/, "")}; ` : ""}color: ${paintColor}`));
   editByHand(ver.id, ver, setOpen(ver.src, span, entity || (inPicture ? withPaint(open, "fill", paintColor) : withBackground(open, paintColor))));
@@ -2344,8 +2082,6 @@ function retypePage(paper: HTMLElement, cx: number, html: string) {
   editByHand(ver.id, ver, withContent(ver.src, span, html));
 }
 
-// What a version changed in its source, as a unified diff: the lines taken out and put in, with three lines of what
-// stayed around each change, and how much stayed between them
 function diffView(was: Version, ver: Version): HTMLElement {
   const lines = lineDiff(was.src, ver.src), box = h("div", "code art-changes");
   const add = lines.filter((d) => d.op === "+").length, del = lines.filter((d) => d.op === "-").length;
@@ -2363,8 +2099,6 @@ function diffView(was: Version, ver: Version): HTMLElement {
   return box;
 }
 
-// Code changed by hand where it is shown: Edit turns the block into its text to type in, kept as the user's next version
-// when it is left (Done, Ctrl+Enter, or a click elsewhere), dropped with Esc
 function editCode(el: HTMLElement, btn: HTMLElement, ver: Version) {
   const code = el.querySelector<HTMLElement>("pre code")!;
   if (code.isContentEditable) return code.blur();
@@ -2388,18 +2122,12 @@ function editCode(el: HTMLElement, btn: HTMLElement, ver: Version) {
     code.contentEditable = "false";
     el.classList.remove("editing");
     btn.textContent = "Edit";
-    // (a line typed at the very end leaves the browser's own newline after it, to show the caret on)
     const text = (code.textContent ?? "").replace(ver.src.endsWith("\n") ? /(?!)/ : /\n$/, "");
     code.innerHTML = before;
     if (!dropped && text !== ver.src) editByHand(ver.id, artifactsOf(conv).get(ver.id)!.at(-1)!, text);
   }, { once: true });
 }
 
-// Documents (```latex``` and ```markdown``` artifacts): the document as it reads, LaTeX on a paper's page (latex.ts),
-// Markdown as the chat writes it, each drawn block by block so a document being written grows and one changed keeps
-// what stayed. Each block knows where it is in the source (data-at, data-end): pointing at one quotes its source, and the
-// tools change it there, by hand: Text (or a double click) turns a block into its source to retype, and a block picked
-// moves up or down among its siblings, is copied or deleted.
 const DOC_KINDS = new Set(["latex", "tex", "markdown", "md"]);
 const isTex = (kind: string) => kind === "latex" || kind === "tex";
 const MD_CSS = `:host { display: block; }
@@ -2419,8 +2147,6 @@ const DOC_EDIT_CSS = `.doc-body { position: relative; }
 textarea.retype { display: block; box-sizing: border-box; width: 100%; margin: 0.4em 0; padding: 8px 10px; border: 1.5px solid #e24d85; border-radius: 6px;
   background: rgb(255 255 255 / 0.92); color: #1f1b1c; font: 13px/1.5 ui-monospace, "JetBrains Mono", monospace; resize: vertical; outline: none; }
 :host(.busy) .tools { display: none; }`;
-// KaTeX's and highlight.js's rules (the chat's stylesheet has them) for documents' shadow roots, whose math and code
-// would be unstyled without them; their fonts are the page's already
 let docSheet: CSSStyleSheet | undefined;
 function docRules(): CSSStyleSheet {
   if (docSheet) return docSheet;
@@ -2434,7 +2160,6 @@ function docRules(): CSSStyleSheet {
   docSheet.replaceSync(rules.join("\n"));
   return docSheet;
 }
-// A document's HTML, each block marked with its place: LaTeX's (latex.ts) as it makes them; Markdown's by its blocks
 function docHtml(kind: string, src: string, live: boolean): string {
   if (isTex(kind)) return latexToHtml(live ? texSoFar(src) : src);
   const tokens = marked.lexer(src);
@@ -2450,7 +2175,6 @@ function docHtml(kind: string, src: string, live: boolean): string {
   }
   return `<article class="md">${html}</article>`;
 }
-// A LaTeX document being written, up to a display it has not closed yet (that would show as math gone wrong)
 function texSoFar(src: string): string {
   const re = /\\(begin|end)\s*\{(equation|align|gather|multline|eqnarray|flalign|alignat|tabular|array)\*?\}|\\\[|\\\]/g;
   let open = -1;
@@ -2460,7 +2184,6 @@ function texSoFar(src: string): string {
   }
   return open < 0 ? src : src.slice(0, open);
 }
-// The new document's blocks brought in where they differ, the rest left as they are
 function syncChildren(live: Element, next: Element) {
   const have = [...live.childNodes], want = [...next.childNodes];
   want.forEach((w, k) => {
@@ -2524,7 +2247,6 @@ function docAction(btn: HTMLElement) {
   else if (act === "save") download(`${fig.dataset.art ?? "document"}.${isTex(fig.dataset.lang ?? "") ? "tex" : "md"}`, text, "text/plain");
 }
 
-// The block at an event: the innermost with a place in the source
 function docPoint(paper: HTMLElement, e: Event): Point | undefined {
   const host = paper.closest<HTMLElement>("[data-art]"), t = e.composedPath()[0], ver = shownVersion(paper);
   const el = t instanceof Element ? t.closest<HTMLElement>("[data-at]") : null;
@@ -2534,7 +2256,6 @@ function docPoint(paper: HTMLElement, e: Event): Point | undefined {
     label: words.length > 28 ? `${words.slice(0, 26).trimEnd()}…` : words, paper };
 }
 const docBlock = (paper: HTMLElement, at: number) => paper.shadowRoot!.querySelector<HTMLElement>(`[data-at="${at}"]`);
-// The blocks as spans of the source, each with the block it is in, for the structure edits (artifacts.ts)
 function docSpans(paper: HTMLElement): { spans: Span[]; els: HTMLElement[] } {
   const els = [...paper.shadowRoot!.querySelectorAll<HTMLElement>("[data-at]")];
   const spans = els.map((el): Span => {
@@ -2549,7 +2270,6 @@ function docPointable(paper: HTMLElement) {
   addToolbar(paper, "doc");
   const inTools = (_e: Event) => false;
   const retyping = (e: Event) => e.composedPath().some((x) => x instanceof HTMLTextAreaElement);
-  // focused for its keys before the press's own focus, which would scroll a block partly out of view under the pointer
   paper.addEventListener("pointerdown", (e) => { if (!inTools(e) && !retyping(e)) paper.focus({ preventScroll: true }); });
   paper.addEventListener("pointermove", (e) => {
     if (inTools(e) || retyping(e)) return;
@@ -2583,7 +2303,6 @@ function docPointable(paper: HTMLElement) {
     e.stopPropagation();
   });
 }
-// A block turned into its source, to retype where it is; kept as the user's next version when it is left
 function retypeDoc(paper: HTMLElement, p: Point) {
   const ver = shownVersion(paper), el = p.at === undefined ? null : docBlock(paper, p.at);
   if (!ver || !el || paper.classList.contains("busy")) return;
@@ -2631,7 +2350,6 @@ function editDoc(paper: HTMLElement, act: string) {
   editByHand(ver.id, ver, src);
 }
 
-// The selection's box over the part selected, on the picture it was selected in
 function placeSelection(paper: HTMLElement) {
   const box = paper.shadowRoot?.querySelector<HTMLElement>(".sel");
   if (!box) return;
@@ -2642,7 +2360,6 @@ function placeSelection(paper: HTMLElement) {
   Object.assign(box.style, { left: `${r.left - at.left - 3}px`, top: `${r.top - at.top - 3}px`, width: `${r.width + 6}px`, height: `${r.height + 6}px` });
 }
 function glow() {
-  // a selection whose picture was drawn anew (the chat redrawn) is on the artifact's canvas now
   if (pinned && !pinned.paper?.isConnected) pinned.paper = thread.querySelector<HTMLElement>(`.art-canvas[data-art="${CSS.escape(pinned.art)}"] :is(.svg-paper, .page-paper, .doc-paper)`) ?? undefined;
   for (const paper of document.querySelectorAll<HTMLElement>(".svg-paper, .shelf-paper")) {
     const root = paper.shadowRoot, art = paper.closest<HTMLElement>("[data-art]")?.dataset.art;
@@ -2682,15 +2399,12 @@ function renderPointing() {
   x.onclick = () => { pinned = undefined; glow(); renderPointing(); };
   el.replaceChildren(h("span", "", `Pointing at ${pointName(pinned)}`), x);
 }
-// The artifacts changed by hand since the last question: the next one takes them (and the model is told them, editsNote)
 function takeEdits(): Pick<Message, "edits"> {
   const p = conv.pending;
   if (!p || !Object.keys(p).length) return {};
   delete conv.pending;
   return { edits: Object.entries(p).map(([id, e]) => ({ id, kind: e.kind, src: e.srcs.at(-1)! })) };
 }
-// What a new question points at (the part kept, else in voice mode the one under the pointer), as told the model: the
-// part as its artifact has it now (by its id), or as it was drawn.
 function pointFields(said: boolean): Pick<Message, "point" | "pointAt"> {
   const p = pinned ?? (said ? hovered : undefined);
   if (!p) return {};
@@ -2710,39 +2424,35 @@ function pref(key: string, fallback: string) {
   try { return localStorage.getItem(key) ?? fallback; } catch { return fallback; }
 }
 function setPref(key: string, value: string) {
-  try { localStorage.setItem(key, value); } catch { /* private window: keep the default */ }
+  try { localStorage.setItem(key, value); } catch {  }
 }
 function load<T>(key: string, fallback: T): T {
   try { return JSON.parse(sessionStorage.getItem(key) ?? "null") ?? fallback; } catch { return fallback; }
 }
 function store(key: string, value: unknown) {
-  try { sessionStorage.setItem(key, JSON.stringify(value)); } catch { /* full or disabled: kept until a reload */ }
+  try { sessionStorage.setItem(key, JSON.stringify(value)); } catch {  }
 }
 
-// Saved conversations by id, mirrored to sessionStorage. They are copied in and out, so unsaved changes to the
-// open one (turns cut by "edit" and never resent) are not kept.
 const chats: Record<string, Conversation> = load("chats", {});
 let settings = loadSettings();
 let conv = blank();
-const runs = new Map<string, Run>();               // conversation id -> its reply being written
+const runs = new Map<string, Run>();
 const running = (c: Conversation = conv) => runs.get(c.id);
 let status: Status = { state: "offline" };
-let build = "";                                     // the server's code version when this page loaded
-let follow = true;                                  // keep the newest text in view (see keepUp)
+let build = "";
+let follow = true;
 const views = new Map<Message, View>();
-const tokens = new Map<string, { reasoning: Tok[]; content: Tok[] }>();   // replies' token odds by message id (this page only)
-const tokenView = new Set<string>();                // replies shown as their tokens
-let editing: Message | null = null;                 // the message being edited in place
+const tokens = new Map<string, { reasoning: Tok[]; content: Tok[] }>();
+const tokenView = new Set<string>();
+let editing: Message | null = null;
 
-// Plain-HTTP pages (the web chat on the LAN) get no crypto.randomUUID; getRandomValues works on every page.
 function randomId() {
   return Array.from(crypto.getRandomValues(new Uint8Array(16)), (b) => b.toString(16).padStart(2, "0")).join("");
 }
 
-// A new chat starts with the thinking and the tools the last one was left with.
 function blank(): Conversation {
   let tools: ToolChoice["tools"] | undefined;
-  try { tools = JSON.parse(pref("tools", "null")) ?? undefined; } catch { /* none */ }
+  try { tools = JSON.parse(pref("tools", "null")) ?? undefined; } catch {  }
   return { id: randomId(), title: "New chat", updated: Date.now(), effort: pref("effort", "xhigh") as Effort, messages: [], ...(tools && Object.keys(tools).length ? { tools } : {}) };
 }
 
@@ -2785,18 +2495,18 @@ function messageView(m: Message, i: number): HTMLElement {
   foot.innerHTML = pager(m) + (m.voice ? `<span class="said" title="Said in voice mode">${icon("wave")}</span>` : "")
     + slots([["speak", !!m.content.trim() && !voice, reading === m ? `<button type="button" class="act on" data-act="speak" title="Stop reading">${icon("stop")}</button>` : undefined],
       ["copy", true], ["edit", !running()], ["trash", !running()]]);
-  if (m.note) {                                      // what the app told the model with it: sent, so shown
+  if (m.note) {
     const note = h("details", "msg-note"), sum = h("summary", "", m.voice ? "Voice mode note" : "Note to the model");
     sum.title = "What the app told the model with this message (Settings, Voice mode)";
     note.append(sum, h("div", "msg-note-text", m.note));
     el.append(note);
   }
-  for (const e of m.edits ?? []) {                  // artifacts changed by hand before it: sent with it, whole
+  for (const e of m.edits ?? []) {
     const chip = h("div", "point-chip edit-chip", `you changed ${e.id}`);
     chip.title = "Changed by hand before this message: the model was sent it as it was then";
     el.append(chip);
   }
-  if (m.pointAt) {                                  // what it pointed at in an artifact: the model was told, quoting it
+  if (m.pointAt) {
     const chip = h("div", "point-chip", m.pointAt);
     chip.title = m.point ?? "";
     el.append(chip);
@@ -2813,8 +2523,6 @@ function heardBubble(m: Message): HTMLElement {
   else for (const p of fixedParts(m.content, m.heard)) b.append(typeof p === "string" ? p : fixedSpan(p));
   return b;
 }
-// The user's text as a reply's is shown (chatTokens): speech in quotes in color, *italics*, **bold**. Nothing else
-// is read as Markdown, so pasted code, paths and HTML show as typed, and code in backticks is left as it is.
 function userHtml(s: string): string {
   const re = /```[\s\S]*?(?:```|$)|`[^`\n]*`|\*\*(?=\S)(.+?)(?<=\S)\*\*|\*(?=[^\s*])(.+?)(?<=[^\s*])\*|["“«「『＂]/g;
   let out = "", at = 0;
@@ -2838,9 +2546,6 @@ function fixedSpan(p: Fix): HTMLElement {
   return f;
 }
 
-// A message edited in place: its text, and a reply's thinking. Save keeps the rest of the chat as it is; a question's
-// Send makes it a new version, with a new reply (the old one keeps what followed it). Ctrl+Enter takes the main
-// action, Esc cancels.
 function editorView(m: Message, i: number): HTMLElement {
   const el = h("article", `msg ${m.role} editing`), box = h("div", "editor"), acts = h("div", "editor-acts");
   el.dataset.i = String(i);
@@ -2899,13 +2604,11 @@ function editorView(m: Message, i: number): HTMLElement {
 }
 const fit = (t: HTMLTextAreaElement) => { t.style.height = "auto"; t.style.height = `${Math.min(t.scrollHeight + 2, innerHeight * 0.6)}px`; };
 
-// The versions of the conversation from message i on, the one on screen among them at its place.
 function versionsAt(c: Conversation, i: number): Message[][] {
   const vs = c.messages[i].versions, all = [...(vs?.others ?? [])];
   all.splice(vs?.shown ?? 0, 0, c.messages.slice(i));
   return all;
 }
-// Puts version k of `all` (the versions from message i on) on screen; the others go with its first message.
 function showVersion(c: Conversation, i: number, all: Message[][], k: number) {
   c.messages.splice(i);
   for (const v of all) delete v[0].versions;
@@ -2913,7 +2616,6 @@ function showVersion(c: Conversation, i: number, all: Message[][], k: number) {
   if (others.length) all[k][0].versions = { shown: k, others };
   c.messages.push(...all[k]);
 }
-// A new version from message i on, starting with `head`, made the one on screen (the others keep all that followed them).
 function branch(c: Conversation, i: number, head: Message) {
   if (i >= c.messages.length) return void c.messages.push(head);
   const all = versionsAt(c, i);
@@ -2926,7 +2628,6 @@ function* walk(list: Message[]): Generator<Message> {
     for (const v of m.versions?.others ?? []) yield* walk(v);
   }
 }
-// "‹ 2 / 3 ›" under a message that has other versions; nothing under one that has none.
 function pager(m: Message) {
   const vs = m.versions;
   if (!vs) return "";
@@ -2936,8 +2637,6 @@ function pager(m: Message) {
     `<span class="pager-n" aria-hidden="true">${k + 1} / ${n}</span>${b("next", k < n - 1, "Next version")}</span>`;
 }
 
-// A message's delete. One with other versions takes this version with it (all that followed it), and the next
-// version shows; the rest just loses the message.
 function deleteMessage(i: number) {
   const c = conv;
   if (c.messages[i].versions) {
@@ -2970,14 +2669,11 @@ function assistantView(i: number): View {
   el.dataset.i = String(i);
   think.append(summary, thought);
   el.append(rounds, think, body, calls, notes, foot);
-  // while it streams the thinking box keeps its newest line in view, until it is scrolled up by hand (back at its end,
-  // it follows again)
   thought.addEventListener("wheel", (e) => { if (e.deltaY < 0) thought.dataset.held = "1"; }, { passive: true });
   thought.addEventListener("scroll", () => { if (thought.scrollHeight - thought.scrollTop - thought.clientHeight < 4) delete thought.dataset.held; });
   return { el, think, summary, thought, body, foot, rounds, calls, notes };
 }
 
-// A finished round of a reply with tools: its thinking (closed), its text and its calls, where they happened.
 function roundView(r: Round, m: Message): HTMLElement {
   const el = h("div", "round"), body = h("div", "markdown"), calls = h("div", "tool-cards");
   if (r.reasoning) {
@@ -2991,12 +2687,9 @@ function roundView(r: Round, m: Message): HTMLElement {
   return el;
 }
 
-// Tool calls as cards: what was called, on what (a line of its arguments), and how it went; a click shows the
-// arguments and the result. A call waiting for the user shows its arguments with Allow once, Always allow and Deny.
-// Cards are kept by call id and only their changed parts redrawn, so one stays open (and focused) while it runs.
-const openCards = new Set<string>();                // calls shown with their arguments and result
-const callSince = new Map<string, number>();        // when a call began running, as this page saw it
-const deciding = new Set<string>();                 // calls whose answer is on its way to the server
+const openCards = new Set<string>();
+const callSince = new Map<string, number>();
+const deciding = new Set<string>();
 const LONG_RESULT = 1200;
 function argLine(c: Call) {
   let a: unknown;
@@ -3015,7 +2708,7 @@ function stateText(c: Call, live: boolean) {
 function resultView(c: Call): HTMLElement {
   const box = h("div", "tool-result"), text = c.result ?? "";
   let pretty: string | undefined;
-  try { const j = JSON.parse(text); if (j && typeof j === "object") pretty = JSON.stringify(j, null, 2); } catch { /* not JSON: markdown */ }
+  try { const j = JSON.parse(text); if (j && typeof j === "object") pretty = JSON.stringify(j, null, 2); } catch {  }
   if (pretty !== undefined) box.append(Object.assign(h("pre", "tool-pre"), { textContent: pretty }));
   else {
     const md = h("div", "markdown");
@@ -3032,7 +2725,7 @@ function resultView(c: Call): HTMLElement {
   }
   return box;
 }
-const cardLists = new WeakMap<HTMLElement, Call[]>();   // each list of cards' calls as last drawn (a click redraws it)
+const cardLists = new WeakMap<HTMLElement, Call[]>();
 function syncCards(box: HTMLElement, calls: Call[], m: Message, live: boolean) {
   cardLists.set(box, calls);
   const kept = new Map([...box.children].map((el) => [(el as HTMLElement).dataset.call!, el as HTMLElement]));
@@ -3087,9 +2780,6 @@ function syncCards(box: HTMLElement, calls: Call[], m: Message, live: boolean) {
 }
 const prettyArgs = (args: string) => { try { return JSON.stringify(JSON.parse(args), null, 2); } catch { return args; } };
 
-// Sub-agents (server.ts, subagent()): a call to the Sub-agents tool has a card of its own. Shut, it shows the task's
-// label, what the sub-agent is doing (once it is done, the start of its answer), its tool calls and tokens, and how it
-// went; open, the task as it was given, its work as a reply's rounds are shown, its answer, and Stop for it alone.
 const AGENT_FN = "subagent";
 interface AgentView { task: HTMLElement; log: HTMLElement; think: HTMLDetailsElement; thought: HTMLElement; calls: HTMLElement;
   answerLabel: HTMLElement; answer: { body: HTMLElement; blocks?: Blocks }; notes: HTMLElement; stop: HTMLButtonElement; logShown: number }
@@ -3098,7 +2788,6 @@ function agentArgs(c: Call): { description?: unknown; prompt?: unknown } {
   try { const a = JSON.parse(c.args); return a && typeof a === "object" ? a : {}; } catch { return {}; }
 }
 const agentCalls = (a?: AgentRun) => [...(a?.rounds ?? []).flatMap((r) => r.calls), ...(a?.calls ?? [])];
-// the first line of what it wrote that says something (a heading or a bold label alone does not), as plain words
 function gist(text: string) {
   const lines = text.split("\n").map((l) => l.trim()).filter(Boolean);
   const line = lines.find((l) => !/^#{1,6}\s/.test(l) && !/^\*\*[^*]+\*\*:?$/.test(l)) ?? lines[0] ?? "";
@@ -3162,19 +2851,15 @@ function paintAgent(el: HTMLElement, c: Call, m: Message, live: boolean) {
   syncCards(v.calls, a?.calls ?? [], m, live);
   v.answerLabel.hidden = !a?.content;
   renderBlocks(v.answer, a?.content ?? "", working);
-  // what the web server said of it: a limit reached, a failure, a stop (and what it gave back then)
   const said = [...(a?.notes ?? []), ...(c.state === "failed" || c.state === "stopped" ? [c.result ?? ""] : [])].filter(Boolean);
   if (v.notes.childElementCount !== said.length) v.notes.replaceChildren(...said.map((x) => h("div", "note", x)));
   v.stop.hidden = !(working && m.job);
 }
 
-// Message actions in fixed places: from the right, delete, edit and copy on every message, then a reply's token odds,
-// regenerate and continue. An action that is not available keeps its place empty, so none ever moves.
 type Act = keyof typeof TITLES | "cont";
 const slots = (list: [Act, boolean, string?][]) => list.map(([a, on, html]) => !on ? `<span class="act ghost" aria-hidden="true"></span>`
   : html ?? `<button type="button" class="act" data-act="${a}" title="${TITLES[a as keyof typeof TITLES]}">${icon(a)}</button>`).join("");
 
-// Fill an assistant message's view; `live` while it streams (cheap to call repeatedly).
 function paint(v: View, m: Message, live?: Live) {
   const elapsed = live ? (performance.now() - live.since) / 1000 : 0;
   if (v.roundsShown !== (m.rounds?.length ?? 0)) {
@@ -3183,7 +2868,7 @@ function paint(v: View, m: Message, live?: Live) {
   }
   syncCards(v.calls, m.calls ?? [], m, !!live);
   if (v.notes.childElementCount !== (m.notes?.length ?? 0)) v.notes.replaceChildren(...(m.notes ?? []).map((n) => h("div", "note", n)));
-  if (live && v.foot.dataset.pager !== pager(m)) v.foot.innerHTML = v.foot.dataset.pager = pager(m);   // while it is written, only its versions
+  if (live && v.foot.dataset.pager !== pager(m)) v.foot.innerHTML = v.foot.dataset.pager = pager(m);
   v.think.hidden = !m.reasoning;
   v.think.classList.toggle("live", live?.phase === "thinking");
   if (m.reasoning) {
@@ -3193,7 +2878,7 @@ function paint(v: View, m: Message, live?: Live) {
   const asTokens = !!m.id && tokenView.has(m.id) && tokens.has(m.id);
   v.el.classList.toggle("as-tokens", asTokens);
   if (asTokens) {
-    if (!live) v.tok = undefined;                  // drawn afresh (and with the error, if any) once it is done
+    if (!live) v.tok = undefined;
     paintTokens(v, m);
     if (live) {
       if (live.phase === "thinking" && !v.thought.dataset.held) v.thought.scrollTop = v.thought.scrollHeight;
@@ -3207,8 +2892,7 @@ function paint(v: View, m: Message, live?: Live) {
     v.thought.textContent = m.reasoning;
     if (live && !v.thought.dataset.held) v.thought.scrollTop = v.thought.scrollHeight;
   }
-  if (asTokens) { /* drawn above */ } else if (live?.phase === "waiting") {
-    // while a model loads the sidebar's bar says so; here only the dot
+  if (asTokens) {  } else if (live?.phase === "waiting") {
     v.body.innerHTML = `<p class="waiting">${live.loading ? "" : `${live.note} · ${fmtS(elapsed)}`}</p>`;
     v.shown = v.blocks = undefined;
   } else if (v.shown !== m.content) {
@@ -3226,9 +2910,6 @@ function paint(v: View, m: Message, live?: Live) {
   if (m.edited) facts.push("edited");
   if (s?.seed !== undefined) facts.push(`<button type="button" class="seed" data-act="seed" data-seed="${s.seed}" title="Use this seed for the next replies">seed ${s.seed}</button>`);
   const last = conv.messages.at(-1) === m, busy = !!running();
-  // Continue is spelled out when the reply was cut short (its length limit, Stop, or the tool rounds' limit); after
-  // tool calls it carries on from their results. Writing on from the middle of a reply is Chrysalis's alone (its
-  // prefix): llama.cpp started over and KoboldCpp wrote into the thinking.
   const ranCalls = !!m.calls?.some((c) => c.result !== undefined), canCont = onChrysalis() || ranCalls;
   const cut = m.finish === "length" || m.stopped || (ranCalls && !m.error);
   const cont = cut ? `<button type="button" class="btn" data-act="cont" title="Continue">${icon("cont")}Continue</button>`
@@ -3240,8 +2921,6 @@ function paint(v: View, m: Message, live?: Live) {
   v.foot.querySelector("[data-act=tokens]")?.classList.toggle("on", asTokens);
 }
 
-// A new chat: the butterfly in its sea of characters (ocean.ts), or the logo alone where no canvas can be drawn on. The sea stays
-// behind the chat once it has begun, unless Settings turns that off (kept on this device, as the panels are).
 const ocean = new Ocean($("sea")), seaReady = ocean.start(), seaSwitch = $<HTMLButtonElement>("sea-switch");
 function emptyState() {
   const e = h("div", "empty");
@@ -3261,7 +2940,6 @@ seaSwitch.onclick = () => {
   showSea(on);
 };
 showSea(pref("sea", "on") === "on");
-// The theme: the system's, light or dark (theme.ts), kept on this device too.
 const themePick = $("theme-pick");
 for (const [t, label] of [["system", "System"], ["light", "Light"], ["dark", "Dark"]] as [Theme, string][]) {
   const b = h("button", "", label);
@@ -3271,11 +2949,6 @@ for (const [t, label] of [["system", "System"], ["light", "Light"], ["dark", "Da
   b.onclick = () => { choose(t); markTheme(); };
   themePick.append(b);
 }
-// Connect a device (the top bar, on this computer's own screen only): a QR code of the chat's address, where a new device
-// gets the connect page (setup.ts); the devices asking to join, each with the code it shows, to allow or deny
-// (devices.ts), and the computers asking to link (link.ts), each with the code it shows too; the devices and computers let
-// in; and the authority's fingerprint, which a device's certificate details show too when it trusts this computer and not
-// an impostor's.
 const connectView = $<HTMLDialogElement>("connect-view");
 let known: Set<string> | undefined, joined = "", connectTimer = 0;
 interface Paired { id: string; name: string; added: number; seen: number; kind: "browser" | "computer" }
@@ -3297,7 +2970,7 @@ async function renderConnect() {
   clearTimeout(connectTimer);
   connectTimer = window.setTimeout(renderConnect, 2000);
   const box = $("connect-body");
-  if (!p) {                                         // the web server restarting: the dialog asks again in 2 s
+  if (!p) {
     box.dataset.key = "";
     return void box.replaceChildren(h("p", "set-note", "Cannot reach Chrysalis's web server. Trying again…"));
   }
@@ -3361,8 +3034,6 @@ function openConnect() {
   connectView.showModal();
   void renderConnect();
 }
-// A browser shows it trusts Chrysalis through the trust check (devices.ts), in a frame of the server's
-// (/check-frame): the page's own policy lets images in from itself only. One check at a time.
 let checking: Promise<boolean> | undefined;
 function checkTrust(): Promise<boolean> {
   return checking ??= new Promise<boolean>((done) => {
@@ -3381,8 +3052,6 @@ function markTheme() {
 }
 markTheme();
 
-// A reply as its tokens, tinted by how unsure the model was of each; a click on one shows what else it could have
-// written there. Drawn incrementally while the reply streams.
 function paintTokens(v: View, m: Message) {
   const td = tokens.get(m.id!)!;
   for (const [ch, box] of [["reasoning", v.thought], ["content", v.body]] as const) {
@@ -3403,7 +3072,7 @@ function paintTokens(v: View, m: Message) {
     box.append(frag);
     v.tok[ch] = list.length;
   }
-  v.shown = v.blocks = undefined;                   // markdown is drawn afresh when the view goes back
+  v.shown = v.blocks = undefined;
 }
 
 const SPECIAL: Record<string, string> = { "<|im_end|>": "end of reply", "<|endoftext|>": "end of reply", "</think>": "end of thinking" };
@@ -3413,7 +3082,6 @@ function closeTokPop() {
   $("tokpop").hidden = true;
   thread.querySelector(".tok.picked")?.classList.remove("picked");
 }
-// What else the model could have written at a token; picking one rewrites the reply from there.
 function openTokPop(span: HTMLElement) {
   closeTokPop();
   const m = conv.messages[Number(span.closest<HTMLElement>("article")?.dataset.i)];
@@ -3440,7 +3108,6 @@ function openTokPop(span: HTMLElement) {
   pop.style.top = `${r.bottom + 6 + ph > innerHeight - 8 ? r.top - ph - 6 : r.bottom + 6}px`;
 }
 
-// A picked token rewrites the reply from there as a new version of it (the one it was stays a click away).
 function pickToken(m: Message, ch: "reasoning" | "content", i: number, a: Alt) {
   const c = conv, at = c.messages.indexOf(m);
   if (at < 0 || running(c)) return;
@@ -3449,7 +3116,7 @@ function pickToken(m: Message, ch: "reasoning" | "content", i: number, a: Alt) {
   tokens.set(copy.id!, td);
   if (tokenView.has(m.id!)) tokenView.add(copy.id!);
   branch(c, at, copy);
-  if (SPECIAL[a.t] === "end of reply") {            // nothing to write: the reply just ends there
+  if (SPECIAL[a.t] === "end of reply") {
     td[ch] = td[ch].slice(0, i);
     copy[ch] = before;
     if (ch === "reasoning") { td.content = []; copy.content = ""; }
@@ -3464,7 +3131,6 @@ function pickToken(m: Message, ch: "reasoning" | "content", i: number, a: Alt) {
 
 function renderComposer() {
   const busy = !!running();
-  // in voice mode it ends voice mode (Enter still sends what is typed; Esc talks over the reply)
   sendBtn.innerHTML = icon(busy || voice ? "stop" : "send");
   sendBtn.setAttribute("aria-label", voice ? "End voice mode" : busy ? "Stop" : "Send");
   sendBtn.title = voice ? "End voice mode" : "";
@@ -3474,22 +3140,20 @@ function renderComposer() {
   draftBtn.title = drafting ? "Stop the draft" : input.value.trim() ? "Finish my message (draft)" : "Draft my next message";
   draftBtn.setAttribute("aria-label", draftBtn.title);
   draftBtn.classList.toggle("on", !!drafting);
-  draftBtn.hidden = busy || !conv.messages.length || !onChrysalis();   // Chrysalis's aside and prefix
+  draftBtn.hidden = busy || !conv.messages.length || !onChrysalis();
   $("composer").classList.toggle("drafting", !!drafting);
   renderControls();
-  if (modeOf(conv) !== chatMode) {                  // Settings shows the values of the thinking slider's mode
+  if (modeOf(conv) !== chatMode) {
     chatMode = modeOf(conv);
-    syncSettings();                                 // (it does nothing while Settings is closed)
+    syncSettings();
   }
 }
 
-// Anything differs from the recommended values (what Reset all settings would change).
 const customized = () => settings.system !== DEFAULT_SYSTEM
   || Object.keys(settings.think).length + Object.keys(settings.fast).length > 0
   || !!settings.max_tokens || settings.seed !== undefined || !!settings.allow?.length || settings.fetchChars !== undefined
   || Object.keys(settings.voice ?? {}).length > 0;
 
-// Chrysalis, the characters and the groups, each a folder of its chats (castRow its head), the latest-used first
 function renderList() {
   const folders = [...[...people.values()].filter((p) => p.kind !== "persona"), ...groups.values()].map((x) => ({ id: x.id, list: chatsOf(x.id), at: x.added }));
   $("conversations").replaceChildren(...folders.sort((a, b) => (b.list[0]?.updated ?? b.at) - (a.list[0]?.updated ?? a.at)).map(({ id, list }) => {
@@ -3503,7 +3167,6 @@ function renderList() {
     return box;
   }));
 }
-// how long ago, as a chat's row says it
 function ago(t: number) {
   const s = (Date.now() - t) / 1000;
   return s < 60 ? "now" : s < 3600 ? `${Math.floor(s / 60)}m` : s < 86400 ? `${Math.floor(s / 3600)}h` : s < 7 * 86400 ? `${Math.floor(s / 86400)}d`
@@ -3512,7 +3175,7 @@ function ago(t: number) {
 function convRow(s: Conversation) {
   const a = h("a", `conv${s.id === conv.id ? " active" : ""}${runs.has(s.id) ? " running" : ""}`), del = h("button", "conv-del", "×");
   a.href = `#${s.id}`;
-  a.onclick = (e) => { if (!e.defaultPrevented) closeOver(panes.conversations); };   // the open chat too (no hash change)
+  a.onclick = (e) => { if (!e.defaultPrevented) closeOver(panes.conversations); };
   del.type = "button";
   del.title = "Delete";
   del.onclick = (e) => {
@@ -3526,9 +3189,6 @@ function convRow(s: Conversation) {
   return a;
 }
 
-// The model picker: what this machine's Chrysalis service has loaded (or is loading); while it is stopped, what Load
-// will start. With any other backend, one of its models: the one last picked there while it still lists it (Chrysalis
-// elsewhere: not its -fast twins, which thinking off picks).
 let picked = pref("model", MODELS[0][0]);
 const onChrysalis = () => status.backend?.chrysalis ?? true;
 const onService = () => status.backend?.service ?? true;
@@ -3540,13 +3200,8 @@ const otherModel = () => {
   const mine = pref(`model@${status.backend?.url}`, "");
   return listed().includes(mine) ? mine : listed()[0] ?? mine;
 };
-// A model picked that Chrysalis has not switched to yet: it waits for the replies being written, reporting the model it
-// has meanwhile, and a question asked then is for the one picked (asked for the other, it switched there and back)
 let switching: string | undefined;
 const current = () => !onService() ? otherModel() : switching ?? status.loading ?? (status.state === "online" ? status.model : undefined) ?? picked;
-// A quick answer beside the chat (a title, what speech recognition misheard): Chrysalis's model with thinking off, or
-// the other backend's with the standard way to turn it off, which llama.cpp, Ollama, LM Studio and vLLM honor (KoboldCpp
-// writes a line of thinking first) and Ollama takes for a model that does not think too.
 const quick = () => (onChrysalis() ? { model: `${current()}-fast` } : { model: current(), reasoning_effort: "none" });
 
 async function start() {
@@ -3559,7 +3214,7 @@ async function pickModel(model: string) {
   switching = undefined;
   if (status.state !== "online" || status.model === model) return renderStatus();
   switching = model;
-  status = { ...status, loading: model, progress: undefined };   // shown at once; the page polls while Chrysalis switches
+  status = { ...status, loading: model, progress: undefined };
   renderStatus();
   if (!conv.messages.length) render();
   try {
@@ -3571,7 +3226,6 @@ async function pickModel(model: string) {
   }
 }
 
-// The engine's state lives with the model in the message box (renderControls): nothing of it in the sidebar.
 function renderStatus() {
   renderControls();
 }
@@ -3581,31 +3235,28 @@ async function refreshStatus(again = true) {
   const was = current();
   try {
     const r = await fetch("/api/status");
-    // a device on the network this computer has not let in, or one that shows again it trusts Chrysalis, once (devices.ts)
     if (r.status === 401) {
       if ((await r.json().catch(() => ({}))).check && again && await checkTrust()) return refreshStatus(false);
-      return location.replace("/");                // the connect page, in the chat's place
+      return location.replace("/");
     }
     status = await r.json();
-  } catch { status = { state: "offline", backend: status.backend }; }   // the web server unreachable: its backend as it was
-  if (status.check) void checkTrust();             // past half its time: checked again before the gate has to
-  $("connect").hidden = !status.here;              // this computer's own screen only, at whichever address
+  } catch { status = { state: "offline", backend: status.backend }; }
+  if (status.check) void checkTrust();
+  $("connect").hidden = !status.here;
   $("connect").classList.toggle("asking", !!status.waiting);
   if ((status.waiting ?? 0) > asked && !connectView.open) toast("A device is asking to join: Connect a device, the phone at the top");
   asked = status.waiting ?? 0;
   build ||= status.build ?? "";
   if (status.state === "online" && status.model && !status.loading && status.model !== picked) {
-    picked = status.model;                         // the picker follows Chrysalis (another client may have switched it)
+    picked = status.model;
     setPref("model", picked);
   }
   if (current() !== was && !conv.messages.length) render();
-  // The server has newer code: reload into it once nothing would be lost (chats are kept in sessionStorage).
   if (status.build && status.build !== build && !runs.size && !input.value && !panel.contains(document.activeElement)
     && !editing && !drafting) return location.reload();
   renderStatus();
 }
 
-// Saved, or forgotten once it has no messages left (deleting its last one).
 function persist(c: Conversation) {
   if (c.messages.length) return save(c);
   delete chats[c.id];
@@ -3617,24 +3268,14 @@ function save(c: Conversation) {
   if (!c.messages.length) return;
   chats[c.id] = structuredClone(c);
   store("chats", chats);
-  // the address is the open chat's, unless it already names another saved one: a navigation to it that its hashchange has
-  // yet to open (a reply's title saved in between took the address back from it)
   const at = location.hash.slice(1);
   if (c === conv && at !== c.id && !chats[at]) history.replaceState(null, "", `#${c.id}`);
   renderList();
 }
 
-// The request body for a reply after the messages `upto`. Assistant turns go back exactly as Chrysalis sent them, tool
-// rounds and all (wire.ts): Chrysalis then replays its own tokens and every turn is a cache hit (only the new message
-// is read). Chrysalis's reply's tokens come with their odds (log probs, five alternatives each) for the token view.
-// effort: the thinking setting (the chat's by default); sampling: whose values (by default the effort's mode). With
-// tools on, chrysalis_web tells the web server which to offer (it runs them: server.ts); loop: false offers them without
-// running any.
 function request(c: Conversation, upto: Message[], o: { effort?: Effort; sampling?: Mode; final?: object; extra?: Record<string, unknown>; loop?: boolean; route?: boolean; as?: string } = {}) {
   const effort = o.effort ?? c.effort, mode: Mode = effort === "off" ? "fast" : "think";
   const messages: object[] = upto.flatMap(wire), system = systemFor(c), { members, group } = castOf(c);
-  // the cards' instructions for after the chat (the writer's, then the user's) go at the end of the last question:
-  // Chrysalis takes a system turn only first, and the rest of the conversation stays as it was sent before, a cache hit
   const writer = writerOf(c), char = writer?.card.data.name ?? members[0]?.card.data.name ?? "";
   const after = [writer, persona()].map((p) => p?.card.data.post_history_instructions?.trim()).filter(Boolean).map((t) => `[${fillCard(t!, char, userName())}]`);
   const asked = [...messages].reverse().find((x) => (x as { role: string }).role === "user") as { content: string | { type: string; text?: string }[] } | undefined;
@@ -3643,11 +3284,7 @@ function request(c: Conversation, upto: Message[], o: { effort?: Effort; samplin
     if (typeof asked.content === "string") asked.content += note;
     else asked.content = [...asked.content, { type: "text", text: note }];
   }
-  // Chrysalis takes no conversation without a user turn, and a chat with characters begins with theirs (a greeting, a
-  // scene they start): one goes first, the same every time, so what follows stays a cache hit
   if ((members.length || c.messages[0]?.role === "assistant") && (messages[0] as { role: string } | undefined)?.role !== "user") messages.unshift({ role: "user", content: "[The scene begins.]" });
-  // a reply asked of one of a group: who, last, as a note the model reads before it thinks (a reply begun with their
-  // name would skip its thinking)
   const next = o.as && people.get(o.as)?.card.data.name, last = messages.at(-1) as { role: string; content: unknown } | undefined;
   if (next && last?.role === "user" && typeof last.content === "string") last.content += `\n\n[${next} next.]`;
   else if (next) messages.push({ role: "user", content: `[${next} next.]` });
@@ -3661,19 +3298,12 @@ function request(c: Conversation, upto: Message[], o: { effort?: Effort; samplin
     model: chrysalis && effort === "off" ? `${current()}-fast` : current(), reasoning_effort: chrysalis ? (effort === "off" ? undefined : effort) : OTHER_EFFORT[effort],
     ...samplerFields(o.sampling ?? mode), max_tokens: settings.max_tokens, seed: settings.seed, ...(chrysalis ? { logprobs: true, top_logprobs: 5 } : {}),
     messages, stream: true, stream_options: { include_usage: true }, ...(web ? { chrysalis_web: web } : {}),
-    ...(group ? { stop: [`\n${userName()}:`, `\n**${userName()}`] } : {}), ...o.extra,   // a scene never writes the user's lines
+    ...(group ? { stop: [`\n${userName()}:`, `\n**${userName()}`] } : {}), ...o.extra,
   };
 }
-// The thinking bar for another backend, as OpenAI's reasoning_effort. Max sends none, so a model thinks as its backend
-// sets it up: Ollama refuses any other effort for a model that does not think, but takes "none".
 const OTHER_EFFORT: Record<Effort, string | undefined> = { xhigh: undefined, medium: "medium", low: "low", off: "none" };
 const ran = (c: Call) => c.result !== undefined;
-// The end of a reply talked over, as Chrysalis is sent it: kept as it was heard, cut mid-sentence, it taught the model
-// to stop so itself (an essay asked for next came back as a sentence or two in 6 of 6 tries; with this, whole in 5 of
-// 6).
 const TALKED_OVER = " — [cut off: the user talked over this reply]";
-// A message as Chrysalis is sent it: a question as its files and text; a reply as each round's turn with the calls that
-// ran and their results, then its last text (none when it ended in calls). Calls that never ran are left out.
 function wire(m: Message): object[] {
   if (m.role === "user") return [{ role: "user", content: userContent(m) }];
   const ended = !!m.calls?.some(ran);
@@ -3686,16 +3316,11 @@ function wire(m: Message): object[] {
   return out;
 }
 const toolsOn = (c: Conversation) => !!c.tools && Object.keys(c.tools).length > 0;
-// The system prompt as sent: the user's as written; the default says what is true of the chat (no tools, or these).
-// After it, how to make and change artifacts, unless Settings leaves that out.
-// A chat with Chrysalis: Settings' system prompt, then Chrysalis's card as any character's is sent after its chat's
-// own (cast.ts castPrompt), then the artifacts' instructions
 const systemFor = (c: Conversation) => castOf(c).members.length ? castSystem(c)
   : [castPrompt(fill((settings.system.trim() === DEFAULT_SYSTEM && toolsOn(c) ? DEFAULT_SYSTEM_TOOLS : settings.system).trim()),
     [people.get(CHRYSALIS)!.card.data], userCard()),
     settings.artifacts === false ? "" : ARTIFACTS_PROMPT].filter(Boolean).join("\n\n");
 
-// Server-sent events of a reply, as parsed JSON chunks, then DONE.
 const DONE = Symbol("done");
 async function* events(body: ReadableStream<Uint8Array>): AsyncGenerator<any> {
   const reader = body.getReader(), decoder = new TextDecoder();
@@ -3714,7 +3339,7 @@ async function* events(body: ReadableStream<Uint8Array>): AsyncGenerator<any> {
 }
 
 async function ensureOnline(run: { stopping: boolean }) {
-  if (!onService()) {                              // nothing here starts another backend
+  if (!onService()) {
     if (status.state !== "online") await refreshStatus();
     const l = status.backend?.listed;
     if (l && !l.ok) throw new Error(l.error);
@@ -3731,8 +3356,6 @@ async function ensureOnline(run: { stopping: boolean }) {
 
 const CUT_OFF = "The reply was cut off: the web server restarted while it was being written";
 
-// A new reply after the messages before `at`: at the end, or as a new version of the reply at `at` (Regenerate), asked
-// of one of a group (as) if it was.
 async function generate(c: Conversation = conv, at = c.messages.length, as = c.messages[at]?.as) {
   const m: Message = { id: randomId(), role: "assistant", content: "", reasoning: "", params: changed(modeOf(c)) || undefined, effort: c.effort, ...(as ? { as } : {}) };
   branch(c, at, m);
@@ -3740,11 +3363,6 @@ async function generate(c: Conversation = conv, at = c.messages.length, as = c.m
   await startRun(c, m, () => request(c, upto, { as }));
 }
 
-// Writes on from the end of the last reply, or (pick) from one of its tokens replaced by an alternative. Chrysalis is
-// given the reply as it generated it (chrysalis_original), finds the exact tokens to keep and serves them from its
-// cache; it restates the reply as it now stands before the new text. A reply that ended in tool calls (stopped, or at
-// the rounds' limit) carries on from their results instead, in a new round. Both write into the same reply: it grows,
-// it is not another version (a picked token's rewrite is: pickToken).
 function continueReply(m: Message, pick?: { ch: "reasoning" | "content"; i: number; alt: Alt; before: string }) {
   const c = conv, at = c.messages.indexOf(m);
   if (at < 0 || running(c)) return;
@@ -3764,13 +3382,11 @@ function continueReply(m: Message, pick?: { ch: "reasoning" | "content"; i: numb
   const original = { role: "assistant", content: m.content, reasoning_content: m.reasoning ?? "" };
   const final = !pick ? original : pick.ch === "content" ? { ...original, content: pick.before } : { role: "assistant", content: "", reasoning_content: pick.before };
   const extra = pick ? { continue_final_message: true, chrysalis_original: original, chrysalis_append_token: pick.alt.id } : { continue_final_message: true };
-  const upto = [...c.messages.slice(0, at), { ...m, content: "", reasoning: "", calls: undefined }];   // with the reply's earlier rounds
+  const upto = [...c.messages.slice(0, at), { ...m, content: "", reasoning: "", calls: undefined }];
   void startRun(c, m, () => request(c, upto, { effort, final, extra }),
     pick && { t: pick.alt.t, p: pick.alt.p, alts: tokens.get(m.id!)?.[pick.ch][pick.i]?.alts ?? [] });
 }
 
-// body: the request, made once the conversation's files are read (a file that is gone ends the reply with an error)
-// A page being left (reloaded, closed) has its requests failed under it: nothing it records then is true of the reply
 let leaving = false;
 addEventListener("pagehide", () => { leaving = true; });
 async function startRun(c: Conversation, m: Message, body: () => object, pick?: Tok) {
@@ -3783,8 +3399,6 @@ async function startRun(c: Conversation, m: Message, body: () => object, pick?: 
     follow = true;
     render();
   }
-  // kept at once: the job can take seconds to begin (the chat's tools started, a model loading), and a chat left or a
-  // page reloaded meanwhile would otherwise lose the question
   m.starting = true;
   save(c);
   try {
@@ -3801,7 +3415,7 @@ async function startRun(c: Conversation, m: Message, body: () => object, pick?: 
     if (!res.ok || !res.body) throw new Error((await res.json().catch(() => null))?.error?.message ?? `HTTP ${res.status}`);
     m.job = res.headers.get("X-Chrysalis-Job") ?? undefined;
     delete m.starting;
-    save(c);                                       // a reload finds the reply and follows it again
+    save(c);
     if (run.stopping) stopRun(run, true);
     await stream(run, res.body);
   } catch (e) {
@@ -3819,7 +3433,7 @@ async function resume(c: Conversation, m: Message) {
     const res = await fetch(`/api/chat/${m.job}?from=0`);
     if (res.status === 404) throw new Error(CUT_OFF);
     if (!res.ok || !res.body) throw new Error(`HTTP ${res.status}`);
-    m.content = m.reasoning = "";                   // the job's events bring them back, its rounds and calls too
+    m.content = m.reasoning = "";
     m.rounds = m.rounds?.slice(0, m.base ?? 0);
     if (!m.rounds?.length) delete m.rounds;
     m.calls = m.notes = undefined;
@@ -3832,8 +3446,6 @@ async function resume(c: Conversation, m: Message) {
   finish(run);
 }
 
-// Follows a reply to its end. A dropped connection (sleep, network, the server busy) is picked up again from the last
-// event seen, after 0.3, 0.6, 1.2 ... up to 8 s; only a server that no longer knows the reply ends it.
 async function stream(run: Run, body: ReadableStream<Uint8Array> | null) {
   for (let attempt = 0; ; ) {
     if (body) {
@@ -3844,7 +3456,7 @@ async function stream(run: Run, body: ReadableStream<Uint8Array> | null) {
           if (ev === DONE) return;
           take(run, ev);
         }
-      } catch { /* the connection dropped */ }
+      } catch {  }
     }
     body = null;
     if (run.stopping && run.at === 0 && !run.m.job) throw new DOMException("stopped", "AbortError");
@@ -3852,16 +3464,15 @@ async function stream(run: Run, body: ReadableStream<Uint8Array> | null) {
     const res = await fetch(`/api/chat/${run.m.job}?from=${run.at}`).catch(() => null);
     if (res?.status === 404) throw new Error(CUT_OFF);
     if (res?.ok) body = res.body;
-    else if (run.stopping) throw new DOMException("stopped", "AbortError");   // Stop while the server is unreachable
+    else if (run.stopping) throw new DOMException("stopped", "AbortError");
   }
 }
 
-// One event of a reply into its message, and onto the screen on the next frame.
 function take(run: Run, ev: any) {
   const { m, live } = run, choice = ev.choices?.[0], d = choice?.delta ?? {}, now = performance.now(), v = views.get(m);
   if (ev.error) m.error = ev.error.message;
   if (choice?.finish_reason) m.finish = choice.finish_reason;
-  if (d.chrysalis_prefix) {                             // a continued reply as it now stands (no thinking comes as a line break)
+  if (d.chrysalis_prefix) {
     m.reasoning = d.chrysalis_prefix.reasoning_content?.trim() ? d.chrysalis_prefix.reasoning_content : "";
     m.content = d.chrysalis_prefix.content ?? "";
     keepTokens(m, run.pick);
@@ -3876,7 +3487,6 @@ function take(run: Run, ev: any) {
   }
   if (ev.stopped) m.stopped = true;
   if (ev.timing) run.timing = ev.timing;
-  // the context as it grows: each text event is a token (its exact count comes with the round's usage)
   if (ev.chrysalis_prompt) { run.read = ev.chrysalis_prompt.prompt_tokens; run.written = 0; }
   if (d.content || d.reasoning_content) run.written = (run.written ?? 0) + 1;
   if (ev.usage) {
@@ -3887,7 +3497,7 @@ function take(run: Run, ev: any) {
   }
   if (ev.seed !== undefined) run.seed ??= ev.seed;
   for (const c of d.tool_calls ?? []) {
-    if (live.phase !== "writing") {                // a call ends the thinking, as text does
+    if (live.phase !== "writing") {
       if (live.phase === "thinking" && v) v.think.open = false;
       live.phase = "writing";
     }
@@ -3898,7 +3508,7 @@ function take(run: Run, ev: any) {
     const c = m.calls?.find((x) => x.id === ev.agent.id);
     if (c) feedAgent(c, ev.agent.ev, now);
   }
-  if (ev.round) {                                  // the calls' results are in: Chrysalis reads them in a new round
+  if (ev.round) {
     m.rounds = [...(m.rounds ?? []), { content: m.content, ...(m.reasoning ? { reasoning: m.reasoning } : {}), calls: m.calls ?? [] }];
     m.content = m.reasoning = "";
     m.calls = undefined;
@@ -3921,7 +3531,7 @@ function take(run: Run, ev: any) {
     live.phase = "writing";
     m.content += d.content;
   }
-  if (now - run.saved > 2000) {                    // a reload shows the text so far even if the server forgets it
+  if (now - run.saved > 2000) {
     run.saved = now;
     save(run.conv);
   }
@@ -3929,14 +3539,12 @@ function take(run: Run, ev: any) {
   schedule(run);
 }
 
-// A tool call as Chrysalis streams it (by index, its arguments possibly in pieces), the same way server.ts adds them up.
 function addCall(holder: { calls?: Call[] }, t: any) {
   const calls = (holder.calls ??= []), at = (calls[t.index ?? calls.length] ??= { id: "", name: "", args: "" });
   if (t.id) at.id = t.id;
   if (t.function?.name) at.name += t.function.name;
   if (t.function?.arguments) at.args += t.function.arguments;
 }
-// What the web server says of a call as it goes: its state, its result, how long it ran.
 function toolEvent(calls: Call[] | undefined, tool: any, now: number): Call | undefined {
   const c = calls?.find((x) => x.id === tool.id);
   if (!c) return undefined;
@@ -3946,8 +3554,6 @@ function toolEvent(calls: Call[] | undefined, tool: any, now: number): Call | un
   deciding.delete(c.id);
   return c;
 }
-// A sub-agent's event (server.ts: agent) into its call, as a reply's own events go into the reply (take). A call of its
-// that needs the user opens its card: the question is in there.
 function feedAgent(c: Call, ev: any, now: number) {
   const a = (c.agent ??= { content: "", reasoning: "" }), d = ev.choices?.[0]?.delta ?? {};
   if (ev.error) a.error = ev.error.message;
@@ -3965,8 +3571,6 @@ function feedAgent(c: Call, ev: any, now: number) {
   if (ev.note) a.notes = [...(a.notes ?? []), ev.note];
 }
 
-// After Chrysalis restates a continued reply: keep the tokens it still starts with; the rest (a picked alternative)
-// stands in as one token.
 function keepTokens(m: Message, pick?: Tok) {
   const td = m.id && tokens.get(m.id);
   if (!td) return;
@@ -3983,18 +3587,14 @@ function schedule(run: Run) {
   run.frame ||= requestAnimationFrame(() => {
     run.frame = 0;
     const v = views.get(run.m);
-    if (!v) return;                                // its chat is not on screen
+    if (!v) return;
     paint(v, run.m, run.live);
-    if (voice?.reply?.m === run.m) paintSpoken(voice, performance.now(), true);   // its text's nodes are new
+    if (voice?.reply?.m === run.m) paintSpoken(voice, performance.now(), true);
     if (run.conv === conv) { renderMeter(); shelfSoon(); }
     keepUp();
   });
 }
 
-// Following a reply: the newest text stays in view until the user scrolls up (wheel, touch, keys or the scrollbar; a
-// scroll the page makes itself never counts), and again once they are back at the end. Following only scrolls down,
-// so it never takes the page from under someone reading. A figure drawing at the end is shown from its top and the
-// page holds still while it draws (its size is set when it starts).
 function followTarget() {
   const end = scroller.scrollHeight - scroller.clientHeight;
   const fig = thread.querySelector<HTMLElement>(".msg:last-child .svg-fig.drawing");
@@ -4012,12 +3612,10 @@ function stopFollowing() {
   follow = false;
   keepUp();
 }
-setInterval(() => { for (const r of runs.values()) schedule(r); }, 250);   // the elapsed-time labels
+setInterval(() => { for (const r of runs.values()) schedule(r); }, 250);
 
 function finish(run: Run) {
   const { conv: c, m, usage, timing: t } = run;
-  // A reply with tool rounds counts as one: time to its first token, its tokens over the time spent writing them
-  // (each round's first token to its last: not the tools' time, nor reading their results), all its prompts.
   if (usage && t?.first && t.last) {
     m.stats = {
       ttft: (t.first - t.start) / 1000, tps: usage.completion_tokens / Math.max((t.gen || t.last - t.first) / 1000, 1e-3),
@@ -4033,7 +3631,7 @@ function finish(run: Run) {
   } else if (voice?.reply?.m === m) endSaying(voice.reply);
   if (voice?.c === c) tellVoice(voice);
   const unrun = (m.calls ?? []).filter((x) => !x.state);
-  if (unrun.length && !m.error && !m.stopped && !toolsOn(c))   // shown, not dropped: the reply would otherwise just stop
+  if (unrun.length && !m.error && !m.stopped && !toolsOn(c))
     m.error = `The model asked to run ${[...new Set(unrun.map((x) => x.name))].join(", ")}, but this chat has no tools on, so the reply ends here.`;
   delete m.job;
   delete m.base;
@@ -4051,9 +3649,6 @@ function finish(run: Run) {
   else if (talking) { talking = 0; renderCastNext(); }
 }
 
-// An edit that did not apply in full (a SEARCH not in the artifact, a shape it could not place) is asked for again, once,
-// in a question of the app's own: what went wrong, and the artifact as it is now to copy from. Not in voice mode, where
-// the reply would be spoken, nor after a reply that was stopped or failed, nor for the reply to such a question.
 function redoEdits(c: Conversation, m: Message) {
   const at = c.messages.indexOf(m);
   if (m.error || m.stopped || voice?.c === c || at !== c.messages.length - 1 || c.messages[at - 1]?.fix || runs.has(c.id)) return;
@@ -4071,8 +3666,6 @@ function redoEdits(c: Conversation, m: Message) {
   void generate(c);
 }
 
-// Stop: Chrysalis stops and the reply ends with what it has. (Without a job yet, generate() sends this once it has
-// one.)
 function stopRun(run: Run, now = false) {
   if (talking) { talking = 0; renderCastNext(); }
   if (run.stopping && !now) return;
@@ -4080,12 +3673,10 @@ function stopRun(run: Run, now = false) {
   if (run.m.job) void fetch(`/api/chat/${run.m.job}/stop`, { method: "POST" }).catch(() => {});
 }
 
-// Titles come from the -fast model with a title-generator prompt, which Chrysalis runs as a low-priority request (with
-// another backend, its model with thinking off: quick).
 async function name(c: Conversation) {
   c.named = true;
   const first = c.messages.find((m) => m.role === "user");
-  if (!first) {                                      // a scene begun by its characters: the group's name
+  if (!first) {
     c.title = nameOf(folderOf(c));
     return save(c);
   }
@@ -4097,11 +3688,10 @@ async function name(c: Conversation) {
         { role: "user", content: (first.content || (first.files ?? []).map((f) => f.name).join(", ")).slice(0, 2000) },
       ] }),
     });
-    // a model that thinks whatever it is sent fills the 24 tokens with thinking (KoboldCpp's, cut off, as the answer)
     const choice = (await res.json()).choices?.[0], cut = !onChrysalis() && choice?.finish_reason === "length";
     const title: string | undefined = cut ? undefined : choice?.message?.content?.trim().split("\n")[0]?.replace(/^[\s#*"']+|[\s*"'.]+$/g, "");
     if (title) c.title = title.slice(0, 80);
-  } catch { /* keep the first line of the question */ }
+  } catch {  }
   save(c);
   if (c === conv) $("title").textContent = document.title = c.title;
 }
@@ -4121,45 +3711,35 @@ function submit(text: string, reply = true) {
   else save(conv);
 }
 
-// Voice mode: the message box becomes a dock (the orb, what it is doing, mute and end) and the conversation goes on in
-// the chat as ordinary messages. voice.ts carries the sound; here what the user said becomes a question, its reply's
-// text is spoken as it is written, and talking over a reply keeps only what was heard of it.
 type VoicePhase = "starting" | "listening" | "thinking" | "speaking" | "muted" | "error";
-// sent and spoken: code points of its spoken text (sayable) given to the service, and through the piece last heard to
-// begin; sounding: that piece, its text's range and its speech's time (VoiceHandlers.spoken); ended: say_end sent
 interface VoiceReply {
   m: Message; sent: number; spoken: number; audible: boolean; ended?: boolean;
   sounding?: { from: number; to: number; at: number; secs: number };
 }
 interface VoiceMode {
   client: VoiceClient; c: Conversation; ready?: VoiceReady; muted: boolean; partial: string; error?: string;
-  reply?: VoiceReply;                               // being spoken, or about to be
-  merge?: Message;                                  // a question whose reply was talked over before it said a word: the next turn joins it
+  reply?: VoiceReply;
+  merge?: Message;
   latency?: number;
-  now: { voice?: string; speed?: number };          // what the service speaks with: its ready's, then what it was asked
-  asked?: VoiceAsk; pushed?: string;                // the last hello or config; the last config (a refused one is not sent again as is)
-  defaults: { tts?: string; voices: Record<string, string> };   // what it runs when not told (voices: by voice model)
-  level: number; frame: number;                    // the pill's dots: the level they show, their animation frame
-  check: { role: string; content: string }[];      // the session's check conversation (CHECK)
-  asking: Asking;                                   // the checks of the question being said
-  ahead?: Ahead;                                    // its reply, begun before the question stands
+  now: { voice?: string; speed?: number };
+  asked?: VoiceAsk; pushed?: string;
+  defaults: { tts?: string; voices: Record<string, string> };
+  level: number; frame: number;
+  check: { role: string; content: string }[];
+  asking: Asking;
+  ahead?: Ahead;
 }
 let voice: VoiceMode | null = null;
-// The service's models and voices as its last ready listed them, so Settings can offer them while voice mode is closed.
 let voiceCatalog: VoiceReady["catalog"] = (() => { try { return JSON.parse(pref("voice-catalog", "{}")) ?? {}; } catch { return {}; } })();
-const cuts = new Map<Message, number | null>();     // replies talked over while still written: what to keep once they end (null: none of it)
+const cuts = new Map<Message, number | null>();
 const voicePrompt = () => settings.voice?.prompt ?? DEFAULT_VOICE_PROMPT;
 const voiceNote = (c: Conversation) => fill([voicePrompt().trim(), toolsOn(c) ? VOICE_TOOLS : ""].filter(Boolean).join(" "));
-// The note a new question carries, if any: voice mode's where it starts or its note changed, the typing one where it
-// ends (a note marks which: a voice question's note is the voice one).
 function noteFor(c: Conversation, said: boolean): string | undefined {
   const users = c.messages.filter((m) => m.role === "user"), prev = users.at(-1);
   if (!said) return prev?.voice ? VOICE_OFF : undefined;
   const last = users.findLast((m) => m.note && m.voice)?.note, note = voiceNote(c);
   return note && (!prev?.voice || last !== note) ? note : undefined;
 }
-// The conversation as speech recognition is told it, to listen for its names (voice/parts.py, terms): the model's name
-// (one the user says), the system prompt, and the chat's last few thousand characters.
 function tellVoice(v: VoiceMode) {
   const chat = v.c.messages.map((m) => m.content).join("\n");
   v.client.context(`${modelName(current())}\n${systemFor(v.c)}\n${chat.slice(-4000)}`);
@@ -4173,7 +3753,6 @@ async function openVoice() {
     ready: (r) => {
       if (!mine()) return;
       const v = voice!, asked = v.asked ?? {}, first = !v.ready;
-      // what it chose for what it was not asked: the parts after the hello, a voice after a voice model's switch
       if (first && !asked.stack?.tts) v.defaults.tts = r.stack.tts;
       if ((first || asked.stack?.tts) && !asked.voice && r.stack.tts) v.defaults.voices[r.stack.tts] = r.voice;
       v.ready = r;
@@ -4211,7 +3790,6 @@ async function openVoice() {
       if (v && ![...runs.values()].some((r) => r.m === m)) paint(v, m);
     },
     played: (id) => { if (mine() && voice!.reply?.m.id === id) voice!.reply = undefined; },
-    // before it is ready the dock says why it is not; after, a refused ask (a model not installed) is a note and the rest goes on
     error: (message) => {
       if (!mine()) return;
       if (voice!.ready) return toast(`Voice: ${message}`);
@@ -4223,7 +3801,7 @@ async function openVoice() {
   voice = { client, c: conv, muted: false, partial: "", level: 0, frame: 0, check: [], asking: asking(), now: {}, defaults: { voices: {} }, asked: voiceWant(null) };
   tellVoice(voice);
   renderVoice();
-  if (status.state === "offline" && onService()) void start().then(() => refreshStatus());   // the first question finds the model loaded
+  if (status.state === "offline" && onService()) void start().then(() => refreshStatus());
   if (!navigator.mediaDevices?.getUserMedia) {
     voice.error = "This browser gives no page a microphone";
     return renderVoice();
@@ -4238,14 +3816,13 @@ async function openVoice() {
   }
 }
 
-// Ending voice mode silences it; a reply still being written goes on as text.
 function closeVoice() {
   const v = voice;
   if (!v) return;
   dropAhead(v);
   voice = null;
   cancelAnimationFrame(v.frame);
-  (globalThis as any).CSS?.highlights?.delete("voice-unspoken");   // a reply still being written shows whole
+  (globalThis as any).CSS?.highlights?.delete("voice-unspoken");
   v.client.close();
   setVoicePop(false);
   paintGhost();
@@ -4253,30 +3830,20 @@ function closeVoice() {
   input.focus();
 }
 
-// What a check found for a transcript, and the turn of the check conversation that asked it (kept once the question
-// it checked stands, so the next check is an append to Chrysalis's cache).
 interface Heard { text: string; fixes: Fix[]; tool: boolean; asked?: { role: string; content: string }[] }
-// The checks of the question being said, by transcript: its words as they settle, a pause's, its turn's (each asked
-// once); settled: the newest words speech recognition settled.
 interface Asking { checks: Map<string, Promise<Heard>>; done: Map<string, Heard>; busy?: string; settled?: string }
 const asking = (): Asking => ({ checks: new Map(), done: new Map() });
-// A voice reply begun before its question stands: at a pause (the turn may yet go on), or at the turn while the turn's
-// own check is out. Chrysalis writes it (its tools held: server.ts, HELD_MS) and the service speaks it into the
-// client's hold, so once the turn ended with its words and the check found what it was sent with, it shows and sounds
-// at once. Otherwise it is dropped, and begun again on the question as checked.
 interface Ahead {
-  text: string;                                     // the transcript it answers
-  q: Message;                                       // its question (in the chat from the turn on)
-  sent: string; tool: boolean;                      // the question's words as sent (the fixes known then made), and chrysalis_voice.tool
-  said?: Message;                                   // the question in the chat, once the turn ended with these words
-  check?: Heard;                                    // the check of exactly `text`
+  text: string;
+  q: Message;
+  sent: string; tool: boolean;
+  said?: Message;
+  check?: Heard;
   run: Run; reply: VoiceReply; ended: boolean; live: boolean;
 }
-const unsettled = new WeakSet<Message>();                // questions said aloud whose check is not in yet: grey
-const heardAs = new WeakMap<Message, string>();          // such a question's words as they were heard
+const unsettled = new WeakSet<Message>();
+const heardAs = new WeakMap<Message, string>();
 
-// CHECK of a transcript: a turn of the session's check conversation (begun again when its instructions change: the
-// model, tools on or off; and past 60 turns). A check that fails leaves the words as they were heard.
 function checkOf(v: VoiceMode, text: string): Promise<Heard> {
   const mine = v.asking, asked = mine.checks.get(text);
   if (asked) return asked;
@@ -4300,18 +3867,12 @@ function checkOf(v: VoiceMode, text: string): Promise<Heard> {
   void p.then((h) => mine.done.set(text, h));
   return p;
 }
-// What is known of a transcript: the check of it, or else of the most of its first words.
 function knownFor(v: VoiceMode, text: string): Heard | undefined {
   let best: Heard | undefined;
   for (const h of v.asking.done.values())
     if ((text === h.text || text.startsWith(`${h.text} `)) && (!best || h.text.length > best.text.length)) best = h;
   return best;
 }
-// The words as speech recognition settles them, checked as they come (one check at a time, the newest words next): they
-// show fixed while the user is still talking, and the turn's own, settled as the speech stops, are checked before the
-// turn ends. Only settled ones: a check of each look's words (every 0.3 s of speech) kept Chrysalis busy beside the
-// reply and its slots turning over, so a new chat's reply read its whole prompt again (Flash-Next: 1.1 s to its first
-// token).
 function checkSaying(v: VoiceMode) {
   const mine = v.asking, text = mine.settled && questionFor(v, mine.settled).text;
   if (mine.busy || !text || mine.checks.has(text)) return;
@@ -4324,8 +3885,6 @@ function checkSaying(v: VoiceMode) {
   });
 }
 
-// The question a turn (or a pause) would make: what was heard, joined to the question it goes on (one still being
-// checked, or one whose reply was talked over before it made a sound), if any.
 function questionFor(v: VoiceMode, text: string): { text: string; on?: Message } {
   const last = v.c.messages.at(-1), on = last && (last === v.merge || last === v.ahead?.said) ? last : undefined;
   return on ? { text: `${heardAs.get(on) ?? on.content} ${text}`, on } : { text };
@@ -4358,7 +3917,7 @@ function startAhead(v: VoiceMode, text: string, on?: Message): Ahead {
     }
     a.ended = true;
     if (a.live) finish(run);
-    else if (voice?.ahead === a) endSaying(a.reply);   // its last words are spoken into the hold too
+    else if (voice?.ahead === a) endSaying(a.reply);
   })();
   void checkOf(v, text).then((h) => {
     a.check = h;
@@ -4375,7 +3934,6 @@ function dropAhead(v: VoiceMode) {
   v.client.cancel(a.run.m.id!);
 }
 
-// A pause: a reply on its words begins now, so a turn that ends with them is answered at once.
 function pauseAhead(v: VoiceMode, text: string) {
   if (v.ahead?.said || running(v.c) || status.state !== "online" || status.loading) return;
   const q = questionFor(v, text.trim());
@@ -4384,8 +3942,6 @@ function pauseAhead(v: VoiceMode, text: string) {
   v.ahead = startAhead(v, q.text, q.on);
 }
 
-// The reply begun ahead stands once its words are the turn's and its check found what it was sent with: it joins the
-// chat as it is so far and is heard. Otherwise it goes, and the question as checked is answered.
 function standAhead(v: VoiceMode, a: Ahead) {
   if (voice !== v || v.ahead !== a || !a.said || !a.check) return;
   const c = v.c, said = a.said, fixed = applyFixes(a.text, a.check.fixes), m = a.run.m;
@@ -4421,12 +3977,12 @@ function standAhead(v: VoiceMode, a: Ahead) {
 
 async function voiceTurn(v: VoiceMode, text: string) {
   v.partial = "";
-  v.asking.settled = undefined;                     // the turn's own: what settles next is said after it
+  v.asking.settled = undefined;
   paintGhost();
   text = text.trim();
   if (!text) return;
   const c = v.c;
-  for (let i = 0; running(c) && i < 150; i++) {     // a reply talked over ends within a few ms of its stop
+  for (let i = 0; running(c) && i < 150; i++) {
     if (i === 50) stopRun(running(c)!);
     await sleep(20);
   }
@@ -4453,8 +4009,6 @@ async function voiceTurn(v: VoiceMode, text: string) {
   standAhead(v, a);
 }
 
-// With Chrysalis still starting (or loading another model), a turn waits for its check and then for Chrysalis, as a
-// reply does.
 async function answerLater(v: VoiceMode, text: string, on?: Message) {
   const c = v.c, note = on ? undefined : noteFor(c, true);
   const said: Message = on ?? { role: "user", content: text, voice: true, ...(note ? { note } : {}), ...pointFields(true), ...takeEdits() };
@@ -4466,7 +4020,7 @@ async function answerLater(v: VoiceMode, text: string, on?: Message) {
   unsettled.add(said);
   if (c === conv) render();
   const mine = v.asking, heard = await checkOf(v, text);
-  if (v.asking !== mine || c.messages.at(-1) !== said) return;   // the user went on: the next turn answers for these words
+  if (v.asking !== mine || c.messages.at(-1) !== said) return;
   unsettled.delete(said);
   heardAs.delete(said);
   const fixed = applyFixes(text, heard.fixes);
@@ -4487,25 +4041,16 @@ async function answerLater(v: VoiceMode, text: string, on?: Message) {
   await startRun(c, m, () => request(c, upto, { effort, route: true, extra: { chrysalis_voice: { tool: heard.tool } } }));
 }
 
-// The chat as the next voice turn will send it, read by Chrysalis while the user starts talking: the voice prompt
-// replaces the system prompt (an open chat's whole history is read again) and the first request after a while idle is
-// slow (Flash-Next: 1.7-3.3 s to the first token where 0.07-0.25 s warm), so the first turn would wait for both. One
-// token, through the same job path as a reply (tools and all, so the prompt is the turn's own), and nothing is kept of
-// it.
 async function warmVoice(v: VoiceMode) {
   const effort = v.c.effort;
   await ensureOnline({ stopping: false }).catch(() => {});
   if (voice !== v || running(v.c)) return;
-  // Chrysalis wants a question to answer: a new chat's stands in for the one to come (its snapshot ends with the
-  // prompt)
   const upto: Message[] = v.c.messages.length ? [...v.c.messages] : [{ role: "user", content: "Hi" }];
   const body = { ...request(v.c, upto, { effort }), max_tokens: 1, logprobs: false, top_logprobs: undefined };
   const res = await fetch("/api/chat", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body) }).catch(() => null);
   await res?.body?.cancel().catch(() => {});
 }
 
-// What of a reply is spoken: each round's text and the text being written (thinking never is). It grows only at its
-// end, so what was sent stays a prefix and the service's chunk offsets point into it.
 const sayable = (m: Message) => [...(m.rounds ?? []).map((r) => r.content), m.content].filter(Boolean).join("\n\n");
 function feedVoice(m: Message) {
   const r = voice?.reply?.m === m ? voice.reply : voice?.ahead?.reply.m === m ? voice.ahead.reply : undefined;
@@ -4524,22 +4069,17 @@ function endSaying(r: VoiceReply) {
   voice!.client.done(r.m.id!);
 }
 
-// Talked over (the service heard the user, or the orb or Esc): silent at once, the reply stopped, and the chat keeps
-// what was heard of it, which is also what the model is told it said. A reply that had not said a word yet is taken
-// out, and the user's next words join the question it answered, as one.
 function cutVoice(here: boolean) {
   const v = voice;
   if (!v) return;
   if (here) v.client.stop();
-  const a = v.ahead;                                // not heard yet: the next words join its question
+  const a = v.ahead;
   dropAhead(v);
   if (a?.said) v.merge = a.said;
   const r = v.reply;
   v.reply = undefined;
   renderVoice();
   if (!r) return;
-  // taken out (and the next words joined to its question) only when nothing of it happened yet: a reply that ran tools
-  // keeps them and their results, and what was heard of it
   const worked = !!(r.m.rounds?.length || r.m.calls?.length);
   const keep = r.audible || worked ? heardTo(r) : null, run = running(v.c);
   if (keep === null) v.merge = v.c.messages[v.c.messages.indexOf(r.m) - 1];
@@ -4551,8 +4091,6 @@ function cutVoice(here: boolean) {
   save(v.c);
   if (v.c === conv) render();
 }
-// How far a reply has been heard, in code points of its spoken text: in the piece sounding, at its speech's pace (a
-// word takes about as long as its letters), to the end of the word it is on.
 function heardTo(r: VoiceReply, now = performance.now()): number {
   const s = r.sounding;
   if (!s) return r.spoken;
@@ -4560,8 +4098,6 @@ function heardTo(r: VoiceReply, now = performance.now()): number {
   const at = unitOf(text, s.from + Math.round(f * (s.to - s.from))), word = shownWords(text).findLast((w) => w.start < at);
   return Math.min(s.to, Math.max(s.from, word ? pointOf(text, word.end) : 0));
 }
-// The words of a reply not yet heard, grey (the text being read, style.css ::highlight(voice-unspoken)): those after the
-// place heardTo finds, counted among its shown words as the page shows them (spoken.ts).
 const UNREAD_ELS = ".code, table, .katex, figure, svg, button";
 let spokenAt = 0;
 function paintSpoken(v: VoiceMode, now: number, painted = false) {
@@ -4571,7 +4107,7 @@ function paintSpoken(v: VoiceMode, now: number, painted = false) {
   if (!painted && now - spokenAt < 80) return;
   spokenAt = now;
   const text = sayable(r.m), at = unitOf(text, r.sounding ? heardTo(r, now) : 0);
-  const n = shownWords(text).filter((w) => w.start < at).length;   // the word it is on is heard
+  const n = shownWords(text).filter((w) => w.start < at).length;
   const boxes = [...view.rounds.querySelectorAll<HTMLElement>(":scope > .round > .markdown"), view.body], from = afterWords(boxes, n);
   if (!from) return void reg.delete("voice-unspoken");
   const range = new Range();
@@ -4579,11 +4115,9 @@ function paintSpoken(v: VoiceMode, now: number, painted = false) {
   range.setEnd(view.body, view.body.childNodes.length);
   reg.set("voice-unspoken", new (globalThis as any).Highlight(range));
 }
-// The place after the first n words of these boxes' text as it is shown (runs with a letter or digit, across the
-// inline elements in a block; nothing of what is not read), or null when they hold no more.
 function afterWords(boxes: HTMLElement[], n: number): { node: Text; offset: number } | null {
   let count = 0, inWord = false, wordy = false, block: Element | null = null, end: { node: Text; offset: number } | null = null;
-  const ended = () => {                             // the word under way ended at `end`
+  const ended = () => {
     inWord = false;
     return wordy && ++count === n ? end : null;
   };
@@ -4611,7 +4145,6 @@ function afterWords(boxes: HTMLElement[], n: number): { node: Text; offset: numb
   }
   return inWord && ended() ? end : null;
 }
-// `to` counts code points of the spoken text, as the service does.
 function keepHeard(c: Conversation, m: Message, to: number | null) {
   if (to === null) {
     const at = c.messages.indexOf(m);
@@ -4621,11 +4154,9 @@ function keepHeard(c: Conversation, m: Message, to: number | null) {
   const before = sayable({ ...m, content: "" }), skip = before ? [...before].length + 2 : 0;
   m.content = [...m.content].slice(0, Math.max(0, to - skip)).join("").trimEnd();
   m.interrupted = true;
-  if (m.id) tokens.delete(m.id);                    // its token odds no longer match its text
+  if (m.id) tokens.delete(m.id);
 }
 
-// The user's words while they speak: a faint message at the end of the chat, until the turn makes it a real one. The
-// words checked so far are in their own color, fixed.
 function paintGhost() {
   let g = thread.querySelector<HTMLElement>(".msg.ghost");
   const v = voice, text = v && v.c === conv ? v.partial : "";
@@ -4645,8 +4176,6 @@ function paintGhost() {
   keepUp();
 }
 
-// Listening once the microphone gives audio, whether or not the service has its models yet: it keeps what comes before
-// them, and what is said before the microphone opens (a phone's can take 3 s) is not heard at all.
 function voicePhase(v: VoiceMode): VoicePhase {
   if (v.error) return "error";
   if (!v.client.hearing) return "starting";
@@ -4676,7 +4205,6 @@ function renderVoice() {
   const cur = currentVoice(), name = voiceInfo(cur.tts, cur.id)?.label ?? cur.id ?? "Voice", model = modelLabel("tts", cur.tts);
   pick.innerHTML = `<span class="voice-pick-name">${escapeHtml(name)}</span>${model ? `<span class="voice-pick-model">${escapeHtml(model)}</span>` : ""}${icon("chevron")}`;
   pick.title = `Voice: ${name}${model ? ` (${model})` : ""}`;
-  // the stack heads the voice list; its names, kind by kind, are the meta line's title
   $("voice-meta").textContent = v.ready ? (["stt", "turn", "tts"] as Part[]).map((k) => modelLabel(k, v.ready!.stack[k])).filter(Boolean).join(" · ") : "";
   $("voice-meta").title = v.ready ? Object.entries(v.ready.stack).map(([k, n]) => `${k}: ${n}`).join("\n") : "";
   paintVoice();
@@ -4692,9 +4220,6 @@ function paintVoice() {
   dots.setAttribute("aria-label", phase === "speaking" || phase === "thinking" ? `${text}: talk over the reply` : text);
 }
 
-// The pill's dots: bars the voice being heard stretches, the user's while listening and the reply's while speaking, each
-// a little apart so they read as a voice and not a meter; a wave of light runs along them while thinking and they
-// pulse while voice mode starts. Still dots when muted, with reduced motion, or on an error.
 const DOT_WEIGHT = [0.45, 0.8, 1, 0.8, 0.45];
 function animateVoice(now: number) {
   const v = voice;
@@ -4704,7 +4229,7 @@ function animateVoice(now: number) {
   paintSpoken(v, now);
   const phase = voicePhase(v), still = reducedMotion.matches || phase === "muted" || phase === "error", t = now / 1000;
   const lv = v.client.levels(), target = still ? 0 : Math.min(1, (phase === "speaking" ? lv.out : phase === "listening" ? lv.mic : 0) * 6);
-  v.level += (target - v.level) * (target > v.level ? 0.5 : 0.12);    // quick to rise, slower to fall: it follows syllables
+  v.level += (target - v.level) * (target > v.level ? 0.5 : 0.12);
   const dots = $("voice-dots").children as HTMLCollectionOf<HTMLElement>;
   for (let i = 0; i < dots.length; i++) {
     const wobble = 0.75 + 0.25 * Math.sin(t * 9 + i * 1.7), w = DOT_WEIGHT[i] ?? 1;
@@ -4721,17 +4246,13 @@ function setVoice(change: Partial<VoiceSettings>) {
   if (Object.keys(next).length) settings.voice = next;
   else delete settings.voice;
 }
-// What the settings ask the service for; with voice mode open, what is unset is filled in with what the service runs
-// when not told (so taking a choice back goes back to that).
 function voiceWant(v: VoiceMode | null): VoiceAsk {
   const { members, group } = v ? castOf(v.c) : { members: [] as Person[], group: undefined };
-  const own = !group && members.length === 1 ? voiceOf(members[0].card.data) : undefined;   // a character's own voice
+  const own = !group && members.length === 1 ? voiceOf(members[0].card.data) : undefined;
   const s = { ...(settings.voice ?? {}), ...(own ?? {}) }, d = v?.defaults, tts = s.tts ?? d?.tts, name = s.name ?? (tts ? d?.voices[tts] : undefined);
   const stack: VoiceAsk["stack"] = tts ? { tts } : {};
   return { ...(Object.keys(stack).length ? { stack } : {}), ...(name ? { voice: name } : {}), speed: s.speed ?? 1 };
 }
-// The settings to the service, as far as they differ from what it runs: a model switch it loads (and is ready again),
-// a voice or speed from its next sentence.
 function pushVoice() {
   const v = voice, r = v?.ready;
   if (!v || !r) return;
@@ -4747,7 +4268,6 @@ function pushVoice() {
   Object.assign(v.now, ask.voice ? { voice: ask.voice } : {}, ask.speed ? { speed: ask.speed } : {});
   v.client.config(ask);
 }
-// The voice in use: the settings' pick, else what the service speaks with for its voice model.
 function currentVoice() {
   const s = settings.voice, r = voice?.ready, tts = s?.tts ?? r?.stack.tts;
   return { tts, id: s?.name ?? (r && tts === r.stack.tts ? voice!.now.voice : undefined) };
@@ -4757,9 +4277,7 @@ const LANGS = new Intl.DisplayNames(["en"], { type: "language" });
 const langName = (code: string) => { try { return LANGS.of(code) ?? code; } catch { return code; } };
 const voiceGroup = (x: VoiceInfo) => [langName(x.lang), x.gender ? x.gender[0].toUpperCase() + x.gender.slice(1) : ""].filter(Boolean).join(" · ");
 const modelLabel = (part: Part, name?: string) => (name && voiceCatalog[part]?.find((m) => m.name === name)?.label) || name;
-const setupHint = (part: Part, name: string) => voiceCatalog[part]?.find((m) => m.name === name)?.hint ?? `voice/setup.sh ${name}`;
 
-// A voice from the dock's picker: from the next sentence, and a voice of another voice model switches to that model.
 function pickVoice(tts: string, x: VoiceInfo) {
   const before = { tts: settings.voice?.tts, name: settings.voice?.name };
   setVoice({ tts, name: x.id });
@@ -4768,8 +4286,6 @@ function pickVoice(tts: string, x: VoiceInfo) {
   toast(`Voice: ${x.label}`, () => { setVoice(before); saveSettings(); });
 }
 
-// The voice picker beside the pill, as the message box's model picker: the voice's name, opening the voice models' voices by
-// language and gender, each with a play button for its sample. A model that is not installed shows how to set it up.
 let voicePop = false;
 function setVoicePop(open: boolean, refocus = false) {
   voicePop = open && !!voice;
@@ -4789,8 +4305,12 @@ function renderVoicePop() {
   for (const m of voiceCatalog.tts ?? []) {
     const head = h("div", m.installed ? "voice-model" : "voice-model missing");
     head.append(h("span", "", m.label));
-    if (!m.installed) head.append(h("code", "voice-hint", setupHint("tts", m.name)));
-    head.title = m.installed ? "" : "Not installed: this command sets it up";
+    if (!m.installed) {
+      const get = h("button", "btn small", "Download");
+      get.type = "button";
+      get.onclick = () => { get.disabled = true; get.textContent = "Downloading…"; voice?.client.get(m.name); };
+      head.append(get);
+    }
     rows.push(head);
     if (!m.installed) continue;
     const groups = new Map<string, VoiceInfo[]>();
@@ -4820,11 +4340,9 @@ function renderVoicePop() {
   $("voice-list").replaceChildren(...rows);
 }
 
-// Picked with the clip, dropped anywhere on the page or pasted: shown as chips in the message box until it is sent,
-// then above the message (pictures as pictures). Chrysalis is sent each file before the text that was typed.
 let pending: Attachment[] = [];
-const bodies = new Map<string, string>();               // a file's text, or a picture's data URL, ready for requests
-const thumbs = new Map<string, Promise<string>>();      // a picture's object URL, for showing it
+const bodies = new Map<string, string>();
+const thumbs = new Map<string, Promise<string>>();
 
 const thumb = (a: Attachment) => {
   let u = thumbs.get(a.id);
@@ -4892,9 +4410,6 @@ async function filesReady(msgs: Message[]) {
   }
 }
 
-// A user message as the backend gets it: its files (pictures as images, PDFs as files, videos as videos, texts as fenced
-// blocks; to a backend that is not Chrysalis a PDF or video is a line saying it was left out), then the text typed.
-// Artifacts the user changed by hand before a question, whole as they left them: the model's next edits start from them
 const editsNote = (m: Message) => !m.edits?.length ? undefined : `The user changed ${m.edits.map((e) => e.id).join(", ")} by hand since your ` +
   `last reply. As ${m.edits.length > 1 ? "they are" : "it is"} now:\n\n` + m.edits.map((e) => `\`\`\`${e.kind} ${e.id}\n${e.src}\n\`\`\``).join("\n\n");
 function userContent(m: Message): string | object[] {
@@ -4903,7 +4418,7 @@ function userContent(m: Message): string | object[] {
   const parts: object[] = m.files.map((a) => {
     const body = bodies.get(a.id) ?? "";
     if (a.kind === "image") return { type: "image_url", image_url: { url: body } };
-    if ((a.kind === "pdf" || a.kind === "video") && !onChrysalis())   // attached while the chat was on Chrysalis (attach)
+    if ((a.kind === "pdf" || a.kind === "video") && !onChrysalis())
       return { type: "text", text: `[${a.name}: a ${a.kind === "pdf" ? "PDF" : "video"}, which ${status.backend?.name} is not sent]\n\n` };
     if (a.kind === "pdf") return { type: "file", file: { file_data: body, filename: a.name } };
     if (a.kind === "video") return { type: "video_url", video_url: { url: body } };
@@ -4914,8 +4429,6 @@ function userContent(m: Message): string | object[] {
   return parts;
 }
 
-// Chats live and die with the tab; a file keeps one. Export writes the open chat (or all of them) as JSON, Import adds
-// chats from such files under new ids, so nothing already here is replaced. Token odds stay behind (this page only).
 interface ChatFile { chrysalis: "chats"; version: 1; exported: string; conversations: Conversation[]; files?: Record<string, string> }
 
 function download(name: string, data: string, type: string) {
@@ -4926,7 +4439,6 @@ function download(name: string, data: string, type: string) {
   setTimeout(() => URL.revokeObjectURL(a.href), 1000);
 }
 
-// Attached files go along (every version's): texts as they are, pictures as data URLs.
 async function exportChats(list: Conversation[], name: string) {
   const files: Record<string, string> = {};
   for (const a of list.flatMap((c) => [...walk(c.messages)].flatMap((m) => m.files ?? []))) {
@@ -4940,15 +4452,12 @@ async function exportChats(list: Conversation[], name: string) {
   download(name, JSON.stringify(file, null, 1), "application/json");
 }
 
-const blobOf = (url: string) => {                       // a data URL's bytes (fetch would need connect-src data:)
+const blobOf = (url: string) => {
   const [head, b64] = url.split(",", 2), bytes = Uint8Array.from(atob(b64), (ch) => ch.charCodeAt(0));
   return new Blob([bytes], { type: head.slice(5).split(";")[0] });
 };
 const fileName = (title: string) => `${title.replace(/[^\p{L}\p{N}]+/gu, "-").replace(/^-+|-+$/g, "").slice(0, 60) || "chat"}.chrysalis.json`;
 
-// One chat from a file, or null if it is not one: roles and text only where Chrysalis expects them, tool rounds with
-// their calls as Chrysalis wrote them, versions as the tree they were. Files from before versions and tools have
-// neither.
 const isCall = (c: any) => typeof c?.id === "string" && typeof c.name === "string" && typeof c.args === "string" && (c.result === undefined || typeof c.result === "string");
 const isRound = (r: any) => typeof r?.content === "string" && (r.reasoning === undefined || typeof r.reasoning === "string") && Array.isArray(r.calls) && r.calls.every(isCall);
 function importedMessages(list: unknown, depth = 0): Message[] | null {
@@ -4995,7 +4504,7 @@ async function importFiles(files: FileList) {
       added = added.concat(list.filter(Boolean));
     } catch { bad++; }
   }
-  const theirs = added.filter(castless).length;          // with a character this device has no card of: not anyone else's
+  const theirs = added.filter(castless).length;
   added = added.filter((c) => !castless(c));
   for (const c of added) save(c);
   if (added.length) openConversation(added.at(-1)!.id);
@@ -5004,10 +4513,6 @@ async function importFiles(files: FileList) {
     : theirs && !bad ? `Nothing imported: ${why}` : "Nothing to import: not a chat exported from Chrysalis");
 }
 
-// Chrysalis writes the message the user would likely send next, into the composer to edit and send. It is asked as the
-// assistant (Qwen will not write a user turn: at one it just ends it), without thinking, from the conversation
-// Chrysalis has cached, which it leaves as it was (chrysalis_aside). Text already in the composer is how the draft
-// begins.
 let drafting: { job?: string; stop: boolean } | null = null;
 
 async function draft() {
@@ -5053,11 +4558,10 @@ async function draft() {
   }
 }
 
-// reveal: its folder opens (not where the page opens again at it: the folders stay as they were left)
 function openConversation(id: string, reveal = true) {
   closeVoice();
   stopReading();
-  conv = runs.get(id)?.conv ?? (chats[id] ? structuredClone(chats[id]) : blank());   // a reply being written keeps going
+  conv = runs.get(id)?.conv ?? (chats[id] ? structuredClone(chats[id]) : blank());
   if (reveal) unfold(whoOf(conv));
   closeOver(panes.conversations);
   render();
@@ -5073,7 +4577,6 @@ function newChat(who = "") {
   unfold(who || CHRYSALIS);
   if (who && who !== CHRYSALIS) conv.who = who;
   greet(conv);
-  // the user's own greeting is their first message, in the box to send as it is or change (a character's opens the chat)
   const mine = persona().card.data.first_mes?.trim();
   if (mine && !input.value.trim()) {
     input.value = fillCard(mine, writerOf(conv)?.card.data.name ?? castOf(conv).members[0]?.card.data.name ?? "", userName());
@@ -5097,16 +4600,14 @@ function remove(id: string) {
   else renderList();
 }
 
-// The copy command, from a hidden textarea: every browser has it, and it asks for nothing (the Clipboard API asks for a
-// permission in some).
 function copy(text: string, button: HTMLElement) {
   const area = h("textarea");
   area.value = text;
-  area.readOnly = true;                                  // no on-screen keyboard on phones
-  area.style.cssText = "position: fixed; top: 0; opacity: 0; font-size: 16px";   // 16px: iOS does not zoom
+  area.readOnly = true;
+  area.style.cssText = "position: fixed; top: 0; opacity: 0; font-size: 16px";
   document.body.append(area);
   area.select();
-  area.setSelectionRange(0, text.length);                // iOS ignores select()
+  area.setSelectionRange(0, text.length);
   document.execCommand("copy");
   area.remove();
   const label = button.textContent;
@@ -5115,8 +4616,7 @@ function copy(text: string, button: HTMLElement) {
   setTimeout(() => { button.classList.remove("done"); if (button.classList.contains("copy")) button.textContent = label; }, 1200);
 }
 
-$("svg-zoom").addEventListener("click", (e) => (e.currentTarget as HTMLDialogElement).close());   // a click anywhere closes it
-// a page at full size takes clicks: only one beside it closes it (or Esc)
+$("svg-zoom").addEventListener("click", (e) => (e.currentTarget as HTMLDialogElement).close());
 $("page-zoom").addEventListener("click", (e) => { if (e.target === e.currentTarget) (e.currentTarget as HTMLDialogElement).close(); });
 $("page-zoom").addEventListener("close", () => $("page-zoom").querySelector(".page-zoom-box")!.replaceChildren());
 
@@ -5153,7 +4653,6 @@ thread.addEventListener("click", (e) => {
     if (!tokenView.delete(m.id)) tokenView.add(m.id);
     return render();
   }
-  // switching versions works while a reply is written (in any of them: it goes on, and shows again when its version does)
   if ((act.dataset.act === "prev" || act.dataset.act === "next") && m.versions) {
     const k = m.versions.shown + (act.dataset.act === "prev" ? -1 : 1);
     editing = null;
@@ -5180,7 +4679,6 @@ document.addEventListener("pointerdown", (e) => {
   if (!$("tokpop").hidden && !(e.target as Element).closest("#tokpop, .tok")) closeTokPop();
 });
 
-// A card's head opens and closes it in place (no redraw, so the focus stays); "Show all" opens a long result.
 function toggleCard(btn: HTMLElement) {
   const card = btn.closest<HTMLElement>(".tool-card")!, id = card.dataset.call!;
   if (btn.dataset.act === "more") return void btn.closest(".tool-result")!.classList.remove("long");
@@ -5188,7 +4686,6 @@ function toggleCard(btn: HTMLElement) {
   const m = conv.messages[Number(card.closest<HTMLElement>("article")?.dataset.i)];
   syncCards(card.parentElement!, cardLists.get(card.parentElement!) ?? [], m, running()?.m === m);
 }
-// a call anywhere in a reply's last round, a sub-agent's included (one waiting for the user is there)
 function findCall(calls: Call[] | undefined, id: string): Call | undefined {
   for (const c of calls ?? []) {
     const found = c.id === id ? c : c.agent && (findCall(c.agent.calls, id) ?? c.agent.rounds?.map((r) => findCall(r.calls, id)).find(Boolean));
@@ -5196,7 +4693,6 @@ function findCall(calls: Call[] | undefined, id: string): Call | undefined {
   }
   return undefined;
 }
-// One sub-agent stops (the reply goes on with what it had written)
 function stopAgent(btn: HTMLElement, m: Message) {
   const card = btn.closest<HTMLElement>(".agent-card")!;
   if (!m.job) return;
@@ -5204,8 +4700,6 @@ function stopAgent(btn: HTMLElement, m: Message) {
   void fetch(`/api/chat/${m.job}/agent/${encodeURIComponent(card.dataset.call!)}/stop`, { method: "POST" }).catch(() => {});
 }
 
-// The user's answer to a call that asks first, to the web server (whichever page answers, the reply goes on).
-// Always allow also lets the tool run without asking from now on, in every chat of the tab (Settings lists it).
 async function decide(btn: HTMLElement) {
   const card = btn.closest<HTMLElement>(".tool-card")!, id = card.dataset.call!, decision = btn.dataset.decision!;
   const m = conv.messages[Number(card.closest<HTMLElement>("article")?.dataset.i)], c = findCall(m?.calls, id);
@@ -5230,15 +4724,13 @@ $("composer").addEventListener("submit", (e) => {
   else submit(input.value);
 });
 input.addEventListener("input", () => { grow(); if (!drafting) $("draft").title = input.value.trim() ? "Finish my message (draft)" : "Draft my next message"; });
-input.addEventListener("input", () => { if (talking) { talking = 0; renderCastNext(); } });   // typing joins the scene
+input.addEventListener("input", () => { if (talking) { talking = 0; renderCastNext(); } });
 input.addEventListener("keydown", (e) => {
   if (e.key === "Enter" && !e.shiftKey && !e.isComposing) {
     e.preventDefault();
     submit(input.value);
   }
 });
-// Ctrl+B and Ctrl+, toggle the side panels. Esc stops this chat's reply, unless it is closing something: a menu, a
-// picture at full size, a panel over the chat.
 document.addEventListener("keydown", (e) => {
   const keyed = (e.ctrlKey || e.metaKey) && !e.altKey && !e.shiftKey && PANES.find((p) => e.key.toLowerCase() === p.key);
   if (keyed) {
@@ -5257,9 +4749,6 @@ document.addEventListener("keydown", (e) => {
   const r = running();
   if (r) stopRun(r);
 });
-// Back at the end by scrolling down to it: following again. Only a downward scroll counts: the first pixels of an
-// upward one (a trackpad's small steps, a wheel's smooth scroll) are still at the end, and taking those as a return
-// snapped the page back under the user's hand.
 let lastTop = 0;
 scroller.addEventListener("scroll", () => {
   const down = scroller.scrollTop > lastTop + 0.5;
@@ -5271,10 +4760,10 @@ scroller.addEventListener("wheel", (e) => { if (e.deltaY < 0) stopFollowing(); }
 let touchY = 0;
 scroller.addEventListener("touchstart", (e) => { touchY = e.touches[0].clientY; }, { passive: true });
 scroller.addEventListener("touchmove", (e) => {
-  if (e.touches[0].clientY > touchY + 2) stopFollowing();                  // the finger moves down: the page up
+  if (e.touches[0].clientY > touchY + 2) stopFollowing();
   touchY = e.touches[0].clientY;
 }, { passive: true });
-scroller.addEventListener("pointerdown", (e) => { if (e.target === scroller && e.offsetX >= scroller.clientWidth) stopFollowing(); });   // its scrollbar
+scroller.addEventListener("pointerdown", (e) => { if (e.target === scroller && e.offsetX >= scroller.clientWidth) stopFollowing(); });
 document.addEventListener("keydown", (e) => {
   if (["PageUp", "ArrowUp", "Home"].includes(e.key) && !(e.target as Element).closest?.("input, textarea, select, [contenteditable]")) stopFollowing();
 });
@@ -5305,8 +4794,6 @@ input.addEventListener("paste", (e) => {
   e.preventDefault();
   void addFiles(files);
 });
-// Files dragged over the page light up the message box; dropped anywhere, they are attached (cards join the cast:
-// welcome). A character's row dragged onto a chat with characters joins it.
 let dragDepth = 0;
 const dropsHere = (e: DragEvent) => !!e.dataTransfer?.types.includes("Files")
   || (!!e.dataTransfer?.types.includes(CAST_DRAG) && !!folderOf(conv) && !!(e.target as Element).closest?.("main"));
@@ -5322,7 +4809,6 @@ document.addEventListener("drop", (e) => {
   if (who) join([who]);
   else void addFiles(e.dataTransfer!.files);
 });
-// a row's drag that ends anywhere else (the conversations, outside the window) leaves no drop to say so
 document.addEventListener("dragend", () => { dragDepth = 0; document.querySelector(".composer-box")!.classList.remove("dropping"); });
 $("import").addEventListener("click", () => $("import-file").click());
 $("import-file").addEventListener("change", (e) => {
@@ -5330,15 +4816,9 @@ $("import-file").addEventListener("change", (e) => {
   if (input.files?.length) void importFiles(input.files).finally(() => { input.value = ""; });
 });
 
-// The conversations (left) and Settings (right) work alike: a toggle fixed in the panel's top corner (it never moves)
-// and a key. Where the window has room a panel sits beside the chat (the chat glides to its new place), its inner
-// edge resizes it, and it stays as it was left, width and all; with too little room it slides over the chat, starts
-// closed, and a click outside it or Esc closes it. One panel over the chat at a time.
-const MAIN_MIN = 640;                                    // the chat beside the panels keeps this much (its message box fits)
+const MAIN_MIN = 640;
 const isOpen = (p: Pane) => p.el.hasAttribute("data-open");
 const besideOpen = (p: Pane) => isOpen(p) && p.beside.matches;
-// Changes to the layout while `still` > 0 (a drag, a window being resized, a state restored) take effect at once
-// rather than easing.
 let still = 0;
 function hush() {
   still++;
@@ -5347,8 +4827,6 @@ function hush() {
 function unhush() {
   requestAnimationFrame(() => requestAnimationFrame(() => { if (--still === 0) document.documentElement.classList.remove("no-anim"); }));
 }
-// Each panel's width: the one it was given, as far as the window allows. The chat keeps MAIN_MIN, and Settings gives
-// way to the conversations (down to its minimum) before they give way to it.
 function fitPanes() {
   const { conversations: c, settings: s } = panes, room = innerWidth - MAIN_MIN;
   c.width = Math.round(Math.max(c.min, Math.min(c.preferred, room - (besideOpen(s) ? s.min : 0))));
@@ -5363,7 +4841,7 @@ function setPane(p: Pane, open: boolean, { focus = true, animate = true } = {}) 
   p.toggle.setAttribute("aria-expanded", String(open));
   if (p.beside.matches) setPref(`pane-${p.name}`, open ? "open" : "closed");
   if (open && !p.beside.matches) for (const q of PANES) if (q !== p) closeOver(q);
-  fitPanes();                                            // the other panel may have more room now, or less
+  fitPanes();
   if (open) {
     p.onOpen?.();
     if (focus && !p.beside.matches) p.el.focus({ preventScroll: true });
@@ -5373,15 +4851,11 @@ function setPane(p: Pane, open: boolean, { focus = true, animate = true } = {}) 
 function closeOver(p: Pane) {
   if (isOpen(p) && !p.beside.matches) setPane(p, false, { focus: false });
 }
-// as it was left (beside the chat) or closed (over it), at the width it was given, without sliding there
 function restorePane(p: Pane) {
   const saved = pref(`pane-${p.name}`, "");
   p.preferred = Number(pref(`pane-${p.name}-width`, "")) || p.def;
   setPane(p, p.beside.matches && (saved ? saved === "open" : p.byDefault), { focus: false, animate: false });
 }
-// Dragging the inner edge resizes the panel: it follows the pointer (no easing), within the window's limits, and the
-// width it ends at is kept. A press that does not move (2 px) changes nothing; a double click gives the panel its
-// default width back, eased.
 function resizeWith(p: Pane, rail: HTMLElement) {
   const dir = p.el.dataset.side === "left" ? 1 : -1;
   rail.addEventListener("pointerdown", (e) => {
@@ -5405,7 +4879,7 @@ function resizeWith(p: Pane, rail: HTMLElement) {
       frame ||= requestAnimationFrame(apply);
     };
     const up = (ev: PointerEvent) => { x = ev.clientX; };
-    const end = () => {                                  // capture ends on pointerup and on pointercancel
+    const end = () => {
       cancelAnimationFrame(frame);
       apply();
       rail.classList.remove("dragging");
@@ -5442,14 +4916,10 @@ for (const p of PANES) {
   p.beside.addEventListener("change", () => restorePane(p));
 }
 addEventListener("resize", () => { hush(); fitPanes(); unhush(); });
-// Over the chat, a click outside the panel closes it (and goes on to do what it was for), except on a toast (its Undo).
 document.addEventListener("pointerdown", (e) => {
   const t = e.target as Node;
   for (const p of PANES) if (!p.el.contains(t) && !p.toggle.contains(t) && !$("toast").contains(t)) closeOver(p);
 });
-// Thinking is an energy bar of four stops, Off to Max, always in view: it grows more vivid to the right (Medium flows;
-// Max is brightest: it flows faster, a shine sweeps it, sparks rise from it). The model's name beside the send button
-// opens the models, a flat list; it is the only place a model is chosen (the sidebar shows the engine's state).
 let modelsOpen = false;
 
 function buildControls() {
@@ -5463,7 +4933,6 @@ function buildControls() {
     const b = (e.target as Element).closest<HTMLElement>("[data-stop]");
     if (b) setEffort(Number(b.dataset.stop));
   });
-  // A third of the way to a stop takes it (the thumb leads the hand), and it snaps there in under 0.1 s.
   const stopAt = (x: number, dir: number) => {
     const r = energy.getBoundingClientRect(), t = energy.querySelector<HTMLElement>(".energy-thumb")!.offsetWidth;
     return Math.min(3, Math.max(0, Math.round(((x - r.left - t / 2) / (r.width - t)) * 3 + 0.17 * dir)));
@@ -5505,7 +4974,6 @@ function buildControls() {
   });
 }
 
-// The thinking bar sets what the chat's next reply thinks with, spoken or written.
 const barEffort = (): Effort => conv.effort;
 function setEffort(i: number) {
   const e = EFFORTS[Math.min(3, Math.max(0, i))];
@@ -5515,10 +4983,6 @@ function setEffort(i: number) {
   renderComposer();
 }
 
-// Where replies come from, out in the top bar: the address the web server is connected to, as it is, and a key if the
-// backend wants one. This computer's own screen changes it (server.ts checks it, its model list with the key, before it
-// keeps it); a device sees it, read-only. One off this machine's networks is kept only once the user has seen where
-// their chats would go. The addresses this browser has seen it connected to are offered as it is typed.
 let backendEdited = false;
 function renderBackend() {
   const b = status.backend, form = $("backend");
@@ -5535,14 +4999,12 @@ function renderBackend() {
   key.placeholder = b.key ? "key set" : "API key";
   $("backend-go").hidden = !here || !backendEdited;
   let known: string[] = [];
-  try { known = JSON.parse(pref("backends", "[]")); } catch { /* kept as it was */ }
+  try { known = JSON.parse(pref("backends", "[]")); } catch {  }
   if (!known.includes(b.url)) setPref("backends", JSON.stringify((known = [b.url, ...known].slice(0, 8))));
   const list = $("backend-known");
   if (list.childElementCount !== known.length) list.replaceChildren(...known.map((u) => Object.assign(h("option"), { value: u })));
   renderLink();
 }
-// A computer without the engine (link.ts): a Chrysalis found on the network, to use as this one's once its own screen
-// allows this one, with the code both show; a note under the backend's address, where none of the backend's own is
 function renderLink() {
   const l = status.link, p = l?.pairing, note = $("link-note"), parts: (string | Node)[] = [];
   if (l?.refused) parts.push(l.refused);
@@ -5568,7 +5030,6 @@ function backendNote(text: string, error = false, far = false) {
   $("backend-note").hidden = !text;
   $("backend-far").hidden = !far;
 }
-// back to the backend as it is connected
 function resetBackend() {
   backendEdited = false;
   $<HTMLInputElement>("backend-url").value = status.backend?.url ?? "";
@@ -5609,16 +5070,11 @@ function setModelsOpen(open: boolean, refocus = false) {
   else if (refocus) $("model-btn").focus();
 }
 
-// Tools, beside the thinking bar: a wrench with how many tools this chat has on. It opens them by source: Fetch URL,
-// then each MCP server of the config file with its state, a switch for the whole server and, a click further, one for
-// each of its tools. The choice is the chat's (a new chat starts from the last one, as the thinking bar does) and goes
-// with each request; the web server starts a server the first time a chat turns it on. What a server runs is the
-// config file's alone: nothing here can change it (tools.ts).
 let catalog: Catalog | null = null, toolsOpen = false;
-const shownTools = new Set<string>();               // servers shown with their tools in the popover
-let fetchKnob: HTMLElement | undefined;            // Fetch URL's page length (made with Settings' sliders), under it while it is on
+const shownTools = new Set<string>();
+let fetchKnob: HTMLElement | undefined;
 const JSON_POST = { method: "POST", headers: { "Content-Type": "application/json" } };
-const FETCH_CHARS = 20_000;                         // what Fetch URL gives at a time unless its page length says otherwise (tool-fetch.ts' default)
+const FETCH_CHARS = 20_000;
 const EXAMPLE = '{"mcpServers": {"notes": {"command": "npx", "args": ["-y", "@modelcontextprotocol/server-filesystem", "/home/me/notes"]}}}';
 
 async function loadCatalog(how: { reload?: boolean; connect?: string } = {}) {
@@ -5626,11 +5082,10 @@ async function loadCatalog(how: { reload?: boolean; connect?: string } = {}) {
     const r = how.reload ? await fetch("/api/tools/reload", JSON_POST)
       : how.connect ? await fetch("/api/tools/connect", { ...JSON_POST, body: JSON.stringify({ source: how.connect }) }) : await fetch("/api/tools");
     if (r.ok) catalog = await r.json();
-  } catch { /* the web server is restarting: keep what is shown */ }
+  } catch {  }
   renderTools();
   void watchTools();
 }
-// While a server starts, its state (then its tools) twice a second.
 let watching = false;
 async function watchTools() {
   if (watching) return;
@@ -5655,7 +5110,6 @@ function setTools(next: NonNullable<Conversation["tools"]>) {
   renderTools();
   if (isOpen(panes.settings)) syncSettings();
 }
-// A whole source on (all its tools; `only`: just that one) or off. One that is not running starts now.
 function setSource(id: string, on: boolean, only?: string) {
   const next = { ...conv.tools }, s = catalog?.sources.find((x) => x.id === id);
   if (!on) delete next[id];
@@ -5669,7 +5123,7 @@ function setTool(id: string, name: string, on: boolean) {
   if (!isOn(id)) return void (on && setSource(id, true, name));
   const off = new Set(conv.tools![id].off ?? []), s = catalog?.sources.find((x) => x.id === id);
   if (on) off.delete(name); else off.add(name);
-  if (s && s.tools.every((t) => off.has(t.name))) return setSource(id, false);   // the last one off: the server is off
+  if (s && s.tools.every((t) => off.has(t.name))) return setSource(id, false);
   setTools({ ...conv.tools, [id]: off.size ? { off: [...off].sort() } : {} });
 }
 
@@ -5683,8 +5137,6 @@ function stateLine(s: SourceInfo) {
 }
 const toolTag = (t: ToolInfo) => (t.readOnly ? ["read-only", "Changes nothing: runs without asking"]
   : settings.allow?.includes(t.fn) ? ["runs without asking", "You allowed it for good (Settings, Tools)"] : ["asks first", "Asks you before each run"]);
-// The popover's controls say what they do in data-do (and on which source and tool); data-k names each one, so it
-// keeps the focus across a redraw.
 function keyed<T extends HTMLElement>(el: T, what: string, src = "", tool = ""): T {
   Object.assign(el.dataset, { do: what, src, tool, k: `${what}|${src}|${tool}` });
   return el;
@@ -5730,7 +5182,7 @@ function sourceView(s: SourceInfo): HTMLElement {
     const list = h("div", "tp-tools");
     for (const t of s.tools) {
       const r = h("div", "tp-tool"), [tag, why] = toolTag(t), label = h("span", "tp-tname", t.title), badge = h("span", `tp-tag${t.readOnly ? "" : " asks"}`, tag);
-      label.title = DESCRIPTIONS[t.name] ?? (t.description || t.name);   // what the model is told of it
+      label.title = DESCRIPTIONS[t.name] ?? (t.description || t.name);
       badge.title = why;
       r.append(label, badge, toolSwitch("tool", s.id, t.name, toolOn(s.id, t.name), `${t.title} (${s.label})`));
       list.append(r);
@@ -5752,7 +5204,6 @@ function renderTools() {
   btn.classList.toggle("open", toolsOpen);
   btn.classList.toggle("pending", starting);
   if (!toolsOpen) return;
-  // redrawn only when something in it changed (a poll never takes the focus from it), and the focus is kept
   const pop = $("tools-pop"), key = JSON.stringify([catalog, conv.tools, [...shownTools], settings.allow]);
   if (pop.dataset.key === key) return;
   pop.dataset.key = key;
@@ -5772,7 +5223,7 @@ function renderTools() {
         h("pre", "tp-code", EXAMPLE), "then Reload.");
       parts.push(help);
     }
-    if (settings.allow?.length) {                  // a click makes one ask first again
+    if (settings.allow?.length) {
       const allow = h("div", "tp-allow");
       allow.append(h("span", "tp-allow-label", "Run without asking"), ...settings.allow.map((fn) => {
         const b = keyed(h("button", "chip", fn), "unallow", "", fn);
@@ -5834,10 +5285,6 @@ function buildTools() {
 }
 
 const shortName = (id: string) => modelName(id).replace(/^Qwen3\.8-/, "");
-// Usage, in view: this chat's length against the context (growing while a reply is written: the prompt once Chrysalis
-// has read it, and each token since), and how full Chrysalis's cache of conversations is. The two are spans, so where
-// the row is short the cache's drops out whole rather than cut mid-word (style.css); the title says both in full.
-// Any backend but this machine's Chrysalis service keeps its context and cache to itself: the chat's length alone.
 function renderMeter() {
   const online = status.state === "online" && !status.loading, ctx = status.context ?? 262144;
   const used = status.kv_tokens && status.cache ? 1 - status.cache.free_kv_tokens / status.kv_tokens : 0;
@@ -5862,10 +5309,9 @@ function renderControls() {
   energy.setAttribute("aria-valuenow", String(at));
   energy.setAttribute("aria-valuetext", LEVEL[effort][0]);
   energy.title = `Thinking: ${LEVEL[effort][0]}`;
-  energy.querySelectorAll(".energy-dot").forEach((d, k) => d.classList.toggle("lit", at > 0 && k <= at));   // the stops inside the fill
+  energy.querySelectorAll(".energy-dot").forEach((d, k) => d.classList.toggle("lit", at > 0 && k <= at));
   $("energy-stops").dataset.heat = HEAT[at];
   $("energy-stops").querySelectorAll("button").forEach((b, k) => b.classList.toggle("on", k === at));
-  // the model, and the engine's state: a dot (ready, loading, stopped), the load's progress while it switches
   const state = status.loading || status.state === "loading" ? "loading" : status.state;
   const pct = status.progress == null ? "" : `${Math.round(status.progress * 100)}%`, name = modelName(current());
   const btn = $("model-btn");
@@ -5876,14 +5322,12 @@ function renderControls() {
   btn.setAttribute("aria-expanded", String(modelsOpen));
   btn.classList.toggle("open", modelsOpen);
   renderMeter();
-  // power: unload the model, or load it when it is stopped
   const power = $<HTMLButtonElement>("power");
   power.innerHTML = icon("power");
   power.title = power.ariaLabel = state === "online" ? `Unload ${name}` : state === "loading" ? `Loading ${name}` : `Load ${name}`;
   power.disabled = state === "loading";
-  power.hidden = !onService();                     // another backend loads its models itself
+  power.hidden = !onService();
   if (!modelsOpen) return;
-  // the list (redrawn only when something in it changed, so a poll never takes the focus from it)
   const pop = $("model-pop");
   const key = JSON.stringify([current(), state, pct, listed()]);
   if (pop.dataset.key === key) return;
@@ -5907,7 +5351,6 @@ function renderControls() {
   pop.replaceChildren(...rows);
 }
 
-// Another backend's models, as it lists them: picking one is this browser's choice for that backend.
 function otherRows(down: string): HTMLElement[] {
   if (!listed().length) return [h("div", "model-empty", down || `${status.backend?.name} lists no model to chat with`)];
   return listed().map((id) => {
@@ -5928,23 +5371,19 @@ function otherRows(down: string): HTMLElement[] {
   });
 }
 
-// A panel beside the chat (it opens without moving the chat when there is room). Every change applies to the next
-// reply and can be undone; each value shows what Chrysalis is sent, marked where it differs from the recommended one.
 
 const modeOf = (c: Conversation): Mode => (c.effort === "off" ? "fast" : "think");
-let chatMode: Mode | undefined;                     // the Think setting Settings last showed
-const shownMode = (): Mode => modeOf(conv);             // the values Settings shows: those of the chat's Think setting
+let chatMode: Mode | undefined;
+const shownMode = (): Mode => modeOf(conv);
 
 function loadSettings(): Settings {
   const s = load<(Settings & Record<string, unknown>) | null>("settings2", null);
   if (s) {
-    if (s.system === PLAIN_SYSTEM) s.system = DEFAULT_SYSTEM;   // the plain default (before {{MODEL}}) follows the default
-    // v3 kept a second system prompt for chats with tools, the other texts sent and each tool's description: gone
+    if (s.system === PLAIN_SYSTEM) s.system = DEFAULT_SYSTEM;
     for (const k of ["systemTools", "prompts", "descriptions"]) delete s[k];
     s.v = 4;
     return s;
   }
-  // the earlier shape: one set of values for both modes, and a system prompt added after a built-in line
   const old = load<{ system?: string; sampling?: Record<string, number> } | null>("settings", null);
   const { max_tokens, seed, ...rest } = old?.sampling ?? {};
   return { v: 4, system: [DEFAULT_SYSTEM, old?.system?.trim()].filter(Boolean).join("\n\n"), think: { ...rest }, fast: { ...rest }, max_tokens, seed };
@@ -5958,12 +5397,10 @@ function saveSettings() {
 const value = (mode: Mode, key: SamplerKey) => settings[mode][key] ?? RECOMMENDED[mode][key];
 const orderOf = (mode: Mode) => settings[mode].order ?? STAGES;
 const fmtValue = (key: SamplerKey, v: number) => SAMPLERS[key].step >= 1 ? String(v) : v.toFixed(2);
-// The sampling fields of a request for a mode: only what differs from the recommended values.
 function samplerFields(mode: Mode) {
   const { order, ...rest } = settings[mode];
   return { ...rest, ...(order ? { samplers: order } : {}) };
 }
-// What a reply was drawn with, where it differs from the recommended values (its footer shows it).
 function changed(mode: Mode) {
   const out = (Object.keys(SAMPLERS) as SamplerKey[]).filter((k) => settings[mode][k] !== undefined)
     .map((k) => `${SAMPLERS[k].short} ${fmtValue(k, settings[mode][k]!)}`);
@@ -5990,9 +5427,6 @@ function useSeed(seed: number) {
   toast(`Seed ${seed} is fixed for the next replies`, () => { settings.seed = before; saveSettings(); });
 }
 
-// Two real moments of Qwen3.8-Flash-Next run through Chrysalis's sampler (make_dist in engine/sampler.h) with the
-// settings as they stand: the first name of a reply (what the stages do) and the next name of a list that has started
-// to repeat itself (what presence and DRY do). Each sits above the values it shows.
 
 const FIRST: Cand[] = ODDS.map(([word, c], i) => ({ word, logit: Math.log(c), id: -1 - i }));
 const NEXT: Cand[] = LOOP.cands.map(([t, lp, id]) => ({ word: t.trim(), logit: lp, id }));
@@ -6000,9 +5434,6 @@ const NEXT: Cand[] = LOOP.cands.map(([t, lp, id]) => ({ word: t.trim(), logit: l
 const pct = (p: number) => (p >= 0.995 ? "100%" : p >= 0.01 ? `${Math.round(p * 100)}%` : p > 0 ? "<1%" : "");
 const CUT_BY: Record<Stage, string> = { top_k: "top-k", top_p: "top-p", min_p: "min-p", temperature: "temp 0" };
 
-// A chart: a row per named candidate (the rest share one): the name, a bar for its odds now with a tick where the
-// model had them, and its share, or what cut it (struck through). Min P is a line across the bars. Pointing at a row
-// tells it in the line below; nothing changes size.
 function chart(fig: HTMLElement, shown: number[], tagOf: (r: Odds) => string) {
   const box = h("div", "odd-rows"), min = h("div", "odd-min"), caption = h("figcaption", "odd-caption");
   const els = [...shown, -1].map(() => {
@@ -6037,7 +5468,7 @@ function chart(fig: HTMLElement, shown: number[], tagOf: (r: Odds) => string) {
         o.bar.style.width = `${r.cut ? 0 : r.p * 100}%`;
         o.tick.style.left = `${r.raw * 100}%`;
         o.tag.style.setProperty("--w", `${(r.cut ? r.raw : r.p) * 100}%`);
-        o.tag.classList.toggle("inside", !r.cut && r.p > 0.62);   // a long bar carries its tag at its end
+        o.tag.classList.toggle("inside", !r.cut && r.p > 0.62);
         o.tag.textContent = isRest ? (cuts && !r.cut ? `${cuts} cut` : "") : tagOf(r);
         o.p.textContent = r.cut ? CUT_BY[r.cut] : pct(r.p);
       });
@@ -6052,10 +5483,9 @@ function chart(fig: HTMLElement, shown: number[], tagOf: (r: Odds) => string) {
 }
 
 let drawFirst: ReturnType<typeof chart> | null = null, drawNext: ReturnType<typeof chart> | null = null;
-const LOOP_FROM = LOOP.reply.findIndex(([t]) => t === ":") + 1;   // the reply line shows the list, not its lead-in
+const LOOP_FROM = LOOP.reply.findIndex(([t]) => t === ":") + 1;
 function drawCharts() {
   const mode = shownMode();
-  // the first name of a reply: what the stages keep
   drawFirst ??= chart($("odds-first"), [0, 1, 2, 3, 4, 5], () => "");
   const first = sample(FIRST, [], (k) => value(mode, k), orderOf(mode));
   drawFirst(first.rows, first.minLine, (r, rest) => {
@@ -6068,7 +5498,6 @@ function drawCharts() {
     const kept = first.rows.filter((x) => !x.cut);
     return kept.length === 1 ? `Always <b>${kept[0].word}</b>` : `<b>${kept.length}</b> of ${first.rows.length} names can be drawn <span>· Luna ${pct(first.rows[0].p)}</span>`;
   });
-  // the next name of a list that repeats itself: what presence and DRY push down
   drawNext ??= chart($("odds-next"), [0, 1, 4, 5], (r) => [r.pres > 0 ? "used" : r.pres < 0 ? "used, boosted" : "", r.dry ? "repeats" : ""].filter(Boolean).join(" · "));
   const next = sample(NEXT, LOOP.reply, (k) => value(mode, k), orderOf(mode)), { best } = dryRuns(LOOP.reply), allowed = value(mode, "dry_allowed_length");
   const dryOn = value(mode, "dry_multiplier") > 0 && !!best && best.run >= allowed, presOn = value(mode, "presence_penalty") !== 0;
@@ -6083,9 +5512,6 @@ function drawCharts() {
     const kept = next.rows.filter((x) => !x.cut), topNow = kept.reduce((a, x) => (x.p > a.p ? x : a), kept[0]);
     return `<b>${kept.length}</b> of ${next.rows.length} can be drawn <span>· ${topNow.word} ${pct(topNow.p)}${topNow.word === "Shadow" ? ", the loop goes on" : ""}</span>`;
   });
-  // the reply so far, the run DRY sees and the names presence counts as used marked in it
-  // Each highlighted stretch (the run, both times; what followed it) is one span, and spaces stay outside the marks,
-  // so highlights and underlines cover the words only.
   const line = $("odds-line");
   line.replaceChildren(h("span", "faint", "…"));
   let group: HTMLElement | null = null, groupCls = "";
@@ -6103,11 +5529,10 @@ function drawCharts() {
   line.append(h("i", "caret"));
 }
 
-// One value on one line: label, slider (its fill shows the value, a notch the recommended one), the number, ↺.
 interface KnobSpec {
   id: string; label: string; help: string; min: number; max: number; step: number;
   get(): number; rec(): number; custom(): boolean; set(v: number | undefined): void; fmt(v: number): string;
-  pos(v: number): number; val(pos: number): number;    // value <-> slider position, 0..1
+  pos(v: number): number; val(pos: number): number;
 }
 const knobs: (() => void)[] = [];
 const roundTo = (v: number, step: number) => Math.round(v / step) * step;
@@ -6126,7 +5551,7 @@ function knob(k: KnobSpec) {
   range.min = "0";
   range.max = "1";
   range.step = "any";
-  range.tabIndex = -1;                             // the number takes the keyboard (arrows step it)
+  range.tabIndex = -1;
   range.setAttribute("aria-hidden", "true");
   reset.type = "button";
   reset.innerHTML = icon("retry");
@@ -6135,7 +5560,6 @@ function knob(k: KnobSpec) {
   const commit = (v: number) => {
     if (!Number.isFinite(v)) return sync(true);
     v = Math.min(k.max, Math.max(k.min, roundTo(v, k.step)));
-    // with Chrysalis the recommended value is what it uses unset; another backend's own default is not known here
     k.set(onChrysalis() && Math.abs(v - k.rec()) < k.step / 2 ? undefined : +v.toFixed(6));
     saveSettings();
     sync();
@@ -6156,7 +5580,7 @@ function knob(k: KnobSpec) {
     }
   });
   function sync(force = false) {
-    const v = k.get(), p = k.pos(v), custom = k.custom(), unset = !custom && !onChrysalis();   // left to the backend: not sent
+    const v = k.get(), p = k.pos(v), custom = k.custom(), unset = !custom && !onChrysalis();
     el.classList.toggle("custom", custom);
     el.classList.toggle("unset", unset);
     num.placeholder = unset ? "default" : "";
@@ -6182,7 +5606,6 @@ function samplerKnob(key: SamplerKey) {
 }
 
 function buildSettings() {
-  // the four stages, one row each, in the order the sampler applies them: drag a row by its grip (or arrows on it)
   for (const st of STAGES) {
     const row = samplerKnob(st), grip = h("button", "grip");
     row.dataset.stage = st;
@@ -6224,7 +5647,7 @@ function buildSettings() {
   knobs.push(() => { dryMore.classList.toggle("off", value(shownMode(), "dry_multiplier") <= 0); });
   $("repetition").replaceChildren(samplerKnob("presence_penalty"), samplerKnob("dry_multiplier"), dryMore);
 
-  const LO = 256, HI = () => status.context ?? 262144;   // reply length: powers of two on the slider
+  const LO = 256, HI = () => status.context ?? 262144;
   const maxLen = knob({
     id: "max_tokens", label: "Max length", help: "Max length: the reply stops here; thinking counts toward it.", min: 1, max: 262144, step: 1,
     fmt: (v) => v.toLocaleString("en-US"), get: () => settings.max_tokens ?? MAX_REPLY, rec: () => MAX_REPLY,
@@ -6232,7 +5655,6 @@ function buildSettings() {
     pos: (v) => Math.min(1, Math.max(0, Math.log(v / LO) / Math.log(HI() / LO))),
     val: (p) => 2 ** Math.round(Math.log2(LO) + p * Math.log2(HI() / LO)),
   });
-  // Seed: random for every reply, or fixed. A reply's footer shows its seed; clicking it fixes that one here.
   const seed = h("div", "knob seed-knob"), modes = h("div", "segmented"), num = h("input", "knob-num"), dice = h("button", "act");
   seed.title = "Seed: the same seed, chat and settings draw the same reply. Click a reply's seed to fix it here.";
   const label = h("label", "", "Seed");
@@ -6273,8 +5695,6 @@ function buildSettings() {
   });
   $("reply-knobs").replaceChildren(maxLen, seed);
 
-  // Fetch URL's page length, under it in the tools of a chat: what is safe to change from here (the private-address
-  // rule is the config file's)
   const FLO = 2000, FHI = 100_000;
   fetchKnob = knob({
     id: "fetchChars", label: "Page length", min: FLO, max: FHI, step: 1000,
@@ -6283,7 +5703,6 @@ function buildSettings() {
     custom: () => settings.fetchChars !== undefined, set: (v) => { settings.fetchChars = v; },
     pos: (v) => Math.min(1, Math.max(0, Math.log(v / FLO) / Math.log(FHI / FLO))), val: (p) => Math.round(FLO * (FHI / FLO) ** p / 1000) * 1000,
   });
-  // Voice mode: its prompt, the voice (the service's list, kept from the last time it said), its speed, its thinking.
   const voicePromptInput = $<HTMLTextAreaElement>("voice-prompt");
   voicePromptInput.addEventListener("input", () => {
     setVoice({ prompt: voicePromptInput.value === DEFAULT_VOICE_PROMPT ? undefined : voicePromptInput.value });
@@ -6296,7 +5715,6 @@ function buildSettings() {
     saveSettings();
     toast("The voice prompt is back to the default", () => { setVoice({ prompt: before }); saveSettings(); });
   };
-  // a choice row: label, the select, ↺ back to what the service runs when not told
   const choice = (id: string, label: string, help: string, change: (value: string) => void, reset: () => void) => {
     const row = h("div", "knob voice-choice"), lab = h("label", "", label), select = h("select", "voice-select"), back = h("button", "act knob-reset");
     row.title = help;
@@ -6327,7 +5745,7 @@ function buildSettings() {
       groups.push(...by.values());
     }
     const listed = groups.flatMap((g) => g instanceof HTMLOptionElement ? [g.value] : [...g.querySelectorAll("option")].map((o) => o.value));
-    if (now && !listed.includes(now)) groups.push(new Option(s!.name!, now));   // a voice the service no longer lists
+    if (now && !listed.includes(now)) groups.push(new Option(s!.name!, now));
     pick.select.replaceChildren(...groups);
     pick.select.value = now;
   });
@@ -6368,10 +5786,6 @@ function buildSettings() {
   addEventListener("resize", measureScrollbar);
 }
 
-// What the model is sent: the open chat's next request as the web server builds it for Chrysalis (/api/preview, the
-// same code as a reply's), so it is exactly that: the tools, which Chrysalis's chat template writes first in the system
-// turn, the system prompt after them, then every message as sent, notes included. A file shows as what it is and its
-// size, not its data.
 async function showSent() {
   const c = conv, said = voice?.c === c, effort = c.effort;
   await filesReady(c.messages);
@@ -6399,8 +5813,6 @@ async function showSent() {
   $<HTMLDialogElement>("sent-view").showModal();
 }
 
-// The chat stays put when Settings opens beside it: its column keeps the place it has with Settings closed, as far
-// as the room left allows (style.css), which needs the scrollbar's width.
 function measureScrollbar() {
   document.documentElement.style.setProperty("--sb", `${scroller.offsetWidth - scroller.clientWidth}px`);
 }
@@ -6418,7 +5830,6 @@ function moveStage(stage: Stage, to: number) {
   else settings[shownMode()].order = order;
   saveSettings();
 }
-// The stage rows in the current order; the ones that move glide to their new place.
 function placeStages() {
   const box = $("samplers"), order = orderOf(shownMode()), rows = [...box.children] as HTMLElement[];
   if (rows.map((x) => x.dataset.stage).join() === order.join()) return;
@@ -6440,7 +5851,7 @@ function syncSettings() {
   $("voice-prompt-reset").classList.toggle("on", settings.voice?.prompt !== undefined);
   $("mode-note").textContent = shownMode() === "think" ? "with thinking" : "thinking off";
   $("artifacts-switch").setAttribute("aria-checked", String(settings.artifacts !== false));
-  $("settings").classList.toggle("other-backend", !onChrysalis());   // Chrysalis's sampler order and its odds charts
+  $("settings").classList.toggle("other-backend", !onChrysalis());
   $("order-reset").classList.toggle("on", !!settings[shownMode()].order);
   placeStages();
   for (const sync of knobs) sync();
@@ -6471,7 +5882,6 @@ $("voice-mute").addEventListener("click", () => {
 });
 $("voice-dots").addEventListener("click", () => { if (voice?.reply || voice?.client.playing) cutVoice(true); });
 $("voice-pick").addEventListener("click", () => setVoicePop(!voicePop));
-// the shelf: its button in the top bar, its own buttons, moved by its head (where it is left is kept), sized by its corner
 $("artifacts-switch").addEventListener("click", () => {
   if (settings.artifacts === false) delete settings.artifacts;
   else settings.artifacts = false;
@@ -6511,7 +5921,6 @@ addEventListener("resize", () => { placeShelf(); glow(); });
 placeShelf();
 buildControls();
 buildTools();
-// a page starts by showing it trusts Chrysalis, so that its first requests find the gate open
 await checkTrust();
 void loadCatalog();
 $("to-latest").innerHTML = icon("down");
@@ -6520,7 +5929,7 @@ for (const id of ["system-reset", "order-reset", "voice-prompt-reset"]) $(id).in
 buildSettings();
 for (const p of PANES) restorePane(p);
 await refreshStatus();
-for (const c of Object.values(chats)) {                // a reply being written may be in a version not on screen
+for (const c of Object.values(chats)) {
   const m = [...walk(c.messages)].find((x) => x.role === "assistant" && x.job);
   if (m) void resume(c, m);
   for (const x of walk(c.messages)) if (x.starting) {
@@ -6542,7 +5951,6 @@ for (const c of Object.values(chats)) {                // a reply being written 
 }
 if (location.hash.length > 1) openConversation(location.hash.slice(1), false);
 else render();
-// Every 4 s, or 4 times a second while a model loads (5-20 s).
 (async () => {
   for (;;) {
     await sleep(status.state === "loading" || status.loading ? 250 : 4000);

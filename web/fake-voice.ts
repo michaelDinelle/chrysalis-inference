@@ -1,14 +1,3 @@
-// A speech service for the tests, through CHRYSALIS_VOICE_CMD: voice mode's protocol, played from scripts instead of
-// models. The voice a page asks for picks its script: the user says each line once some microphone audio has come
-// (speech, partials word by word, then the turn), and the reply's text comes back as tone chunks of three words (or
-// up to a clause's end), each lasting 0.12 s a word. "interruptAfter": the user talks over the reply once that many
-// chunks were sent and the page plays them; "interruptOnSay": as soon as the reply's first text arrives, before any
-// sound. "after": the line waits for the page's first config. "goOn": the next line is said straight after this one.
-// "pause": that many frames of silence after the words, which the turn waits out (a pause event at their start, as
-// the service sends when its turn model hears more to come), then the turn, or "more" words in the same turn.
-// Its catalog (in ready, or asked for alone) has a second voice model to switch to and one not installed (refused, as the
-// real service refuses it); a preview speaks a voice's sample as chunks of the reply "preview", hello or not. Every message, every chunk (with the voice that
-// spoke it), the audio frames counted and its own start and exit go to FAKE_VOICE_LOG as JSON lines.
 import { appendFileSync } from "node:fs";
 
 interface Line { text: string; interruptAfter?: number; interruptOnSay?: boolean; after?: "config"; goOn?: boolean; pause?: number; more?: string }
@@ -43,7 +32,7 @@ const RATE = 24000, LOG = process.env.FAKE_VOICE_LOG;
 const log = (o: object) => { if (LOG) appendFileSync(LOG, `${JSON.stringify(o)}\n`); };
 
 interface Reply { text: string[]; told: number; seq: number; sent: number; ended: boolean; dropped: boolean }
-interface Session {                               // n: pid.count, as a service started again counts from 1 and the log outlives it
+interface Session {
   n: string; script: Line[]; at: number; line?: Line; listening: boolean; heard: number; frames: number; configs: number;
   stack: Record<Part, string>; voice: string; speed: number;
   replies: Map<string, Reply>; playing: boolean; answer?: string; overtalk?: boolean;
@@ -70,7 +59,6 @@ function chunk(ws: Bun.ServerWebSocket<Session>, id: string, r: Reply, to: numbe
   overtalk(ws);
 }
 
-// The script's talking over: once the page plays the reply and enough of it was sent.
 function overtalk(ws: Bun.ServerWebSocket<Session>) {
   const d = ws.data, r = d.answer ? d.replies.get(d.answer) : undefined, after = d.line?.interruptAfter;
   if (!r || !after || !d.playing || r.sent < after || r.dropped || d.overtalk) return;
@@ -78,7 +66,6 @@ function overtalk(ws: Bun.ServerWebSocket<Session>) {
   setTimeout(() => { if (!r.dropped) interrupt(ws); }, 150);
 }
 
-// Speaks what is complete: three words, or a clause.
 function speak(ws: Bun.ServerWebSocket<Session>, id: string, r: Reply) {
   for (;;) {
     const rest = r.text.slice(r.told).join(""), clause = /[.,!?;:]\s/.exec(rest), three = /^\s*(\S+\s+){3}/.exec(rest);
@@ -97,7 +84,6 @@ function interrupt(ws: Bun.ServerWebSocket<Session>) {
   log({ s: ws.data.n, ev: "interrupt" });
 }
 
-// One microphone frame: the next line of the script is said over the frames that follow, a word each 10 frames.
 function hear(ws: Bun.ServerWebSocket<Session>) {
   const d = ws.data;
   if (++d.frames % 10 === 0) log({ s: d.n, ev: "frames", n: d.frames });
@@ -105,8 +91,6 @@ function hear(ws: Bun.ServerWebSocket<Session>) {
   if (!d.listening || !line || (line.after === "config" && !d.configs)) return;
   const k = ++d.heard, step = 10, first = line.text.split(" "), more = line.more?.split(" ") ?? [];
   const send = (o: object) => (ws.send(JSON.stringify(o)), log({ s: d.n, ev: "sent", t: Date.now(), ...o }));
-  // the words from frame `at` on, after `before` (already said in this turn): speech, a partial a word (the last one
-  // settled, as the service reads the words once the speech stops), its end
   const say = (at: number, before: string[], words: string[]) => {
     const w = (k - at) / step - 1;
     if (k === at + step) send({ type: "speech", on: true });
@@ -136,8 +120,6 @@ const voicesOf = (tts: string) => CATALOG.tts.find((t) => t.name === tts)?.voice
 const ready = (ws: Bun.ServerWebSocket<Session>) => ws.send(JSON.stringify({ type: "ready", stack: ws.data.stack, catalog: CATALOG,
   voices: voicesOf(ws.data.stack.tts), voice: ws.data.voice, speed: ws.data.speed, sample_rate: RATE, load_ms: 5 }));
 
-// hello's and config's asks: a part of the stack by name (loaded, then ready again), the voice, the speed. A model
-// it does not have, or does not have installed, is refused and the one in use kept.
 function ask(ws: Bun.ServerWebSocket<Session>, m: any) {
   const d = ws.data, stack = { ...d.stack };
   for (const [part, name] of Object.entries(m.stack ?? {}) as [Part, string][]) {
@@ -162,7 +144,7 @@ function message(ws: Bun.ServerWebSocket<Session>, m: any) {
     ask(ws, m);
     ready(ws);
     d.listening = true;
-  } else if (m.type === "config") {           // ready again after each, as the service is
+  } else if (m.type === "config") {
     d.configs++;
     ask(ws, m);
     ready(ws);
@@ -190,7 +172,7 @@ function message(ws: Bun.ServerWebSocket<Session>, m: any) {
       ws.send(JSON.stringify({ type: "said", id: m.id }));
       if (!r.sent && d.answer === m.id) d.listening = true;
     }
-  } else if (m.type === "cancel" && m.id !== undefined) {          // one reply (one spoken ahead, not heard)
+  } else if (m.type === "cancel" && m.id !== undefined) {
     const r = d.replies.get(m.id) ?? { text: [], told: 0, seq: 0, sent: 0, ended: false, dropped: false };
     d.replies.set(m.id, { ...r, dropped: true });
     if (d.answer === m.id) d.answer = undefined;
@@ -221,6 +203,6 @@ const server = Bun.serve<Session>({
 });
 log({ ev: "start" });
 console.log(`voice: ws://127.0.0.1:${server.port}`);
-for await (const _ of Bun.stdin.stream()) { /* the web server's end of the pipe */ }
+for await (const _ of Bun.stdin.stream()) {  }
 log({ ev: "exit" });
 process.exit(0);

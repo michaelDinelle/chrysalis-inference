@@ -1,5 +1,3 @@
-// The source-level helpers of artifacts (artifacts.ts) that have an outside reference: a version's changes as a line
-// diff, against GNU diff's.
 import { expect, test } from "bun:test";
 import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";

@@ -1,4 +1,3 @@
-// CPU cold-expert workers (see cpu_moe.h): ggml's dot products, or the AVX-512 VNNI kernels of cpu_vnni.cpp.
 #include "cpu_moe.h"
 #include "ggml.h"
 #include "ggml-cpu.h"
@@ -19,10 +18,9 @@ void CpuMoe::start(MoeShared *shared, MoeShared *pred, const std::vector<ColdLay
     pr = pred;
     L = layers;
     n = threads;
-    // every layer's groups share their formats (one model file); groups 1 and 2 may be absent
     const ColdLayer *c0 = nullptr;
     for (const ColdLayer &c : L) if (c.n) { c0 = &c; break; }
-    if (!c0) return;                                            // no cold experts at all
+    if (!c0) return;
     int t[3] = {c0->type_gu[0], c0->type_gu[0], c0->type_gu[0]};
     for (int g = 1; g < 3; g++)
         for (const ColdLayer &c : L) if (c.gate[g]) { t[g] = c.type_gu[g]; break; }
@@ -62,7 +60,7 @@ void CpuMoe::stop() {
 void CpuMoe::arm() { armed.store(1, std::memory_order_release); wake.fetch_add(1, std::memory_order_release); wake.notify_all(); }
 void CpuMoe::disarm() { armed.store(0, std::memory_order_release); }
 
-void CpuMoe::barrier() {                           // spin barrier for the n workers
+void CpuMoe::barrier() {
     const uint32_t g = bar_gen.load(std::memory_order_acquire);
     if (bar_count.fetch_add(1, std::memory_order_acq_rel) + 1 == n) {
         bar_count.store(0, std::memory_order_relaxed);
@@ -86,9 +84,6 @@ void CpuMoe::wait() {
     while (jfin.load(std::memory_order_acquire) < n) _mm_pause();
 }
 
-// One prefill job: quantize the chunk's inputs, then take experts one at a time in the host's order (largest first).
-// An expert is computed whole by one worker (rows outer, its tokens inner, so each weight row is read once while it
-// sits in L1), which keeps the results independent of how the experts land on the workers.
 void CpuMoe::prefill_work(int id) {
     const MoeJob &J = job;
     const ColdLayer &c = L[J.layer];
@@ -105,7 +100,7 @@ void CpuMoe::prefill_work(int id) {
     Scratch &s = scr[id];
     for (int e; (e = jexp.fetch_add(1, std::memory_order_relaxed)) < J.n_exp;) {
         const int p0 = J.first[e], np = J.first[e + 1] - p0, slot = J.slot[e];
-        if (vnni && np >= VNNI_MIN_TOKENS) {     // several tokens: each weight row decoded once, 16 tokens per instruction
+        if (vnni && np >= VNNI_MIN_TOKENS) {
             std::vector<const int8_t *> xq(np); std::vector<const float *> xs(np); std::vector<const int32_t *> xsum(np);
             std::vector<uint16_t *> out(np);
             for (int i = 0; i < np; i++) {
@@ -145,9 +140,6 @@ void CpuMoe::prefill_work(int id) {
     jfin.fetch_add(1, std::memory_order_release);
 }
 
-// The predicted handoff's weights, this worker's 1/n of each pick's gate, up and down rows, read one load per cache line
-// (prefetch hints are dropped at this volume; loads keep ~20 misses in flight per core and the lines stay in L2 / L3).
-// Stops as soon as the real handoff (or a host job) arrives: then whatever was loaded is a cache hit.
 void CpuMoe::preload(int id, uint32_t real, uint32_t job) {
     const int layer = pr->layer, T = std::min(pr->T, MOE_MAX_T);
     if (layer < 0 || layer >= (int)L.size()) return;
@@ -173,12 +165,10 @@ void CpuMoe::preload(int id, uint32_t real, uint32_t job) {
 void CpuMoe::worker(int id) {
     uint32_t last = seen.load(), jlast = jgen.load(), plast = pr ? load_acq(&pr->go) : 0;
     for (;;) {
-        // wait for the next generation (GPU decode handoff) or host job: spin while armed, sleep otherwise; meanwhile
-        // load the weights of a prediction for the next handoff
         uint32_t g;
         bool host_job = false;
         for (;;) {
-            const uint32_t wk = wake.load(std::memory_order_acquire);   // read first: a later bump ends the wait below
+            const uint32_t wk = wake.load(std::memory_order_acquire);
             if (quit.load(std::memory_order_acquire)) return;
             const uint32_t j = jgen.load(std::memory_order_acquire);
             if (j != jlast) { jlast = j; host_job = true; break; }
@@ -198,16 +188,14 @@ void CpuMoe::worker(int id) {
         last = g;
         const int layer = sh->layer, T = sh->T;
         const ColdLayer &c = L[layer];
-        // picks handled here
         int pick[MOE_MAX_T * MOE_MAX_E], np = 0;
         for (int j = 0; j < T * MOE_MAX_E; j++) if (sh->slot[j] >= 0) pick[np++] = j;
         const ggml_type_traits_cpu *tr_gu[3] = {ggml_get_type_traits_cpu((ggml_type)c.type_gu[0]),
                                                 ggml_get_type_traits_cpu((ggml_type)(c.gate[1] ? c.type_gu[1] : c.type_gu[0])),
                                                 ggml_get_type_traits_cpu((ggml_type)(c.gate[2] ? c.type_gu[2] : c.type_gu[0]))};
         const auto *tr_dn = ggml_get_type_traits_cpu((ggml_type)c.type_dn);
-        const bool vx = vnni;                       // AVX-512 VNNI row dots, or ggml's
+        const bool vx = vnni;
         if (np > 0) {
-            // inputs to the gate/up dot types (one token per worker)
             if (id < T) {
                 if (vx) {
                     int32_t *xsum = dxsum.data() + id * (D_ / 16);
@@ -219,7 +207,6 @@ void CpuMoe::worker(int id) {
                 }
             }
             barrier();
-            // gate | up rows of all picks, split evenly
             const int R1 = np * 2 * FE_;
             for (int r = id * R1 / n; r < (id + 1) * R1 / n; r++) {
                 const int p = r / (2 * FE_), k = r % (2 * FE_), j = pick[p], slot = sh->slot[j], g = c.grp(slot), gx = dot_same ? 0 : g;
@@ -232,7 +219,6 @@ void CpuMoe::worker(int id) {
                 else tr_gu[g]->vec_dot(D_, &gu[(size_t)p * 2 * FE_ + k], 0, row, 0, xq[gx].data() + xq_row[gx] * t, 0, 1);
             }
             barrier();
-            // silu(gate) * up, quantized for the down rows
             for (int p = id; p < np; p += n) {
                 float h[FE_];
                 const float *g2 = &gu[(size_t)p * 2 * FE_];
@@ -242,7 +228,6 @@ void CpuMoe::worker(int id) {
             }
             barrier();
         }
-        // down rows: each worker owns a slice of the output rows for every token (no races, fixed order)
         for (int r = id * D_ / n; r < (id + 1) * D_ / n; r++) {
             float acc[MOE_MAX_T] = {};
             for (int p = 0; p < np; p++) {

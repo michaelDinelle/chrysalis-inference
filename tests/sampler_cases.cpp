@@ -1,8 +1,3 @@
-// make_dist (engine/sampler.h) on cases from stdin, for web/sampler.test.ts: the web UI's copy of the sampler must
-// give the odds the engine draws from. Per case: SAMPLE_N logits (descending) and their ids, the reply's ids, the DRY
-// breaker ids, then temperature top_p min_p presence_penalty top_k dry_multiplier dry_base dry_allowed_length and the
-// four stage ids in order. Writes each case's distribution as "n id p id p ...".
-//   build/sampler_cases < cases.txt
 #include "../engine/sampler.h"
 #include <cstdio>
 

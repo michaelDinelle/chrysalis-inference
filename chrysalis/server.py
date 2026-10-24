@@ -1,16 +1,3 @@
-"""OpenAI-compatible HTTP server around the Chrysalis engine, built for coding-agent loops (OpenCode); it also speaks
-Anthropic's Messages API and OpenAI's Responses API (chrysalis/apis.py).
-
-What keeps time-to-first-token low:
-  * prompts render to token ids; assistant turns Chrysalis generated are replayed as their exact ids, so each
-    agent step extends the cached sequence (only new tool output / user text is prefilled);
-  * snapshots at the end of the tool block and the static system prompt (shared by all sessions), the system turn
-    and every prompt (with the next token's distribution, so a resent prompt needs no prefill), so new sessions,
-    edited turns and evicted sessions resume from cache instead of from scratch;
-  * side requests (session titles, summaries) wait until the agent requests pause;
-  * OpenCode prompts are kept byte-stable (date frozen per conversation, appended reminders kept),
-    and its compaction request is answered from the live conversation instead of a full re-read.
-"""
 import functools
 import hashlib
 import ipaddress
@@ -43,19 +30,15 @@ from .sleep import SleepGuard, vram_used, wait_vram_freed
 
 MODEL = "qwen3.8-27b"
 _ROOT = __import__("os").path.dirname(__import__("os").path.dirname(__import__("os").path.abspath(__file__)))
-# a model's weights are here (a release downloads each the first time it is wanted)
 present = lambda name: __import__("os").path.exists(__import__("os").path.join(_ROOT, MODELS[name]["path"]))
 MAX_CONTEXT = 262144
-# Reply length (reasoning included) when the request sets none. The model card asks for room on agentic tasks:
-# 262,144 tokens of reasoning and 131,072 of final response where the two are limited separately. A reply never
-# outgrows the context either; much past this it is a model stuck in a loop.
 MAX_OUTPUT = 131072
-DEFAULTS = {True: dict(temperature=1.0, top_p=0.95, top_k=20, min_p=0.0, presence_penalty=0.0),   # Qwen3.8 card
+DEFAULTS = {True: dict(temperature=1.0, top_p=0.95, top_k=20, min_p=0.0, presence_penalty=0.0),
             False: dict(temperature=0.7, top_p=0.8, top_k=20, min_p=0.0, presence_penalty=1.5)}
 SIDE_PROMPTS = ("You are a title generator", "Summarize what was done in this conversation")
 COMPACT_PROMPT = "You are a context summarization agent"
-TRACE = bool(os.environ.get("CHRYSALIS_TRACE"))     # log where each request's time to first token went
-SNAPSHOT_DIR = os.environ.get("CHRYSALIS_SNAPSHOTS") or os.path.join(_ROOT, "data/cache")   # one directory per model
+TRACE = bool(os.environ.get("CHRYSALIS_TRACE"))
+SNAPSHOT_DIR = os.environ.get("CHRYSALIS_SNAPSHOTS") or os.path.join(_ROOT, "data/cache")
 EFFORTS = {"xhigh": "xhigh", "high": "xhigh", "medium": "medium", "low": "low", "minimal": "low"}
 
 
@@ -72,21 +55,18 @@ class Asleep(RequestError):
 
 
 def first_text(content):
-    """Start of a message's first text part: how OpenCode's compaction serializer begins a user message."""
     if isinstance(content, list):
         content = next((c.get("text") for c in content if isinstance(c, dict) and c.get("type") == "text"), "")
     return (content or "")[:200]
 
 
 def merge_system(messages):
-    """The Qwen3.8 template allows one system message, first. Fold any others into it (plugins add them)."""
     sys_parts = [text_of(m.get("content")) for m in messages if m.get("role") == "system"]
     rest = [m for m in messages if m.get("role") != "system"]
     return ([{"role": "system", "content": "\n\n".join(p for p in sys_parts if p)}] if sys_parts else []) + rest
 
 
 class LRU(OrderedDict):
-    """Requests write their replies concurrently (Batcher), so each use holds the lock; values() is a copy."""
 
     def __init__(self, limit):
         super().__init__()
@@ -115,24 +95,17 @@ DATE = re.compile(r"(Today's date: )([^\n]*)")
 
 
 class Pictures:
-    """The pictures and videos requests have sent, by content and how they are read (chrysalis/vision.py pixel_limit: a
-    picture's own max_pixels or detail, else its request's, at most the server's `cap`; a video's frames a second). Each
-    picture, and each pair of a video's frames, keeps one image-token slot for the life of the engine, so its tokens are
-    the same in every request and the prompt cache tells them apart by them (a slot is never given to another while cached
-    state may hold its tokens), and its grid. The engine holds their embeddings only for prefills: encoded when a prompt's
-    uncached part needs them, the least recently used dropped beyond `budget` (never those of the prompt being read)."""
     SLOTS = (2**31 - IMG_BASE) // IMG_ROWS
 
     def __init__(self, engine, width, budget, cap=vision.MAX_PIXELS):
         self.e, self.width, self.budget, self.cap = engine, width, budget, cap
-        self.lock = threading.Lock()             # renders run on request threads, beside the request on the GPU
-        self.by_digest, self.grid, self.limit = {}, {}, {}   # key -> slot; slot -> grid, how a picture is read
-        self.pair = {}                           # slot -> which frame pair of its video
-        self.videos = OrderedDict()              # (digest, frames a second) -> chrysalis.vision.Video, the latest few
-        self.encoded = OrderedDict()             # slot -> bytes held by the engine, least recently used first
+        self.lock = threading.Lock()
+        self.by_digest, self.grid, self.limit = {}, {}, {}
+        self.pair = {}
+        self.videos = OrderedDict()
+        self.encoded = OrderedDict()
 
     def slot(self, key, grid):
-        """The slot of a picture or frame pair (lock held)."""
         slot = self.by_digest.get(key)
         if slot is None:
             if len(self.grid) >= self.SLOTS:
@@ -147,9 +120,6 @@ class Pictures:
         return list(range(base, base + gh * gw // 4))
 
     def tokens(self, item, seen, limit=None):
-        """A picture's (chat.Picture) image token ids, or a video's (chat.Clip) (time, image token ids) for each frame pair;
-        seen (slot -> picture bytes or chrysalis.vision.Video) collects the request's for encoding. limit: the request's
-        max_pixels."""
         if isinstance(item, Clip):
             return self.video_tokens(item, seen)
         data = vision.image_bytes(item.url)
@@ -188,13 +158,12 @@ class Pictures:
         return out
 
     def positions(self, prompt):
-        """The prompt's M-RoPE positions (chrysalis/vision.py), or None when it has no pictures (text positions)."""
         img = prompt >= IMG_BASE
         if not img.any():
             return None
         edges = np.flatnonzero(np.diff(np.concatenate([[0], img.view(np.int8), [0]])))
         segs, prev = [], 0
-        for a, b in zip(edges[::2], edges[1::2]):    # a run of image tokens is one picture (markers stand between two)
+        for a, b in zip(edges[::2], edges[1::2]):
             if a > prev:
                 segs.append(("text", int(a - prev)))
             gh, gw = self.grid[int(prompt[a] - IMG_BASE) // IMG_ROWS]
@@ -205,15 +174,11 @@ class Pictures:
         return vision.positions(segs)
 
     def runs(self, prompt):
-        """(start, end, slot) of each picture's tokens in the prompt."""
         img = prompt >= IMG_BASE
         edges = np.flatnonzero(np.diff(np.concatenate([[0], img.view(np.int8), [0]])))
         return [(int(a), int(b), int(prompt[a] - IMG_BASE) // IMG_ROWS) for a, b in zip(edges[::2], edges[1::2])]
 
     def ensure(self, slots, seen):
-        """The engine holds these slots' embeddings (the vision tower runs for those it does not: a video is decoded once
-        for all its pairs); then the least recently used beyond the budget are dropped, but not these. Returns how many
-        were encoded."""
         frames, n = {}, 0
         for slot in slots:
             if slot in self.encoded:
@@ -246,23 +211,15 @@ class Pictures:
 
 
 class Turnstile:
-    """One holder of the GPU at a time: a prompt being read, a pass of replies (Batcher), a model switch. Side requests
-    (titles, summaries) go last: they wait while agent requests queue, and start only after SIDE_IDLE seconds without an
-    agent request, counted from their own arrival too. OpenCode sends a new session's title request 8 ms before the
-    session's first request, and an agent's next step ~25 ms after a tool returns, so a side request that took the GPU
-    whenever it was free would hold up the turn the user is waiting for."""
     SIDE_IDLE = 0.3
 
     def __init__(self):
         self.cv = threading.Condition()
         self.busy, self.waiting = False, 0
-        self.main_seen = 0.0                             # an agent request last arrived or finished
-        # Agent requests take turns in the order they asked: a reply being written takes the GPU again for every pass
-        # (Batcher), and would otherwise have it back before a prompt waiting to be read woke up.
+        self.main_seen = 0.0
         self.ticket = self.serving = 0
 
     def acquire(self, main, arrived=None):
-        """arrived: when a side request came (its SIDE_IDLE counts from then at the latest)."""
         with self.cv:
             if main:
                 turn, self.ticket = self.ticket, self.ticket + 1
@@ -276,7 +233,6 @@ class Turnstile:
             self.busy = True
 
     def wait_side(self, arrived):
-        """Until the GPU would be a side request's, without taking it."""
         with self.cv:
             self.side_turn(arrived)
 
@@ -296,8 +252,6 @@ class Turnstile:
 
 
 class Lanes:
-    """Requests in flight at once: one per cache slot, so each has its own. A model switch or sleep has the engine alone:
-    new requests wait, and those in flight finish first."""
 
     def __init__(self, n):
         self.cv = threading.Condition()
@@ -316,7 +270,6 @@ class Lanes:
             return False
 
     def changed(self, timeout):
-        """Waits for a lane to be left (or the timeout)."""
         with self.cv:
             self.cv.wait(timeout)
 
@@ -326,8 +279,6 @@ class Lanes:
             self.cv.notify_all()
 
     def hold(self, mine=False):
-        """Until release(): mine, the caller is a request in flight, which gives up its lane while the others finish (two
-        requests that both switch then take turns) and has it back."""
         with self.cv:
             if mine:
                 self.used -= 1
@@ -344,9 +295,6 @@ class Lanes:
 
 
 def admit(lanes, gpu, side, arrived):
-    """A lane for a request. A side request waits for its turn at the GPU first, holding none: it waits as long as agent
-    requests queue or run, and a lane held that long keeps one of them out (OpenCode titles a session as it starts, and an
-    agent that starts three sub-agents needs all three lanes: waiting in one, the title held the third back 7 s)."""
     if not side:
         return lanes.enter()
     while True:
@@ -357,12 +305,10 @@ def admit(lanes, gpu, side, arrived):
 
 
 class Held:
-    """A request's turn at the GPU, taken and given back as it goes: its prompt is read with the GPU to itself, its reply's
-    steps share passes (Batcher), and a constrained answer's steps or a freeing of KV pages take it for the moment."""
 
     def __init__(self, gpu, main, arrived=None):
         self.gpu, self.main, self.arrived, self.on = gpu, main, arrived, False
-        self.slot = None                             # the cache slot its reply is written in, freed when it ends
+        self.slot = None
 
     def take(self):
         if not self.on:
@@ -376,17 +322,13 @@ class Held:
 
 
 class Batcher:
-    """Replies being written share the GPU. The first to ask for its next step waits a moment for the others (each spends
-    a little between steps sending out its tokens) and runs all their steps in one pass (Engine.generate_batch), which
-    reads the weights once for all of them: two replies at once write 141 tok/s together where 107 in turn. A reply alone,
-    or one that wants log probs, steps as before (with prompt lookup). A prompt being read takes the GPU between passes."""
-    GATHER = 0.002                                   # seconds the first waits for the rest
+    GATHER = 0.002
 
     def __init__(self, gpu):
         self.gpu, self.cv = gpu, threading.Condition()
-        self.writing = 0                             # replies whose steps come through here
+        self.writing = 0
         self.queue, self.done, self.leading = {}, {}, False
-        self.shared = 0                              # passes that carried several replies
+        self.shared = 0
 
     def begin(self):
         with self.cv:
@@ -398,7 +340,6 @@ class Batcher:
             self.cv.notify_all()
 
     def step(self, engine, sid, sp, rows=False, most=16):
-        """The reply's next tokens, at most `most` (with their candidate rows if asked: (ids, values, ids of candidates))."""
         with self.cv:
             self.queue[sid] = (sp, rows, most)
             self.cv.notify_all()
@@ -414,7 +355,7 @@ class Batcher:
                 self.cv.release()
                 try:
                     results = self.run(engine, batch)
-                except BaseException as e:           # every reply in the pass hears of it
+                except BaseException as e:
                     results = dict.fromkeys(batch, e)
                 finally:
                     self.cv.acquire()
@@ -427,8 +368,6 @@ class Batcher:
         return got
 
     def run(self, engine, batch):
-        """The pass: results by sequence, its tokens or the exception (KVFull) its step raised."""
-        # (log probs too: the web UI asks for them with every reply, and taken alone three replies wrote 75 tok/s where 91)
         alone = [sid for sid, (sp, rows, most) in batch.items() if most < 16 or len(batch) == 1 or not engine.batched]
         together = [sid for sid in batch if sid not in alone]
         if len(together) == 1:
@@ -457,9 +396,6 @@ class Batcher:
 
 
 class Sticky:
-    """Keeps a conversation's prompt stable across requests so it stays a cache hit:
-    the date in OpenCode's environment block is frozen at the conversation's first request, and
-    text that an earlier request appended to a user message (plan-mode reminders) is kept there."""
 
     def __init__(self):
         self.convs = LRU(512)
@@ -494,31 +430,26 @@ class Sticky:
 class Server:
     def __init__(self, model_path, tokenizer_path, slots=3, n_draft=None, umax=None, log=sys.stderr, engine=None, warmup=True,
                  model=MODEL, lookup=None, max_pixels=None):
-        """engine: a future of the Engine (engine.load_async) if its load already started; by default it loads here,
-        alongside the tokenizer. warmup=False leaves Engine.warmup() to the caller (serve() runs it under the GPU lock).
-        model: the name of the model that model_path holds (see MODELS); requests can switch to the others. n_draft,
-        lookup: MTP and prompt-lookup drafts per step for it (default: its MODELS entry's, as a switch back would set).
-        max_pixels: the most pixels a picture is read at (default: the official 16,777,216); requests may ask for fewer."""
         self.max_pixels = vision.pixel_limit(max_pixels)
         if engine is None:
             engine = load_async(model_path, max_seqs=slots, umax=umax or MODELS.get(model, MODELS[MODEL])["chunk"], warmup=False,
                                 lib=__import__("os").path.join(_ROOT, MODELS.get(model, MODELS[MODEL])["lib"]))
         self.active, self.slots, self.umax = model, slots, umax
-        self.loading = None              # the model a switch is loading; stats() then leaves the engine alone
+        self.loading = None
         self.state_lock = threading.Lock()
         self.tok = Tokens(tokenizer_path)
         self.replay = LRU(8192)
         self.renderer = Renderer(self.tok, self.replay.get)
         self.sticky = Sticky()
-        self.sessions = LRU(64)          # latest request + reply per conversation, for compaction rewrites
-        self.stored = LRU(256)           # Responses API: a response's conversation, by its id (previous_response_id)
-        self.grammars = None             # response_format's JSON schemas as grammars (made at the first)
-        self.documents = Documents()     # PDFs and text files attached to messages, read
+        self.sessions = LRU(64)
+        self.stored = LRU(256)
+        self.grammars = None
+        self.documents = Documents()
         self.gpu = Turnstile()
         self.lanes = Lanes(slots)
         self.batcher = Batcher(self.gpu)
-        self.replying = set()            # the sequences replies are being written in (a prompt being read makes way for them)
-        self.pausing = threading.Event()  # the machine is about to sleep: GPU work ends at its next step (sleep())
+        self.replying = set()
+        self.pausing = threading.Event()
         self.log = log
         self.link_dev = link.device()
         spec = MODELS.get(model, MODELS[MODEL])
@@ -526,7 +457,7 @@ class Server:
         self.lookup = spec.get("lookup", 0) if lookup is None else lookup
         self.recent = LRU(64)
         self.metrics = Metrics()
-        self.warmer, self.warming = Warmer(log, lambda: self.lanes.used > 0), False   # serve() turns warming on
+        self.warmer, self.warming = Warmer(log, lambda: self.lanes.used > 0), False
         self.engine = engine.result()
         self.capacity = min(MAX_CONTEXT, self.engine.capacity)
         self.cache = Cache(self.engine, slots, max_snapshots=MODELS.get(model, MODELS[MODEL])["snapshots"],
@@ -536,8 +467,6 @@ class Server:
             self.engine.warmup()
 
     def snapshot_disk(self, name, model_path):
-        """Where the model's shared prefixes are kept on disk (chrysalis/cache.py Disk), if its engine can write them
-        out."""
         import os
         if not self.engine.persistent:
             return None
@@ -546,7 +475,6 @@ class Server:
         return Disk(os.path.join(SNAPSHOT_DIR, name), identity)
 
     def open_vision(self, name):
-        """The model's vision tower, when the engine and its GGUF are there (else pictures become a note)."""
         import os
         spec = MODELS.get(name, {})
         path = spec.get("vision") and os.path.join(_ROOT, spec["vision"])
@@ -556,14 +484,10 @@ class Server:
         return Pictures(self.engine, 5120 if name == "qwen3.8-27b" else 2560, spec["pictures"], self.max_pixels)
 
     def resolve(self, name):
-        """The MODELS key a request names ("-fast" variants included); unknown names, and a model whose files are not
-        here yet (a release fetches Flash-Next after the 27B), mean the active model."""
         base = str(name or "").removesuffix("-fast")
         return base if base in MODELS and present(base) else self.active
 
     def rewarm(self):
-        """The other models' files into the page cache while this one runs, if it leaves the room
-        (chrysalis/warm.py)."""
         import os
         if self.warming and MODELS[self.active].get("warm"):
             self.warmer.start([os.path.join(_ROOT, spec["path"]) for name, spec in MODELS.items() if name != self.active],
@@ -572,13 +496,11 @@ class Server:
             self.warmer.stop()
 
     def use(self, name):
-        """Switch the GPU to another model (the caller holds the GPU). Cached conversations of the old model are
-        dropped: they are that model's KV and states."""
         if name == self.active:
             return
         t0 = time.time()
         self.warmer.stop()
-        with self.state_lock:                         # waits for a stats() call that is reading the engine
+        with self.state_lock:
             self.loading = name
         try:
             self.engine.shutdown()
@@ -605,13 +527,10 @@ class Server:
         self.n_draft, self.lookup = spec["draft"], spec.get("lookup", 0)
 
     def sleep(self):
-        """The machine is about to sleep (chrysalis/sleep.py): a reply being written ends at its next step, cut short as
-        at max_tokens; a prompt being read stops at its next piece; then the GPU is freed. It stays taken until
-        wake()."""
         t0 = time.time()
         self.warmer.stop()
         self.pausing.set()
-        self.lanes.hold()                                # the requests in flight end (pausing) and new ones wait
+        self.lanes.hold()
         self.gpu.acquire(main=True)
         with self.state_lock:
             self.loading = self.active
@@ -621,8 +540,6 @@ class Server:
         print(f"chrysalis: the machine is going to sleep: GPU freed in {time.time() - t0:.2f} s", file=self.log, flush=True)
 
     def wake(self):
-        """The machine woke up: the model it had loads again, its cache empty as after a restart (the shared prefixes on
-        disk read back when asked for)."""
         t0 = time.time()
         try:
             self.load_engine(self.active)
@@ -630,7 +547,7 @@ class Server:
             self.metrics.add("chrysalis_model_load_seconds_total", time.time() - t0, model=self.active)
             print(f"chrysalis: awake: {self.active} loaded in {time.time() - t0:.1f} s", file=self.log, flush=True)
             now = link.status(self.link_dev)
-            if now and now["slow"]:                      # the resume trained it; only a restart trains it again
+            if now and now["slow"]:
                 print(f"chrysalis: PCIe link at {now['gts']:g} GT/s x{now['width']} after the wake, slower than this machine's "
                       f"best ({now['best_gts']:g} GT/s): `chrysalis.sh restart` trains it again", file=self.log, flush=True)
         finally:
@@ -642,17 +559,12 @@ class Server:
             self.rewarm()
 
     def chat(self, body):
-        """Runs one chat completion. Yields ("start", prompt info) once the prompt is read, ("reasoning"|"content",
-        text), ("tool_call", (name, args)), finally ("done", info); a continued reply first ("prefix", its text)."""
         messages = self.read_documents(merge_system(body.get("messages") or []))
         if not any(m.get("role") == "user" for m in messages):
             raise RequestError("the request needs at least one user message")
-        # continue_final_message (as in vLLM): the final assistant message is left open and the model writes on
         final = messages[-1] if body.get("continue_final_message") else None
         if final is not None and final.get("role") != "assistant":
             raise RequestError("continue_final_message needs a final assistant message")
-        # chrysalis_aside: a request beside the conversation (the web UI's draft of the user's next message): answered
-        # without thinking, rendered so the conversation's cache still matches, and leaving that cache as it was
         aside = bool(body.get("chrysalis_aside"))
         seed = seed_of(body)
         tools = body.get("tools") if body.get("tool_choice") != "none" else None
@@ -671,19 +583,18 @@ class Server:
         messages = self.sticky.apply(messages)
 
         def render(pictures, seen):
-            """The prompt (without a continued reply) for these pictures' token slots; seen collects its pictures."""
             images = (lambda pic: pictures.tokens(pic, seen, body.get("max_pixels"))) if pictures else None
             try:
                 return self.renderer.render(messages if final is None else messages[:-1], tools, *style,
                                             think_reply=False if aside else None, images=images)
-            except ValueError as e:                      # a picture Chrysalis cannot read, a malformed conversation
+            except ValueError as e:
                 raise RequestError(str(e)) from None
         cont, seen, pictures, prefix = None, {}, self.pictures, []
         prompt, marks = render(pictures, seen)
         if final is not None:
             reply_thinking = bool(thinking) and not aside
             prefix = self.reply_prefix(final, body.get("chrysalis_original"), reply_thinking)
-            if body.get("chrysalis_append_token") is not None:        # a token picked among the reply's alternatives
+            if body.get("chrysalis_append_token") is not None:
                 t = int(body["chrysalis_append_token"])
                 if t in self.tok.eos or not 0 <= t < self.tok.full.get_vocab_size():
                     raise RequestError("chrysalis_append_token must be a token that continues the reply")
@@ -692,11 +603,11 @@ class Server:
             parser.feed(prefix)
             prompt, cont = prompt + prefix, (prefix, parser)
             reasoning, content = parser.raw()
-            yield "prefix", {"reasoning_content": reasoning, "content": content}   # the reply so far, as it now stands
+            yield "prefix", {"reasoning_content": reasoning, "content": content}
         if aside:
             thinking = False
         d = DEFAULTS[bool(thinking)]
-        order = body.get("samplers") or STAGES               # llama.cpp's name; penalties (presence, DRY) always come first
+        order = body.get("samplers") or STAGES
         order = [x for x in order if x in STAGES]
         sp = Sampling(temperature=float(body.get("temperature", d["temperature"])), top_p=float(body.get("top_p", d["top_p"])),
                       min_p=float(body.get("min_p", d["min_p"])), presence_penalty=float(body.get("presence_penalty", d["presence_penalty"])),
@@ -704,11 +615,8 @@ class Server:
                       dry_multiplier=float(body.get("dry_multiplier") or 0), dry_base=float(body.get("dry_base") or 1.75),
                       dry_allowed_length=int(body.get("dry_allowed_length") or 2),
                       order=order + [x for x in STAGES if x not in order],
-                      # A model can call only the tools it is offered. Without any, Flash-Next still writes tool calls for
-                      # agent-like asks ("design an SVG": list_files, read_file; the Q8_0 original as well, p ~0.94), and
-                      # the reply ends there: so without tools <tool_call> is never drawn and it answers in text.
                       ban=-1 if tools else self.tok.id["<tool_call>"])
-        top_lp = int(body.get("top_logprobs") or 0) if body.get("logprobs") else -1   # -1: no log probs
+        top_lp = int(body.get("top_logprobs") or 0) if body.get("logprobs") else -1
         stops = body.get("stop") or []
         stops = [stops] if isinstance(stops, str) else stops
         if not isinstance(stops, list) or not all(isinstance(x, str) for x in stops):
@@ -733,8 +641,8 @@ class Server:
         admit(self.lanes, self.gpu, side, arrived)
         held = Held(self.gpu, main=not side, arrived=arrived)
         try:
-            want = self.active if side else self.resolve(body.get("model"))   # titles never cause a switch
-            if want != self.active:                      # replies in flight finish on the model they began with
+            want = self.active if side else self.resolve(body.get("model"))
+            if want != self.active:
                 self.lanes.hold(mine=True)
                 try:
                     held.take()
@@ -749,7 +657,7 @@ class Server:
             if len(prompt) + 1 >= self.capacity:
                 raise ContextError(f"the request ({len(prompt)} tokens) exceeds the available context size "
                                    f"({self.capacity} tokens), try increasing it")
-            if seen and self.pictures is not pictures:   # a switch or a wake gave pictures new token slots: render again
+            if seen and self.pictures is not pictures:
                 seen = {}
                 prompt, marks = render(self.pictures, seen)
                 prompt += prefix
@@ -763,10 +671,6 @@ class Server:
             self.lanes.leave()
 
     def constraints(self, body, tools, schemas):
-        """What a reply's answer is held to (chrysalis/structured.py): (answer, strict). answer: a Matcher for all of the answer
-        after any reasoning: tool calls when tool_choice is "required" or names a tool, else response_format's JSON (or a
-        tool call instead, when tools are offered). strict: makes the Matcher for tool calls the model begins in an answer
-        otherwise free, when a tool is marked strict."""
         choice, only = body.get("tool_choice"), None
         if isinstance(choice, dict):
             only = (choice.get("function") or {}).get("name") or choice.get("name")
@@ -786,18 +690,12 @@ class Server:
                 return self.grammars.matcher(tools=schemas, only=only, parallel=parallel), None
             if schema is not None:
                 return self.grammars.matcher(schema=schema, tools=schemas or None, parallel=parallel), None
-            self.grammars.matcher(tools=schemas, parallel=parallel, inside=True)     # its errors before the reply starts
+            self.grammars.matcher(tools=schemas, parallel=parallel, inside=True)
             return None, lambda: self.grammars.matcher(tools=schemas, parallel=parallel, inside=True)
         except ValueError as e:
             raise RequestError(str(e)) from None
 
     def held_step(self, slot, sp, answer, unread, room):
-        """The next tokens of an answer held to a grammar, and what of the reply the engine then has not read. Where the
-        engine can (Engine.masked), a step verifies drafts: the tokens the grammar forces next, then the MTP head's guesses,
-        each position masked to what the grammar allows there; unread is the pending token alone, or none when the engine
-        has just read up to here (the first token is then drawn from those logits). Otherwise the engine reads what it has
-        not, a token is drawn from the logits the grammar allows (the engine's sampler, over the largest 64 of them), then
-        come the tokens it forces."""
         if self.engine.masked and len(unread) == 1:
             drafts = self.engine.draft(slot.sid, sp, answer.forced(), min(7, room - 1))
             masks, k = answer.masks(drafts)
@@ -817,17 +715,12 @@ class Server:
 
     @functools.cache
     def close_thinking(self, budget=True, newline=False):
-        """What ends the reasoning for the model, then </think>: at a thinking budget, the words Qwen3's technical report
-        gives; else only the line break the reasoning ends with (newline: it lacks one)."""
         enc = lambda t: self.tok.full.encode(t, add_special_tokens=False).ids
         head = enc("\n\nConsidering the limited time by the user, I have to give the solution based on the thinking directly "
                    "now.\n") if budget else enc("\n") if newline else []
         return head + [self.tok.id["</think>"]] + enc("\n\n")
 
     def inject(self, slot, held, pending, toks, keep=False):
-        """The reply goes on after tokens it did not draw: the engine reads its pending token (a list: none at the reply's
-        start) and them, and the next step draws from the logits after them. keep: the GPU stays taken until that step
-        (a held answer's, which draws from those logits as run() says)."""
         held.take()
         try:
             self.engine.prefill(slot.sid, pending + toks)
@@ -838,19 +731,16 @@ class Server:
             held.drop()
 
     def read_documents(self, messages):
-        """The messages with their attached files read (chrysalis/documents.py): a PDF's pages as text, and as pictures when the
-        model has a vision tower."""
         try:
             return self.documents.expand(messages, self.pictures is not None)
         except DocumentError as e:
             raise RequestError(str(e)) from None
 
     def count_tokens(self, body):
-        """The prompt tokens a chat body renders to, without running it (Anthropic's count_tokens)."""
         messages = self.read_documents(merge_system(body.get("messages") or []))
         tools = body.get("tools") if body.get("tool_choice") != "none" else None
 
-        def images(item):                                # a picture's or video's tokens, by their sizes alone
+        def images(item):
             if isinstance(item, Clip):
                 video = vision.Video(vision.image_bytes(item.url, "videos"), float(item.fps or vision.VIDEO_FPS))
                 return [(t, [IMG_BASE] * (video.grid[0] * video.grid[1] // 4)) for t in video.times]
@@ -865,8 +755,6 @@ class Server:
         return len(prompt)
 
     def reply_prefix(self, msg, original, thinking):
-        """Token ids of a partial reply to continue: as Chrysalis generated them when it can (its replay; when `msg` is
-        `original` shortened, cut where msg ends), else msg's text tokenized."""
         S = self.tok.id
         r, c = msg.get("reasoning_content") or "", text_of(msg.get("content"))
         src = original or msg
@@ -887,8 +775,6 @@ class Server:
         return list(self.tok.encode(pieces)[0])
 
     def logprobs(self, ids, rv, ri, n_top, ban):
-        """Each token's log prob and its n_top likeliest alternatives, from the 64 candidates it was drawn among (the
-        model's own distribution, before sampling)."""
         out = []
         for tok, v, i in zip(ids, rv, ri):
             m = float(v.max())
@@ -904,8 +790,6 @@ class Server:
         return self.tok.decode([tid])
 
     def dry_breakers(self):
-        """Tokens holding a newline, ':', '"' or '*' end DRY's runs (its usual sequence breakers). Made once per
-        engine (a model switch makes a new one)."""
         if getattr(self.engine, "_dry_set", False):
             return
         if not hasattr(self, "_breakers"):
@@ -915,18 +799,15 @@ class Server:
         self.engine._dry_set = True
 
     def compaction(self, messages):
-        """OpenCode compacts by sending the older part of the conversation serialized into one user message,
-        an uncached prefill of up to ~200K tokens. Instead, append the summary request to the conversation it
-        came from, rendered exactly as before, so all of it except the request is already cached."""
         user = text_of(messages[-1].get("content"))
         m = re.search(r"<conversation>\n(.*)\n</conversation>", user, re.S)
         if not m:
             return None
 
-        def score(rec):   # how many of the conversation's user messages appear in the serialized history
+        def score(rec):
             texts = (first_text(x.get("content")) for x in rec["messages"] if x.get("role") == "user")
             return sum("[User]: " + t in m.group(1) for t in texts if t)
-        rec = max(reversed(self.sessions.values()), key=score, default=None)   # ties: most recent
+        rec = max(reversed(self.sessions.values()), key=score, default=None)
         if rec is None or score(rec) == 0:
             return None
         request = (text_of(messages[0].get("content")) + "\n\nDo not call any tools.\n\n" + user[:m.start()]
@@ -934,11 +815,6 @@ class Server:
         return rec["messages"] + [rec["reply"], {"role": "user", "content": request}], rec["tools"], rec["style"]
 
     def prefill(self, slot, prompt, a, b, pos=None, held=None):
-        """prompt[a:b] into the slot a prefill chunk at a time (the engine chunks one call the same way, so the numbers are
-        the same), so a sleep (pausing) waits for one chunk at most. While other replies are being written, the GPU goes
-        back to them after each chunk for as long as the chunk took (held: this request's turn at it): a long prompt
-        halves their speed where it would stop them, and is read at half speed itself. pos: the prompt's M-RoPE positions
-        when it has pictures."""
         chunk = self.umax or MODELS[self.active]["chunk"]
         while a < b:
             if self.pausing.is_set():
@@ -961,8 +837,6 @@ class Server:
                 held.take()
 
     def free_kv(self, need, keep):
-        """Drop snapshots, then other sessions' slots (not those a reply is being written in), until `need` tokens of KV
-        are free."""
         self.cache.trim(need)
         for s in sorted(self.cache.slots, key=lambda s: s.used):
             if self.engine.free_tokens() >= need:
@@ -974,26 +848,17 @@ class Server:
 
     def run(self, prompt, marks, sp, seed, max_tokens, thinking, schemas, record, side=False, cont=None, top_lp=-1, aside=False,
             stops=(), seen=None, answer=None, held=None, strict=None, budget=None):
-        """cont: (prefix ids, primed parser) when the prompt ends inside a reply being continued (its ids are then
-        part of the reply too). top_lp >= 0: text events carry log probs with that many alternatives. aside: keep
-        the conversation it extends resumable (a snapshot of where it ended), and no replay of the reply. stops: the
-        answer ends before the first of these strings (OpenAI's `stop`). seen: the request's pictures (slot -> bytes).
-        answer: a grammar (chrysalis/structured.py Matcher) the answer is held to, after any reasoning. strict: makes the
-        grammar a tool call the model starts is held to, to the reply's end (strict tools). budget: the reasoning tokens
-        after which Chrysalis closes the reasoning for the model (thinking_budget). held: the request's turn at the GPU (Held):
-        taken for the prompt, given back for the reply, whose steps share passes (Batcher)."""
         t0 = time.time()
         trace = [] if TRACE else None
-        # a held answer's first token is drawn from the full logits, which only a prefill of the prompt's end makes
         slot, cached = self.cache.acquire(prompt[:-1] if answer else prompt)
         held.slot = slot
-        if aside and cached and cached == len(slot.tokens):   # appending to a live conversation: keep it as it was
+        if aside and cached and cached == len(slot.tokens):
             self.cache.checkpoint(slot)
         if trace is not None:
             trace.append(("acquire", time.time() - t0))
         pos = self.pictures.positions(prompt) if seen else None
         encoded = 0
-        if seen:                                         # tokens to prefill: the engine needs their pictures' embeddings
+        if seen:
             t = time.time()
             try:
                 encoded = self.pictures.ensure([pic for a, b, pic in self.pictures.runs(prompt) if b > cached], seen)
@@ -1003,12 +868,6 @@ class Server:
                 trace.append((f"{encoded} pictures", time.time() - t))
         if encoded and not MODELS[self.active].get("vision_stays", True):
             self.engine.vision_release()
-        # Cache points: the prompt is prefilled in pieces that end at them, whichever state it starts from, so a seed
-        # draws the same reply from a cold cache and from a snapshot. The last one is the prompt's end, kept with the
-        # next token's distribution: the same prompt again (a retry, a redraw) needs no prefill at all, and an agent
-        # step is one piece (its new messages and the reply's opening tokens together). A side request's system turn
-        # (the title / summary instructions) is shared by every session, so it is kept like the tool block; side
-        # prompts are never resent, so their end is not kept.
         points = [(marks["tools"], True), (marks["static"], True), (marks["system"], side)]
         done = cached
         for at, pinned in sorted(p for p in points if p[0] is not None and p[0] > cached) + [(len(prompt), False)]:
@@ -1034,18 +893,12 @@ class Server:
         prefix, parser = cont or ([], OutputParser(self.tok, thinking, schemas))
         stop_text = StopText(stops)
         out, finish, steps, completed, calls = [], "stop", 0, False, []
-        # A held answer starts at once, or after the reasoning: a step then ends at </think> (at <tool_call> for strict calls
-        # in a free answer) and the answer goes on in steps of its own from there. behind: emitted tokens the engine has not
-        # read (a step leaves its last one pending); unread: those of a held answer.
         think_end, call_start = self.tok.id["</think>"], self.tok.id["<tool_call>"]
         holding, unread, behind = answer is not None and not thinking, [], 0
-        unclosed = False                                 # an end of turn was drawn inside the reasoning (and dropped)
+        unclosed = False
         sp.halt = think_end if answer is not None and thinking else call_start if strict is not None else -1
         hsp = Sampling.from_buffer_copy(sp)
-        hsp.halt = -1                                    # a held answer's steps end where its grammar says
-        # The prompt is read: the reply's steps share passes. A held answer's first token is drawn from the logits the
-        # prompt left in the engine's one buffer (Engine.masked_top), so it keeps the GPU until then: another reply's
-        # step in between writes over them, and the token drawn can be one its grammar refuses
+        hsp.halt = -1
         if not holding:
             held.drop()
         batched = not holding
@@ -1056,8 +909,6 @@ class Server:
             yield "start", {"prompt_tokens": len(prompt), "cached_tokens": cached}
             while True:
                 if parser.state == "reasoning" and (unclosed or budget is not None and len(out) >= budget):
-                    # Qwen3's own way to end its thinking at a budget (its technical report, 4.3): these words and </think>.
-                    # An end of turn drawn in the reasoning: </think> alone, and the model answers from there
                     close = self.close_thinking(not unclosed, not self.tok.full.decode(out[-1:]).endswith("\n"))
                     if len(close) > max_tokens - len(out):
                         finish = "length"
@@ -1074,7 +925,7 @@ class Server:
                     behind, budget, unclosed = 0, None, False
                     for ev in stop_text.feed(parser.feed(close)):
                         yield ev
-                    if answer is not None:               # its first token comes from the logits after the closing words
+                    if answer is not None:
                         holding, unread = True, []
                     else:
                         self.batcher.begin()
@@ -1110,7 +961,7 @@ class Server:
                         trace.append(("first step", t_first - t_prefill))
                 steps += 1
                 stop = next((i for i, t in enumerate(ids) if t in self.tok.eos), None)
-                n, room = len(ids) if stop is None else stop, max_tokens - len(out)   # reply tokens in this step; allowed
+                n, room = len(ids) if stop is None else stop, max_tokens - len(out)
                 out += ids
                 emit = ids[:min(n, room)]
                 for ev in stop_text.feed(parser.feed(emit, self.logprobs(emit, rv, ri, top_lp, sp.ban) if top_lp >= 0 else None)):
@@ -1118,26 +969,23 @@ class Server:
                     yield ev
                 if stop_text.hit:
                     break
-                if n > room or n == room and stop is None:   # cut at max_tokens (a step can carry several tokens)
+                if n > room or n == room and stop is None:
                     finish = "length"
                     break
                 if stop is not None and parser.state == "reasoning" and not holding:
-                    # A reply never ends inside its thinking, without an answer (Flash-Next drew an end of turn there for 1
-                    # in 11 seeds of "hello" with tools offered): the end of turn, the step's last token and still pending,
-                    # is dropped, and the reasoning closed at the top of the loop
                     out.pop()
                     behind, unclosed = 0, True
                     continue
                 if stop is not None or holding and answer.done():
                     break
-                if self.pausing.is_set():                # the machine is going to sleep
+                if self.pausing.is_set():
                     finish = "length"
                     break
                 if not holding and sp.halt >= 0 and ids[-1] == sp.halt:
                     if sp.halt == call_start:
                         answer = strict()
                     holding, unread = True, [sp.halt]
-                    self.batcher.end()                   # its steps go on outside the passes
+                    self.batcher.end()
                     batched = False
             for ev in stop_text.feed(parser.finish()) + stop_text.flush():
                 calls += [ev[1]] if ev[0] == "tool_call" else []
@@ -1147,23 +995,18 @@ class Server:
             self.replying.discard(slot.sid)
             if batched:
                 self.batcher.end()
-            # Also runs when the client goes away mid-stream (OpenCode's Esc, a Stop button). The engine holds
-            # prompt + out[:-1] (the last emitted token is still pending) and the cache must agree, or the next
-            # request would be appended after the abandoned reply.
             read = len(out) - behind
             slot.tokens = np.concatenate([prompt, np.array(out[:read], np.int32)]) if out else prompt
             reasoning, content = parser.text()
-            if stops:                                    # what the client was sent of the answer
+            if stops:
                 content = "".join(stop_text.content).strip()
             reply = {"role": "assistant", "content": content, "reasoning_content": reasoning,
                      "tool_calls": [{"type": "function", "function": {"name": n, "arguments": json.dumps(a, ensure_ascii=False)}} for n, a in calls]}
-            # An empty reply's key would match every other one. A reply cut at a stop string may end inside a token: the
-            # client's copy of it is re-tokenized next time instead.
             if (content or calls) and not aside and not stop_text.hit:
-                gen = prefix + (out[:-1] if out and out[-1] in self.tok.eos else out)[:max_tokens]   # what the client was sent
-                self.replay.put(message_key(reply, False), (thinking, gen))   # for clients that drop the reasoning
+                gen = prefix + (out[:-1] if out and out[-1] in self.tok.eos else out)[:max_tokens]
+                self.replay.put(message_key(reply, False), (thinking, gen))
                 self.replay.put(message_key(reply), (thinking, gen))
-            if record:                                   # the conversation's latest state, for compaction
+            if record:
                 record["reply"] = reply
                 key = next(text_of(m.get("content")) for m in record["messages"] if m.get("role") == "user")
                 self.sessions.put(hashlib.sha1(key.encode()).hexdigest(), record)
@@ -1192,7 +1035,7 @@ class Server:
 
     def stats(self):
         with self.state_lock:
-            if self.loading:                          # the old engine is gone, the new one not ready
+            if self.loading:
                 return {"model": self.active, "loading": self.loading, "progress": load_progress(), "models": list(MODELS)}
             out = {"model": self.active, "models": list(MODELS), "context": self.capacity, "kv_tokens": self.engine.capacity,
                    "cache": self.cache.stats(), "recent": list(self.recent.values())[-16:], "link": link.status(self.link_dev)}
@@ -1202,7 +1045,6 @@ class Server:
             return out
 
     def gauges(self):
-        """Chrysalis's state now, for /metrics (Metrics.render)."""
         g = []
         with self.state_lock:
             g.append(("chrysalis_model_loaded", "1 for the model on the GPU", [({"model": m}, int(m == self.active and not self.loading)) for m in MODELS]))
@@ -1215,7 +1057,7 @@ class Server:
                       ("chrysalis_kv_free_tokens", "Tokens of the KV pool no sequence holds", [({}, c["free_kv_tokens"])]),
                       ("chrysalis_snapshots", "Prompt-cache snapshots in RAM", [({}, c["snapshots"])])]
                 x = self.engine.expert_stats()
-                if x:                                    # Flash-Next: counted since the model loaded
+                if x:
                     g += [("chrysalis_experts_decode_picks_total", "Experts routed to by decode steps", [({}, x["decode_picks"])]),
                           ("chrysalis_experts_decode_picks_in_pool_total", "Of them, experts in the VRAM pool", [({}, x["decode_picks_in_pool"])]),
                           ("chrysalis_experts_placed_total", "Experts copied into the pool", [({}, x["placed"])]),
@@ -1232,7 +1074,6 @@ class Server:
         return g
 
     def load(self, name):
-        """Switch to a model now (the web chat's model picker), after the replies in flight, if any."""
         if name not in MODELS:
             raise RequestError(f"unknown model {name!r}; Chrysalis has {', '.join(MODELS)}")
         self.lanes.hold()
@@ -1248,14 +1089,12 @@ class Server:
             self.lanes.release()
 
 
-# DNS rebinding guard: a web page from another site that points its own name at this machine still sends that name
-# as Host. Requests addressed to an IP address or to this machine's names are fine.
 NAMES = {"", "localhost", socket.gethostname().lower(), socket.gethostname().lower() + ".local"}
 
 
 def host_ok(host):
     name = (host or "").strip().lower()
-    if name.startswith("["):                             # IPv6 literal
+    if name.startswith("["):
         return True
     name = name.rsplit(":", 1)[0]
     try:
@@ -1266,8 +1105,6 @@ def host_ok(host):
 
 
 def make_handler(state, ready):
-    """state["srv"] is the Server once `ready` is set; until then /health and /chrysalis/stats answer 503 and the other
-    requests wait."""
     class Handler(BaseHTTPRequestHandler):
         protocol_version = "HTTP/1.1"
         server_version = "chrysalis"
@@ -1344,7 +1181,7 @@ def make_handler(state, ready):
             rid, created, model = "chatcmpl-" + uuid.uuid4().hex[:24], int(time.time()), body.get("model") or srv.active
             gen = srv.chat(body)
             try:
-                first = next(gen)                         # surfaces request errors before any bytes are sent
+                first = next(gen)
             except RequestError as e:
                 return self.send_json(e.status, {"error": {"message": str(e), "type": "invalid_request_error", "code": e.code}})
             except Exception as e:
@@ -1361,7 +1198,6 @@ def make_handler(state, ready):
                 gen.close()
 
         def messages_api(self, srv, req, count):
-            """Anthropic's Messages API (chrysalis/apis.py), and its token count."""
             def error(status, kind, message):
                 self.send_json(status, {"type": "error", "error": {"type": kind, "message": message}})
             try:
@@ -1391,8 +1227,7 @@ def make_handler(state, ready):
             finally:
                 gen.close()
 
-        def responses_api(self, srv, req):  # not "responses": BaseHTTPRequestHandler's status texts
-            """OpenAI's Responses API (chrysalis/apis.py); a stored response's conversation goes on with previous_response_id."""
+        def responses_api(self, srv, req):
             def error(status, message, code=None):
                 self.send_json(status, {"error": {"message": message, "type": "invalid_request_error", "param": None, "code": code}})
             prev = req.get("previous_response_id")
@@ -1427,8 +1262,6 @@ def make_handler(state, ready):
                 gen.close()
 
         def events(self, stream, on_error):
-            """Server-sent events with names (Anthropic's and the Responses API's): (name, data) pairs from stream; an
-            error once it has begun becomes on_error(exception)'s event."""
             self.send_response(200)
             self.send_header("Content-Type", "text/event-stream")
             self.send_header("Cache-Control", "no-cache")
@@ -1465,11 +1298,11 @@ def make_handler(state, ready):
             n_calls, ev = 0, first
             while True:
                 kind, val = ev[0], ev[1]
-                if kind == "prefix":                      # a continued message as it now stands (Chrysalis extension)
+                if kind == "prefix":
                     self.chunk({**base, "choices": [{"index": 0, "delta": {"chrysalis_prefix": val}, "finish_reason": None}]})
                     ev = next(gen)
                     continue
-                if kind == "start":                       # the prompt read: its length, for a client's live count (Chrysalis extension)
+                if kind == "start":
                     if usage:
                         self.chunk({**base, "choices": [{"index": 0, "delta": {}, "finish_reason": None}], "chrysalis_prompt": val})
                     ev = next(gen)
@@ -1490,7 +1323,7 @@ def make_handler(state, ready):
                 else:
                     delta = {"reasoning_content" if kind == "reasoning" else "content": val}
                 choice = {"index": 0, "delta": delta, "finish_reason": None}
-                if len(ev) > 2 and ev[2] is not None:     # OpenAI's logprobs; the reasoning's under its own key
+                if len(ev) > 2 and ev[2] is not None:
                     choice["logprobs"] = {"content" if kind == "content" else "reasoning_content": [ev[2]]}
                 self.chunk({**base, "choices": [choice]})
                 ev = next(gen)
@@ -1524,16 +1357,14 @@ def make_handler(state, ready):
 
 
 def seed_of(body):
-    """The request's seed, or a random one. Either way the response carries it (top-level `seed`; when streaming,
-    in the finish_reason chunk), so any reply can be drawn again."""
     seed = body.get("seed")
     if seed is None:
-        return random.getrandbits(32)                # fits a JavaScript number exactly
+        return random.getrandbits(32)
     if isinstance(seed, float) and seed.is_integer():
         seed = int(seed)
     if not isinstance(seed, int) or isinstance(seed, bool):
         raise RequestError("seed must be an integer")
-    return seed % 2**64                              # negative seeds wrap, as in a C uint64
+    return seed % 2**64
 
 
 def usage_of(info):
@@ -1546,21 +1377,15 @@ class HTTPServer(ThreadingHTTPServer):
     daemon_threads = True
 
     def server_bind(self):
-        # The stock version also looks up the bind address's fully qualified name, which it never uses: a reverse
-        # DNS query that runs into a timeout (4.5 s) for 0.0.0.0.
         socketserver.TCPServer.server_bind(self)
         self.server_name, self.server_port = self.server_address[:2]
 
     def handle_error(self, request, client_address):
-        # A client that hangs up (curl -f on a 503 while the model loads, a closed tab) is not worth a traceback.
         if not isinstance(sys.exc_info()[1], ConnectionError):
             super().handle_error(request, client_address)
 
 
 def serve(make_server, host="127.0.0.1", port=8080, model=None):
-    """Listens right away, so clients connect while the model loads: until make_server() returns, /health answers
-    503 (with the load's progress) and requests wait. The engine's warm-up then runs holding the GPU lock; requests
-    queue behind it."""
     state, ready = {"loading": model}, threading.Event()
     httpd = HTTPServer((host, port), make_handler(state, ready))
     threading.Thread(target=httpd.serve_forever, daemon=True).start()

@@ -16,19 +16,17 @@ QTensor make_qtensor(Arena &a, int type, int rows, int cols) {
     return t;
 }
 
-// IQ4_XS non-linear codebook, as four little-endian words for v_perm_b32 lookups.
 __device__ __forceinline__ int2 iq4_lookup(uint32_t q) {
-    constexpr uint32_t T0 = 0xBFAD9881u, T1 = 0xF6EADDCFu, T2 = 0x26190D01u, T3 = 0x71594535u;  // -127 ... 113
+    constexpr uint32_t T0 = 0xBFAD9881u, T1 = 0xF6EADDCFu, T2 = 0x26190D01u, T3 = 0x71594535u;
     const uint32_t lo = q & 0x07070707u, hi = (q >> 4) & 0x07070707u;
     const uint32_t a0 = __builtin_amdgcn_perm(T1, T0, lo), a1 = __builtin_amdgcn_perm(T3, T2, lo);
     const uint32_t b0 = __builtin_amdgcn_perm(T1, T0, hi), b1 = __builtin_amdgcn_perm(T3, T2, hi);
     const uint32_t ma = 0x03020100u | ((q & 0x08080808u) >> 1), mb = 0x03020100u | (((q >> 4) & 0x08080808u) >> 1);
     return make_int2(__builtin_amdgcn_perm(a1, a0, ma), __builtin_amdgcn_perm(b1, b0, mb));
 }
-__device__ __forceinline__ int iq4_scale(const QTensor &W, size_t sb, int ib) {   // sb = super-block index
+__device__ __forceinline__ int iq4_scale(const QTensor &W, size_t sb, int ib) {
     return (((W.sc[sb * 4 + (ib >> 1)] >> 4 * (ib & 1)) & 0xf) | (((W.sh[sb] >> 2 * ib) & 3) << 4)) - 32;
 }
-// Q6_K: 4 low bits + 2 high bits, minus 32, for 4 packed bytes at once.
 __device__ __forceinline__ int q6_unpack(uint32_t lo4, uint32_t hi2) {
     const uint32_t x = (lo4 & 0x0F0F0F0Fu) | ((hi2 & 0x03030303u) << 4);
     return (int)((x & 0x1F1F1F1Fu) | ((~x & 0x20202020u) * 7));
@@ -37,19 +35,6 @@ __device__ __forceinline__ int dot16(int4 w, int4 x, int acc) {
     return dot4(w.w, x.w, dot4(w.z, x.z, dot4(w.y, x.y, dot4(w.x, x.x, acc))));
 }
 
-// Decode GEMV: y[t][row] (+)= W[row] . x[t] for T <= 8 tokens.
-// A wave computes R rows at once (R consecutive rows of one matrix, or the gate and up rows of the FFN), so every
-// activation load is reused R times; lane i takes chunks i, i + 32, ... of a row (32 weights, 64 for Q6_K) and sums them
-// in that order in every kernel here, with each chunk's term an explicit fma (left to the compiler, its contraction
-// differs between kernels), so a row comes out the same in a pass of 1 token or 8. Up to 4 tokens each wave reads its
-// activations itself: the pass is bound by streaming the weights. From 5, each wave reading them from L2 would make it
-// compute-bound, so the workgroup's activations go through LDS in slabs of 32 chunks, double-buffered, read by all its
-// waves (k_gemv_staged). Measured per pass of 8 tokens: 32.1 ms in all where 36.6 unstaged (4 tokens: 23.4); the 5120-row
-// matrices 10.1 ms where 14.1, the gated delta net's projections 3.9 where 5.0. The 1024-thread GLU stays unstaged:
-// staged it took 13.0 ms where 10.0, a workgroup that fills a CU stalling it at every slab's barrier.
-// One launch covers up to 3 matrices stacked by rows (e.g. q|k|v) with their own types and outputs, all of one chunk
-// width. Modes: STORE, ADD (residual stream), GLU: silu(gate) * up quantized straight into the int8 input of the down
-// projection (1024-thread workgroups = 32 rows = one int8 block per token).
 
 template <int QT, int T, int R>
 __device__ __forceinline__ void rows_dot(const QTensor *const W[R], const int row[R], int lane, QAct x, float acc[R][T]) {
@@ -179,12 +164,11 @@ __global__ __launch_bounds__(1024) void k_gemv_glu(GemvArgs a) {
     }
 }
 
-template <int T, int CW> struct Slabs {                // alignas: else the compiler splits 16-byte reads of q in four
+template <int T, int CW> struct Slabs {
     alignas(16) int8_t q[2][T][32 * CW];
     float d[2][T][CW];
 };
 
-// slab s of the activations into buffer buf, by the workgroup's 256 threads
 template <int T, int CW>
 __device__ __forceinline__ void stage(Slabs<T, CW> &S, int buf, QAct x, int K, int s) {
     constexpr int SLAB = 32 * CW;
@@ -199,7 +183,6 @@ __device__ __forceinline__ void stage(Slabs<T, CW> &S, int buf, QAct x, int K, i
     }
 }
 
-// acc[r][t] += chunk ch of W's row row0 + r . token t's activations, the chunk being c of the slab in buffer buf
 template <int QT, int T, int R, int CW>
 __device__ __forceinline__ void chunk_dot(const QTensor &W, int row0, int ch, const Slabs<T, CW> &S, int buf, int c, float acc[R][T]) {
     const int K = W.cols;
@@ -239,7 +222,7 @@ __device__ __forceinline__ void chunk_dot(const QTensor &W, int row0, int ch, co
             for (int r = 0; r < R; r++) acc[r][t] = __builtin_fmaf(dl[r] * xd, (float)dot16(hi[r], b, dot16(lo[r], a, 0)), acc[r][t]);
         }
     } else if constexpr (QT == Q6_K) {
-        const int sb = ch >> 2, h = (ch >> 1) & 1, cc = ch & 1, lsb = c >> 2;   // lsb: the superblock within the slab
+        const int sb = ch >> 2, h = (ch >> 1) & 1, cc = ch & 1, lsb = c >> 2;
         int4 q[R][4]; float sc[R][4];
 #pragma unroll
         for (int r = 0; r < R; r++) {
@@ -271,15 +254,13 @@ __device__ __forceinline__ void chunk_dot(const QTensor &W, int row0, int ch, co
     }
 }
 
-// The wave's rows over all of K, the slabs staged by all 256 threads (every one of them must call this: the slabs are
-// shared; `live` says whether this wave's rows exist).
 template <int T, int R, int CW>
 __device__ __forceinline__ void rows_staged(const QTensor &W, int row0, bool live, QAct x, Slabs<T, CW> &S, float acc[R][T]) {
     const int K = W.cols, lane = threadIdx.x % 32, nslab = (K + 32 * CW - 1) / (32 * CW);
     stage<T, CW>(S, 0, x, K, 0);
     for (int s = 0; s < nslab; s++) {
         const int buf = s & 1, nch = min(32, (K - s * 32 * CW) / CW);
-        __syncthreads();                             // slab s staged; slab s - 1 no longer read, so its buffer is free
+        __syncthreads();
         if (s + 1 < nslab) stage<T, CW>(S, buf ^ 1, x, K, s + 1);
         if (live && lane < nch) {
             if constexpr (CW == 64) chunk_dot<Q6_K, T, R, CW>(W, row0, s * 32 + lane, S, buf, lane, acc);
@@ -295,7 +276,7 @@ __global__ __launch_bounds__(256) void k_gemv_staged(GemvArgs a) {
     int row = (blockIdx.x * 8 + threadIdx.x / 32) * R, s = 0;
     const int lane = threadIdx.x % 32;
     while (s < a.nseg - 1 && row >= a.seg[s].W.rows) row -= a.seg[s++].W.rows;
-    s = __builtin_amdgcn_readfirstlane(s);           // wave-uniform: the segment's fields stay in scalar registers
+    s = __builtin_amdgcn_readfirstlane(s);
     row = __builtin_amdgcn_readfirstlane(row);
     const QTensor &W = a.seg[s].W;
     const bool live = row < W.rows;
@@ -348,16 +329,6 @@ void gemv(const QTensor &W, QAct x, int T, float *y, int ldy, int mode, hipStrea
     gemv(a, st);
 }
 
-// Small-batch GEMM: y[t][row] (+)= W[row] . x[t] for prefill chunks of 9..384 tokens.
-// Weights are dequantized in registers straight into WMMA fragments (fp16 x fp16 -> fp32), so a pass
-// reads the quantized weights once instead of writing and re-reading an fp16 copy of every matrix (that
-// costs ~140 ms per forward and dominated short prefills). A workgroup is 4 waves on the same 32 rows and
-// 16*NT tokens, each wave taking a quarter of K; the partial sums are added through LDS.
-//
-// WMMA wants every 16-wide K fragment in both half-waves. Here the lower half produces K 0..7 and the
-// upper half K 8..15 (dequantizing or loading only 8 values per lane), then the halves swap with
-// v_permlanex16. The upper half ends up holding (8..15, 0..7): each half-wave's outputs are computed from
-// its own operands, so a K order that A and B share is exact (checked in tests/test_quant.hip).
 
 typedef uint32_t u4v __attribute__((ext_vector_type(4)));
 typedef uint32_t u8v __attribute__((ext_vector_type(8)));
@@ -372,7 +343,6 @@ __device__ __forceinline__ h16 join_halves(u4v own) {
     return __builtin_bit_cast(h16, r);
 }
 
-// 8 int8 values times d -> 8 halves. int8 -> fp16 is exact via the bits of 1024 + (q + 128).
 __device__ __forceinline__ u4v to_h8(int2 q, float d) {
     typedef _Float16 h2 __attribute__((ext_vector_type(2)));
     const h2 dd = {(_Float16)d, (_Float16)d}, off = {(_Float16)-1152.0f, (_Float16)-1152.0f};
@@ -386,14 +356,13 @@ __device__ __forceinline__ u4v to_h8(int2 q, float d) {
     return r;
 }
 
-// Scale data of one 256-weight super-block of a row, and the scale of its fragment f (weights 16f..16f+15).
 struct SbScales { float d; int4 raw; };
 template <int QT>
 __device__ __forceinline__ SbScales sb_scales(const QTensor &W, int row, int sb) {
     const size_t gsb = (size_t)row * (W.cols / 256) + sb;
     if constexpr (QT == IQ4_XS) return {__half2float(W.d[gsb]), make_int4(((const int *)W.sc)[gsb], W.sh[gsb], 0, 0)};
     else if constexpr (QT == Q6_K) return {__half2float(W.d[gsb]), ((const int4 *)W.sc)[gsb]};
-    else return {1.0f, ((const int4 *)W.d)[gsb]};                  // Q8_0: 8 fp16 block scales
+    else return {1.0f, ((const int4 *)W.d)[gsb]};
 }
 template <int QT>
 __device__ __forceinline__ float frag_scale(const SbScales &s, int f) {
@@ -403,17 +372,15 @@ __device__ __forceinline__ float frag_scale(const SbScales &s, int f) {
     else return __half2float(__ushort_as_half((uint16_t)(w[f >> 2] >> 16 * ((f >> 1) & 1))));
 }
 
-// This lane half's 8 int8 values of the 4 fragments in step c (weights 64c..64c+63) of super-block sb, and
-// the fragments' indices (Q6_K interleaves its 16-weight groups, so they are not consecutive).
 template <int QT>
 __device__ __forceinline__ void frags(const QTensor &W, int row, int sb, int c, int hf, int2 q[4], int f[4]) {
     const int K = W.cols;
     if constexpr (QT == IQ4_XS) {
-        const uint8_t *p = W.q + (size_t)row * (K / 2) + sb * 128 + c * 32 + 8 * hf;     // sub-blocks 2c, 2c+1
+        const uint8_t *p = W.q + (size_t)row * (K / 2) + sb * 128 + c * 32 + 8 * hf;
 #pragma unroll
         for (int h = 0; h < 2; h++) {
             const int2 w = *(const int2 *)(p + 16 * h);
-            const int2 a = iq4_lookup(w.x), b = iq4_lookup(w.y);                     // low / high nibbles
+            const int2 a = iq4_lookup(w.x), b = iq4_lookup(w.y);
             q[2 * h] = make_int2(a.x, b.x); q[2 * h + 1] = make_int2(a.y, b.y);
             f[2 * h] = 4 * c + 2 * h; f[2 * h + 1] = 4 * c + 2 * h + 1;
         }
@@ -440,14 +407,14 @@ __global__ __launch_bounds__(128) void k_gemm_q(QTensor W, const half *x, int ld
     __shared__ float red[4][16 * NT][33];
     const int wave = threadIdx.x / 32, l = threadIdx.x % 32, hf = l >> 4, r = l & 15;
     const int row0 = blockIdx.x * 32, t0 = blockIdx.y * 16 * NT, nsb = W.cols / 256, sb1 = (wave + 1) * nsb / 4;
-    const _Float16 *xl = (const _Float16 *)x + (size_t)(t0 + r) * ldx + 8 * hf;   // B fragments: lane = token
+    const _Float16 *xl = (const _Float16 *)x + (size_t)(t0 + r) * ldx + 8 * hf;
     f8 acc[2][NT] = {};
     for (int sb = wave * nsb / 4; sb < sb1; sb++) {
         const SbScales s0 = sb_scales<QT>(W, row0 + r, sb), s1 = sb_scales<QT>(W, row0 + 16 + r, sb);
 #pragma unroll
         for (int c = 0; c < 4; c++) {
             int2 q0[4], q1[4]; int f[4];
-            frags<QT>(W, row0 + r, sb, c, hf, q0, f);                                 // A fragments: lane = row
+            frags<QT>(W, row0 + r, sb, c, hf, q0, f);
             frags<QT>(W, row0 + 16 + r, sb, c, hf, q1, f);
 #pragma unroll
             for (int g = 0; g < 4; g++) {
@@ -499,9 +466,7 @@ void gemm_q(const QTensor &W, const half *x, int ldx, int T, void *y, int ldy, i
     else FAIL("gemm_q: type %d", W.type);
 }
 
-// Dequantization to fp16 (long prefill chunks feed hipBLASLt).
 
-// 16 int8 values times a scale -> 16 halves, written as two 16-byte stores.
 __device__ __forceinline__ void store16(half *o, int4 q, float d) {
     const int8_t *b = (const int8_t *)&q;
     half2 h[8];
@@ -557,7 +522,6 @@ void dequant(const QTensor &W, half *out, hipStream_t st) {
     k_dequant<<<(nchunks + 255) / 256, 256, 0, st>>>(W, out, nchunks);
 }
 
-// Dequantize selected rows (token embeddings) to fp32; an image token's row is its picture's embedding (fp16, host).
 __global__ void k_embed(QTensor W, const int *tokens, const half *const *rows, float *out) {
     const int t = blockIdx.y, K = W.cols;
     if (rows && rows[t]) {
@@ -565,7 +529,7 @@ __global__ void k_embed(QTensor W, const int *tokens, const half *const *rows, f
         return;
     }
     const int row = tokens[t];
-    for (int c = threadIdx.x; c < K / 32; c += blockDim.x) {          // IQ4_XS rows
+    for (int c = threadIdx.x; c < K / 32; c += blockDim.x) {
         const int sb = c >> 3, ib = c & 7;
         const size_t gsb = (size_t)row * (K / 256) + sb;
         const float dl = __half2float(W.d[gsb]) * iq4_scale(W, gsb, ib);
@@ -586,10 +550,9 @@ void embed(const QTensor &W, const int *tokens, const half *const *rows, int T, 
     k_embed<<<dim3(1, T), 256, 0, st>>>(W, tokens, rows, out);
 }
 
-// Activation quantization: fp32 -> int8 with one scale per 32 values.
 
 __global__ void k_quant_act(const float *x, int64_t n, QAct out) {
-    const int64_t i = blockIdx.x * (int64_t)blockDim.x + threadIdx.x;   // one lane per value, one wave per block
+    const int64_t i = blockIdx.x * (int64_t)blockDim.x + threadIdx.x;
     const float v = i < n ? x[i] : 0.0f;
     const float amax = warp_max(fabsf(v));
     const float d = amax / 127.0f;

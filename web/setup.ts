@@ -1,35 +1,18 @@
-// Connecting a device to the web chat on the network (`chrysalis.sh start --host 0.0.0.0`): the page the chat's own address serves a
-// browser this computer has not let in, or one that has not shown lately it trusts Chrysalis (server.ts). The chat is
-// HTTPS there (tls.ts) and a device warns about its certificate until it trusts this machine's authority, so a new device
-// comes here past that warning, once. The page offers the authority the way the device's system takes it (a profile on
-// Apple's, the certificate elsewhere, Firefox's own prompt) with the taps that trust it there. It has to be offered over
-// HTTPS: Chromium holds back every download a plain-HTTP page makes, blob: and data: ones too. Once the device trusts
-// the authority (an image from the trust check loads, devices.ts), the same page asks to join and shows the device's own
-// code, which the computer's screen shows beside Allow; allowed, the chat opens in its place.
-//
-// Until the device trusts the authority, nothing proves this page came from this computer: someone on the network could
-// answer with a page and an authority of their own. The check is the device's own certificate details against the
-// computer's screen.
 import { readFileSync } from "node:fs";
 
 export interface Authority { caDer: Uint8Array; caName: string; fingerprint: string }
 
 const TOKENS = readFileSync(`${import.meta.dir}/tokens.css`, "utf8");
-// the aurora the chat's panels wear on their heads (index.html's sprite), for the card's
 const INDEX = readFileSync(`${import.meta.dir}/index.html`, "utf8"), SPRITE_AT = INDEX.indexOf('<svg class="sprite"');
 const AURORA = INDEX.slice(SPRITE_AT, INDEX.indexOf("</svg>", SPRITE_AT) + "</svg>".length);
 if (SPRITE_AT < 0 || !AURORA.includes('id="aurora"')) throw new Error("index.html has no aurora sprite for the connect page");
 const esc = (s: string) => s.replace(/[&<>"']/g, (c) => `&#${c.charCodeAt(0)};`);
 const b64 = (b: Uint8Array) => Buffer.from(b).toString("base64");
-// a profile's identifiers from the authority's fingerprint: the same authority is the same profile, so setting a device
-// up again replaces it rather than adding another
 function uuid(fingerprint: string, k: number) {
   const h = fingerprint.replace(/:/g, "").toLowerCase().slice(k * 32, k * 32 + 32);
   return `${h.slice(0, 8)}-${h.slice(8, 12)}-5${h.slice(13, 16)}-${((parseInt(h[16], 16) & 3) | 8).toString(16)}${h.slice(17, 20)}-${h.slice(20, 32)}`;
 }
 
-// Apple's configuration profile: the authority as a root certificate (iOS and iPadOS install it from Safari; macOS from
-// System Settings). Unsigned: nothing the device trusts yet could sign it, so it shows as not verified.
 export function appleProfile(a: Authority): string {
   const id = `local.chrysalis.${uuid(a.fingerprint, 0)}`;
   return `<?xml version="1.0" encoding="UTF-8"?>
@@ -61,10 +44,8 @@ export function appleProfile(a: Authority): string {
 `;
 }
 
-// A 1x1 transparent GIF: the trust check's image, which a page loads to see whether the device trusts Chrysalis
 export const TRUSTED_GIF = Uint8Array.from(atob("R0lGODlhAQABAIAAAAAAAP///yH5BAEAAAAALAAAAAABAAEAAAIBRAA7"), (c) => c.charCodeAt(0));
 
-// The device as the page tells it: its system (the guide it gets) and, for the list of devices let in, a name
 const DETECT = `const ua = navigator.userAgent, touchMac = /Macintosh/.test(ua) && navigator.maxTouchPoints > 1;
 const os = /iPhone|iPad|iPod/.test(ua) || touchMac ? "ios" : /Android/.test(ua) ? "android" : /CrOS/.test(ua) ? "chromeos"
   : /Macintosh/.test(ua) ? "mac" : /Windows/.test(ua) ? "windows" : "linux";
@@ -73,9 +54,6 @@ const NAME = { ios: /iPad/.test(ua) || touchMac ? "iPad" : "iPhone", android: "A
   + (browser ? " · " + browser : "");
 const $ = (id) => document.getElementById(id);`;
 
-// The page's look is the chat's (tokens.css): its sea of characters fills the window (device.ts, whose built script the
-// page carries: `sea`), and the page is a card floating on it, as the message box does, with the butterfly above it and
-// a night sky over the page's top: the aurora the chat's panels wear, fading into the sea.
 const page = (body: string, script: string, sea: string) => `<!doctype html>
 <html lang="en">
 <head>
@@ -86,14 +64,12 @@ const page = (body: string, script: string, sea: string) => `<!doctype html>
 <style>
 ${TOKENS}
   * { box-sizing: border-box; }
-  /* no bounce past the page's ends: the sea is fixed to the window, and the sky would come away from its top */
   html, body { overscroll-behavior: none; background: var(--bg); }
   body { margin: 0; color: var(--text); font: 16px/1.55 var(--sans); -webkit-font-smoothing: antialiased; }
   .sea { position: fixed; inset: 0; overflow: hidden; }
   .sea > .ocean { position: absolute; touch-action: manipulation; }
   main { position: relative; display: flex; flex-direction: column; align-items: center; min-height: 100dvh;
     padding: 0 16px max(28px, env(safe-area-inset-bottom)); pointer-events: none; }
-  /* the whole art across a wide window (its own proportions), its middle on a phone's, under the status bar too */
   .sky { position: relative; display: grid; place-items: center; align-self: stretch; margin: 0 -16px; box-sizing: content-box;
     height: clamp(68px, 100vw * 51 / 640, 120px); padding-top: env(safe-area-inset-top); }
   .sky > .aurora { position: absolute; inset: 0; width: 100%; height: 100%; mask-image: linear-gradient(#000 45%, transparent); }
@@ -168,7 +144,6 @@ ${script}
 </html>
 `;
 
-// device.ts as a script of its own, its drawing in it as a data: URL: the page is served whole, as its policy lets in no file but the trust check's image
 export async function deviceScript(): Promise<string> {
   const built = await Bun.build({ entrypoints: [`${import.meta.dir}/device.ts`], target: "browser", minify: true, plugins: [{ name: "svg as a data: URL",
     setup(b) {
@@ -179,17 +154,10 @@ export async function deviceScript(): Promise<string> {
   return (await built.outputs[0].text()).replaceAll("</script", "<\\/script");
 }
 
-// The page: what it checks, the guide for the device it detects (any other one a tap away) one step at a time, the
-// device's code once it trusts Chrysalis, and the chat once it is allowed. check: the trust check's image.
 export function connectPage(a: Authority, check: string, sea: string): string {
   const name = esc(a.caName);
-  // an address the person copies: browsers open no chrome:// address from a page, by link or by script
   const copyable = (text: string) => `<span class="copyable"><code>${esc(text)}</code><button type="button" class="copy">Copy</button></span>`;
-  // Each step as the card names it, and how (the download's alone, with only what its button does not say): as few as each
-  // system allows, the last one trusting the authority. The page moves on to the next step on the download, and again
-  // each time the person comes back to it (from Settings) and the device does not trust Chrysalis yet.
   const guides = {
-    // iOS installs a profile in one place and trusts its authority in another
     ios: { title: "iPhone and iPad", button: ["Download", "/chrysalis.mobileconfig"], steps: [
       ["Download", "Then tap <b>Allow</b>."],
       ["Install", "Open <b>Settings</b>, tap <b>Profile Downloaded</b>, then <b>Install</b>."],
@@ -197,10 +165,7 @@ export function connectPage(a: Authority, check: string, sea: string): string {
     android: { title: "Android", button: ["Download", "/chrysalis-ca.crt"], steps: [
       ["Download", ""],
       ["Trust", "Open <b>Settings</b>, search for <b>CA certificate</b>, tap <b>Install anyway</b> and pick <b>chrysalis-ca.crt</b>. Then come back here."]],
-      // Firefox on Android goes by its own list until told to take the system's
       firefox: ["Trust in Firefox", "In Firefox, <b>Settings → About Firefox</b>, tap the logo five times, then in <b>Secret settings</b> turn on <b>Use third party CA certificates</b>."] },
-    // a profile the person installed may leave its authority untrusted on a Mac: Keychain Access trusts it then (the page
-    // goes on before this step where it does not)
     mac: { title: "Mac", button: ["Download", "/chrysalis.mobileconfig"], steps: [
       ["Download", "Then open the file, if the browser only saves it."],
       ["Install", "Open <b>System Settings</b>, click <b>Profile Downloaded</b> (or <b>General → Device Management</b>), then <b>Install</b>."],
@@ -208,7 +173,6 @@ export function connectPage(a: Authority, check: string, sea: string): string {
     windows: { title: "Windows", button: ["Download", "/chrysalis-ca.crt"], steps: [
       ["Download", "Then open the file."],
       ["Trust", "Click <b>Install Certificate…</b> and <b>Next</b>, choose <b>Place all certificates in the following store → Browse… → Trusted Root Certification Authorities</b>, then <b>Next</b>, <b>Finish</b> and <b>Yes</b>."]] },
-    // Chrome's certificate manager opens on the list it imports authorities into at this address
     linux: { title: "Linux", button: ["Download", "/chrysalis-ca.crt"], steps: [
       ["Download", ""],
       ["Trust", `Open this address in a new tab, click <b>Import</b> beside <b>Trusted Certificates</b> and pick <b>chrysalis-ca.crt</b>.${copyable("chrome://certificate-manager/localcerts/usercerts")}`]] },
@@ -238,7 +202,6 @@ export function connectPage(a: Authority, check: string, sea: string): string {
       fingerprint this device shows for <b>${name}</b> in its certificate details with the one under <b>Connect a device</b>
       on the computer.</p>
   </details>`, `const CHECK = ${JSON.stringify(check)}, GUIDES = ${JSON.stringify(guides)};
-// desktop Firefox keeps an authority list of its own, and asks itself; on phones it goes by the system's
 const detected = /Firefox\\//.test(ua) && os !== "ios" && os !== "android" ? "firefox" : os;
 if (os === "android" && browser === "Firefox") GUIDES.android.steps.push(GUIDES.android.firefox);
 const status = $("status");
@@ -252,7 +215,7 @@ function copied(button, text) {
 }
 function copies(root) {
   for (const b of root.querySelectorAll(".copy")) b.onclick = () => {
-    getSelection().selectAllChildren(b.previousElementSibling);      // to paste by hand where nothing may be copied
+    getSelection().selectAllChildren(b.previousElementSibling);
     copied(b, b.previousElementSibling.textContent);
   };
 }
@@ -268,14 +231,12 @@ function render() {
   $("back").hidden = at === 0;
   $("on").hidden = at === n - 1;
   $("count").textContent = "Step " + (at + 1) + " of " + n + " · " + guide.steps[at][0];
-  // a profile installs from Safari only
   $("safari").hidden = !(guide === GUIDES.ios && os === "ios" && /CriOS|FxiOS|EdgiOS|OPiOS/.test(ua));
   for (const b of $("others").children) b.setAttribute("aria-pressed", String(GUIDES[b.dataset.key] === guide));
 }
 const move = (by) => { at = Math.max(0, Math.min(guide.steps.length - 1, at + by)); render(); };
 $("back").onclick = () => move(-1);
 $("on").onclick = () => move(1);
-// the next step once the download has begun (moving the link at once could cancel it)
 $("go").onclick = () => setTimeout(() => { if (at === 0) move(1); }, 500);
 $("safari").querySelector("button").onclick = (e) => copied(e.target, location.href);
 for (const [key, g] of Object.entries(GUIDES)) {
@@ -288,9 +249,6 @@ for (const [key, g] of Object.entries(GUIDES)) {
 }
 render();
 const sleep = (ms) => new Promise((done) => setTimeout(done, ms));
-// The image loads only where this browser trusts Chrysalis's authority: a warning clicked past covers the chat's
-// certificate alone, and an image cannot show one. A certificate it does not trust fails at once; no answer at all
-// (null) is a firewall that drops the trust check's port.
 function trusts(nonce) {
   return new Promise((done) => {
     const img = new Image(), late = setTimeout(() => done(null), 6000);
@@ -310,8 +268,6 @@ function opening(text) {
   document.dispatchEvent(new Event("chrysalis-opening"));
   setTimeout(() => location.replace("/"), 900);
 }
-// Checked every 1.5 s, and at once when the page comes back into view, until the device trusts Chrysalis; then it asks
-// to join and waits for this computer's answer
 let asking = false, timer = 0;
 async function check() {
   if (asking) return;
@@ -339,7 +295,7 @@ async function check() {
   setUp(false);
   const r = await fetch("/pair/ask", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ nonce, name: NAME }) })
     .then((x) => x.json()).catch(() => null);
-  if (r?.in) return opening("Trusted. Opening Chrysalis…");     // let in before, and trusted again
+  if (r?.in) return opening("Trusted. Opening Chrysalis…");
   if (!r?.code) return again("Could not ask to join");
   $("sub").innerHTML = "Allow this device on your computer: <b>Connect a device</b>, the phone at the top of the chat, shows this code.";
   $("code").textContent = r.code.slice(0, 3) + " " + r.code.slice(3);

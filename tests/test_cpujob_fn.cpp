@@ -1,8 +1,3 @@
-// The CPU prefill job (CpuMoe::submit/wait): its per-pick outputs against a float reference built from ggml's
-// dequantization, on 8 random cold experts in two gate/up format groups (Q3_K + Q2_K as in chrysalis-fn.gguf, and
-// IQ4_XS), for each path and group: ggml's dot products (experts with fewer than VNNI_MIN_TOKENS tokens) and the VNNI
-// kernel.
-//   build_fn/test_cpujob_fn
 #include "../engine_fn/cpu_moe.h"
 #include "ggml.h"
 #include "ggml-cpu.h"
@@ -14,11 +9,10 @@
 
 constexpr int D = 2560, FE = 640;
 
-struct Job {                           // a MoeJob and the arrays it points into
+struct Job {
     std::vector<int> slot, first, tok; std::vector<float> w; std::vector<uint16_t> out, x16; MoeJob j;
 };
 
-// picks[t]: token t's distinct experts among n, grouped by expert as the engine does (largest first)
 static Job make_job(const std::vector<std::vector<int>> &picks, int n, std::mt19937 &rng, std::vector<float> &x) {
     const int T = (int)picks.size();
     std::vector<std::vector<int>> by(n);
@@ -37,7 +31,7 @@ static Job make_job(const std::vector<std::vector<int>> &picks, int n, std::mt19
         J.first.push_back((int)J.tok.size());
     }
     J.out.resize(J.tok.size() * (size_t)D);
-    J.x16.resize(x.size());                    // the job takes fp16 inputs: round x to them, for the reference too
+    J.x16.resize(x.size());
     for (size_t i = 0; i < x.size(); i++) { J.x16[i] = ggml_fp32_to_fp16(x[i]); x[i] = ggml_fp16_to_fp32(J.x16[i]); }
     J.j.layer = 0; J.j.T = T; J.j.n_exp = (int)J.slot.size(); J.j.x = J.x16.data();
     J.j.slot = J.slot.data(); J.j.first = J.first.data(); J.j.tok = J.tok.data(); J.j.w = J.w.data(); J.j.out = J.out.data();
@@ -50,10 +44,6 @@ int main() {
     std::normal_distribution<float> nd(0.f, 1.f);
     int fails = 0;
     MoeShared *sh = new MoeShared{};
-    // 8 experts, slots 0-4 in gate/up format group 0 and 5-7 in group 1; T = 24, 3 picks per token. Every token takes
-    // experts 4 and 6, and one more with a skewed count, so that each path has experts in both groups:
-    //   tokens per expert   slot 0: 1, 1: 2 | 2: 3, 3: 7, 4: 24 | 5: 1 | 6: 24, 7: 10
-    //   (ggml: slots 0, 1 and 5; VNNI: the others)
     static_assert(VNNI_MIN_TOKENS >= 3 && VNNI_MIN_TOKENS <= 24, "the picks give both paths experts in both groups");
     const int NC = 8, NC0 = 5, T = 24;
     std::vector<int> third = {0, 1, 1, 2, 2, 2, 5};
@@ -90,12 +80,12 @@ int main() {
         cl.down = rd.data(); cl.type_dn = GGML_TYPE_IQ4_NL; cl.row_dn = ggml_row_size(GGML_TYPE_IQ4_NL, FE);
         cl.n0 = NC0; cl.n = NC;
         CpuMoe cpu; cpu.start(sh, nullptr, {cl}, 8); cpu.arm();
-        const bool vnni = cpu.use_vnni(1);                   // whether this CPU and these formats take the VNNI kernel
+        const bool vnni = cpu.use_vnni(1);
         std::vector<float> x((size_t)T * D);
         for (auto &v : x) v = nd(rng);
         Job J = make_job(picks, NC, rng, x);
         cpu.submit(J.j); cpu.wait();
-        double num[2][2] = {}, den[2][2] = {};               // [ggml path, VNNI path][format group]
+        double num[2][2] = {}, den[2][2] = {};
         for (int e = 0; e < J.j.n_exp; e++) {
             const int s = J.slot[e], path = vnni && J.first[e + 1] - J.first[e] >= VNNI_MIN_TOKENS, grp = s >= NC0;
             for (int p = J.first[e]; p < J.first[e + 1]; p++) {
@@ -119,7 +109,7 @@ int main() {
             for (int grp = 0; grp < 2; grp++) {
                 char what[96];
                 snprintf(what, sizeof what, "CPU prefill job, %s, %s path, group %d", f.name, path ? "VNNI" : "ggml", grp);
-                if (den[path][grp] == 0) {                       // a path that got no work proves nothing
+                if (den[path][grp] == 0) {
                     const bool expected = !path || vnni;
                     printf("%-48s %s\n", what, expected ? "no expert took it  FAIL" : "not run: no AVX-512 VNNI on this CPU");
                     fails += expected;

@@ -1,26 +1,3 @@
-"""Build Chrysalis's Qwen3.8-Flash-Next model file from Unsloth's Q8_0 GGUF (+ its shared MTP head and imatrix).
-
-Weights, by how Chrysalis uses them:
-  * always-active matrices on the GPU: the big projections (GDN qkv / z, attention q, shared expert gate / up) Q6_K,
-    the LM head Q6_K, everything else Q8_0 (output projections, K / V, hyper-connections, PLE, embeddings);
-    the QSA indexer projections Q8_0 (from BF16), GDN alpha | beta as one F16 matrix, the router F16;
-  * routed experts by how often the router picks them, ranked over all 24,576 (layer, expert) pairs: the N_HOT most
-    used IQ4_XS gate / up + IQ4_NL down for VRAM; the rest for system RAM (CPU and GPU both read them there) in two
-    groups, Q3_K gate / up, and for the least used Q2_FRAC of all pairs Q2_K, both with IQ4_NL down (640-wide rows rule
-    out 256-blocks). K-quants run at the CPU's full memory bandwidth (the IQ3 formats are compute-bound there). Use is
-    Unsloth's imatrix counts (845,728 tokens of calibration text), blended with routing counts measured by Chrysalis on
-    the work it does: prefill of code (engine_fn/route_stats.py) and, since decode reads every pick's expert per token
-    while a long prefill reads them all once per pass, decode in agent sessions (CHRYSALIS_FN_DECODE_COUNTS), whose
-expert
-    use correlates little with either.
-    The sizes: hot experts + the rest of VRAM's contents fill a 24 GiB card with a 262K-token KV cache and 8K-token
-    prefill passes; the RAM groups take ~42 GB;
-  * the MTP head's experts Q3_K / IQ4_NL (VRAM; drafts only, so precision only moves acceptance);
-  * the n-gram table (51.2B parameters) stays in the source file (Q8_0), memory-mapped by the engine.
-Quantization uses the imatrix importances (per expert for the experts). Usage:
-  python engine_fn/fn_quantize.py SRC_DIR OUT.gguf [--hot N] [--q2 FRAC] [--route COUNTS:W ...]
-  (COUNTS: [48][512] .npy; the calibration counts weigh 1 - the sum of the W)
-"""
 import argparse
 import ctypes as C
 import json
@@ -33,7 +10,7 @@ from concurrent.futures import ThreadPoolExecutor
 import numpy as np
 
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "data", "llama.cpp", "gguf-py"))
-from gguf import GGUFReader  # noqa: E402
+from gguf import GGUFReader
 
 F32, F16, Q5_0, Q8_0, Q2_K, Q3_K, Q6_K, IQ4_NL, IQ4_XS, I32 = 0, 1, 6, 8, 10, 11, 14, 20, 23, 26
 BLOCK = {Q5_0: (32, 22), Q8_0: (32, 34), Q2_K: (256, 84), Q3_K: (256, 110), Q6_K: (256, 210), IQ4_NL: (32, 18), IQ4_XS: (256, 136),
@@ -59,7 +36,6 @@ def nbytes(t, ne):
 
 
 def quantize(t, x, imatrix=None):
-    """x: float32 [rows, n_per_row] -> bytes in ggml block format."""
     x = np.ascontiguousarray(x, dtype=np.float32)
     rows, n = x.shape
     if t == F32:
@@ -74,7 +50,6 @@ def quantize(t, x, imatrix=None):
 
 
 def dequant(rt, raw, n_per_row):
-    """Source tensor bytes -> float32 [rows, n_per_row] (Q8_0, BF16, F16, F32)."""
     raw = np.asarray(raw).reshape(-1).view(np.uint8)
     if rt == "Q8_0":
         blk = raw.reshape(-1, 34)
@@ -138,7 +113,6 @@ class Imatrix:
 
 
 class Writer:
-    """GGUF v3 writer: all tensor infos up front (sizes are known), then the data streamed in order."""
 
     def __init__(self, path):
         self.path, self.kv, self.tensors = path, [], []
@@ -212,8 +186,6 @@ def main():
     I = Imatrix(os.path.join(src, "imatrix_unsloth.gguf"))
     pool = ThreadPoolExecutor(int(os.environ.get("THREADS", os.cpu_count())))
 
-    # tiers by use over all (layer, expert) pairs: the n_hot most used to VRAM, the least used q2_frac of all to Q2_K;
-    # use = shares of the calibration counts, blended with measured routing counts
     calib = np.stack([I.t[f"blk.{l}.ffn_gate_exps.weight.counts"].reshape(-1) for l in range(NL)]).astype(np.float64).reshape(-1)
     routes = []
     for spec in a.route:
@@ -225,7 +197,7 @@ def main():
     for _, cnt, wt in routes: use += wt * cnt / cnt.sum()
     order = np.argsort(-use, kind="stable")
     n_q2 = int(q2_frac * order.size)
-    tier = np.ones(order.size, np.int32)                          # 0 hot, 1 Q3_K, 2 Q2_K
+    tier = np.ones(order.size, np.int32)
     tier[order[:n_hot]] = 0
     tier[order[order.size - n_q2:]] = 2
     hot_ids, q2_ids = order[:n_hot], order[order.size - n_q2:]
@@ -250,7 +222,7 @@ def main():
     if routes:
         W.add_kv("chrysalisfn.routes", ", ".join(f"{f}:{wt:g}" for f, _, wt in routes))
 
-    def keep(name, out_name=None, dims=None):                    # copy a tensor as it is
+    def keep(name, out_name=None, dims=None):
         t = S.get(name)
         ne = dims or [int(x) for x in t.shape]
         tt = {"Q8_0": Q8_0, "F32": F32, "F16": F16}[t.tensor_type.name]
@@ -260,24 +232,23 @@ def main():
             yield np.asarray(raw).reshape(-1).view(np.uint8).tobytes()
         W.add_tensor(out_name or name, ne, tt, produce)
 
-    def requant(name, tt, imat_name=None, out_name=None):        # dequantize and quantize again
+    def requant(name, tt, imat_name=None, out_name=None):
         t = S.get(name)
         ne = [int(x) for x in t.shape]
         im = I.vec(imat_name) if imat_name else None
 
         def produce():
             x = S.f32(name)
-            step = max(1, (1 << 24) // ne[0])                     # ~64 MB of float32 per job
+            step = max(1, (1 << 24) // ne[0])
             jobs = [pool.submit(quantize, tt, x[i:i + step], im) for i in range(0, x.shape[0], step)]
             for j in jobs:
                 yield j.result()
         W.add_tensor(out_name or name, ne, tt, produce)
 
     def experts(l, prefix, mat, tt, ids, out_name):
-        """Experts `ids` of one of a layer's expert matrices (gate / up / down) as one tensor [len(ids)] experts."""
         t = S.get(f"{prefix}ffn_{mat}_exps.weight")
-        ne = [int(x) for x in t.shape]                           # [K, N, 512]
-        raw = np.asarray(t.data).reshape(NE, -1)                  # one row of bytes per expert
+        ne = [int(x) for x in t.shape]
+        raw = np.asarray(t.data).reshape(NE, -1)
 
         def produce(raw=raw, ne=ne, rt=t.tensor_type.name):
             def one(e):
@@ -290,12 +261,11 @@ def main():
         if ids:
             W.add_tensor(f"blk.{l}.{out_name}.weight", [ne[0], ne[1], len(ids)], tt, produce)
 
-    # global tensors
     keep("token_embd.weight")
     requant("output.weight", Q6_K, "output.weight" if I.vec("output.weight") is not None else None)
     keep("output_hc_norm.weight"); keep("output_hc_down.weight"); keep("output_hc_up.weight")
 
-    for l in range(NL + 1):                                     # 48 = the MTP layer
+    for l in range(NL + 1):
         p = f"blk.{l}."
         for k in ("hc_attn_norm", "hc_attn_down", "hc_attn_up", "hc_attn_inject", "hc_ffn_norm", "hc_ffn_down", "hc_ffn_up", "hc_ffn_inject"):
             keep(p + k + ".weight")
@@ -312,7 +282,7 @@ def main():
             for k in ("ssm_conv1d.weight", "ssm_a", "ssm_dt.bias", "ssm_norm.weight"):
                 keep(p + k)
 
-            def ab(p=p):                                          # alpha | beta rows as one fp16 matrix [96, 2560]
+            def ab(p=p):
                 x = np.concatenate([S.f32(p + "ssm_alpha.weight"), S.f32(p + "ssm_beta.weight")])
                 yield x.astype(np.float16).tobytes()
             W.add_tensor(p + "ssm_ab.weight", [D, 96], F16, ab)
@@ -332,8 +302,6 @@ def main():
         requant(p + "ffn_up_shexp.weight", Q6_K, p + "ffn_up_shexp.weight")
         keep(p + "ffn_down_shexp.weight")
         if l < NL:
-            # slots: hot experts 0.. (VRAM tier); RAM experts -1 - s, s counting through the Q3_K group, then the Q2_K group
-            # (gate / up one tensor per group, down one tensor for both)
             h = hot[l]
             c0 = [e for e in range(NE) if tier[l, e] == 1]
             c1 = [e for e in range(NE) if tier[l, e] == 2]

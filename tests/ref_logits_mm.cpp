@@ -1,7 +1,3 @@
-// Reference logits from llama.cpp for a prompt with pictures: text tokens by id, image tokens as given embeddings, every
-// token at its M-RoPE position. Writes float32 [n][vocab] (all positions).
-// Build: make build/ref_logits_mm. Usage: ref_logits_mm model.gguf tokens.i32 pos.i32 embd.f32 out.f32
-//   tokens: [n] (image tokens are any id >= 2^30); pos: [n][3] (t, h, w); embd: [image tokens][n_embd], in order
 #include "llama.h"
 #include <cstdint>
 #include <cstdio>
@@ -30,8 +26,8 @@ int main(int argc, char **argv) {
     auto cp = llama_context_default_params();
     cp.n_ctx = n + 16;
     cp.n_batch = n;
-    cp.n_ubatch = getenv("REF_UBATCH") ? atoi(getenv("REF_UBATCH")) : n;   // smaller: llama.cpp's own numerics, split otherwise
-    if (getenv("REF_KV_Q")) {                           // an 8-bit K, 5-bit V cache like Chrysalis's (diagnostics)
+    cp.n_ubatch = getenv("REF_UBATCH") ? atoi(getenv("REF_UBATCH")) : n;
+    if (getenv("REF_KV_Q")) {
         cp.type_k = GGML_TYPE_Q8_0;
         cp.type_v = GGML_TYPE_Q5_0;
         cp.flash_attn_type = LLAMA_FLASH_ATTN_TYPE_ENABLED;
@@ -41,7 +37,6 @@ int main(int argc, char **argv) {
     std::vector<float> logits((size_t)n * nv);
     llama_batch_ext *b = llama_batch_ext_init(ctx);
     int used = 0;
-    // runs of text and of image tokens, each its own batch (as mtmd decodes them)
     for (int i = 0; i < n;) {
         const bool img = toks[i] >= (1 << 30);
         int j = i;

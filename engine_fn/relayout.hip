@@ -1,11 +1,7 @@
-// Relayout at load time: raw GGUF blocks (in the staging ring) -> the aligned arrays of make_qtensor. A source file
-// of its own: the first launch from a file loads that file's whole code object (~40 ms for quant.hip's GEMVs), and the
-// loader wants this one to be small.
 #include "kernels.h"
 #include <algorithm>
 #include <vector>
 
-// Each SoA array is one fixed byte range of every GGUF block; copy a range with one thread per 4 bytes.
 __global__ void k_copy_range(const uint8_t *raw, int block_bytes, int off, int len, uint8_t *out, int64_t nblocks) {
     const int64_t i = blockIdx.x * (int64_t)blockDim.x + threadIdx.x, words = len / 4;
     if (len == 2) {
@@ -13,31 +9,26 @@ __global__ void k_copy_range(const uint8_t *raw, int block_bytes, int off, int l
         return;
     }
     if (i >= nblocks * words) return;
-    const uint8_t *src = raw + (i / words) * block_bytes + off + (i % words) * 4;   // at least 2-byte aligned
+    const uint8_t *src = raw + (i / words) * block_bytes + off + (i % words) * 4;
     const uint16_t *s16 = (const uint16_t *)src;
     ((uint32_t *)out)[i] = s16[0] | ((uint32_t)s16[1] << 16);
 }
 
-// Q3_K's 12 bytes of packed 6-bit scales (at byte 96 of a block) -> 16 int8 scales minus 32, one thread per block
 __global__ void k_q3k_scales(const uint8_t *raw, int8_t *out, int64_t nblocks) {
     const int64_t i = blockIdx.x * (int64_t)blockDim.x + threadIdx.x;
     if (i >= nblocks) return;
-    const uint16_t *s16 = (const uint16_t *)(raw + i * 110 + 96);              // blocks are 2-byte aligned
+    const uint16_t *s16 = (const uint16_t *)(raw + i * 110 + 96);
     uint8_t sc[12];
     for (int k = 0; k < 6; k++) { sc[2 * k] = (uint8_t)s16[k]; sc[2 * k + 1] = (uint8_t)(s16[k] >> 8); }
     for (int g = 0; g < 16; g++)
         out[i * 16 + g] = (int8_t)((((sc[g & 7] >> (4 * (g >> 3))) & 0xf) | (((sc[8 + (g & 3)] >> (2 * (g >> 2))) & 3) << 4)) - 32);
 }
 
-// len bytes from a 2-byte aligned source to a 4-byte aligned destination (len a multiple of 4)
 __device__ __forceinline__ void copy_words(const uint8_t *src, uint8_t *dst, int len) {
     const uint16_t *s16 = (const uint16_t *)src;
     for (int w = 0; w < len / 4; w++) ((uint32_t *)dst)[w] = s16[2 * w] | ((uint32_t)s16[2 * w + 1] << 16);
 }
 
-// One thread per GGUF block of the placed experts (gate, then up: FE * D / 256 super-blocks each; then down: D * FE / 32
-// IQ4_NL blocks), written where slot_view and the down rows put them; block (0, 0)'s first threads apply the table patches.
-// Placements and patches run in stream order with the passes, so no pass sees a slot half written.
 __global__ void k_place(PlaceArgs a) {
     constexpr int64_t NGU = (int64_t)FE * D / 256, NDN = (int64_t)D * FE / 32;
     const Place &p = a.p[blockIdx.y];
@@ -68,7 +59,7 @@ __global__ void k_place(PlaceArgs a) {
             for (int k = 0; k < 6; k++) { sc[2 * k] = (uint8_t)s16[k]; sc[2 * k + 1] = (uint8_t)(s16[k] >> 8); }
             for (int g = 0; g < 16; g++)
                 ((int8_t *)v.sc)[b * 16 + g] = (int8_t)((((sc[g & 7] >> (4 * (g >> 3))) & 0xf) | (((sc[8 + (g & 3)] >> (2 * (g >> 2))) & 3) << 4)) - 32);
-        } else {                                                        // Q2_K
+        } else {
             copy_words(src, v.sc + b * 16, 16);
             copy_words(src + 16, v.q + b * 64, 64);
             v.d[b] = *(const half *)(src + 80);
@@ -88,7 +79,6 @@ void place_experts(const PlaceArgs &a, hipStream_t st) {
     else if (a.npatch) k_place<<<dim3(1, 1), 256, 0, st>>>(a);
 }
 
-// Blocks b0 .. b0 + nb of the tensor, read from raw (which starts at block b0); nb < 0: the whole tensor.
 void relayout(const QTensor &t, const uint8_t *raw_dev, hipStream_t st, int64_t b0, int64_t nb) {
     const int64_t n = (int64_t)t.rows * t.cols;
     struct Range { int off, len; uint8_t *out; };
@@ -98,7 +88,7 @@ void relayout(const QTensor &t, const uint8_t *raw_dev, hipStream_t st, int64_t 
     else if (t.type == IQ4_XS) ranges = {{0, 2, (uint8_t *)t.d}, {2, 2, (uint8_t *)t.sh}, {4, 4, t.sc}, {8, 128, t.q}};
     else if (t.type == Q5_0) ranges = {{0, 2, (uint8_t *)t.d}, {2, 4, t.qh}, {6, 16, t.q}};
     else if (t.type == IQ4_NL) ranges = {{0, 2, (uint8_t *)t.d}, {2, 16, t.q}};
-    else if (t.type == Q3_K) ranges = {{0, 32, t.qh}, {32, 64, t.q}, {108, 2, (uint8_t *)t.d}};   // + the scales below
+    else if (t.type == Q3_K) ranges = {{0, 32, t.qh}, {32, 64, t.q}, {108, 2, (uint8_t *)t.d}};
     else if (t.type == Q2_K) ranges = {{0, 16, t.sc}, {16, 64, t.q}, {80, 2, (uint8_t *)t.d}, {82, 2, (uint8_t *)t.dm}};
     else FAIL("relayout: type %d", t.type);
     const int block_bytes = qbytes_of(t.type);

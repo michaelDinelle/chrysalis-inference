@@ -1,10 +1,7 @@
-// The web UI's sampler (sampler.ts, which Settings' odds charts run) against the engine's (make_dist in
-// engine/sampler.h, through build/sampler_cases) on random candidates, replies and settings: every candidate's odds
-// must agree, so what the charts show is what Chrysalis draws from.
 import { expect, test } from "bun:test";
 import { type Cand, type SamplerKey, type Stage, sample } from "./sampler";
 
-const STAGES: Stage[] = ["top_k", "temperature", "top_p", "min_p"];   // in their engine/sampler.h id order
+const STAGES: Stage[] = ["top_k", "temperature", "top_p", "min_p"];
 const HELPER = `${import.meta.dir}/../build/sampler_cases`;
 
 function mulberry32(seed: number) {
@@ -18,7 +15,7 @@ function mulberry32(seed: number) {
 
 test("the web sampler gives make_dist's odds", () => {
   const r = mulberry32(7), gauss = () => Math.sqrt(-2 * Math.log(1 - r())) * Math.cos(2 * Math.PI * r());
-  const f32 = (x: number) => Math.fround(x), num = (x: number) => x.toPrecision(9);   // both sides see the same floats
+  const f32 = (x: number) => Math.fround(x), num = (x: number) => x.toPrecision(9);
   const text = (id: number) => (id % 23 === 0 ? "\n" : id % 29 === 0 ? ":" : id % 31 === 0 ? "*" : `w${id}`);
   const N = 2000;
   const cases: { cands: Cand[]; reply: [string, number][]; vals: Record<SamplerKey, number>; order: Stage[] }[] = [];
@@ -29,7 +26,6 @@ test("the web sampler gives make_dist's odds", () => {
     while (ids.size < 64) ids.add(Math.floor(r() * 3000));
     const idl = [...ids];
     const cands = idl.map((id, i) => ({ word: text(id), logit: logits[i], id }));
-    // a reply that repeats a short pattern of candidates and breakers (so DRY finds runs), with some noise
     const pattern = Array.from({ length: 2 + Math.floor(r() * 4) }, () => (r() < 0.15 ? 23 * (1 + Math.floor(r() * 9)) : idl[Math.floor(r() * 16)]));
     const reply: [string, number][] = [];
     for (let i = 0, len = Math.floor(r() * 41); i < len; i++) {

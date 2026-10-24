@@ -25,7 +25,7 @@ void Engine::seq_reset(Seq &s) {
     for (int p : s.pages) page_release(p);
     s.n = 0; s.pos = 0; s.tail_pos = {0, 0, 0}; s.pending = -1; s.pages.clear(); s.seen.clear(); s.top_v.clear(); s.top_i.clear();
     s.hist[0] = s.hist[1] = -1;
-    s.look.clear();                              // a new sequence drafts from its own conversation, not the slot's last
+    s.look.clear();
     s.rng.seed(std::random_device{}());
     CK(hipMemsetAsync(s.ssm, 0, ssm_bytes(), st));
     CK(hipMemsetAsync(s.conv, 0, conv_bytes(), st));
@@ -59,8 +59,6 @@ void Engine::page_release(int p) {
     if (--page_ref[p] == 0) free_pages.push_back(p);
 }
 
-// Make s cover n_tokens, with exclusive ownership of every page written from position `from` on
-// (pages shared with snapshots or other sequences are copied first).
 void Engine::ensure_pages(Seq &s, int n_tokens, int from) {
     const int need = (n_tokens + PAGE - 1) / PAGE;
     int dirty = (int)s.pages.size();
@@ -68,7 +66,7 @@ void Engine::ensure_pages(Seq &s, int n_tokens, int from) {
     for (int i = from / PAGE; i < dirty && i < need; i++) shared += page_ref[s.pages[i]] > 1;
     if ((int)free_pages.size() < need - dirty + shared) throw std::runtime_error("out of KV pages");
     while ((int)s.pages.size() < need) {
-        const int p = page_alloc();   // fresh pages start zeroed (WMMA results must not depend on stale masked data)
+        const int p = page_alloc();
         CK(hipMemsetAsync(kv_pool + (size_t)p * KV_PAGE, 0, KV_PAGE, st));
         s.pages.push_back(p);
     }
@@ -84,10 +82,7 @@ void Engine::ensure_pages(Seq &s, int n_tokens, int from) {
         CK(hipMemcpyAsync(s.d_pages + dirty, s.pages.data() + dirty, (need - dirty) * 4, hipMemcpyHostToDevice, st));
 }
 
-// Snapshots: recurrent state copied to pinned host memory, KV pages shared copy-on-write.
 
-// Pinned host memory for a snapshot slot: hugepage anonymous memory registered with the GPU (hipHostMalloc pins page by
-// page, ~0.3 s for a slot while the cold experts hold most of RAM; this takes a few ms)
 void *Engine::snap_buffer() {
     const size_t n = (state_bytes() + (2 << 20) - 1) & ~size_t((2 << 20) - 1);
     const auto t0 = std::chrono::steady_clock::now();
@@ -111,9 +106,6 @@ void *Engine::take_snap_buffer() {
     return p;
 }
 
-// Buffers for n snapshots in all: the missing ones in one region, faulted in by a few threads and pinned in one call.
-// Small pages: with MADV_HUGEPAGE, faulting in 1.9 GB right after a load took ~1 s of compaction (pinning more pages costs
-// ~0.2 s instead).
 void Engine::reserve_snapshots(int n) {
     snap_target = std::max(snap_target, n);
     if (snap_warm) { snap_reserve_start(); snap_reserve_finish(); }
@@ -182,7 +174,7 @@ int Engine::snapshot(int id) {
 void Engine::restore(int id, int snap) {
     Seq &s = seqs.at(id);
     Snap &sn = snaps.at(snap);
-    if (!sn.used) throw std::runtime_error("restore of a freed snapshot");   // its pages may belong to others by now
+    if (!sn.used) throw std::runtime_error("restore of a freed snapshot");
     CK(hipStreamWaitEvent(st, copied, 0));
     for (int p : s.pages) page_release(p);
     s.pages = sn.pages;
@@ -213,8 +205,8 @@ size_t Engine::snap_bytes(int snap) const {
 void Engine::snap_export(int snap, uint8_t *dst) {
     const Snap &sn = snaps.at(snap);
     if (!sn.used) throw std::runtime_error("export of a freed snapshot");
-    CK(hipStreamSynchronize(st));               // the pages' last writes
-    CK(hipStreamSynchronize(cst));              // the state's host copy
+    CK(hipStreamSynchronize(st));
+    CK(hipStreamSynchronize(cst));
     SnapHeader h;
     memcpy(h.magic, SNAP_MAGIC, 8);
     h.kv_page = KV_PAGE; h.state = state_bytes(); h.n = sn.n; h.pos = sn.pos;
@@ -233,7 +225,6 @@ void Engine::snap_export(int snap, uint8_t *dst) {
     CK(hipStreamSynchronize(cst));
 }
 
-// Returns the new snapshot's id, -1 for bytes of another layout (or cut short), -2 when the pool lacks the pages.
 int Engine::snap_import(const uint8_t *src, size_t bytes) {
     SnapHeader h;
     if (bytes < sizeof h) return -1;
@@ -258,7 +249,7 @@ int Engine::snap_import(const uint8_t *src, size_t bytes) {
         CK(hipMemcpyAsync(kv_pool + (size_t)pg * KV_PAGE, p, KV_PAGE, hipMemcpyHostToDevice, st));
         p += KV_PAGE;
     }
-    CK(hipStreamSynchronize(st));               // src is the caller's to free once this returns
+    CK(hipStreamSynchronize(st));
     sn.n = h.n;
     sn.pos = h.pos;
     sn.tail_pos = {h.tail[0], h.tail[1], h.tail[2]};
@@ -284,7 +275,6 @@ Engine::LtPlan &Engine::lt_plan(int N, int K, int T, int ldx, int ldd, bool c32,
     return it->second;
 }
 
-// y = x W^T (x fp16 [T][ldx], W fp16 [N][K]); fp32 results go through an fp16 scratch (fast kernels)
 void Engine::gemm(const half *W, int N, int K, const half *x, int ldx, int T, void *y, int ldy, bool y_f16, bool accumulate) {
     const float alpha = 1.0f, beta = 0.0f;
     half *dst = y_f16 && !accumulate ? (half *)y : b.gemm16;
@@ -296,8 +286,6 @@ void Engine::gemm(const half *W, int N, int K, const half *x, int ldx, int T, vo
     if (dst != y) store_f16(b.gemm16, N, T, (float *)y, ldy, accumulate, st);
 }
 
-// y = x W^T with fp32 output, for the small projections whose results must not be rounded to fp16 (hipBLASLt's
-// fp32-output kernels are the slow ones, so only those).
 void Engine::gemm32(const half *W, int N, int K, const half *x, int ldx, int T, float *y, int ldy) {
     const float alpha = 1.0f, beta = 0.0f;
     const int Tp = std::min(umax * HC, (T + 63) / 64 * 64);
@@ -313,7 +301,7 @@ void Engine::linear(const QTensor &W, int T, const QAct &qin, const half *hin, i
         gemm_q(W, hin, ldin, T, out, ldo, mode, out_f16, st);
     } else if (W.type == F16) {
         gemm((const half *)W.f, W.rows, W.cols, hin, ldin, T, out, ldo, out_f16, mode == GEMV_ADD);
-    } else {                                      // dequantized to fp16 in row blocks that fit b.deq
+    } else {
         const int rb = std::max(32, (int)(DEQ_ELEMS / W.cols) / 32 * 32);
         for (int r0 = 0; r0 < W.rows; r0 += rb) {
             QTensor Wb = W;
@@ -326,12 +314,9 @@ void Engine::linear(const QTensor &W, int T, const QAct &qin, const half *hin, i
     }
 }
 
-// hyper-connection mixer: residual res [T][HC][D] -> block input b.mx (fp32), b.hq (int8, decode) / b.hh (fp16),
-// and the stream weights `inject` [T][HC] when the mixer has them. pieces: a shared decode pass (Engine::Part) runs the
-// fused kernels on up to 4 rows at a time (their LDS holds 4), so each sequence's rows come out as alone.
 static void hc_mix_run(Engine &e, const HcMix &m, const float *res, int T, float *inject, bool pieces = false) {
     auto &b = e.b;
-    if (T <= 4 || (pieces && T <= 8)) {           // decode: two fused kernels
+    if (T <= 4 || (pieces && T <= 8)) {
         for (int t0 = 0; t0 < T; t0 += 4) {
             const int n = std::min(4, T - t0);
             hc_mix_fused(res + (size_t)t0 * HCD, m.norm, m.down, m.up, inject ? &m.inject : nullptr, n, b.lo + (size_t)t0 * HCR,
@@ -398,7 +383,7 @@ void Engine::attn_core(const Layer &w, int kvl, Seq &s, int T, int off, int praw
     a.Q16 = Q16; a.kv = kv(s); a.layer = kvl; a.T = T; a.pos0 = pos0; a.qg = proj;
     a.part_o = b.part_o; a.part_ml = b.part_ml;
     const int last_pos = pos0 + T - 1;
-    if ((last_pos + 1) / KPOOL <= SEL_BLOCKS) {            // every query sees at most SEL_BLOCKS complete blocks: dense
+    if ((last_pos + 1) / KPOOL <= SEL_BLOCKS) {
         attention(a, small ? nullptr : b.att_h, mq, st);
     } else {
         const int nblk = (last_pos + 1) / KPOOL;
@@ -465,10 +450,8 @@ void Engine::gdn_block(const Layer &w, int gl, Seq &s, int T, bool verify, float
     hc_combine(res, inject, HC, b.blk, nullptr, T, st);
 }
 
-// Routed experts + shared expert for T tokens of b.mx / b.hq, added into res: decode-sized passes (hot picks on the GPU,
-// cold picks on the CPU when cpu_cold) and the MTP block, whose catch-up passes (T > 8) go through moe_front / moe_back.
 void Engine::moe_block(const Layer &w, int layer, int T, bool cpu_cold, float *res, float *inject, unsigned starts) {
-    if (T > 8) {                                  // a pass of one sub-chunk (the MTP block's catch-up)
+    if (T > 8) {
         moe_front(w, T, 0);
         moe_back(w, layer, T);
         hc_combine(res, inject, HC, b.moe, nullptr, T, st);
@@ -479,24 +462,19 @@ void Engine::moe_block(const Layer &w, int layer, int T, bool cpu_cold, float *r
     router_route_dec(w.router, w.sg_w, b.mx, T, b.logits_e, b.sg, w.slot_of, pooled ? cold[layer].n : 0, b.ids, b.wts, b.hot,
                      cpu_cold ? d_sh : nullptr, gf, layer, gen + 1, b.rr_counter, st, pooled ? xc.d_counts : nullptr, starts);
     if (cpu_cold) gen++;
-    if (cpu_cold && layer + 1 < NL && pf_on && xc.recent_hits < Experts::CPU_HEAVY) {   // the next layer's weights into the
-                                                  // Infinity Cache while the CPU works (2-3x faster reads)
+    if (cpu_cold && layer + 1 < NL && pf_on && xc.recent_hits < Experts::CPU_HEAVY) {
         CK(hipEventRecord(routed, st));
         CK(hipStreamWaitEvent(pst, routed, 0));
         prefetch(pf_ranges + pf_off[layer + 1], pf_n[layer + 1], pf_sink, pst);
     }
     moe_dec(w.hot_gate, w.hot_up, w.hot_down, pooled ? d_fmt : nullptr, w.sh_gate, w.sh_up, w.sh_down, gf > 0 ? &cold_dev[layer] : nullptr,
-            b.hot, T, b.hq, b.hq_e, b.wts, b.sg, b.y, st);   // pool picks, shared expert and the GPU's share of the cold picks
+            b.hot, T, b.hq, b.hq_e, b.wts, b.sg, b.y, st);
     moe_finish(cpu_cold ? &d_sh->done : nullptr, gen, b.y, b.hot, b.y + (size_t)T * TOPK_E * D, nullptr, cpu_cold ? d_sh->y : nullptr,
                inject, res, T, st);
 }
 
-// Cost model of a pass's cold experts (per layer), with this machine's rates measured at load (Engine::calibrate): the
-// CPU computes an expert in place (bandwidth-bound for experts with few tokens, compute-bound for busy ones), the GPU
-// first copies it to VRAM (DMA) and then computes it for nothing. The rates are fixed for the session, so the split (and
-// with it the output) depends only on the routing.
 namespace {
-constexpr double GPU_PER_EXPERT = 4e-6;          // the GPU's own cost per staged expert (relayout and GEMM launches)
+constexpr double GPU_PER_EXPERT = 4e-6;
 constexpr double EXPERT_MAC = 3.0 * FE * D;
 }
 
@@ -511,22 +489,17 @@ void Engine::pmark(int phase) {
 static const char *PROF_NAMES[12] = {"embed+ple rows", "token mixers", "moe front", "moe host", "moe hot", "moe cold gpu",
                                      "moe cpu wait", "moe combine", "mtp catch-up", "head", "", ""};
 
-// MoE of a pass, part 1, for its sub-chunk of n tokens at c0 (after the sub-chunk's ffn mixer: inputs in b.mx / b.hh):
-// router picks into b.idsT / b.wtsT and the shared-expert gate into b.sgT at row c0, the inputs kept in b.hmoe, and b.moe
-// started with the gated shared expert.
 void Engine::moe_front(const Layer &w, int n, int c0) {
     half *x = b.hmoe + (size_t)c0 * D;
     CK(hipMemcpyAsync(x, b.hh, (size_t)n * D * 2, hipMemcpyDeviceToDevice, st));
     gemm(w.router, NE, D, x, D, n, b.rlog, NE, false, false);
     route_many(b.rlog, w.sg_w, b.mx, n, b.idsT + (size_t)c0 * TOPK_E, b.wtsT + (size_t)c0 * TOPK_E, b.sgT + c0, st);
-    // the sub-chunk's picks (and inputs, for the CPU's experts) go to the host on the copy stream while the next
-    // sub-chunks run, so moe_back only waits for the last one
     CK(hipEventRecord(front_ready, st));
     CK(hipStreamWaitEvent(cst, front_ready, 0));
     CK(hipMemcpyAsync(b.h_ids + (size_t)c0 * TOPK_E, b.idsT + (size_t)c0 * TOPK_E, (size_t)n * TOPK_E * 4, hipMemcpyDeviceToHost, cst));
     CK(hipMemcpyAsync(b.h_wts + (size_t)c0 * TOPK_E, b.wtsT + (size_t)c0 * TOPK_E, (size_t)n * TOPK_E * 4, hipMemcpyDeviceToHost, cst));
     if (&w != &M) CK(hipMemcpyAsync(b.h_x16 + (size_t)c0 * D, x, (size_t)n * D * 2, hipMemcpyDeviceToHost, cst));
-    half *g = b.att_h, *u = b.att_h + (size_t)n * FS;           // shared expert as GEMMs: gate | up -> silu * up -> down
+    half *g = b.att_h, *u = b.att_h + (size_t)n * FS;
     linear(w.sh_gate, n, NO_Q, x, D, g, FS, GEMV_STORE, true);
     linear(w.sh_up, n, NO_Q, x, D, u, FS, GEMV_STORE, true);
     swiglu_h(g, u, (int64_t)n * FS, st);
@@ -534,22 +507,15 @@ void Engine::moe_front(const Layer &w, int n, int c0) {
     moe_shared(b.blk, b.sgT + c0, n, b.moe + (size_t)c0 * D, st);
 }
 
-// MoE of a pass, part 2: the routed experts of all T tokens, added into b.moe. Picks are sorted by expert on the host (one
-// sync per layer), so each expert's weights are read once per pass, however long the pass. Hot experts run as grouped
-// WMMA GEMMs from VRAM. Of the cold experts with picks, the CPU workers take the ones with the fewest tokens and compute
-// them where they are, while the GPU copies the rest into a two-slot VRAM staging ring (copy stream), relayouts them and
-// runs the same GEMMs. Picks go in batches of at most smax (the gather / output buffers); a batch's outputs are added to
-// its tokens' rows of b.moe in router order, so the result does not depend on how the work was split.
 void Engine::moe_back(const Layer &w, int layer, int T) {
     const int N = T * TOPK_E, P = smax;
-    CK(hipEventRecord(front_copied, cst));        // the copies moe_front queued for this pass's sub-chunks
+    CK(hipEventRecord(front_copied, cst));
     CK(hipEventSynchronize(front_copied));
     const std::vector<int> &slot_of = w.slot_h;
     std::vector<int> cnt(NE, 0);
     for (int j = 0; j < N; j++) cnt[b.h_ids[j]]++;
     if (!route_counts.empty() && layer < NL) for (int e = 0; e < NE; e++) route_counts[(size_t)layer * NE + e] += cnt[e];
     if (layer < NL && !xc.fresh.empty()) for (int e = 0; e < NE; e++) xc.fresh[(size_t)layer * NE + e] += cnt[e];
-    // cold experts with picks, fewest tokens first: the CPU takes a prefix (at most P picks, its output buffer), the GPU the rest
     std::vector<int> ce, hot;
     for (int e = 0; e < NE; e++) if (cnt[e]) (slot_of[e] >= 0 ? hot : ce).push_back(e);
     std::stable_sort(ce.begin(), ce.end(), [&](int a, int c) { return cnt[a] < cnt[c]; });
@@ -572,13 +538,10 @@ void Engine::moe_back(const Layer &w, int layer, int T) {
     }
     if (split >= 0) kc = split ? kmax : 0;
     std::vector<int> gpu_cold(ce.begin() + kc, ce.end()), cpu_cold(ce.begin(), ce.begin() + kc);
-    // pool slots by format, then slot (a gate / up launch per format)
     auto fmt_of = [&](int e) { return layer < NL ? (int)xc.fmt[slot_of[e]] : w.hot_gate.type; };
     std::sort(hot.begin(), hot.end(), [&](int a, int c) { return std::make_pair(fmt_of(a), slot_of[a]) < std::make_pair(fmt_of(c), slot_of[c]); });
-    std::sort(gpu_cold.begin(), gpu_cold.end(), [&](int a, int c) { return slot_of[a] > slot_of[c]; });   // cold slots ascending:
-                                                                                                         // format group 0 first
-    std::stable_sort(cpu_cold.begin(), cpu_cold.end(), [&](int a, int c) { return cnt[a] > cnt[c]; });   // largest first
-    // pick order: hot experts, the GPU's cold experts, the CPU's; tokens ascending within an expert
+    std::sort(gpu_cold.begin(), gpu_cold.end(), [&](int a, int c) { return slot_of[a] > slot_of[c]; });
+    std::stable_sort(cpu_cold.begin(), cpu_cold.end(), [&](int a, int c) { return cnt[a] > cnt[c]; });
     std::vector<int> off(NE, 0);
     {
         int o = 0;
@@ -589,16 +552,12 @@ void Engine::moe_back(const Layer &w, int layer, int T) {
             b.h_tok[p] = j / TOPK_E; b.h_entw[p] = b.h_wts[j]; b.h_pos[j] = p;
         }
     }
-    // Picks go through the gather / output buffers (P rows) in ranges: a range is gathered once and its outputs added to
-    // b.moe once. A range holds groups that run together: all its hot experts, or staging groups of the GPU's cold
-    // experts (at most STAGE_G, one format: one DMA + relayout each). Work items are tiles of at most MOE_ITEM of an expert's
-    // tokens (rows relative to the range), so a busy expert spreads over many workgroups.
     struct Range { int p0, p1, t0, t1; };
     struct Group { int range, i0, i1, w0, w1; };
     std::vector<Range> ranges;
     std::vector<Group> hot_g, gpu_g;
     int nw = 0, nt = 0;
-    std::vector<int> item_fmt(N / 64 + 2 * NE);        // per work item: its pool slot's format (hot items)
+    std::vector<int> item_fmt(N / 64 + 2 * NE);
     std::vector<int> mark(T, -1);
     auto close_range = [&](Range &r) {
         r.t0 = nt;
@@ -607,7 +566,6 @@ void Engine::moe_back(const Layer &w, int layer, int T) {
         r.t1 = nt;
         ranges.push_back(r);
     };
-    // experts ex[i0..i1) in groups; max_g experts per group, a new group when the format group changes (cold)
     auto plan = [&](std::vector<Group> &gs, const std::vector<int> &ex, bool hot_slots, int max_g, int cap) {
         Range r{-1, -1, 0, 0};
         Group g{-1, 0, 0, 0, 0};
@@ -628,19 +586,17 @@ void Engine::moe_back(const Layer &w, int layer, int T) {
         }
         if (r.p0 >= 0) { close_group((int)ex.size()); close_range(r); }
     };
-    // Hot and GPU-cold ranges in separate halves of the buffers, so the hot experts' GEMMs can run between the cold
-    // groups while their DMA streams (the copy engine is the prefill's bottleneck); one expert per range at most P / 2
     int max_cnt = 0;
     for (const auto *v : {&hot, &gpu_cold}) for (int e : *v) max_cnt = std::max(max_cnt, cnt[e]);
     const bool halves = max_cnt <= P / 2 && !hot.empty() && !gpu_cold.empty();
     plan(hot_g, hot, true, NE, halves ? P / 2 : P);
     plan(gpu_g, gpu_cold, false, STAGE_G, halves ? P / 2 : P);
-    half *X0 = b.Xs, *H0 = b.Hs, *Y0 = b.Ys;                  // hot
+    half *X0 = b.Xs, *H0 = b.Hs, *Y0 = b.Ys;
     half *X1 = halves ? b.Xs + (size_t)(P / 2) * D : b.Xs, *H1 = halves ? b.Hs + (size_t)(P / 2) * FE : b.Hs;
-    half *Y1 = halves ? b.Ys + (size_t)(P / 2) * D : b.Ys;   // GPU cold
+    half *Y1 = halves ? b.Ys + (size_t)(P / 2) * D : b.Ys;
     const int pc0 = cpu_cold.empty() ? N : off[cpu_cold[0]];
-    if (!cpu_cold.empty()) { Range r{pc0, N, 0, 0}; close_range(r); }   // the CPU's picks: one range (at most P)
-    if (!cpu_cold.empty()) {                      // the CPU starts right away
+    if (!cpu_cold.empty()) { Range r{pc0, N, 0, 0}; close_range(r); }
+    if (!cpu_cold.empty()) {
         j_slot.clear(); j_first.assign(1, 0);
         j_tok.assign(b.h_tok + pc0, b.h_tok + N); j_w.assign(b.h_entw + pc0, b.h_entw + N);
         for (int e : cpu_cold) { j_slot.push_back(cslot(e)); j_first.push_back(off[e] - pc0 + cnt[e]); }
@@ -660,7 +616,7 @@ void Engine::moe_back(const Layer &w, int layer, int T) {
         moe_gemm_gateup(G, U, none, none, b.work + w0, w1 - w0, X, H, st);
         moe_gemm_down(Dn, none, b.work + w0, w1 - w0, H, b.ent_w + ranges[g.range].p0, Y, st);
     };
-    auto hot_gemms = [&](const Group &g, int w0, int w1, half *X, half *H, half *Y) {   // runs of one slot format
+    auto hot_gemms = [&](const Group &g, int w0, int w1, half *X, half *H, half *Y) {
         for (int a = w0; a < w1;) {
             int z = a + 1;
             while (z < w1 && item_fmt[z] == item_fmt[a]) z++;
@@ -671,10 +627,7 @@ void Engine::moe_back(const Layer &w, int layer, int T) {
     };
     auto gather = [&](int ri, half *X) { const Range &r = ranges[ri]; gather_rows(b.hmoe, b.ent_tok + r.p0, r.p1 - r.p0, X, st); };
     auto accum = [&](int ri, half *Y) { const Range &r = ranges[ri]; moe_accum(Y, b.pos, r.p0, r.p1, b.btok + r.t0, r.t1 - r.t0, b.moe, st); };
-    // staging slot k: gate | up regions of stage_gu bytes each (the group's packed GGUF experts), then down
-    // a group of the file's VRAM-tier experts (format group 2: the spill mirror, not registered) is copied into pinned
-    // memory first, once the copy that last read that memory has finished
-    auto dma = [&](int gi) {                      // runs of consecutive slots in one copy
+    auto dma = [&](int gi) {
         const Group &G = gpu_g[gi];
         const int k = gi % NSLOT, fg = cl->grp(cslot(gpu_cold[G.i0])), ng = G.i1 - G.i0;
         const size_t gsz = (size_t)FE * cl->row_gu[fg], dsz = (size_t)D * cl->row_dn;
@@ -700,11 +653,10 @@ void Engine::moe_back(const Layer &w, int layer, int T) {
         }
         CK(hipEventRecord(raw_ready[k], cst));
     };
-    // the hot work items in slices, one before each cold group (with halves) or all before the first
     int nwh = 0;
     for (const Group &g : hot_g) nwh += g.w1 - g.w0;
     const int slots = halves ? (int)gpu_g.size() : 1;
-    auto hot_slice = [&](int s) {                 // hot items [nwh * s / slots, nwh * (s + 1) / slots) in item order
+    auto hot_slice = [&](int s) {
         const int a = (int)((int64_t)nwh * s / slots), z = (int)((int64_t)nwh * (s + 1) / slots);
         for (int i = 0, base = 0; i < (int)hot_g.size(); base += hot_g[i].w1 - hot_g[i].w0, i++) {
             const Group &g = hot_g[i];
@@ -719,13 +671,13 @@ void Engine::moe_back(const Layer &w, int layer, int T) {
     if (gpu_g.empty()) hot_slice(0);
     for (size_t gi = 0; gi < gpu_g.size(); gi++) {
         const Group &g = gpu_g[gi];
-        if (gi + NSLOT - 1 < gpu_g.size()) dma((int)gi + NSLOT - 1);   // the copy engine runs ahead while the GPU computes
+        if (gi + NSLOT - 1 < gpu_g.size()) dma((int)gi + NSLOT - 1);
         if ((int)gi < slots) hot_slice((int)gi);
         if (gi == 0) pmark(4);
         if (gi == 0 || gpu_g[gi - 1].range != g.range) gather(g.range, X1);
         const int k = gi % NSLOT, ns = g.i1 - g.i0, fmt = cl->type_gu[cl->grp(cslot(gpu_cold[g.i0]))];
         CK(hipStreamWaitEvent(st, raw_ready[k], 0));
-        Arena ag, au;                             // the SoA arrays of this format over the slot's staging regions
+        Arena ag, au;
         ag.base = b.sgu[k]; au.base = b.sgu[k] + stage_soa; ag.cap = au.cap = stage_soa;
         const QTensor G = make_qtensor(ag, fmt, ns * FE, D), U = make_qtensor(au, fmt, ns * FE, D);
         QTensor Dn = b.sd_[k];
@@ -738,13 +690,9 @@ void Engine::moe_back(const Layer &w, int layer, int T) {
         if (gi + 1 == gpu_g.size() || gpu_g[gi + 1].range != g.range) accum(g.range, Y1);
     }
     pmark(5);
-    if (!cpu_cold.empty()) {                      // the CPU's outputs into Ys, then the same accumulation (the last range)
+    if (!cpu_cold.empty()) {
         if (!gpu_cold.empty()) CK(hipEventRecord(moe_gpu_done, st));
         cpu.wait();
-        // balance feedback: if the GPU's share is already done when the CPU's is, the CPU got too much (and the reverse);
-        // the split's CPU estimates scale by cpu_bias, which settles where both finish together. It runs for the first
-        // passes after a load only: a split that keeps following timing would make results depend on history (the CPU
-        // and the GPU round differently), and a settled bias is as fast (1.5-2x the estimate: within 2% everywhere).
         if (!gpu_cold.empty() && split < 0 && adapt && adapt_left > 0) {
             cpu_bias = std::clamp(cpu_bias * (hipEventQuery(moe_gpu_done) == hipSuccess ? 1.03 : 1 / 1.03), 0.1, 10.0);
             if (--adapt_left == 0) fprintf(stderr, "chrysalis-fn: prefill split settled (CPU cost x%.2f)\n", cpu_bias);
@@ -755,9 +703,6 @@ void Engine::moe_back(const Layer &w, int layer, int T) {
     }
 }
 
-// llama.cpp's n-gram hash (llm_graph_input_qwen4exp_ple).
-// Table rows of the n-gram heads for tokens at the positions after history (h0, h1) (-1 = none): 8 bigram heads, then
-// 8 trigram heads; an EOS (or no token) cuts the context at and before it.
 void Engine::ple_ids(int h0, int h1, const int *tokens, int T, size_t *rows) const {
     constexpr int64_t EOS = EOS_TEXT;
     for (int t = 0; t < T; t++) {
@@ -774,8 +719,6 @@ void Engine::ple_ids(int h0, int h1, const int *tokens, int T, size_t *rows) con
     }
 }
 
-// Ask the kernel for every page these rows touch at once: cold rows (most of them when RAM is full) are then read from
-// the disk in parallel instead of one ~0.1-0.3 ms fault after another.
 void Engine::ple_prefetch(const size_t *rows, size_t n) const {
     constexpr size_t RB = PLE_DIM / 32 * 34;
     for (size_t i = 0; i < n; i++) {
@@ -794,13 +737,11 @@ void Engine::ple_rows(const Seq &s, const int *tokens, int T, int off) {
         for (size_t i = i0; i < i1; i++) memcpy(dst + i * RB, ngram + rows[i] * RB, RB);
     };
     if (T <= 8) { copy(0, rows.size()); return; }
-    // long passes: 4 threads, so the reads of rows that are not in the page cache overlap
     std::thread th[4];
     for (int k = 0; k < 4; k++) th[k] = std::thread(copy, rows.size() * k / 4, rows.size() * (k + 1) / 4);
     for (auto &t : th) t.join();
 }
 
-// the n-gram block for the n tokens of a pass at c0 (their rows from ple_rows); res: their residual streams
 void Engine::ple_block_run(Seq &s, int c0, int n, bool verify, float *res) {
     const Layer &w = L[PLE_LAYER];
     constexpr size_t RB = PLE_DIM / 32 * 34;
@@ -818,14 +759,12 @@ void Engine::ple_block_run(Seq &s, int c0, int n, bool verify, float *res) {
     if (!verify) ple_commit(s.ple, b.xconv, n, st);
 }
 
-// The layer's MoE routing predicted from its input residual (see lst in model.h). la.res is a copy, so the token mixer may
-// write the residual meanwhile; the next layer's copy waits until this layer's lookahead has read it.
 void Engine::lookahead(const Layer &w, int layer, int T, const float *res, unsigned starts) {
     CK(hipStreamWaitEvent(st, la_done, 0));
     CK(hipMemcpyAsync(la.res, res, (size_t)T * HCD * 4, hipMemcpyDeviceToDevice, st));
     CK(hipEventRecord(la_ready, st));
     CK(hipStreamWaitEvent(lst, la_ready, 0));
-    for (int t0 = 0; t0 < T; t0 += 4)              // the fused kernels' LDS holds 4 rows
+    for (int t0 = 0; t0 < T; t0 += 4)
         hc_mix_fused(la.res + (size_t)t0 * HCD, w.hcf.norm, w.hcf.down, w.hcf.up, nullptr, std::min(4, T - t0), la.lo + (size_t)t0 * HCR,
                      nullptr, HC, la.inv + t0 * HC, la.mx + (size_t)t0 * D, la.hh + (size_t)t0 * D, qoff(la.hq, (size_t)t0 * D), lst);
     router_route_dec(w.router, w.sg_w, la.mx, T, la.logits, la.sg, w.slot_of, cold[layer].n, la.ids, la.wts, la.hot, d_sh_pred, gfrac,
@@ -833,8 +772,6 @@ void Engine::lookahead(const Layer &w, int layer, int T, const float *res, unsig
     CK(hipEventRecord(la_done, lst));
 }
 
-// The M-RoPE position of cell `cell` for a pass starting at cell p0 whose positions are pos3 (host, or null: text from
-// s.pos); a cell before the pass can only be the first of the sequence's incomplete indexer block (s.tail_pos).
 static Pos3 cell_pos(const Seq &s, int p0, const int *pos3, int cell) {
     if (cell < p0) return s.tail_pos;
     const int i = cell - p0;
@@ -842,15 +779,11 @@ static Pos3 cell_pos(const Seq &s, int p0, const int *pos3, int cell) {
     return {s.pos + i, s.pos + i, s.pos + i};
 }
 
-// A pass: tokens (host) at positions s.n .. s.n+T-1 (T <= smax) through the 48 layers, layer by layer. Within a layer,
-// the token mixer and the mixers run over sub-chunks of at most umax tokens in order (attention and the recurrent states
-// see every earlier token), then the routed experts once for all T. Leaves the final residual in b.res.
 void Engine::forward(Seq &s, const int *tokens, int T, bool verify, const int *pos3, bool img) {
     ensure_pages(s, s.n + T, s.n);
     experts_place(T);
     if (T > 8) pmark(-1);
-    // the n-gram rows are needed at layer 1: long passes gather them while layer 0 runs
-    std::vector<int> grams;                       // a picture's tokens hash as the <|image_pad|> they stand for
+    std::vector<int> grams;
     const int *hashed = tokens;
     if (img) {
         grams.assign(tokens, tokens + T);
@@ -862,7 +795,7 @@ void Engine::forward(Seq &s, const int *tokens, int T, bool verify, const int *p
     else ple_rows(s, hashed, T);
     CK(hipMemcpyAsync(b.tokens, tokens, T * 4, hipMemcpyHostToDevice, st));
     if (pos3) CK(hipMemcpyAsync(b.rpos, pos3, (size_t)T * 12, hipMemcpyHostToDevice, st));
-    const int nc = (T + umax - 1) / umax;         // sub-chunks as even as possible: none is decode-sized when T > 8
+    const int nc = (T + umax - 1) / umax;
     auto cb = [&](int c) { return (int)((int64_t)T * c / nc); };
     for (int c = 0; c < nc; c++) {
         const int c0 = cb(c), n = cb(c + 1) - c0;
@@ -916,9 +849,6 @@ void Engine::ple_parts(const Part *p, int np, int T, float *res) {
     }
 }
 
-// A decode pass of several sequences' rows, as forward() runs one sequence's: the projections, routers and experts once for
-// all rows, attention and the recurrent and n-gram states per sequence. A verify part keeps its recurrent inputs for the
-// commit, the others advance their states here.
 void Engine::forward_parts(const Part *p, int np, const int *tokens, int T) {
     unsigned starts = 0;
     for (int i = 0; i < np; i++) {
@@ -945,8 +875,6 @@ void Engine::forward_parts(const Part *p, int np, const int *tokens, int T) {
     experts_plan();
 }
 
-// final mixer + LM head for rows [r0, r0+T) of b.res -> b.logits [T][VOCAB] (rows: vocabulary prefix; pieces: as
-// hc_mix_run's)
 static void head(Engine &e, const HcMix &hm, const float *res, int T, int rows, bool pieces = false) {
     hc_mix_run(e, hm, res, T, nullptr, pieces);
     if (T > 8) quant_act(e.b.mx, (int64_t)T * D, e.b.hq, e.st);
@@ -962,11 +890,8 @@ void Engine::lm_head(const QAct &in, int T, int rows) {
     gemv(w, in, T, b.logits, VOCAB, GEMV_STORE, st);
 }
 
-// MTP block over pairs (token at pos0+t, residual of pos0+t-1): h_prev [T][HCD] -> b.mtp_res [T][HCD]; the draft
-// logits of the last row come from its head mixer (left in b.mx / b.hq).
 void Engine::mtp_forward(Seq &s, int T, int pos0, const float *h_prev, const int *d_tokens, bool spec, int rope0, const int *rpos,
                          Pos3 tail_pos, const half *const *img, int praw_off) {
-    // eh_proj input per (token, stream): [rmsnorm(e) * enorm ; rmsnorm(h_s) * hnorm_s]
     embed(embd, d_tokens, img, T, b.mtp_e, st);
     rmsnorm(b.mtp_e, enorm, T, D, D, D, b.mtp_e, nullptr, NO_Q, st);
     hc_norm(h_prev, hnorm, T, b.xn, nullptr, NO_Q, st);
@@ -986,11 +911,7 @@ void Engine::mtp_forward(Seq &s, int T, int pos0, const float *h_prev, const int
     moe_block(w, NL, T, false, b.mtp_res, b.inj_f);
 }
 
-// Run the MTP block over the T tokens just processed at pos0.., pairing each with the previous position's residual,
-// so the MTP layer's KV cache tracks the sequence. b.res holds this pass's residuals.
 void Engine::mtp_catch_up(Seq &s, int T, int pos0, bool spec, const int *pos3, bool img, int off) {
-    // in pieces of MTP_CHUNK tokens, so the MTP buffers need not grow with the prefill chunk; h_prev rows (each token's
-    // previous residual: h_last for the pass's first) staged in b.key, free here
     const float *res = b.res + (size_t)off * HCD;
     for (int t0 = 0; t0 < T; t0 += MTP_CHUNK) {
         const int n = std::min(MTP_CHUNK, T - t0);
@@ -1009,7 +930,6 @@ void Engine::mtp_catch_up(Seq &s, int T, int pos0, bool spec, const int *pos3, b
 void Engine::prefill(int id, const int *tokens, const int *pos3, int n) {
     if (!embd.q) FAIL("prefill before warmup(): the token embeddings are not loaded");
     Seq &s = seqs.at(id);
-    // Image tokens resolve to their rows before anything runs, so a bad one leaves the sequence as it was.
     std::vector<const half *> rows(n, nullptr);
     bool any_img = false;
     for (int i = 0; i < n; i++) {
@@ -1027,7 +947,7 @@ void Engine::prefill(int id, const int *tokens, const int *pos3, int n) {
     s.pending = -1;
     for (int done = 0; done < n;) {
         const int T = std::min(smax, n - done);
-        if (T <= 8) cpu.arm();                    // a decode-sized pass hands its cold picks over like decode does
+        if (T <= 8) cpu.arm();
         const int *p3 = pos3 ? pos3 + (size_t)done * 3 : nullptr;
         const bool img = any_img && std::any_of(rows.begin() + done, rows.begin() + done + T, [](const half *r) { return r; });
         if (img) CK(hipMemcpyAsync(b.img, rows.data() + done, T * sizeof(half *), hipMemcpyHostToDevice, st));
@@ -1045,9 +965,9 @@ void Engine::prefill(int id, const int *tokens, const int *pos3, int n) {
         auto gram = [](int t) { return t >= IMG_BASE ? IMAGE_PAD : t; };
         s.hist[0] = T >= 2 ? gram(tokens[done + T - 2]) : s.hist[1];
         s.hist[1] = gram(tokens[done + T - 1]);
-        const int end = s.n + T, blk = end / KPOOL * KPOOL;   // the new incomplete indexer block starts at blk
+        const int end = s.n + T, blk = end / KPOOL * KPOOL;
         if (end % KPOOL && blk >= s.n) s.tail_pos = cell_pos(s, s.n, p3, blk);
-        if (p3)                      // the text after a picture goes on from its largest position
+        if (p3)
             for (int i = 0; i < T * 3; i++) s.pos = std::max(s.pos, p3[i] + 1);
         else
             s.pos += T;
@@ -1073,11 +993,6 @@ static void keep_row(const float *v, const int *i, float *rows_v, int *rows_i, i
     std::copy(i, i + TOPK, rows_i + (size_t)at * TOPK);
 }
 
-// One speculative step. Emits the pending token (if newly sampled), accepted drafts and one more token.
-// rows_v / rows_i (optional): each emitted token's row, the SAMPLE_N candidates it was drawn from (log probs).
-// A picture's embeddings for its image tokens (IMG_BASE + slot * IMG_ROWS + row): the vision tower runs in the activation
-// arena, idle between calls but for the routers' completion counters, which it zeroes again. -1: too large for the arena
-// (or more rows than an image token can name).
 int Engine::image_encode(int slot, const float *patches, int gh, int gw, int frames) {
     const int rows = gh * gw / 4;
     if (slot < 0 || slot >= (INT32_MAX - IMG_BASE) / IMG_ROWS || rows > IMG_ROWS || vision.scratch_need(gh * gw) > barena.cap) return -1;
@@ -1107,22 +1022,21 @@ int Engine::generate(int id, const Sampling &sp, int *out, int max_out, float *r
         if (rows_v) keep_row(s.top_v.data(), s.top_i.data(), rows_v, rows_i, nout);
         out[nout++] = s.pending;
         if (sp.lookup > 0) s.look.push(s.pending);
-        if (is_eos(s.pending) || s.pending == sp.halt || nout == max_out) return nout;   // a step below emits at least one more
+        if (is_eos(s.pending) || s.pending == sp.halt || nout == max_out) return nout;
     }
-    {   // its n-gram rows load while the MTP head drafts (normally already started at the end of the last step)
+    {
         size_t rows[PLE_HEADS];
         ple_ids(s.hist[0], s.hist[1], &s.pending, 1, rows);
         ple_prefetch(rows, PLE_HEADS);
     }
     cpu.arm();
-    const int room = std::min(3, max_out - nout - 1);         // a verify pass takes 4 tokens at most
+    const int room = std::min(3, max_out - nout - 1);
     int copied[4] = {s.pending};
     const int nl = sp.lookup > 0 ? s.look.find(std::min(sp.lookup, room), VOCAB, copied + 1) : 0;
     const int k = nl > 0 ? nl : std::max(0, std::min(sp.n_draft, room));
     const int q = s.n;
     ensure_pages(s, q + k + 1, q);
 
-    // 1. draft k tokens: copied from earlier in the conversation, else with the MTP head (greedy, on the GPU)
     CK(hipMemcpyAsync(b.draft, copied, (nl + 1) * 4, hipMemcpyHostToDevice, st));
     for (int i = 0; i < k && nl == 0; i++) {
         const Pos3 tail = cell_pos(s, q, nullptr, (q + i) / KPOOL * KPOOL);
@@ -1135,20 +1049,16 @@ int Engine::generate(int id, const Sampling &sp, int *out, int max_out, float *r
         lm_head(b.hq, 1, DRAFT_VOCAB);
         argmax(b.logits, 1, DRAFT_VOCAB, VOCAB, b.draft + i + 1, st);
     }
-    if (k > 0) {                                  // the drafts' n-gram rows need them on the host
+    if (k > 0) {
         CK(hipMemcpyAsync(b.h_draft, b.draft, (k + 1) * 4, hipMemcpyDeviceToHost, st));
         CK(hipStreamSynchronize(st));
     } else b.h_draft[0] = s.pending;
     return verify(s, sp, std::vector<int>(b.h_draft, b.h_draft + k + 1), false, out, nout, rows_v, rows_i);
 }
 
-// Steps 2-5 of a speculative step: drafts holds the pending token and the drafts (also in b.draft, for the MTP head's
-// catch-up), the CPU workers armed; masked: each position's logits keep only the tokens d_mask's row for it allows
-// (generate_masked).
 int Engine::verify(Seq &s, const Sampling &sp, const std::vector<int> &drafts, bool masked, int *out, int nout, float *rows_v,
                    int *rows_i) {
     const int q = s.n, T = (int)drafts.size(), k = T - 1;
-    // 2. verify pending + drafts with the full model (the n-gram rows need the drafts on the host)
     forward(s, drafts.data(), T, k > 0);
     head(*this, hc_head, b.res, T, VOCAB);
     if (masked) mask_logits(b.logits, d_mask, VOCAB, T, st);
@@ -1156,8 +1066,6 @@ int Engine::verify(Seq &s, const Sampling &sp, const std::vector<int> &drafts, b
     CK(hipMemcpyAsync(b.h_topv, b.topv, T * TOPK * 4, hipMemcpyDeviceToHost, st));
     CK(hipMemcpyAsync(b.h_topi, b.topi, T * TOPK * 4, hipMemcpyDeviceToHost, st));
     CK(hipEventRecord(topk_ready, st));
-    // 3. MTP catch-up on the verified pairs (rejected rows get overwritten later); it has no cold experts, so the CPU
-    // workers can stop, and the host samples while the GPU runs it (the commit below queues after it)
     CK(hipMemcpyAsync(b.tokens, b.draft, T * 4, hipMemcpyDeviceToDevice, st));
     mtp_catch_up(s, T, q, k > 0);
     CK(hipEventSynchronize(topk_ready));
@@ -1165,7 +1073,6 @@ int Engine::verify(Seq &s, const Sampling &sp, const std::vector<int> &drafts, b
     const float *tv = b.h_topv;
     const int *ti = b.h_topi;
 
-    // 4. accept drafts (rejection sampling against greedy drafts is lossless) and draw the next token
     int a = 0, next = -1;
     for (; a < k; a++) {
         const Dist d = make_dist(&tv[a * TOPK], &ti[a * TOPK], sp, s.seen, s.ctx);
@@ -1187,7 +1094,6 @@ int Engine::verify(Seq &s, const Sampling &sp, const std::vector<int> &drafts, b
     s.seen.push(next);
     if (sp.lookup > 0) s.look.push(next);
 
-    // 5. commit the recurrent states to the accepted prefix (pending + a drafts)
     if (k > 0) {
         GdnScanArgs sa{};
         sa.S = s.ssm; sa.S_layer = (size_t)GV * GD * GD;
@@ -1201,15 +1107,14 @@ int Engine::verify(Seq &s, const Sampling &sp, const std::vector<int> &drafts, b
         idx_tail_commit(s.idx_tail, b.idx_raw, (size_t)umax * IDX_D, NKVL, q, q + a + 1, st);
     }
     CK(hipMemcpyAsync(s.h_last, b.res + (size_t)a * HCD, (size_t)HCD * 4, hipMemcpyDeviceToDevice, st));
-    // history: the last two tokens before position q + a + 1
     if (a >= 1) { s.hist[0] = drafts[a - 1]; s.hist[1] = drafts[a]; }
     else { s.hist[0] = s.hist[1]; s.hist[1] = drafts[0]; }
-    const int end = q + a + 1, blk = end / KPOOL * KPOOL;   // the new incomplete indexer block starts at blk
+    const int end = q + a + 1, blk = end / KPOOL * KPOOL;
     if (end % KPOOL && blk >= q) s.tail_pos = cell_pos(s, q, nullptr, blk);
     s.pos += a + 1;
     s.n = end;
     s.pending = next;
-    {   // the next step reads this token's n-gram rows first: start fetching them now
+    {
         size_t rows[PLE_HEADS];
         ple_ids(s.hist[0], s.hist[1], &next, 1, rows);
         ple_prefetch(rows, PLE_HEADS);
@@ -1222,9 +1127,6 @@ uint32_t *Engine::mask_rows() {
     return d_mask;
 }
 
-// Drafts for a held answer's next step (chrysalis/server.py): `fixed` first, the tokens its grammar forces next, then the MTP
-// head's guesses going on after them; with none forced, a copy from earlier in the conversation where one matches (as
-// generate() drafts). At most max_k (and 3: a verify pass takes 4 tokens) in all, into out; returns how many.
 int Engine::draft(int id, const Sampling &sp, const int *fixed, int nfixed, int max_k, int *out) {
     Seq &s = seqs.at(id);
     if (s.pending < 0) FAIL("draft: no pending token");
@@ -1246,7 +1148,7 @@ int Engine::draft(int id, const Sampling &sp, const int *fixed, int nfixed, int 
                 CK(hipMemcpyAsync(b.value, b.mtp_res, (size_t)HCD * 4, hipMemcpyDeviceToDevice, st));
                 mtp_forward(s, 1, q + i, b.value, b.draft + i, true, s.pos + i, nullptr, tail, nullptr);
             }
-            if (i < nf) continue;                    // a forced token: the head only runs over it
+            if (i < nf) continue;
             hc_mix_run(*this, mtp_head, b.mtp_res, 1, nullptr);
             lm_head(b.hq, 1, DRAFT_VOCAB);
             argmax(b.logits, 1, DRAFT_VOCAB, VOCAB, b.draft + i + 1, st);
@@ -1258,9 +1160,6 @@ int Engine::draft(int id, const Sampling &sp, const int *fixed, int nfixed, int 
     return k;
 }
 
-// One step of a held answer: the pending token and drafts[0..k) verified with each position's logits masked to the tokens
-// its grammar allows there (masks: k + 1 rows of VOCAB / 32 words), then accepted and drawn as generate() does: the
-// rejection sampling stays exact for the masked distribution, a draft the grammar refuses being one it never accepts.
 int Engine::generate_masked(int id, const Sampling &sp, const int *drafts, int k, const uint32_t *masks, int *out, int max_out) {
     if (max_out < 1) return 0;
     Seq &s = seqs.at(id);
@@ -1275,17 +1174,9 @@ int Engine::generate_masked(int id, const Sampling &sp, const int *drafts, int k
     return verify(s, sp, toks, true, out, 0, nullptr, nullptr);
 }
 
-// One speculative step for several sequences at once (parallel requests), as the 27B's: their pending tokens and MTP drafts
-// go through the model in one pass (forward_parts), which reads the weights and computes the picks of every row once,
-// while each keeps its own attention, recurrent state, acceptance and commit, as in generate(). A sequence takes one
-// draft (two rows) while 8 rows hold them, none beyond: two replies wrote 115-128 tok/s together with one draft each,
-// 111-113 with two, 82-93 in turn with two (the expert pool warm; three replies: 115-125 with one, 92-110 with none).
-// Prompt lookup stays with steps of one sequence. out: max_out tokens per sequence, counts: how many each emitted, rows_v /
-// rows_i (optional) their candidates as generate() gives them, max_out rows a sequence. Out of KV pages, it throws before
-// drawing anything.
 void Engine::generate_batch(int n, const int *ids, const Sampling *sps, int *out, int max_out, int *counts, float *rows_v,
                             int *rows_i) {
-    int need = 0;                                    // pages for 2 more tokens each, before anything is drawn
+    int need = 0;
     for (int i = 0; i < n; i++) {
         const Seq &s = seqs.at(ids[i]);
         const int last = (s.n + 2 + PAGE - 1) / PAGE;
@@ -1293,7 +1184,7 @@ void Engine::generate_batch(int n, const int *ids, const Sampling *sps, int *out
         for (int pg = s.n / PAGE; pg < (int)s.pages.size() && pg < last; pg++) need += page_ref[s.pages[pg]] > 1;
     }
     if (need > (int)free_pages.size()) throw std::runtime_error("out of KV pages");
-    std::vector<int> act;                            // the sequences that go through the model
+    std::vector<int> act;
     for (int i = 0; i < n; i++) {
         Seq &s = seqs.at(ids[i]);
         const Sampling &sp = sps[i];
@@ -1318,7 +1209,7 @@ void Engine::generate_batch(int n, const int *ids, const Sampling *sps, int *out
     std::vector<Part> parts;
     std::vector<int> k(n, 0), q(n, 0);
     int T = 0;
-    for (int i : act) {                              // drafts with the MTP head into b.draft, each sequence its rows
+    for (int i : act) {
         Seq &s = seqs.at(ids[i]);
         k[i] = std::max(0, std::min({sps[i].n_draft, per - 1, max_out - counts[i] - 1}));
         q[i] = s.n;
@@ -1338,7 +1229,7 @@ void Engine::generate_batch(int n, const int *ids, const Sampling *sps, int *out
         parts.push_back({&s, k[i] + 1, T, k[i] > 0});
         T += k[i] + 1;
     }
-    std::vector<int> drafts(T);                      // the n-gram rows need them on the host
+    std::vector<int> drafts(T);
     CK(hipMemcpyAsync(drafts.data(), b.draft, T * 4, hipMemcpyDeviceToHost, st));
     CK(hipStreamSynchronize(st));
     forward_parts(parts.data(), (int)parts.size(), drafts.data(), T);
@@ -1352,7 +1243,7 @@ void Engine::generate_batch(int n, const int *ids, const Sampling *sps, int *out
     cpu.disarm();
     const float *tv = b.h_topv;
     const int *ti = b.h_topi;
-    for (size_t j = 0; j < parts.size(); j++) {      // accept, draw the next token, commit: as verify() does
+    for (size_t j = 0; j < parts.size(); j++) {
         const int i = act[j];
         const Part &p = parts[j];
         Seq &s = *p.s;
@@ -1399,7 +1290,7 @@ void Engine::generate_batch(int n, const int *ids, const Sampling *sps, int *out
         s.pos += a + 1;
         s.n = end;
         s.pending = next;
-        size_t rows[PLE_HEADS];                      // the next step reads this token's n-gram rows first
+        size_t rows[PLE_HEADS];
         ple_ids(s.hist[0], s.hist[1], &next, 1, rows);
         ple_prefetch(rows, PLE_HEADS);
     }
