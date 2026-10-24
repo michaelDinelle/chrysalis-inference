@@ -374,10 +374,10 @@ anyc = claude.messages.create(model=MODEL, max_tokens=200, tools=[weather], tool
 use = next((b for b in anyc.content if b.type == "tool_use"), None)
 check("Messages: tool_choice any", use is not None and isinstance(use.input.get("city"), str) and anyc.stop_reason == "tool_use",
       repr(use and use.input))
-bud = claude.messages.create(model=MODEL, max_tokens=4000, thinking={"type": "enabled", "budget_tokens": 1024}, messages=pell)
+bud = claude.messages.create(model=MODEL, max_tokens=4000, thinking={"type": "enabled", "budget_tokens": 300}, messages=pell)
 thought = "".join(b.thinking for b in bud.content if b.type == "thinking")
 n = len(srv.tok.full.encode(thought, add_special_tokens=False).ids)
-check("Messages: budget_tokens closes the thinking", n <= 1024 + len(srv.close_thinking()) + 4 and thought.rstrip().endswith("directly now.")
+check("Messages: budget_tokens closes the thinking", n <= 300 + len(srv.close_thinking()) + 4 and thought.rstrip().endswith("directly now.")
       and any(b.type == "text" and b.text for b in bud.content), f"{n} thinking tokens")
 st = claude.messages.create(model=MODEL, max_tokens=60, stop_sequences=["4"], thinking={"type": "disabled"},
                             messages=[{"role": "user", "content": "Count from 1 to 9, separated by spaces."}])
@@ -521,7 +521,6 @@ if srv.engine.expert_stats():
     lanes = now and now["gts"] * 1e9 * now["width"] * (0.8 if now["gts"] < 8 else 128 / 130) / 8
     check("metrics: the PCIe link bounds the DMA rate", bool(now and dma and 0.25 * lanes < dma <= lanes),
           f"link {now and now['gts']} GT/s x{now and now['width']} ({lanes and lanes / 1e9:.1f} GB/s), DMA {dma and dma / 1e9:.1f} GB/s")
-httpd.shutdown()
 
 
 from chrysalis.sleep import vram_used
@@ -564,6 +563,21 @@ if disk:
     t_after, i_after = answer(tooled)
     check("wake: the tool block read back from disk", i_after["cached_tokens"] > 0 and t_after == t_before and t_after,
           f"cached {i_after['cached_tokens']} of {i_after['prompt_tokens']} ({len(os.listdir(disk.dir))} files), {str(t_after)[:50]}")
+held = vram_used()
+httpx.post(base + "/chrysalis/unload", json={}, timeout=120)
+unloaded, st = vram_used(), httpx.get(base + "/chrysalis/stats").json()
+check("unload: the GPU's memory is freed and stats say asleep", unloaded < held - 15e9 and st.get("asleep") is True,
+      f"VRAM used {held / 1e9:.1f} -> {unloaded / 1e9:.1f} GB, {st}")
+srv.system_sleep()
+srv.system_wake()
+st = httpx.get(base + "/chrysalis/stats").json()
+check("unload: the machine's sleep and wake leave it unloaded", vram_used() < held - 15e9 and st.get("asleep") is True,
+      f"VRAM used {vram_used() / 1e9:.1f} GB, {st}")
+woke = oai.chat.completions.create(model=MODEL + "-fast", messages=poem, max_tokens=16, temperature=0)
+st = httpx.get(base + "/chrysalis/stats").json()
+check("unload: a request loads the model again and answers", woke.choices[0].message.content and "asleep" not in st and vram_used() > held - 5e9,
+      f"{woke.choices[0].message.content!r}, VRAM used {vram_used() / 1e9:.1f} GB")
+httpd.shutdown()
 other = next(m for m in MODELS if m != MODEL)
 kept = MODELS[other]["path"]
 MODELS[other]["path"] = "data/models/not-downloaded-yet.gguf"

@@ -1,5 +1,5 @@
 import { afterAll, beforeAll, expect, test } from "bun:test";
-import { mkdtempSync, rmSync, readFileSync, writeFileSync } from "node:fs";
+import { existsSync, mkdtempSync, rmSync, readFileSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { WebStandardStreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/webStandardStreamableHttp.js";
 import { createHash } from "node:crypto";
@@ -803,6 +803,8 @@ test("a computer without the engine finds this one on the network, and is not fo
     const { code } = (await until((s) => !!s.pairing?.code)).pairing;
     expect(await shownHere()).toEqual([[code, "computer"]]);
     expect((await fetch(`${here}/api/pair/allow`, { method: "POST", headers: json, body: JSON.stringify({ code }) })).status).toBe(200);
+    expect((await until((s) => !!s.pairing?.theirs)).linked).toBeUndefined();
+    expect((await fetch(`${lap.url}/api/link/confirm`, { method: "POST", headers: json, body: "{}" })).status).toBe(200);
     expect((await until((s) => !!s.linked)).linked).toBeTruthy();
 
     expect(await (await fetch(`${lap.chrysalis}/chrysalis/stats`)).json()).toEqual({ model: "fake-model" });
@@ -847,6 +849,26 @@ test("a computer without the engine finds this one on the network, and is not fo
       quiet();
       between.stop(true);
     }
+
+    const fake = webTls(TLS());
+    const yes = Bun.serve({ hostname: desk.ips[0], port: 0, tls: { cert: fake.link.cert, key: fake.link.key },
+      fetch: (req) => {
+        const path = new URL(req.url).pathname;
+        return path === "/link/ca" ? new Response(fake.link.ca) : path === "/link/ask" ? Response.json({ secret: "s", nonce: "n" })
+          : path === "/link/reveal" ? new Response(null, { status: 204 }) : Response.json({ state: "allowed", key: "theirs" });
+      } });
+    const quiet2 = advertise("omarchy", yes.port!, fake.link.fingerprint);
+    try {
+      await fetch(`${lap.url}/api/link`, { method: "DELETE" });
+      await until((s) => s.found.some((f: { fp: string }) => f.fp === fake.link.fingerprint));
+      await pair(fake.link.fingerprint);
+      expect((await until((s) => !!s.pairing?.theirs)).linked).toBeUndefined();
+      await Bun.sleep(1500);
+      expect([(await state()).linked, existsSync(`${lap.dir}/link.json`)]).toEqual([undefined, false]);
+    } finally {
+      quiet2();
+      yes.stop(true);
+    }
   } finally {
     desk.proc.kill();
     lap.proc.kill();
@@ -874,14 +896,6 @@ test("the page hears Chrysalis is off where its address takes a connection and n
     proc.kill();
     mute.stop(true);
   }
-});
-
-test("chrysalis.sh stop where nothing runs, as a first start moves the chat, says Chrysalis stopped and succeeds", () => {
-  const run = mkdtempSync(`${RUN}/run-`);
-  const r = Bun.spawnSync(["bash", `${import.meta.dir}/../chrysalis.sh`, "stop"], {
-    env: { ...process.env, XDG_RUNTIME_DIR: run, DBUS_SESSION_BUS_ADDRESS: `unix:path=${run}/bus` }, stdout: "pipe", stderr: "pipe",
-  });
-  expect([r.exitCode, r.stdout.toString().trim()]).toEqual([0, "Chrysalis stopped"]);
 });
 
 test("a computer with neither systemd nor openssl, as a Mac is, runs the chat: the page hears Chrysalis is off there and gets the computers found, and its Stop and model picker answer", async () => {

@@ -223,11 +223,12 @@ fails += not ok
 fails += paths(", pool moved by code")
 eng.lib.chrysalis_tune(b"spill", 100000)
 eng.lib.chrysalis_tune(b"spill_spare", 1e6)
-out3 = eng.expert_stats()["mirrored"]
+out3, r3 = eng.expert_stats()["mirrored"], mirror_rss()
 move_pool(prose, 200)
-d, out4 = placed()[0] - c[0], eng.expert_stats()["mirrored"]
-ok = d >= 300 and out4 <= out3
-print(f"pool after prose with no RAM to spare: {d} experts placed, the file's out of it {out3} -> {out4}  {'ok' if ok else 'FAIL'}", flush=True)
+d, out4, r4 = placed()[0] - c[0], eng.expert_stats()["mirrored"], mirror_rss()
+ok = out3 >= 100 and out4 <= out3 // 4 and r4 <= out4 * HOT_EXPERT + 64e6 and d >= max(300, out3 - out4)
+print(f"pool after prose with no RAM to spare: {d} experts placed, the file's back from the mirror, {out3} -> {out4} out of the pool, "
+      f"the mirror {r3 / 1e9:.2f} -> {r4 / 1e9:.2f} GB  {'ok' if ok else 'FAIL'}", flush=True)
 fails += not ok
 print("all ok" if not fails else f"{fails} FAILURES")
 sys.exit(fails != 0)

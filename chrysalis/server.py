@@ -437,6 +437,7 @@ class Server:
         self.active, self.slots, self.umax = model, slots, umax
         self.loading = None
         self.state_lock = threading.Lock()
+        self.wake_lock, self.asleep, self.suspended = threading.Lock(), False, False
         self.tok = Tokens(tokenizer_path)
         self.replay = LRU(8192)
         self.renderer = Renderer(self.tok, self.replay.get)
@@ -539,6 +540,30 @@ class Server:
         wait_vram_freed(held)
         print(f"chrysalis: the machine is going to sleep: GPU freed in {time.time() - t0:.2f} s", file=self.log, flush=True)
 
+    def unload(self):
+        with self.wake_lock:
+            if not self.asleep and not self.suspended:
+                self.sleep()
+            self.asleep, self.suspended = True, False
+
+    def awake(self):
+        with self.wake_lock:
+            if self.asleep:
+                self.asleep = False
+                self.wake()
+
+    def system_sleep(self):
+        with self.wake_lock:
+            if not self.asleep:
+                self.sleep()
+                self.suspended = True
+
+    def system_wake(self):
+        with self.wake_lock:
+            if self.suspended:
+                self.suspended = False
+                self.wake()
+
     def wake(self):
         t0 = time.time()
         try:
@@ -549,7 +574,7 @@ class Server:
             now = link.status(self.link_dev)
             if now and now["slow"]:
                 print(f"chrysalis: PCIe link at {now['gts']:g} GT/s x{now['width']} after the wake, slower than this machine's "
-                      f"best ({now['best_gts']:g} GT/s): `chrysalis.sh restart` trains it again", file=self.log, flush=True)
+                      f"best ({now['best_gts']:g} GT/s): starting Chrysalis again trains it again", file=self.log, flush=True)
         finally:
             with self.state_lock:
                 self.loading = None
@@ -1015,6 +1040,7 @@ class Server:
                 self.metrics.reply(self.active, {"prompt_tokens": len(prompt), "cached_tokens": cached,
                                                  "completion_tokens": min(len(out), max_tokens), "ttft": (t_first if steps else t1) - t0,
                                                  "prefill_s": t_prefill - t0, "decode_s": t1 - t_prefill}, steps, "client")
+                self.recent.put(time.time(), {"prompt_tokens": len(prompt), "cached_tokens": cached, "completion_tokens": len(out), "finish_reason": "client"})
                 print(f"chrysalis: prompt {len(prompt)} (cached {cached}) | stopped by the client after {len(out)} tokens "
                       f"| slot {slot.sid}", file=self.log, flush=True)
         if finish == "stop" and calls and not stop_text.hit:
@@ -1035,10 +1061,12 @@ class Server:
 
     def stats(self):
         with self.state_lock:
+            if self.asleep:
+                return {"model": self.active, "asleep": True, "models": list(MODELS)}
             if self.loading:
                 return {"model": self.active, "loading": self.loading, "progress": load_progress(), "models": list(MODELS)}
             out = {"model": self.active, "models": list(MODELS), "context": self.capacity, "kv_tokens": self.engine.capacity,
-                   "cache": self.cache.stats(), "recent": list(self.recent.values())[-16:], "link": link.status(self.link_dev)}
+                   "cache": self.cache.stats(), "recent": [{"at": t, **v} for t, v in list(self.recent.items())[-16:]], "link": link.status(self.link_dev)}
             experts = self.engine.expert_stats()
             if experts:
                 out["experts"] = experts
@@ -1070,12 +1098,17 @@ class Server:
             g += [("chrysalis_pcie_link_gts", "PCIe link speed now, GT/s (the slowest link to the GPU)", [({}, ln["gts"])]),
                   ("chrysalis_pcie_link_width", "PCIe link width now, lanes", [({}, ln["width"])]),
                   ("chrysalis_pcie_link_best_gts", "The fastest link speed seen on this machine, GT/s", [({}, ln["best_gts"])]),
-                  ("chrysalis_pcie_link_slow", "1 when the link is slower than this machine's best (chrysalis.sh restart trains it again)", [({}, int(ln["slow"]))])]
+                  ("chrysalis_pcie_link_slow", "1 when the link is slower than this machine's best (starting Chrysalis again trains it again)", [({}, int(ln["slow"]))])]
         return g
 
     def load(self, name):
         if name not in MODELS:
             raise RequestError(f"unknown model {name!r}; Chrysalis has {', '.join(MODELS)}")
+        with self.wake_lock:
+            if self.asleep:
+                self.active, self.asleep = name, False
+                self.wake()
+                return
         self.lanes.hold()
         try:
             self.gpu.acquire(main=True)
@@ -1154,6 +1187,10 @@ def make_handler(state, ready):
         def do_POST(self):
             if not host_ok(self.headers.get("Host")):
                 return self.send_json(403, {"error": {"message": "unknown host", "type": "invalid_request_error"}})
+            if self.path.rstrip("/") == "/chrysalis/unload":
+                ready.wait()
+                state["srv"].unload()
+                return self.send_json(200, {"asleep": True})
             if self.path.rstrip("/") == "/chrysalis/load":
                 ready.wait()
                 srv = state["srv"]
@@ -1170,6 +1207,7 @@ def make_handler(state, ready):
                 return self.send_json(404, {"error": {"message": "not found"}})
             ready.wait()
             srv = state["srv"]
+            srv.awake()
             try:
                 body = json.loads(self.rfile.read(int(self.headers.get("Content-Length") or 0)) or b"{}")
             except json.JSONDecodeError:
@@ -1398,5 +1436,5 @@ def serve(make_server, host="127.0.0.1", port=8080, model=None):
     srv.gpu.release()
     srv.warming = True
     srv.rewarm()
-    SleepGuard(srv.sleep, srv.wake, srv.log).start()
+    SleepGuard(srv.system_sleep, srv.system_wake, srv.log).start()
     threading.Event().wait()

@@ -30,7 +30,7 @@ None: no comments or docstrings anywhere in the repo, in any language, including
 - With Chrysalis running Flash-Next: `make test_chaos` (the chat for real, used oddly: replies through reloads, closed
   tabs and chat switches, several at once, Stop / regenerate / edit mid-reply, tools, settings, a 3D page, memory taken
   by another program; it restarts Chrysalis and switches models, so ask first, as for stopping it).
-- GPU, with Chrysalis's model server stopped (`systemctl --user stop chrysalis`; the user runs Chrysalis: check the GPU
+- GPU, with Chrysalis's model server stopped (the chat's Stop, which frees the GPU; the user runs Chrysalis: check the GPU
   is idle, ask once per task, then just say when it stops and for how long): `make test` (test_web, the 27B kernels,
   then the model in-process: chat format, cache, snapshots and generation (held answers' masked steps too), the server
   (its Anthropic and Responses APIs through those SDKs, which data/venv has; held answers and strict tool calls,
@@ -39,5 +39,5 @@ None: no comments or docstrings anywhere in the repo, in any language, including
   against llama.cpp; the transformers references need data/ref-venv: CPU torch, torchvision, transformers, Pillow, safetensors), `make test_fn` (Flash-Next
   kernels) and `make test_fn_model` (the Flash-Next model in-process: generation and snapshots, the server, llama.cpp's
   logits, pictures and videos).
-- Flash-Next takes ~47 GiB of system RAM, in Chrysalis or in-process, and more as its expert pool moves (until 4 GB is left). Check MemAvailable before loading it, and run it
+- Flash-Next takes ~47 GiB of system RAM, in Chrysalis or in-process, and more as its expert pool moves (until 4 GB is left, given back below 3 GB). Check MemAvailable before loading it, and run it
   in its own scope (`systemd-run --user --scope ...`): systemd-oomd kills whole terminal scopes under memory pressure.

@@ -7,7 +7,7 @@ WEB_URL=http://127.0.0.1:8081
 TLS_DIR="${CHRYSALIS_TLS_DIR:-$HOME/.config/chrysalis/tls}"
 here() { curl -s --connect-timeout 1 "$@"; }
 MAC=; [ "$(uname)" = Darwin ] && MAC=1
-APP="$ROOT/Chrysalis.app" WEB_LOG=~/Library/Logs/chrysalis-web.log
+APP="$ROOT/Chrysalis.app"
 BUN="$ROOT/bin/bun"; [ -n "$MAC" ] && BUN="$APP/Contents/MacOS/Chrysalis"; [ -x "$BUN" ] || BUN=bun
 export BUN_BE_BUN=1
 get() { (cd "$ROOT" && "$PY" -m chrysalis get "$@"); }
@@ -25,54 +25,28 @@ for d in range(n.value):
 sys.exit(1)' 2>/dev/null
 }
 
-up() {
-    if [ -n "$MAC" ]; then
-        launchctl list "$1" >/dev/null 2>&1 && return
-        codesign -v "$APP" 2>/dev/null || codesign --force -s - "$APP" 2>/dev/null
-        /System/Library/Frameworks/CoreServices.framework/Frameworks/LaunchServices.framework/Support/lsregister -f "$APP"
-        : > "$WEB_LOG"
-        launchctl submit -l "$1" -o "$WEB_LOG" -e "$WEB_LOG" -- /usr/bin/env NODE_ENV=production BUN_BE_BUN=1 "$BUN" "$ROOT/web/server.ts"
-        return
-    fi
-    [ "$(systemctl --user show -p LoadState --value "$1")" = loaded ] && return
-    case $1 in
-      chrysalis)
-        systemd-run --user -q --collect --unit chrysalis -p MemorySwapMax=0 -p Restart=on-failure -p RestartSec=3 \
-            "$ROOT/chrysalis.sh" serve ;;
-      chrysalis-web)
-        [ -d "$ROOT/web/node_modules" ] || (cd "$ROOT/web" && "$BUN" install --frozen-lockfile >/dev/null)
-        systemd-run --user -q --collect --unit chrysalis-web -p WorkingDirectory="$ROOT/web" -E NODE_ENV=production \
-            -p Restart=on-failure "$BUN" server.ts ;;
-    esac
-}
-running() { if [ -n "$MAC" ]; then launchctl list "$1" >/dev/null 2>&1; else systemctl --user is-active -q "$1"; fi; }
-halt() {
-    local u i
-    if [ -z "$MAC" ]; then systemctl --user stop "$@" 2>/dev/null || true; return 0; fi
-    for u in "$@"; do
-        launchctl remove "$u" 2>/dev/null || continue
-        for i in $(seq 50); do launchctl list "$u" >/dev/null 2>&1 || break; sleep 0.1; done
-    done
+engine() {
+    local run=("$ROOT/chrysalis.sh" serve)
+    systemd-run --user --scope -q true 2>/dev/null && run=(systemd-run --user --scope -q -p MemorySwapMax=0 "${run[@]}")
+    until "${run[@]}" </dev/null; do sleep 3; done
 }
 
 usage() {
     cat <<EOF
 usage: chrysalis.sh <command>
 
-  start     load the model, start the web chat, print their URLs
+  start     run Chrysalis here, in this terminal: the model and the web chat, their log, and the questions when a
+            phone or computer wants in (Ctrl+C stops it)
             (requests pick the model: qwen3.8-27b or qwen3.8-flash-next; Chrysalis switches between them)
             --host 0.0.0.0: on the local network too, for the phones and computers let in: a QR code connects
             a phone, and Chrysalis on another computer finds this one and uses its GPU
-  stop      stop both and free the GPU
-  restart   stop, then start (after rebuilding or editing the code; takes --host too)
+  stop      stop it, from another terminal
   status    is it running, and where
-  logs      follow the request log (prompt and cached tokens, TTFT, tok/s)
   allow     let in the phone or computer asking with this code (Connect a device does the same)
   get       download a model's files now (qwen3.8-27b or qwen3.8-flash-next; start gets the one it loads)
 EOF
 }
 
-host() { if [ -n "$MAC" ]; then echo 127.0.0.1; else systemctl --user show-environment | sed -n 's/^CHRYSALIS_HOST=//p'; fi; }
 lan_ip() { ip -4 route show default | awk '{ for (i = 1; i < NF; i++) if ($i == "src") { print $(i + 1); exit } }'; }
 lan_subnet() {
     local dev
@@ -117,16 +91,6 @@ EOF
         "$WIN/System32/wsl.exe" -d "$WSL_DISTRO_NAME" -u root -- sh -c 'export DEBIAN_FRONTEND=noninteractive; dpkg --configure -a; apt-get update -q && curl -fsSL -o /tmp/amdgpu-install.deb https://repo.radeon.com/amdgpu-install/7.2/ubuntu/noble/amdgpu-install_7.2.70200-1_all.deb &&
             apt-get install -yq /tmp/amdgpu-install.deb && amdgpu-install -y --usecase=wsl --no-dkms' </dev/null >/dev/null 2>&1 || echo "  that failed: start again to try again"
     fi
-    if [ ! -f "$(wslpath "$(win '$env:LOCALAPPDATA')")/Chrysalis/chrysalis.sh.cmd" ]; then
-        win "$(cat <<'EOF'
-$d = Join-Path $env:LOCALAPPDATA Chrysalis
-New-Item -ItemType Directory -Force $d | Out-Null
-Set-Content -Encoding ascii (Join-Path $d chrysalis.sh.cmd) '@wsl.exe -d @DISTRO@ --cd ~ -- ~/chrysalis/chrysalis.sh %*'
-$p = [Environment]::GetEnvironmentVariable('Path', 'User')
-if (($p -split ';') -notcontains $d) { [Environment]::SetEnvironmentVariable('Path', ((@($p, $d) | Where-Object { $_ }) -join ';'), 'User') }
-EOF
-)"
-    fi
 }
 
 UFW_NOTE=~/.config/chrysalis/ufw
@@ -161,23 +125,20 @@ EOF
 
 urls() {
     local at=127.0.0.1
-    if [ "$(host)" = 0.0.0.0 ]; then at=$(lan_ip); fi
+    if [ "$1" = 0.0.0.0 ]; then at=$(lan_ip); fi
     echo "  API       http://127.0.0.1:8080/v1"
-    if running chrysalis-web; then
-        echo "  web chat  http://localhost:8081"
-        if [ "$at" != 127.0.0.1 ]; then
-            echo "  phones    scan this, or open https://$at:8081 on the phone, past its warning: it sets the phone up,"
-            echo "            then shows a code to allow in Connect a device or with 'chrysalis.sh allow <code>'"
-            if command -v qrencode >/dev/null; then qrencode -t ANSIUTF8 -m 2 "https://$at:8081"; fi
-            echo "  computers start Chrysalis there: it finds this one, and asks with a code too"
-            asking
-            local ca="$TLS_DIR/ca.pem"
-            if [ -f "$ca" ]; then
-                echo "  authority SHA-256 $(openssl x509 -in "$ca" -noout -fingerprint -sha256 | cut -d= -f2)"
-                echo "            a device that trusts this computer shows the same in its certificate details"
-            fi
-            if blocked; then echo "  ufw keeps other devices out: 'chrysalis.sh start --host 0.0.0.0' lets this network in"; fi
+    echo "  web chat  http://localhost:8081"
+    if [ "$at" != 127.0.0.1 ]; then
+        echo "  phones    scan this, or open https://$at:8081 on the phone, past its warning: it sets the phone up,"
+        echo "            then shows a code to allow in Connect a device or with 'chrysalis.sh allow <code>'"
+        if command -v qrencode >/dev/null; then qrencode -t ANSIUTF8 -m 2 "https://$at:8081"; fi
+        echo "  computers start Chrysalis there: it finds this one, and asks with a code too"
+        local ca="$TLS_DIR/ca.pem"
+        if [ -f "$ca" ]; then
+            echo "  authority SHA-256 $(openssl x509 -in "$ca" -noout -fingerprint -sha256 | cut -d= -f2)"
+            echo "            a device that trusts this computer shows the same in its certificate details"
         fi
+        if blocked; then echo "  ufw keeps other devices out: 'chrysalis.sh start --host 0.0.0.0' lets this network in"; fi
     fi
 }
 
@@ -194,28 +155,23 @@ ready() {
         printf "loading the model"
         local i=0
         until here -f "$API/health" >/dev/null; do
-            if (( ++i % 10 == 0 )); then
-                if ! systemctl --user is-active -q chrysalis; then
-                    echo " failed:"; journalctl --user -u chrysalis -n 15 -o cat --no-pager; exit 1
-                fi
-                printf .
-            fi
+            if (( ++i % 10 == 0 )); then printf .; fi
             sleep 0.1
         done
         echo " done"
     fi
-    echo "Chrysalis is running ($(loaded))"; urls
+    echo "Chrysalis is running ($(loaded))"
 }
 
 loaded() { here -f "$API/chrysalis/stats" | "$BUN" -e '
 const s = await Bun.stdin.json(), l = s.link ?? {};
-console.log(s.model, "loaded" + (l.slow ? `; PCIe link at ${l.gts} GT/s x${l.width}, slower than its best (${l.best_gts} GT/s): chrysalis.sh restart` : ""));' 2>/dev/null || echo loading; }
+console.log(s.model, "loaded" + (l.slow ? `; PCIe link at ${l.gts} GT/s x${l.width}, slower than its best (${l.best_gts} GT/s): start Chrysalis again` : ""));' 2>/dev/null || echo loading; }
 
 release() {
     set -uo pipefail
     local VER="${1:-$(git -C "$ROOT" describe --tags --always)}" OUT=dist/chrysalis R=data/rocm/lib
     cd "$ROOT"
-    rm -rf "$OUT" dist/native && mkdir -p "$OUT"/{bin,data/rocm/lib/rocm_sysdeps/lib,data/rocm/lib/llvm/lib,data/rocm/lib/hipblaslt/library,data/models/vision,web} dist/native
+    rm -rf dist && mkdir -p "$OUT"/{bin,data/rocm/lib/rocm_sysdeps/lib,data/rocm/lib/llvm/lib,data/rocm/lib/hipblaslt/library,data/models/vision,web} dist/native
     docker run --rm -e OWNER="$(id -u):$(id -g)" -v "$PWD:/src:ro" -v "$PWD/dist/native:/out" quay.io/pypa/manylinux_2_28_x86_64 bash /src/chrysalis.sh native
     cp -r dist/native/build dist/native/ggml "$OUT/"
     LD_LIBRARY_PATH="$PWD/$R:$PWD/$R/rocm_sysdeps/lib:$PWD/dist/native/ggml/avx2" ldd "$OUT"/build/*.so |
@@ -246,7 +202,7 @@ release() {
         "COPY --chown=chrysalis:chrysalis chrysalis /home/chrysalis/chrysalis" \
         "COPY chrysalis.ico /usr/share/chrysalis/chrysalis.ico" \
         "RUN printf '[boot]\nsystemd=true\n[user]\ndefault=chrysalis\n' > /etc/wsl.conf && printf '[oobe]\ndefaultUid=1000\ndefaultName=Chrysalis\n[shortcut]\nicon=/usr/share/chrysalis/chrysalis.ico\n[windowsterminal]\nenabled=false\n' > /etc/wsl-distribution.conf" \
-        "RUN printf '%s\n' 'if [ \"\$(ps -o comm= -p \$PPID)\" != login ]; then' '    ~/chrysalis/chrysalis.sh start && explorer.exe http://localhost:8081' '    exec ~/chrysalis/chrysalis.sh logs' 'fi' >> /home/chrysalis/.bashrc" |
+        "RUN printf '%s\n' 'if [ \"\$(ps -o comm= -p \$PPID)\" != login ]; then' '    (until curl -s -o /dev/null http://127.0.0.1:8081/; do sleep 0.5; done; explorer.exe http://localhost:8081) &' '    exec ~/chrysalis/chrysalis.sh start' 'fi' >> /home/chrysalis/.bashrc" |
         docker build -q -t chrysalis-wsl -f - dist >/dev/null
     local c; c=$(docker create chrysalis-wsl) && docker export "$c" | bsdtar -czf dist/chrysalis.wsl --exclude .dockerenv @- && docker rm "$c" >/dev/null
     local M=dist/macos/chrysalis A=dist/macos/chrysalis/Chrysalis.app/Contents
@@ -258,7 +214,9 @@ for (let i = 0, at = 32; i < b.readUInt32LE(16); i++, at += b.readUInt32LE(at + 
   if (b.readUInt32LE(at) === 0x1b) crypto.getRandomValues(b.subarray(at + 8, at + 24));
 await Bun.write(file, b);' "$UV/darwin/bun"
     printf '%s\n' 'import { resolve } from "node:path";' 'const root = resolve(process.execPath, "../../../..");' \
-        'Bun.spawnSync([`${root}/chrysalis.sh`, "start"]);' 'Bun.spawnSync(["open", "http://localhost:8081"]);' > "$UV/open.ts"
+        'const run = Bun.spawn([`${root}/chrysalis.sh`, "start"], { stdio: ["ignore", "inherit", "inherit"] });' \
+        'for (let i = 0; i < 300 && !(await fetch("http://127.0.0.1:8081/").then(() => true, () => false)); i++) await Bun.sleep(200);' \
+        'Bun.spawnSync(["open", "http://localhost:8081"]);' 'await run.exited;' > "$UV/open.ts"
     bun build --compile --target=bun-darwin-arm64 --compile-executable-path="$UV/darwin/bun" "$UV/open.ts" --outfile "$A/MacOS/Chrysalis" >/dev/null
     printf '%s\n' '<?xml version="1.0" encoding="UTF-8"?>' '<plist version="1.0"><dict>' \
         '<key>CFBundleIdentifier</key><string>io.github.michaeldinelle.chrysalis</string>' '<key>CFBundleName</key><string>Chrysalis</string>' \
@@ -309,42 +267,40 @@ native() {
 }
 
 case "${1:-help}" in
-  start|restart)
-            case "${2:-}:${3:-}" in --host:0.0.0.0) to=0.0.0.0 ;; --host:127.0.0.1|:) to=127.0.0.1 ;; *) usage; exit 1 ;; esac
+  start)    case "${2:-}:${3:-}" in --host:0.0.0.0) to=0.0.0.0 ;; --host:127.0.0.1|:) to=127.0.0.1 ;; *) usage; exit 1 ;; esac
             if [ -n "$MAC" ] && [ $to = 0.0.0.0 ]; then
                 echo "a Mac has no RX 7900 to share: its Chrysalis is the one on the computer with the GPU, which"
                 echo "'chrysalis.sh start --host 0.0.0.0' there puts on the network"; exit 1
             fi
+            if here -f -o /dev/null "$WEB_URL/"; then echo "Chrysalis is running already: 'chrysalis.sh stop' stops it"; exit 1; fi
             wsl_ready
-            gpu=; if has_gpu; then gpu=1; fi
             if [ $to = 0.0.0.0 ]; then let_in; fi
-            if [ "$1" = restart ]; then halt chrysalis chrysalis-web
-            elif [ "$(host)" != $to ]; then halt chrysalis-web; fi
-            [ -n "$MAC" ] || systemctl --user set-environment CHRYSALIS_HOST=$to
-            if [ -z "$gpu" ]; then
-                up chrysalis-web
-                for i in $(seq 100); do here -f -o /dev/null "$WEB_URL/" && break; sleep 0.1; done
-                echo "the web chat: http://localhost:8081 (no RX 7900 here: it uses Chrysalis on another computer on your network, or set"
-                echo "its address, at the top, to your Ollama, LM Studio or llama.cpp)"
-                exit 0
+            if [ -n "$MAC" ]; then
+                codesign -v "$APP" 2>/dev/null || codesign --force -s - "$APP" 2>/dev/null
             fi
-            model=$(systemctl --user show-environment | sed -n 's/^CHRYSALIS_MODEL=//p')
-            get ${model:+"$model"}
-            if roomy && ! get --check qwen3.8-flash-next; then
-                systemd-run --user -q --collect --unit chrysalis-get "$ROOT/chrysalis.sh" get qwen3.8-flash-next 2>/dev/null || true
-                echo "  Qwen3.8-Flash-Next is downloading in the background: the model picker has it once it is here"
+            trap 'trap - EXIT; kill 0' EXIT
+            if has_gpu; then
+                model=$(cat "$TLS_DIR/model" 2>/dev/null || true)
+                get ${model:+"$model"}
+                if roomy && ! get --check qwen3.8-flash-next; then
+                    get qwen3.8-flash-next >/dev/null 2>&1 &
+                    echo "  Qwen3.8-Flash-Next is downloading in the background: the model picker has it once it is here"
+                fi
+                engine &
+                ready
+            else
+                echo "no RX 7900 here: the web chat uses Chrysalis on another computer on your network, or your Ollama, LM Studio or llama.cpp"
             fi
-            up chrysalis
-            up chrysalis-web
-            ready ;;
-  up)       if has_gpu; then up chrysalis; fi ;;
-  stop)     halt chrysalis chrysalis-web; echo "Chrysalis stopped" ;;
-  status)   if here -f "$API/health" >/dev/null; then echo "Chrysalis is running ($(loaded))"; urls
-            elif running chrysalis; then echo "Chrysalis is loading the model ('chrysalis.sh logs' to follow)"
-            elif running chrysalis-web; then echo "the web chat is running at http://localhost:8081, without Chrysalis (stopped here, or not linked yet to the one on your network)"
+            urls $to
+            [ -d "$ROOT/web/node_modules" ] || (cd "$ROOT/web" && "$BUN" install --frozen-lockfile >/dev/null)
+            cd "$ROOT/web" && NODE_ENV=production CHRYSALIS_HOST=$to "$BUN" server.ts ;;
+  stop)     if here -f -X POST -H "Content-Type: application/json" -d "{}" -o /dev/null "$WEB_URL/api/quit"; then echo "Chrysalis stopped"
+            else echo "Chrysalis is not running"; fi ;;
+  status)   at=127.0.0.1; here -f "$WEB_URL/api/pair" | grep -q '"lan":true' && at=0.0.0.0
+            if here -f "$API/health" >/dev/null; then echo "Chrysalis is running ($(loaded))"; urls $at; [ $at = 127.0.0.1 ] || asking
+            elif here -f -o /dev/null "$WEB_URL/"; then echo "the web chat is running at http://localhost:8081, with no model loaded (stopped, or not linked yet to the Chrysalis on your network)"
             else echo "Chrysalis is stopped ('chrysalis.sh start' starts it)"; fi ;;
-  logs)     if [ -n "$MAC" ]; then exec tail -f "$WEB_LOG"; fi
-            exec journalctl --user -u chrysalis -f -o cat ;;
+  gpu)      has_gpu ;;
   allow)    code=$(printf %s "${*:2}" | tr -cd 0-9)
             [ -n "$code" ] || { echo "usage: chrysalis.sh allow <code>   (the code the phone or computer shows; 'chrysalis.sh status' lists them)"; exit 1; }
             r=$(here -w "\n%{http_code}" -X POST -H "Content-Type: application/json" -d "{\"code\": \"$code\"}" "$WEB_URL/api/pair/allow") \
@@ -358,7 +314,8 @@ case "${1:-help}" in
   serve)    ggml="$ROOT/ggml/avx2"; grep -qw avx512_vnni /proc/cpuinfo && ggml="$ROOT/ggml/avx512"
             export LD_LIBRARY_PATH="$ROOT/data/rocm/lib:$ROOT/data/rocm/lib/rocm_sysdeps/lib:$ggml${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
             [ -e /dev/dxg ] && export HSA_ENABLE_DXG_DETECTION=1
-            cd "$ROOT" && exec "$PY" -m chrysalis serve --host 127.0.0.1 ${CHRYSALIS_MODEL:+--use "$CHRYSALIS_MODEL"} "${@:2}" ;;
+            m=$(cat "$TLS_DIR/model" 2>/dev/null || true)
+            cd "$ROOT" && exec "$PY" -m chrysalis serve --host 127.0.0.1 ${m:+--use "$m"} "${@:2}" ;;
   stats)    here "$API/chrysalis/stats" ;;
   release)  release "${@:2}" ;;
   native)   native ;;

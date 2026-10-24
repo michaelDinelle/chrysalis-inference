@@ -65,7 +65,7 @@ interface Status { state: "online" | "loading" | "offline"; build?: string; mode
   check?: boolean; here?: boolean; waiting?: number;
   backend?: Backend; link?: Linking }
 interface Linking { linked?: { name: string }; found: { name: string; fp: string }[]; refused?: string;
-  pairing?: { name: string; code: string; state: "waiting" | "allowed" | "gone" | "error"; error?: string } }
+  pairing?: { name: string; code: string; state: "waiting" | "allowed" | "gone" | "error"; error?: string; theirs?: boolean; confirmed?: boolean } }
 interface Backend { url: string; chrysalis: boolean; service: boolean; key: boolean; remote: boolean; name: string;
   listed?: { ok: true; models: { id: string }[] } | { ok: false; error: string } }
 interface View {
@@ -3348,7 +3348,7 @@ async function ensureOnline(run: { stopping: boolean }) {
   if (status.state === "offline") await start();
   for (const deadline = Date.now() + 180_000; status.state !== "online" || status.loading; await refreshStatus()) {
     if (run.stopping) throw new DOMException("stopped", "AbortError");
-    if (Date.now() > deadline) throw new Error("Chrysalis did not start: see `chrysalis.sh logs`");
+    if (Date.now() > deadline) throw new Error("Chrysalis did not start: its terminal says why");
     await sleep(100);
   }
 }
@@ -5015,7 +5015,12 @@ function renderBackend() {
 function renderLink() {
   const l = status.link, p = l?.pairing, note = $("link-note"), parts: (string | Node)[] = [];
   if (l?.refused) parts.push(l.refused);
-  else if (p?.state === "waiting") parts.push(p.code ? `Allow ${spaced(p.code)} on ${p.name}` : `Asking ${p.name}…`);
+  else if (p?.state === "waiting" && p.code && !p.confirmed) {
+    const yes = h("button", "btn small primary", "Yes");
+    yes.type = "button";
+    yes.onclick = () => void fetch("/api/link/confirm", { method: "POST", headers: { "Content-Type": "application/json" }, body: "{}" }).then(() => refreshStatus());
+    parts.push(`Does ${p.name} show ${spaced(p.code)}? Allow it there, and here:`, yes);
+  } else if (p?.state === "waiting") parts.push(p.code ? `Allow ${spaced(p.code)} on ${p.name}` : `Asking ${p.name}…`);
   else {
     if (p?.state === "gone") parts.push(`${p.name} did not allow this computer.`);
     if (p?.state === "error") parts.push(p.error ?? "");
@@ -5928,7 +5933,7 @@ addEventListener("resize", () => { placeShelf(); glow(); });
 placeShelf();
 buildControls();
 buildTools();
-await checkTrust();
+if (location.protocol === "https:") await checkTrust();
 void loadCatalog();
 $("to-latest").innerHTML = icon("down");
 $("settings-reset").insertAdjacentHTML("afterbegin", icon("retry"));

@@ -47,7 +47,8 @@ const base = (f: Found) => `https://${f.address.includes(":") ? `[${f.address}]`
 
 export class Link {
   private linked?: Linked;
-  pairing?: { name: string; code: string; state: "waiting" | "allowed" | "gone" | "error"; error?: string };
+  pairing?: { name: string; code: string; state: "waiting" | "allowed" | "gone" | "error"; error?: string; theirs?: boolean; confirmed?: boolean };
+  private pending?: Linked;
   private found: Found[] = [];
   private finding?: Promise<void>;
   private lastFind = 0;
@@ -62,7 +63,19 @@ export class Link {
     if (l) writeFileSync(this.file, JSON.stringify(l, null, 1), { mode: 0o600 });
     else rmSync(this.file, { force: true });
   }
-  forget() { this.save(undefined); this.pairing = undefined; }
+  forget() { this.save(undefined); this.pairing = undefined; this.pending = undefined; }
+  confirm(): boolean {
+    if (this.pairing?.state !== "waiting" || !this.pairing.code) return false;
+    this.pairing.confirmed = true;
+    this.settle();
+    return true;
+  }
+  private settle() {
+    if (!this.pairing?.confirmed || !this.pending) return;
+    this.save(this.pending);
+    this.pending = undefined;
+    this.pairing.state = "allowed";
+  }
 
   state() {
     if (!this.linked && !this.finding && Date.now() - this.lastFind > 5000) {
@@ -98,8 +111,10 @@ export class Link {
         if (r.status === 404) { this.pairing.state = "gone"; return; }
         const got = await r.json();
         if (got.state === "allowed") {
-          this.save({ ...to, fp: fingerprint(ca), ca, key: got.key });
-          this.pairing.state = "allowed";
+          this.pending = { ...to, fp: fingerprint(ca), ca, key: got.key };
+          this.pairing.theirs = true;
+          this.settle();
+          while (this.pairing?.state === "waiting" && Date.now() < end) await Bun.sleep(250);
           return;
         }
       }

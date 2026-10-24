@@ -23,7 +23,7 @@ const RED = (() => {
   return Buffer.concat([Buffer.from([137, 80, 78, 71, 13, 10, 26, 10]), chunk("IHDR", ihdr), chunk("IDAT", deflateSync(raw)), chunk("IEND", new Uint8Array())]);
 })();
 
-let web: Bun.Subprocess<"ignore", "pipe", "pipe">, base = "", key = "", browser: Browser;
+let web: Bun.Subprocess<"ignore", "pipe", "pipe">, base = "", browser: Browser;
 const problems: string[] = [];
 const serverLog: string[] = [];
 
@@ -33,7 +33,7 @@ beforeAll(async () => {
   web = Bun.spawn([process.execPath, "server.ts"], {
     cwd: import.meta.dir, stdout: "pipe", stderr: "pipe",
     env: { ...process.env, PORT: "0", CHRYSALIS_URL: CHRYSALIS, CHRYSALIS_HOST: "127.0.0.1", NODE_ENV: "production",
-      CHRYSALIS_MCP_CONFIG: `${dir}/mcp.json`, CHRYSALIS_TLS_DIR: tls, CHRYSALIS_CHECK_PORT: "0" },
+      CHRYSALIS_MCP_CONFIG: `${dir}/mcp.json`, CHRYSALIS_TLS_DIR: tls },
   });
   void (async () => {
     const r = web.stderr.getReader(), dec = new TextDecoder();
@@ -45,25 +45,19 @@ beforeAll(async () => {
   })();
   const reader = web.stdout.getReader(), dec = new TextDecoder();
   let out = "";
-  while (!/chrysalis check: \S+/.test(out)) {
+  while (!/chrysalis web: \S+/.test(out)) {
     const { value, done } = await reader.read();
     if (done) throw new Error(`server.ts exited: ${out}`);
     out += dec.decode(value);
   }
   base = out.match(/chrysalis web: (\S+)/)![1].replace(/\/$/, "");
-  const check = out.match(/chrysalis check: (\S+)/)![1].replace(/\/$/, ""), nonce = crypto.randomUUID().replaceAll("-", "");
-  await fetch(`${check}/check.gif?n=${nonce}`);
-  const asked = await fetch(`${base}/pair/ask`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ nonce, name: "Linux · Chrome" }) });
-  key = asked.headers.get("set-cookie")!.split(";")[0].split("=")[1];
   browser = await puppeteer.launch({ executablePath: process.env.CHROMIUM ?? "/usr/bin/chromium", headless: true, args: CHAT_ARGS,
     userDataDir: mkdtempSync(`${RUN}/chromium-`) });
 }, MIN);
 afterAll(async () => { await browser?.close(); web?.kill(); rmSync(RUN, { recursive: true, force: true }); });
 
 async function context(): Promise<BrowserContext> {
-  const ctx = await browser.createBrowserContext();
-  await ctx.setCookie({ name: "chrysalis-device", value: key, domain: "127.0.0.1", path: "/", secure: true, httpOnly: true, sameSite: "Strict" });
-  return ctx;
+  return browser.createBrowserContext();
 }
 async function open(ctx?: BrowserContext): Promise<Page> {
   const page = await (ctx ?? await context()).newPage();
@@ -128,16 +122,11 @@ const idle = (page: Page, timeout = 5 * MIN) => until(page, "the reply's end",
 const openChat = (page: Page, k: number) => page.evaluate((i) => (document.querySelectorAll(".conv")[i] as HTMLElement).click(), k);
 
 interface Logged { gen: number; tps: number; finish: string; stopped: boolean }
-function chrysalisReplies(since: number): Logged[] {
-  const out = Bun.spawnSync(["journalctl", "--user", "-u", "chrysalis", "--since", `@${Math.floor(since / 1000)}`, "-o", "short-unix", "--no-pager"]).stdout.toString();
-  const got: Logged[] = [];
-  for (const l of out.split("\n")) {
-    if (!(parseFloat(l) * 1000 >= since)) continue;
-    const m = l.match(/\| gen (\d+) ([\d.]+) tok\/s [\d.]+\/step \| (\w+)/);
-    if (m) got.push({ gen: +m[1], tps: +m[2], finish: m[3], stopped: false });
-    const s = l.match(/stopped by the client after (\d+) tokens/);
-    if (s) got.push({ gen: +s[1], tps: 0, finish: "client", stopped: true });
-  }
+async function chrysalisReplies(since: number): Promise<Logged[]> {
+  const recent: { at: number; completion_tokens: number; decode_tps?: number; finish_reason: string }[] =
+    (await (await fetch(`${CHRYSALIS}/chrysalis/stats`)).json()).recent ?? [];
+  const got: Logged[] = recent.filter((x) => x.at * 1000 >= since)
+    .map((x) => ({ gen: x.completion_tokens, tps: x.decode_tps ?? 0, finish: x.finish_reason, stopped: x.finish_reason === "client" }));
   return got;
 }
 async function experts() {
@@ -175,7 +164,7 @@ test("a reply is followed through a reload, a new chat and back, and a second re
   await idle(page);
   expect((await lastReply(page)).length).toBeGreaterThan(1200);
   expect(await page.$$eval("#thread .msg.assistant", (a) => a.length)).toBe(2);
-  const r = chrysalisReplies(t0);
+  const r = await chrysalisReplies(t0);
   console.log("reload and switch:", r.map((x) => `${x.gen} tokens ${x.tps} tok/s ${x.finish}`).join("; "));
   expect(r.filter((x) => x.finish === "stop").length).toBeGreaterThanOrEqual(2);
   await healthy("reload and switch");
@@ -205,7 +194,7 @@ test("three chats write at once, a fourth waits its turn, and another tab writes
     expect((await lastReply(page)).length).toBeGreaterThan(800);
   }
   expect((await lastReply(other)).length).toBeGreaterThan(800);
-  const r = chrysalisReplies(t0);
+  const r = await chrysalisReplies(t0);
   console.log("five at once:", r.map((x) => `${x.gen} tokens ${x.tps} tok/s ${x.finish}`).join("; "));
   expect(r.filter((x) => x.finish === "stop" && x.gen > 150).length).toBe(5);
   await healthy("five at once");
@@ -260,7 +249,7 @@ test("a chat deleted while it is written stops its reply at Chrysalis, and the c
   await idle(page);
   expect((await lastReply(page)).length).toBeGreaterThan(800);
   await Bun.sleep(1500);
-  const r = chrysalisReplies(t0);
+  const r = await chrysalisReplies(t0);
   console.log("deleted mid-reply:", r.map((x) => `${x.gen} tokens ${x.finish}`).join("; "));
   expect(r.some((x) => x.stopped)).toBe(true);
   await healthy("delete mid-reply");
@@ -403,7 +392,7 @@ test("the controls hammered: Enter held on an empty box, a question sent twice f
   await page.close();
 }, 10 * MIN);
 
-test("two chats' replies are written whole while another program takes the memory (all but 2 GB of what is free, 8 GB at most)", async () => {
+test("two chats' replies are written whole while another program takes the memory (all but 1.5 GB of what is free, 8 GB at most), and Chrysalis gives back the RAM it borrowed", async () => {
   const run = async (label: string) => {
     const t0 = Date.now(), page = await open();
     await thinking(page, "Off");
@@ -413,13 +402,14 @@ test("two chats' replies are written whole while another program takes the memor
     await ask(page, "Write a 600-word story about a pianist who goes deaf.");
     await page.waitForFunction(() => !document.querySelector(".conv.running"), { timeout: 10 * MIN, polling: 1000 });
     await page.close();
-    const r = chrysalisReplies(t0);
+    const r = await chrysalisReplies(t0);
     console.log(`${label}:`, r.map((x) => `${x.gen} tokens ${x.tps} tok/s`).join("; "));
     return tpsOf(r);
   };
   const calm = await run("no other program");
-  const free = +readFileSync("/proc/meminfo", "utf8").match(/MemAvailable:\s+(\d+)/)![1] * 1024, take = Math.min(8e9, free - 2e9);
-  expect(take).toBeGreaterThan(2e9);
+  const available = () => +readFileSync("/proc/meminfo", "utf8").match(/MemAvailable:\s+(\d+)/)![1] * 1024;
+  const free = available(), take = Math.min(8e9, free - 1.5e9);
+  expect(free).toBeGreaterThan(2.5e9);
   const hog = Bun.spawn(["systemd-run", "--user", "--scope", "-q", "python3", "-c",
     `import time\nb = bytearray(${Math.round(take)})\nfor i in range(0, len(b), 4096): b[i] = 1\nprint('held', flush=True)\ntime.sleep(900)`], { stdout: "pipe" });
   try {
@@ -429,6 +419,9 @@ test("two chats' replies are written whole while another program takes the memor
     const mean = (a: number[]) => a.reduce((s, x) => s + x, 0) / a.length;
     expect([calm.length, squeezed.length]).toEqual([2, 2]);
     console.log(`decode with the memory taken: ${(100 * mean(squeezed) / mean(calm)).toFixed(0)}% of its speed without`);
+    const back = available(), { mirrored } = await experts();
+    console.log(`with ${(take / 1e9).toFixed(1)} GB taken: ${(back / 1e9).toFixed(1)} GB available, ${mirrored} experts still mirrored`);
+    expect(back > 2.5e9 || mirrored === 0).toBe(true);
   } finally {
     hog.kill();
     await hog.exited;
@@ -441,7 +434,8 @@ test("Chrysalis restarted under a reply: the reply says it was cut off, nothing 
   await thinking(page, "Off");
   await ask(page, "Write a 700-word story about a train that never stops.");
   await writing(page, 200);
-  Bun.spawnSync(["systemctl", "--user", "restart", "chrysalis"]);
+  await fetch(`${base}/api/chrysalis/stop`, { method: "POST" });
+  await fetch(`${base}/api/chrysalis/start`, { method: "POST", headers: { "Content-Type": "application/json" }, body: "{}" });
   await idle(page, 2 * MIN);
   const deadline = Date.now() + 3 * MIN;
   while ((await fetch(`${CHRYSALIS}/v1/models`).then((r) => r.ok, () => false)) === false) {
@@ -497,7 +491,7 @@ test("a long conversation keeps its speed: eight questions in one chat, each ans
     expect((await lastReply(page)).length).toBeGreaterThan(40);
   }
   expect(await page.$$eval("#thread .msg.assistant", (a) => a.length)).toBe(qs.length);
-  const r = chrysalisReplies(t0).filter((x) => x.finish === "stop");
+  const r = (await chrysalisReplies(t0)).filter((x) => x.finish === "stop");
   console.log("eight turns:", r.map((x) => `${x.gen} tokens ${x.tps} tok/s`).join("; "));
   expect(r.length).toBeGreaterThanOrEqual(qs.length);
   await healthy("long conversation");
@@ -539,8 +533,8 @@ test("a tab closed while its reply is written: the reply runs out at Chrysalis, 
   await ask(fresh, "In one sentence, what is a paper boat?");
   await idle(fresh, 3 * MIN);
   expect((await lastReply(fresh)).length).toBeGreaterThan(20);
-  for (let k = 0; k < 60 && !chrysalisReplies(t0).some((x) => x.finish === "stop" && x.gen > 250); k++) await Bun.sleep(1000);
-  expect(chrysalisReplies(t0).some((x) => x.finish === "stop" && x.gen > 250)).toBe(true);
+  for (let k = 0; k < 60 && !(await chrysalisReplies(t0)).some((x) => x.finish === "stop" && x.gen > 250); k++) await Bun.sleep(1000);
+  expect((await chrysalisReplies(t0)).some((x) => x.finish === "stop" && x.gen > 250)).toBe(true);
   await healthy("closed tab");
   await ctx.close();
 }, 10 * MIN);

@@ -1,4 +1,6 @@
+import { writeFileSync } from "node:fs";
 import { hostname } from "node:os";
+import { createInterface } from "node:readline";
 import type { BunPlugin, Server, Subprocess } from "bun";
 import app from "./index.html";
 import { Backends, standard } from "./backend";
@@ -44,17 +46,15 @@ const here = (handler: Handler) => guarded((req, srv) => fromNetwork(req, srv)
 const json = (handler: (req: Request, srv: Srv) => Response | Promise<Response>) => (req: Request, srv: Srv) =>
   (req.headers.get("content-type") ?? "").startsWith("application/json") ? handler(req, srv) : new Response("JSON only", { status: 415 });
 
-const systemctl = (...args: string[]) => {
-  try { return Bun.spawnSync(["systemctl", "--user", ...args]).stdout.toString().trim(); } catch { return ""; }
-};
-const unit = (...args: string[]) => systemctl(...args, "chrysalis");
-const MODELS = ["qwen3.8-27b", "qwen3.8-flash-next"];
+const MODELS = ["qwen3.8-27b", "qwen3.8-flash-next"], MODEL_FILE = `${tlsDir()}/model`;
 async function pickModel(req: Request): Promise<string | undefined> {
   const model = (await req.json().catch(() => ({})))?.model;
   if (!MODELS.includes(model)) return undefined;
-  systemctl("set-environment", `CHRYSALIS_MODEL=${model}`);
+  writeFileSync(MODEL_FILE, model);
   return model;
 }
+const engineCall = (path: string, body: object = {}) =>
+  fetch(`${CHRYSALIS}${path}`, { method: "POST", body: JSON.stringify(body), headers: { "Content-Type": "application/json" } });
 
 interface Job {
   id: string;
@@ -514,6 +514,13 @@ img.src = ${JSON.stringify(checkUrl(req))} + "?t=" + Date.now();
       })),
       DELETE: here(() => (link.forget(), new Response(null, { status: 204 }))),
     },
+    "/api/link/confirm": {
+      POST: here(json(async () => {
+        if (!link.confirm()) return Response.json({ error: { message: "no code to confirm" } }, { status: 409 });
+        forwardHere();
+        return Response.json(link.state());
+      })),
+    },
     "/vendor/mermaid/*": { GET: guarded(vendor) },
     "/vendor/three/*": { GET: guarded(vendor3d) },
     "/vendor/aframe/*": { GET: guarded(vendor3d) },
@@ -606,9 +613,10 @@ img.src = ${JSON.stringify(checkUrl(req))} + "?t=" + Date.now();
             return { state: "loading", build: BUILD, loading: b.model ?? undefined, progress: b.progress ?? undefined };
           }
           if (!r.ok) throw new Error("loading");
-          return { state: "online", build: BUILD, ...(await r.json()) };
+          const stats = await r.json();
+          return { state: stats.asleep ? "offline" : "online", build: BUILD, ...stats };
         } catch {
-          return { state: unit("is-active") === "active" ? "loading" : "offline", build: BUILD };
+          return { state: "offline", build: BUILD };
         }
       })(), net = fromNetwork(req, srv), found = devices.find(req);
       const res = Response.json({ ...state, backend, here: !net, ...(found && devices!.stale(found.device) ? { check: true } : {}),
@@ -624,7 +632,11 @@ img.src = ${JSON.stringify(checkUrl(req))} + "?t=" + Date.now();
         return r.ok ? Response.json(await backends.about()) : Response.json({ error: { message: r.error }, ...(r.remote ? { remote: r.remote } : {}) }, { status: r.remote ? 409 : 400 });
       })),
     },
-    "/api/chrysalis/start": { POST: guarded(async (req) => (await pickModel(req), Bun.spawnSync([`${import.meta.dir}/../chrysalis.sh`, "up"]), new Response(null, { status: 202 }))) },
+    "/api/chrysalis/start": { POST: guarded(async (req) => {
+      const model = (await pickModel(req)) ?? (await engineStats().then((r) => r.json()).catch(() => ({}))).model;
+      if (model) void engineCall("/chrysalis/load", { model }).catch(() => {});
+      return new Response(null, { status: 202 });
+    }) },
     "/api/chrysalis/load": {
       POST: guarded(async (req, srv) => {
         srv.timeout(req, 0);
@@ -638,7 +650,8 @@ img.src = ${JSON.stringify(checkUrl(req))} + "?t=" + Date.now();
         }
       }),
     },
-    "/api/chrysalis/stop": { POST: guarded(() => (unit("stop"), new Response(null, { status: 204 }))) },
+    "/api/chrysalis/stop": { POST: guarded(async () => (await engineCall("/chrysalis/unload").catch(() => {}), new Response(null, { status: 204 }))) },
+    "/api/quit": { POST: here(json(async () => (setTimeout(() => process.kill(process.pid, "SIGTERM"), 50), new Response(null, { status: 204 })))) },
   },
   websocket: {
     open(ws) {
@@ -750,6 +763,36 @@ function forwardHere() {
   }
 }
 forwardHere();
+const spaced = (code: string) => `${code.slice(0, 3)} ${code.slice(3)}`;
+const questions: { text: string; answer: (yes: boolean) => void }[] = [], asked = new Set<string>();
+const tty = process.stdin.isTTY ? createInterface({ input: process.stdin }) : undefined;
+const nextQuestion = () => { if (questions[0]) process.stdout.write(`${questions[0].text} [y/N] `); };
+tty?.on("line", (line) => {
+  questions.shift()?.answer(/^\s*y/i.test(line));
+  nextQuestion();
+});
+function question(key: string, text: string, answer: (yes: boolean) => void) {
+  if (!tty || asked.has(key)) return;
+  asked.add(key);
+  questions.push({ text, answer });
+  if (questions.length === 1) nextQuestion();
+}
+if (tty) setInterval(() => {
+  for (const a of LAN ? devices.waiting() : []) if (!a.allowed)
+    question(`ask ${a.code}`, `${a.name} asks to use ${a.kind === "computer" ? "this computer's Chrysalis" : "the chat"} · ${spaced(a.code)} · allow?`,
+      (yes) => void (yes ? devices.allow(a.code) : devices.deny(a.code)));
+  const p = link.pairing;
+  if (p?.state === "waiting" && p.code && !p.confirmed)
+    question(`link ${p.code}`, `${p.name}'s code: ${spaced(p.code)}. Same as on ${p.name}?`, (yes) => yes ? (link.confirm(), forwardHere()) : link.forget());
+}, 1000);
+const declined = new Set<string>();
+if (Bun.spawnSync([`${import.meta.dir}/../chrysalis.sh`, "gpu"]).exitCode !== 0) setInterval(() => {
+  const s = link.state(), to = s.found.find((f) => !declined.has(f.fp));
+  if (!s.linked && !link.pairing && to) void link.pair(to.fp, MACHINE).then(() => {
+    if (!link.pairing && !link.state().linked) declined.add(to.fp);
+    forwardHere();
+  });
+}, 2000);
 console.log(`chrysalis web: ${server.url}`);
 for (const s of secure) console.log(`chrysalis web: ${s.url}`);
 for (const s of checks) console.log(`chrysalis check: ${s.url}`);

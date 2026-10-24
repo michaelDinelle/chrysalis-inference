@@ -267,19 +267,21 @@ void Engine::experts_plan() {
         v.insert(std::upper_bound(v.begin(), v.end(), e, better), e);
         if ((int)v.size() > nf) v.pop_back();
     };
-    for (size_t k = 0; k < keys; k++)
-        if (x.slot[k] < 0 && !x.coming[k] && x.score[k] > 0) keep(in, {x.score[k] * x.mb[k], (int)k}, true);
-    if (in.empty()) return;
     auto file_tier = [&](int k) { return k >= 0 && cold[k / NE].grp(x.home[k]) == 2; };
+    const double avail = mem_available(x);
+    const bool yield = x.spilled > 0 && avail < 0.75 * x.spare;
+    for (size_t k = 0; k < keys; k++)
+        if (x.slot[k] < 0 && !x.coming[k] && (yield ? file_tier((int)k) : x.score[k] > 0)) keep(in, {x.score[k] * x.mb[k], (int)k}, true);
+    if (in.empty()) return;
     int room = x.spill_cap - x.spilled;
-    if (room > 0 && mem_available(x) < x.spare) room = 0;
+    if (room > 0 && avail < x.spare) room = 0;
     for (int s = 0; s < n_slots; s++)
         if (!x.busy[s] && (room > 0 || !file_tier(x.owner[s])))
             keep(out, {x.owner[s] >= 0 ? x.score[x.owner[s]] * x.mb[x.owner[s]] : -1.0f, s}, false);
     bool queued = false;
     for (int i = 0, j = 0, q = 0; i < (int)in.size() && j < (int)out.size(); i++, j++) {
         while (j < (int)out.size() && room <= 0 && file_tier(x.owner[out[j].second])) j++;
-        if (j == (int)out.size() || in[i].first <= out[j].first * (1 + MARGIN) + MIN_GAIN) break;
+        if (j == (int)out.size() || (!yield && in[i].first <= out[j].first * (1 + MARGIN) + MIN_GAIN)) break;
         Experts::Load &ld = x.loads[free_k[q]];
         ld.key = in[i].second; ld.slot = out[j].second;
         ld.out = file_tier(x.owner[ld.slot]) ? x.owner[ld.slot] : -1;
