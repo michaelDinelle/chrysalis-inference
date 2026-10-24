@@ -15,6 +15,7 @@ constexpr int VOCAB = 248320;
 constexpr int NL = 64;
 constexpr int NH = 24, NKV = 4, HD = 256, ROT = 64;
 constexpr int GK = 16, GV = 48, GD = 128;
+constexpr bool SIGMOID_GATE = false;
 constexpr int QKV = 2 * GK * GD + GV * GD;
 constexpr int NATT = NL / 4;
 constexpr int NKVL = NATT + 1;

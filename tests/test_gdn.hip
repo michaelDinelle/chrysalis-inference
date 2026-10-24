@@ -1,5 +1,5 @@
 #ifndef CHRYSALIS_GDN_KERNELS
-#include "../engine/kernels.h"
+#include "../engine/27b/kernels.h"
 #endif
 #include <cmath>
 #include <random>

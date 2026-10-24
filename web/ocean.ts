@@ -1,4 +1,4 @@
-import logo from "./logo-thin.svg";
+import logo from "./logo.svg";
 import { isDark, onTheme } from "./theme";
 
 const SEA = " ·~≈+*#";

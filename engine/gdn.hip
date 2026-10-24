@@ -144,7 +144,7 @@ __global__ __launch_bounds__(128) void k_gdn_out(const float *o, const float *z,
     const float ss = warp_sum(v * v);
     if ((threadIdx.x & 31) == 0) red[threadIdx.x >> 5] = ss;
     __syncthreads();
-    const float y = v * rsqrtf((red[0] + red[1] + red[2] + red[3]) / GD + EPS) * w[threadIdx.x] * silu(z[idx]);
+    const float y = v * rsqrtf((red[0] + red[1] + red[2] + red[3]) / GD + EPS) * w[threadIdx.x] * (SIGMOID_GATE ? sigmoid(z[idx]) : silu(z[idx]));
     if (oh) oh[idx] = __float2half(y);
     if (oq.q) {
         const float d = warp_max(fabsf(y)) / 127.0f;
@@ -249,7 +249,7 @@ __global__ __launch_bounds__(512) void k_gdn_step(GdnStepArgs a) {
     for (int r = warp; r < 4 * T; r += 16) {
         const int t = r / 4, col = (r % 4) * 32 + lane;
         const size_t idx = (size_t)t * GV * GD + h * GD + col;
-        const float y = os[t][col] * rms[t] * a.norm_w[col] * silu(a.z[idx]);
+        const float y = os[t][col] * rms[t] * a.norm_w[col] * (SIGMOID_GATE ? sigmoid(a.z[idx]) : silu(a.z[idx]));
         const float d = warp_max(fabsf(y)) / 127.0f;
         a.out.q[idx] = (int8_t)__float2int_rn(d > 0 ? y / d : 0.0f);
         if (lane == 0) a.out.d[idx / 32] = d;

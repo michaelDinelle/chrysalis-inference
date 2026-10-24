@@ -18,6 +18,7 @@ constexpr int NL = 48;
 constexpr int NH = 24, NKV = 2, HD = 256, ROT = 64;
 constexpr int QPK = NH / NKV;
 constexpr int GK = 16, GV = 48, GD = 128;
+constexpr bool SIGMOID_GATE = true;
 constexpr int QKV = 2 * GK * GD + GV * GD;
 constexpr int NGDN = 36;
 constexpr int NATT = NL / 4;

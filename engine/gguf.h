@@ -3,6 +3,7 @@
 #include <cstring>
 #include <map>
 #include <string>
+#include <vector>
 #include <fcntl.h>
 #include <sys/mman.h>
 #include <sys/stat.h>
@@ -18,26 +19,34 @@ struct GGUFTensor {
 struct GGUF {
     std::map<std::string, GGUFTensor> tensors;
     std::map<std::string, int64_t> ints;
+    std::map<std::string, std::string> strs;
+    std::map<std::string, std::vector<int64_t>> arrs;
     uint8_t *base = nullptr;
     size_t size = 0;
+    int fd = -1;
 
     static size_t type_bytes(int type, int64_t n) {
         switch (type) {
             case 0: return n * 4;
             case 1: return n * 2;
+            case 6: return n / 32 * 22;
             case 8: return n / 32 * 34;
+            case 20: return n / 32 * 18;
+            case 26: return n * 4;
+            case 30: return n * 2;
             case 14: return n / 256 * 210;
             case 23: return n / 256 * 136;
+            case 10: return n / 256 * 84;
+            case 11: return n / 256 * 110;
             default: return 0;
         }
     }
 
     bool open(const char *path) {
-        int fd = ::open(path, O_RDONLY);
+        fd = ::open(path, O_RDONLY);
         if (fd < 0) return false;
         struct stat st; fstat(fd, &st); size = st.st_size;
         base = (uint8_t *)mmap(nullptr, size, PROT_READ, MAP_SHARED, fd, 0);
-        ::close(fd);
         if (base == MAP_FAILED || memcmp(base, "GGUF", 4) != 0) return false;
 
         const uint8_t *p = base + 4;
@@ -51,10 +60,12 @@ struct GGUF {
         for (uint64_t i = 0; i < n_kv; i++) {
             std::string key = rs();
             uint32_t t; rd(t);
-            if (t == 8) { rs(); continue; }
+            if (t == 8) { strs[key] = rs(); continue; }
             if (t == 9) {
                 uint32_t at; uint64_t n; rd(at); rd(n);
                 if (at == 8) for (uint64_t j = 0; j < n; j++) rs();
+                else if (at == 11 || at == 10) { std::vector<int64_t> v(n); memcpy(v.data(), p, n * 8); arrs[key] = v; p += n * 8; }
+                else if (at == 4 || at == 5) { std::vector<int64_t> v(n); for (uint64_t j = 0; j < n; j++) { int32_t x; memcpy(&x, p + 4 * j, 4); v[j] = x; } arrs[key] = v; p += n * 4; }
                 else p += n * scalar_size[at];
                 continue;
             }
@@ -79,6 +90,7 @@ struct GGUF {
         for (auto &[name, t] : tensors) {
             t.data = base + data_start + offsets[name];
             t.nbytes = type_bytes(t.type, t.ne[0] * t.ne[1] * t.ne[2] * t.ne[3]);
+            if (!t.nbytes) { fprintf(stderr, "chrysalis: tensor %s has a type this reader does not know (%d)\n", name.c_str(), t.type); return false; }
         }
         return true;
     }
@@ -88,5 +100,10 @@ struct GGUF {
         return it == tensors.end() ? nullptr : &it->second;
     }
 
-    ~GGUF() { if (base && base != MAP_FAILED) munmap(base, size); }
+    void drop(const void *p, size_t n) const {
+        const size_t off = (size_t)((const uint8_t *)p - base) & ~size_t(4095);
+        madvise(base + off, n + ((const uint8_t *)p - base - off), MADV_DONTNEED);
+        posix_fadvise(fd, (off_t)off, (off_t)(n + ((const uint8_t *)p - base - off)), POSIX_FADV_DONTNEED);
+    }
+    ~GGUF() { if (base && base != MAP_FAILED) munmap(base, size); if (fd >= 0) ::close(fd); }
 };

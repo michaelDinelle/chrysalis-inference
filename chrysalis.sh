@@ -284,7 +284,7 @@ await Bun.write(out, Buffer.concat([h, p]));' "$UV/icon.png" "$A/Resources/chrys
 native() {
     set -uo pipefail
     local ROCM=/src/data/rocm GCC=/opt/rh/gcc-toolset-14/root/usr W=/work a b l
-    mkdir -p "$W" && cp -r /src/engine /src/engine_fn "$W/" && cp -r /src/data/llama.cpp "$W/llama.cpp" && rm -rf "$W/llama.cpp/build"
+    mkdir -p "$W" && cp -r /src/engine "$W/" && cp -r /src/data/llama.cpp "$W/llama.cpp" && rm -rf "$W/llama.cpp/build"
     ggml() {
         local b=$W/ggml-$1
         cmake -S $W/llama.cpp -B "$b" -DCMAKE_BUILD_TYPE=Release -DGGML_NATIVE=OFF -DLLAMA_BUILD_TOOLS=OFF -DLLAMA_BUILD_EXAMPLES=OFF \
@@ -297,12 +297,12 @@ native() {
     local FLAGS=(-O3 -std=c++20 -fPIC --offload-arch=gfx1100 -Wno-unused-result --gcc-toolchain=$GCC)
     local LIBS=(-L$ROCM/lib -lhipblaslt -pthread -ldl -Wl,--no-undefined)
     cd "$W"
-    local SRC=(engine/relayout.hip engine/quant.hip engine/ops.hip engine/gdn.hip engine/attn.hip engine/vision.hip engine/model.cpp engine/load.cpp engine/api.cpp)
-    local FN_SRC=(engine_fn/relayout.hip engine_fn/quant.hip engine_fn/ops.hip engine_fn/gdn.hip engine_fn/attn.hip engine_fn/moe.hip engine_fn/ple.hip
-                  engine/vision.hip engine_fn/model.cpp engine_fn/load.cpp engine_fn/experts.cpp engine_fn/api.cpp engine_fn/cpu_moe.cpp engine_fn/cpu_vnni.cpp)
+    local SRC=(engine/27b/relayout.hip engine/27b/quant.hip engine/27b/ops.hip engine/gdn.hip engine/27b/attn.hip engine/vision.hip engine/27b/model.cpp engine/27b/load.cpp engine/27b/api.cpp)
+    local FN_SRC=(engine/flash-next/relayout.hip engine/flash-next/quant.hip engine/flash-next/ops.hip engine/gdn.hip engine/flash-next/attn.hip engine/flash-next/moe.hip engine/flash-next/ple.hip
+                  engine/vision.hip engine/flash-next/model.cpp engine/flash-next/load.cpp engine/flash-next/experts.cpp engine/flash-next/api.cpp engine/flash-next/cpu_moe.cpp engine/flash-next/cpu_vnni.cpp)
     mkdir -p /out/build
-    $ROCM/bin/hipcc "${FLAGS[@]}" -x hip -shared -o /out/build/libchrysalis.so "${SRC[@]}" "${LIBS[@]}" & a=$!
-    $ROCM/bin/hipcc "${FLAGS[@]}" -I$W/llama.cpp/ggml/include -x hip -shared -o /out/build/libchrysalis_fn.so "${FN_SRC[@]}" "${LIBS[@]}" \
+    $ROCM/bin/hipcc "${FLAGS[@]}" -Iengine/27b -x hip -shared -o /out/build/libchrysalis.so "${SRC[@]}" "${LIBS[@]}" & a=$!
+    $ROCM/bin/hipcc "${FLAGS[@]}" -Iengine/flash-next -I$W/llama.cpp/ggml/include -x hip -shared -o /out/build/libchrysalis_fn.so "${FN_SRC[@]}" "${LIBS[@]}" \
         -L/out/ggml/avx2 -lggml-cpu -lggml-base & b=$!
     wait $a && wait $b
     chown -R "$OWNER" /out

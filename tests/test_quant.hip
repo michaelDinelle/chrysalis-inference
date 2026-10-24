@@ -1,4 +1,4 @@
-#include "../engine/kernels.h"
+#include "../engine/27b/kernels.h"
 #include "../engine/gguf.h"
 #include <cmath>
 #include <cstring>

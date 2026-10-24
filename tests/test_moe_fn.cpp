@@ -1,5 +1,5 @@
-#include "../engine_fn/kernels.h"
-#include "../engine_fn/cpu_moe.h"
+#include "../engine/flash-next/kernels.h"
+#include "../engine/flash-next/cpu_moe.h"
 #include "ggml.h"
 #include <algorithm>
 #include <cmath>

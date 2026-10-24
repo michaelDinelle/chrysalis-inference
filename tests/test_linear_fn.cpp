@@ -1,4 +1,4 @@
-#include "../engine_fn/model.h"
+#include "../engine/flash-next/model.h"
 #include "ggml.h"
 #include <cmath>
 #include <random>

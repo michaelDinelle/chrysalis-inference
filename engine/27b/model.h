@@ -1,8 +1,8 @@
 #pragma once
 #include "kernels.h"
-#include "sampler.h"
-#include "lookup.h"
-#include "vision.h"
+#include "../sampler.h"
+#include "../lookup.h"
+#include "../vision.h"
 static_assert(TOPK == SAMPLE_N, "the sampler takes the engine's rows as they are");
 #include <random>
 #include <hipblaslt/hipblaslt.h>

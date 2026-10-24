@@ -1,6 +1,6 @@
 #include "model.h"
 #include <stdexcept>
-#include "gguf.h"
+#include "../gguf.h"
 #include <algorithm>
 #include <array>
 #include <set>
@@ -113,7 +113,7 @@ void Engine::load(const std::string &path, int max_seqs, size_t reserve_bytes) {
     if (!g.base && !g.open(path.c_str())) FAIL("cannot open %s", path.c_str());
     for (Layer *w = L; w <= &M; w++) *w = Layer{};
     hc_head = HcMix{}; mtp_head = HcMix{};
-    if (g.strs["general.architecture"] != "chrysalisfn") FAIL("%s is not a Chrysalis Flash-Next file (engine_fn/fn_quantize.py)", path.c_str());
+    if (g.strs["general.architecture"] != "chrysalisfn") FAIL("%s is not a Chrysalis Flash-Next file (engine/flash-next/quantize.py)", path.c_str());
     auto get = [&](const std::string &name) {
         const GGUFTensor *t = g.get(name);
         if (!t) FAIL("missing tensor %s", name.c_str());

@@ -1685,6 +1685,15 @@ async function openSettings(page: Page) {
 const stored = (page: Page) => page.evaluate(() => JSON.parse(sessionStorage.getItem("settings2") ?? "{}").voice);
 const settled = async (ok: () => boolean, ms = 5000) => { for (const t = Date.now(); !ok() && Date.now() - t < ms; ) await Bun.sleep(25); return ok(); };
 
+test("voice picker: a voice model not downloaded yet is downloaded from the picker, and then offers its voices", async () => {
+  const { page } = await voicePage("pick");
+  await page.click("#voice-pick");
+  expect(await page.$$eval('#voice-pop [data-voice^="big-tts/"]', (els) => els.length)).toBe(0);
+  await page.click("#voice-pop .voice-model.missing button");
+  await page.waitForSelector('#voice-pop [data-voice="big-tts/zed"]', { timeout: 10_000 });
+  expect(await page.$$eval("#voice-pop .voice-model.missing", (els) => els.length)).toBe(0);
+});
+
 test("voice picker: the voice models' voices by language and gender; a pick switches model and voice for the next sentence, and Settings shows the same choice", async () => {
   const { page, session } = await voicePage("pick");
   await page.waitForFunction(() => /^voice /.test(document.querySelector('#thread > article[data-i="1"] .stats')?.textContent ?? ""), { timeout: 10_000 });

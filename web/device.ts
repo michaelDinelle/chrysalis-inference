@@ -1,4 +1,4 @@
-import logo from "./logo-thin.svg";
+import logo from "./logo.svg";
 import { Ocean } from "./ocean";
 
 const ocean = new Ocean(document.getElementById("sea")!, { box: ".card", hint: "", room: "#stage" }), up = document.createElement("i");

@@ -14,7 +14,6 @@ import { type Block, type Span, type Version, ARTIFACTS_PROMPT, PAGE_DOC, elemen
   withContent, withCopy, withOrder, withPaint, withoutElement, lineDiff } from "./artifacts";
 import { LATEX_CSS, latexToHtml } from "./latex";
 import logo from "./logo.svg";
-import logoThin from "./logo-thin.svg";
 import { type CardData, type Group, type Person, type Voice, cardPng, castPrompt, dropGroup, dropPerson, fill as fillCard, loadCast, readCast, saveGroup, savePerson, speakerOf,
   voiceOf } from "./cast";
 import { Ocean } from "./ocean";
@@ -2925,7 +2924,7 @@ const ocean = new Ocean($("sea")), seaReady = ocean.start(), seaSwitch = $<HTMLB
 function emptyState() {
   const e = h("div", "empty");
   if (seaReady) ocean.butterfly(e);
-  else e.innerHTML = `<img class="logo" src="${logoThin}" alt="">`;
+  else e.innerHTML = `<img class="logo" src="${logo}" alt="">`;
   return e;
 }
 function showSea(on: boolean) {
@@ -4308,7 +4307,15 @@ function renderVoicePop() {
     if (!m.installed) {
       const get = h("button", "btn small", "Download");
       get.type = "button";
-      get.onclick = () => { get.disabled = true; get.textContent = "Downloading…"; voice?.client.get(m.name); };
+      get.onclick = () => {
+        get.disabled = true;
+        get.textContent = "Downloading…";
+        samples().get(m.name);
+        void samples().catalog().then((c) => {
+          if (c?.tts?.length) { voiceCatalog = c; setPref("voice-catalog", JSON.stringify(c)); }
+          renderVoicePop();
+        });
+      };
       head.append(get);
     }
     rows.push(head);

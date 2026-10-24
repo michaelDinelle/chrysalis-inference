@@ -1,17 +1,17 @@
 ROCM  ?= $(CURDIR)/data/rocm
 HIPCC := $(ROCM)/bin/hipcc
 FLAGS := -O3 -std=c++20 -fPIC --offload-arch=gfx1100 -Wno-unused-result
-SRC   := engine/relayout.hip engine/quant.hip engine/ops.hip engine/gdn.hip engine/attn.hip engine/vision.hip engine/model.cpp engine/load.cpp engine/api.cpp
+SRC   := engine/27b/relayout.hip engine/27b/quant.hip engine/27b/ops.hip engine/gdn.hip engine/27b/attn.hip engine/vision.hip engine/27b/model.cpp engine/27b/load.cpp engine/27b/api.cpp
 KERN  := $(filter %.hip,$(SRC))
 LIBS  := -L$(ROCM)/lib -lhipblaslt -Wl,-rpath,$(ROCM)/lib -Wl,--no-undefined
 
-build/libchrysalis.so: $(SRC) $(wildcard engine/*.h)
+build/libchrysalis.so: $(SRC) $(wildcard engine/*.h engine/27b/*.h)
 	@mkdir -p build
-	$(HIPCC) $(FLAGS) -x hip -shared -o $@ $(SRC) $(LIBS)
+	$(HIPCC) $(FLAGS) -Iengine/27b -x hip -shared -o $@ $(SRC) $(LIBS)
 
-build/%: tests/%.hip $(KERN) $(wildcard engine/*.h)
+build/%: tests/%.hip $(KERN) $(wildcard engine/*.h engine/27b/*.h)
 	@mkdir -p build
-	$(HIPCC) $(FLAGS) -o $@ $< $(KERN) $(LIBS)
+	$(HIPCC) $(FLAGS) -Iengine/27b -o $@ $< $(KERN) $(LIBS)
 
 build/test_sampler: tests/test_sampler.cpp engine/sampler.h
 	@mkdir -p build
@@ -41,25 +41,25 @@ test: test_web build/libchrysalis.so build/test_quant build/test_attn build/test
 	data/venv/bin/python tests/test_vision.py
 
 GGML  := $(CURDIR)/data/llama.cpp
-FN_SRC := engine_fn/relayout.hip engine_fn/quant.hip engine_fn/ops.hip engine_fn/gdn.hip engine_fn/attn.hip engine_fn/moe.hip \
-          engine_fn/ple.hip engine/vision.hip engine_fn/model.cpp engine_fn/load.cpp engine_fn/experts.cpp engine_fn/api.cpp \
-          engine_fn/cpu_moe.cpp engine_fn/cpu_vnni.cpp
+FN_SRC := engine/flash-next/relayout.hip engine/flash-next/quant.hip engine/flash-next/ops.hip engine/gdn.hip engine/flash-next/attn.hip engine/flash-next/moe.hip \
+          engine/flash-next/ple.hip engine/vision.hip engine/flash-next/model.cpp engine/flash-next/load.cpp engine/flash-next/experts.cpp engine/flash-next/api.cpp \
+          engine/flash-next/cpu_moe.cpp engine/flash-next/cpu_vnni.cpp
 FN_LIBS := $(LIBS) -L$(GGML)/build/bin -lggml-cpu -lggml-base -Wl,-rpath,$(GGML)/build/bin
 
-build/libchrysalis_fn.so: $(FN_SRC) $(wildcard engine_fn/*.h) engine/sampler.h engine/vision.h engine/lookup.h engine/lt_tune.h
+build/libchrysalis_fn.so: $(FN_SRC) $(wildcard engine/*.h engine/flash-next/*.h)
 	@mkdir -p build
-	$(HIPCC) $(FLAGS) -I$(GGML)/ggml/include -x hip -shared -o $@ $(FN_SRC) $(FN_LIBS)
+	$(HIPCC) $(FLAGS) -Iengine/flash-next -I$(GGML)/ggml/include -x hip -shared -o $@ $(FN_SRC) $(FN_LIBS)
 
 fn: build/libchrysalis_fn.so
 
-FN_KERN := $(filter-out engine_fn/model.cpp engine_fn/load.cpp engine_fn/experts.cpp engine_fn/api.cpp,$(FN_SRC))
-build/test_%_fn: tests/test_%_fn.cpp $(FN_KERN) $(wildcard engine_fn/*.h)
+FN_KERN := $(filter-out engine/flash-next/model.cpp engine/flash-next/load.cpp engine/flash-next/experts.cpp engine/flash-next/api.cpp,$(FN_SRC))
+build/test_%_fn: tests/test_%_fn.cpp $(FN_KERN) $(wildcard engine/flash-next/*.h)
 	@mkdir -p build
-	$(HIPCC) $(FLAGS) -I$(GGML)/ggml/include -x hip -o $@ $< $(FN_KERN) $(FN_LIBS)
+	$(HIPCC) $(FLAGS) -Iengine/flash-next -I$(GGML)/ggml/include -x hip -o $@ $< $(FN_KERN) $(FN_LIBS)
 
-build/test_linear_fn: tests/test_linear_fn.cpp $(FN_SRC) $(wildcard engine_fn/*.h)
+build/test_linear_fn: tests/test_linear_fn.cpp $(FN_SRC) $(wildcard engine/flash-next/*.h)
 	@mkdir -p build
-	$(HIPCC) $(FLAGS) -I$(GGML)/ggml/include -x hip -o $@ $< $(filter-out engine_fn/api.cpp,$(FN_SRC)) $(FN_LIBS)
+	$(HIPCC) $(FLAGS) -Iengine/flash-next -I$(GGML)/ggml/include -x hip -o $@ $< $(filter-out engine/flash-next/api.cpp,$(FN_SRC)) $(FN_LIBS)
 
 build/test_gdn_fn: tests/test_gdn.hip
 

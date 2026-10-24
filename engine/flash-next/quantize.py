@@ -9,7 +9,7 @@ from concurrent.futures import ThreadPoolExecutor
 
 import numpy as np
 
-sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "data", "llama.cpp", "gguf-py"))
+sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "..", "data", "llama.cpp", "gguf-py"))
 from gguf import GGUFReader
 
 F32, F16, Q5_0, Q8_0, Q2_K, Q3_K, Q6_K, IQ4_NL, IQ4_XS, I32 = 0, 1, 6, 8, 10, 11, 14, 20, 23, 26
@@ -17,7 +17,7 @@ BLOCK = {Q5_0: (32, 22), Q8_0: (32, 34), Q2_K: (256, 84), Q3_K: (256, 110), Q6_K
          F16: (1, 2), F32: (1, 4), I32: (1, 4)}
 NL, NE, D, FE = 48, 512, 2560, 640
 
-ggml = C.CDLL(os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "data", "llama.cpp", "build", "bin", "libggml-base.so"))
+ggml = C.CDLL(os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "..", "data", "llama.cpp", "build", "bin", "libggml-base.so"))
 ggml.ggml_quantize_chunk.restype = C.c_size_t
 ggml.ggml_quantize_chunk.argtypes = [C.c_int, C.c_void_p, C.c_void_p, C.c_int64, C.c_int64, C.c_int64, C.c_void_p]
 for t in (Q5_0, Q2_K, Q3_K, Q6_K, IQ4_NL, IQ4_XS, Q8_0):

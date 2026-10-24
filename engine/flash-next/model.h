@@ -1,10 +1,10 @@
 #pragma once
 #include "kernels.h"
-#include "../engine/sampler.h"
-#include "../engine/lookup.h"
+#include "../sampler.h"
+#include "../lookup.h"
 static_assert(TOPK == SAMPLE_N, "the sampler takes the engine's rows as they are");
 #include "cpu_moe.h"
-#include "../engine/vision.h"
+#include "../vision.h"
 #include <hipblaslt/hipblaslt.h>
 #include <atomic>
 #include <chrono>

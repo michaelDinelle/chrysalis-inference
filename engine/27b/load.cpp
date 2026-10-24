@@ -1,5 +1,5 @@
 #include "model.h"
-#include "gguf.h"
+#include "../gguf.h"
 #include <algorithm>
 #include <atomic>
 #include <chrono>

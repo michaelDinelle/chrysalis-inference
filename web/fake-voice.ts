@@ -33,6 +33,7 @@ const log = (o: object) => { if (LOG) appendFileSync(LOG, `${JSON.stringify(o)}\
 
 interface Reply { text: string[]; told: number; seq: number; sent: number; ended: boolean; dropped: boolean }
 interface Session {
+  got?: string[];
   n: string; script: Line[]; at: number; line?: Line; listening: boolean; heard: number; frames: number; configs: number;
   stack: Record<Part, string>; voice: string; speed: number;
   replies: Map<string, Reply>; playing: boolean; answer?: string; overtalk?: boolean;
@@ -148,8 +149,10 @@ function message(ws: Bun.ServerWebSocket<Session>, m: any) {
     d.configs++;
     ask(ws, m);
     ready(ws);
+  } else if (m.type === "get") {
+    d.got = [...(d.got ?? []), m.tts];
   } else if (m.type === "catalog") {
-    ws.send(JSON.stringify({ type: "catalog", catalog: CATALOG }));
+    ws.send(JSON.stringify({ type: "catalog", catalog: { ...CATALOG, tts: CATALOG.tts.map((t) => d.got?.includes(t.name) ? { ...t, installed: true } : t) } }));
   } else if (m.type === "preview") {
     const v = Object.values(CATALOG.tts).flatMap((t) => t.voices).find((x) => x.id === m.voice);
     const r: Reply = { text: Array.from(m.text ?? `This is ${v?.label ?? m.voice}.`), told: 0, seq: 0, sent: 0, ended: true, dropped: false };
