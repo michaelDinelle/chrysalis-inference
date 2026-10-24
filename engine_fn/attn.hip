@@ -841,7 +841,7 @@ void idx_select(const half *q16, int pos0, int G, int nblk, KVRef kv, int layer,
     }
     k_idx_select2<<<G, 1024, 0, st>>>(score, hist, pos0, nblk, sel);
 }
-// The two-kernel selection (k_idx_score, k_idx_select): the reference tools_fn/test_attn_fn.cpp compares against.
+// The two-kernel selection (k_idx_score, k_idx_select): the reference tests/test_attn_fn.cpp compares against.
 void idx_select_ref(const half *q16, int pos0, int G, int nblk, KVRef kv, int layer, float *score, int *sel, hipStream_t st) {
     k_idx_score<<<dim3((nblk + 255) / 256, G), 256, 0, st>>>(q16, pos0, nblk, kv, layer, score);
     k_idx_select<<<G, 1024, 0, st>>>(score, pos0, nblk, sel);

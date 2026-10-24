@@ -29,6 +29,8 @@ const strokes = (w: number) => { const half = HALF_STROKE * w / VIEW_W; return {
 // (WAKE), small swells WAKE_LIFE s long.
 const PATTERNS = [1, 0, 2, 3, 4];
 const WAKE = 9, MAX_RIPPLES = 16, WAVE_LIFE = 5, WAKE_LIFE = 2;
+// The pointer's light comes and goes with this time constant, s (at every frame rate alike)
+const HOVER = 0.033;
 // The butterfly sinks into the water as a chat begins and rises out of it in a new chat, quickest at first (out of the
 // way of the chat's first words) and settling: these are their time constants, s (most of the way in three).
 const SINK = 0.34, RISE = 0.26;
@@ -48,7 +50,8 @@ uniform vec4 uBox;          // the message box and the hint under it, likewise
 uniform vec2 uLane;         // the chat's column (the message box's): left and right, likewise
 uniform float uFlyOn;       // the butterfly: 1 in a new chat, 0 sunk into the water behind a chat
 uniform float uTime, uMotion;
-uniform vec4 uRip[${MAX_RIPPLES}];
+uniform int uWaves;         // the waves live now (Ocean.waves), two vectors each: x, y (CSS px), kind, height; size, wavelength
+uniform vec4 uWave[${2 * MAX_RIPPLES}];
 uniform vec3 uFly;          // the drawing's width, its strokes' half-width and how much a small one's are thickened, CSS px
 uniform vec2 uCenter;       // the butterfly's middle, CSS px
 uniform sampler2D uSdf;     // distance to the drawing in texels, negative inside
@@ -147,31 +150,21 @@ float shapeAt(float kind, vec2 d, float r) {
   return length(d) - r * (0.78 + 0.22 * cos(6.0 * a));
 }
 
-// A wave: a few smooth crests spreading from the click in its shape, quick at first and slowing as they spread (as a
-// stone's rings do), lower as they go. A drag's wake is the same, smaller and shorter.
-struct Wave { vec2 at; float kind, amp, size, len; };
-bool wave(int i, out Wave v) {
-  vec4 r = uRip[i];
-  if (r.w < 0.0) return false;
-  float age = uTime - r.z;
-  bool wake = r.w > 8.5;
-  float life = wake ? ${WAKE_LIFE}.0 : ${WAVE_LIFE}.0;
-  if (age < 0.0 || age > life) return false;
-  float k = 1.0 - age / life, size = 8.0 + (wake ? 90.0 : 320.0) * (1.0 - exp(-0.8 * age));
-  v = Wave(r.xy, r.w, (wake ? 0.5 : 1.0) * pow(k, 1.6) * smoothstep(0.0, 0.3, age), size, wake ? 30.0 : 44.0 + 0.06 * size);
-  return true;
-}
-// The water's height: each wave a short train of crests, at its front and behind it. A crest is a wavelength (len) of
-// at least 44 px, so that it spans a few rows of 11 px cells: thinner, the grid missed it in most of them.
+// The water's height: each wave a short train of crests, at its front and behind it.
 float waves(vec2 p) {
   float sum = 0.0;
-  Wave v;
-  for (int i = 0; i < ${MAX_RIPPLES}; i++) {
-    if (!wave(i, v)) continue;
-    float x = shapeAt(v.kind, p - v.at, v.size) / v.len;
-    sum += v.amp * cos(6.2832 * x) * exp(-0.9 * (x + 0.6) * (x + 0.6));
+  for (int i = 0; i < uWaves; i++) {
+    vec4 a = uWave[2 * i];
+    vec2 b = uWave[2 * i + 1].xy;
+    float x = shapeAt(a.z, p - a.xy, b.x) / b.y;
+    sum += a.w * cos(6.2832 * x) * exp(-0.9 * (x + 0.6) * (x + 0.6));
   }
   return sum;
+}
+// as the butterfly sinks its bold glyphs give way to the water's, unevenly (patches and single cells), and rise back
+// the same way
+float grain(vec2 p, vec2 cell) {
+  return 0.999 * (0.65 * (0.5 + 0.5 * snoise(vec3(p * 0.018, 5.0))) + 0.35 * fract(sin(dot(cell, vec2(12.9898, 78.233))) * 43758.5453));
 }
 
 // Distance outside the message box (and the hint under it), CSS px.
@@ -184,21 +177,24 @@ void main() {
   vec2 cell = vec2(gl_FragCoord.x - 0.5, uGrid.y - 0.5 - gl_FragCoord.y);
   vec2 p = (cell + 0.5) * uCell;
   float t = uTime * uMotion;
-  float w = waves(p);
-  // what is seen through the water is bent by its slope: the current's ribbons, and the butterfly a little
-  vec2 slope = vec2(waves(p + vec2(3.0, 0.0)) - w, waves(p + vec2(0.0, 3.0)) - w) / 3.0;
+  // what is seen through the water is bent by its slope: the current's ribbons, and the butterfly a little. (Each
+  // noise below only where it shows: the cells pass's cost is its noise.)
+  float w = 0.0;
+  vec2 slope = vec2(0.0);
+  if (uWaves > 0) {
+    w = waves(p);
+    slope = vec2(waves(p + vec2(3.0, 0.0)) - w, waves(p + vec2(0.0, 3.0)) - w) / 3.0;
+  }
   float breathe = 1.0 + 0.018 * sin(t * 0.9) * uMotion;
   // sunk, the current pushes the butterfly's strokes about
   float sunk = smoothstep(0.0, 1.0, 1.0 - uFlyOn);
-  vec2 drift = sunk * 6.0 * vec2(snoise(vec3(p * 0.011, t * 0.12)), snoise(vec3(p * 0.011 + 31.0, t * 0.12)));
+  vec2 drift = sunk > 0.0 ? sunk * 6.0 * vec2(snoise(vec3(p * 0.011, t * 0.12)), snoise(vec3(p * 0.011 + 31.0, t * 0.12))) : vec2(0.0);
   vec2 q = uCenter + (p - uCenter) / vec2(breathe, 1.0) - slope * 30.0 + drift;
   float d = flyAt(q, uCenter, uFly.x) - uFly.z;
-  // as it sinks its bold glyphs give way to the water's, unevenly (patches and single cells), and rise back the same way
-  float grain = 0.999 * (0.65 * (0.5 + 0.5 * snoise(vec3(p * 0.018, 5.0))) + 0.35 * fract(sin(dot(cell, vec2(12.9898, 78.233))) * 43758.5453));
   float edge = smoothstep(0.0, 28.0, min(min(p.x - uView.x, uView.z - p.x), min(p.y - uView.y, uView.w - p.y)));
   float hover = uPointer.z * exp(-dot2(p - uPointer.xy) / 3600.0);
   float lift = max(w, 0.0);
-  if (d < 0.5 && grain < uFlyOn) {
+  if (d < 0.5 && uFlyOn > 0.0 && (uFlyOn >= 1.0 || grain(p, cell) < uFlyOn)) {
     float depth = clamp(-d / uFly.y, 0.0, 1.0);
     float prof = sqrt(max(0.0, 1.0 - (1.0 - depth) * (1.0 - depth)));
     float g = ${ROW}.0 + floor(clamp(1.0 + prof * ${TUBE.length - 2}.0 + 0.5 + lift * 0.5, 0.0, ${TUBE.length - 1}.0));
@@ -411,12 +407,13 @@ export class Ocean {
   private lane = [0, 0];
   private center = [0, 0];
   private flyW = 0;
-  private ripples = new Float32Array(MAX_RIPPLES * 4).fill(-1);
-  private next = 0;
+  private ripples = new Float32Array(MAX_RIPPLES * 4).fill(-1);   // x, y, when, kind (-1: none)
+  private packed = new Float32Array(MAX_RIPPLES * 8);
   private pattern = 0;
   private t0 = performance.now() / 1000;
   private pointer = [0, 0, 0];
   private presence = 0;
+  private moved = 0;                                // when the pointer last moved over the water
   private lastWake: [number, number] | null = null;
   private colors = { sea: [0, 0, 0], pink: [0, 0, 0], hi: [0, 0, 0] };
   private drawn = 0;
@@ -453,7 +450,7 @@ export class Ocean {
       this.lastWake = [e.clientX, e.clientY];
     });
     c.addEventListener("pointermove", (e) => {
-      this.pointer[0] = e.clientX; this.pointer[1] = e.clientY; this.presence = 1;
+      this.pointer[0] = e.clientX; this.pointer[1] = e.clientY; this.presence = 1; this.moved = this.now();
       if (e.buttons & 1 && this.lastWake && Math.hypot(e.clientX - this.lastWake[0], e.clientY - this.lastWake[1]) > 34) {
         this.splash(e.clientX, e.clientY, WAKE);
         this.lastWake = [e.clientX, e.clientY];
@@ -527,11 +524,34 @@ export class Ocean {
     probe.remove();
   }
 
+  // A new wave takes the slot of one that has ended, else of the one that ends soonest (a drag's wake before a click's
+  // wave): a wave cut off while still high vanishes from one frame to the next.
   private splash(x: number, y: number, kind: number) {
     if (this.still.matches) return;
-    const i = this.next++ % MAX_RIPPLES;
-    this.ripples.set([x, y, this.now(), kind], i * 4);
+    let slot = 0, end = Infinity;
+    for (let i = 0; i < MAX_RIPPLES; i++) {
+      const k = this.ripples[i * 4 + 3], e = k < 0 ? -Infinity : this.ripples[i * 4 + 2] + (k === WAKE ? WAKE_LIFE : WAVE_LIFE);
+      if (e < end) { end = e; slot = i; }
+    }
+    this.ripples.set([x, y, this.now(), kind], slot * 4);
     this.wake();
+  }
+
+  // The waves live at time t, each a few smooth crests spreading from its click in its shape, quick at first and
+  // slowing as they spread (as a stone's rings do), lower as they go; a drag's wake is the same, smaller and shorter. A
+  // crest is a wavelength (len) of at least 44 px, so that it spans a few rows of 11 px cells: thinner, the grid missed
+  // it in most of them. Worked out here once a frame, for the shader (uWave) and the CPU's passes alike.
+  private waves(t: number): Wave[] {
+    const out: Wave[] = [];
+    for (let i = 0; i < MAX_RIPPLES; i++) {
+      const [x, y, at, kind] = this.ripples.subarray(i * 4, i * 4 + 4);
+      if (kind < 0) continue;
+      const age = t - at, wake = kind === WAKE, life = wake ? WAKE_LIFE : WAVE_LIFE;
+      if (age < 0 || age > life) continue;
+      const k = 1 - age / life, size = 8 + (wake ? 90 : 320) * (1 - Math.exp(-0.8 * age));
+      out.push({ x, y, kind, amp: (wake ? 0.5 : 1) * k ** 1.6 * smoothstep(0, 0.3, age), size, len: wake ? 30 : 44 + 0.06 * size });
+    }
+    return out;
   }
 
   private uploadSdf() {
@@ -659,8 +679,9 @@ export class Ocean {
     const tick = () => {
       if (!this.live() || !(this.gl ? this.sdfTex : this.sdf)) { this.running = false; return; }
       const t = this.now(), blank = !!this.empty?.isConnected;
-      const busy = this.presence > 0 || this.pointer[2] > 0.01 || this.fly !== (blank ? 1 : 0)
-        || this.ripples.some((v, i) => i % 4 === 2 && v >= 0 && t - v < WAVE_LIFE);
+      // (a pointer resting on the water is not: its light stays where it is)
+      const busy = this.moved > this.drawn || Math.abs(this.presence - this.pointer[2]) > 0.01 || this.fly !== (blank ? 1 : 0)
+        || this.waves(t).length > 0;
       // the CPU keeps its frames to a quarter of the time (half while something moves fast)
       // (with reduced motion the one frame drawn now is the frame that stays)
       if (this.still.matches || t - this.drawn >= Math.max(busy ? 0 : 1 / (blank ? 24 : 12), this.cpu ? this.cost * (busy ? 2 : 4) : 0)) this.draw();
@@ -680,7 +701,7 @@ export class Ocean {
     if (Math.abs(Number(blank) - this.fly) < 0.003) this.fly = Number(blank);
     if (!blank) this.presence = 0;                          // behind a chat the thread has the pointer
     this.drawn = t;
-    this.pointer[2] += (this.presence - this.pointer[2]) * 0.12;
+    this.pointer[2] += (this.presence - this.pointer[2]) * (1 - Math.exp(-dt / HOVER));
     if (!gl) {
       const t0 = performance.now();
       this.cellsCpu(still ? 12 : t, still ? 0 : 1);
@@ -704,7 +725,10 @@ export class Ocean {
     gl.uniform1f(c("uFlyOn"), this.fly);
     gl.uniform1f(c("uTime"), still ? 12 : t);
     gl.uniform1f(c("uMotion"), still ? 0 : 1);
-    gl.uniform4fv(c("uRip"), this.ripples);
+    const waves = this.waves(still ? 12 : t);
+    waves.forEach((v, i) => this.packed.set([v.x, v.y, v.kind, v.amp, v.size, v.len], i * 8));
+    gl.uniform1i(c("uWaves"), waves.length);
+    gl.uniform4fv(c("uWave"), this.packed);
     const { half, bold } = strokes(this.flyW);
     gl.uniform3f(c("uFly"), this.flyW, half, bold);
     gl.uniform2f(c("uCenter"), this.center[0], this.center[1]);
@@ -745,15 +769,7 @@ export class Ocean {
     const uFlyW = this.flyW, { half: uFlyHalf, bold: uFlyBold } = strokes(this.flyW);
     const [cx0, cy0] = this.center, [vl, vt, vr, vb] = this.view, [bl, bt, br, bb] = this.box, [lane0, lane1] = this.lane;
     const [px0, py0, pz] = [this.pointer[0], this.pointer[1], uMotion ? this.pointer[2] : 0];
-    const waves: Wave[] = [];
-    for (let i = 0; i < MAX_RIPPLES; i++) {
-      const [x, y, at, kind] = this.ripples.subarray(i * 4, i * 4 + 4);
-      if (kind < 0) continue;
-      const age = uTime - at, wake = kind > 8.5, life = wake ? WAKE_LIFE : WAVE_LIFE;
-      if (age < 0 || age > life) continue;
-      const k = 1 - age / life, size = 8 + (wake ? 90 : 320) * (1 - Math.exp(-0.8 * age));
-      waves.push({ x, y, kind, amp: (wake ? 0.5 : 1) * k ** 1.6 * smoothstep(0, 0.3, age), size, len: wake ? 30 : 44 + 0.06 * size });
-    }
+    const waves = this.waves(uTime);
     const flyAt = (x: number, y: number, c0: number, c1: number, w: number) => {
       const h = w * VIEW_H / VIEW_W, u = (x - c0) / w + 0.5, v = (y - c1) / h + 0.5;
       if (u < 0 || u > 1 || v < 0 || v > 1) return 1e4;

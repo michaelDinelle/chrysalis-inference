@@ -1,4 +1,4 @@
-// Connecting a device to the web chat on the network (`chrysalis start --lan`): the page the chat's own address serves a
+// Connecting a device to the web chat on the network (`chrysalis.sh start --host 0.0.0.0`): the page the chat's own address serves a
 // browser this computer has not let in, or one that has not shown lately it trusts Chrysalis (server.ts). The chat is
 // HTTPS there (tls.ts) and a device warns about its certificate until it trusts this machine's authority, so a new device
 // comes here past that warning, once. The page offers the authority the way the device's system takes it (a profile on
@@ -180,9 +180,8 @@ export async function deviceScript(): Promise<string> {
 }
 
 // The page: what it checks, the guide for the device it detects (any other one a tap away) one step at a time, the
-// device's code once it trusts Chrysalis, and the chat once it is allowed. check: the trust check's image. self: the
-// computer Chrysalis runs on, at its network address, whose browsers the command line sets up and which needs no code.
-export function connectPage(a: Authority, check: string, sea: string, self: boolean): string {
+// device's code once it trusts Chrysalis, and the chat once it is allowed. check: the trust check's image.
+export function connectPage(a: Authority, check: string, sea: string): string {
   const name = esc(a.caName);
   // an address the person copies: browsers open no chrome:// address from a page, by link or by script
   const copyable = (text: string) => `<span class="copyable"><code>${esc(text)}</code><button type="button" class="copy">Copy</button></span>`;
@@ -220,8 +219,6 @@ export function connectPage(a: Authority, check: string, sea: string, self: bool
       ["Open", ""],
       ["Trust", "Tick <b>Trust this CA to identify websites</b>, then <b>OK</b>."]] },
   };
-  // a browser open before `chrysalis start --lan` trusted the authority reads its store again only when it restarts
-  const here = ["Trust", `Run this in a terminal, then quit this browser and open it again.${copyable("chrysalis start --lan")}`];
   return page(`  <p class="sub" id="sub">Checking this device…</p>
   <div class="status" id="status" role="status" aria-live="polite">Checking the secure connection…</div>
   <div class="code" id="code" hidden></div>
@@ -240,7 +237,7 @@ export function connectPage(a: Authority, check: string, sea: string, self: bool
       proves this page came from your computer (that is what the browser's warning said): to be sure, compare the SHA-256
       fingerprint this device shows for <b>${name}</b> in its certificate details with the one under <b>Connect a device</b>
       on the computer.</p>
-  </details>`, `const CHECK = ${JSON.stringify(check)}, GUIDES = ${JSON.stringify(guides)}, SELF = ${self}, HERE = ${JSON.stringify(here)};
+  </details>`, `const CHECK = ${JSON.stringify(check)}, GUIDES = ${JSON.stringify(guides)};
 // desktop Firefox keeps an authority list of its own, and asks itself; on phones it goes by the system's
 const detected = /Firefox\\//.test(ua) && os !== "ios" && os !== "android" ? "firefox" : os;
 if (os === "android" && browser === "Firefox") GUIDES.android.steps.push(GUIDES.android.firefox);
@@ -259,14 +256,13 @@ function copies(root) {
     copied(b, b.previousElementSibling.textContent);
   };
 }
-let guide = SELF ? { button: ["", ""], steps: [HERE] } : GUIDES[detected], at = 0, returned = false;
+let guide = GUIDES[detected], at = 0, returned = false;
 function render() {
   const n = guide.steps.length, now = $("now"), go = $("go");
   now.innerHTML = guide.steps[at][1];
   now.hidden = !guide.steps[at][1];
   copies(now);
-  go.hidden = at > 0 || SELF;
-  $("count").parentElement.hidden = SELF;
+  go.hidden = at > 0;
   go.textContent = guide.button[0];
   go.href = guide.button[1];
   $("back").hidden = at === 0;
@@ -305,10 +301,9 @@ function trusts(nonce) {
 }
 function setUp(on) {
   $("setup").hidden = !on;
-  $("more").hidden = !on || SELF;
+  $("more").hidden = !on;
   status.hidden = on;
-  if (on) $("sub").textContent = SELF ? "This is the computer Chrysalis runs on: its browsers trust Chrysalis once its command line sets them up."
-    : "Set this device up once, and it opens Chrysalis from then on.";
+  if (on) $("sub").textContent = "Set this device up once, and it opens Chrysalis from then on.";
 }
 function opening(text) {
   say(text, "ok");
@@ -328,7 +323,7 @@ async function check() {
     asking = false;
     setUp(false);
     $("sub").innerHTML = "This device cannot reach Chrysalis's trust check (port " + new URL(CHECK).port + "). On the computer running Chrysalis, "
-      + "<code>chrysalis start --lan</code> lets it through the firewall.";
+      + "<code>chrysalis.sh start --host 0.0.0.0</code> lets it through the firewall.";
     say("Cannot reach this computer", "bad");
     timer = setTimeout(check, 1500);
     return;
@@ -353,7 +348,7 @@ async function check() {
   const aside = document.createElement("div");
   aside.className = "aside";
   aside.innerHTML = 'Or in a terminal there:<span class="copyable"><code></code><button type="button" class="copy">Copy</button></span>';
-  aside.querySelector("code").textContent = "chrysalis allow " + r.code;
+  aside.querySelector("code").textContent = "chrysalis.sh allow " + r.code;
   copies(aside);
   $("after").replaceChildren(aside);
   for (;;) {

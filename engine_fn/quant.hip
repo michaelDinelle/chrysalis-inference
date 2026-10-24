@@ -420,7 +420,7 @@ void gemv_hc(const QTensor &W, QAct x, int T, float *res, const float *inj, hipS
 // WMMA wants every 16-wide K fragment in both half-waves. Here the lower half produces K 0..7 and the
 // upper half K 8..15 (dequantizing or loading only 8 values per lane), then the halves swap with
 // v_permlanex16. The upper half ends up holding (8..15, 0..7): each half-wave's outputs are computed from
-// its own operands, so a K order that A and B share is exact (checked in tools_fn/test_quant_fn.cpp).
+// its own operands, so a K order that A and B share is exact (checked in tests/test_quant_fn.cpp).
 
 typedef uint32_t u4v __attribute__((ext_vector_type(4)));
 typedef uint32_t u8v __attribute__((ext_vector_type(8)));

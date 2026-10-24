@@ -1,13 +1,13 @@
 # Chrysalis Inference: notes for coding agents
 
-README.md shows what Chrysalis is; docs/DETAILS.md says how it is built and what it measures. This file is how to change it.
+README.md shows what Chrysalis is. This file is how to change it.
 
 ## Comments
 
 Comments say why: a constraint, a hardware or library quirk, a measured reason, a data layout, an invariant the code
 cannot show. Don't restate names or signatures, narrate steps, label sections, or record history ("was", "new",
 "no longer", what an earlier version did). When a change makes a comment wrong, fix or delete it in the same change:
-a stale comment steers people and agents wrong. `make lint` catches the mechanical cases (tools/lint_comments.py).
+a stale comment steers people and agents wrong. `make lint` catches the mechanical cases (tests/lint_comments.py).
 
 ## Tests
 
@@ -18,14 +18,14 @@ a stale comment steers people and agents wrong. `make lint` catches the mechanic
   nothing), and a case is named for what it exercises.
 - Prove a new or fixed check: break the product code on purpose, watch the check fail, revert.
 - Flash-Next's CPU / GPU split and its expert pool move with history and change results by rounding: a check that
-  needs bit-identical repeats pins them (`chrysalis_tune` "split", "gfrac", "experts"), as tools/test_snapshot.py does.
-- Tests check, benchmarks measure: timings belong in the bench_* tools.
+  needs bit-identical repeats pins them (`chrysalis_tune` "split", "gfrac", "experts"), as tests/test_snapshot.py does.
+- Tests check, they don't time: a timing is not a check.
 
 ## Running them
 
-- CPU only: `make build/test_sampler && build/test_sampler`, `data/venv/bin/python tools/test_cache.py`,
-  `data/venv/bin/python tools/test_lanes.py` (requests in flight, sub-agents beside a session's title),
-  `data/venv/bin/python tools/test_chat.py`, `data/venv/bin/python tools/test_documents.py` (which PDF pages are
+- CPU only: `make build/test_sampler && build/test_sampler`, `data/venv/bin/python tests/test_cache.py`,
+  `data/venv/bin/python tests/test_lanes.py` (requests in flight, sub-agents beside a session's title),
+  `data/venv/bin/python tests/test_chat.py`, `data/venv/bin/python tests/test_documents.py` (which PDF pages are
   pictured), `make build_fn/test_cpujob_fn && build_fn/test_cpujob_fn`, `make test_voice` (the voice service: its features against
   transformers', turns, echo and barge-in over its WebSocket; `make voice` first), `make test_web` (the web UI's sampler against
   the engine's, its server against a fake Chrysalis, the page in headless Chromium, and Firefox past and trusting the network's
@@ -39,7 +39,7 @@ a stale comment steers people and agents wrong. `make lint` catches the mechanic
   (its Anthropic and Responses APIs through those SDKs, which data/venv has; held answers and strict tool calls,
   thinking budgets, PDFs, videos, a long prompt read beside a reply), its next-token distributions against llama.cpp's,
   and pictures and videos: preprocessing, positions and the vision tower against transformers, prompts with pictures
-  against llama.cpp; the transformers references need data/ref-venv, see docs/DETAILS.md Rebuilding), `make test_fn` (Flash-Next
+  against llama.cpp; the transformers references need data/ref-venv: CPU torch, torchvision, transformers, Pillow, safetensors), `make test_fn` (Flash-Next
   kernels) and `make test_fn_model` (the Flash-Next model in-process: generation and snapshots, the server, llama.cpp's
   logits, pictures and videos).
 - Flash-Next takes ~47 GiB of system RAM, in Chrysalis or in-process, and more as its expert pool moves (until 4 GB is left). Check MemAvailable before loading it, and run it

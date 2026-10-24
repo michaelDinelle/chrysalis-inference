@@ -43,6 +43,8 @@ from .sleep import SleepGuard, vram_used, wait_vram_freed
 
 MODEL = "qwen3.8-27b"
 _ROOT = __import__("os").path.dirname(__import__("os").path.dirname(__import__("os").path.abspath(__file__)))
+# a model's weights are here (a release downloads each the first time it is wanted)
+present = lambda name: __import__("os").path.exists(__import__("os").path.join(_ROOT, MODELS[name]["path"]))
 MAX_CONTEXT = 262144
 # Reply length (reasoning included) when the request sets none. The model card asks for room on agentic tasks:
 # 262,144 tokens of reasoning and 131,072 of final response where the two are limited separately. A reply never
@@ -554,9 +556,10 @@ class Server:
         return Pictures(self.engine, 5120 if name == "qwen3.8-27b" else 2560, spec["pictures"], self.max_pixels)
 
     def resolve(self, name):
-        """The MODELS key a request names ("-fast" variants included); unknown names mean the active model."""
+        """The MODELS key a request names ("-fast" variants included); unknown names, and a model whose files are not
+        here yet (a release fetches Flash-Next after the 27B), mean the active model."""
         base = str(name or "").removesuffix("-fast")
-        return base if base in MODELS else self.active
+        return base if base in MODELS and present(base) else self.active
 
     def rewarm(self):
         """The other models' files into the page cache while this one runs, if it leaves the room
@@ -629,7 +632,7 @@ class Server:
             now = link.status(self.link_dev)
             if now and now["slow"]:                      # the resume trained it; only a restart trains it again
                 print(f"chrysalis: PCIe link at {now['gts']:g} GT/s x{now['width']} after the wake, slower than this machine's "
-                      f"best ({now['best_gts']:g} GT/s): `chrysalis restart` trains it again", file=self.log, flush=True)
+                      f"best ({now['best_gts']:g} GT/s): `chrysalis.sh restart` trains it again", file=self.log, flush=True)
         finally:
             with self.state_lock:
                 self.loading = None
@@ -1225,7 +1228,7 @@ class Server:
             g += [("chrysalis_pcie_link_gts", "PCIe link speed now, GT/s (the slowest link to the GPU)", [({}, ln["gts"])]),
                   ("chrysalis_pcie_link_width", "PCIe link width now, lanes", [({}, ln["width"])]),
                   ("chrysalis_pcie_link_best_gts", "The fastest link speed seen on this machine, GT/s", [({}, ln["best_gts"])]),
-                  ("chrysalis_pcie_link_slow", "1 when the link is slower than this machine's best (chrysalis restart trains it again)", [({}, int(ln["slow"]))])]
+                  ("chrysalis_pcie_link_slow", "1 when the link is slower than this machine's best (chrysalis.sh restart trains it again)", [({}, int(ln["slow"]))])]
         return g
 
     def load(self, name):
@@ -1303,7 +1306,7 @@ def make_handler(state, ready):
                 now = int(time.time())
                 self.send_json(200, {"object": "list", "data": [
                     {"id": m, "object": "model", "created": now, "owned_by": "chrysalis", "context_length": MAX_CONTEXT}
-                    for name in MODELS for m in (name, name + "-fast")]})
+                    for name in MODELS if present(name) for m in (name, name + "-fast")]})
             elif self.path.rstrip("/") in ("/health", "/v1/health"):
                 self.send_json(200, {"status": "ok"})
             elif self.path.rstrip("/") == "/chrysalis/stats":
@@ -1522,7 +1525,7 @@ def make_handler(state, ready):
 
 def seed_of(body):
     """The request's seed, or a random one. Either way the response carries it (top-level `seed`; when streaming,
-    in the finish_reason chunk), so any reply can be drawn again (docs/DETAILS.md: Decode)."""
+    in the finish_reason chunk), so any reply can be drawn again."""
     seed = body.get("seed")
     if seed is None:
         return random.getrandbits(32)                # fits a JavaScript number exactly

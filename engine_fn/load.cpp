@@ -1,4 +1,4 @@
-// Loading Chrysalis's Flash-Next file (tools_fn/fn_quantize.py): dense weights and hot experts to VRAM (relayout to
+// Loading Chrysalis's Flash-Next file (engine_fn/fn_quantize.py): dense weights and hot experts to VRAM (relayout to
 // structure-of-arrays), cold experts to system RAM in GGUF block order for the CPU workers, token embeddings to pinned
 // host memory, the n-gram table memory-mapped from the source file; then buffers, sequences and the KV pool.
 #include "model.h"
@@ -126,7 +126,7 @@ void Engine::load(const std::string &path, int max_seqs, size_t reserve_bytes) {
     if (!g.base && !g.open(path.c_str())) FAIL("cannot open %s", path.c_str());
     for (Layer *w = L; w <= &M; w++) *w = Layer{};  // a reload (after shutdown) starts from clean pointers
     hc_head = HcMix{}; mtp_head = HcMix{};
-    if (g.strs["general.architecture"] != "chrysalisfn") FAIL("%s is not a Chrysalis Flash-Next file (tools_fn/fn_quantize.py)", path.c_str());
+    if (g.strs["general.architecture"] != "chrysalisfn") FAIL("%s is not a Chrysalis Flash-Next file (engine_fn/fn_quantize.py)", path.c_str());
     auto get = [&](const std::string &name) {
         const GGUFTensor *t = g.get(name);
         if (!t) FAIL("missing tensor %s", name.c_str());

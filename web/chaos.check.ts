@@ -6,7 +6,7 @@
 // its log, its expert pool's mirror within its cap). The web server is one of the run's own (its certificates and the
 // devices it lets in in a folder that goes with the run, the test MCP server's tools), so nothing of the person's
 // changes. Needs Chrysalis running Flash-Next on this machine (one test restarts it): `make test_chaos`. Speeds are
-// printed, not checked (tools_fn/compare_fn.py checks that decode reads nothing of the model file).
+// printed, not checked (tests/compare_fn.py checks that decode reads nothing of the model file).
 import { afterAll, beforeAll, expect, test } from "bun:test";
 import { mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";

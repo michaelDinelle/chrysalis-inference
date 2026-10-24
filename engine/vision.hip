@@ -10,7 +10,7 @@
 // Numerics: GEMMs take fp16 inputs and accumulate in fp32 (hipBLASLt), and write fp16: its fastest fp32-output kernels
 // take 1.3-1.7x as long on the tower's shapes (2048 rows, measured). fp16 activations are as good as fp32 for what
 // the language model makes of a picture: its predictions move no more than when the official embeddings are rounded to
-// fp16 (tools/test_vision.py), where an fp32-grade tower (activations split into two fp16 halves, emulated) would take
+// fp16 (tests/test_vision.py), where an fp32-grade tower (activations split into two fp16 halves, emulated) would take
 // twice the time. The residual stream stays fp32, and it reaches ~7,800 (27B) and ~11,400 (Flash-Next) in a few
 // channels, measured, within 6x of fp16's limit: so the GEMMs that add into it (patch embedding, attention output, fc2)
 // are written scaled by 1/16 (alpha) and scaled back in fp32. That moves fp16's range, not its relative precision,

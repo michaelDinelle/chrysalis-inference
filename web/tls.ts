@@ -1,8 +1,8 @@
-// The web chat's HTTPS, on this machine and with `chrysalis start --lan` on the local network: a page a browser trusts
+// The web chat's HTTPS on the local network (`chrysalis.sh start --host 0.0.0.0`): a page a browser trusts
 // everywhere (and gives the microphone, voice mode, which http://<this machine's address> does not get). A certificate
 // authority of this machine's own signs the server's certificate; its name constraints let it vouch only for private
-// addresses and local names, so a browser or device that trusts it (chrysalis-ca.crt, installed once; this machine's
-// browsers by `chrysalis start`) trusts nothing else because of it.
+// addresses and local names, so a device that trusts it (chrysalis-ca.crt, installed once) trusts nothing else because
+// of it. This machine itself gets the chat over plain HTTP, which leaves it never.
 import { X509Certificate } from "node:crypto";
 import { createSocket } from "node:dgram";
 import { chmodSync, existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
@@ -30,8 +30,13 @@ function openssl(...args: string[]) {
   return { ok: r.exitCode === 0, err: r.stderr.toString().trim() };
 }
 
-export function webTls(dir = process.env.CHRYSALIS_TLS_DIR ?? `${homedir()}/.config/chrysalis/tls`) {
+// the certificates' folder, which the devices let in, the backend and the link are kept in too (server.ts)
+export function tlsDir(dir = process.env.CHRYSALIS_TLS_DIR ?? `${homedir()}/.config/chrysalis/tls`) {
   mkdirSync(dir, { recursive: true, mode: 0o700 });
+  return dir;
+}
+
+export function webTls(dir = tlsDir()) {
   const host = hostname().toLowerCase(), ec = ["-newkey", "ec", "-pkeyopt", "ec_paramgen_curve:prime256v1", "-nodes"];
   const run = (...args: string[]) => {
     const r = openssl(...args);
@@ -59,11 +64,27 @@ export function webTls(dir = process.env.CHRYSALIS_TLS_DIR ?? `${homedir()}/.con
   run("req", "-x509", ...ec, "-keyout", `${dir}/check.key`, "-out", `${dir}/check.pem`, "-days", "825", "-subj", `/CN=${host} trust check`,
     "-CA", `${dir}/ca.pem`, "-CAkey", `${dir}/ca.key`, "-addext", `subjectAltName=${names}`, "-addext", "extendedKeyUsage=serverAuth",
     "-addext", "basicConstraints=critical,CA:FALSE", "-addext", "keyUsage=critical,digitalSignature");
-  for (const k of ["ca.key", "server.key", "check.key"]) chmodSync(`${dir}/${k}`, 0o600);
-  const ca = readFileSync(`${dir}/ca.pem`, "utf8"), x = new X509Certificate(ca);
+  // The link's (link.ts): an authority of its own that only this computer and the computers linked to it know, each of
+  // which trusts it for this computer alone (a request's own `ca`, not the system's). It has no name constraints, which
+  // Bun's TLS refuses for IP addresses ("unsupported name constraint type"), and needs none: nothing else trusts it.
+  if (!existsSync(`${dir}/link-ca.pem`)) {
+    run("req", "-x509", ...ec, "-keyout", `${dir}/link-ca.key`, "-out", `${dir}/link-ca.pem`, "-days", "3650", "-subj", `/CN=Chrysalis link on ${host}`,
+      "-addext", "basicConstraints=critical,CA:TRUE,pathlen:0", "-addext", "keyUsage=critical,keyCertSign,cRLSign");
+  }
+  if (stale || !existsSync(`${dir}/link.pem`)) {
+    run("req", "-x509", ...ec, "-keyout", `${dir}/link.key`, "-out", `${dir}/link.pem`, "-days", "825", "-subj", `/CN=${host} link`,
+      "-CA", `${dir}/link-ca.pem`, "-CAkey", `${dir}/link-ca.key`, "-addext", `subjectAltName=${names}`, "-addext", "extendedKeyUsage=serverAuth",
+      "-addext", "basicConstraints=critical,CA:FALSE", "-addext", "keyUsage=critical,digitalSignature");
+  }
+  for (const k of ["ca.key", "server.key", "check.key", "link-ca.key", "link.key"]) chmodSync(`${dir}/${k}`, 0o600);
+  const ca = readFileSync(`${dir}/ca.pem`, "utf8"), x = new X509Certificate(ca), linkCa = readFileSync(`${dir}/link-ca.pem`, "utf8");
   // the authority as devices take it (DER: Apple's profiles, Android's installer), its name and its SHA-256 fingerprint
   // as their certificate details show it
   return { dir, cert: readFileSync(`${dir}/server.pem`, "utf8"), key: readFileSync(`${dir}/server.key`, "utf8"), ca, caDer: Uint8Array.from(x.raw),
     caName: x.subject.replace(/^CN=/, ""), fingerprint: x.fingerprint256,
-    check: { cert: readFileSync(`${dir}/check.pem`, "utf8"), key: readFileSync(`${dir}/check.key`, "utf8") } };
+    check: { cert: readFileSync(`${dir}/check.pem`, "utf8"), key: readFileSync(`${dir}/check.key`, "utf8") },
+    link: { cert: readFileSync(`${dir}/link.pem`, "utf8"), key: readFileSync(`${dir}/link.key`, "utf8"), ca: linkCa, fingerprint: fingerprint(linkCa) } };
 }
+
+// a certificate's SHA-256 fingerprint, as hex
+export const fingerprint = (pem: string) => new X509Certificate(pem).fingerprint256.replaceAll(":", "").toLowerCase();

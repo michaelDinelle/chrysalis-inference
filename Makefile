@@ -9,16 +9,16 @@ build/libchrysalis.so: $(SRC) $(wildcard engine/*.h)
 	@mkdir -p build
 	$(HIPCC) $(FLAGS) -x hip -shared -o $@ $(SRC) $(LIBS)
 
-# kernel tests and benchmarks: build/<name> from tools/<name>.hip
-build/%: tools/%.hip $(KERN) $(wildcard engine/*.h)
+# kernel tests: build/<name> from tests/<name>.hip
+build/%: tests/%.hip $(KERN) $(wildcard engine/*.h)
 	@mkdir -p build
 	$(HIPCC) $(FLAGS) -o $@ $< $(KERN) $(LIBS)
 
-build/test_sampler: tools/test_sampler.cpp engine/sampler.h
+build/test_sampler: tests/test_sampler.cpp engine/sampler.h
 	@mkdir -p build
 	g++ -O2 -std=c++20 -o $@ $<
 
-build/sampler_cases: tools/sampler_cases.cpp engine/sampler.h
+build/sampler_cases: tests/sampler_cases.cpp engine/sampler.h
 	@mkdir -p build
 	g++ -O2 -std=c++20 -o $@ $<
 
@@ -27,8 +27,8 @@ build/sampler_cases: tools/sampler_cases.cpp engine/sampler.h
 test_web: build/sampler_cases
 	cd web && bun test
 
-# the web UI with llama.cpp, Ollama, LM Studio, KoboldCpp and vLLM, for real, each started in turn on the CPU (docs/DETAILS.md:
-# Rebuilding has where they come from)
+# the web UI with llama.cpp, Ollama, LM Studio, KoboldCpp and vLLM, for real, each started in turn on the CPU
+# (in data/backends)
 test_backends:
 	cd web && bun test --timeout 1200000 ./backends.check.ts
 
@@ -39,13 +39,13 @@ test_chaos:
 
 test: test_web build/libchrysalis.so build/test_quant build/test_attn build/test_gdn build/test_sampler build/ref_logits build/ref_logits_mm
 	./build/test_quant data/models/chrysalis-mix.gguf && ./build/test_attn && ./build/test_gdn && ./build/test_sampler
-	data/venv/bin/python tools/test_chat.py
-	data/venv/bin/python tools/test_cache.py
-	data/venv/bin/python tools/test_documents.py
-	data/venv/bin/python tools/test_snapshot.py
-	data/venv/bin/python tools/test_server.py
-	data/venv/bin/python tools/compare_ref.py
-	data/venv/bin/python tools/test_vision.py
+	data/venv/bin/python tests/test_chat.py
+	data/venv/bin/python tests/test_cache.py
+	data/venv/bin/python tests/test_documents.py
+	data/venv/bin/python tests/test_snapshot.py
+	data/venv/bin/python tests/test_server.py
+	data/venv/bin/python tests/compare_ref.py
+	data/venv/bin/python tests/test_vision.py
 
 # Qwen3.8-Flash-Next engine (engine_fn/): its cold experts run on the CPU with ggml's kernels from data/llama.cpp
 GGML  := $(CURDIR)/data/llama.cpp
@@ -60,22 +60,18 @@ build/libchrysalis_fn.so: $(FN_SRC) $(wildcard engine_fn/*.h) engine/sampler.h e
 
 fn: build/libchrysalis_fn.so
 
-# its kernel tests: build_fn/<name> from tools_fn/<name>.cpp with the kernels and the CPU expert code
+# its kernel tests: build_fn/<name> from tests/<name>.cpp with the kernels and the CPU expert code
 FN_KERN := $(filter-out engine_fn/model.cpp engine_fn/load.cpp engine_fn/experts.cpp engine_fn/api.cpp,$(FN_SRC))
-build_fn/test_%_fn: tools_fn/test_%_fn.cpp $(FN_KERN) $(wildcard engine_fn/*.h)
-	@mkdir -p build_fn
-	$(HIPCC) $(FLAGS) -I$(GGML)/ggml/include -x hip -o $@ $< $(FN_KERN) $(FN_LIBS)
-
-build_fn/bench_%_fn: tools_fn/bench_%_fn.cpp $(FN_KERN) $(wildcard engine_fn/*.h)
+build_fn/test_%_fn: tests/test_%_fn.cpp $(FN_KERN) $(wildcard engine_fn/*.h)
 	@mkdir -p build_fn
 	$(HIPCC) $(FLAGS) -I$(GGML)/ggml/include -x hip -o $@ $< $(FN_KERN) $(FN_LIBS)
 
 # the engine's own GEMM path (Engine::linear) needs the whole engine
-build_fn/test_linear_fn: tools_fn/test_linear_fn.cpp $(FN_SRC) $(wildcard engine_fn/*.h)
+build_fn/test_linear_fn: tests/test_linear_fn.cpp $(FN_SRC) $(wildcard engine_fn/*.h)
 	@mkdir -p build_fn
 	$(HIPCC) $(FLAGS) -I$(GGML)/ggml/include -x hip -o $@ $< $(filter-out engine_fn/api.cpp,$(FN_SRC)) $(FN_LIBS)
 
-build_fn/test_gdn_fn: tools/test_gdn.hip
+build_fn/test_gdn_fn: tests/test_gdn.hip
 
 test_fn: build_fn/test_quant_fn build_fn/test_attn_fn build_fn/test_gdn_fn build_fn/test_mix_fn build_fn/test_moe_fn build_fn/test_cpujob_fn \
          build_fn/test_linear_fn
@@ -85,42 +81,42 @@ test_fn: build_fn/test_quant_fn build_fn/test_attn_fn build_fn/test_gdn_fn build
 # the Flash-Next model in-process (Chrysalis stopped, ~47 GiB of system RAM): generation and snapshots, the server, and
 # its next-token distributions against llama.cpp's
 test_fn_model: build/libchrysalis_fn.so build_fn/ref_logits_fn build_fn/ref_logits_mm_fn
-	data/venv/bin/python tools/test_snapshot.py --use qwen3.8-flash-next
-	data/venv/bin/python tools/test_server.py --use qwen3.8-flash-next
-	data/venv/bin/python tools_fn/compare_fn.py
-	data/venv/bin/python tools/test_vision.py --use qwen3.8-flash-next
+	data/venv/bin/python tests/test_snapshot.py --use qwen3.8-flash-next
+	data/venv/bin/python tests/test_server.py --use qwen3.8-flash-next
+	data/venv/bin/python tests/compare_fn.py
+	data/venv/bin/python tests/test_vision.py --use qwen3.8-flash-next
 
-# llama.cpp's logits for those comparisons (tools/compare_ref.py, tools_fn/compare_fn.py)
+# llama.cpp's logits for those comparisons (tests/compare_ref.py, tests/compare_fn.py)
 LLAMA      := -O2 -std=c++17 -I$(GGML)/include -I$(GGML)/ggml/include
 LLAMA_LIBS := -L$(GGML)/build/bin -lllama -lggml -lggml-base -Wl,-rpath,$(GGML)/build/bin:$(ROCM)/lib
-build/ref_logits: tools/ref_logits.cpp
+build/ref_logits: tests/ref_logits.cpp
 	@mkdir -p build
 	g++ $(LLAMA) -o $@ $< $(LLAMA_LIBS)
 
-build/ref_logits_mm: tools/ref_logits_mm.cpp
+build/ref_logits_mm: tests/ref_logits_mm.cpp
 	@mkdir -p build
 	g++ $(LLAMA) -o $@ $< $(LLAMA_LIBS)
 
-build_fn/ref_logits_fn: tools_fn/ref_logits_fn.cpp
+build_fn/ref_logits_fn: tests/ref_logits_fn.cpp
 	@mkdir -p build_fn
 	g++ $(LLAMA) -o $@ $< $(LLAMA_LIBS)
 
-build_fn/ref_logits_mm_fn: tools_fn/ref_logits_mm_fn.cpp
+build_fn/ref_logits_mm_fn: tests/ref_logits_mm_fn.cpp
 	@mkdir -p build_fn
 	g++ $(LLAMA) -o $@ $< $(LLAMA_LIBS)
 
-# the web UI's voice service (voice/): its venv and default models (tools/voice_setup.sh NAME fetches the others)
+# the web UI's voice service (voice/): its venv and default models (voice/setup.sh NAME fetches the others)
 voice:
-	tools/voice_setup.sh
+	voice/setup.sh
 
 # the voice service on the CPU: its features against transformers', the turn model, sessions over its WebSocket
 test_voice: voice
-	data/voice-venv/bin/python tools/test_voice.py
+	data/voice-venv/bin/python tests/test_voice.py
 
 .PHONY: voice test_voice
 
 # the mechanical cases of AGENTS.md's comment rule
 lint:
-	python3 -I tools/lint_comments.py
+	python3 -I tests/lint_comments.py
 
 .PHONY: test test_web test_backends test_chaos fn test_fn test_fn_model lint

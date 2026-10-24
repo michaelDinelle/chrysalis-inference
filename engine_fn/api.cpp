@@ -150,7 +150,7 @@ void chrysalis_expert_stats(int64_t *out) {
     out[4] = (int64_t)(E->cal_dma_bw / 1e6); out[5] = (int64_t)(E->gfrac * 1e6);
     out[6] = E->xc.spilled; out[7] = E->xc.spill_cap;
 }
-// Routing statistics (tools_fn/route_stats.py): out == nullptr starts counting the picks per (layer, expert) of prefill
+// Routing statistics (engine_fn/route_stats.py): out == nullptr starts counting the picks per (layer, expert) of prefill
 // passes from zero; otherwise copies the [48][512] counts so far.
 void chrysalis_route_counts(int64_t *out) {
     if (!out) E->route_counts.assign((size_t)NL * NE, 0);

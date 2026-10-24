@@ -25,8 +25,19 @@ def main():
                    help="the most pixels a picture is read at, fewer tokens for large ones (default: the official 16777216)")
     s.add_argument("--link-tries", type=int, default=4,
                    help="restarts to have a PCIe link that came up slower than this machine's best trained again (chrysalis/link.py)")
+    g = sub.add_parser("get", help="download a model's files (serve does, for the one it loads)")
+    g.add_argument("model", nargs="?", default=os.environ.get("CHRYSALIS_MODEL") or DEFAULT, choices=list(MODELS))
+    g.add_argument("--check", action="store_true", help="download nothing: exit 1 if any are missing")
     a = ap.parse_args()
+    if a.cmd == "get":
+        from . import get
+        if a.check:
+            raise SystemExit(1 if get.missing(a.model) else 0)
+        get.fetch(a.model)
     if a.cmd == "serve":
+        if not a.model:
+            from . import get
+            get.fetch(a.use)
         # Start what takes longest first: the GPU wakes and the weights load while the rest of Python starts up.
         import threading
         from . import link

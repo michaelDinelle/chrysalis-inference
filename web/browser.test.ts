@@ -15,9 +15,9 @@ import { cardPng } from "./cast";
 const RUN = mkdtempSync(`${tmpdir()}/chrysalis-test-`);
 import { deflateSync } from "node:zlib";
 
-// The servers here are HTTPS with an authority of their own, made in a folder of each run's: the browsers that open the
-// chat take any certificate (CHAT_ARGS), and the test's own requests too. What checks certificates is the network test's
-// browsers, which do as a person's do.
+// The servers on the network here are HTTPS with an authority of their own, made in a folder of each run's: the test's
+// own requests take any certificate. What checks certificates is the network test's browsers, which do as a person's do;
+// the chat here is plain HTTP, as on this machine.
 process.env.NODE_TLS_REJECT_UNAUTHORIZED = "0";
 const CHAT_ARGS = ["--no-sandbox", "--ignore-certificate-errors"];
 
@@ -206,7 +206,7 @@ const fake = Bun.serve({
   },
 });
 
-let web: Bun.Subprocess<"ignore", "pipe", "inherit">, base = "", browser: Browser, hereKey = "";
+let web: Bun.Subprocess<"ignore", "pipe", "inherit">, base = "", browser: Browser;
 const dir = mkdtempSync(`${RUN}/web-`), LOG = `${dir}/mcp.log`, VOICE_LOG = `${dir}/voice.log`;
 writeFileSync(`${dir}/mcp.json`, JSON.stringify({ mcpServers: {
   fake: { command: process.execPath, args: ["fake-mcp.ts"], cwd: import.meta.dir, env: { FAKE_MCP_LOG: LOG } },
@@ -221,29 +221,20 @@ beforeAll(async () => {
   });
   const reader = web.stdout.getReader(), dec = new TextDecoder();
   let out = "";
-  while (!/chrysalis check: \S+/.test(out)) {
+  while (!/chrysalis web: \S+/.test(out)) {
     const { value, done } = await reader.read();
     if (done) throw new Error(`server.ts exited: ${out}`);
     out += dec.decode(value);
   }
   base = out.match(/chrysalis web: (\S+)/)![1].replace(/\/$/, "");
-  // this machine's browser, let in as its connect page lets it in once it trusts Chrysalis: each page starts with its key
-  const check = out.match(/chrysalis check: (\S+)/)![1].replace(/\/$/, ""), nonce = crypto.randomUUID().replaceAll("-", "");
-  await fetch(`${check}/check.gif?n=${nonce}`);
-  const asked = await fetch(`${base}/pair/ask`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ nonce, name: "Linux · Chrome" }) });
-  hereKey = asked.headers.get("set-cookie")!.split(";")[0].split("=")[1];
   REPLIES.page = REPLIES.page.replaceAll("PROBE_URL", `http://127.0.0.1:${fake.port}`);
   browser = await puppeteer.launch({ executablePath: process.env.CHROMIUM ?? "/usr/bin/chromium", headless: true,
     args: [...CHAT_ARGS, "--use-fake-ui-for-media-stream", "--use-fake-device-for-media-stream", "--autoplay-policy=no-user-gesture-required"] });
 }, 30_000);
 afterAll(async () => { await browser?.close(); web.kill(); fake.stop(true); rmSync(RUN, { recursive: true, force: true }); });
 
-// a browser context of its own, with this machine's key
-async function chatContext(b = browser) {
-  const ctx = await b.createBrowserContext();
-  await ctx.setCookie({ name: "chrysalis-device", value: hereKey, domain: "127.0.0.1", path: "/", secure: true, httpOnly: true, sameSite: "Strict" });
-  return ctx;
-}
+// a browser context of its own: this machine's browser, which needs no key
+const chatContext = (b = browser) => b.createBrowserContext();
 // Each page in a browser context of its own: what one test leaves in localStorage (the last chat's tools) stays there.
 async function open(): Promise<Page> {
   const page = await (await chatContext()).newPage();
@@ -1807,7 +1798,7 @@ test("voice picker: the voice models' voices by language and gender; a pick swit
   expect(await page.$eval("#voice-pick .voice-pick-name", (el) => el.textContent)).toBe("Pick");
   await page.click("#voice-pick");
   const rows = await page.$$eval("#voice-list > *", (els) => els.map((e) => [e.className, e.textContent]));
-  expect(rows.filter(([c]) => c.startsWith("voice-model"))).toEqual([["voice-model", "Fake TTS"], ["voice-model", "Other TTS"], ["voice-model missing", "Big TTStools/voice_setup.sh big-tts"]]);
+  expect(rows.filter(([c]) => c.startsWith("voice-model"))).toEqual([["voice-model", "Fake TTS"], ["voice-model", "Other TTS"], ["voice-model missing", "Big TTSvoice/setup.sh big-tts"]]);
   expect(rows.filter(([c]) => c === "voice-group").map(([, t]) => t)).toEqual(["American English · Female", "British English · Male", "Spanish · Female", "American English · Male"]);
   expect(await page.$$eval("#voice-pop .voice-item", (els) => els.map((e) => (e as HTMLElement).dataset.voice))).toEqual(
     ["plain", "pie", "story", "long", "merge", "join", "ahead", "onward", "checking", "silent", "pick", "notes", "point", "echo"].map((v) => `fake-tts/${v}`).concat(["other-tts/ana", "other-tts/bob"]));
@@ -1899,15 +1890,16 @@ async function pastWarning(page: Page, firefox: boolean) {
     await page.click("#proceed-link");
   }
 }
-// A computer's browsers, under `home`, trusting the authority in `tlsDir` as `chrysalis start --lan` makes them
-// (chrysalis.sh trust): Chromium's store ($HOME/.pki/nssdb), and a Firefox profile's, which has its store from Firefox's
-// first run (an empty one here). The profile, for Firefox to run with.
+// A device's browsers, under `home`, trusting the authority in `tlsDir`, as one that went through its connect page's
+// steps does: Chromium's store ($HOME/.pki/nssdb), and a Firefox profile's, which has its store from Firefox's first run
+// (an empty one here). The profile, for Firefox to run with.
 function trusting(home: string, tlsDir: string) {
-  const profile = `${home}/.mozilla/firefox/test.default`;
-  mkdirSync(profile, { recursive: true });
-  expect(Bun.spawnSync(["certutil", "-N", "--empty-password", "-d", `sql:${profile}`]).exitCode).toBe(0);
-  const r = Bun.spawnSync([`${import.meta.dir}/../chrysalis.sh`, "trust"], { env: { ...process.env, HOME: home, CHRYSALIS_TLS_DIR: tlsDir }, stderr: "pipe" });
-  expect([r.exitCode, r.stdout.toString()]).toEqual([0, expect.stringContaining("this computer's browsers trust Chrysalis now")]);
+  const profile = `${home}/.mozilla/firefox/test.default`, chromium = `${home}/.pki/nssdb`;
+  for (const db of [profile, chromium]) {
+    mkdirSync(db, { recursive: true });
+    expect(Bun.spawnSync(["certutil", "-N", "--empty-password", "-d", `sql:${db}`]).exitCode).toBe(0);
+    expect(Bun.spawnSync(["certutil", "-A", "-d", `sql:${db}`, "-n", "Chrysalis", "-t", "C,,", "-i", `${tlsDir}/ca.pem`]).exitCode).toBe(0);
+  }
   return profile;
 }
 
@@ -1917,7 +1909,7 @@ test("past the chat's warning on the network, a device gets the connect page and
   const start = async (ports = { PORT: "0", CHRYSALIS_CHECK_PORT: "0" }) => {
     const proc = Bun.spawn([process.execPath, "server.ts"], {
       cwd: import.meta.dir, stdout: "pipe", stderr: "inherit",
-      env: { ...process.env, ...ports, CHRYSALIS_URL: `http://127.0.0.1:${fake.port}`, CHRYSALIS_HOST: "0.0.0.0", NODE_ENV: "production",
+      env: { ...process.env, ...ports, CHRYSALIS_URL: `http://127.0.0.1:${fake.port}`, CHRYSALIS_HOST: "0.0.0.0", NODE_ENV: "production", CHRYSALIS_LINK_PORT: "0",
         CHRYSALIS_SELF_AS_NETWORK: "1",                                // this machine's browsers stand in for other devices
         CHRYSALIS_MCP_CONFIG: `${dir}/mcp.json`, CHRYSALIS_TLS_DIR: tlsDir },
     });
@@ -1983,7 +1975,7 @@ test("past the chat's warning on the network, a device gets the connect page and
       await page.reload({ waitUntil: "domcontentloaded" });             // "load" waits on the image held back
       await page.waitForFunction(() => /Cannot reach/.test(document.getElementById("status")!.textContent!), { timeout: 10_000 });
       expect([await page.$eval("#status", (e) => (e as HTMLElement).hidden), await page.$eval("#sub", (e) => e.textContent)])
-        .toEqual([false, expect.stringContaining("chrysalis start --lan")]);
+        .toEqual([false, expect.stringContaining("chrysalis.sh start --host 0.0.0.0")]);
       await page.close();
     }
 
@@ -2017,9 +2009,9 @@ test("past the chat's warning on the network, a device gets the connect page and
       expect(await waiting()).toEqual([]);
     }
 
-    // This computer's browser (one that takes the test's certificates) goes through its connect page with no code. Trusting
-    // the authority (their stores as the CLI makes them), Chromium's and Firefox's connect page at the chat's address shows
-    // the device's code; Connect a device here shows the same code, Allow lets that device in, and the chat opens there.
+    // This computer's browser gets the chat at once, over plain HTTP. Trusting the authority, as a device does once its
+    // connect page's steps are done, Chromium's and Firefox's connect page at the chat's address shows the device's code;
+    // Connect a device here shows the same code, Allow lets that device in, and the chat opens there.
     const local = await (await browser.createBrowserContext()).newPage();
     await local.goto(here, { waitUntil: "load" });
     await local.waitForSelector("#input", { timeout: 15_000 });
@@ -2038,7 +2030,7 @@ test("past the chat's warning on the network, a device gets the connect page and
       expect(await page.$eval("#setup", (e) => (e as HTMLElement).hidden)).toBe(true);     // nothing to set up
       const code = await page.$eval("#code", (e) => e.textContent!);
       expect(code).toMatch(/^\d{3} \d{3}$/);
-      expect(await page.$eval("#after .copyable code", (e) => e.textContent)).toBe(`chrysalis allow ${code.replace(" ", "")}`);   // to copy
+      expect(await page.$eval("#after .copyable code", (e) => e.textContent)).toBe(`chrysalis.sh allow ${code.replace(" ", "")}`);   // to copy
       await local.waitForFunction((c) => [...document.querySelectorAll("#connect-view .dev-ask-code")].some((e) => e.textContent === c), { timeout: 5000 }, code);
       expect(await local.$$eval("#connect-view .dev-ask .dev-name", (n) => n.map((e) => e.textContent))).toEqual([name]);
       await local.evaluate((c) => [...document.querySelectorAll("#connect-view .dev-ask")]
@@ -2051,7 +2043,7 @@ test("past the chat's warning on the network, a device gets the connect page and
       if (!firefox) chrome = page;
     }
     expect(await local.$$eval("#connect-view .dev-item .dev-name", (n) => n.map((e) => e.textContent)))
-      .toEqual(["Linux · Chrome (this computer)", "Linux · Chrome", "Linux · Firefox"]);
+      .toEqual(["Linux · Chrome", "Linux · Firefox"]);
 
     // A restart (every deploy) forgets each browser's check: an open chat checks again by itself and carries on, with no
     // trip through the pairing page (which would reload it)
@@ -2262,12 +2254,25 @@ test("the sea drawn by the CPU, in a browser without WebGL, is the sea WebGL2 dr
 
 // The sea needs WebGL2, which headless Chromium here gets only from SwiftShader on request: a browser of its own, so the
 // other tests run without its frames (costly when rendered in software) and with the plain logo in a new chat.
-test("a new chat is the butterfly in a sea under the message box too, never blanked by a side panel sliding shut; a click on the water makes ripples and keeps the message box focused, and with reduced motion draws nothing", async () => {
+test("a new chat is the butterfly in a sea under the message box too, never blanked by a side panel sliding shut; a click on the water makes ripples and keeps the message box focused, and with reduced motion draws nothing; a pointer resting on the water draws it no more often than the water alone does", async () => {
   const gl = await puppeteer.launch({ executablePath: process.env.CHROMIUM ?? "/usr/bin/chromium", headless: true, args: [...CHAT_ARGS, "--enable-unsafe-swiftshader"] });
   try {
     for (const motion of ["no-preference", "reduce"] as const) {
       const page = await (await chatContext(gl)).newPage();     // its own storage: the panel starts open
       page.on("pageerror", (e) => { throw e; });
+      // the frames the sea draws: its cells pass, counted
+      await page.evaluateOnNewDocument(() => {
+        const get = HTMLCanvasElement.prototype.getContext;
+        (window as any).seaFrames = 0;
+        HTMLCanvasElement.prototype.getContext = function (this: HTMLCanvasElement, kind: string, ...rest: unknown[]) {
+          const c = (get as any).call(this, kind, ...rest);
+          if (kind === "webgl2" && c && !c.counted) {
+            const draw = c.drawArrays.bind(c);
+            c.counted = c.drawArrays = (...a: unknown[]) => { if (c.getParameter(c.FRAMEBUFFER_BINDING)) (window as any).seaFrames++; return draw(...a); };
+          }
+          return c;
+        } as typeof get;
+      });
       await page.emulateMediaFeatures([{ name: "prefers-color-scheme", value: "dark" }, { name: "prefers-reduced-motion", value: motion }]);
       await page.setViewport({ width: 1200, height: 900 });
       await page.goto(`${base}/`, { waitUntil: "networkidle0" });
@@ -2312,7 +2317,18 @@ test("a new chat is the butterfly in a sea under the message box too, never blan
       const near1 = await look(page, near, near0.png), far1 = await look(page, far, far0.png);
       expect(await page.evaluate(() => document.activeElement?.id)).toBe("input");
       if (motion === "reduce") expect([near1.changed, far1.changed]).toEqual([0, 0]);
-      else expect(near1.changed).toBeGreaterThan(2 * far1.changed + 500);
+      else {
+        expect(near1.changed).toBeGreaterThan(2 * far1.changed + 500);
+        // once the ripples are gone: as many frames with the pointer resting on the water as with it on the message box
+        const frames = async () => { const n = await page.evaluate(() => (window as any).seaFrames); await Bun.sleep(2000); return await page.evaluate(() => (window as any).seaFrames) - n; };
+        await Bun.sleep(5200);
+        const resting = await frames();
+        await page.mouse.move(box.x + box.width / 2, box.y + box.height / 2);
+        await Bun.sleep(300);
+        const away = await frames();
+        expect(away).toBeGreaterThan(10);
+        expect(resting).toBeLessThan(away * 1.5);
+      }
       await page.close();
     }
   } finally {

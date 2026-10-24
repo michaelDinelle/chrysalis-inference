@@ -82,7 +82,12 @@ interface SourceInfo { id: string; label: string; kind: "fetch" | "agent" | "mcp
 interface Catalog { config: string; error?: string; sources: SourceInfo[] }
 interface Status { state: "online" | "loading" | "offline"; build?: string; model?: string; loading?: string; progress?: number; context?: number; kv_tokens?: number; cache?: { free_kv_tokens: number };
   check?: boolean; here?: boolean; waiting?: number;   // (on the network: check the device's trust again; this computer: devices asking to join)
-  backend?: Backend }
+  backend?: Backend; link?: Linking }
+// A computer without the engine (server.ts, link.ts): the Chrysalis computers found on the network, the pairing under way
+// with the code both screens show, and the one linked; refused: what to do where the system keeps Chrysalis off the
+// network (macOS, until the user allows it)
+interface Linking { linked?: { name: string }; found: { name: string; fp: string }[]; refused?: string;
+  pairing?: { name: string; code: string; state: "waiting" | "allowed" | "gone" | "error"; error?: string } }
 // Where replies come from (server.ts, backend.ts): its address, whether it is Chrysalis (it says so of itself) and
 // whether it is this machine's Chrysalis service (whose models the page loads, and which it starts), its models or why
 // it does not answer. key: whether it has one (no page is sent the key itself); remote: off this machine's networks;
@@ -3268,12 +3273,12 @@ for (const [t, label] of [["system", "System"], ["light", "Light"], ["dark", "Da
 }
 // Connect a device (the top bar, on this computer's own screen only): a QR code of the chat's address, where a new device
 // gets the connect page (setup.ts); the devices asking to join, each with the code it shows, to allow or deny
-// (devices.ts); the devices let in; a key for an app on another computer (shown once: it is kept only as its hash); and
-// the authority's fingerprint, which a device's certificate details show too when it trusts this computer and not an
-// impostor's.
+// (devices.ts), and the computers asking to link (link.ts), each with the code it shows too; the devices and computers let
+// in; and the authority's fingerprint, which a device's certificate details show too when it trusts this computer and not
+// an impostor's.
 const connectView = $<HTMLDialogElement>("connect-view");
-let known: Set<string> | undefined, joined = "", connectTimer = 0, appKey = "";
-interface Paired { id: string; name: string; added: number; seen: number; kind: "browser" | "app" }
+let known: Set<string> | undefined, joined = "", connectTimer = 0;
+interface Paired { id: string; name: string; added: number; seen: number; kind: "browser" | "computer" }
 interface Joining { code: string; name: string; at: number; allowed: boolean }
 const since = (t: number) => {
   const m = Math.round((Date.now() - t) / 60_000);
@@ -3298,14 +3303,14 @@ async function renderConnect() {
   }
   if (!p.lan) {
     const note = h("p", "set-note");
-    note.append("Chrysalis is on this computer only. Run ", h("code", "", "chrysalis start --lan"), " in a terminal to let your phone and other devices on this network in.");
+    note.append("Chrysalis is on this computer only. Run ", h("code", "", "chrysalis.sh start --host 0.0.0.0"), " in a terminal to let your phone and other devices on this network in.");
     box.dataset.key = "";
     return void box.replaceChildren(note);
   }
   const list: Paired[] = p.devices, asking: Joining[] = p.waiting, fresh = known && list.find((d) => !known!.has(d.id));
   if (fresh) joined = fresh.name;
   known = new Set(list.map((d) => d.id));
-  const key = JSON.stringify([joined, asking, list.map((d) => [d.id, since(d.seen)]), p.connect, !!p.qr, appKey]);
+  const key = JSON.stringify([joined, asking, list.map((d) => [d.id, since(d.seen)]), p.connect, !!p.qr]);
   if (box.dataset.key === key) return;
   box.dataset.key = key;
   const row = h("div", "dev-row"), text = h("div", "dev-text"), other = h("p");
@@ -3317,7 +3322,8 @@ async function renderConnect() {
   }
   other.append(p.qr ? "No camera? On the device, open " : "On the device, open ", h("code", "dev-url", p.connect[0].replace(/\/$/, "")), ".");
   text.append(h("p", "dev-lead", `${p.qr ? "Scan this with your phone's camera." : "The device connects there."} It warns once that the connection is not private, as it does not trust this computer yet: go on past it, and the page sets the device up. Then the device shows a code, which appears here to allow.`),
-    other, ...(p.qr ? [] : [h("p", "set-note", "With qrencode installed, a QR code shows here for phones to scan.")]));
+    other, h("p", "set-note", "A computer: open Chrysalis there. It finds this one, and asks with a code that appears here too."),
+    ...(p.qr ? [] : [h("p", "set-note", "With qrencode installed, a QR code shows here for phones to scan.")]));
   row.append(text);
   const asks = h("div", "dev-list");
   if (asking.length) asks.append(h("div", "set-title", "Asking to join"));
@@ -3338,28 +3344,8 @@ async function renderConnect() {
     const item = h("div", "dev-item"), remove = h("button", "btn small", "Remove");
     remove.type = "button";
     remove.onclick = async () => { await fetch(`/api/pair/${d.id}`, { method: "DELETE" }); box.dataset.key = ""; void renderConnect(); };
-    item.append(h("span", "dev-name", d.name), h("span", "dev-when", `${d.kind === "app" ? "app key · " : ""}added ${day(d.added)} · used ${since(d.seen)}`), remove);
+    item.append(h("span", "dev-name", d.name), h("span", "dev-when", `${d.kind === "computer" ? "linked computer · " : ""}added ${day(d.added)} · used ${since(d.seen)}`), remove);
     devs.append(item);
-  }
-  const apps = h("div", "dev-list"), apiRow = h("div", "dev-item"), api = h("span", "dev-api"), make = h("button", "btn small", "New key");
-  make.type = "button";
-  make.onclick = async () => {
-    const r = await fetch("/api/pair/key", { method: "POST", headers: { "Content-Type": "application/json" }, body: "{}" }).then((x) => x.json()).catch(() => null);
-    if (!r?.key) return;
-    appKey = r.key;
-    known?.add(r.id);                              // made here: not a device joining
-    void renderConnect();
-  };
-  api.append("Chrysalis's API on the network: ", h("code", "dev-url", p.api[0]), ", with a key");
-  apiRow.append(api, make);
-  apps.append(h("div", "set-title", "Apps on other computers"), apiRow);
-  if (appKey) {
-    const shown = h("div", "dev-key"), copyKey = h("button", "btn small", "Copy");
-    copyKey.type = "button";
-    copyKey.onclick = () => copy(appKey, copyKey);
-    shown.append(h("code", "", appKey), copyKey);
-    apps.append(shown, h("p", "set-note", "Shown this once: Chrysalis keeps only its hash. Apps send it as OpenAI's and Anthropic's SDKs send "
-      + "theirs, over HTTPS, so that computer trusts this one's authority (its connect page, or the app pointed at chrysalis-ca.crt)."));
   }
   const fp = h("p", "set-note dev-fp");
   fp.append(`To be sure a device trusts this computer and not an impostor on the network, its certificate details show the same SHA-256 fingerprint for ${p.name}: `,
@@ -3367,10 +3353,10 @@ async function renderConnect() {
   const done = h("p", "dev-joined");
   done.innerHTML = icon("check");
   done.append(`${joined} is connected.`);
-  box.replaceChildren(...(joined ? [done] : []), row, ...(asking.length ? [asks] : []), devs, apps, fp);
+  box.replaceChildren(...(joined ? [done] : []), row, ...(asking.length ? [asks] : []), devs, fp);
 }
 function openConnect() {
-  joined = appKey = "";
+  joined = "";
   known = undefined;
   connectView.showModal();
   void renderConnect();
@@ -3738,7 +3724,7 @@ async function ensureOnline(run: { stopping: boolean }) {
   if (status.state === "offline") await start();
   for (const deadline = Date.now() + 180_000; status.state !== "online" || status.loading; await refreshStatus()) {
     if (run.stopping) throw new DOMException("stopped", "AbortError");
-    if (Date.now() > deadline) throw new Error("Chrysalis did not start: see `chrysalis logs`");
+    if (Date.now() > deadline) throw new Error("Chrysalis did not start: see `chrysalis.sh logs`");
     await sleep(100);
   }
 }
@@ -4771,7 +4757,7 @@ const LANGS = new Intl.DisplayNames(["en"], { type: "language" });
 const langName = (code: string) => { try { return LANGS.of(code) ?? code; } catch { return code; } };
 const voiceGroup = (x: VoiceInfo) => [langName(x.lang), x.gender ? x.gender[0].toUpperCase() + x.gender.slice(1) : ""].filter(Boolean).join(" · ");
 const modelLabel = (part: Part, name?: string) => (name && voiceCatalog[part]?.find((m) => m.name === name)?.label) || name;
-const setupHint = (part: Part, name: string) => voiceCatalog[part]?.find((m) => m.name === name)?.hint ?? `tools/voice_setup.sh ${name}`;
+const setupHint = (part: Part, name: string) => voiceCatalog[part]?.find((m) => m.name === name)?.hint ?? `voice/setup.sh ${name}`;
 
 // A voice from the dock's picker: from the next sentence, and a voice of another voice model switches to that model.
 function pickVoice(tts: string, x: VoiceInfo) {
@@ -5553,6 +5539,28 @@ function renderBackend() {
   if (!known.includes(b.url)) setPref("backends", JSON.stringify((known = [b.url, ...known].slice(0, 8))));
   const list = $("backend-known");
   if (list.childElementCount !== known.length) list.replaceChildren(...known.map((u) => Object.assign(h("option"), { value: u })));
+  renderLink();
+}
+// A computer without the engine (link.ts): a Chrysalis found on the network, to use as this one's once its own screen
+// allows this one, with the code both show; a note under the backend's address, where none of the backend's own is
+function renderLink() {
+  const l = status.link, p = l?.pairing, note = $("link-note"), parts: (string | Node)[] = [];
+  if (l?.refused) parts.push(l.refused);
+  else if (p?.state === "waiting") parts.push(p.code ? `Allow ${spaced(p.code)} on ${p.name}` : `Asking ${p.name}…`);
+  else {
+    if (p?.state === "gone") parts.push(`${p.name} did not allow this computer.`);
+    if (p?.state === "error") parts.push(p.error ?? "");
+    for (const f of !l?.linked && status.state === "offline" ? l?.found ?? [] : []) {
+      const use = h("button", "btn small primary", "Use it");
+      use.type = "button";
+      use.onclick = () => void fetch("/api/link", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ fp: f.fp }) })
+        .then(() => refreshStatus());
+      parts.push(`Chrysalis is on ${f.name}.`, use);
+    }
+  }
+  const key = JSON.stringify([parts.map((x) => typeof x === "string" ? x : x.textContent), l?.found]);
+  if (note.dataset.key !== key) { note.dataset.key = key; note.replaceChildren(...parts); }
+  note.hidden = !parts.length || !$("backend-note").hidden;
 }
 function backendNote(text: string, error = false, far = false) {
   $("backend-why").textContent = text;

@@ -7,7 +7,7 @@
   tts   rate, voices() -> [{id, label, lang, gender}] (a classmethod: it loads nothing), VOICE (the default),
         synth(text, voice, speed) -> float32 mono at rate
 A loaded part is shared by the sessions using it; what a session changes lives in its own state or stream. A part's
-models are its FILES in data/voice/<DIR>/, fetched by `tools/voice_setup.sh DIR`."""
+models are its FILES in data/voice/<DIR>/, fetched by `voice/setup.sh DIR`."""
 import collections, ctypes, gc, os, re, threading, wave
 
 import numpy as np
@@ -35,7 +35,7 @@ def files(cls):
     paths = [os.path.join(DATA, cls.DIR, n) for n in cls.FILES]
     for p in paths:
         if not os.path.exists(p):
-            raise Missing(f"{cls.label} is not installed ({p} is missing): run tools/voice_setup.sh {cls.DIR}")
+            raise Missing(f"{cls.label} is not installed ({p} is missing): run voice/setup.sh {cls.DIR}")
     return paths
 
 

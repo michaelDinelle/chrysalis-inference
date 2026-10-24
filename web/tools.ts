@@ -1,7 +1,7 @@
 // The tools a reply can call, whatever provides them: the built-in Fetch URL (tool-fetch.ts) and Sub-agents
 // (tool-agent.ts), and the MCP servers in the config file (tool-mcp.ts). Each provider is a Source of Tools behind the interfaces below; server.ts only talks to
 // this file. The config file is the only place a server's command, URL or environment comes from: the page (no logins,
-// and on the LAN after `chrysalis start --lan`) can list sources, start, retry and reload them, never define one, or it
+// and on the LAN after `chrysalis.sh start --host 0.0.0.0`) can list sources, start, retry and reload them, never define one, or it
 // could run any command on this machine.
 import { readFileSync } from "node:fs";
 import { homedir } from "node:os";
