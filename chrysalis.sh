@@ -72,7 +72,7 @@ running() { if [ -n "$MAC" ]; then launchctl list "$1" >/dev/null 2>&1; else sys
 # stopped, and gone (launchd's job until its process has exited: the next one takes its port)
 halt() {
     local u i
-    if [ -z "$MAC" ]; then systemctl --user stop "$@" 2>/dev/null; return 0; fi
+    if [ -z "$MAC" ]; then systemctl --user stop "$@" 2>/dev/null || true; return 0; fi
     for u in "$@"; do
         launchctl remove "$u" 2>/dev/null || continue
         for i in $(seq 50); do launchctl list "$u" >/dev/null 2>&1 || break; sleep 0.1; done

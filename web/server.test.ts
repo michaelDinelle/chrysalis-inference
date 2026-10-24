@@ -937,6 +937,16 @@ test("the page hears Chrysalis is off where its address takes a connection and n
   }
 });
 
+// chrysalis.sh's way in on a computer where nothing of Chrysalis has run yet: a systemd of its own, empty (as a first
+// start finds it), where stopping what is not there must not end the script (set -e)
+test("chrysalis.sh stop where nothing runs, as a first start moves the chat, says Chrysalis stopped and succeeds", () => {
+  const run = mkdtempSync(`${RUN}/run-`);
+  const r = Bun.spawnSync(["bash", `${import.meta.dir}/../chrysalis.sh`, "stop"], {
+    env: { ...process.env, XDG_RUNTIME_DIR: run, DBUS_SESSION_BUS_ADDRESS: `unix:path=${run}/bus` }, stdout: "pipe", stderr: "pipe",
+  });
+  expect([r.exitCode, r.stdout.toString().trim()]).toEqual([0, "Chrysalis stopped"]);
+});
+
 test("a computer with neither systemd nor openssl, as a Mac is, runs the chat: the page hears Chrysalis is off there and gets the computers found, and its Stop and model picker answer", async () => {
   const free = Bun.serve({ hostname: "127.0.0.1", port: 0, fetch: () => new Response() }), chrysalis = `http://127.0.0.1:${free.port}`;
   free.stop(true);
