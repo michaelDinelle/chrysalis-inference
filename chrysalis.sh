@@ -174,7 +174,12 @@ release() {
     ln -sf python3 "$OUT/data/venv/bin/python"
     find web -maxdepth 1 -type f \( -name '*.ts' -o -name '*.html' -o -name '*.css' -o -name '*.js' -o -name '*.svg' -o -name '*.json' -o -name 'bun.lock' \) \
         ! -name '*.test.ts' ! -name '*.check.ts' ! -name 'fake-*' ! -name 'bench-*' -exec cp {} "$OUT/web/" \;
-    (cd "$OUT/web" && bun install --production --frozen-lockfile >/dev/null)
+    (cd web && bun install --frozen-lockfile >/dev/null)
+    bun build web/server.ts --target=bun --production --outdir "$OUT/web" >/dev/null
+    for p in mermaid/dist/mermaid.esm.min.mjs mermaid/dist/chunks/mermaid.esm.min aframe/dist/aframe-v1.8.0.min.js three/package.json three/build three/examples/jsm; do
+        mkdir -p "$OUT/web/node_modules/${p%/*}" && cp -r "web/node_modules/$p" "$OUT/web/node_modules/$p"
+    done
+    find "$OUT/web/node_modules" -name '*.map' -delete
     cp "$(readlink -f "$(command -v bun)")" "$OUT/bin/bun"
     echo "$VER" > "$OUT/VERSION"
     tar -C dist -czf dist/chrysalis-linux-x86_64.tar.gz chrysalis
@@ -275,8 +280,9 @@ case "${1:-}" in
                 echo "no RX 7900 here: the web chat uses Chrysalis on another computer on your network, or your Ollama, LM Studio or llama.cpp"
             fi
             urls $to
+            web=server.ts; [ -f "$ROOT/web/server.js" ] && web=server.js
             [ -d "$ROOT/web/node_modules" ] || (cd "$ROOT/web" && "$BUN" install --frozen-lockfile >/dev/null)
-            cd "$ROOT/web" && NODE_ENV=production CHRYSALIS_HOST=$to "$BUN" server.ts ;;
+            cd "$ROOT/web" && NODE_ENV=production CHRYSALIS_HOST=$to "$BUN" $web ;;
   gpu)      has_gpu ;;
   get)      get "${@:2}" ;;
   serve)    ggml="$ROOT/ggml/avx2"; grep -qw avx512_vnni /proc/cpuinfo && ggml="$ROOT/ggml/avx512"
