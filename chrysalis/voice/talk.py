@@ -324,7 +324,7 @@ class Talk:
                     self.drop(self.reply)
                 elif ev["type"] == "turn":
                     self.awaiting = True
-                    print(f"voice: turn, {ev['wait_ms']} ms after speech: {ev['text'][:80]!r}", file=sys.stderr, flush=True)
+                    print(f"voice: turn, {ev['wait_ms']} ms after speech", file=sys.stderr, flush=True)
                 await self.send(ev)
                 if ev["type"] == "turn":
                     trim()

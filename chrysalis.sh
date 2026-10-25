@@ -44,6 +44,37 @@ usage: chrysalis.sh [--host 0.0.0.0]
 EOF
 }
 
+pick() {
+    local ids=(qwen3.8-27b) names=(Qwen3.8-27B) notes=("Quickest replies · 4 s to load") at=0 n i key last
+    if roomy; then ids+=(qwen3.8-flash-next) names+=(Qwen3.8-Flash-Next) notes+=("Fast at any length · 20 s to load"); fi
+    n=${#ids[@]}
+    (( n > 1 )) && [ -t 0 ] && [ -t 1 ] || return 0
+    last=$(cat "$TLS_DIR/model" 2>/dev/null || true)
+    for i in "${!ids[@]}"; do
+        [ "${ids[i]}" != "$last" ] || at=$i
+        get --check "${ids[i]}" || notes[i]+=" · downloads first"
+    done
+    printf '\e[?25l  \e[1mWhich model?\e[0m\n'
+    while :; do
+        for i in "${!ids[@]}"; do
+            if (( i == at )); then printf '\r\e[K  \e[35m●\e[0m \e[1m%-19s\e[0m %s\n' "${names[i]}" "${notes[i]}"
+            else printf '\r\e[K  \e[2m○ %-19s %s\e[0m\n' "${names[i]}" "${notes[i]}"; fi
+        done
+        printf '\r\e[K  \e[2m↑↓ to choose · Enter to start\e[0m'
+        IFS= read -rsn1 key
+        if [ "$key" = $'\e' ]; then read -rsn2 -t 0.05 key || true; fi
+        case $key in
+            "[A"|k) at=$(( (at + n - 1) % n )) ;;
+            "[B"|j) at=$(( (at + 1) % n )) ;;
+            [1-9]) if (( key <= n )); then at=$((key - 1)); break; fi ;;
+            "") break ;;
+        esac
+        printf '\r\e[%dA' "$n"
+    done
+    printf '\r\e[%dA\e[J\e[?25h' $((n + 1))
+    mkdir -p "$TLS_DIR" && printf %s "${ids[at]}" > "$TLS_DIR/model"
+}
+
 lan_ip() { ip -4 route get 1.1.1.1 2>/dev/null | awk '{ for (i = 1; i < NF; i++) if ($i == "src") { print $(i + 1); exit } }'; }
 lan_subnet() {
     local dev
@@ -287,8 +318,9 @@ case "${1:-}" in
             if [ -n "$MAC" ]; then
                 codesign -v "$APP" 2>/dev/null || codesign --force -s - "$APP" 2>/dev/null
             fi
-            trap 'trap - EXIT; kill 0' EXIT
+            trap 'trap - EXIT; [ ! -t 1 ] || printf "\e[?25h"; kill 0' EXIT
             if has_gpu; then
+                pick
                 model=$(cat "$TLS_DIR/model" 2>/dev/null || true)
                 get ${model:+"$model"}
                 if roomy && ! get --check qwen3.8-flash-next; then
