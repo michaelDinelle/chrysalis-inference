@@ -441,6 +441,7 @@ class Server:
         self.tok = Tokens(tokenizer_path)
         self.replay = LRU(8192)
         self.renderer = Renderer(self.tok, self.replay.get)
+        self.im_start = self.tok.full.token_to_id("<|im_start|>")
         self.sticky = Sticky()
         self.sessions = LRU(64)
         self.stored = LRU(256)
@@ -464,6 +465,7 @@ class Server:
         self.cache = Cache(self.engine, slots, max_snapshots=MODELS.get(model, MODELS[MODEL])["snapshots"],
                            disk=self.snapshot_disk(model, model_path))
         self.pictures = self.open_vision(model)
+        self.warm_pool(model)
         if warmup:
             self.engine.warmup()
 
@@ -504,6 +506,7 @@ class Server:
         with self.state_lock:
             self.loading = name
         try:
+            self.keep_pool(force=True)
             self.engine.shutdown()
             self.load_engine(name)
             self.metrics.add("chrysalis_model_loads_total", model=name)
@@ -526,9 +529,30 @@ class Server:
                            disk=self.snapshot_disk(name, os.path.join(_ROOT, spec["path"])))
         self.pictures = self.open_vision(name)
         self.n_draft, self.lookup = spec["draft"], spec.get("lookup", 0)
+        self.warm_pool(name)
+
+    def warm_pool(self, name):
+        t0 = time.time()
+        moved = self.engine.pool_warm(self.pool_path(name))
+        if moved >= 0:
+            print(f"chrysalis: the expert pool as the last run left it: {moved} experts moved in {time.time() - t0:.1f} s",
+                  file=self.log, flush=True)
+        self.pool_saved = time.time()
+
+    def pool_path(self, name):
+        return os.path.join(SNAPSHOT_DIR, name, "pool.bin")
+
+    def keep_pool(self, force=False):
+        if not force and time.time() - self.pool_saved < 30:
+            return
+        self.pool_saved = time.time()
+        path = self.pool_path(self.active)
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        self.engine.pool_save(path)
 
     def sleep(self):
         t0 = time.time()
+        self.keep_pool(force=True)
         self.warmer.stop()
         self.pausing.set()
         self.lanes.hold()
@@ -893,7 +917,9 @@ class Server:
                 trace.append((f"{encoded} pictures", time.time() - t))
         if encoded and not MODELS[self.active].get("vision_stays", True):
             self.engine.vision_release()
-        points = [(marks["tools"], True), (marks["static"], True), (marks["system"], side)]
+        turns = np.flatnonzero(prompt == self.im_start)
+        points = [(marks["tools"], True), (marks["static"], True), (marks["system"], side),
+                  (int(turns[-1]) if len(turns) and not side else None, False)]
         done = cached
         for at, pinned in sorted(p for p in points if p[0] is not None and p[0] > cached) + [(len(prompt), False)]:
             if at <= done:
@@ -1053,6 +1079,7 @@ class Server:
                 "stop_sequence": stop_text.matched}
         self.recent.put(time.time(), info)
         self.metrics.reply(self.active, {**info, "decode_s": t1 - t_prefill}, steps, finish)
+        self.keep_pool()
         print(f"chrysalis: prompt {len(prompt)} (cached {cached}){f' | {encoded} pictures encoded' if encoded else ''} ttft {info['ttft']:.2f}s | gen {n_gen} "
               f"{info['decode_tps']:.1f} tok/s {info['tokens_per_step']:.2f}/step | {finish} | slot {slot.sid}"
               + (" | " + ", ".join(f"{k} {v * 1000:.0f} ms" for k, v in trace) if trace else ""),

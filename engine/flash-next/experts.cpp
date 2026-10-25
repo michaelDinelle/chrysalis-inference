@@ -5,6 +5,7 @@
 #include <cstring>
 #include <fcntl.h>
 #include <sys/mman.h>
+#include <sys/stat.h>
 #include <unistd.h>
 
 namespace {
@@ -94,6 +95,58 @@ void Engine::experts_init() {
     x.loader = std::thread(&Engine::experts_loader, this);
 }
 
+constexpr uint64_t POOL_MAGIC = 0x324c4f4f50465243ull;
+
+uint64_t Engine::model_bytes() const {
+    struct stat st_{};
+    return file_fd >= 0 && fstat(file_fd, &st_) == 0 ? (uint64_t)st_.st_size : 0;
+}
+
+bool Engine::pool_save(const char *path) const {
+    const Experts &x = xc;
+    if (x.score.empty()) return false;
+    const std::string tmp = std::string(path) + ".tmp";
+    FILE *f = fopen(tmp.c_str(), "wb");
+    if (!f) return false;
+    const uint64_t head[4] = {POOL_MAGIC, x.score.size(), x.owner.size(), model_bytes()};
+    bool ok = fwrite(head, sizeof head, 1, f) == 1 && fwrite(x.score.data(), 4, x.score.size(), f) == x.score.size() &&
+              fwrite(x.owner.data(), 4, x.owner.size(), f) == x.owner.size();
+    ok = fclose(f) == 0 && ok;
+    return ok && rename(tmp.c_str(), path) == 0;
+}
+
+int Engine::pool_warm(const char *path) {
+    Experts &x = xc;
+    if (x.score.empty() || !x.on) return -1;
+    FILE *f = fopen(path, "rb");
+    if (!f) return -1;
+    uint64_t head[4];
+    std::vector<float> s(x.score.size());
+    std::vector<int> owner(x.owner.size());
+    const bool ok = fread(head, sizeof head, 1, f) == 1 && head[0] == POOL_MAGIC && head[1] == s.size() && head[2] == owner.size() &&
+                    head[3] == model_bytes() && fread(s.data(), 4, s.size(), f) == s.size() &&
+                    fread(owner.data(), 4, owner.size(), f) == owner.size();
+    fclose(f);
+    if (!ok) return -1;
+    std::vector<float> want(s.size(), 0.0f);
+    for (int k : owner) if (k >= 0 && k < (int)want.size()) want[k] = 1e9f;
+    x.score = want;
+    const int start = x.placed;
+    const auto end = std::chrono::steady_clock::now() + std::chrono::seconds(30);
+    while (std::chrono::steady_clock::now() < end) {
+        const int before = x.placed;
+        experts_place(0);
+        experts_plan();
+        bool busy = false;
+        for (Experts::Load &ld : x.loads) busy |= ld.state.load(std::memory_order_acquire) != Experts::FREE;
+        if (!busy && x.placed == before) break;
+        std::this_thread::sleep_for(std::chrono::milliseconds(1));
+    }
+    CK(hipStreamSynchronize(st));
+    x.score = s;
+    return x.placed - start;
+}
+
 void Engine::experts_stop() {
     Experts &x = xc;
     if (x.loader.joinable()) {
@@ -172,6 +225,7 @@ void Engine::experts_place(int T) {
     Experts &x = xc;
     if (x.owner.empty()) return;
     x.tokens += T;
+    x.decoding = T > 0 && T <= 8;
     const size_t keys = (size_t)NL * NE;
     if (!x.counts_pending) {
         CK(hipMemcpyAsync(x.h_counts, x.d_counts, keys * 4, hipMemcpyDeviceToHost, st));
@@ -190,7 +244,7 @@ void Engine::experts_place(int T) {
         if (ld.state.load(std::memory_order_acquire) != Experts::COPYING || hipEventQuery(ld.copied) != hipSuccess) continue;
         const int key = ld.key, s = ld.slot, old = x.owner[s];
         float ms = 0;
-        if (hipEventElapsedTime(&ms, ld.start, ld.copied) == hipSuccess && ms > 0) {
+        if (!x.decoding && hipEventElapsedTime(&ms, ld.start, ld.copied) == hipSuccess && ms > 0) {
             x.copied_bytes += cold[key / NE].bytes(x.home[key]); x.copied_ms += ms;
         }
         pa.p[pa.n++] = {ld.stage, s, x.type[key]};
@@ -256,8 +310,9 @@ void Engine::experts_plan() {
         x.tokens = 0;
     }
     if (!x.on) return;
-    int free_k[PLACE_MAX], nf = 0;
-    for (int k = 0; k < PLACE_MAX; k++) if (x.loads[k].state.load(std::memory_order_acquire) == Experts::FREE) free_k[nf++] = k;
+    int free_k[PLACE_MAX], nf = 0, busy = 0;
+    for (int k = 0; k < PLACE_MAX; k++) if (x.loads[k].state.load(std::memory_order_acquire) == Experts::FREE) free_k[nf++] = k; else busy++;
+    if (x.decoding) nf = std::max(0, std::min(nf, x.decode_loads - busy));
     if (!nf) return;
     std::vector<std::pair<float, int>> in, out;
     in.reserve(nf + 1); out.reserve(nf + 1);

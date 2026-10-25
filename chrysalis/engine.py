@@ -300,6 +300,18 @@ class Engine:
     def free_tokens(self):
         return self.lib.chrysalis_free_tokens()
 
+    def pool_save(self, path):
+        if not hasattr(self.lib, "chrysalis_pool_save"):
+            return False
+        self.lib.chrysalis_pool_save.argtypes = [C.c_char_p]
+        return bool(self.lib.chrysalis_pool_save(path.encode()))
+
+    def pool_warm(self, path):
+        if not hasattr(self.lib, "chrysalis_pool_warm"):
+            return -1
+        self.lib.chrysalis_pool_warm.argtypes = [C.c_char_p]
+        return self.lib.chrysalis_pool_warm(path.encode())
+
     def expert_stats(self):
         if not hasattr(self.lib, "chrysalis_expert_stats"):
             return None

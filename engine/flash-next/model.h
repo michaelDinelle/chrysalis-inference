@@ -108,6 +108,8 @@ struct Engine {
         double copied_bytes = 0, copied_ms = 0;
         uint64_t picks = 0, hits = 0;
         double recent_hits = 0;
+        bool decoding = false;
+        int decode_loads = 4;
         static constexpr double CPU_HEAVY = 0.75;
         enum { FREE, QUEUED, COPYING };
         struct Load {
@@ -132,6 +134,9 @@ struct Engine {
     void experts_plan();
     void experts_loader();
     void experts_stop();
+    bool pool_save(const char *path) const;
+    int pool_warm(const char *path);
+    uint64_t model_bytes() const;
     void file_read(uint8_t *dst, const uint8_t *src, size_t n) const;
     std::vector<ColdLayer> cold;
     std::vector<ColdDec> cold_dev;
@@ -155,19 +160,13 @@ struct Engine {
     void pmark(int phase);
     uint32_t gen = 0;
 
-    hipStream_t st, cst, pst;
-    hipStream_t lst = nullptr;
-    hipEvent_t la_ready = nullptr, la_done = nullptr;
+    hipStream_t st, cst;
     MoeShared *sh_pred = nullptr, *d_sh_pred = nullptr;
-    struct { float *res, *lo, *inv, *mx, *logits, *sg, *wts; half *hh; QAct hq; int *ids, *hot; unsigned *counter; } la{};
+    struct { float *lo, *inv, *mx, *logits, *sg, *wts; half *hh; QAct hq; int *ids, *hot; unsigned *counter; } la{};
     bool la_on = getenv("CHRYSALIS_FN_NO_LOOKAHEAD") == nullptr;
     void lookahead(const Layer &w, int layer, int T, const float *res, unsigned starts = 1);
-    hipEvent_t staged, copied, topk_ready, routed;
+    hipEvent_t staged, copied, topk_ready;
     hipEvent_t front_ready, front_copied;
-    PrefetchRange *pf_ranges = nullptr;
-    std::vector<int> pf_off, pf_n;
-    unsigned *pf_sink = nullptr;
-    bool pf_on = true;
     uint8_t *stage_state = nullptr;
     hipblasLtHandle_t lt = nullptr;
     void *lt_ws = nullptr;

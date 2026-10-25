@@ -792,10 +792,12 @@ if (Bun.spawnSync([`${import.meta.dir}/../chrysalis.sh`, "gpu"]).exitCode !== 0)
     forwardHere();
   });
 }, 2000);
-console.log(`chrysalis web: ${server.url}`);
-for (const s of secure) console.log(`chrysalis web: ${s.url}`);
-for (const s of checks) console.log(`chrysalis check: ${s.url}`);
-for (const s of links) console.log(`chrysalis link: ${s.url}`);
+if (!process.stdout.isTTY) {
+  console.log(`chrysalis web: ${server.url}`);
+  for (const s of secure) console.log(`chrysalis web: ${s.url}`);
+  for (const s of checks) console.log(`chrysalis check: ${s.url}`);
+  for (const s of links) console.log(`chrysalis link: ${s.url}`);
+}
 
 function checkFetch(req: Request): Response {
   if (!hostOk(req)) return new Response("unknown host", { status: 403 });

@@ -96,10 +96,10 @@ int chrysalis_generate(int id, const Sampling *sp, int *out, int max_out, float 
 double chrysalis_tune(const char *key, double value) {
     const std::string k = key;
     double old = NAN;
+    if (k == "decode_loads") { old = E->xc.decode_loads; if (value >= 0) E->xc.decode_loads = (int)value; }
     if (k == "gfrac") { old = E->gfrac; E->gfrac = (float)value; E->gfrac_pinned = true; }
     if (k == "split") { old = E->split; E->split = (int)value; }
     if (k == "vnni") old = E->cpu.use_vnni((int)value);
-    if (k == "prefetch") { old = E->pf_on; E->pf_on = value != 0; }
     if (k == "cpu_bias") { old = E->cpu_bias; if (value > 0) E->cpu_bias = value; }
     if (k == "adapt") { old = E->adapt; E->adapt = value != 0; }
     if (k == "lookahead") { old = E->la_on; E->la_on = value != 0; }
@@ -110,6 +110,8 @@ double chrysalis_tune(const char *key, double value) {
     if (k == "spill_spare") { old = E->xc.spare / 1e9; if (value >= 0) { E->xc.spare = value * 1e9; E->xc.avail_at = {}; } }
     return old;
 }
+int chrysalis_pool_save(const char *path) { return E && E->pool_save(path); }
+int chrysalis_pool_warm(const char *path) { return E ? E->pool_warm(path) : -1; }
 void chrysalis_expert_stats(int64_t *out) {
     out[0] = E->xc.placed; out[1] = E->xc.loaded_file; out[2] = (int64_t)E->xc.picks; out[3] = (int64_t)E->xc.hits;
     out[4] = (int64_t)(E->cal_dma_bw / 1e6); out[5] = (int64_t)(E->gfrac * 1e6);

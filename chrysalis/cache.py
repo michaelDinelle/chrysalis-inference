@@ -208,7 +208,8 @@ class Cache:
                 return
             victims = [en for en in self.entries if not en.pinned] or self.entries
             states = [en.tokens for en in self.entries] + [s.tokens for s in self.slots]
-            v = max(victims, key=lambda en: (sum(extends(t, en.tokens) for t in states) >= 2, -en.used))
+            v = max(victims, key=lambda en: (sum(len(t) >= len(en.tokens) + self.min_gap and extends(t, en.tokens) for t in states) >= 2,
+                                             -en.used))
             self.entries.remove(v)
             self.e.free_snapshot(v.snap)
 

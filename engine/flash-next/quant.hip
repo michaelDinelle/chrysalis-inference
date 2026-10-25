@@ -18,41 +18,6 @@ void qtensor_rows(QTensor &t, const QTensor &W, int r0) {
     }
 }
 
-void qtensor_arrays(const QTensor &t, std::vector<std::pair<const void *, size_t>> &out) {
-    const size_t n = (size_t)t.rows * t.cols;
-    auto add = [&](const void *p, size_t bytes) { if (p && bytes) out.push_back({p, bytes}); };
-    switch (t.type) {
-        case F32: add(t.f, n * 4); break;
-        case F16: add(t.f, n * 2); break;
-        case Q8_0: add(t.q, n); add(t.d, n / 32 * 2); break;
-        case Q6_K: add(t.q, n / 2); add(t.qh, n / 4); add(t.sc, n / 16); add(t.d, n / 256 * 2); break;
-        case IQ4_XS: add(t.q, n / 2); add(t.sc, n / 64); add(t.sh, n / 256 * 2); add(t.d, n / 256 * 2); break;
-        case IQ4_NL: add(t.q, n / 2); add(t.d, n / 32 * 2); break;
-        case Q5_0: add(t.q, n / 2); add(t.qh, n / 8); add(t.d, n / 32 * 2); break;
-        case Q3_K: add(t.q, n / 4); add(t.qh, n / 8); add(t.sc, n / 16); add(t.d, n / 256 * 2); break;
-        case Q2_K: add(t.q, n / 4); add(t.sc, n / 16); add(t.d, n / 256 * 2); add(t.dm, n / 256 * 2); break;
-    }
-}
-
-constexpr int PF_WGS = 8;
-__global__ __launch_bounds__(256) void k_prefetch(const PrefetchRange *r, int n, unsigned *sink) {
-    unsigned acc = 0;
-    for (int k = 0; k < n; k++) {
-        const PrefetchRange R = r[k];
-        for (size_t i = (size_t)blockIdx.x * 2048 + threadIdx.x; i < R.n16; i += (size_t)gridDim.x * 2048) {
-            int4 v[8];
-#pragma unroll
-            for (int u = 0; u < 8; u++) v[u] = i + u * 256 < R.n16 ? R.p[i + u * 256] : int4{0, 0, 0, 0};
-#pragma unroll
-            for (int u = 0; u < 8; u++) acc ^= v[u].x;
-        }
-    }
-    if (acc == 0x9e3779b9u) *sink = acc;
-}
-void prefetch(const PrefetchRange *r, int n, unsigned *sink, hipStream_t st) {
-    if (n) k_prefetch<<<PF_WGS, 256, 0, st>>>(r, n, sink);
-}
-
 QTensor make_qtensor(Arena &a, int type, int rows, int cols) {
     QTensor t; t.type = type; t.rows = rows; t.cols = cols;
     const size_t n = (size_t)rows * cols;

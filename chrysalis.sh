@@ -123,18 +123,12 @@ EOF
 urls() {
     local at=127.0.0.1
     if [ "$1" = 0.0.0.0 ]; then at=$(lan_ip); fi
-    echo "  API       http://127.0.0.1:8080/v1"
-    echo "  web chat  http://localhost:8081"
+    echo "  chat    http://localhost:8081"
+    echo "  API     http://127.0.0.1:8080/v1"
     if [ "$at" != 127.0.0.1 ]; then
-        echo "  phones    scan this, or open https://$at:8081 on the phone, past its warning: it sets the phone up,"
-        echo "            then shows a code that this terminal asks you to allow"
+        echo "  phone   scan this, or open https://$at:8081 past its warning; this terminal asks to let it in"
         if command -v qrencode >/dev/null; then qrencode -t ANSIUTF8 -m 2 "https://$at:8081"; fi
-        echo "  computers start Chrysalis there: it finds this one, and asks with a code too"
-        local ca="$TLS_DIR/ca.pem"
-        if [ -f "$ca" ]; then
-            echo "  authority SHA-256 $(openssl x509 -in "$ca" -noout -fingerprint -sha256 | cut -d= -f2)"
-            echo "            a device that trusts this computer shows the same in its certificate details"
-        fi
+        echo "  laptop  run Chrysalis there: it finds this one, and both terminals ask with the same code"
         if blocked; then echo "  ufw keeps other devices out: 'chrysalis.sh --host 0.0.0.0' in a terminal lets this network in"; fi
     fi
 }

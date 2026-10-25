@@ -5,10 +5,7 @@
 
 enum { GEMV_STORE = 0, GEMV_ADD = 1, GEMV_GLU = 2, GEMV_HC = 3 };
 QTensor make_qtensor(Arena &a, int type, int rows, int cols);
-void qtensor_arrays(const QTensor &t, std::vector<std::pair<const void *, size_t>> &out);
 void qtensor_rows(QTensor &t, const QTensor &W, int r0);
-struct PrefetchRange { const int4 *p; size_t n16; };
-void prefetch(const PrefetchRange *r, int n, unsigned *sink, hipStream_t st);
 void relayout(const QTensor &t, const uint8_t *raw_dev, hipStream_t st, int64_t b0 = 0, int64_t nb = -1);
 struct Place { const uint8_t *src = nullptr; int slot = 0, type = 0; };
 struct Patch { int slot_of = -1, fmt = -1, value = 0; };

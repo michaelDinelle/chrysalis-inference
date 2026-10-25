@@ -462,11 +462,6 @@ void Engine::moe_block(const Layer &w, int layer, int T, bool cpu_cold, float *r
     router_route_dec(w.router, w.sg_w, b.mx, T, b.logits_e, b.sg, w.slot_of, pooled ? cold[layer].n : 0, b.ids, b.wts, b.hot,
                      cpu_cold ? d_sh : nullptr, gf, layer, gen + 1, b.rr_counter, st, pooled ? xc.d_counts : nullptr, starts);
     if (cpu_cold) gen++;
-    if (cpu_cold && layer + 1 < NL && pf_on && xc.recent_hits < Experts::CPU_HEAVY) {
-        CK(hipEventRecord(routed, st));
-        CK(hipStreamWaitEvent(pst, routed, 0));
-        prefetch(pf_ranges + pf_off[layer + 1], pf_n[layer + 1], pf_sink, pst);
-    }
     moe_dec(w.hot_gate, w.hot_up, w.hot_down, pooled ? d_fmt : nullptr, w.sh_gate, w.sh_up, w.sh_down, gf > 0 ? &cold_dev[layer] : nullptr,
             b.hot, T, b.hq, b.hq_e, b.wts, b.sg, b.y, st);
     moe_finish(cpu_cold ? &d_sh->done : nullptr, gen, b.y, b.hot, b.y + (size_t)T * TOPK_E * D, nullptr, cpu_cold ? d_sh->y : nullptr,
@@ -760,16 +755,11 @@ void Engine::ple_block_run(Seq &s, int c0, int n, bool verify, float *res) {
 }
 
 void Engine::lookahead(const Layer &w, int layer, int T, const float *res, unsigned starts) {
-    CK(hipStreamWaitEvent(st, la_done, 0));
-    CK(hipMemcpyAsync(la.res, res, (size_t)T * HCD * 4, hipMemcpyDeviceToDevice, st));
-    CK(hipEventRecord(la_ready, st));
-    CK(hipStreamWaitEvent(lst, la_ready, 0));
     for (int t0 = 0; t0 < T; t0 += 4)
-        hc_mix_fused(la.res + (size_t)t0 * HCD, w.hcf.norm, w.hcf.down, w.hcf.up, nullptr, std::min(4, T - t0), la.lo + (size_t)t0 * HCR,
-                     nullptr, HC, la.inv + t0 * HC, la.mx + (size_t)t0 * D, la.hh + (size_t)t0 * D, qoff(la.hq, (size_t)t0 * D), lst);
+        hc_mix_fused(res + (size_t)t0 * HCD, w.hcf.norm, w.hcf.down, w.hcf.up, nullptr, std::min(4, T - t0), la.lo + (size_t)t0 * HCR,
+                     nullptr, HC, la.inv + t0 * HC, la.mx + (size_t)t0 * D, la.hh + (size_t)t0 * D, qoff(la.hq, (size_t)t0 * D), st);
     router_route_dec(w.router, w.sg_w, la.mx, T, la.logits, la.sg, w.slot_of, cold[layer].n, la.ids, la.wts, la.hot, d_sh_pred, gfrac,
-                     layer, gen + 1, la.counter, lst, nullptr, starts);
-    CK(hipEventRecord(la_done, lst));
+                     layer, gen + 1, la.counter, st, nullptr, starts);
 }
 
 static Pos3 cell_pos(const Seq &s, int p0, const int *pos3, int cell) {
@@ -1001,7 +991,7 @@ int Engine::image_encode(int slot, const float *patches, int gh, int gw, int fra
     if (im.rows && im.n != rows) { CK(hipHostFree(im.rows)); im.rows = nullptr; }
     if (!im.rows) CK(hipHostMalloc(&im.rows, (size_t)rows * D * 2));
     im.n = rows;
-    for (hipStream_t s : {st, cst, pst, lst}) if (s) CK(hipStreamSynchronize(s));
+    for (hipStream_t s : {st, cst}) if (s) CK(hipStreamSynchronize(s));
     const bool ok = vision.encode(patches, gh, gw, im.rows, barena.base, barena.cap, st, frames);
     CK(hipMemsetAsync(b.rr_counter, 0, 4, st));
     CK(hipMemsetAsync(la.counter, 0, 4, st));

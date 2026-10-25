@@ -5,6 +5,9 @@
 #include <cmath>
 #include <cstdio>
 #include <cstring>
+#include <pthread.h>
+#include <sched.h>
+#include <string>
 
 namespace {
 constexpr int D_ = 2560, FE_ = 640;
@@ -44,7 +47,23 @@ void CpuMoe::start(MoeShared *shared, MoeShared *pred, const std::vector<ColdLay
     dxq.resize((size_t)MOE_MAX_T * D_); dxs.resize(MOE_MAX_T * (D_ / 32)); dxsum.resize(MOE_MAX_T * (D_ / 16));
     ds16.resize(MOE_MAX_T * (D_ / 16)); df16.resize(MOE_MAX_T * (D_ / 16));
     dhq.resize((size_t)MOE_MAX_T * MOE_MAX_E * FE_); dhs.resize(MOE_MAX_T * MOE_MAX_E * (FE_ / 32)); dhc.resize(MOE_MAX_T * MOE_MAX_E * (FE_ / 32));
-    for (int i = 0; i < n; i++) th.emplace_back(&CpuMoe::worker, this, i);
+    std::vector<int> core;
+    for (int c = 1; c < CPU_SETSIZE && (int)core.size() < n; c++) {
+        FILE *f = fopen(("/sys/devices/system/cpu/cpu" + std::to_string(c) + "/topology/thread_siblings_list").c_str(), "r");
+        if (!f) continue;
+        int first = -1;
+        if (fscanf(f, "%d", &first) == 1 && first == c) core.push_back(c);
+        fclose(f);
+    }
+    for (int i = 0; i < n; i++) {
+        th.emplace_back(&CpuMoe::worker, this, i);
+        if (i < (int)core.size()) {
+            cpu_set_t set;
+            CPU_ZERO(&set);
+            CPU_SET(core[i], &set);
+            pthread_setaffinity_np(th.back().native_handle(), sizeof set, &set);
+        }
+    }
 }
 
 void CpuMoe::stop() {

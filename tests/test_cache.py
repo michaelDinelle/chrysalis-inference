@@ -91,3 +91,30 @@ assert not any(len(s.tokens) and s.tokens.tolist()[:len(before)] == before for s
 cached = serve(c, e, before + [400] * 30, reply=5)
 assert cached == len(before), f"the agent's step read {len(before) + 30 - cached} tokens again (cached {cached} of {len(before)})"
 print("an agent waiting on its sub-agents keeps its cache: ok")
+
+
+def serve_turn(c, e, prompt, turn, reply=0):
+    prompt = np.array(prompt, np.int32)
+    slot, cached = c.acquire(prompt)
+    e.prefill(slot.sid, prompt[cached:turn])
+    slot.tokens = prompt[:turn].copy()
+    c.checkpoint(slot)
+    e.prefill(slot.sid, prompt[turn:])
+    slot.tokens = prompt.copy()
+    c.checkpoint(slot, logits=True)
+    out = list(range(10_000, 10_000 + reply))
+    e.prefill(slot.sid, out)
+    slot.tokens = np.concatenate([prompt, np.array(out, np.int32)])
+    slot.busy = False
+    return cached
+
+
+e = FakeEngine()
+c = cache.Cache(e, n_slots=3, max_snapshots=4, min_snapshot_gap=8)
+reply_prompt = [1, 2, 3, 4]
+for k in range(3):
+    serve_turn(c, e, [600 + k] * 30 + reply_prompt, 30, reply=10)
+serve_turn(c, e, [5] * 50 + reply_prompt, 50, reply=30)
+cached = serve(c, e, [5] * 50 + [1, 2] + [77] * 20, reply=5)
+assert cached >= 50, f"the follow-up read the conversation again (cached {cached} of 50)"
+print("a full cache keeps the newest conversation up to its reply for the follow-up: ok")

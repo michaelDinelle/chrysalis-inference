@@ -124,15 +124,6 @@ void Engine::load(const std::string &path, int max_seqs, size_t reserve_bytes) {
     CK(hipSetDevice(0));
     CK(hipStreamCreateWithFlags(&st, hipStreamNonBlocking));
     CK(hipStreamCreateWithFlags(&cst, hipStreamNonBlocking));
-    CK(hipStreamCreateWithFlags(&pst, hipStreamNonBlocking));
-    {
-        int lo = 0, hi = 0;
-        CK(hipDeviceGetStreamPriorityRange(&lo, &hi));
-        CK(hipStreamCreateWithPriority(&lst, hipStreamNonBlocking, hi));
-    }
-    CK(hipEventCreateWithFlags(&la_ready, hipEventDisableTiming));
-    CK(hipEventCreateWithFlags(&la_done, hipEventDisableTiming));
-    CK(hipEventCreateWithFlags(&routed, hipEventDisableTiming));
     CK(hipEventCreateWithFlags(&moe_gpu_done, hipEventDisableTiming));
     CK(hipEventCreateWithFlags(&staged, hipEventDisableTiming));
     CK(hipEventCreateWithFlags(&copied, hipEventDisableTiming));
@@ -141,7 +132,7 @@ void Engine::load(const std::string &path, int max_seqs, size_t reserve_bytes) {
     CK(hipEventCreateWithFlags(&front_copied, hipEventDisableTiming));
     CK(hipEventRecord(copied, cst));
 
-    struct Up { const GGUFTensor *t; QTensor *q = nullptr; float **f = nullptr; half **h = nullptr; int layer = -1; bool pf = true;
+    struct Up { const GGUFTensor *t; QTensor *q = nullptr; float **f = nullptr; half **h = nullptr; int layer = -1;
                 int64_t b0 = -1; };
     std::vector<Up> ups;
     int cur = -1;
@@ -186,7 +177,6 @@ void Engine::load(const std::string &path, int max_seqs, size_t reserve_bytes) {
         quant(p + "ffn_gate_shexp.weight", w.sh_gate); quant(p + "ffn_up_shexp.weight", w.sh_up); quant(p + "ffn_down_shexp.weight", w.sh_down);
         if (l == NL && g.get(p + "ffn_gate_mtp.weight")) {
             quant(p + "ffn_gate_mtp.weight", w.hot_gate); quant(p + "ffn_up_mtp.weight", w.hot_up); quant(p + "ffn_down_mtp.weight", w.hot_down);
-            for (int k = 1; k <= 3; k++) ups[ups.size() - k].pf = false;
             w.n_hot = (int)get(p + "ffn_gate_mtp.weight")->ne[2];
         }
         if (l < NL) {
@@ -196,9 +186,9 @@ void Engine::load(const std::string &path, int max_seqs, size_t reserve_bytes) {
                 if (hg->type != IQ4_XS || get(p + "ffn_up_hot.weight")->type != IQ4_XS || get(p + "ffn_down_hot.weight")->type != IQ4_NL)
                     FAIL("layer %d: VRAM experts must be IQ4_XS gate / up, IQ4_NL down", l);
                 const int64_t b0 = (int64_t)n_slots * FE * D / 256, d0 = (int64_t)n_slots * D * FE / 32;
-                ups.push_back({hg, &pool_gate, nullptr, nullptr, cur, false, b0});
-                ups.push_back({get(p + "ffn_up_hot.weight"), &pool_up, nullptr, nullptr, cur, false, b0});
-                ups.push_back({get(p + "ffn_down_hot.weight"), &pool_down, nullptr, nullptr, cur, false, d0});
+                ups.push_back({hg, &pool_gate, nullptr, nullptr, cur, b0});
+                ups.push_back({get(p + "ffn_up_hot.weight"), &pool_up, nullptr, nullptr, cur, b0});
+                ups.push_back({get(p + "ffn_down_hot.weight"), &pool_down, nullptr, nullptr, cur, d0});
             }
             first_slot[l] = n_slots;
             n_slots += w.n_hot;
@@ -226,7 +216,7 @@ void Engine::load(const std::string &path, int max_seqs, size_t reserve_bytes) {
         dry.get<int>((size_t)NL * NE); dry.get<uint8_t>(n_slots);
         wbytes += dry.used;
     }
-    wbytes += (size_t)NE * 4 + 2 * (size_t)NGDN * GV * 4 + (1 << 20) + ups.size() * 8 * sizeof(PrefetchRange);
+    wbytes += (size_t)NE * 4 + 2 * (size_t)NGDN * GV * 4 + (1 << 20);
     warena.init(wbytes);
     pool_gate = make_qtensor(warena, IQ4_XS, n_slots * FE, D);
     pool_up = make_qtensor(warena, IQ4_XS, n_slots * FE, D);
@@ -335,23 +325,6 @@ void Engine::load(const std::string &path, int max_seqs, size_t reserve_bytes) {
             if (u.f) *u.f = (float *)d;
             if (u.h) *u.h = (half *)d;
         }
-    }
-    {
-        std::vector<std::vector<PrefetchRange>> pr(NL);
-        std::vector<std::pair<const void *, size_t>> arrs;
-        for (const Up &u : ups) {
-            if (u.layer < 0 || u.layer >= NL || !u.pf) continue;
-            arrs.clear();
-            if (u.q) qtensor_arrays(*u.q, arrs);
-            else arrs.push_back({u.f ? (const void *)*u.f : (const void *)*u.h, u.t->nbytes});
-            for (auto [p, n] : arrs) if (n >= 16) pr[u.layer].push_back({(const int4 *)p, n / 16});
-        }
-        std::vector<PrefetchRange> all;
-        pf_off.assign(NL, 0); pf_n.assign(NL, 0);
-        for (int l = 0; l < NL; l++) { pf_off[l] = (int)all.size(); pf_n[l] = (int)pr[l].size(); all.insert(all.end(), pr[l].begin(), pr[l].end()); }
-        pf_ranges = warena.get<PrefetchRange>(all.size());
-        pf_sink = warena.get<unsigned>(1);
-        CK(hipMemcpyAsync(pf_ranges, all.data(), all.size() * sizeof(PrefetchRange), hipMemcpyHostToDevice, st));
     }
     gdn_A = warena.get<float>((size_t)NGDN * GV);
     gdn_dt = warena.get<float>((size_t)NGDN * GV);
@@ -471,7 +444,7 @@ void Engine::load(const std::string &path, int max_seqs, size_t reserve_bytes) {
         };
         shared(sh, d_sh);
         shared(sh_pred, d_sh_pred);
-        n_workers = physical_cores();
+        n_workers = std::max(1, physical_cores() - 1);
         cpu.start(sh, sh_pred, cold, n_workers);
     }
     hipblasLtCreate(&lt);
@@ -522,7 +495,7 @@ void Engine::alloc_buffers(int max_seqs) {
         b.lo = a.get<float>((size_t)U * HCR);
         b.inv = a.get<float>((size_t)8 * HC);
         b.rr_counter = a.get<unsigned>(64);
-        la.res = a.get<float>((size_t)8 * HCD); la.lo = a.get<float>((size_t)8 * HCR); la.inv = a.get<float>((size_t)8 * HC);
+        la.lo = a.get<float>((size_t)8 * HCR); la.inv = a.get<float>((size_t)8 * HC);
         la.mx = a.get<float>((size_t)8 * D); la.hh = a.get<half>((size_t)8 * D); la.hq = qact((size_t)8 * D);
         la.logits = a.get<float>((size_t)8 * NE); la.sg = a.get<float>(8); la.wts = a.get<float>(8 * TOPK_E);
         la.ids = a.get<int>(8 * TOPK_E); la.hot = a.get<int>(8 * TOPK_E); la.counter = a.get<unsigned>(64);
@@ -698,8 +671,7 @@ void Engine::shutdown() {
     free_pages.clear(); page_ref.clear();
     if (cold_mem) (void)hipHostUnregister(cold_mem);
     (void)hipGetLastError();
-    (void)hipStreamDestroy(st); (void)hipStreamDestroy(cst); (void)hipStreamDestroy(pst); (void)hipStreamDestroy(lst);
-    (void)hipEventDestroy(la_ready); (void)hipEventDestroy(la_done);
+    (void)hipStreamDestroy(st); (void)hipStreamDestroy(cst);
     if (cold_mem) munmap(cold_mem, cold_bytes);
     if (spill_mem) munmap(spill_mem, spill_bytes);
     if (ngram_map) munmap(ngram_map, ngram_map_bytes);
