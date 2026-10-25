@@ -133,22 +133,43 @@ urls() {
     fi
 }
 
-ready() {
-    if ! here -f "$API/health" >/dev/null; then
-        printf "loading the model"
-        local i=0
-        until here -f "$API/health" >/dev/null; do
-            if (( ++i % 10 == 0 )); then printf .; fi
-            sleep 0.1
-        done
-        echo " done"
-    fi
-    echo "Chrysalis is running ($(loaded))"
+CHATTER='^chrysalis(-fn)?: (loading |CPU |weights |loaded in |warmed up |the expert pool as the last run)'
+loading() {
+    local spin=(⠋ ⠙ ⠹ ⠸ ⠼ ⠴ ⠦ ⠧ ⠇ ⠏) t0=$SECONDS i=0 name=model step="loading the weights" line buf= rc vram= ram= ctx n pct=0 bar rest
+    local sizes='weights ([0-9.]+) GB.*buffers ([0-9.]+) GB.*\(([0-9.]+) GB\)' cold='cold experts ([0-9.]+) GB' tokens='context ([0-9]+)'
+    local progress='"progress": ([0-9]+)\.?([0-9]*)'
+    while :; do
+        rc=0; IFS= read -r -t 0.1 line || rc=$?
+        if (( rc > 128 )); then
+            buf+=$line
+            [ -t 1 ] || continue
+            if (( i % 3 == 0 )) && [[ $(here -m 0.5 "$API/health") =~ $progress ]]; then
+                rest=${BASH_REMATCH[2]}00 pct=$((10#${BASH_REMATCH[1]} * 100 + 10#${rest:0:2}))
+            fi
+            printf -v bar '%*s%*s' $((pct / 5)) "" $((20 - pct / 5)) ""
+            rest=${bar:pct / 5} bar=${bar:0:pct / 5}
+            printf '\r\e[K  \e[35m%s\e[0m \e[1m%s\e[0m  \e[35m%s\e[90m%s\e[0m %3d%%  \e[2m%s · %d s\e[0m' \
+                "${spin[i++ % 10]}" "$name" "${bar// /━}" "${rest// /━}" $pct "$step" $((SECONDS - t0))
+            continue
+        fi
+        (( rc == 0 )) || return 1
+        line=$buf$line buf=
+        if [[ $line =~ $sizes ]]; then
+            vram=$(awk "BEGIN { printf \"%.1f\", ${BASH_REMATCH[1]} + ${BASH_REMATCH[2]} + ${BASH_REMATCH[3]} }") step="warming up"
+            [[ $line =~ $cold ]] && ram=$(awk "BEGIN { printf \"%.1f\", ${BASH_REMATCH[1]} }")
+        fi
+        case $line in
+            "chrysalis: loading "*) name=${line#chrysalis: loading } ;;
+            "chrysalis: serving "*)
+                [[ $line =~ $tokens ]] && n=${BASH_REMATCH[1]}
+                while (( n >= 1000 )); do ctx=$(printf ',%03d' $((n % 1000)))$ctx n=$((n / 1000)); done
+                printf '\r\e[K  \e[32m✓\e[0m \e[1m%s\e[0m ready in %d s  \e[2m%s tokens of context · %s GB VRAM%s\e[0m\n' \
+                    "$name" $((SECONDS - t0)) "$n$ctx" "$vram" "${ram:+ · $ram GB RAM}"
+                return 0 ;;
+            *) [[ $line =~ $CHATTER ]] || printf '\r\e[K%s\n' "$line" ;;
+        esac
+    done
 }
-
-loaded() { here -f "$API/chrysalis/stats" | "$BUN" -e '
-const s = await Bun.stdin.json(), l = s.link ?? {};
-console.log(s.model, "loaded" + (l.slow ? `; PCIe link at ${l.gts} GT/s x${l.width}, slower than its best (${l.best_gts} GT/s): start Chrysalis again` : ""));' 2>/dev/null || echo loading; }
 
 release() {
     set -uo pipefail
@@ -274,8 +295,9 @@ case "${1:-}" in
                     get qwen3.8-flash-next >/dev/null 2>&1 &
                     echo "  Qwen3.8-Flash-Next is downloading in the background: the model picker has it once it is here"
                 fi
-                engine &
-                ready
+                exec 3< <(trap "" INT; engine 2>&1)
+                loading <&3
+                grep --line-buffered -vE "$CHATTER" <&3 &
             else
                 echo "no RX 7900 here: the web chat uses Chrysalis on another computer on your network, or your Ollama, LM Studio or llama.cpp"
             fi

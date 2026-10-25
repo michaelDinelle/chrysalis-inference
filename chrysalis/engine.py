@@ -310,7 +310,12 @@ class Engine:
         if not hasattr(self.lib, "chrysalis_pool_warm"):
             return -1
         self.lib.chrysalis_pool_warm.argtypes = [C.c_char_p]
-        return self.lib.chrysalis_pool_warm(path.encode())
+        global _loading
+        _loading = self.lib
+        try:
+            return self.lib.chrysalis_pool_warm(path.encode())
+        finally:
+            _loading = None
 
     def expert_stats(self):
         if not hasattr(self.lib, "chrysalis_expert_stats"):

@@ -18,6 +18,8 @@ static_assert(TOPK == SAMPLE_N, "the sampler takes the engine's rows as they are
 #include <tuple>
 #include <vector>
 
+extern std::atomic<int> warm_done, warm_total;
+
 inline bool is_eos(int t) { return t == EOS_IM_END || t == EOS_TEXT; }
 inline size_t ssm_bytes() { return (size_t)NGDN * GV * GD * GD * 4; }
 inline size_t conv_bytes() { return (size_t)NGDN * QKV * 3 * 4; }

@@ -1,5 +1,6 @@
 import argparse
 import os
+import sys
 
 from .models import DEFAULT, MODELS
 
@@ -54,6 +55,7 @@ def main():
                 link.check(dev, a.link_tries)
             threading.Thread(target=check, daemon=True).start()
         spec = MODELS[a.use]
+        print(f"chrysalis: loading {a.use}", file=sys.stderr, flush=True)
         path = a.model or os.path.join(ROOT, spec["path"])
         engine = load_async(path, max_seqs=a.slots, umax=a.chunk or spec["chunk"], warmup=False, lib=os.path.join(ROOT, spec["lib"]))
         from .server import Server, serve

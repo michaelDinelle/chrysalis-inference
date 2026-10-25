@@ -27,10 +27,12 @@ void read_file(const GGUF &g, uint8_t *dst, const uint8_t *src, size_t n) {
 }
 }
 
+std::atomic<int> warm_done{0}, warm_total{0};
+
 float load_progress() {
-    if (load_phase >= 3) return 1.0f;
-    if (load_phase >= 1) return load_phase == 1 ? 0.93f : 0.97f;
-    return load_total ? 0.9f * std::min(1.0f, (float)load_read / (float)load_total) : 0.0f;
+    if (warm_total > 0) return 0.8f + 0.2f * std::min(1.0f, (float)warm_done / (float)warm_total);
+    if (load_phase >= 1) return load_phase == 1 ? 0.74f : load_phase == 2 ? 0.77f : 0.8f;
+    return load_total ? 0.72f * std::min(1.0f, (float)load_read / (float)load_total) : 0.0f;
 }
 
 namespace {

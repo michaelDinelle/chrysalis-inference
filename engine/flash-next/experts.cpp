@@ -132,11 +132,15 @@ int Engine::pool_warm(const char *path) {
     for (int k : owner) if (k >= 0 && k < (int)want.size()) want[k] = 1e9f;
     x.score = want;
     const int start = x.placed;
+    warm_done = 0;
+    warm_total = (int)std::count_if(owner.begin(), owner.end(), [&](int k) { return k >= 0 && k < (int)x.slot.size() && x.slot[k] < 0; });
+    struct Done { ~Done() { warm_total = 0; } } done_;
     const auto end = std::chrono::steady_clock::now() + std::chrono::seconds(30);
     while (std::chrono::steady_clock::now() < end) {
         const int before = x.placed;
         experts_place(0);
         experts_plan();
+        warm_done = x.placed - start;
         bool busy = false;
         for (Experts::Load &ld : x.loads) busy |= ld.state.load(std::memory_order_acquire) != Experts::FREE;
         if (!busy && x.placed == before) break;
