@@ -17,10 +17,7 @@
 
 Qwen3.8-Flash-Next on one PC. Each engine runs at its best for this PC, and the same client times every request.
 
-<p align="center"><picture>
-  <source media="(prefers-color-scheme: dark)" srcset="media/vs-strata-dark.svg">
-  <img src="media/vs-strata-light.svg" width="860" alt="Chrysalis against Strata IQ3_S and Q2_0: time to first token and writing speed at five prompt lengths, error against Q8_0, load time and memory">
-</picture></p>
+<p align="center"><img src="media/vs-strata.png" width="860" alt="Chrysalis against Strata IQ3_S and Q2_0: time to first token and writing speed at five prompt lengths, error against Q8_0, load time and memory"></p>
 
 Strata's IQ3_S is the closest to Chrysalis in quality, and the best Strata's setup offers a 64 GB PC. Chrysalis beats it
 on every measure here: first tokens 1.7-2.6x sooner, writing 1.1-1.3x faster, 1.7x closer to the full model and 1.5x
@@ -67,10 +64,7 @@ RX 7900 XTX (24 GB), Ryzen 7 7800X3D, 64 GB DDR5, Linux, one engine at a time.
 
 The same file in Chrysalis and in llama.cpp, on the same GPU.
 
-<p align="center"><picture>
-  <source media="(prefers-color-scheme: dark)" srcset="media/27b-vs-llamacpp-dark.svg">
-  <img src="media/27b-vs-llamacpp-light.svg" width="860" alt="Qwen3.8-27B in Chrysalis and in llama.cpp: time to first token and writing speed at five prompt lengths, load time and memory">
-</picture></p>
+<p align="center"><img src="media/27b-vs-llamacpp.png" width="860" alt="Qwen3.8-27B in Chrysalis and in llama.cpp: time to first token and writing speed at five prompt lengths, load time and memory"></p>
 
 Chrysalis reads prompts 1.4-2.8x sooner, writes 1.2-2.1x faster, starts 2.4x sooner and keeps 11 GB less in RAM.
 
