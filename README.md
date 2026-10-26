@@ -17,12 +17,13 @@
 
 Qwen3.8-Flash-Next on one PC. Each engine runs at its best for this PC, and the same client times every request.
 
-<p align="center"><img src="media/vs-strata.png" width="860" alt="Chrysalis against Strata IQ3_S and Q2_0: time to first token and writing speed at five prompt lengths, error against Q8_0, load time and memory"></p>
+<p align="center"><img src="media/vs-strata.png" width="860" alt="Chrysalis against Strata IQ3_S and Q2_0: time to first token and writing speed at five prompt lengths, error against Q8_0, load time, memory, and each one's share of this GPU's limit"></p>
 
 Strata's IQ3_S is the closest to Chrysalis in quality, and the best Strata's setup offers a 64 GB PC. Chrysalis beats it
-on every measure here: first tokens 1.7-2.6x sooner, writing 1.1-1.3x faster, 1.7x closer to the full model and 1.5x
-faster to load, in the same memory. Strata's Q2_0 is its speed setting: it writes 1.0-1.3x faster than Chrysalis and
-needs 11 GB less memory, at 5.9 times the error, and it failed one of its own sanity checks in one of the two runs.
+on every measure here: first tokens 1.8-2.9x sooner, writing 1.2-1.3x faster, 1.7x closer to the full model and 1.6x
+faster to load, in less memory. Strata's Q2_0 is its speed setting: it writes 1.0-1.2x faster than Chrysalis and needs
+10 GB less memory, at 5.6 times the error, and it failed one of its own sanity checks in one of the two runs. Reading a
+100K prompt, Chrysalis reaches 30% of this GPU's limit and Strata 17-18%.
 
 <details><summary>How it was measured, and every number</summary>
 
@@ -39,24 +40,30 @@ RX 7900 XTX (24 GB), Ryzen 7 7800X3D, 64 GB DDR5, Linux, one engine at a time.
   follow-up adds about 1,100 tokens to that chat. Each engine ran all of it twice: medians over 6 rounds, and over 10
   trials at 100K.
 - KL is against Q8_0 over the same 1,082 tokens of prose, a technical explanation and Python. Chrysalis ran one token at
-  a time, as it writes; Strata's files ran in llama.cpp.
+  a time, as it writes, with its experts moving as they do in use; Strata's files ran in llama.cpp.
 - Memory is the peak private RAM of each server. File pages, which the kernel can drop at any time, are not counted.
+- **Share of this GPU's limit**: the time the card's peak FP16 matrix rate needs for the prompt's math, or its memory
+  bandwidth for the weights a pass reads, over the time taken. [bench/limits.py](bench/limits.py) reads both from the
+  driver and the work from the model file. For Flash-Next it counts the whole model as if it were in VRAM, which it
+  can't be on this card, and Strata doesn't report how many tokens each of its passes writes.
 
 | | Chrysalis, 3.8-bit | Strata IQ3_S, 3.3-bit | Strata Q2_0, 2.3-bit |
 | --- | ---: | ---: | ---: |
-| First token, short prompt | **0.25 s** | 0.64 s | 0.41 s |
-| First token, 4K prompt | **1.9 s** | 3.4 s | 3.0 s |
-| First token, 16K prompt | **6.3 s** | 10.6 s | 9.8 s |
-| First token, 100K prompt | **39.6 s** | 66.2 s | 60.7 s |
-| First token, follow-up in the 100K chat | **1.2 s** | 1.9 s | 1.9 s |
-| Writing, short prompt | 81.8 tok/s | 72.9 tok/s | **107.3 tok/s** |
-| Writing, 4K prompt | 85.4 tok/s | 66.5 tok/s | **95.6 tok/s** |
-| Writing, 16K prompt | 85.7 tok/s | 69.7 tok/s | **95.4 tok/s** |
-| Writing, 100K prompt | 79.1 tok/s | 65.8 tok/s | **81.0 tok/s** |
-| Writing, follow-up in the 100K chat | 85.6 tok/s | 69.7 tok/s | **97.4 tok/s** |
-| Error vs Q8_0, mean KL over 1,082 tokens | **0.032** | 0.055 | 0.187 |
-| Load time, to a first answer | **16.0 s** | 24.6 s | 17.4 s |
-| Peak private RAM | 51.9 GB | 52.0 GB | **40.8 GB** |
+| First token, short prompt | **0.22 s** | 0.64 s | 0.41 s |
+| First token, 4K prompt | **1.8 s** | 3.4 s | 3.0 s |
+| First token, 16K prompt | **6.0 s** | 10.6 s | 9.8 s |
+| First token, 100K prompt | **37.0 s** | 66.2 s | 60.7 s |
+| First token, follow-up in the 100K chat | **1.1 s** | 1.9 s | 1.9 s |
+| Writing, short prompt | 92.6 tok/s | 72.9 tok/s | **107.3 tok/s** |
+| Writing, 4K prompt | 89.1 tok/s | 66.5 tok/s | **95.6 tok/s** |
+| Writing, 16K prompt | 87.6 tok/s | 69.7 tok/s | **95.4 tok/s** |
+| Writing, 100K prompt | 80.0 tok/s | 65.8 tok/s | **81.0 tok/s** |
+| Writing, follow-up in the 100K chat | 82.3 tok/s | 69.7 tok/s | **97.4 tok/s** |
+| Error vs Q8_0, mean KL over 1,082 tokens | **0.033** | 0.055 | 0.187 |
+| Load time, to a first answer | **15.7 s** | 24.6 s | 17.4 s |
+| Peak private RAM | 50.6 GB | 52.0 GB | **40.8 GB** |
+| Share of this GPU's limit, reading 100K | **30%** | 17% | 18% |
+| Share of this GPU's limit, writing at 100K | **22%** | not reported | not reported |
 
 </details>
 
@@ -64,9 +71,10 @@ RX 7900 XTX (24 GB), Ryzen 7 7800X3D, 64 GB DDR5, Linux, one engine at a time.
 
 The same file in Chrysalis and in llama.cpp, on the same GPU.
 
-<p align="center"><img src="media/27b-vs-llamacpp.png" width="860" alt="Qwen3.8-27B in Chrysalis and in llama.cpp: time to first token and writing speed at five prompt lengths, load time and memory"></p>
+<p align="center"><img src="media/27b-vs-llamacpp.png" width="860" alt="Qwen3.8-27B in Chrysalis and in llama.cpp: time to first token and writing speed at five prompt lengths, load time, memory, and each one's share of this GPU's limit"></p>
 
-Chrysalis reads prompts 1.4-2.8x sooner, writes 1.2-2.1x faster, starts 2.4x sooner and keeps 11 GB less in RAM.
+Chrysalis reads prompts 1.4-2.8x sooner, writes 1.2-2.1x faster, starts 2.4x sooner and keeps 11 GB less in RAM. At
+100K it reaches 62% of this GPU's limit reading the prompt and 55% writing, llama.cpp 40% and 27%.
 
 <details><summary>How it was measured, and every number</summary>
 
@@ -79,6 +87,7 @@ Chrysalis reads prompts 1.4-2.8x sooner, writes 1.2-2.1x faster, starts 2.4x soo
 - The same benchmark and PC as above. Chrysalis ran it twice and llama.cpp once; medians over every round, and over 10
   and 5 trials at 100K. Sanity checks: Chrysalis 24/24, llama.cpp 10/12 (its misses were answers that were not strict
   JSON).
+- **Share of this GPU's limit**: as above, with each engine's tokens per pass from its own log.
 
 | | Chrysalis, 4.65-bit file | llama.cpp, the same file |
 | --- | ---: | ---: |
@@ -94,6 +103,8 @@ Chrysalis reads prompts 1.4-2.8x sooner, writes 1.2-2.1x faster, starts 2.4x soo
 | Writing, follow-up in the 100K chat | **74.3 tok/s** | 38.5 tok/s |
 | Load time, to a first answer | **1.6 s** | 3.7 s |
 | Peak private RAM | **0.5 GB** | 11.9 GB |
+| Share of this GPU's limit, reading 100K | **62%** | 40% |
+| Share of this GPU's limit, writing at 100K | **55%** | 27% |
 
 </details>
 
@@ -163,7 +174,9 @@ docker run -d --device /dev/kfd --device /dev/dri -p 127.0.0.1:8080:8080 -v chry
 Chrysalis has its own engine for this GPU: hand-written kernels for each quantized format, MTP speculative decoding,
 and a prompt cache that turns each agent turn into an append. Flash-Next's 24,576 experts are placed by how often its
 replies use them: the most used in VRAM, following the conversation, and the rest in RAM, computed by the CPU. VRAM the
-KV cache isn't using holds about 1,300 more experts, until a long context needs it back.
+KV cache isn't using holds about 1,300 more experts, until a long context needs it back. Each machine's speeds are
+measured once and kept, and experts move at fixed steps, so a run repeats to the bit: that is how every engine change
+is checked against the last, and none may make any measure worse.
 
 ## Links
 
