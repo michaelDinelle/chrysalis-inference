@@ -66,7 +66,7 @@ interface Status { state: "online" | "loading" | "offline"; build?: string; mode
   backend?: Backend; link?: Linking }
 interface Linking { linked?: { name: string }; found: { name: string; fp: string }[]; refused?: string;
   pairing?: { name: string; code: string; state: "waiting" | "allowed" | "gone" | "error"; error?: string; theirs?: boolean; confirmed?: boolean } }
-interface Backend { url: string; chrysalis: boolean; service: boolean; key: boolean; remote: boolean; name: string;
+interface Backend { url: string; chrysalis: boolean; service: boolean; remote: boolean; name: string;
   listed?: { ok: true; models: { id: string }[] } | { ok: false; error: string } }
 interface View {
   el: HTMLElement; think: HTMLDetailsElement; summary: HTMLElement; thought: HTMLElement; body: HTMLElement; foot: HTMLElement; shown?: string; blocks?: Blocks;
@@ -78,7 +78,7 @@ interface Tok { t: string; p: number; alts: Alt[] }
 interface Live { phase: "waiting" | "thinking" | "writing"; since: number; note: string; loading?: boolean }
 interface Run {
   conv: Conversation; m: Message; live: Live;
-  at: number;
+  at: number; begun: number;
   stopping: boolean; gone?: boolean;
   usage?: { prompt_tokens: number; completion_tokens: number; cached?: number }; last?: any;
   read?: number; written?: number;
@@ -204,6 +204,7 @@ const ICONS = {
   mic: '<rect x="9" y="3" width="6" height="11" rx="3"/><path d="M5.5 11a6.5 6.5 0 0 0 13 0M12 17.5V21"/>',
   phone: '<rect x="6.5" y="2.5" width="11" height="19" rx="2.5"/><path d="M10.5 18.5h3"/>',
   shapes: '<rect x="3.5" y="10.5" width="10" height="10" rx="2"/><circle cx="15.5" cy="8.5" r="5"/>',
+  working: '<path d="M10.1 2.182a10 10 0 0 1 3.8 0"/><path d="M13.9 21.818a10 10 0 0 1-3.8 0"/><path d="M17.609 3.721a10 10 0 0 1 2.69 2.7"/><path d="M2.182 13.9a10 10 0 0 1 0-3.8"/><path d="M20.279 17.609a10 10 0 0 1-2.7 2.69"/><path d="M21.818 10.1a10 10 0 0 1 0 3.8"/><path d="M3.721 6.391a10 10 0 0 1 2.7-2.69"/><path d="M6.391 20.279a10 10 0 0 1-2.69-2.7"/>',
   gear: '<circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.7 1.7 0 0 0 .3 1.8l.1.1a2 2 0 1 1-2.8 2.8l-.1-.1a1.7 1.7 0 0 0-1.8-.3 1.7 1.7 0 0 0-1 1.5V21a2 2 0 1 1-4 0v-.1a1.7 1.7 0 0 0-1.1-1.5 1.7 1.7 0 0 0-1.8.3l-.1.1a2 2 0 1 1-2.8-2.8l.1-.1a1.7 1.7 0 0 0 .3-1.8 1.7 1.7 0 0 0-1.5-1H3a2 2 0 1 1 0-4h.1a1.7 1.7 0 0 0 1.5-1.1 1.7 1.7 0 0 0-.3-1.8l-.1-.1a2 2 0 1 1 2.8-2.8l.1.1a1.7 1.7 0 0 0 1.8.3H9a1.7 1.7 0 0 0 1-1.5V3a2 2 0 1 1 4 0v.1a1.7 1.7 0 0 0 1 1.5 1.7 1.7 0 0 0 1.8-.3l.1-.1a2 2 0 1 1 2.8 2.8l-.1.1a1.7 1.7 0 0 0-.3 1.8V9a1.7 1.7 0 0 0 1.5 1H21a2 2 0 1 1 0 4h-.1a1.7 1.7 0 0 0-1.5 1z"/>',
   page: '<rect x="3" y="4" width="18" height="16" rx="2.5"/><path d="M3 9h18M6.5 6.5h.01M9.5 6.5h.01"/>',
   image: '<rect x="3" y="4" width="18" height="16" rx="2.5"/><circle cx="9" cy="10" r="1.8"/><path d="m21 16-5-5-9 9"/>',
@@ -321,7 +322,7 @@ function unfold(id: string, open = true) {
 }
 function castRow(id: string, list: Conversation[], open: boolean): HTMLElement {
   const g = groups.get(id), name = nameOf(id);
-  const row = h("div", `cast-row${list.some((s) => runs.has(s.id)) ? " running" : ""}`);
+  const row = h("div", "cast-row");
   const pic = h("button", "cast-pic"), main = h("button", "cast-main"), add = h("button", "act cast-new");
   pic.type = main.type = add.type = "button";
   pic.title = pic.ariaLabel = g ? `${name}: who is in it` : `${name}'s card`;
@@ -331,7 +332,9 @@ function castRow(id: string, list: Conversation[], open: boolean): HTMLElement {
   if (list.length) {
     main.insertAdjacentHTML("beforeend", icon("chevron"));
     main.setAttribute("aria-expanded", String(open));
-    if (!open) main.append(h("span", "cast-count", String(list.length)));
+    const running = list.find((x) => runs.get(x.id));
+    if (!open && running) main.append(workingLabel(runs.get(running.id)!.begun));
+    else if (!open) main.append(h("span", "cast-count", String(list.length)));
   }
   main.onclick = () => {
     if (!list.length) return newChat(id);
@@ -684,6 +687,7 @@ async function cardFile(p: Person) {
 }
 const cardName = (id: string) => `${nameOf(id) || "character"}.png`;
 function closeSheet() {
+  if (menuAnchor?.closest("#cast-sheet")) voiceMenu.hidePopover();
   $("cast-sheet").hidden = true;
   if (sheetFile) URL.revokeObjectURL(sheetFile.url);
   sheetFile = undefined;
@@ -692,70 +696,41 @@ function closeSheet() {
   sampler = undefined;
 }
 function voicePick(p: Person, keep: () => void) {
-  const box = h("div", "card-voice"), sel = h("select"), play = h("button", "act");
-  const assistant = p.kind === "assistant";
-  const hear = () => {
-    const [tts, name] = sel.value ? sel.value.split("\n") : assistant ? [] : [settings.voice?.tts, settings.voice?.name];
-    samples().preview(tts, name);
-  };
-  const fill = (none_ = "Voices…") => {
-    const mine = assistant ? { tts: settings.voice?.tts, name: settings.voice?.name } : voiceOf(p.card.data);
-    const models = (voiceCatalog.tts ?? []).filter((m) => m.installed && m.voices?.length);
-    const none = h("option", "", models.length ? (assistant ? "The default voice" : `${nameOf(CHRYSALIS)}'s voice`) : none_);
-    none.value = "";
-    sel.replaceChildren(none, ...models.map((m) => {
-      const group = h("optgroup");
-      group.label = m.label;
-      for (const x of m.voices!) {
-        const o = h("option", "", `${x.label} · ${voiceGroup(x)}`);
-        o.value = `${m.name}\n${x.id}`;
-        o.selected = mine?.tts === m.name && mine?.name === x.id;
-        group.append(o);
+  const box = h("div", "card-voice"), assistant = p.kind === "assistant";
+  const mine = () => (assistant ? settings.voice : voiceOf(p.card.data));
+  const spot: VoiceSpot = {
+    now: () => voiceIdOf(mine()?.tts, mine()?.name),
+    none: assistant ? "The default voice" : `${nameOf(CHRYSALIS)}'s voice`,
+    pick: (id) => {
+      const [tts, name] = voiceParts(id);
+      if (assistant) {
+        setVoice({ tts, name });
+        saveSettings();
+      } else {
+        const ext = (p.card.data.extensions ??= {}), own = (ext.chrysalis ??= {}) as { voice?: Voice };
+        if (name) own.voice = { tts, name }; else delete own.voice;
+        keep();
       }
-      return group;
-    }));
-    play.disabled = !models.length;
+      if (voice && castOf(voice.c).members.some((m) => m.id === p.id)) pushVoice();
+      trigger.paint();
+    },
+    hear: (id) => {
+      const [tts, name] = id ? voiceParts(id) : assistant ? [] : [settings.voice?.tts, settings.voice?.name];
+      return samples().preview(tts, name);
+    },
   };
+  const trigger = voiceTrigger(spot);
   box.title = "The voice they speak with in voice mode";
-  sel.ariaLabel = "Voice";
-  play.type = "button";
-  play.title = play.ariaLabel = "Hear it";
-  play.innerHTML = icon("play");
-  play.onclick = hear;
-  sel.onchange = () => {
-    const [tts, name] = sel.value.split("\n");
-    if (assistant) {
-      setVoice({ tts: tts || undefined, name: name || undefined });
-      saveSettings();
-    } else {
-      const ext = (p.card.data.extensions ??= {}), own = (ext.chrysalis ??= {}) as { voice?: Voice };
-      if (sel.value) own.voice = { tts, name }; else delete own.voice;
-      keep();
-    }
-    if (voice && castOf(voice.c).members.some((m) => m.id === p.id)) pushVoice();
-    hear();
-  };
-  fill();
-  if (!voiceCatalog.tts?.length) {
-    void samples().catalog().then((c) => {
-      if (c?.tts?.length) {
-        voiceCatalog = c;
-        setPref("voice-catalog", JSON.stringify(c));
-      }
-      if (box.isConnected) fill("No voices");
-    });
-  }
-  box.insertAdjacentHTML("afterbegin", icon("wave"));
-  box.append(sel, play);
+  box.append(trigger.el);
   return box;
 }
 document.addEventListener("pointerdown", (e) => {
   const t = e.target as HTMLElement;
   if (!$("cast-add").hidden && !t.closest("#cast-add, #add-cast")) $("cast-add").hidden = true;
-  if (!$("cast-sheet").hidden && !t.closest("#cast-sheet, [data-card]")) closeSheet();
+  if (!$("cast-sheet").hidden && !t.closest("#cast-sheet, [data-card], #voice-menu")) closeSheet();
 });
 document.addEventListener("keydown", (e) => {
-  if (e.key !== "Escape") return;
+  if (e.key !== "Escape" || voiceMenu.matches(":popover-open")) return;
   if (!$("cast-add").hidden) { $("cast-add").hidden = true; e.preventDefault(); }
   else if (!$("cast-sheet").hidden) { closeSheet(); e.preventDefault(); }
 }, true);
@@ -1387,6 +1362,12 @@ function pageFigure(old: Node | undefined, text: string, live = false, fixed = f
   const title = text.match(/<title[^>]*>([^<]*)<\/title>/i)?.[1].trim();
   fig.querySelector(".svg-state")!.textContent = live ? "Writing the page" : title ? `Page · ${title}` : "Page";
   fig.classList.toggle("drawing", live);
+  const paper = fig.querySelector<HTMLElement>(".page-paper")!;
+  let badge = paper.querySelector<HTMLElement>(":scope > .page-writing");
+  if (live && !badge) {
+    paper.append(badge = h("div", "page-writing"));
+    badge.innerHTML = `${icon("gear")}<span>Writing the page…</span>`;
+  } else if (!live) badge?.remove();
   showPage(fig.querySelector<HTMLElement>(".page-paper")!, text, live);
   return fig;
 }
@@ -1562,9 +1543,10 @@ const KINDS_SHOWN: Record<string, [keyof typeof ICONS, string]> = { svg: ["image
   doc: ["doc", "Document"], code: ["code", "Code"] };
 const canvasKind = (ver: Version) => ver.kind === "svg" || (["xml", "html"].includes(ver.kind) && SVG_START.test(ver.src)) ? "svg"
   : ver.kind === "mermaid" ? "mermaid" : isPage(ver.kind, ver.src) ? "page" : DOC_KINDS.has(ver.kind) ? "doc" : "code";
+const WRITING: Record<string, string> = { page: "Writing the page", svg: "Drawing", mermaid: "Drawing the diagram", doc: "Writing", code: "Writing the code" };
 function cardText(ver: Version, count: number) {
-  const done = (ver.applied ?? []).filter((a) => a.ok).length, [, kind] = KINDS_SHOWN[canvasKind(ver)];
-  const what = ver.block.live ? (ver.applied ? `Changing${done ? `, ${done} so far` : ""}` : "Writing") : ver.block.by === "user"
+  const done = (ver.applied ?? []).filter((a) => a.ok).length, shape = canvasKind(ver), [, kind] = KINDS_SHOWN[shape];
+  const what = ver.block.live ? (ver.applied ? `Changing${done ? `, ${done} so far` : ""}…` : `${WRITING[shape]}…`) : ver.block.by === "user"
     ? `your edit${ver.block.at === conv ? ", not sent yet" : ""}` : ver.applied ? `${done} change${done === 1 ? "" : "s"}` : "";
   return [kind, `v${ver.v}`, ver.from ? `from ${ver.from.id} v${ver.from.v}` : "", what, ver.v < count && !ver.block.live ? `now v${count}` : ""]
     .filter(Boolean).join(" · ");
@@ -1583,10 +1565,10 @@ function artCard(old: Node | undefined, ver: Version, count: number): HTMLElemen
   return el;
 }
 function paintCard(el: HTMLElement, ver: Version, count: number) {
-  const kind = canvasKind(ver);
-  if (el.dataset.shape !== kind) {
-    el.dataset.shape = kind;
-    el.querySelector(".art-icon")!.innerHTML = icon(KINDS_SHOWN[kind][0]);
+  const kind = canvasKind(ver), shape = ver.block.live ? "live" : kind;
+  if (el.dataset.shape !== shape) {
+    el.dataset.shape = shape;
+    el.querySelector(".art-icon")!.innerHTML = icon(ver.block.live ? "gear" : KINDS_SHOWN[kind][0]);
   }
   el.dataset.art = ver.id;
   el.dataset.v = String(ver.v);
@@ -1672,7 +1654,7 @@ function renderShelf() {
     shelf.main = shelf.other = undefined;
   }
   const fresh = made.filter((x) => !shelf.known!.has(liveKey(x))).at(-1);
-  for (const x of made) if (!x.block.live) shelf.known!.add(liveKey(x));
+  for (const x of made) shelf.known!.add(liveKey(x));
   if (fresh && p.beside.matches && shelf.shut !== liveKey(fresh) && (!shelf.open || !shelf.main?.v)) {
     shelf.open = true;
     shelf.main = { id: fresh.id };
@@ -1691,7 +1673,6 @@ function renderShelf() {
     return markCards(all);
   }
   if (!shelf.main || !all.has(shelf.main.id)) shelf.main = { id: live?.id ?? ids.at(-1)! };
-  else if (live && !shelf.main.v && shelf.main.id !== live.id) shelf.main = { id: live.id };
   const main = pickVersion(all, shelf.main);
   if (shelf.other && !all.has(shelf.other.id)) shelf.other = undefined;
   const other = shelf.compare ? (shelf.other ? pickVersion(all, shelf.other) : (() => { const b = besideOf(main); return b ? pickVersion(all, b) : undefined; })()) : undefined;
@@ -2449,7 +2430,6 @@ function render() {
   thread.append(...(conv.messages.length ? conv.messages.map(messageView) : [emptyState()]));
   for (const el of was) el.remove();
   $("title").textContent = conv.title;
-  $("export").hidden = !conv.messages.length;
   document.title = conv.messages.length ? `${conv.title} · Chrysalis Inference` : "Chrysalis Inference";
   renderComposer();
   renderList();
@@ -3150,7 +3130,7 @@ function ago(t: number) {
     : s < 30 * 86400 ? `${Math.floor(s / 604800)}w` : new Date(t).toLocaleDateString(undefined, { month: "short", day: "numeric" });
 }
 function convRow(s: Conversation) {
-  const a = h("a", `conv${s.id === conv.id ? " active" : ""}${runs.has(s.id) ? " running" : ""}`), del = h("button", "conv-del", "×");
+  const a = h("a", `conv${s.id === conv.id ? " active" : ""}`), del = h("button", "conv-del", "×");
   a.href = `#${s.id}`;
   a.onclick = (e) => { if (!e.defaultPrevented) closeOver(panes.conversations); };
   del.type = "button";
@@ -3162,8 +3142,30 @@ function convRow(s: Conversation) {
     del.textContent = "Delete";
     setTimeout(() => { del.classList.remove("armed"); del.textContent = "×"; }, 2500);
   };
-  a.append(h("span", "conv-title", s.title), h("span", "conv-ago", ago(s.updated)), del);
+  const r = runs.get(s.id);
+  a.append(h("span", "conv-title", s.title), r ? workingLabel(r.begun) : h("span", "conv-ago", ago(s.updated)), del);
   return a;
+}
+const workingFor = (ms: number) => {
+  const sec = Math.max(0, Math.floor(ms / 1000)), min = Math.floor(sec / 60);
+  return sec < 60 ? `${sec}s` : min < 60 ? `${min}m` : `${Math.floor(min / 60)}h ${min % 60}m`;
+};
+function workingLabel(begun: number) {
+  const el = h("span", "conv-status"), dur = h("span", "conv-dur", workingFor(Date.now() - begun));
+  dur.dataset.since = String(begun);
+  dur.ariaHidden = "true";
+  el.innerHTML = icon("working");
+  el.append(h("span", "", "Working"), dur);
+  workingTick ||= window.setInterval(tickWorking, 1000);
+  return el;
+}
+let workingTick = 0;
+function tickWorking() {
+  const els = document.querySelectorAll<HTMLElement>(".conv-dur[data-since]");
+  for (const el of els) el.textContent = workingFor(Date.now() - Number(el.dataset.since));
+  if (els.length) return;
+  clearInterval(workingTick);
+  workingTick = 0;
 }
 
 let picked = pref("model", MODELS[0][0]);
@@ -3368,7 +3370,7 @@ let leaving = false;
 addEventListener("pagehide", () => { leaving = true; });
 async function startRun(c: Conversation, m: Message, body: () => object, pick?: Tok) {
   const phase = m.content ? "writing" : m.reasoning ? "thinking" : "waiting";
-  const run: Run = { conv: c, m, live: { phase, since: performance.now(), note: "Reading the prompt" }, at: 0, stopping: false, frame: 0, saved: 0, pick };
+  const run: Run = { conv: c, m, live: { phase, since: performance.now(), note: "Reading the prompt" }, at: 0, begun: Date.now(), stopping: false, frame: 0, saved: 0, pick };
   m.base = m.rounds?.length || undefined;
   m.notes = undefined;
   runs.set(c.id, run);
@@ -3404,7 +3406,7 @@ async function startRun(c: Conversation, m: Message, body: () => object, pick?: 
 }
 
 async function resume(c: Conversation, m: Message) {
-  const run: Run = { conv: c, m, live: { phase: "waiting", since: performance.now(), note: "Reading the prompt" }, at: 0, stopping: false, frame: 0, saved: 0 };
+  const run: Run = { conv: c, m, live: { phase: "waiting", since: performance.now(), note: "Reading the prompt" }, at: 0, begun: Date.now(), stopping: false, frame: 0, saved: 0 };
   runs.set(c.id, run);
   try {
     const res = await fetch(`/api/chat/${m.job}?from=0`);
@@ -3464,6 +3466,7 @@ function take(run: Run, ev: any) {
   }
   if (ev.stopped) m.stopped = true;
   if (ev.timing) run.timing = ev.timing;
+  if (typeof ev.started === "number" && ev.started !== run.begun) { run.begun = ev.started; renderList(); }
   if (ev.chrysalis_prompt) { run.read = ev.chrysalis_prompt.prompt_tokens; run.written = 0; }
   if (d.content || d.reasoning_content) run.written = (run.written ?? 0) + 1;
   if (ev.usage) {
@@ -3738,6 +3741,7 @@ async function openVoice() {
       setPref("voice-catalog", JSON.stringify(voiceCatalog));
       pushVoice();
       renderVoice();
+      renderVoiceMenu();
       syncSettings();
     },
     speech: (on) => { if (mine() && on && voice!.ahead && !voice!.ahead.said) dropAhead(voice!); },
@@ -3801,7 +3805,7 @@ function closeVoice() {
   cancelAnimationFrame(v.frame);
   (globalThis as any).CSS?.highlights?.delete("voice-unspoken");
   v.client.close();
-  setVoicePop(false);
+  if (menuSpot === composerVoice) voiceMenu.hidePopover();
   paintGhost();
   renderVoice();
   input.focus();
@@ -3874,7 +3878,7 @@ function startAhead(v: VoiceMode, text: string, on?: Message): Ahead {
   const q: Message = on ?? { role: "user", content: fixed.text, voice: true, ...(note ? { note } : {}), ...pointFields(true), ...takeEdits() };
   const sent = { ...q, content: fixed.text }, upto = on ? c.messages.map((x) => (x === on ? sent : x)) : [...c.messages, sent];
   const m: Message = { id: randomId(), role: "assistant", content: "", reasoning: "", effort, params: changed(mode) || undefined };
-  const run: Run = { conv: c, m, live: { phase: "waiting", since: performance.now(), note: "Reading the prompt" }, at: 0, stopping: false, frame: 0, saved: 0 };
+  const run: Run = { conv: c, m, live: { phase: "waiting", since: performance.now(), note: "Reading the prompt" }, at: 0, begun: Date.now(), stopping: false, frame: 0, saved: 0 };
   const a: Ahead = { text, q, sent: fixed.text, tool, run, reply: { m, sent: 0, spoken: 0, audible: false }, ended: false, live: false };
   if (!on) heardAs.set(q, text);
   v.client.hold(m.id!);
@@ -4167,9 +4171,11 @@ function voiceStatus(v: VoiceMode, phase: VoicePhase) {
 }
 
 function renderVoice() {
-  const v = voice, pill = $("voice-pill"), pick = $("voice-pick");
+  const v = voice, pill = $("voice-pill");
   $("composer").classList.toggle("voicing", !!v);
-  pill.hidden = pick.hidden = !v;
+  pill.hidden = !v;
+  composerPick ??= voiceTrigger(composerVoice, $<HTMLButtonElement>("voice-pick"));
+  composerPick.el.hidden = !v;
   $("voice").hidden = !!v;
   renderComposer();
   if (!v) return void delete $("composer").dataset.phase;
@@ -4179,11 +4185,8 @@ function renderVoice() {
   mute.setAttribute("aria-label", mute.title);
   mute.setAttribute("aria-pressed", String(v.muted));
   mute.classList.toggle("on", v.muted);
-  const cur = currentVoice(), name = voiceInfo(cur.tts, cur.id)?.label ?? cur.id ?? "Voice", model = modelLabel("tts", cur.tts);
-  pick.innerHTML = `<span class="voice-pick-name">${escapeHtml(name)}</span>${model ? `<span class="voice-pick-model">${escapeHtml(model)}</span>` : ""}${icon("chevron")}`;
-  pick.title = `Voice: ${name}${model ? ` (${model})` : ""}`;
-  $("voice-meta").textContent = v.ready ? (["stt", "turn", "tts"] as Part[]).map((k) => modelLabel(k, v.ready!.stack[k])).filter(Boolean).join(" · ") : "";
-  $("voice-meta").title = v.ready ? Object.entries(v.ready.stack).map(([k, n]) => `${k}: ${n}`).join("\n") : "";
+  composerPick.paint();
+  if (menuSpot === composerVoice) renderVoiceMenu();
   paintVoice();
   v.frame ||= requestAnimationFrame(animateVoice);
 }
@@ -4255,75 +4258,19 @@ const langName = (code: string) => { try { return LANGS.of(code) ?? code; } catc
 const voiceGroup = (x: VoiceInfo) => [langName(x.lang), x.gender ? x.gender[0].toUpperCase() + x.gender.slice(1) : ""].filter(Boolean).join(" · ");
 const modelLabel = (part: Part, name?: string) => (name && voiceCatalog[part]?.find((m) => m.name === name)?.label) || name;
 
-function pickVoice(tts: string, x: VoiceInfo) {
-  const before = { tts: settings.voice?.tts, name: settings.voice?.name };
-  setVoice({ tts, name: x.id });
-  saveSettings();
-  setVoicePop(false, true);
-  toast(`Voice: ${x.label}`, () => { setVoice(before); saveSettings(); });
-}
-
-let voicePop = false;
-function setVoicePop(open: boolean, refocus = false) {
-  voicePop = open && !!voice;
-  $("voice-pop").hidden = !voicePop;
-  $("voice-pick").classList.toggle("open", voicePop);
-  $("voice-pick").setAttribute("aria-expanded", String(voicePop));
-  delete $("voice-pop").dataset.key;
-  renderVoicePop();
-  if (voicePop) $("voice-pop").querySelector<HTMLElement>(".current .voice-item, .voice-item")?.focus();
-  else if (refocus && voice) $("voice-pick").focus();
-}
-function renderVoicePop() {
-  const pop = $("voice-pop"), cur = currentVoice(), key = JSON.stringify([voiceCatalog.tts, cur]);
-  if (!voicePop || pop.dataset.key === key) return;
-  pop.dataset.key = key;
-  const rows: HTMLElement[] = [];
-  for (const m of voiceCatalog.tts ?? []) {
-    const head = h("div", m.installed ? "voice-model" : "voice-model missing");
-    head.append(h("span", "", m.label));
-    if (!m.installed) {
-      const get = h("button", "btn small", "Download");
-      get.type = "button";
-      get.onclick = () => {
-        get.disabled = true;
-        get.textContent = "Downloading…";
-        samples().get(m.name);
-        void samples().catalog().then((c) => {
-          if (c?.tts?.length) { voiceCatalog = c; setPref("voice-catalog", JSON.stringify(c)); }
-          renderVoicePop();
-        });
-      };
-      head.append(get);
-    }
-    rows.push(head);
-    if (!m.installed) continue;
-    const groups = new Map<string, VoiceInfo[]>();
-    for (const x of m.voices ?? []) groups.set(voiceGroup(x), [...(groups.get(voiceGroup(x)) ?? []), x]);
-    for (const [g, list] of groups) {
-      rows.push(h("div", "voice-group", g));
-      for (const x of list) {
-        const on = m.name === cur.tts && x.id === cur.id, row = h("div", on ? "voice-row current" : "voice-row");
-        const item = h("button", "model-item voice-item"), play = h("button", "act voice-play"), mark = h("span", "model-check");
-        item.type = play.type = "button";
-        item.setAttribute("role", "option");
-        item.setAttribute("aria-selected", String(on));
-        item.dataset.voice = `${m.name}/${x.id}`;
-        if (on) mark.innerHTML = icon("check");
-        item.append(h("span", "model-label", x.label), mark);
-        item.onclick = () => pickVoice(m.name, x);
-        play.innerHTML = icon("play");
-        play.title = `Hear ${x.label}`;
-        play.setAttribute("aria-label", play.title);
-        play.onclick = () => voice?.client.preview(x.id);
-        row.append(play, item);
-        rows.push(row);
-      }
-    }
-  }
-  if (!rows.length) rows.push(h("div", "voice-group", "The voice service has not listed its voices yet"));
-  $("voice-list").replaceChildren(...rows);
-}
+const composerVoice: VoiceSpot = {
+  now: () => { const c = currentVoice(); return voiceIdOf(c.tts, c.id); },
+  none: "Default",
+  pick: (id) => {
+    const before = { tts: settings.voice?.tts, name: settings.voice?.name }, [tts, name] = voiceParts(id);
+    setVoice({ tts, name });
+    saveSettings();
+    toast(`Voice: ${voiceShown(id, "Default").name}`, () => { setVoice(before); saveSettings(); });
+  },
+  hear: (id) => { const [tts, name] = voiceParts(id); return voice ? voice.client.preview(name, tts) : Promise.resolve(); },
+  meta: () => voice?.ready ? (["stt", "turn", "tts"] as Part[]).map((k) => modelLabel(k, voice!.ready!.stack[k])).filter(Boolean).join(" · ") : "",
+};
+let composerPick: ReturnType<typeof voiceTrigger> | undefined;
 
 let pending: Attachment[] = [];
 const bodies = new Map<string, string>();
@@ -4441,7 +4388,6 @@ const blobOf = (url: string) => {
   const [head, b64] = url.split(",", 2), bytes = Uint8Array.from(atob(b64), (ch) => ch.charCodeAt(0));
   return new Blob([bytes], { type: head.slice(5).split(";")[0] });
 };
-const fileName = (title: string) => `${title.replace(/[^\p{L}\p{N}]+/gu, "-").replace(/^-+|-+$/g, "").slice(0, 60) || "chat"}.chrysalis.json`;
 
 const isCall = (c: any) => typeof c?.id === "string" && typeof c.name === "string" && typeof c.args === "string" && (c.result === undefined || typeof c.result === "string");
 const isRound = (r: any) => typeof r?.content === "string" && (r.reasoning === undefined || typeof r.reasoning === "string") && Array.isArray(r.calls) && r.calls.every(isCall);
@@ -4745,7 +4691,7 @@ document.addEventListener("keydown", (e) => {
   if (!$("tokpop").hidden) return closeTokPop();
   if (toolsOpen) return setToolsOpen(false, true);
   if (modelsOpen) return setModelsOpen(false, true);
-  if (voicePop) return setVoicePop(false, true);
+  if (voiceMenu.matches(":popover-open")) return;
   if (document.querySelector("dialog[open]")) return;
   const over = PANES.find((p) => isOpen(p) && !p.beside.matches);
   if (over) return over === panes.artifacts ? closeShelf() : setPane(over, false);
@@ -4781,7 +4727,6 @@ window.addEventListener("hashchange", () => {
 });
 $("new-chat").addEventListener("click", () => newChat());
 $("add-cast").addEventListener("click", (e) => { e.stopPropagation(); openAdd(e.currentTarget as HTMLElement); });
-$("export").addEventListener("click", () => void exportChats([conv], fileName(conv.title)));
 $("export-all").addEventListener("click", () => {
   const all = Object.values(chats).sort((a, b) => b.updated - a.updated);
   if (all.length) void exportChats(all, `chrysalis-chats-${new Date().toISOString().slice(0, 10)}.json`);
@@ -4976,7 +4921,6 @@ function buildControls() {
   });
   document.addEventListener("pointerdown", (e) => {
     if (modelsOpen && !(e.target as Element).closest("#model-pop, #model-btn")) setModelsOpen(false);
-    if (voicePop && !(e.target as Element).closest("#voice-pop, #voice-pick")) setVoicePop(false);
   });
 }
 
@@ -4994,15 +4938,13 @@ function renderBackend() {
   const b = status.backend, form = $("backend");
   form.hidden = !b;
   if (!b) return;
-  const url = $<HTMLInputElement>("backend-url"), key = $<HTMLInputElement>("backend-key"), here = !!status.here;
+  const url = $<HTMLInputElement>("backend-url"), here = !!status.here;
   const down = b.listed && !b.listed.ok ? b.listed.error : "", dot = $("backend-dot");
   dot.className = `dot ${down ? "offline" : b.remote ? "remote" : status.state}`;
   dot.title = down || (b.remote ? "Off this computer and its network" : status.state === "online" ? "Answering" : status.state === "loading" ? "Loading" : "Stopped");
   if (!backendEdited && document.activeElement !== url) url.value = b.url;
   url.readOnly = !here;
   url.title = here ? `${b.name}: replies come from here. Paste another backend's address and press Enter.` : "Set on the computer Chrysalis runs on";
-  key.hidden = !here;
-  key.placeholder = b.key ? "key set" : "API key";
   $("backend-go").hidden = !here || !backendEdited;
   let known: string[] = [];
   try { known = JSON.parse(pref("backends", "[]")); } catch {  }
@@ -5044,17 +4986,16 @@ function backendNote(text: string, error = false, far = false) {
 function resetBackend() {
   backendEdited = false;
   $<HTMLInputElement>("backend-url").value = status.backend?.url ?? "";
-  $<HTMLInputElement>("backend-key").value = "";
   backendNote("");
   renderBackend();
 }
 async function setBackend(confirmRemote = false) {
-  const url = $<HTMLInputElement>("backend-url").value.trim(), key = $<HTMLInputElement>("backend-key").value, go = $<HTMLButtonElement>("backend-go");
+  const url = $<HTMLInputElement>("backend-url").value.trim(), go = $<HTMLButtonElement>("backend-go");
   go.disabled = true;
   backendNote("Checking…");
   try {
     const r = await fetch("/api/backend", { method: "POST", headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ url, ...(key ? { key } : {}), ...(confirmRemote ? { confirmRemote: true } : {}) }) });
+      body: JSON.stringify({ url, ...(confirmRemote ? { confirmRemote: true } : {}) }) });
     const body = await r.json().catch(() => ({}));
     if (r.status === 409 && body.remote)
       return backendNote(`Every chat you send would go to ${body.remote}, off this computer and its network.`, true, true);
@@ -5403,7 +5344,8 @@ function loadSettings(): Settings {
 function saveSettings() {
   store("settings2", settings);
   pushVoice();
-  if (voice) { renderVoice(); renderVoicePop(); }
+  if (voice) renderVoice();
+  renderVoiceMenu();
   syncSettings();
 }
 const value = (mode: Mode, key: SamplerKey) => settings[mode][key] ?? RECOMMENDED[mode][key];
@@ -5728,7 +5670,7 @@ function buildSettings() {
   voicePromptInput.addEventListener("input", () => {
     setVoice({ prompt: voicePromptInput.value === DEFAULT_VOICE_PROMPT ? undefined : voicePromptInput.value });
     saveSettings();
-    fit(voicePromptInput);
+    growAll(voicePromptInput);
   });
   $("voice-prompt-reset").onclick = () => {
     const before = settings.voice?.prompt;
@@ -5736,46 +5678,13 @@ function buildSettings() {
     saveSettings();
     toast("The voice prompt is back to the default", () => { setVoice({ prompt: before }); saveSettings(); });
   };
-  const choice = (id: string, label: string, help: string, change: (value: string) => void, reset: () => void) => {
-    const row = h("div", "knob voice-choice"), lab = h("label", "", label), select = h("select", "voice-select"), back = h("button", "act knob-reset");
-    row.title = help;
-    lab.htmlFor = select.id = id;
-    back.type = "button";
-    back.innerHTML = icon("retry");
-    back.title = "Back to the voice service's default";
-    select.addEventListener("change", () => { change(select.value); saveSettings(); });
-    back.onclick = () => { reset(); saveSettings(); };
-    row.append(lab, select, back);
-    return { row, select };
-  };
-  const pick = choice("voice-name", "Voice", "The voice replies are spoken in; one of another voice model switches to it (also in voice mode's dock)",
-    (v) => { const [tts, name] = v ? JSON.parse(v) : []; setVoice({ tts, name }); }, () => setVoice({ tts: undefined, name: undefined }));
-  knobs.push(() => {
-    const s = settings.voice, now = s?.name ? JSON.stringify([s.tts ?? voice?.ready?.stack.tts ?? "", s.name]) : "", key = JSON.stringify([voiceCatalog.tts, now]);
-    pick.row.classList.toggle("custom", !!now);
-    if (pick.select.dataset.key === key) return;
-    pick.select.dataset.key = key;
-    const groups: HTMLElement[] = [new Option("Default", "")];
-    for (const m of (voiceCatalog.tts ?? []).filter((x) => x.installed)) {
-      const by = new Map<string, HTMLOptGroupElement>();
-      for (const x of m.voices ?? []) {
-        const g = `${m.label} · ${voiceGroup(x)}`;
-        if (!by.has(g)) by.set(g, Object.assign(document.createElement("optgroup"), { label: g }));
-        by.get(g)!.append(new Option(x.label, JSON.stringify([m.name, x.id])));
-      }
-      groups.push(...by.values());
-    }
-    const listed = groups.flatMap((g) => g instanceof HTMLOptionElement ? [g.value] : [...g.querySelectorAll("option")].map((o) => o.value));
-    if (now && !listed.includes(now)) groups.push(new Option(s!.name!, now));
-    pick.select.replaceChildren(...groups);
-    pick.select.value = now;
-  });
+  knobs.push(voiceTrigger(settingsVoice, $<HTMLButtonElement>("voice-settings")).paint);
   const speed = knob({
     id: "voice_speed", label: "Speed", help: "Speed: how fast the voice speaks.", min: 0.5, max: 2, step: 0.05,
     fmt: (v) => `${v.toFixed(2)}×`, get: () => settings.voice?.speed ?? 1, rec: () => 1, custom: () => settings.voice?.speed !== undefined,
     set: (v) => setVoice({ speed: v }), pos: (v) => (v - 0.5) / 1.5, val: (p) => 0.5 + p * 1.5,
   });
-  $("voice-knobs").replaceChildren(pick.row, speed);
+  $("voice-knobs").replaceChildren(speed);
 
 
 
@@ -5838,16 +5747,172 @@ function measureScrollbar() {
   document.documentElement.style.setProperty("--sb", `${scroller.offsetWidth - scroller.clientWidth}px`);
 }
 
+interface VoiceSpot { now(): string; none: string; pick(id: string): void; hear(id: string): Promise<void>; meta?(): string }
+const voiceMenu = $("voice-menu"), PLAY = `${icon("wave")}<span class="eq"><i></i><i></i><i></i><i></i><i></i></span>`, fetching = new Set<string>();
+let menuSpot: VoiceSpot | undefined, menuAnchor: HTMLElement | undefined, playingVoice: string | undefined;
+const voiceParts = (id: string) => (id ? [id.slice(0, id.indexOf("/")), id.slice(id.indexOf("/") + 1)] : [undefined, undefined]);
+const voiceIdOf = (tts?: string, name?: string) => (name ? `${tts ?? (voiceCatalog.tts ?? []).find((m) => m.installed)?.name ?? ""}/${name}` : "");
+function voiceShown(id: string, none: string) {
+  const [tts, name] = voiceParts(id);
+  return id ? { name: (tts && voiceInfo(tts, name!)?.label) || name!, model: modelLabel("tts", tts) ?? "" } : { name: none, model: "" };
+}
+function playButton(spot: VoiceSpot, id: string, label: string) {
+  const b = h("button", "voice-play");
+  b.type = "button";
+  b.dataset.voice = id;
+  b.title = b.ariaLabel = `Hear ${label}`;
+  b.innerHTML = PLAY;
+  b.addEventListener("click", (e) => { e.stopPropagation(); void playVoice(spot, b.dataset.voice!); });
+  return b;
+}
+async function playVoice(spot: VoiceSpot, id: string) {
+  playingVoice = id;
+  paintPlaying();
+  await spot.hear(id);
+  if (playingVoice !== id) return;
+  playingVoice = undefined;
+  paintPlaying();
+}
+function paintPlaying() {
+  for (const b of document.querySelectorAll<HTMLElement>(".voice-play[data-voice]")) b.classList.toggle("playing", b.dataset.voice === playingVoice);
+}
+function voiceTrigger(spot: VoiceSpot, name: HTMLButtonElement = h("button", "voice-name")) {
+  const el = h("span", "voice-pick"), play = playButton(spot, spot.now(), "this voice"), mine = () => voiceMenu.matches(":popover-open") && menuSpot === spot;
+  let wasOpen = false;
+  name.type = "button";
+  name.setAttribute("aria-haspopup", "dialog");
+  name.setAttribute("aria-expanded", "false");
+  name.addEventListener("pointerdown", () => { wasOpen = mine(); });
+  name.addEventListener("click", () => {
+    const close = wasOpen || mine();
+    wasOpen = false;
+    if (close) voiceMenu.hidePopover(); else openVoiceMenu(spot, name);
+  });
+  if (name.isConnected) name.replaceWith(el);
+  el.append(play, name);
+  const paint = () => {
+    const id = spot.now(), shown = voiceShown(id, spot.none);
+    play.dataset.voice = id;
+    name.replaceChildren(h("span", "voice-pick-name", shown.name), ...(shown.model ? [h("span", "voice-pick-model", shown.model)] : []));
+    name.insertAdjacentHTML("beforeend", icon("chevron"));
+    name.title = `Voice: ${shown.name}${shown.model ? ` (${shown.model})` : ""}`;
+    paintPlaying();
+  };
+  paint();
+  return { el, paint };
+}
+function openVoiceMenu(spot: VoiceSpot, anchor: HTMLElement) {
+  const host = anchor.closest("dialog") ?? document.body;
+  if (voiceMenu.parentElement !== host) host.append(voiceMenu);
+  menuSpot = spot;
+  menuAnchor = anchor;
+  anchor.setAttribute("aria-expanded", "true");
+  delete voiceMenu.dataset.key;
+  renderVoiceMenu();
+  voiceMenu.showPopover();
+  placeVoiceMenu();
+  if (!voiceCatalog.tts?.length) void loadVoices();
+}
+function voiceChip(spot: VoiceSpot, id: string, label: string, about = "") {
+  const el = h("div", "voice-chip");
+  el.dataset.voice = id;
+  el.tabIndex = 0;
+  el.title = about;
+  el.setAttribute("role", "radio");
+  el.append(playButton(spot, id, label), h("span", "", label));
+  return el;
+}
+function renderVoiceMenu() {
+  const spot = menuSpot;
+  if (!spot) return;
+  const models = voiceCatalog.tts ?? [], cur = spot.now(), meta = spot.meta?.() ?? "";
+  const key = JSON.stringify([models.map((m) => [m.name, m.installed, m.voices?.map((x) => x.id)]), cur, meta, [...fetching]]);
+  if (voiceMenu.dataset.key !== key) {
+    voiceMenu.dataset.key = key;
+    const out: HTMLElement[] = [], top = h("div", "voice-chips voice-top");
+    if (meta) out.push(h("div", "voice-menu-meta", meta));
+    top.append(voiceChip(spot, "", spot.none));
+    for (const m of models.filter((x) => !x.installed)) {
+      const b = h("button", "voice-chip voice-get", fetching.has(m.name) ? `${m.label} · Downloading…` : `${m.label} · Download`);
+      b.type = "button";
+      b.dataset.get = m.name;
+      b.disabled = fetching.has(m.name);
+      top.append(b);
+    }
+    if (!models.length) top.append(h("span", "voice-wait", "Asking the voice service for its voices…"));
+    out.push(top);
+    for (const m of models.filter((x) => x.installed && x.voices?.length)) {
+      const langs = new Map<string, VoiceInfo[]>();
+      for (const x of m.voices!) langs.set(x.lang ? langName(x.lang) : "", [...(langs.get(x.lang ? langName(x.lang) : "") ?? []), x]);
+      out.push(h("div", "voice-model", m.label));
+      for (const [lang, list] of langs) {
+        const chips = h("div", "voice-chips");
+        chips.append(...list.map((x) => voiceChip(spot, `${m.name}/${x.id}`, x.label, voiceGroup(x))));
+        out.push(h("div", "voice-group", lang), chips);
+      }
+    }
+    if (cur && !out.some((e) => e.querySelector(`[data-voice="${CSS.escape(cur)}"]`))) top.append(voiceChip(spot, cur, voiceParts(cur)[1]!, "Not in the voice service's list"));
+    voiceMenu.replaceChildren(...out);
+    placeVoiceMenu();
+  }
+  for (const c of voiceMenu.querySelectorAll<HTMLElement>(".voice-chip[data-voice]")) c.setAttribute("aria-checked", String(c.dataset.voice === cur));
+  paintPlaying();
+}
+function placeVoiceMenu() {
+  if (!menuAnchor || !voiceMenu.matches(":popover-open")) return;
+  const a = menuAnchor.getBoundingClientRect(), m = voiceMenu.getBoundingClientRect(), room = innerHeight - a.bottom - 16;
+  const top = m.height <= room || room >= a.top - 16 ? a.bottom + 8 : a.top - 8 - m.height;
+  voiceMenu.style.top = `${Math.max(8, Math.min(top, innerHeight - m.height - 8))}px`;
+  voiceMenu.style.left = `${Math.max(8, Math.min(a.left, innerWidth - m.width - 8))}px`;
+}
+voiceMenu.addEventListener("click", (e) => {
+  const t = e.target as HTMLElement, chip = t.closest<HTMLElement>(".voice-chip[data-voice]"), get = t.closest<HTMLButtonElement>("[data-get]");
+  if (get) return void loadVoices(get.dataset.get);
+  if (!chip || !menuSpot) return;
+  menuSpot.pick(chip.dataset.voice!);
+  voiceMenu.hidePopover();
+});
+voiceMenu.addEventListener("keydown", (e) => {
+  const chip = (e.target as HTMLElement).closest<HTMLElement>(".voice-chip[data-voice]");
+  if (!chip || !menuSpot || (e.key !== "Enter" && e.key !== " ")) return;
+  e.preventDefault();
+  menuSpot.pick(chip.dataset.voice!);
+  voiceMenu.hidePopover();
+});
+voiceMenu.addEventListener("toggle", () => {
+  for (const b of document.querySelectorAll(".voice-name[aria-expanded]")) b.setAttribute("aria-expanded", String(b === menuAnchor && voiceMenu.matches(":popover-open")));
+  if (!voiceMenu.matches(":popover-open")) menuSpot = menuAnchor = undefined;
+});
+addEventListener("resize", placeVoiceMenu);
+async function loadVoices(get?: string) {
+  if (get) {
+    fetching.add(get);
+    samples().get(get);
+    renderVoiceMenu();
+  }
+  const c = await samples().catalog();
+  if (get) fetching.delete(get);
+  if (c?.tts?.length) { voiceCatalog = c; setPref("voice-catalog", JSON.stringify(c)); }
+  renderVoiceMenu();
+  for (const sync of knobs) sync();
+  if (voice) renderVoice();
+}
+const settingsVoice: VoiceSpot = {
+  now: () => voiceIdOf(settings.voice?.tts ?? voice?.ready?.stack.tts, settings.voice?.name),
+  none: "Default",
+  pick: (id) => { const [tts, name] = voiceParts(id); setVoice({ tts, name }); saveSettings(); },
+  hear: (id) => { const [tts, name] = voiceParts(id); return samples().preview(tts, name); },
+};
+
+const growAll = (t: HTMLTextAreaElement) => { t.style.height = "auto"; t.style.height = `${t.scrollHeight + 2}px`; };
 function growSystem() {
-  systemInput.style.height = "auto";
-  systemInput.style.height = `${Math.min(systemInput.scrollHeight + 2, innerHeight * 0.4)}px`;
+  growAll(systemInput);
 }
 
 function openSettings(sec?: string) {
   settingsMode = modeOf(conv);
   if (!panel.open) panel.showModal();
   showSettingsSec(sec ?? pref("settings-sec", "chat"));
-  growSystem();
   void loadCatalog();
 }
 function showSettingsSec(sec: string) {
@@ -5856,6 +5921,8 @@ function showSettingsSec(sec: string) {
   for (const el of panel.querySelectorAll<HTMLElement>(".set-sec")) el.hidden = el.dataset.sec !== sec;
   setPref("settings-sec", sec);
   syncSettings();
+  growSystem();
+  growAll($<HTMLTextAreaElement>("voice-prompt"));
 }
 
 function syncSettings() {
@@ -5863,7 +5930,7 @@ function syncSettings() {
   if (document.activeElement !== systemInput && systemInput.value !== settings.system) systemInput.value = settings.system;
   $("system-reset").classList.toggle("on", settings.system !== DEFAULT_SYSTEM);
   const vp = $<HTMLTextAreaElement>("voice-prompt");
-  if (document.activeElement !== vp && vp.value !== voicePrompt()) { vp.value = voicePrompt(); fit(vp); }
+  if (document.activeElement !== vp && vp.value !== voicePrompt()) { vp.value = voicePrompt(); growAll(vp); }
   $("voice-prompt-reset").classList.toggle("on", settings.voice?.prompt !== undefined);
   $("artifacts-switch").setAttribute("aria-checked", String(settings.artifacts !== false));
   $("settings").classList.toggle("other-backend", !onChrysalis());
@@ -5877,7 +5944,6 @@ $("new-chat").innerHTML = `${icon("plus")}New chat`;
 $("add-cast").innerHTML = icon("personAdd");
 $("import").innerHTML = icon("upload");
 $("export-all").innerHTML = icon("download");
-$("export").innerHTML = icon("download");
 $("connect").innerHTML = icon("phone");
 $("connect").onclick = openConnect;
 $("connect-close").innerHTML = icon("x");
@@ -5894,7 +5960,6 @@ $("voice-mute").addEventListener("click", () => {
   renderVoice();
 });
 $("voice-dots").addEventListener("click", () => { if (voice?.reply || voice?.client.playing) cutVoice(true); });
-$("voice-pick").addEventListener("click", () => setVoicePop(!voicePop));
 $("artifacts-switch").addEventListener("click", () => {
   if (settings.artifacts === false) delete settings.artifacts;
   else settings.artifacts = false;
@@ -5922,7 +5987,11 @@ $("settings-open").addEventListener("click", () => openSettings());
 $("settings-close").innerHTML = icon("x");
 $("settings-close").addEventListener("click", () => panel.close());
 panel.addEventListener("click", (e) => { if (e.target === panel) panel.close(); });
-panel.addEventListener("close", () => { settingsMode = undefined; });
+panel.addEventListener("close", () => {
+  settingsMode = undefined;
+  if (menuAnchor?.closest("#settings")) voiceMenu.hidePopover();
+  if (playingVoice !== undefined) sampler?.stop();
+});
 $("set-nav").addEventListener("click", (e) => {
   const b = (e.target as Element).closest<HTMLElement>("[data-sec]");
   if (b) showSettingsSec(b.dataset.sec!);

@@ -454,13 +454,12 @@ test("the user is a character like any other: a portrait opens its card and clos
   for (const click of [() => page.click("#thread .msg.assistant .speaker .face"), () => page.click("#you"), () => page.click("#you"),
     () => inRow(page, "Mirela", ".cast-pic"), () => inRow(page, "Mirela", ".cast-pic")]) { await click(); steps.push(await shown()); }
   expect(steps).toEqual(["Mirela", "User", "", "Mirela", ""]);
-  const parts = () => page.$eval("#cast-sheet", (s) => [...s.querySelectorAll(".card-pic, .card-voice select, .card-label")].map((x) => x.classList.contains("card-pic") ? "picture" : x.textContent || "voice"));
+  const parts = () => page.$eval("#cast-sheet", (s) => [...s.querySelectorAll(".card-pic, .card-voice, .card-label")].map((x) => x.classList.contains("card-pic") ? "picture" : x.classList.contains("card-voice") ? "voice" : x.textContent));
   await inRow(page, "Mirela", ".cast-pic");
   const hers = await parts();
   await page.click("#you");
   expect(await parts()).toEqual(hers);
-  await page.waitForFunction(() => [...document.querySelectorAll<HTMLOptionElement>("#cast-sheet option")].some((o) => o.value === "other-tts\nbob"), { timeout: 10_000 });
-  await page.select("#cast-sheet select", "other-tts\nbob");
+  await pickVoice(page, "#cast-sheet .card-voice .voice-name", "other-tts/bob");
   for (const [label, text] of [["Personality", "curious"], ["Greeting", "Hi, {{char}}."], ["How they talk", "{{user}}: Hm."], ["After the chat", "Keep it short."]]) {
     await page.evaluate((label) => {
       const f = [...document.querySelectorAll("#cast-sheet .card-field")].find((x) => x.querySelector(".card-label")!.textContent === label)!;
@@ -869,6 +868,33 @@ test("an edit that does not apply in full is asked for again, once, with the art
   await page.close();
 }, 30_000);
 
+test("an artifact being written can be left for another: a tab chosen in the panel while it is written stays chosen until the reply ends", async () => {
+  const page = await open(), shown = () => page.$eval("#shelf .art-canvas", (c) => c.getAttribute("data-art"));
+  await send(page, "draw the panda");
+  const done = await page.$$eval(".msg .stats", (s) => s.length);
+  await page.type("#input", "steady counter page");
+  await page.keyboard.press("Enter");
+  await page.waitForFunction(() => document.querySelector("#shelf .art-canvas")?.getAttribute("data-art") === "counter" && !!document.querySelector(".art-card.live"),
+    { timeout: 10_000 });
+  await page.click(".shelf-tab:first-child");
+  await Bun.sleep(500);
+  expect([await shown(), await page.$$eval(".art-card.live", (c) => c.length)]).toEqual(["panda", 1]);
+  await page.waitForFunction((n) => document.querySelectorAll(".msg .stats").length > n, { timeout: 20_000 }, done);
+  expect(await shown()).toBe("panda");
+  await page.close();
+}, 30_000);
+
+test("a chat whose reply is being written says Working, and for how long, where the list shows its age; once written it shows its age again", async () => {
+  const page = await open();
+  await page.type("#input", "slow count");
+  await page.keyboard.press("Enter");
+  await page.waitForFunction(() => /^Working[1-9]\d*s$/.test(document.querySelector(".conv .conv-status")?.textContent ?? ""), { timeout: 10_000 });
+  expect(await page.$(".conv .conv-ago")).toBeNull();
+  await page.waitForSelector(".msg.assistant .stats", { timeout: 20_000 });
+  await page.waitForFunction(() => !document.querySelector(".conv .conv-status") && document.querySelector(".conv .conv-ago")?.textContent === "now");
+  await page.close();
+}, 30_000);
+
 test("pointing: the part under the pointer glows, a click keeps it in the message box, and the question tells the model that part as it is now", async () => {
   const page = await open();
   await send(page, "draw the panda");
@@ -1007,8 +1033,8 @@ test("attached files go to Chrysalis as images, PDFs, videos and fenced text, st
   await page.waitForFunction(() => (document.querySelector(".msg-files img") as HTMLImageElement | null)?.naturalWidth === 2);
   await send(page, "again");
   expect(lastStream.messages.find((m: any) => m.role === "user").content).toEqual(content);
-  await page.click("#export");
-  const file = await (async () => { for (let k = 0; k < 50; k++) { const f = readdirSync(dir).find((x) => x.endsWith(".chrysalis.json")); if (f) return f; await Bun.sleep(100); } })();
+  await page.click("#export-all");
+  const file = await (async () => { for (let k = 0; k < 50; k++) { const f = readdirSync(dir).find((x) => x.startsWith("chrysalis-chats-")); if (f) return f; await Bun.sleep(100); } })();
   const other = await open();
   await (await other.$("input#import-file"))!.uploadFile(`${dir}/${file}`);
   await other.waitForFunction(() => (document.querySelector(".msg-files img") as HTMLImageElement | null)?.naturalWidth === 2);
@@ -1036,8 +1062,8 @@ async function toolsOn(page: Page, src = "mcp:fake") {
 async function download(page: Page, into: string) {
   const cdp = await page.createCDPSession();
   await cdp.send("Browser.setDownloadBehavior", { behavior: "allow", downloadPath: into, browserContextId: page.browserContext().id });
-  await page.click("#export");
-  for (let k = 0; k < 50; k++) { const f = readdirSync(into).find((x) => x.endsWith(".chrysalis.json")); if (f) return `${into}/${f}`; await Bun.sleep(100); }
+  await page.click("#export-all");
+  for (let k = 0; k < 50; k++) { const f = readdirSync(into).find((x) => x.startsWith("chrysalis-chats-")); if (f) return `${into}/${f}`; await Bun.sleep(100); }
   throw new Error("no export");
 }
 
@@ -1405,9 +1431,15 @@ async function voicePage(script: string, o: { system?: string; first?: (page: Pa
   const s = voiceLog().filter((e) => e.ev === "msg" && e.type === "hello" && e.voice === script).at(-1).s;
   return { page, session: () => voiceLog().filter((e) => e.s === s) };
 }
+async function pickVoice(page: Page, trigger: string, id: string) {
+  await page.click(trigger);
+  await page.waitForSelector(`#voice-menu:popover-open .voice-chip[data-voice="${id}"]`, { timeout: 10_000 });
+  await page.click(`#voice-menu .voice-chip[data-voice="${id}"] > span`);
+  await page.waitForFunction(() => !document.querySelector("#voice-menu:popover-open"));
+}
 const replyText = (page: Page, i: number) => page.$eval(`#thread > article[data-i="${i}"] .markdown`, (el) => el.textContent?.trim() ?? "");
 
-test("a character's voice is picked and heard from their card with voice mode never opened (the voice service lists its voices and speaks the sample, with no hello: no microphone, no speech recognition), and voice mode speaks with it", async () => {
+test("a character's voice is picked and heard from their card with voice mode never opened (the voice service lists its voices and speaks the sample, with no hello: no microphone, no speech recognition), Escape closing the voice menu before the card, and voice mode speaks with it", async () => {
   const page = await open();
   await Bun.write(`${dir}/Vox.png`, await cardPng({ spec: "chara_card_v2", spec_version: "2.0", data: { name: "Vox", description: "{{char}} sings.", first_mes: "La." } },
     new Blob([png], { type: "image/png" })));
@@ -1415,13 +1447,18 @@ test("a character's voice is picked and heard from their card with voice mode ne
   await page.waitForSelector("#conversations .cast-row");
   const n = voiceLog().length;
   await inRow(page, "Vox", ".cast-pic");
-  await page.waitForFunction(() => [...document.querySelectorAll<HTMLOptionElement>("#cast-sheet option")].some((o) => o.value === "other-tts\nbob"), { timeout: 10_000 });
-  await page.select("#cast-sheet select", "other-tts\nbob");
+  await pickVoice(page, "#cast-sheet .card-voice .voice-name", "other-tts/bob");
+  await page.click("#cast-sheet .card-voice .voice-play");
   const until = async (ok: () => boolean) => { for (let t = Date.now(); !ok(); await Bun.sleep(50)) if (Date.now() - t > 10_000) throw new Error("timed out"); };
   await until(() => voiceLog().slice(n).some((e) => e.type === "preview"));
   const s = voiceLog().slice(n).find((e) => e.type === "catalog").s, own = () => voiceLog().filter((e) => e.s === s);
   expect(own().filter((e) => e.ev === "msg").map((e) => [e.type, e.tts, e.voice])).toEqual([["catalog", undefined, undefined], ["preview", "other-tts", "bob"]]);
   await until(() => own().some((e) => e.ev === "chunk"));
+  await page.click("#cast-sheet .card-voice .voice-name");
+  await page.waitForSelector("#voice-menu:popover-open");
+  await page.keyboard.press("Escape");
+  await page.waitForFunction(() => !document.querySelector("#voice-menu:popover-open"));
+  expect(await page.$eval("#cast-sheet", (s) => (s as HTMLElement).hidden)).toBe(false);
   await page.keyboard.press("Escape");
   await until(() => own().some((e) => e.ev === "close"));
   const m = voiceLog().length;
@@ -1668,13 +1705,13 @@ test("the theme is the system's until Settings chooses one, which overrides it a
   expect(await bg("dark")).toBeLessThan(60);
   await scheme("light");
   expect(await bg("light")).toBeGreaterThan(200);
-  await openSettings(page, "look");
+  await openSettings(page);
   await page.click('#theme-pick [data-theme="dark"]');
   expect(await bg("dark")).toBeLessThan(60);
   await page.reload({ waitUntil: "networkidle0" });
   expect(await bg("dark")).toBeLessThan(60);
   expect(await page.$eval('#theme-pick [aria-checked="true"]', (b) => (b as HTMLElement).dataset.theme)).toBe("dark");
-  await openSettings(page, "look");
+  await openSettings(page);
   await page.click('#theme-pick [data-theme="system"]');
   expect(await bg("light")).toBeGreaterThan(200);
   await scheme("dark");
@@ -1682,7 +1719,7 @@ test("the theme is the system's until Settings chooses one, which overrides it a
   await page.close();
 }, 30_000);
 
-async function openSettings(page: Page, sec = "voice") {
+async function openSettings(page: Page, sec = "chat") {
   if (!(await page.$eval("#settings", (d) => (d as HTMLDialogElement).open))) await page.click("#settings-open");
   await page.click(`.set-nav [data-sec="${sec}"]`);
   await page.waitForFunction((sec) => { const r = document.querySelector(`.set-sec[data-sec="${sec}"]`)!.getBoundingClientRect(); return r.width > 0 && r.right <= innerWidth; }, {}, sec);
@@ -1697,25 +1734,29 @@ const settled = async (ok: () => boolean, ms = 5000) => { for (const t = Date.no
 test("voice picker: a voice model not downloaded yet is downloaded from the picker, and then offers its voices", async () => {
   const { page } = await voicePage("pick");
   await page.click("#voice-pick");
-  expect(await page.$$eval('#voice-pop [data-voice^="big-tts/"]', (els) => els.length)).toBe(0);
-  await page.click("#voice-pop .voice-model.missing button");
-  await page.waitForSelector('#voice-pop [data-voice="big-tts/zed"]', { timeout: 10_000 });
-  expect(await page.$$eval("#voice-pop .voice-model.missing", (els) => els.length)).toBe(0);
+  await page.waitForSelector('#voice-menu:popover-open [data-get="big-tts"]');
+  expect(await page.$$eval('#voice-menu [data-voice^="big-tts/"]', (els) => els.length)).toBe(0);
+  await page.click('#voice-menu [data-get="big-tts"]');
+  await page.waitForSelector('#voice-menu [data-voice="big-tts/zed"]', { timeout: 10_000 });
+  expect(await page.$$eval("#voice-menu [data-get]", (els) => els.length)).toBe(0);
 });
 
-test("voice picker: the voice models' voices by language and gender; a pick switches model and voice for the next sentence, and Settings shows the same choice", async () => {
+test("voice picker: the voice models' voices by language, each with its gender; a pick switches model and voice for the next sentence, and Settings shows the same choice", async () => {
   const { page, session } = await voicePage("pick");
   await page.waitForFunction(() => /^voice /.test(document.querySelector('#thread > article[data-i="1"] .stats')?.textContent ?? ""), { timeout: 10_000 });
   expect(new Set(session().filter((e) => e.ev === "chunk").map((e) => `${e.tts}/${e.voice}`))).toEqual(new Set(["fake-tts/pick"]));
   expect(await page.$eval("#voice-pick .voice-pick-name", (el) => el.textContent)).toBe("Pick");
   await page.click("#voice-pick");
-  const rows = await page.$$eval("#voice-list > *", (els) => els.map((e) => [e.className, e.textContent]));
-  expect(rows.filter(([c]) => c.startsWith("voice-model"))).toEqual([["voice-model", "Fake TTS"], ["voice-model", "Other TTS"], ["voice-model missing", "Big TTSDownload"]]);
-  expect(rows.filter(([c]) => c === "voice-group").map(([, t]) => t)).toEqual(["American English · Female", "British English · Male", "Spanish · Female", "American English · Male"]);
-  expect(await page.$$eval("#voice-pop .voice-item", (els) => els.map((e) => (e as HTMLElement).dataset.voice))).toEqual(
-    ["plain", "pie", "story", "long", "merge", "join", "ahead", "onward", "checking", "silent", "pick", "notes", "point", "echo"].map((v) => `fake-tts/${v}`).concat(["other-tts/ana", "other-tts/bob"]));
-  expect(await page.$$eval('#voice-pop .voice-item[aria-selected="true"]', (els) => els.map((e) => (e as HTMLElement).dataset.voice))).toEqual(["fake-tts/pick"]);
-  await page.click('#voice-pop [data-voice="other-tts/bob"]');
+  await page.waitForSelector("#voice-menu:popover-open");
+  const rows = await page.$$eval("#voice-menu > *", (els) => els.map((e) => [e.className, e.classList.contains("voice-chips")
+    ? [...e.children].map((c) => (c as HTMLElement).dataset.voice?.split("/")[1] ?? (c as HTMLElement).dataset.get ?? "") : e.textContent]));
+  const fake = ["plain", "pie", "story", "long", "merge", "join", "ahead", "onward", "checking", "silent", "pick", "notes", "point"];
+  expect(rows.slice(1)).toEqual([["voice-chips voice-top", ["", "big-tts"]], ["voice-model", "Fake TTS"], ["voice-group", "American English"], ["voice-chips", fake],
+    ["voice-group", "British English"], ["voice-chips", ["echo"]], ["voice-model", "Other TTS"], ["voice-group", "Spanish"], ["voice-chips", ["ana"]],
+    ["voice-group", "American English"], ["voice-chips", ["bob"]]]);
+  expect(await page.$$eval('#voice-menu .voice-chip[data-voice^="other-tts/"]', (els) => els.map((e) => (e as HTMLElement).title))).toEqual(["Spanish · Female", "American English · Male"]);
+  expect(await page.$$eval('#voice-menu .voice-chip[aria-checked="true"]', (els) => els.map((e) => (e as HTMLElement).dataset.voice))).toEqual(["fake-tts/pick"]);
+  await page.click('#voice-menu .voice-chip[data-voice="other-tts/bob"] > span');
   const configs = () => session().filter((e) => e.type === "config").map(({ stack, voice, speed }) => ({ stack, voice, speed }));
   expect(await settled(() => configs().length === 1)).toBe(true);
   expect(configs()).toEqual([{ stack: { tts: "other-tts" }, voice: "bob", speed: undefined }]);
@@ -1725,23 +1766,29 @@ test("voice picker: the voice models' voices by language and gender; a pick swit
   expect(new Set(after.map((e) => `${e.tts}/${e.voice}`))).toEqual(new Set(["other-tts/bob"]));
   expect(await page.$eval("#voice-pick .voice-pick-name", (el) => el.textContent)).toBe("Bob");
   expect(await stored(page)).toEqual({ tts: "other-tts", name: "bob" });
+  const chosen = async (id: string) => {
+    await page.click("#voice-settings");
+    await page.waitForFunction((id) => document.querySelector('#voice-menu:popover-open .voice-chip[aria-checked="true"]')?.getAttribute("data-voice") === id, {}, id);
+  };
   await openSettings(page);
-  await page.waitForFunction(() => (document.querySelector("#voice-name") as HTMLSelectElement)?.value === JSON.stringify(["other-tts", "bob"]));
-  await page.select("#voice-name", JSON.stringify(["other-tts", "ana"]));
+  await chosen("other-tts/bob");
+  await page.click('#voice-menu .voice-chip[data-voice="other-tts/ana"] > span');
   await closeSettings(page);
   await page.waitForFunction(() => document.querySelector("#voice-pick .voice-pick-name")?.textContent === "Ana");
   expect(await settled(() => configs().length === 2)).toBe(true);
   expect(configs()[1]).toEqual({ stack: undefined, voice: "ana", speed: undefined });
   await page.click("#voice-pick");
-  await page.click('#voice-pop [data-voice="fake-tts/echo"]');
+  await page.click('#voice-menu .voice-chip[data-voice="fake-tts/echo"] > span');
   await page.waitForSelector("#toast:not([hidden]) .btn");
   await openSettings(page);
-  await page.waitForFunction(() => (document.querySelector("#voice-name") as HTMLSelectElement)?.value === JSON.stringify(["fake-tts", "echo"]));
+  await chosen("fake-tts/echo");
+  await page.keyboard.press("Escape");
   await closeSettings(page);
   await page.click("#toast .btn");
   await page.waitForFunction(() => document.querySelector("#voice-pick .voice-pick-name")?.textContent === "Ana");
   await openSettings(page);
-  await page.waitForFunction(() => (document.querySelector("#voice-name") as HTMLSelectElement)?.value === JSON.stringify(["other-tts", "ana"]));
+  await chosen("other-tts/ana");
+  await page.keyboard.press("Escape");
   await closeSettings(page);
   expect(await settled(() => configs().length === 4)).toBe(true);
   expect(configs().slice(2)).toEqual([{ stack: { tts: "fake-tts" }, voice: "echo", speed: undefined }, { stack: { tts: "other-tts" }, voice: "ana", speed: undefined }]);
@@ -1749,10 +1796,40 @@ test("voice picker: the voice models' voices by language and gender; a pick swit
   await page.close();
 }, 40_000);
 
-test("voice picker: a voice's play button plays its sample, apart from any reply or turn", async () => {
+test("Settings lists the voices in a menu from its voice button, over the dialog and moving nothing in it; a chip's button plays its sample and shows it playing until it has been heard, a chip picks the voice, and the menu goes with the dialog", async () => {
+  const page = await open();
+  await openSettings(page);
+  const layout = () => page.$$eval("#settings, #settings *:not(#voice-menu, #voice-menu *)", (els) => els.flatMap((e) => e instanceof HTMLElement ? [[e.offsetLeft, e.offsetTop, e.offsetWidth, e.offsetHeight].join()] : []).join(";"));
+  const still = await layout();
+  await page.click("#voice-settings");
+  await page.waitForSelector('#voice-menu:popover-open .voice-chip[data-voice="other-tts/bob"]', { timeout: 10_000 });
+  expect(await layout()).toBe(still);
+  const before = voiceLog().length;
+  await page.click('#voice-menu .voice-chip[data-voice="other-tts/bob"] .voice-play');
+  await page.waitForSelector('#voice-menu .voice-chip[data-voice="other-tts/bob"] .voice-play.playing');
+  await page.waitForFunction(() => !document.querySelector("#voice-menu .voice-play.playing"), { timeout: 10_000 });
+  const heard = voiceLog().slice(before);
+  expect([heard.filter((e) => e.type === "preview").map((e) => [e.tts, e.voice]), heard.filter((e) => e.ev === "chunk").map((e) => e.id)])
+    .toEqual([[["other-tts", "bob"]], ["preview"]]);
+  expect(await page.$("#voice-menu:popover-open")).not.toBeNull();
+  await page.click('#voice-menu .voice-chip[data-voice="other-tts/bob"] > span');
+  await page.waitForFunction(() => !document.querySelector("#voice-menu:popover-open"));
+  expect([await page.$eval("#voice-settings .voice-pick-name", (b) => b.textContent), await stored(page)]).toEqual(["Bob", { tts: "other-tts", name: "bob" }]);
+  await page.click("#voice-settings");
+  await page.waitForSelector("#voice-menu:popover-open");
+  await page.keyboard.down("Control");
+  await page.keyboard.press(",");
+  await page.keyboard.up("Control");
+  await page.waitForFunction(() => !(document.getElementById("settings") as HTMLDialogElement).open);
+  await page.waitForFunction(() => !document.querySelector("#voice-menu:popover-open"), { timeout: 2000 });
+  await page.close();
+}, 30_000);
+
+test("voice picker: a voice's play button plays its sample, apart from any reply or turn, and the voice's button closes the menu again", async () => {
   const { page, session } = await voicePage("silent");
   await page.click("#voice-pick");
-  await page.click('#voice-pop .voice-row:has([data-voice="other-tts/ana"]) .voice-play');
+  await page.waitForSelector('#voice-menu:popover-open .voice-chip[data-voice="other-tts/ana"]');
+  await page.click('#voice-menu .voice-chip[data-voice="other-tts/ana"] .voice-play');
   expect(await settled(() => session().filter((e) => e.type === "playback").length === 2)).toBe(true);
   const log = session();
   expect(log.filter((e) => e.type === "preview").map((e) => e.voice)).toEqual(["ana"]);
@@ -1762,7 +1839,10 @@ test("voice picker: a voice's play button plays its sample, apart from any reply
   expect(await page.$$eval("#thread > article", (els) => els.length)).toBe(0);
   await page.waitForFunction(() => document.querySelector("#voice-status")?.textContent === "Listening", { timeout: 3000 });
   expect(await page.$eval("#voice-pick .voice-pick-name", (el) => el.textContent)).toBe("Silent");
-  expect(await page.$eval("#voice-pop", (el) => (el as HTMLElement).hidden)).toBe(false);
+  expect(await page.$("#voice-menu:popover-open")).not.toBeNull();
+  await page.click("#voice-pick");
+  await Bun.sleep(300);
+  expect(await page.$("#voice-menu:popover-open")).toBeNull();
   await page.close();
 }, 30_000);
 
@@ -2247,7 +2327,7 @@ test("the sea stays behind a chat, the butterfly sunk into it and every click th
     expect([rising < 0.7 * full, await risen(0.9 * full) > 0.9 * full]).toEqual([true, true]);
 
     await page.click(".conv");
-    await openSettings(page, "look");
+    await openSettings(page);
     await page.click("#sea-switch");
     await closeSettings(page);
     await page.waitForFunction((x) => document.getElementById("thread")!.getBoundingClientRect().x === x, {}, column.x);
@@ -2258,7 +2338,7 @@ test("the sea stays behind a chat, the butterfly sunk into it and every click th
     expect(await page.$eval("#sea-switch", (b) => b.getAttribute("aria-checked"))).toBe("false");
 
     const cores = async () => (await look(page, middle, "", "var(--accent-hi)")).close;
-    await openSettings(page, "look");
+    await openSettings(page);
     await page.click('#theme-pick [data-theme="light"]');
     await closeSettings(page);
     await Bun.sleep(600);

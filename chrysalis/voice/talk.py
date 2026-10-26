@@ -411,11 +411,18 @@ class Talk:
 
     async def sample(self, voice, text, name=None):
         name = name or self.names.get("tts") or DEFAULTS["tts"]
-        tts = self.parts.get("tts") if name == self.names.get("tts") else await self.sampling(name)
-        voice = str(voice or (tts.VOICE if tts else ""))
-        v = next((x for x in (tts.voice_list if tts else []) if x["id"] == voice), None)
+        if name == self.names.get("tts"):
+            tts = self.parts.get("tts")
+            if not tts:
+                return await self.send({"type": "error", "message": f"tts {name} is not loaded"})
+        else:
+            tts = await self.sampling(name)
+            if not tts:
+                return
+        voice = str(voice or tts.VOICE)
+        v = next((x for x in tts.voice_list if x["id"] == voice), None)
         if not v:
-            return tts and await self.send({"type": "error", "message": f"{name} has no voice {voice!r}"})
+            return await self.send({"type": "error", "message": f"{name} has no voice {voice!r}"})
         text = str(text or PREVIEW.get((v["lang"] or "en")[:2], PREVIEW["en"]).format(v["label"]))
         self.preview += 1
         mine = self.preview

@@ -47,6 +47,7 @@ export class VoiceClient {
   private early: ArrayBuffer[] = [];
   private held = new Map<string, ArrayBuffer[]>();
   private told?: string;
+  private sample?: () => void;
   playing = false;
   muted = false;
   hearing = false;
@@ -145,11 +146,23 @@ export class VoiceClient {
   }
   config(ask: VoiceAsk) { this.send({ type: "config", ...ask }); }
 
-  preview(voice: string, text?: string) {
+  preview(voice?: string, tts?: string): Promise<void> {
+    this.previewDone();
     for (const [src, id] of this.live) if (id === PREVIEW) { src.onended = null; src.stop(); this.live.delete(src); }
     for (const set of [this.dropped, this.said, this.heard]) set.delete(PREVIEW);
     if (!this.live.size) this.end = 0;
-    this.send({ type: "preview", voice, ...(text ? { text } : {}) });
+    const heard = new Promise<void>((done) => { this.sample = done; });
+    this.send({ type: "preview", ...(voice ? { voice } : {}), ...(tts ? { tts } : {}) });
+    return heard;
+  }
+  private previewDone() {
+    const done = this.sample;
+    this.sample = undefined;
+    done?.();
+  }
+  private played(id: string) {
+    if (id === PREVIEW) this.previewDone();
+    this.on.played?.(id);
   }
 
   mute(on: boolean) {
@@ -187,8 +200,11 @@ export class VoiceClient {
       this.on.interrupt?.();
     } else if (e.type === "said") {
       this.said.add(e.id);
-      if (![...this.live.values()].includes(e.id) && !this.dropped.has(e.id) && !this.held.has(e.id)) this.on.played?.(e.id);
-    } else if (e.type === "error") this.on.error?.(String(e.message ?? "The voice service failed"));
+      if (![...this.live.values()].includes(e.id) && !this.dropped.has(e.id) && !this.held.has(e.id)) this.played(e.id);
+    } else if (e.type === "error") {
+      this.previewDone();
+      this.on.error?.(String(e.message ?? "The voice service failed"));
+    }
   }
 
   private chunk(buf: ArrayBuffer) {
@@ -206,7 +222,7 @@ export class VoiceClient {
     this.live.set(src, h.id);
     src.onended = () => {
       this.live.delete(src);
-      if (this.said.has(h.id) && ![...this.live.values()].includes(h.id)) this.on.played?.(h.id);
+      if (this.said.has(h.id) && ![...this.live.values()].includes(h.id)) this.played(h.id);
       if (!this.live.size) this.setPlaying(false);
     };
     const delay = (start - now) * 1000, audibleAt = performance.now() + delay + (ctx.outputLatency || ctx.baseLatency || 0) * 1000;
@@ -224,6 +240,7 @@ export class VoiceClient {
   }
 
   private halt() {
+    this.previewDone();
     for (const id of this.sent) this.dropped.add(id);
     for (const src of this.live.keys()) {
       src.onended = null;
@@ -256,6 +273,7 @@ export class Speaker {
   private readied: ((r: VoiceReady | null) => void)[] = [];
   private made = new Map<string, () => void>();
   private quiet: (() => void)[] = [];
+  private hearing?: { done: () => void; said: boolean };
   previewed = false;
   constructor(private failed: (message: string) => void) {}
 
@@ -263,12 +281,14 @@ export class Speaker {
   catalog(): Promise<VoiceReady["catalog"] | null> {
     return new Promise((done) => { this.listed.push(done); this.send({ type: "catalog" }); });
   }
-  preview(tts?: string, voice?: string) {
+  preview(tts?: string, voice?: string): Promise<void> {
     this.previewed = true;
     this.stop();
     this.sound();
     this.now = PREVIEW;
+    const heard = new Promise<void>((done) => { this.hearing = { done, said: false }; });
     this.send({ type: "preview", ...(tts ? { tts } : {}), ...(voice ? { voice } : {}) });
+    return heard;
   }
   async read(parts: { text: string; voice?: { tts?: string; name?: string } }[], base: VoiceAsk, done: () => void) {
     this.stop();
@@ -305,6 +325,7 @@ export class Speaker {
     this.live.clear();
     for (const ok of this.quiet.splice(0)) ok();
     this.end = 0;
+    this.heard();
   }
   close() {
     this.stop();
@@ -318,7 +339,13 @@ export class Speaker {
     this.out ??= new AudioContext({ latencyHint: "interactive" });
     void this.out.resume();
   }
+  private heard() {
+    const h = this.hearing;
+    this.hearing = undefined;
+    h?.done();
+  }
   private gone() {
+    this.heard();
     for (const done of this.listed.splice(0)) done(null);
     for (const done of this.readied.splice(0)) done(null);
     for (const ok of this.made.values()) ok();
@@ -333,8 +360,17 @@ export class Speaker {
         const m = JSON.parse(e.data);
         if (m.type === "catalog") for (const done of this.listed.splice(0)) done(m.catalog ?? {});
         else if (m.type === "ready") for (const done of this.readied.splice(0)) done(m);
-        else if (m.type === "said") { this.made.get(m.id)?.(); this.made.delete(m.id); }
-        else if (m.type === "error") this.failed(m.message);
+        else if (m.type === "said") {
+          this.made.get(m.id)?.();
+          this.made.delete(m.id);
+          if (m.id === PREVIEW && this.now === PREVIEW && this.hearing) {
+            this.hearing.said = true;
+            if (!this.live.size) this.heard();
+          }
+        } else if (m.type === "error") {
+          this.failed(m.message);
+          this.heard();
+        }
       };
       ws.onclose = () => { if (this.ws === ws) this.gone(); };
     }
@@ -356,7 +392,9 @@ export class Speaker {
     this.live.add(src);
     src.onended = () => {
       this.live.delete(src);
-      if (!this.live.size) for (const ok of this.quiet.splice(0)) ok();
+      if (this.live.size) return;
+      for (const ok of this.quiet.splice(0)) ok();
+      if (this.hearing?.said) this.heard();
     };
   }
 }

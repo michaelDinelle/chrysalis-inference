@@ -153,13 +153,13 @@ test("a streamed reply is a job: Chrysalis's events in order, then the timings, 
 test("a page that goes away leaves the reply running; following from a position gives the rest", async () => {
   const aborts = chrysalisAborted, ctrl = new AbortController();
   const res = await post(ctrl.signal), job = res.headers.get("X-Chrysalis-Job")!;
-  let seen = 0;
-  for await (const _ of events(res)) if (++seen === 3) break;
+  const first: (readonly [number, string])[] = [];
+  for await (const e of events(res)) if (first.push(e) === 3) break;
   ctrl.abort();
   await Bun.sleep(GAP_MS * (CHUNKS + 5));
   const rest = await all(await fetch(`${base}/api/chat/${job}?from=3`));
   expect(rest[0][0]).toBe(3);
-  expect(deltas(rest)).toEqual(Array.from({ length: CHUNKS - 3 }, (_, i) => `t${i + 3}`));
+  expect([...deltas(first), ...deltas(rest)]).toEqual(Array.from({ length: CHUNKS }, (_, i) => `t${i}`));
   expect(rest.at(-1)![1]).toBe("[DONE]");
   expect(chrysalisAborted).toBe(aborts);
 });

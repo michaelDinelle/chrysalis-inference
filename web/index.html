@@ -106,13 +106,11 @@
             <span id="backend-dot" class="dot"></span>
             <input id="backend-url" class="backend-input backend-url" type="text" inputmode="url" spellcheck="false" list="backend-known" aria-label="Backend address" placeholder="http://localhost:11434/v1" />
             <datalist id="backend-known"></datalist>
-            <input id="backend-key" class="backend-input backend-key" type="password" spellcheck="false" aria-label="API key" placeholder="API key" />
             <button id="backend-go" class="btn small primary" type="submit" hidden>Connect</button>
             <p id="backend-note" class="backend-note" role="status" hidden><span id="backend-why"></span><button id="backend-far" class="btn small primary" type="button" hidden>Send my chats there</button></p>
             <p id="link-note" class="backend-note" role="status" hidden></p>
           </form>
           <button id="artifacts-toggle" class="act art-btn" type="button" title="Artifacts" aria-label="Artifacts" aria-controls="shelf" hidden></button>
-          <button id="export" class="act" type="button" title="Export this chat (a file you can import again)" aria-label="Export this chat" hidden></button>
           <button id="connect" class="act" type="button" title="Connect a phone or another device" aria-label="Connect a device" aria-haspopup="dialog" hidden></button>
         </header>
         <div id="sea" class="sea"></div>
@@ -126,7 +124,6 @@
             <textarea id="input" rows="1" placeholder="Message Chrysalis" autofocus></textarea>
             <div id="model-pop" class="model-pop" role="listbox" aria-label="Model" hidden></div>
             <div id="tools-pop" class="tools-pop" role="dialog" aria-label="Tools in this chat" hidden></div>
-            <div id="voice-pop" class="model-pop voice-pop" hidden><div id="voice-meta" class="voice-meta"></div><div id="voice-list" role="listbox" aria-label="Voice"></div></div>
             <div class="composer-row">
               <button id="attach" class="act attach" type="button" title="Attach text files or pictures (or drop or paste them)" aria-label="Attach files"></button>
               <input id="attach-file" type="file" multiple hidden />
@@ -144,7 +141,7 @@
                 <button id="voice-dots" class="voice-dots" type="button"><i></i><i></i><i></i><i></i><i></i></button>
                 <button id="voice-mute" class="voice-mic" type="button"></button>
               </div>
-              <button id="voice-pick" class="model-btn voice-pick" type="button" aria-haspopup="listbox" aria-expanded="false" aria-controls="voice-pop" hidden></button>
+              <button id="voice-pick" class="voice-name" type="button"></button>
               <button id="send" class="send" type="submit" aria-label="Send"></button>
             </div>
           </div>
@@ -165,47 +162,57 @@
       </aside>
     </div>
     <dialog id="settings" class="settings-view" aria-labelledby="settings-title">
-      <header class="sent-head"><h2 id="settings-title">Settings</h2><button id="settings-close" class="act" type="button" aria-label="Close"></button></header>
-      <div class="set-wrap">
+      <header class="pane-head set-head">
+        <svg class="aurora" aria-hidden="true" viewBox="0 0 640 51" preserveAspectRatio="xMinYMin slice"><use href="#aurora" /></svg>
+        <h2 id="settings-title">Settings</h2>
+        <button id="settings-close" class="act" type="button" aria-label="Close"></button>
+      </header>
+      <div class="set-bar">
         <nav id="set-nav" class="set-nav" aria-label="Settings sections">
           <button type="button" data-sec="chat">Chat</button>
           <button type="button" data-sec="sampling">Sampling</button>
-          <button type="button" data-sec="voice">Voice</button>
-          <button type="button" data-sec="look">Appearance</button>
         </nav>
-        <div class="set-body">
-          <section class="set-sec" data-sec="chat">
-            <div class="set-sec-head"><label class="set-title" for="system-input">System prompt</label><button id="system-reset" class="act knob-reset" type="button" title="Back to the default system prompt" aria-label="Restore the default system prompt"></button></div>
-            <textarea id="system-input" rows="3" placeholder="No system prompt" title="Sent as written, {{MODEL}} as the chat's model; empty sends none. The default keeps the model from acting as a coding agent when it doesn't think, and is sent as its tools version in a chat with tools on. A change makes each chat read its history again once."></textarea>
-            <label class="set-switch" title="After the system prompt, how to make artifacts (with an id for each part) and change them in place with edits that hold only what changes"><span>Artifacts the model changes in place</span><button id="artifacts-switch" class="switch" type="button" role="switch" aria-checked="true"></button></label>
-            <button id="sent-open" class="btn small" type="button" title="The open chat's next request, exactly as the backend gets it: the tools, the system prompt and every message">What the model is sent</button>
-          </section>
-          <section class="set-sec" data-sec="sampling" hidden>
-            <div class="set-sec-head"><div id="mode-pick" class="segmented" role="radiogroup" aria-label="Values for"></div></div>
+        <div class="set-look">
+          <div id="theme-pick" class="segmented" role="radiogroup" aria-label="Theme"></div>
+          <label class="set-sea" title="The ASCII background behind chats"><span>ASCII background</span><button id="sea-switch" class="switch" type="button" role="switch" aria-checked="false"></button></label>
+        </div>
+      </div>
+      <div class="set-body">
+        <section class="set-sec" data-sec="chat">
+          <div class="set-block">
+            <div class="set-block-head"><label class="set-block-title" for="system-input">System prompt</label><button id="system-reset" class="act knob-reset" type="button" title="Back to the default system prompt" aria-label="Restore the default system prompt"></button></div>
+            <textarea id="system-input" rows="1" placeholder="No system prompt" title="Sent as written, {{MODEL}} as the chat's model; empty sends none. The default keeps the model from acting as a coding agent when it doesn't think, and is sent as its tools version in a chat with tools on. A change makes each chat read its history again once."></textarea>
+            <div class="set-block-foot">
+              <label class="set-switch" title="After the system prompt, how to make artifacts (with an id for each part) and change them in place with edits that hold only what changes"><button id="artifacts-switch" class="switch" type="button" role="switch" aria-checked="true"></button><span>Artifacts the model changes in place</span></label>
+              <button id="sent-open" class="btn small" type="button" title="The open chat's next request, exactly as the backend gets it: the tools, the system prompt and every message">What the model is sent</button>
+            </div>
+          </div>
+          <div class="set-block">
+            <div class="voice-line">
+              <span class="set-block-title">Voice</span>
+              <button id="voice-settings" class="voice-name" type="button"></button>
+              <div id="voice-knobs" class="knobs"></div>
+            </div>
+            <div class="set-block-head set-block-sub"><label class="set-block-title" for="voice-prompt">Voice prompt</label><button id="voice-prompt-reset" class="act knob-reset" type="button" title="Back to the default voice prompt" aria-label="Restore the default voice prompt"></button></div>
+            <textarea id="voice-prompt" class="prompt-input" rows="1" placeholder="No prompt" title="A note to the model before the first question said aloud (and again when it changes); the system prompt stays as it is. What the reply writes is spoken."></textarea>
+          </div>
+        </section>
+        <section class="set-sec" data-sec="sampling" hidden>
+          <div class="set-block">
+            <div class="set-block-head"><div id="mode-pick" class="segmented" role="radiogroup" aria-label="Values for"></div></div>
             <figure id="odds" class="odds" title="Qwen3.8-Flash-Next naming a cat (thinking off): 2,000 real draws of the first word"></figure>
             <div id="samplers" class="knobs"></div>
-            <h3 class="set-sub">Penalties</h3>
-            <div id="penalties" class="knobs"></div>
-            <h3 class="set-sub">Mirostat</h3>
-            <div id="mirostat" class="knobs"></div>
-            <h3 class="set-sub">Reply</h3>
-            <div id="reply-knobs" class="knobs"></div>
-          </section>
-          <section class="set-sec" data-sec="voice" hidden>
-            <div class="set-sec-head"><label class="set-title" for="voice-prompt">Voice prompt</label><button id="voice-prompt-reset" class="act knob-reset" type="button" title="Back to the default voice prompt" aria-label="Restore the default voice prompt"></button></div>
-            <textarea id="voice-prompt" class="prompt-input" rows="6" placeholder="No prompt" title="A note to the model before the first question said aloud (and again when it changes); the system prompt stays as it is. What the reply writes is spoken."></textarea>
-            <div id="voice-knobs" class="knobs"></div>
-          </section>
-          <section class="set-sec" data-sec="look" hidden>
-            <div class="set-switch"><span>Theme</span><div id="theme-pick" class="segmented" role="radiogroup" aria-label="Theme"></div></div>
-            <label class="set-switch"><span>ASCII background behind chats</span><button id="sea-switch" class="switch" type="button" role="switch" aria-checked="false"></button></label>
-          </section>
-        </div>
+          </div>
+          <div class="set-block"><h3 class="set-block-title">Penalties</h3><div id="penalties" class="knobs"></div></div>
+          <div class="set-block"><h3 class="set-block-title">Mirostat</h3><div id="mirostat" class="knobs"></div></div>
+          <div class="set-block"><h3 class="set-block-title">Reply</h3><div id="reply-knobs" class="knobs"></div></div>
+        </section>
       </div>
       <footer class="set-foot"><button id="settings-reset" class="btn" type="button"
         title="The default system prompt and Qwen's recommended values, with thinking and without (Undo brings yours back)">Reset all settings</button></footer>
     </dialog>
     <div id="tokpop" class="tokpop" role="dialog" aria-label="Alternatives" hidden></div>
+    <div id="voice-menu" class="voice-menu" popover="auto" role="dialog" aria-label="Voices"></div>
     <dialog id="svg-zoom" class="svg-zoom" aria-label="SVG, full size"><div class="svg-zoom-paper"></div></dialog>
     <dialog id="page-zoom" class="page-zoom" aria-label="Page, full size"><div class="page-zoom-box"></div></dialog>
     <dialog id="sent-view" class="sent-view" aria-labelledby="sent-title">

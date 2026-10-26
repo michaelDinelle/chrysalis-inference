@@ -83,6 +83,7 @@ function startJob(body: string): Job {
     job.events.push(typeof data === "string" ? data : JSON.stringify(data));
     for (const wake of [...job.waiters]) wake();
   };
+  push({ started: job.t0 });
   (async () => {
     try {
       const { req, web, said, tool, ahead, tools, notes } = await asSent(JSON.parse(body));
@@ -628,7 +629,7 @@ img.src = ${JSON.stringify(checkUrl(req))} + "?t=" + Date.now();
     "/api/backend": {
       POST: here(json(async (req) => {
         const b = await req.json().catch(() => ({}));
-        const r = await backends.set(String(b?.url ?? ""), typeof b?.key === "string" ? b.key : undefined, b?.confirmRemote === true);
+        const r = await backends.set(String(b?.url ?? ""), b?.confirmRemote === true);
         return r.ok ? Response.json(await backends.about()) : Response.json({ error: { message: r.error }, ...(r.remote ? { remote: r.remote } : {}) }, { status: r.remote ? 409 : 400 });
       })),
     },

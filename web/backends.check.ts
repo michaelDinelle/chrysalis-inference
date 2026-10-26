@@ -1,5 +1,5 @@
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
-import { existsSync, mkdtempSync, rmSync, readFileSync, statSync, writeFileSync } from "node:fs";
+import { existsSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { deflateSync } from "node:zlib";
 import puppeteer from "puppeteer-core";
@@ -7,18 +7,18 @@ import puppeteer from "puppeteer-core";
 const RUN = mkdtempSync(`${tmpdir()}/chrysalis-test-`);
 
 process.env.NODE_TLS_REJECT_UNAUTHORIZED = "0";
-const DATA = `${import.meta.dir}/../data`, B = `${DATA}/backends`, GGUF = `${B}/models/qwen3.5-2b-gguf`, KEY = "chrysalis-test-key";
+const DATA = `${import.meta.dir}/../data`, B = `${DATA}/backends`, GGUF = `${B}/models/qwen3.5-2b-gguf`;
 const LMS = `${process.env.HOME}/.lmstudio/bin/lms`;
 const MINUTES = (n: number) => n * 60_000;
 
-interface Spec { name: string; port: number; model: string; ready: string; start(): Bun.Subprocess | undefined; stop?(): void; key?: string;
+interface Spec { name: string; port: number; model: string; ready: string; start(): Bun.Subprocess | undefined; stop?(): void;
   thinkingOff: "none" | "stub" }
 const spawn = (cmd: string[], env: Record<string, string> = {}) =>
   Bun.spawn(cmd, { cwd: tmpdir(), env: { ...process.env, ...env }, stdout: "ignore", stderr: "ignore" });
 const BACKENDS: Spec[] = [
-  { name: "llama.cpp", port: 18180, model: `${GGUF}/Qwen3.5-2B-Q8_0.gguf`, ready: "/health", key: KEY, thinkingOff: "none",
+  { name: "llama.cpp", port: 18180, model: `${GGUF}/Qwen3.5-2B-Q8_0.gguf`, ready: "/health", thinkingOff: "none",
     start: () => spawn([`${DATA}/llama.cpp/build/bin/llama-server`, "-m", `${GGUF}/Qwen3.5-2B-Q8_0.gguf`, "--mmproj", `${GGUF}/mmproj-Qwen3.5-2B-BF16.gguf`,
-      "--no-mmproj-offload", "-ngl", "0", "-c", "16384", "--host", "127.0.0.1", "--port", "18180", "--api-key", KEY]) },
+      "--no-mmproj-offload", "-ngl", "0", "-c", "16384", "--host", "127.0.0.1", "--port", "18180"]) },
   { name: "Ollama", port: 18181, model: "qwen3.5:2b", ready: "/", thinkingOff: "none",
     start: () => spawn([`${B}/ollama/bin/ollama`, "serve"], { OLLAMA_HOST: "127.0.0.1:18181", OLLAMA_MODELS: `${B}/ollama-models` }) },
   { name: "LM Studio", port: 18182, model: "qwen3.5-2b", ready: "/v1/models", thinkingOff: "none",
@@ -73,7 +73,7 @@ beforeAll(async () => {
 });
 afterAll(() => { web?.kill(); rmSync(RUN, { recursive: true, force: true }); });
 
-const connect = (url: string, key?: string) => fetch(`${base}/api/backend`, { method: "POST", headers: json, body: JSON.stringify({ url, ...(key ? { key } : {}) }) });
+const connect = (url: string) => fetch(`${base}/api/backend`, { method: "POST", headers: json, body: JSON.stringify({ url }) });
 async function reply(body: object) {
   const r = await fetch(`${base}/api/chat`, { method: "POST", headers: json, body: JSON.stringify({ stream: true, stream_options: { include_usage: true }, ...body }) });
   expect(r.status).toBe(200);
@@ -109,31 +109,18 @@ for (const b of BACKENDS) {
       proc = b.start();
       const deadline = Date.now() + MINUTES(15);
       for (;;) {
-        const r = await fetch(`http://127.0.0.1:${b.port}${b.ready}`, { headers: b.key ? { Authorization: `Bearer ${b.key}` } : {} }).catch(() => null);
+        const r = await fetch(`http://127.0.0.1:${b.port}${b.ready}`).catch(() => null);
         if (r?.ok) break;
         if (proc && proc.exitCode !== null) throw new Error(`${b.name} exited (${proc.exitCode})`);
         if (Date.now() > deadline) throw new Error(`${b.name} did not start`);
         await Bun.sleep(1000);
       }
-      expect((await connect(`localhost:${b.port}`, b.key)).status).toBe(200);
+      expect((await connect(`localhost:${b.port}`)).status).toBe(200);
     }, MINUTES(16));
     afterAll(() => { proc?.kill(); b.stop?.(); });
 
-    if (b.key) {
-      test(`${b.name}: a key it refuses, or none, is said so; its key reaches it and no page, and is kept readable by this user only`, async () => {
-        expect((await (await connect(`localhost:${b.port}`)).json()).error.message).toBe(`http://localhost:${b.port} wants a key`);
-        expect((await (await connect(`localhost:${b.port}`, "not-the-key")).json()).error.message).toBe(`http://localhost:${b.port} refused the key`);
-        const ok = await connect(`localhost:${b.port}`, b.key);
-        expect(ok.status).toBe(200);
-        const status = await (await fetch(`${base}/api/status`)).text();
-        expect([status.includes(b.key!), JSON.parse(status).backend.key]).toEqual([false, true]);
-        expect(statSync(`${tls}/backend.json`).mode & 0o777).toBe(0o600);
-        expect(JSON.parse(readFileSync(`${tls}/backend.json`, "utf8")).key).toBe(b.key);
-      });
-    }
-
     test(`${b.name}: connected by its address as pasted (no http://, no /v1), it is named, and lists its model`, async () => {
-      const r = await connect(`localhost:${b.port}`, b.key);
+      const r = await connect(`localhost:${b.port}`);
       const about = await r.json();
       expect([r.status, about.url, about.name, about.chrysalis, about.remote]).toEqual([200, `http://localhost:${b.port}/v1`, b.name, false, false]);
       const status = await (await fetch(`${base}/api/status`)).json();
@@ -184,7 +171,6 @@ for (const b of BACKENDS) {
           expect(await page.$eval("#backend-url", (e) => (e as HTMLInputElement).value)).toBe("http://127.0.0.1:9/v1");
           await page.click("#backend-url", { count: 3 });
           await page.type("#backend-url", `localhost:${b.port}`);
-          await page.type("#backend-key", b.key!);
           await page.keyboard.press("Enter");
           await page.waitForFunction((url) => (document.querySelector("#backend-url") as HTMLInputElement).value === url
             && (document.querySelector("#backend-go") as HTMLElement).hidden && document.querySelector("#backend-dot")!.classList.contains("online"),
