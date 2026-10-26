@@ -471,6 +471,476 @@
    ],
    "protocol": "e0bac4bad873dcd8"
   },
+  "1f684d87980e2d8b": {
+   "dirty": true,
+   "env": "0599bf4f8d4ff3d7",
+   "head": "21c399fa90bdfe61733f8184661f51aedfe84d22",
+   "passes": [
+    {
+     "answers": [
+      {
+       "answer": "00883c83da9b3dfe",
+       "cached": 0,
+       "decode_tps": 90.9219137075235,
+       "gap_p99": 0.026191999999999993,
+       "id": "warmup",
+       "per_pass": 2.388888888888889,
+       "prompt": 75,
+       "written": 128
+      },
+      {
+       "answer": "1378c972de1afd62",
+       "cached": 42,
+       "decode_tps": 104.66617967353949,
+       "gap_p99": 0.02619699999999997,
+       "id": "performance-short-r1",
+       "per_pass": 2.7387387387387387,
+       "prompt": 77,
+       "written": 304
+      },
+      {
+       "answer": "25f9f0a0cd230179",
+       "cached": 42,
+       "decode_tps": 83.4099053698589,
+       "gap_p99": 0.026648999999999923,
+       "id": "performance-prompt-4k-r1",
+       "per_pass": 2.220779220779221,
+       "prompt": 4093,
+       "written": 512
+      },
+      {
+       "answer": "d9f9c36954f23056",
+       "cached": 42,
+       "decode_tps": 88.65511822835852,
+       "gap_p99": 0.02764599999999895,
+       "id": "performance-prompt-16k-r1",
+       "per_pass": 2.447619047619048,
+       "prompt": 16387,
+       "written": 512
+      },
+      {
+       "answer": "5852b9f38d92b236",
+       "cached": 42,
+       "decode_tps": 141.76840266381322,
+       "gap_p99": 0.05221999999999993,
+       "id": "sanity-I1",
+       "per_pass": 3.8,
+       "prompt": 82,
+       "written": 76
+      },
+      {
+       "answer": "198b5c70a9135872",
+       "cached": 42,
+       "decode_tps": 132.5780893653633,
+       "gap_p99": 0.026246999999999993,
+       "id": "sanity-I2",
+       "per_pass": 3.4761904761904763,
+       "prompt": 90,
+       "written": 73
+      },
+      {
+       "answer": "3704245c58d7b031",
+       "cached": 42,
+       "decode_tps": 134.11846303174838,
+       "gap_p99": 0.032331,
+       "id": "sanity-I3",
+       "per_pass": 3.576923076923077,
+       "prompt": 85,
+       "written": 93
+      },
+      {
+       "answer": "69f4cbed6459450b",
+       "cached": 42,
+       "decode_tps": 107.24055209284815,
+       "gap_p99": 0.032150999999999985,
+       "id": "sanity-I4",
+       "per_pass": 2.857142857142857,
+       "prompt": 71,
+       "written": 40
+      },
+      {
+       "answer": "ea6b8b10fe241bd8",
+       "cached": 42,
+       "decode_tps": 126.74222733560451,
+       "gap_p99": 0.05310099999999984,
+       "id": "sanity-R1",
+       "per_pass": 3.375,
+       "prompt": 4089,
+       "written": 54
+      },
+      {
+       "answer": "7699af0dc88be466",
+       "cached": 42,
+       "decode_tps": 136.73511257932714,
+       "gap_p99": 0.05311300000000019,
+       "id": "sanity-R2",
+       "per_pass": 3.642857142857143,
+       "prompt": 4089,
+       "written": 51
+      },
+      {
+       "answer": "35b6a2255ca69976",
+       "cached": 42,
+       "decode_tps": 120.16567864343135,
+       "gap_p99": 0.055120999999999754,
+       "id": "sanity-R3",
+       "per_pass": 3.3181818181818183,
+       "prompt": 16382,
+       "written": 73
+      },
+      {
+       "answer": "cc00c68ed3aca8b4",
+       "cached": 42,
+       "decode_tps": 121.19615967355718,
+       "gap_p99": 0.033902999999998684,
+       "id": "sanity-R4",
+       "per_pass": 3.3658536585365852,
+       "prompt": 16390,
+       "written": 138
+      },
+      {
+       "answer": "6b86947f1fa9a11d",
+       "cached": 0,
+       "decode_tps": 122.58558578414227,
+       "gap_p99": 0.23565199999999997,
+       "id": "sanity-T1",
+       "per_pass": 3.210526315789474,
+       "prompt": 334,
+       "written": 61
+      },
+      {
+       "answer": "c3c463f2b499f6ef",
+       "cached": 0,
+       "decode_tps": 106.31385057985675,
+       "gap_p99": 0.31396999999999997,
+       "id": "sanity-T2",
+       "per_pass": 2.782608695652174,
+       "prompt": 344,
+       "written": 64
+      },
+      {
+       "answer": "245c8cadab92ce27",
+       "cached": 0,
+       "decode_tps": 131.23182487004573,
+       "gap_p99": 0.36604899999999996,
+       "id": "sanity-T3",
+       "per_pass": 3.4285714285714284,
+       "prompt": 361,
+       "written": 72
+      },
+      {
+       "answer": "25c997482047374d",
+       "cached": 0,
+       "decode_tps": 123.83811274238431,
+       "gap_p99": 0.28793,
+       "id": "sanity-T4",
+       "per_pass": 3.238095238095238,
+       "prompt": 348,
+       "written": 68
+      },
+      {
+       "answer": "44d709cb278d3e92",
+       "cached": 0,
+       "decode_tps": 74.29359152220677,
+       "gap_p99": 0.03317199999999332,
+       "id": "long-100k",
+       "per_pass": 2.464114832535885,
+       "prompt": 98878,
+       "written": 512
+      },
+      {
+       "answer": "b81150287b081ed7",
+       "cached": 98873,
+       "decode_tps": 77.96019119175837,
+       "gap_p99": 0.033198999999999756,
+       "id": "follow-up",
+       "per_pass": 2.5849056603773586,
+       "prompt": 100046,
+       "written": 411
+      }
+     ],
+     "at": "2026-10-26T14:05:30",
+     "load": 1.3212890625,
+     "metrics": {
+      "decode_tps.100k": 74.29359152220677,
+      "decode_tps.16k": 88.65511822835852,
+      "decode_tps.4k": 83.4099053698589,
+      "decode_tps.followup": 77.96019119175837,
+      "decode_tps.short": 104.66617967353949,
+      "itl_p99.100k": 0.03317199999999332,
+      "itl_p99.16k": 0.02764599999999895,
+      "itl_p99.4k": 0.026648999999999923,
+      "itl_p99.followup": 0.033198999999999756,
+      "itl_p99.short": 0.02619699999999997,
+      "kl_max": 0.043857964274904467,
+      "kl_mean": 0.003348320907470846,
+      "kl_p999": 0.04223638797591739,
+      "kv_tokens": 270400,
+      "load_s": 4.137373636011034,
+      "pass_rate.100k": 30.15021481192469,
+      "pass_rate.16k": 36.22096270030212,
+      "pass_rate.4k": 37.55884627765576,
+      "pass_rate.followup": 30.159781993891922,
+      "pass_rate.short": 38.21692744658843,
+      "pass_s": 204.07651709701167,
+      "per_pass.100k": 2.464114832535885,
+      "per_pass.16k": 2.447619047619048,
+      "per_pass.4k": 2.220779220779221,
+      "per_pass.followup": 2.5849056603773586,
+      "per_pass.short": 2.7387387387387387,
+      "prompt_tps.100k": 1088.7052621861546,
+      "prompt_tps.16k": 1478.9161139922505,
+      "prompt_tps.4k": 1521.8283717013487,
+      "prompt_tps.followup": 710.7053046361576,
+      "prompt_tps.short": 455.50086259324075,
+      "ram_gb": 8.00933888,
+      "reused.followup": 98873,
+      "sanity": 12,
+      "top1": 0.9704251386321626,
+      "ttft.100k": 90.929135,
+      "ttft.16k": 11.091694,
+      "ttft.4k": 2.693326,
+      "ttft.followup": 1.686982,
+      "ttft.short": 0.104752,
+      "vram_gb": 25.060250112
+     },
+     "outputs": "a5a696af9b72669d",
+     "spread": true
+    },
+    {
+     "answers": [
+      {
+       "answer": "00883c83da9b3dfe",
+       "cached": 0,
+       "decode_tps": 90.87306328084101,
+       "gap_p99": 0.026204000000000116,
+       "id": "warmup",
+       "per_pass": 2.388888888888889,
+       "prompt": 75,
+       "written": 128
+      },
+      {
+       "answer": "1378c972de1afd62",
+       "cached": 42,
+       "decode_tps": 104.63064786446766,
+       "gap_p99": 0.02621199999999968,
+       "id": "performance-short-r1",
+       "per_pass": 2.7387387387387387,
+       "prompt": 77,
+       "written": 304
+      },
+      {
+       "answer": "25f9f0a0cd230179",
+       "cached": 42,
+       "decode_tps": 83.41712938700401,
+       "gap_p99": 0.026651000000000202,
+       "id": "performance-prompt-4k-r1",
+       "per_pass": 2.220779220779221,
+       "prompt": 4093,
+       "written": 512
+      },
+      {
+       "answer": "d9f9c36954f23056",
+       "cached": 42,
+       "decode_tps": 88.66465648635199,
+       "gap_p99": 0.02764899999999848,
+       "id": "performance-prompt-16k-r1",
+       "per_pass": 2.447619047619048,
+       "prompt": 16387,
+       "written": 512
+      },
+      {
+       "answer": "5852b9f38d92b236",
+       "cached": 42,
+       "decode_tps": 141.6886892043679,
+       "gap_p99": 0.052224999999999966,
+       "id": "sanity-I1",
+       "per_pass": 3.8,
+       "prompt": 82,
+       "written": 76
+      },
+      {
+       "answer": "198b5c70a9135872",
+       "cached": 42,
+       "decode_tps": 132.68472144520277,
+       "gap_p99": 0.026220999999999994,
+       "id": "sanity-I2",
+       "per_pass": 3.4761904761904763,
+       "prompt": 90,
+       "written": 73
+      },
+      {
+       "answer": "3704245c58d7b031",
+       "cached": 42,
+       "decode_tps": 134.12399695902837,
+       "gap_p99": 0.03246100000000002,
+       "id": "sanity-I3",
+       "per_pass": 3.576923076923077,
+       "prompt": 85,
+       "written": 93
+      },
+      {
+       "answer": "69f4cbed6459450b",
+       "cached": 42,
+       "decode_tps": 107.28190279848886,
+       "gap_p99": 0.03221299999999999,
+       "id": "sanity-I4",
+       "per_pass": 2.857142857142857,
+       "prompt": 71,
+       "written": 40
+      },
+      {
+       "answer": "ea6b8b10fe241bd8",
+       "cached": 42,
+       "decode_tps": 126.75350514558113,
+       "gap_p99": 0.0530759999999999,
+       "id": "sanity-R1",
+       "per_pass": 3.375,
+       "prompt": 4089,
+       "written": 54
+      },
+      {
+       "answer": "7699af0dc88be466",
+       "cached": 42,
+       "decode_tps": 136.78740000383678,
+       "gap_p99": 0.05308499999999983,
+       "id": "sanity-R2",
+       "per_pass": 3.642857142857143,
+       "prompt": 4089,
+       "written": 51
+      },
+      {
+       "answer": "35b6a2255ca69976",
+       "cached": 42,
+       "decode_tps": 120.14823180309742,
+       "gap_p99": 0.055137000000000214,
+       "id": "sanity-R3",
+       "per_pass": 3.3181818181818183,
+       "prompt": 16382,
+       "written": 73
+      },
+      {
+       "answer": "cc00c68ed3aca8b4",
+       "cached": 42,
+       "decode_tps": 121.1615554524735,
+       "gap_p99": 0.03429799999999972,
+       "id": "sanity-R4",
+       "per_pass": 3.3658536585365852,
+       "prompt": 16390,
+       "written": 138
+      },
+      {
+       "answer": "6b86947f1fa9a11d",
+       "cached": 0,
+       "decode_tps": 122.63270850468669,
+       "gap_p99": 0.23549299999999995,
+       "id": "sanity-T1",
+       "per_pass": 3.210526315789474,
+       "prompt": 334,
+       "written": 61
+      },
+      {
+       "answer": "c3c463f2b499f6ef",
+       "cached": 0,
+       "decode_tps": 106.35201194281521,
+       "gap_p99": 0.31382299999999996,
+       "id": "sanity-T2",
+       "per_pass": 2.782608695652174,
+       "prompt": 344,
+       "written": 64
+      },
+      {
+       "answer": "245c8cadab92ce27",
+       "cached": 0,
+       "decode_tps": 131.19870013359255,
+       "gap_p99": 0.366144,
+       "id": "sanity-T3",
+       "per_pass": 3.4285714285714284,
+       "prompt": 361,
+       "written": 72
+      },
+      {
+       "answer": "25c997482047374d",
+       "cached": 0,
+       "decode_tps": 123.93793644682421,
+       "gap_p99": 0.28765799999999997,
+       "id": "sanity-T4",
+       "per_pass": 3.238095238095238,
+       "prompt": 348,
+       "written": 68
+      },
+      {
+       "answer": "44d709cb278d3e92",
+       "cached": 0,
+       "decode_tps": 74.27532077697293,
+       "gap_p99": 0.03317999999998733,
+       "id": "long-100k",
+       "per_pass": 2.464114832535885,
+       "prompt": 98878,
+       "written": 512
+      },
+      {
+       "answer": "b81150287b081ed7",
+       "cached": 98873,
+       "decode_tps": 77.95036633339404,
+       "gap_p99": 0.03319800000000006,
+       "id": "follow-up",
+       "per_pass": 2.5849056603773586,
+       "prompt": 100046,
+       "written": 411
+      }
+     ],
+     "at": "2026-10-26T14:08:54",
+     "load": 1.05029296875,
+     "metrics": {
+      "decode_tps.100k": 74.27532077697293,
+      "decode_tps.16k": 88.66465648635199,
+      "decode_tps.4k": 83.41712938700401,
+      "decode_tps.followup": 77.95036633339404,
+      "decode_tps.short": 104.63064786446766,
+      "itl_p99.100k": 0.03317999999998733,
+      "itl_p99.16k": 0.02764899999999848,
+      "itl_p99.4k": 0.026651000000000202,
+      "itl_p99.followup": 0.03319800000000006,
+      "itl_p99.short": 0.02621199999999968,
+      "kl_max": 0.043857964274904467,
+      "kl_mean": 0.003348320907470846,
+      "kl_p999": 0.04223638797591739,
+      "kv_tokens": 270400,
+      "load_s": 4.029370911011938,
+      "pass_rate.100k": 30.142800082305524,
+      "pass_rate.16k": 36.22485965395703,
+      "pass_rate.4k": 37.56209919765677,
+      "pass_rate.followup": 30.155981136276527,
+      "pass_rate.short": 38.20395366103918,
+      "pass_s": 203.68780968303327,
+      "per_pass.100k": 2.464114832535885,
+      "per_pass.16k": 2.447619047619048,
+      "per_pass.4k": 2.220779220779221,
+      "per_pass.followup": 2.5849056603773586,
+      "per_pass.short": 2.7387387387387387,
+      "prompt_tps.100k": 1088.6558411675085,
+      "prompt_tps.16k": 1483.4559745446577,
+      "prompt_tps.4k": 1524.626516281511,
+      "prompt_tps.followup": 710.3031892707794,
+      "prompt_tps.short": 455.74550387909756,
+      "ram_gb": 8.008994816,
+      "reused.followup": 98873,
+      "sanity": 12,
+      "top1": 0.9704251386321626,
+      "ttft.100k": 90.93459,
+      "ttft.16k": 11.05785,
+      "ttft.4k": 2.688202,
+      "ttft.followup": 1.687946,
+      "ttft.short": 0.104733,
+      "vram_gb": 25.060250112
+     },
+     "outputs": "a5a696af9b72669d",
+     "spread": true
+    }
+   ],
+   "protocol": "75728ff2783bf369"
+  },
   "899ed84732838884": {
    "dirty": true,
    "env": "0599bf4f8d4ff3d7",
@@ -2527,6 +2997,706 @@
     }
    ],
    "protocol": "2b095d2321e155de"
+  },
+  "a924c3b27fce54dd": {
+   "dirty": true,
+   "env": "0599bf4f8d4ff3d7",
+   "head": "21c399fa90bdfe61733f8184661f51aedfe84d22",
+   "passes": [
+    {
+     "answers": [
+      {
+       "answer": "85231fb02c3c4165",
+       "cached": 0,
+       "decode_tps": 71.94412041704925,
+       "gap_p99": 0.03783499999999995,
+       "id": "warmup",
+       "per_pass": 2.169491525423729,
+       "prompt": 75,
+       "written": 128
+      },
+      {
+       "answer": "a5813f4dd284fee6",
+       "cached": 42,
+       "decode_tps": 88.17610715688993,
+       "gap_p99": 0.03380899999999998,
+       "id": "performance-short-r1",
+       "per_pass": 2.2599118942731278,
+       "prompt": 77,
+       "written": 512
+      },
+      {
+       "answer": "147a2ff16b0e91af",
+       "cached": 42,
+       "decode_tps": 80.81321564792499,
+       "gap_p99": 0.0326519999999999,
+       "id": "performance-prompt-4k-r1",
+       "per_pass": 2.080971659919028,
+       "prompt": 4093,
+       "written": 512
+      },
+      {
+       "answer": "c5db654e8bcf8d9c",
+       "cached": 42,
+       "decode_tps": 79.8197916678282,
+       "gap_p99": 0.03095900000000018,
+       "id": "performance-prompt-16k-r1",
+       "per_pass": 1.9104477611940298,
+       "prompt": 16387,
+       "written": 512
+      },
+      {
+       "answer": "d9de34f7b28b1bba",
+       "cached": 42,
+       "decode_tps": 96.81520054050581,
+       "gap_p99": 0.04021399999999997,
+       "id": "sanity-I1",
+       "per_pass": 2.8461538461538463,
+       "prompt": 82,
+       "written": 74
+      },
+      {
+       "answer": "78fe88a2a61bbc89",
+       "cached": 42,
+       "decode_tps": 94.3302414001386,
+       "gap_p99": 0.059149999999999925,
+       "id": "sanity-I2",
+       "per_pass": 2.757575757575758,
+       "prompt": 90,
+       "written": 91
+      },
+      {
+       "answer": "1e3bd4b4f223a63c",
+       "cached": 0,
+       "decode_tps": 98.55115677553617,
+       "gap_p99": 0.04824600000000001,
+       "id": "sanity-I3",
+       "per_pass": 2.774193548387097,
+       "prompt": 85,
+       "written": 86
+      },
+      {
+       "answer": "c4ab7beb58e62e61",
+       "cached": 0,
+       "decode_tps": 98.44067432909084,
+       "gap_p99": 0.05104000000000003,
+       "id": "sanity-I4",
+       "per_pass": 2.3333333333333335,
+       "prompt": 71,
+       "written": 21
+      },
+      {
+       "answer": "0777b60d97a77150",
+       "cached": 0,
+       "decode_tps": 98.27616788214276,
+       "gap_p99": 0.052505000000000024,
+       "id": "sanity-R1",
+       "per_pass": 2.5714285714285716,
+       "prompt": 4089,
+       "written": 72
+      },
+      {
+       "answer": "62520e4da6877d1d",
+       "cached": 0,
+       "decode_tps": 90.22110527542259,
+       "gap_p99": 0.05262999999999973,
+       "id": "sanity-R2",
+       "per_pass": 2.3225806451612905,
+       "prompt": 4089,
+       "written": 72
+      },
+      {
+       "answer": "41d19a445aa40e5c",
+       "cached": 0,
+       "decode_tps": 105.4654138323496,
+       "gap_p99": 0.0358110000000007,
+       "id": "sanity-R3",
+       "per_pass": 2.7142857142857144,
+       "prompt": 16382,
+       "written": 57
+      },
+      {
+       "answer": "6c043e50226bd4cd",
+       "cached": 0,
+       "decode_tps": 91.4864442061525,
+       "gap_p99": 0.040014000000000216,
+       "id": "sanity-R4",
+       "per_pass": 2.476923076923077,
+       "prompt": 16390,
+       "written": 161
+      },
+      {
+       "answer": "895c4f72b247da1a",
+       "cached": 0,
+       "decode_tps": 98.81208453362406,
+       "gap_p99": 0.31007000000000007,
+       "id": "sanity-T1",
+       "per_pass": 2.5714285714285716,
+       "prompt": 334,
+       "written": 72
+      },
+      {
+       "answer": "cf90127e020df713",
+       "cached": 0,
+       "decode_tps": 89.34413822178502,
+       "gap_p99": 0.4976290000000001,
+       "id": "sanity-T2",
+       "per_pass": 2.5714285714285716,
+       "prompt": 344,
+       "written": 72
+      },
+      {
+       "answer": "435a2f6f4871b7ba",
+       "cached": 0,
+       "decode_tps": 93.77601067219156,
+       "gap_p99": 0.5931790000000001,
+       "id": "sanity-T3",
+       "per_pass": 2.7567567567567566,
+       "prompt": 361,
+       "written": 102
+      },
+      {
+       "answer": "dea7dde5a6ef8ef6",
+       "cached": 0,
+       "decode_tps": 97.40596511546894,
+       "gap_p99": 0.42654499999999995,
+       "id": "sanity-T4",
+       "per_pass": 2.6956521739130435,
+       "prompt": 348,
+       "written": 62
+      },
+      {
+       "answer": "da020ad43c51446f",
+       "cached": 0,
+       "decode_tps": 70.0065511959896,
+       "gap_p99": 0.032900000000005036,
+       "id": "long-100k",
+       "per_pass": 1.9250936329588015,
+       "prompt": 98878,
+       "written": 512
+      },
+      {
+       "answer": "a41a3894e8a35353",
+       "cached": 98873,
+       "decode_tps": 76.65391487998922,
+       "gap_p99": 0.03401000000000032,
+       "id": "follow-up",
+       "per_pass": 2.12448132780083,
+       "prompt": 100046,
+       "written": 512
+      }
+     ],
+     "at": "2026-10-26T13:57:17",
+     "load": 6.767578125,
+     "metrics": {
+      "decode_tps.100k": 70.0065511959896,
+      "decode_tps.16k": 79.8197916678282,
+      "decode_tps.4k": 80.81321564792499,
+      "decode_tps.followup": 76.65391487998922,
+      "decode_tps.short": 88.17610715688993,
+      "itl_p99.100k": 0.032900000000005036,
+      "itl_p99.16k": 0.03095900000000018,
+      "itl_p99.4k": 0.0326519999999999,
+      "itl_p99.followup": 0.03401000000000032,
+      "itl_p99.short": 0.03380899999999998,
+      "kl_max": 0.91807467829847,
+      "kl_mean": 0.03319562475404067,
+      "kl_p999": 0.7380012081202696,
+      "kv_tokens": 239104,
+      "load_s": 15.417694122006651,
+      "mem_limited": 0,
+      "pass_rate.100k": 36.36527075744985,
+      "pass_rate.16k": 41.78067220112882,
+      "pass_rate.4k": 38.834366274391975,
+      "pass_rate.followup": 36.08123727749492,
+      "pass_rate.short": 39.01749770879925,
+      "pass_s": 161.92001520795748,
+      "per_pass.100k": 1.9250936329588015,
+      "per_pass.16k": 1.9104477611940298,
+      "per_pass.4k": 2.080971659919028,
+      "per_pass.followup": 2.12448132780083,
+      "per_pass.short": 2.2599118942731278,
+      "prompt_tps.100k": 2735.3408576879388,
+      "prompt_tps.16k": 2830.041969358092,
+      "prompt_tps.4k": 2393.9494300058514,
+      "prompt_tps.followup": 1186.6938047769559,
+      "prompt_tps.short": 213.04323975241815,
+      "ram_gb": 47.640076288,
+      "reused.followup": 98873,
+      "sanity": 12,
+      "top1": 0.9306839186691312,
+      "ttft.100k": 36.243811,
+      "ttft.16k": 5.816411,
+      "ttft.4k": 1.724347,
+      "ttft.followup": 1.021825,
+      "ttft.short": 0.188243,
+      "vram_gb": 24.990333536
+     },
+     "outputs": "64a10fc8e2dc3abc",
+     "spread": true
+    },
+    {
+     "answers": [
+      {
+       "answer": "85231fb02c3c4165",
+       "cached": 0,
+       "decode_tps": 72.06189417213324,
+       "gap_p99": 0.038213,
+       "id": "warmup",
+       "per_pass": 2.169491525423729,
+       "prompt": 75,
+       "written": 128
+      },
+      {
+       "answer": "a5813f4dd284fee6",
+       "cached": 42,
+       "decode_tps": 87.84245628591741,
+       "gap_p99": 0.03393200000000007,
+       "id": "performance-short-r1",
+       "per_pass": 2.2599118942731278,
+       "prompt": 77,
+       "written": 512
+      },
+      {
+       "answer": "147a2ff16b0e91af",
+       "cached": 42,
+       "decode_tps": 80.22494741065896,
+       "gap_p99": 0.03282199999999946,
+       "id": "performance-prompt-4k-r1",
+       "per_pass": 2.080971659919028,
+       "prompt": 4093,
+       "written": 512
+      },
+      {
+       "answer": "c5db654e8bcf8d9c",
+       "cached": 42,
+       "decode_tps": 79.27308328868229,
+       "gap_p99": 0.031136000000000053,
+       "id": "performance-prompt-16k-r1",
+       "per_pass": 1.9104477611940298,
+       "prompt": 16387,
+       "written": 512
+      },
+      {
+       "answer": "d9de34f7b28b1bba",
+       "cached": 42,
+       "decode_tps": 96.27814399853091,
+       "gap_p99": 0.0405350000000001,
+       "id": "sanity-I1",
+       "per_pass": 2.8461538461538463,
+       "prompt": 82,
+       "written": 74
+      },
+      {
+       "answer": "78fe88a2a61bbc89",
+       "cached": 42,
+       "decode_tps": 94.07189537973154,
+       "gap_p99": 0.059706999999999955,
+       "id": "sanity-I2",
+       "per_pass": 2.757575757575758,
+       "prompt": 90,
+       "written": 91
+      },
+      {
+       "answer": "1e3bd4b4f223a63c",
+       "cached": 0,
+       "decode_tps": 65.45709233146452,
+       "gap_p99": 0.45084199999999996,
+       "id": "sanity-I3",
+       "per_pass": 2.774193548387097,
+       "prompt": 85,
+       "written": 86
+      },
+      {
+       "answer": "c4ab7beb58e62e61",
+       "cached": 0,
+       "decode_tps": 96.58159233929729,
+       "gap_p99": 0.05130800000000002,
+       "id": "sanity-I4",
+       "per_pass": 2.3333333333333335,
+       "prompt": 71,
+       "written": 21
+      },
+      {
+       "answer": "0777b60d97a77150",
+       "cached": 0,
+       "decode_tps": 97.90923963472795,
+       "gap_p99": 0.053608999999999796,
+       "id": "sanity-R1",
+       "per_pass": 2.5714285714285716,
+       "prompt": 4089,
+       "written": 72
+      },
+      {
+       "answer": "62520e4da6877d1d",
+       "cached": 0,
+       "decode_tps": 89.35132846500225,
+       "gap_p99": 0.05298399999999992,
+       "id": "sanity-R2",
+       "per_pass": 2.3225806451612905,
+       "prompt": 4089,
+       "written": 72
+      },
+      {
+       "answer": "41d19a445aa40e5c",
+       "cached": 0,
+       "decode_tps": 104.74031840662626,
+       "gap_p99": 0.03597199999999923,
+       "id": "sanity-R3",
+       "per_pass": 2.7142857142857144,
+       "prompt": 16382,
+       "written": 57
+      },
+      {
+       "answer": "6c043e50226bd4cd",
+       "cached": 0,
+       "decode_tps": 90.92607360579528,
+       "gap_p99": 0.04002700000000026,
+       "id": "sanity-R4",
+       "per_pass": 2.476923076923077,
+       "prompt": 16390,
+       "written": 161
+      },
+      {
+       "answer": "895c4f72b247da1a",
+       "cached": 0,
+       "decode_tps": 98.73484001641276,
+       "gap_p99": 0.3127279999999999,
+       "id": "sanity-T1",
+       "per_pass": 2.5714285714285716,
+       "prompt": 334,
+       "written": 72
+      },
+      {
+       "answer": "cf90127e020df713",
+       "cached": 0,
+       "decode_tps": 88.15264345644661,
+       "gap_p99": 0.5051679999999998,
+       "id": "sanity-T2",
+       "per_pass": 2.5714285714285716,
+       "prompt": 344,
+       "written": 72
+      },
+      {
+       "answer": "435a2f6f4871b7ba",
+       "cached": 0,
+       "decode_tps": 93.907007219192,
+       "gap_p99": 0.595021,
+       "id": "sanity-T3",
+       "per_pass": 2.7567567567567566,
+       "prompt": 361,
+       "written": 102
+      },
+      {
+       "answer": "dea7dde5a6ef8ef6",
+       "cached": 0,
+       "decode_tps": 94.14571565730472,
+       "gap_p99": 0.446553,
+       "id": "sanity-T4",
+       "per_pass": 2.6956521739130435,
+       "prompt": 348,
+       "written": 62
+      },
+      {
+       "answer": "da020ad43c51446f",
+       "cached": 0,
+       "decode_tps": 69.8389596980705,
+       "gap_p99": 0.033364000000005944,
+       "id": "long-100k",
+       "per_pass": 1.9250936329588015,
+       "prompt": 98878,
+       "written": 512
+      },
+      {
+       "answer": "a41a3894e8a35353",
+       "cached": 98873,
+       "decode_tps": 77.02288373577065,
+       "gap_p99": 0.03314799999999973,
+       "id": "follow-up",
+       "per_pass": 2.12448132780083,
+       "prompt": 100046,
+       "written": 512
+      }
+     ],
+     "at": "2026-10-26T13:59:58",
+     "load": 6.76220703125,
+     "metrics": {
+      "decode_tps.100k": 69.8389596980705,
+      "decode_tps.16k": 79.27308328868229,
+      "decode_tps.4k": 80.22494741065896,
+      "decode_tps.followup": 77.02288373577065,
+      "decode_tps.short": 87.84245628591741,
+      "itl_p99.100k": 0.033364000000005944,
+      "itl_p99.16k": 0.031136000000000053,
+      "itl_p99.4k": 0.03282199999999946,
+      "itl_p99.followup": 0.03314799999999973,
+      "itl_p99.short": 0.03393200000000007,
+      "kl_max": 0.91807467829847,
+      "kl_mean": 0.03319562475404067,
+      "kl_p999": 0.7380012081202696,
+      "kv_tokens": 239104,
+      "load_s": 15.162791029026266,
+      "mem_limited": 0,
+      "pass_rate.100k": 36.278214473511326,
+      "pass_rate.16k": 41.49450453391964,
+      "pass_rate.4k": 38.55167706309876,
+      "pass_rate.followup": 36.25491207093892,
+      "pass_rate.short": 38.86985882437281,
+      "pass_s": 161.16775649302872,
+      "per_pass.100k": 1.9250936329588015,
+      "per_pass.16k": 1.9104477611940298,
+      "per_pass.4k": 2.080971659919028,
+      "per_pass.followup": 2.12448132780083,
+      "per_pass.short": 2.2599118942731278,
+      "prompt_tps.100k": 2729.2701756769416,
+      "prompt_tps.16k": 2819.3443464322795,
+      "prompt_tps.4k": 2384.884720989778,
+      "prompt_tps.followup": 1196.4826214103407,
+      "prompt_tps.short": 217.29796779918675,
+      "ram_gb": 47.638298624,
+      "reused.followup": 98873,
+      "sanity": 12,
+      "top1": 0.9306839186691312,
+      "ttft.100k": 36.334978,
+      "ttft.16k": 5.838221,
+      "ttft.4k": 1.731252,
+      "ttft.followup": 1.013688,
+      "ttft.short": 0.184927,
+      "vram_gb": 24.990333536
+     },
+     "outputs": "64a10fc8e2dc3abc",
+     "spread": true
+    },
+    {
+     "answers": [
+      {
+       "answer": "85231fb02c3c4165",
+       "cached": 0,
+       "decode_tps": 64.73556902802518,
+       "gap_p99": 0.05828499999999992,
+       "id": "warmup",
+       "per_pass": 2.169491525423729,
+       "prompt": 75,
+       "written": 128
+      },
+      {
+       "answer": "a5813f4dd284fee6",
+       "cached": 42,
+       "decode_tps": 84.54905999948367,
+       "gap_p99": 0.03525299999999998,
+       "id": "performance-short-r1",
+       "per_pass": 2.2599118942731278,
+       "prompt": 77,
+       "written": 512
+      },
+      {
+       "answer": "147a2ff16b0e91af",
+       "cached": 42,
+       "decode_tps": 76.44012748812999,
+       "gap_p99": 0.03606499999999979,
+       "id": "performance-prompt-4k-r1",
+       "per_pass": 2.080971659919028,
+       "prompt": 4093,
+       "written": 512
+      },
+      {
+       "answer": "c5db654e8bcf8d9c",
+       "cached": 42,
+       "decode_tps": 78.14507001287556,
+       "gap_p99": 0.03213899999999903,
+       "id": "performance-prompt-16k-r1",
+       "per_pass": 1.9104477611940298,
+       "prompt": 16387,
+       "written": 512
+      },
+      {
+       "answer": "d9de34f7b28b1bba",
+       "cached": 42,
+       "decode_tps": 93.7702216623011,
+       "gap_p99": 0.039920999999999984,
+       "id": "sanity-I1",
+       "per_pass": 2.8461538461538463,
+       "prompt": 82,
+       "written": 74
+      },
+      {
+       "answer": "78fe88a2a61bbc89",
+       "cached": 42,
+       "decode_tps": 92.13170566742211,
+       "gap_p99": 0.05989399999999989,
+       "id": "sanity-I2",
+       "per_pass": 2.757575757575758,
+       "prompt": 90,
+       "written": 91
+      },
+      {
+       "answer": "1e3bd4b4f223a63c",
+       "cached": 0,
+       "decode_tps": 96.62239465722917,
+       "gap_p99": 0.04914200000000002,
+       "id": "sanity-I3",
+       "per_pass": 2.774193548387097,
+       "prompt": 85,
+       "written": 86
+      },
+      {
+       "answer": "c4ab7beb58e62e61",
+       "cached": 0,
+       "decode_tps": 96.478341210684,
+       "gap_p99": 0.051499999999999935,
+       "id": "sanity-I4",
+       "per_pass": 2.3333333333333335,
+       "prompt": 71,
+       "written": 21
+      },
+      {
+       "answer": "0777b60d97a77150",
+       "cached": 0,
+       "decode_tps": 97.44529505777699,
+       "gap_p99": 0.05394600000000027,
+       "id": "sanity-R1",
+       "per_pass": 2.5714285714285716,
+       "prompt": 4089,
+       "written": 72
+      },
+      {
+       "answer": "62520e4da6877d1d",
+       "cached": 0,
+       "decode_tps": 89.34694016424412,
+       "gap_p99": 0.05242799999999992,
+       "id": "sanity-R2",
+       "per_pass": 2.3225806451612905,
+       "prompt": 4089,
+       "written": 72
+      },
+      {
+       "answer": "41d19a445aa40e5c",
+       "cached": 0,
+       "decode_tps": 104.41776307169275,
+       "gap_p99": 0.035515000000000185,
+       "id": "sanity-R3",
+       "per_pass": 2.7142857142857144,
+       "prompt": 16382,
+       "written": 57
+      },
+      {
+       "answer": "6c043e50226bd4cd",
+       "cached": 0,
+       "decode_tps": 90.99022365996905,
+       "gap_p99": 0.040135999999999505,
+       "id": "sanity-R4",
+       "per_pass": 2.476923076923077,
+       "prompt": 16390,
+       "written": 161
+      },
+      {
+       "answer": "895c4f72b247da1a",
+       "cached": 0,
+       "decode_tps": 84.73129823637962,
+       "gap_p99": 0.31253399999999987,
+       "id": "sanity-T1",
+       "per_pass": 2.5714285714285716,
+       "prompt": 334,
+       "written": 72
+      },
+      {
+       "answer": "cf90127e020df713",
+       "cached": 0,
+       "decode_tps": 88.65466676765418,
+       "gap_p99": 0.5024929999999999,
+       "id": "sanity-T2",
+       "per_pass": 2.5714285714285716,
+       "prompt": 344,
+       "written": 72
+      },
+      {
+       "answer": "435a2f6f4871b7ba",
+       "cached": 0,
+       "decode_tps": 84.15100717081069,
+       "gap_p99": 0.593656,
+       "id": "sanity-T3",
+       "per_pass": 2.7567567567567566,
+       "prompt": 361,
+       "written": 102
+      },
+      {
+       "answer": "dea7dde5a6ef8ef6",
+       "cached": 0,
+       "decode_tps": 94.88070280799934,
+       "gap_p99": 0.430094,
+       "id": "sanity-T4",
+       "per_pass": 2.6956521739130435,
+       "prompt": 348,
+       "written": 62
+      },
+      {
+       "answer": "da020ad43c51446f",
+       "cached": 0,
+       "decode_tps": 70.20084348901673,
+       "gap_p99": 0.03342600000000573,
+       "id": "long-100k",
+       "per_pass": 1.9250936329588015,
+       "prompt": 98878,
+       "written": 512
+      },
+      {
+       "answer": "a41a3894e8a35353",
+       "cached": 98873,
+       "decode_tps": 75.59723584126917,
+       "gap_p99": 0.03389199999999981,
+       "id": "follow-up",
+       "per_pass": 2.12448132780083,
+       "prompt": 100046,
+       "written": 512
+      }
+     ],
+     "at": "2026-10-26T14:02:05",
+     "load": 5.724609375,
+     "metrics": {
+      "decode_tps.100k": 70.20084348901673,
+      "decode_tps.16k": 78.14507001287556,
+      "decode_tps.4k": 76.44012748812999,
+      "decode_tps.followup": 75.59723584126917,
+      "decode_tps.short": 84.54905999948367,
+      "itl_p99.100k": 0.03342600000000573,
+      "itl_p99.16k": 0.03213899999999903,
+      "itl_p99.4k": 0.03606499999999979,
+      "itl_p99.followup": 0.03389199999999981,
+      "itl_p99.short": 0.03525299999999998,
+      "kv_tokens": 239104,
+      "load_s": 14.793421625974588,
+      "mem_limited": 0,
+      "pass_rate.100k": 36.46619690966433,
+      "pass_rate.16k": 40.904060084864554,
+      "pass_rate.4k": 36.732901730677256,
+      "pass_rate.followup": 35.5838551518474,
+      "pass_rate.short": 37.41254701731539,
+      "pass_s": 127.1626686839736,
+      "per_pass.100k": 1.9250936329588015,
+      "per_pass.16k": 1.9104477611940298,
+      "per_pass.4k": 2.080971659919028,
+      "per_pass.followup": 2.12448132780083,
+      "per_pass.short": 2.2599118942731278,
+      "prompt_tps.100k": 2731.7817614303044,
+      "prompt_tps.16k": 2823.371870244464,
+      "prompt_tps.4k": 2341.438413913534,
+      "prompt_tps.followup": 1193.9816968313824,
+      "prompt_tps.short": 218.16050479861852,
+      "ram_gb": 47.587811328,
+      "reused.followup": 98873,
+      "sanity": 12,
+      "ttft.100k": 36.298916,
+      "ttft.16k": 5.830228,
+      "ttft.4k": 1.764075,
+      "ttft.followup": 1.015277,
+      "ttft.short": 0.185404,
+      "vram_gb": 24.990333536
+     },
+     "outputs": "64a10fc8e2dc3abc",
+     "spread": true
+    }
+   ],
+   "protocol": "75728ff2783bf369"
   },
   "ed92141620631ad5": {
    "dirty": true,
@@ -5725,6 +6895,47 @@
     }
    ],
    "protocol": "2b095d2321e155de"
+  }
+ },
+ "targets": {
+  "hip: AMD Ryzen 7 7800X3D 8-Core Processor, GPU 0x744c 0x164e": {
+   "at": "2026-10-26T14:02:06",
+   "backend": "hip",
+   "env": "0599bf4f8d4ff3d7",
+   "inputs": {
+    "27b": {
+     "files": {
+      "build/bench/ref-27b.bin": "f1f8a1f761298a81ffcb599962345a76d60c722a3203135a2ea0bf5ece35b8f1",
+      "data/cache/hipblaslt.txt": "bfdd3125ff16239c5be80857d45a2411e227fde073c4716068fd1f3480e4a0e7",
+      "data/models/chrysalis-mix.gguf": "bcdc14c85db89af9a1473c2bea3e2560d6ae5867a5d66573e014ceebb5ccf18c",
+      "data/models/tokenizer.json": "0997f410c57a1f4e53b09e4be8f4a172d90edd9564368fb0847030937229b9f3"
+     },
+     "shared": {
+      "data/rocm/lib/libamdhip64.so": "bddbf3553ee64ae5d45c86d2acff458d18dcc04213973bb303050eee910d84e9",
+      "data/rocm/lib/libhipblaslt.so": "3d414626f84ecc439cae9a96fa81deb30c80b3b59afac21bc735c685e32f9d75",
+      "data/strata/bench/prompts/standard-v1/MANIFEST.sha256": "e75eff8b9feea04f745520b392c4c17d97aefc1ba185e222aa6740efa8f68407",
+      "data/strata/strata_cli/bench_standard.py": "4f42c88b65a9f32eb40665786025acaecd41937547bbaeaffe750472644b218a"
+     }
+    },
+    "fn": {
+     "files": {
+      "build/cmp_strata/ref.bin": "3ca24583f5f9f9a4ef5e255248172a3dd0b54d4e4ae2406ec5eb3f44782e7395",
+      "data/cache/flash-next-calibration.txt": "08b1363d05fa8f46154be3f8bfb3b9635c5650daab3f960c2f78b12fd6adb0d4",
+      "data/cache/hipblaslt.txt": "bfdd3125ff16239c5be80857d45a2411e227fde073c4716068fd1f3480e4a0e7",
+      "data/llama.cpp/build/bin/libggml-base.so": "18fd07408c9570535da56cff408500e346951fd246e0cdcde791bb29738d3446",
+      "data/llama.cpp/build/bin/libggml-cpu.so": "be64f8c0bc3899d1375bb95ae045410fc00364429fe7968b2c150a2228fb688b",
+      "data/models/flash-next/chrysalis-fn.gguf": "a8fdd1da6f1d8d7770da44a06314cf48f1f901fdc17fdd31642cfae61aeee3ca",
+      "data/models/flash-next/src/Q8_0/Qwen3.8-Flash-Next-Q8_0-00003-of-00006.gguf": "34efd79a80a1ce540a517a5d56171924b66ce1c38b04c904f17ad6d8ef17cf20",
+      "data/models/tokenizer.json": "0997f410c57a1f4e53b09e4be8f4a172d90edd9564368fb0847030937229b9f3"
+     },
+     "shared": {
+      "data/rocm/lib/libamdhip64.so": "bddbf3553ee64ae5d45c86d2acff458d18dcc04213973bb303050eee910d84e9",
+      "data/rocm/lib/libhipblaslt.so": "3d414626f84ecc439cae9a96fa81deb30c80b3b59afac21bc735c685e32f9d75",
+      "data/strata/bench/prompts/standard-v1/MANIFEST.sha256": "e75eff8b9feea04f745520b392c4c17d97aefc1ba185e222aa6740efa8f68407",
+      "data/strata/strata_cli/bench_standard.py": "4f42c88b65a9f32eb40665786025acaecd41937547bbaeaffe750472644b218a"
+     }
+    }
+   }
   }
  }
 }

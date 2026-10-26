@@ -3,6 +3,8 @@ import glob
 import json
 import os
 import re
+import struct
+import subprocess
 import sys
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
@@ -65,7 +67,32 @@ def pcie(pci):
     return gts * 1e9 * lanes * (128 / 130 if gts >= 8 else 0.8) / 8, f"PCIe {gts:g} GT/s x{lanes}"
 
 
+APPLE_BANDWIDTH = {("Apple M1", None): 68.25e9, ("Apple M1 Pro", None): 200e9, ("Apple M1 Max", None): 400e9,
+                   ("Apple M1 Ultra", None): 800e9, ("Apple M2", None): 100e9, ("Apple M2 Pro", None): 200e9, ("Apple M2 Max", None): 400e9,
+                   ("Apple M2 Ultra", None): 800e9, ("Apple M3", None): 100e9, ("Apple M3 Pro", None): 150e9, ("Apple M3 Max", 30): 300e9,
+                   ("Apple M3 Max", 40): 400e9, ("Apple M3 Ultra", None): 819e9, ("Apple M4", None): 120e9, ("Apple M4 Pro", None): 273e9,
+                   ("Apple M4 Max", 32): 410e9, ("Apple M4 Max", 40): 546e9, ("Apple M5", None): 153e9, ("Apple M5 Pro", None): 307e9,
+                   ("Apple M5 Max", 32): 460e9, ("Apple M5 Max", 40): 614e9, ("Apple M5 Ultra", None): 1200e9}
+
+
+def apple():
+    read = lambda *cmd: subprocess.run(cmd, capture_output=True, text=True).stdout
+    acc = read("ioreg", "-r", "-d", "1", "-c", "IOAccelerator")
+    name = re.search(r'"model" = "([^"]+)"', acc).group(1)
+    cores = int(re.search(r'"gpu-core-count" = (\d+)', acc).group(1))
+    states = re.search(r'"voltage-states9" = <([0-9a-f]+)>', read("ioreg", "-l", "-w0", "-p", "IODeviceTree", "-n", "pmgr"))
+    raw = bytes.fromhex(states.group(1)) if states else b""
+    clock = max((struct.unpack_from("<I", raw, i)[0] for i in range(0, len(raw) - 7, 8)), default=0)
+    bw = APPLE_BANDWIDTH.get((name, cores), APPLE_BANDWIDTH.get((name, None)))
+    gpu = {"name": name, "gfx": "apple", "cus": cores, "clock_mhz": clock / 1e6, "memory": "unified", "bus_bits": None,
+           "memory_clock_mhz": None, "bandwidth": bw, "fp16": cores * 128 * 2 * clock if clock else None, "integrated": True,
+           "pcie": None, "link": "unified memory"}
+    return {"gpus": [gpu], "ram": {"source": name, "memory": "unified", "bus_bits": None, "memory_clock_mhz": None, "bandwidth": bw}}
+
+
 def machine():
+    if sys.platform == "darwin":
+        return apple()
     gpus, cpu_ram = [], None
     for node in sorted(glob.glob("/sys/class/kfd/kfd/topology/nodes/*")):
         p = props(f"{node}/properties")
@@ -157,13 +184,15 @@ def write_limit(c, g, context, per_pass):
 
 CASE_IDS = {"short": "performance-short-r1", "4k": "performance-prompt-4k-r1", "16k": "performance-prompt-16k-r1", "100k": "long-100k",
             "followup": "follow-up"}
-KV = {"27b": 1792, "fn": 896}
+KV = {"hip": {"27b": 1792, "fn": 896}, "metal": {"27b": 2176, "fn": 2112}}
 
 
 def costs(name):
     from measure import BENCH
     path = os.path.join(ROOT, BENCH[name]["files"][0])
-    return dense(path, KV[name]) if name == "27b" else moe(path, KV[name])
+    from chrysalis.models import BACKEND
+    kv = KV[BACKEND][name]
+    return dense(path, kv) if name == "27b" else moe(path, kv)
 
 
 def shares(name, passes, g=None, c=None):
@@ -184,12 +213,14 @@ def shares(name, passes, g=None, c=None):
 
 def show(m):
     for g in m["gpus"]:
-        print(f"{g['name']} ({g['gfx']}): {g['cus']} CUs at {g['clock_mhz']} MHz, {g['memory']} {g['bus_bits']}-bit at "
-              f"{g['memory_clock_mhz']:.0f} MHz")
-        print(f"  memory bandwidth {g['bandwidth'] / 1e9:.1f} GB/s, FP16 matrix {g['fp16'] / 1e12:.1f} TFLOPS, "
-              f"{g['link']} {g['pcie'] / 1e9:.1f} GB/s each way")
+        print(f"{g['name']} ({g['gfx']}): {g['cus']} {'GPU cores' if g['gfx'] == 'apple' else 'CUs'} at {g['clock_mhz']:.0f} MHz, "
+              + (f"{g['memory']} {g['bus_bits']}-bit at {g['memory_clock_mhz']:.0f} MHz" if g["bus_bits"] else f"{g['memory']} memory"))
+        print(f"  memory bandwidth {g['bandwidth'] / 1e9:.1f} GB/s, FP16 matrix {g['fp16'] / 1e12:.1f} TFLOPS, {g['link']}"
+              + (f" {g['pcie'] / 1e9:.1f} GB/s each way" if g["pcie"] else ""))
     r = m["ram"]
-    if r:
+    if r and not r["bus_bits"]:
+        print(f"System RAM: the GPU's own, {r['bandwidth'] / 1e9:.1f} GB/s")
+    elif r:
         print(f"System RAM ({r['memory']} {r['bus_bits']}-bit at {r['memory_clock_mhz']:.0f} MHz, read from {r['source']}): "
               f"{r['bandwidth'] / 1e9:.1f} GB/s")
     else:

@@ -7,8 +7,9 @@ import shutil
 import statistics
 import subprocess
 import sys
+import time
 
-from measure import BENCH, CASES, MODELS, ROOT, STRATA, WORK, kl_ref, kl_tokens, run_pass
+from measure import BACKEND, BENCH, CASES, MAC, MODELS, ROOT, STRATA, WORK, bench_for, kl_ref, kl_tokens, run_pass
 
 RESULTS = os.path.join(ROOT, "bench/results.json")
 PROTOCOL = ["bench/measure.py", "bench/serve.py", "bench/kl.py", "bench/vram.c", "bench/kl.txt"]
@@ -32,8 +33,8 @@ def git(*args, stdin=None):
     return subprocess.run(["git", "-C", ROOT, *args], input=stdin, capture_output=True, text=True, check=True).stdout
 
 
-def code_pairs(name, tree):
-    skip = SKIP + BENCH[name]["skip"]
+def code_pairs(name, tree, backend=BACKEND):
+    skip = SKIP + bench_for(backend)[name]["skip"]
     if tree == "worktree":
         paths = [p for p in git("ls-files", "-co", "--exclude-standard", "--", *CODE).split("\n") if p and os.path.isfile(os.path.join(ROOT, p))]
         shas = git("hash-object", "--stdin-paths", stdin="\n".join(paths) + "\n").split()
@@ -63,7 +64,21 @@ def file_sha(path, cache):
     return cache[path][4]
 
 
+def mac_fingerprint():
+    run = lambda *cmd: subprocess.run(cmd, capture_output=True, text=True).stdout.strip()
+    site = glob.glob(os.path.join(ROOT, "data/venv/lib/python*/site-packages"))
+    return {"os": run("sw_vers", "-productVersion") + " " + run("sw_vers", "-buildVersion"),
+            "chip": run("sysctl", "-n", "machdep.cpu.brand_string"), "memory": run("sysctl", "-n", "hw.memsize"),
+            "gpu_cores": run("sh", "-c", "ioreg -r -d 1 -c IOAccelerator | grep -o '\"gpu-core-count\" = [0-9]*'"),
+            "metal": (run("xcrun", "-sdk", "macosx", "metal", "--version") or
+                      run(*sorted(glob.glob("/private/var/run/com.apple.security.cryptexd/mnt/com.apple.MobileAsset.MetalToolchain-*/"
+                                            "Metal.xctoolchain/usr/bin/metal"))[-1:], "--version")).split("\n")[0],
+            "python": sorted(os.path.basename(d) for d in glob.glob(os.path.join(site[0], "*.dist-info"))) if site else []}
+
+
 def fingerprint():
+    if MAC:
+        return mac_fingerprint()
     read = lambda p: open(p).read().strip() if os.path.exists(p) else ""
     cpu = {k.strip(): v.strip() for k, v in (l.split(":", 1) for l in open("/proc/cpuinfo") if ":" in l) if k.strip() in ("model name", "microcode")}
     cards = [os.path.dirname(p) for p in sorted(glob.glob("/sys/class/drm/card*/device/mem_info_vram_total"))]
@@ -96,11 +111,24 @@ def keys(tree, names=BENCH):
     out = {}
     for name in names:
         files = {p: file_sha(os.path.join(ROOT, p), cache) for p in BENCH[name]["files"] + [BENCH[name]["ref"]] if os.path.exists(os.path.join(ROOT, p))}
-        code = code_pairs(name, tree)
-        out[name] = {"key": digest({"code": code, "files": files, "shared": shared, "env": env_id}),
-                     "protocol": digest([c for c in code if c[0] in PROTOCOL]), "product": digest([c for c in code if c[0] not in PROTOCOL])}
+        out[name] = key_of(code_pairs(name, tree), {"files": files, "shared": shared}, env_id)
     json.dump(cache, open(cache_path, "w"))
     return out, env_id, env
+
+
+def key_of(code, inputs, env_id):
+    return {"key": digest({"code": code, "files": inputs["files"], "shared": inputs["shared"], "env": env_id}), "inputs": inputs,
+            "protocol": digest([c for c in code if c[0] in PROTOCOL]), "product": digest([c for c in code if c[0] not in PROTOCOL])}
+
+
+def target_name(env):
+    if MAC:
+        return f"{BACKEND}: {env['chip']}, {int(env['memory']) >> 30} GB"
+    return f"{BACKEND}: {env['cpu'].get('model name', '')}, GPU {' '.join(g[1] for g in env['gpu'])}"
+
+
+def target_keys(tree, t):
+    return {name: key_of(code_pairs(name, tree, t["backend"]), inputs, t["env"]) for name, inputs in t["inputs"].items() if name in BENCH}
 
 
 def load_results(text=None):
@@ -108,6 +136,7 @@ def load_results(text=None):
         text = open(RESULTS).read() if os.path.exists(RESULTS) else ""
     data = json.loads(text) if text.strip() else {}
     data.setdefault("envs", {})
+    data.setdefault("targets", {})
     for name in BENCH:
         data.setdefault(name, {})
     return data
@@ -237,6 +266,12 @@ def compare(data, name, parent, child, env_id):
 
 
 def machine_ready(names):
+    if MAC:
+        from chrysalis.sleep import vram_used
+        held = vram_used() or 0
+        if held > 4e9:
+            sys.exit(f"bench: {held / 1e9:.1f} GB of GPU memory is in use; stop the other model first, the bench needs the GPU to itself")
+        return
     for p in glob.glob("/proc/[0-9]*/fdinfo/*"):
         try:
             vram = sum(int(l.split()[1]) for l in open(p) if l.startswith("drm-memory-vram:"))
@@ -314,7 +349,8 @@ def table(data, name, key, env_id):
 
 
 def make(names):
-    targets = ["build/vram_peak.so"] + [MODELS[BENCH[n]["use"]]["lib"] for n in names] + [BENCH[n]["make_ref"][0] for n in names]
+    targets = ([] if MAC else ["build/vram_peak.so"]) + [MODELS[BENCH[n]["use"]]["lib"] for n in names] + \
+              [BENCH[n]["make_ref"][0] for n in names if not MAC or n != "fn"]
     subprocess.run(["make", "-s", "-C", ROOT, *targets], check=True)
 
 
@@ -345,8 +381,13 @@ def cmd_run(argv):
     for name in names:
         kl_ref(name, tokens)
     data = load_results()
-    _, env_id, env = keys("worktree", names)
+    have, env_id, env = keys("worktree", names)
     data["envs"][env_id] = env
+    t = data["targets"].get(target_name(env))
+    if not t or t["env"] != env_id:
+        t = data["targets"][target_name(env)] = {"env": env_id, "backend": BACKEND, "inputs": {}}
+    t["inputs"].update({name: have[name]["inputs"] for name in names})
+    t["at"] = time.strftime("%Y-%m-%dT%H:%M:%S")
     head = git("rev-parse", "HEAD").strip()
     dirty = bool(git("status", "--porcelain", "--", *CODE).strip())
     verdict = 0
@@ -391,7 +432,7 @@ def check(child_tree, parent_tree, text, label, parent_measured):
     if text is None:
         return 0
     data = load_results(text)
-    ck, env_id, _ = keys(child_tree)
+    ck, env_id, env = keys(child_tree)
     pk, _, _ = keys(parent_tree)
     bad = 0
     for name in BENCH:
@@ -411,7 +452,44 @@ def check(child_tree, parent_tree, text, label, parent_measured):
             bad = 1
         else:
             bad |= report(name, *compare(data, name, p["key"], c["key"], env_id))
+    for tname, t in data["targets"].items():
+        if t["env"] == env_id or tname == target_name(env):
+            continue
+        ct, pt = target_keys(child_tree, t), target_keys(parent_tree, t)
+        for name in ct:
+            c, p = ct[name], pt[name]
+            if c["key"] == p["key"] or p["key"] not in data[name]:
+                continue
+            if c["protocol"] != p["protocol"] and c["product"] != p["product"]:
+                print(f"bench: {label}: {name}'s code for {tname} and the bench both changed; commit them separately")
+                bad = 1
+            elif c["key"] not in data[name]:
+                print(f"bench: {label}: {name} changed for {tname} and has no numbers there; run `make bench` on it and "
+                      f"`bench.py merge` its bench/results.json here")
+                bad = 1
+            elif c["protocol"] == p["protocol"]:
+                bad |= report(f"{name} on {tname}", *compare(data, name, p["key"], c["key"], t["env"]))
     return bad
+
+
+def cmd_merge(argv):
+    data, other = load_results(), load_results(open(argv[0]).read())
+    for env_id, env in other["envs"].items():
+        data["envs"].setdefault(env_id, env)
+    for name in BENCH:
+        for key, e in other[name].items():
+            mine = data[name].setdefault(key, e)
+            if mine is not e:
+                seen = {p["at"] for p in mine["passes"]}
+                mine["passes"] += [p for p in e["passes"] if p["at"] not in seen]
+    for tname, t in other["targets"].items():
+        mine = data["targets"].get(tname)
+        if mine and mine["env"] == t["env"]:
+            t = {**t, "inputs": {**mine["inputs"], **t["inputs"]}, "at": max(mine["at"], t["at"])}
+        if not mine or t["at"] >= mine["at"]:
+            data["targets"][tname] = t
+    save_results(data)
+    print(f"bench: merged {argv[0]}")
 
 
 def show_file(rev):
@@ -455,6 +533,8 @@ if __name__ == "__main__":
         cmd_run(sys.argv[2:])
     elif cmd == "check":
         cmd_check(sys.argv[2:])
+    elif cmd == "merge":
+        cmd_merge(sys.argv[2:])
     else:
         data = load_results()
         have, env_id, _ = keys("worktree")

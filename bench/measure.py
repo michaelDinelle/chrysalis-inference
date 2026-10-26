@@ -15,7 +15,7 @@ import urllib.request
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, ROOT)
-from chrysalis.models import MODELS
+from chrysalis.models import BACKEND, MODELS
 
 WORK = os.path.join(ROOT, "build/bench")
 PY = os.path.join(ROOT, "data/venv/bin/python")
@@ -25,17 +25,34 @@ STRATA_CASES = {"short": "performance-short-r1", "4k": "performance-prompt-4k-r1
 RECORDS = lambda a, b: "\n".join(f"record{i:06d}: alpha beta gamma delta epsilon zeta eta theta." for i in range(a, b))
 LONG = "[trial 1]\n" + RECORDS(1, 5201) + "\n\nSummarize the structure of these records and explain how to look up a record by its ID."
 MORE = RECORDS(5201, 5261) + "\n\nThese records were added since. Which ID is the last one now?"
-BENCH = {
-    "fn": dict(use="qwen3.8-flash-next", skip=("engine/27b/",), env={"CHRYSALIS_FN_SPILL_GB": "1"}, tune=[("spill_spare", 0)],
-               files=["data/models/flash-next/chrysalis-fn.gguf", "data/models/flash-next/src/Q8_0/Qwen3.8-Flash-Next-Q8_0-00003-of-00006.gguf",
-                      "data/models/tokenizer.json", "data/llama.cpp/build/bin/libggml-cpu.so", "data/llama.cpp/build/bin/libggml-base.so",
-                      "data/cache/hipblaslt.txt", "data/cache/flash-next-calibration.txt"],
-               ref="build/cmp_strata/ref.bin",
-               make_ref=["build/ref_logits_fn", "data/models/flash-next/src/Q8_0/Qwen3.8-Flash-Next-Q8_0-00001-of-00006.gguf"]),
-    "27b": dict(use="qwen3.8-27b", skip=("engine/flash-next/",), env={}, tune=[],
-                files=["data/models/chrysalis-mix.gguf", "data/models/tokenizer.json", "data/cache/hipblaslt.txt"],
-                ref="build/bench/ref-27b.bin", make_ref=["build/ref_logits", "data/models/chrysalis-mix.gguf"]),
+MAC = sys.platform == "darwin"
+BACKENDS = ("hip", "metal")
+FN_FILES = ["data/models/flash-next/chrysalis-fn.gguf", "data/models/flash-next/src/Q8_0/Qwen3.8-Flash-Next-Q8_0-00003-of-00006.gguf",
+            "data/models/tokenizer.json"]
+ON = {
+    "hip": {"fn": dict(env={"CHRYSALIS_FN_SPILL_GB": "1"}, tune=[("spill_spare", 0)],
+                       files=FN_FILES + ["data/llama.cpp/build/bin/libggml-cpu.so", "data/llama.cpp/build/bin/libggml-base.so",
+                                         "data/cache/hipblaslt.txt", "data/cache/flash-next-calibration.txt"]),
+            "27b": dict(env={}, tune=[], files=["data/models/chrysalis-mix.gguf", "data/models/tokenizer.json", "data/cache/hipblaslt.txt"])},
+    "metal": {"fn": dict(env={"CHRYSALIS_FN_CACHE_GB": "16", "CHRYSALIS_FN_CTX": "131072"}, tune=[], files=FN_FILES),
+              "27b": dict(env={}, tune=[], files=["data/models/chrysalis-mix.gguf", "data/models/tokenizer.json"])},
 }
+DIRS = {"fn": "flash-next", "27b": "27b"}
+
+
+def bench_for(backend):
+    out = {
+        "fn": dict(use="qwen3.8-flash-next", ref="build/cmp_strata/ref.bin",
+                   make_ref=["build/ref_logits_fn", "data/models/flash-next/src/Q8_0/Qwen3.8-Flash-Next-Q8_0-00001-of-00006.gguf"]),
+        "27b": dict(use="qwen3.8-27b", ref="build/bench/ref-27b.bin", make_ref=["build/ref_logits", "data/models/chrysalis-mix.gguf"]),
+    }
+    for name, b in out.items():
+        b.update(ON[backend][name])
+        b["skip"] = tuple(f"engine/{o}/" for o in BACKENDS if o != backend) + tuple(f"engine/{backend}/{d}/" for n, d in DIRS.items() if n != name)
+    return out
+
+
+BENCH = bench_for(BACKEND)
 
 
 def tuned(engine, name):
@@ -54,11 +71,20 @@ def free_port():
 
 
 def drop_cache(path):
+    if MAC:
+        return
     fd = os.open(path, os.O_RDONLY)
     try:
         os.posix_fadvise(fd, 0, 0, os.POSIX_FADV_DONTNEED)
     finally:
         os.close(fd)
+
+
+def peak_footprint(pid):
+    info = (C.c_uint8 * 512)()
+    if C.CDLL("/usr/lib/libproc.dylib").proc_pid_rusage(pid, 4, info):
+        return None
+    return int.from_bytes(bytes(info[240:248]), "little")
 
 
 def tree_pids(pid):
@@ -75,6 +101,8 @@ def tree_pids(pid):
 
 
 def server_pid(pid):
+    if MAC:
+        return pid
     for p in tree_pids(pid):
         try:
             if b"bench/serve.py" in open(f"/proc/{p}/cmdline", "rb").read():
@@ -133,9 +161,12 @@ def run_pass(name, with_kl):
     vram_out, log_path = os.path.join(WORK, f"vram-{name}.txt"), os.path.join(WORK, f"server-{name}.log")
     if os.path.exists(vram_out):
         os.remove(vram_out)
-    cmd = ["systemd-run", "--user", "--scope", "-q", "-p", "MemorySwapMax=0", "env", f"LD_PRELOAD={os.path.join(ROOT, 'build/vram_peak.so')}",
-           f"BENCH_VRAM_OUT={vram_out}", f"CHRYSALIS_SNAPSHOTS={snap}", *(f"{k}={v}" for k, v in b["env"].items()), PY, os.path.join(ROOT, "bench/serve.py"),
-           name, str(port)]
+    env = [f"CHRYSALIS_SNAPSHOTS={snap}", *(f"{k}={v}" for k, v in b["env"].items())]
+    if MAC:
+        cmd = ["env", *env, f"CHRYSALIS_FN_STATS={os.path.join(snap, 'experts.bin')}", PY, os.path.join(ROOT, "bench/serve.py"), name, str(port)]
+    else:
+        cmd = ["systemd-run", "--user", "--scope", "-q", "-p", "MemorySwapMax=0", "env", f"LD_PRELOAD={os.path.join(ROOT, 'build/vram_peak.so')}",
+               f"BENCH_VRAM_OUT={vram_out}", *env, PY, os.path.join(ROOT, "bench/serve.py"), name, str(port)]
     url = f"http://127.0.0.1:{port}"
     t0 = time.monotonic()
     srv = subprocess.Popen(cmd, stdout=open(log_path, "w"), stderr=subprocess.STDOUT, start_new_session=True)
@@ -204,7 +235,10 @@ def run_pass(name, with_kl):
         if experts and "memory_limited" in experts:
             m["mem_limited"] = experts["memory_limited"]
         pid = server_pid(srv.pid)
-        m["ram_gb"] = next(int(l.split()[1]) for l in open(f"/proc/{pid}/status") if l.startswith("VmHWM:")) * 1024 / 1e9
+        if MAC:
+            m["ram_gb"] = peak_footprint(pid) / 1e9
+        else:
+            m["ram_gb"] = next(int(l.split()[1]) for l in open(f"/proc/{pid}/status") if l.startswith("VmHWM:")) * 1024 / 1e9
     finally:
         try:
             os.killpg(srv.pid, signal.SIGINT)
@@ -215,7 +249,8 @@ def run_pass(name, with_kl):
         except ProcessLookupError:
             pass
         shutil.rmtree(snap, ignore_errors=True)
-    m["vram_gb"] = int(open(vram_out).read()) / 1e9
+    if not MAC:
+        m["vram_gb"] = int(open(vram_out).read()) / 1e9
     if with_kl:
         tokens = kl_tokens()
         out = subprocess.run([PY, os.path.join(ROOT, "bench/kl.py"), name, tokens, kl_ref(name, tokens)], capture_output=True, text=True,
