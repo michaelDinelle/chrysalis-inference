@@ -215,7 +215,7 @@ void Engine::load(const std::string &path, int max_seqs, size_t reserve_bytes) {
     {
         Arena dry; dry.cap = SIZE_MAX;
         make_qtensor(dry, IQ4_XS, n_slots * FE, D); make_qtensor(dry, IQ4_XS, n_slots * FE, D); make_qtensor(dry, IQ4_NL, n_slots * D, FE);
-        dry.get<int>((size_t)NL * NE); dry.get<uint8_t>(n_slots);
+        dry.get<int>((size_t)NL * NE); dry.get<uint8_t>(n_slots + MAX_EXTRA);
         wbytes += dry.used;
     }
     wbytes += (size_t)NE * 4 + 2 * (size_t)NGDN * GV * 4 + (1 << 20);
@@ -224,7 +224,7 @@ void Engine::load(const std::string &path, int max_seqs, size_t reserve_bytes) {
     pool_up = make_qtensor(warena, IQ4_XS, n_slots * FE, D);
     pool_down = make_qtensor(warena, IQ4_NL, n_slots * D, FE);
     d_slot_of = warena.get<int>((size_t)NL * NE);
-    d_fmt = warena.get<uint8_t>(n_slots);
+    d_fmt = warena.get<uint8_t>(n_slots + MAX_EXTRA);
     for (int l = 0; l < NL; l++) { L[l].hot_gate = pool_gate; L[l].hot_up = pool_up; L[l].hot_down = pool_down; L[l].slot_of = d_slot_of + (size_t)l * NE; }
 
     enum { G0, U0, G1, U1, DN };
@@ -463,8 +463,9 @@ void Engine::load(const std::string &path, int max_seqs, size_t reserve_bytes) {
     load_phase = 1;
     if (cold_bytes) calibrate();
     free_pages.clear();
-    for (int p = n_pages - 1; p >= 0; p--) free_pages.push_back(p);
+    for (int p = 0; p < n_pages; p++) free_pages.push_back(p);
     page_ref.assign(n_pages, 0);
+    extra_init();
     fprintf(stderr, "chrysalis-fn: CPU %d workers %.0f GB/s %.0f GMAC/s, DMA %.0f GB/s: decode GPU share of cold picks %.2f\n",
             n_workers, cal_cpu_bw / 1e9, cal_cpu_mac / 1e9, cal_dma_bw / 1e9, gfrac);
     fprintf(stderr, "chrysalis-fn: weights %.2f GB VRAM (%.1f s), cold experts %.2f GB RAM (%.1f s), buffers %.2f GB (passes of %d tokens), "

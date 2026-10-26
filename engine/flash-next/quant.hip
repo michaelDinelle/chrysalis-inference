@@ -853,10 +853,12 @@ __global__ __launch_bounds__(256) void k_down_dec(QTensor down, QTensor sdown, c
     if (hs == -1 || (hs >= 0 && !shared && down.type < 0) || (hs <= -2 && !cdown)) return;
     if (hs <= -2) { cold_down(cdown, -2 - hs, j, r0, hq, wts, y, tile); return; }
     const int wave = threadIdx.x / 32, lane = threadIdx.x % 32;
+    int d0 = 0;
+    const QTensor dv = shared ? sdown : down_view(down, hs, d0);
     const QTensor *W[4];
     int rows[4];
 #pragma unroll
-    for (int i = 0; i < 4; i++) { W[i] = shared ? &sdown : &down; rows[i] = hs * D + r0 + wave * 4 + i; }
+    for (int i = 0; i < 4; i++) { W[i] = &dv; rows[i] = d0 + r0 + wave * 4 + i; }
     const QAct h{hq.q + (size_t)j * FE, hq.d + (size_t)j * (FE / 32)};
     float acc[4][1] = {};
     rows_dot_any<1, 4>(W, rows, lane, h, acc);
@@ -978,9 +980,10 @@ template <int QT>
 __global__ __launch_bounds__(32 * MOE_NW_DN) void k_moe_down_g(QTensor d0, QTensor d1, const MoeWork *work, const half *H, const float *wts, half *Y) {
     __shared__ _Float16 Ws[32][FE + 8];
     const MoeWork wk = work[blockIdx.y];
-    const QTensor &W = wk.tier ? d1 : d0;
+    int rs;
+    const QTensor W = down_view(wk.tier ? d1 : d0, wk.slot, rs);
     const int tid = threadIdx.x, wave = tid / 32, l = tid % 32, hf = l >> 4, r = l & 15;
-    const int row0 = wk.slot * D + blockIdx.x * 32;
+    const int row0 = rs + blockIdx.x * 32;
     for (int u = tid; u < 32 * (FE / 64) * 2; u += 32 * MOE_NW_DN) {
         const int row = u / (FE / 64 * 2), ch = (u >> 1) % (FE / 64), h = u & 1;
         int2 q[4]; float sc[4];

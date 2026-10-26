@@ -211,9 +211,8 @@ fails += paths(", pool moved by prose")
 read = hot_cached() - cached0
 print(f"paths with the file's experts out of the pool: {read / 1e6:.0f} MB of them read from the model file  {'ok' if read <= 0 else 'FAIL'}", flush=True)
 fails += read > 0
-code = "".join(open(os.path.join(ROOT, f)).read() for f in ("engine/flash-next/model.cpp", "chrysalis/server.py"))
-code_ids = tok.encode("<|im_start|>user\nHere is a file from my project:\n```\n", add_special_tokens=False).ids + \
-    tok.encode(code, add_special_tokens=False).ids[:6000] + tok.encode("\n```\n", add_special_tokens=False).ids + ids
+code_ids = tok.encode("<|im_start|>user\nWrite a C++ hash map with open addressing: insert, find, erase, resize and an iterator, "
+                      "then a test for each.<|im_end|>\n<|im_start|>assistant\n<think>\n\n</think>\n\n```cpp\n", add_special_tokens=False).ids
 move_pool(code_ids, 400)
 c, r2, out2 = placed(), mirror_rss(), eng.expert_stats()["mirrored"]
 ok = c[0] - b[0] >= 300 and c[1] - b[1] >= 50 and abs(r2 - out2 * HOT_EXPERT) <= 0.02 * out2 * HOT_EXPERT + 32e6

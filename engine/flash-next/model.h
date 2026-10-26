@@ -82,7 +82,7 @@ struct Engine {
     uint64_t ple_mult[3] = {};
     uint32_t ple_off[PLE_HEADS] = {}, ple_voc[PLE_HEADS] = {};
     QTensor pool_gate, pool_up, pool_down;
-    int n_slots = 0;
+    int n_slots = 0, n_extra = 0, n_extra_max = 0, extra_pages = 0;
     int *d_slot_of = nullptr;
     uint8_t *d_fmt = nullptr;
     int file_fd = -1; const uint8_t *file_base = nullptr;
@@ -111,8 +111,8 @@ struct Engine {
         double copied_bytes = 0, copied_ms = 0;
         uint64_t picks = 0, hits = 0;
         double recent_hits = 0;
-        bool decoding = false;
-        int decode_loads = 4;
+        bool decoding = false, reading = false;
+        int decode_loads = 16;
         static constexpr double CPU_HEAVY = 0.75;
         enum { FREE, QUEUED, COPYING };
         struct Load {
@@ -133,6 +133,10 @@ struct Engine {
         bool quit = false;
     } xc;
     void experts_init();
+    void extra_init();
+    void extra_grow();
+    void kv_need(int need);
+    int free_tokens() const { return (int)(free_pages.size() + extra_pages) * PAGE; }
     void experts_place(int T);
     void experts_plan();
     void experts_loader();

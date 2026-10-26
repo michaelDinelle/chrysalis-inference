@@ -66,10 +66,12 @@ __global__ void k_place(PlaceArgs a) {
             v.dm[b] = *(const half *)(src + 82);
         }
     } else if (t < 2 * NGU + NDN) {
-        const int64_t b = t - 2 * NGU, o = (int64_t)p.slot * NDN + b;
+        int r0;
+        const QTensor dv = down_view(a.down, p.slot, r0);
+        const int64_t b = t - 2 * NGU, o = (int64_t)r0 * (FE / 32) + b;
         const uint8_t *src = p.src + 2 * NGU * bb + b * 18;
-        a.down.d[o] = *(const half *)src;
-        copy_words(src + 2, a.down.q + o * 16, 16);
+        dv.d[o] = *(const half *)src;
+        copy_words(src + 2, dv.q + o * 16, 16);
     }
 }
 

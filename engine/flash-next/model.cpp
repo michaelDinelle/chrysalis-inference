@@ -56,7 +56,7 @@ int Engine::page_alloc() {
 }
 
 void Engine::page_release(int p) {
-    if (--page_ref[p] == 0) free_pages.push_back(p);
+    if (--page_ref[p] == 0) free_pages.insert(std::upper_bound(free_pages.begin(), free_pages.end(), p), p);
 }
 
 void Engine::ensure_pages(Seq &s, int n_tokens, int from) {
@@ -64,6 +64,7 @@ void Engine::ensure_pages(Seq &s, int n_tokens, int from) {
     int dirty = (int)s.pages.size();
     int shared = 0;
     for (int i = from / PAGE; i < dirty && i < need; i++) shared += page_ref[s.pages[i]] > 1;
+    kv_need(need - dirty + shared);
     if ((int)free_pages.size() < need - dirty + shared) throw std::runtime_error("out of KV pages");
     while ((int)s.pages.size() < need) {
         const int p = page_alloc();
@@ -232,6 +233,7 @@ int Engine::snap_import(const uint8_t *src, size_t bytes) {
     if (memcmp(h.magic, SNAP_MAGIC, 8) || h.kv_page != KV_PAGE || h.state != state_bytes() || h.n <= 0 || h.n_top < 0 ||
         h.n_pages != (h.n + PAGE - 1) / PAGE || bytes != sizeof h + (size_t)h.n_top * 8 + h.state + (size_t)h.n_pages * KV_PAGE)
         return -1;
+    kv_need(h.n_pages);
     if ((int)free_pages.size() < h.n_pages) return -2;
     size_t si = 0;
     while (si < snaps.size() && snaps[si].used) si++;
@@ -510,7 +512,6 @@ void Engine::moe_back(const Layer &w, int layer, int T) {
     std::vector<int> cnt(NE, 0);
     for (int j = 0; j < N; j++) cnt[b.h_ids[j]]++;
     if (!route_counts.empty() && layer < NL) for (int e = 0; e < NE; e++) route_counts[(size_t)layer * NE + e] += cnt[e];
-    if (layer < NL && !xc.fresh.empty()) for (int e = 0; e < NE; e++) xc.fresh[(size_t)layer * NE + e] += cnt[e];
     std::vector<int> ce, hot;
     for (int e = 0; e < NE; e++) if (cnt[e]) (slot_of[e] >= 0 ? hot : ce).push_back(e);
     std::stable_sort(ce.begin(), ce.end(), [&](int a, int c) { return cnt[a] < cnt[c]; });
@@ -1169,6 +1170,7 @@ void Engine::generate_batch(int n, const int *ids, const Sampling *sps, int *out
         need += std::max(0, last - (int)s.pages.size());
         for (int pg = s.n / PAGE; pg < (int)s.pages.size() && pg < last; pg++) need += page_ref[s.pages[pg]] > 1;
     }
+    kv_need(need);
     if (need > (int)free_pages.size()) throw std::runtime_error("out of KV pages");
     std::vector<int> act;
     for (int i = 0; i < n; i++) {

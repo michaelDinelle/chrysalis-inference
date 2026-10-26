@@ -58,7 +58,8 @@ static void expert_ref(const Experts &t, int slot, const float *x, double *y, do
 static double rel(const std::vector<float> &a, const std::vector<double> &b) {
     double n = 0, d = 0;
     for (size_t i = 0; i < a.size(); i++) { n += (a[i] - b[i]) * (a[i] - b[i]); d += b[i] * b[i]; }
-    return sqrt(n / d);
+    const double r = sqrt(n / d);
+    return std::isfinite(r) ? r : INFINITY;
 }
 
 int main() {
@@ -352,10 +353,13 @@ int main() {
     }
     {
         const size_t mark = a.used;
-        const int NP = 6;
+        const int NP = 6, NB = 3;
         struct Src { const Experts *x; int g, s, slot; };
-        const Src src[NP] = {{&filed, 0, 0, 3}, {&filed, 0, 1, 0}, {&cold, 0, 1, 1}, {&cold, 0, 2, 5}, {&cold, 1, 0, 4}, {&cold, 1, 2, 2}};
-        QTensor pg = make_qtensor(a, IQ4_XS, NP * FE, D), pu = make_qtensor(a, IQ4_XS, NP * FE, D), pd = make_qtensor(a, IQ4_NL, NP * D, FE);
+        const Src src[NP] = {{&filed, 0, 0, 2}, {&filed, 0, 1, 0}, {&cold, 0, 1, 1}, {&cold, 0, 2, 5}, {&cold, 1, 0, 4}, {&cold, 1, 2, 3}};
+        QTensor pg = make_qtensor(a, IQ4_XS, NB * FE, D), pu = make_qtensor(a, IQ4_XS, NB * FE, D), pd = make_qtensor(a, IQ4_NL, NB * D, FE);
+        uint8_t *lent = a.get<uint8_t>((size_t)(NP - NB) * XSB);
+        CK(hipMemset(lent, 0x5a, (size_t)(NP - NB) * XSB));
+        pg.f = lent; pu.f = lent + XGU; pd.f = lent + 2 * XGU;
         int *dso = a.get<int>(NE); uint8_t *dfmt = a.get<uint8_t>(NP);
         CK(hipMemset(dso, 0xff, NE * 4)); CK(hipMemset(dfmt, 0, NP));
         PlaceArgs pa;
@@ -406,7 +410,7 @@ int main() {
             ref_src(src[i], x.data(), ref.data(), 1.0);
             worst = std::max(worst, rel(std::vector<float>(y.begin() + (size_t)i * D, y.begin() + (size_t)(i + 1) * D), ref));
         }
-        printf("pool decode, slots of IQ4_XS, Q3_K and Q2_K experts: worst rel diff %.2e %s\n", worst, worst < 2e-2 ? "ok" : "FAIL");
+        printf("pool decode, slots of IQ4_XS, Q3_K and Q2_K experts, 3 lent by the KV cache: worst rel diff %.2e %s\n", worst, worst < 2e-2 ? "ok" : "FAIL");
         fails += worst >= 2e-2;
         {
             const int T = 48, per = 16, N = NP * per;
@@ -451,7 +455,7 @@ int main() {
                     for (int c = 0; c < D; c++) got[c] = __half2float(yh[(size_t)(i * per + k) * D + c]);
                     w2 = std::max(w2, rel(got, ref));
                 }
-            printf("pool prefill GEMMs, slots of IQ4_XS, Q3_K and Q2_K experts: worst rel diff %.2e %s\n", w2, w2 < 1e-2 ? "ok" : "FAIL");
+            printf("pool prefill GEMMs, slots of IQ4_XS, Q3_K and Q2_K experts, 3 lent by the KV cache: worst rel diff %.2e %s\n", w2, w2 < 1e-2 ? "ok" : "FAIL");
             fails += w2 >= 1e-2;
         }
         CK(hipStreamSynchronize(st));

@@ -2,7 +2,7 @@
 
 <h1 align="center">Chrysalis</h1>
 
-<p align="center"><b>Qwen3.8 on one Radeon, and a chat where everything it makes stays alive.</b></p>
+<p align="center">A local inference engine, API server and web chat for Qwen3.8-27B and Qwen3.8-Flash-Next on an AMD Radeon RX 7900 XTX.</p>
 
 <p align="center">
   <a href="LICENSE"><img alt="MIT license" src="https://img.shields.io/badge/license-MIT-e24d85"></a>
@@ -11,52 +11,130 @@
 </p>
 
 <p align="center"><img src="media/pagoda.webp" width="900" alt="A voxel pagoda garden that Qwen3.8-Flash-Next wrote in Chrysalis, running in the browser"><br>
-<sub>A voxel pagoda garden, one prompt, Qwen3.8-Flash-Next on an RX 7900 XTX with Chrysalis, written in about two minutes ·
-<a href="media/pagoda-making-of.webp">watch one being written</a></sub></p>
+<sub>A voxel pagoda garden that Qwen3.8-Flash-Next wrote from one prompt in about two minutes, in Chrysalis on an RX 7900 XTX.</sub></p>
 
 ## Chrysalis vs Strata
 
-Same PC, same model, Strata's own benchmark prompts.
+Qwen3.8-Flash-Next on one PC. Each engine runs at its best for this PC, and the same client times every request.
 
 <p align="center"><picture>
   <source media="(prefers-color-scheme: dark)" srcset="media/vs-strata-dark.svg">
-  <img src="media/vs-strata-light.svg" width="860" alt="Chrysalis against Strata IQ3_S and Q2_0: prompt reading, long-context follow-ups, error against the full model, writing speed">
+  <img src="media/vs-strata-light.svg" width="860" alt="Chrysalis against Strata IQ3_S and Q2_0: time to first token and writing speed at five prompt lengths, error against Q8_0, load time and memory">
 </picture></p>
 
-<sub>RX 7900 XTX, Ryzen 7 7800X3D, 64 GB. Qwen3.8-Flash-Next. Strata 0.2.2 as its setup installs it, at its best quality
-(IQ3_S) and its fastest (Q2_0). Every request timed by the same client.</sub>
+Strata's IQ3_S is the closest to Chrysalis in quality, and the best Strata's setup offers a 64 GB PC. Chrysalis beats it
+on every measure here: first tokens 1.7-2.6x sooner, writing 1.1-1.3x faster, 1.7x closer to the full model and 1.5x
+faster to load, in the same memory. Strata's Q2_0 is its speed setting: it writes 1.0-1.3x faster than Chrysalis and
+needs 11 GB less memory, at 5.9 times the error, and it failed one of its own sanity checks in one of the two runs.
 
-## Point at it. Say what to change.
+<details><summary>How it was measured, and every number</summary>
+
+RX 7900 XTX (24 GB), Ryzen 7 7800X3D, 64 GB DDR5, Linux, one engine at a time.
+
+- **Chrysalis**: its own Flash-Next file, 3.8 bits per expert weight, 63 GB plus a 54 GB lookup table read from disk. The
+  most used experts are IQ4_XS (gate and up) with IQ4_NL (down), the others Q3_K or Q2_K with IQ4_NL down, and attention
+  and the remaining layers Q6_K and Q8_0.
+- **Strata 0.2.6** (engine 0.1.50, its `linux-x86_64-hip-rx7900` build) with its RX 7900 switches on: the hipBLASLt
+  tuning table, prompt attention on the matrix cores and the exact long-prompt scorer. Its own `strata tune auto` found
+  nothing faster. IQ3_S is 3.3 bits (55 GB plus a 29 GB table) and Q2_0 2.3 bits (38 GB plus 29 GB).
+- Short, 4K and 16K are Strata's standard benchmark, run through its own client code: its fixed prompts, Qwen's thinking
+  defaults, 512-token answers and its 12 sanity checks. 100K is the same kind of records at 98,878 tokens, and the
+  follow-up adds about 1,100 tokens to that chat. Each engine ran all of it twice: medians over 6 rounds, and over 10
+  trials at 100K.
+- KL is against Q8_0 over the same 1,082 tokens of prose, a technical explanation and Python. Chrysalis ran one token at
+  a time, as it writes; Strata's files ran in llama.cpp.
+- Memory is the peak private RAM of each server. File pages, which the kernel can drop at any time, are not counted.
+
+| | Chrysalis, 3.8-bit IQ4/Q3_K/Q2_K mix | Strata IQ3_S, 3.3-bit | Strata Q2_0, 2.3-bit |
+| --- | ---: | ---: | ---: |
+| First token, short prompt | **0.25 s** | 0.64 s | 0.41 s |
+| First token, 4K prompt | **1.9 s** | 3.4 s | 3.0 s |
+| First token, 16K prompt | **6.3 s** | 10.6 s | 9.8 s |
+| First token, 100K prompt | **39.6 s** | 66.2 s | 60.7 s |
+| First token, follow-up in the 100K chat | **1.2 s** | 1.9 s | 1.9 s |
+| Writing, short prompt | 81.8 tok/s | 72.9 tok/s | **107.3 tok/s** |
+| Writing, 4K prompt | 85.4 tok/s | 66.5 tok/s | **95.6 tok/s** |
+| Writing, 16K prompt | 85.7 tok/s | 69.7 tok/s | **95.4 tok/s** |
+| Writing, 100K prompt | 79.1 tok/s | 65.8 tok/s | **81.0 tok/s** |
+| Writing, follow-up in the 100K chat | 85.6 tok/s | 69.7 tok/s | **97.4 tok/s** |
+| Error vs Q8_0, mean KL over 1,082 tokens | **0.032** | 0.055 | 0.187 |
+| Load time, to a first answer | **16.0 s** | 24.6 s | 17.4 s |
+| Peak private RAM | 51.9 GB | 52.0 GB | **40.8 GB** |
+
+</details>
+
+## Chrysalis vs llama.cpp, Qwen3.8-27B
+
+The same file in Chrysalis and in llama.cpp, on the same GPU.
+
+<p align="center"><picture>
+  <source media="(prefers-color-scheme: dark)" srcset="media/27b-vs-llamacpp-dark.svg">
+  <img src="media/27b-vs-llamacpp-light.svg" width="860" alt="Qwen3.8-27B in Chrysalis and in llama.cpp: time to first token and writing speed at five prompt lengths, load time and memory">
+</picture></p>
+
+Chrysalis reads prompts 1.4-2.8x sooner, writes 1.2-2.1x faster, starts 2.4x sooner and keeps 11 GB less in RAM.
+
+<details><summary>How it was measured, and every number</summary>
+
+- **The file**: Chrysalis's 27B mix, 4.65 bits per weight, 16 GB, entirely in VRAM: IQ4_XS for most weights, Q6_K and
+  Q8_0 for the most sensitive.
+- **llama.cpp** commit 9c2e0e4 (October 7, 2026) built for HIP, at its best on this card: every layer on the GPU, flash
+  attention with an 8-bit KV cache (its 16-bit decode kernel for this model's 256-wide heads isn't built for this card),
+  MTP speculative decoding with 3 drafts as Chrysalis uses, one slot, a 131K context, and prompt batches of 2,048 tokens
+  (4,096 was 3% faster on prompts but doesn't fit beside that context).
+- The same benchmark and PC as above. Chrysalis ran it twice and llama.cpp once; medians over every round, and over 10
+  and 5 trials at 100K. Sanity checks: Chrysalis 24/24, llama.cpp 10/12 (its misses were answers that were not strict
+  JSON).
+
+| | Chrysalis, 4.65-bit IQ4_XS/Q6_K/Q8_0 mix | llama.cpp, the same file |
+| --- | ---: | ---: |
+| First token, short prompt | **0.12 s** | 0.35 s |
+| First token, 4K prompt | **2.8 s** | 4.1 s |
+| First token, 16K prompt | **11.6 s** | 16.8 s |
+| First token, 100K prompt | **93.5 s** | 145.3 s |
+| First token, follow-up in the 100K chat | **1.7 s** | 2.9 s |
+| Writing, short prompt | **103.7 tok/s** | 74.3 tok/s |
+| Writing, 4K prompt | **90.6 tok/s** | 70.5 tok/s |
+| Writing, 16K prompt | **80.9 tok/s** | 68.3 tok/s |
+| Writing, 100K prompt | **73.1 tok/s** | 34.7 tok/s |
+| Writing, follow-up in the 100K chat | **74.3 tok/s** | 38.5 tok/s |
+| Load time, to a first answer | **1.6 s** | 3.7 s |
+| Peak private RAM | **0.5 GB** | 11.9 GB |
+
+</details>
+
+## Editing artifacts by pointing at them
 
 <p align="center"><img src="media/paint.webp" width="900" alt="An SVG cabin drawn live; pointing at the roof and asking to make it red changes only the roof; the paint bucket fills the door by hand"></p>
 
-<sub>Drawn as it's written. Hover a part and it glows; click and "make this bright red" means that part, and only it
-changes. The gold door is the paint bucket: no model, no wait.</sub>
+<sub>Artifacts render while they are written. Hovering over a part highlights it and clicking attaches it to your next
+message, so "make this bright red" changes only that part. The door was filled with the paint bucket, which edits the
+artifact directly without the model.</sub>
 
-## Bring your characters from Silly Tavern
+## SillyTavern character cards
 
 <p align="center"><img src="media/characters.webp" width="900" alt="Seraphina's SillyTavern card dropped in: her greeting, a reply in her voice, her card"></p>
 
-<sub>A SillyTavern card dropped in: her greeting, speech and narration set as SillyTavern sets them, her card a click away.
-Groups write the scene together, each speaker with their own face. Seraphina is SillyTavern's sample character
+<sub>A SillyTavern card imported by drag and drop: the character's greeting, and speech and narration formatted the way
+SillyTavern formats them. In group chats each speaker has their own portrait. Seraphina is SillyTavern's sample character
 (AGPL-3.0), so this one recording is under their license.</sub>
 
-## On your phone, over real HTTPS
+## Phones and other devices
 
 <p align="center"><img src="media/phone-pairing.png" width="760" alt="A phone connecting: the connect page, the code it shows, then the chat"></p>
 <p align="center"><img src="media/connect-desktop.png" width="520" alt="Connect a device on the computer: the QR code and the phone's code with Allow"></p>
 
-<sub>Scan the QR code, trust this computer once (the page walks each kind of device through it), and allow the code the
-phone shows. Then it's the chat, on HTTPS the phone trusts, from a certificate authority of its own that can vouch for
-nothing outside your network. Only devices you let in get past the connect page.</sub>
+<sub>Scan the QR code, trust this computer's certificate authority once (the page shows how for each kind of device), and
+allow the code the phone shows. The chat then runs over HTTPS. The authority is only valid for addresses on your
+network, and only devices you allow get past the connect page.</sub>
 
-## And
+## Also
 
 - **Voice mode** that hears you talk over the reply
 - **Tools**, MCP servers and sub-agents
 - **Claude Code** and **OpenCode**, through OpenAI and Anthropic APIs
 - The same chat on **llama.cpp, Ollama, LM Studio, KoboldCpp or vLLM**
-- **Qwen3.8-27B** at 100+ tok/s, with its full 262K context
+- **Qwen3.8-27B** with its full 262K context: 104 tok/s on short prompts, 73 at 100K
 
 ## Run it
 
@@ -67,8 +145,9 @@ curl -fsSL https://github.com/michaelDinelle/chrysalis-inference/releases/latest
 chrysalis/chrysalis.sh
 ```
 
-Nothing is installed: Chrysalis is that folder. The first start downloads the 27B (16 GB) and prints the chat's
-address; it runs in that terminal, and Ctrl+C stops it. With 64 GB of RAM, Flash-Next follows in the background.
+Nothing is installed outside that folder. With 64 GB of RAM, each start asks which model to run; otherwise it runs the
+27B. The first start downloads the model (16 GB for the 27B, 117 GB for Flash-Next) and prints the chat's address.
+Chrysalis runs in that terminal, and Ctrl+C stops it.
 
 Your laptop and phone use it too: `chrysalis.sh --host 0.0.0.0` puts it on your network. A laptop runs the same
 Chrysalis, finds yours by itself, and asks in both terminals with the same code: answer y on each, once, and its apps
@@ -85,13 +164,14 @@ Docker, for the API alone (`http://localhost:8080/v1`):
 docker run -d --device /dev/kfd --device /dev/dri -p 127.0.0.1:8080:8080 -v chrysalis:/models ghcr.io/michaeldinelle/chrysalis
 ```
 
-## How
+## How it works
 
-An engine written by hand for one GPU: its own kernels for every quantized format, MTP drafts, and prompt caching that
-makes each agent turn an append. Flash-Next's 24,576 experts live where they're used: the busiest in VRAM, following
-what you're doing, the rest in RAM, run by the CPU at its full memory bandwidth.
+Chrysalis has its own engine for this GPU: hand-written kernels for each quantized format, MTP speculative decoding,
+and a prompt cache that turns each agent turn into an append. Flash-Next's 24,576 experts are placed by how often its
+replies use them: the most used in VRAM, following the conversation, and the rest in RAM, computed by the CPU. VRAM the
+KV cache isn't using holds about 1,300 more experts, until a long context needs it back.
 
-## Follow along
+## Links
 
 [X @michaeldinelle](https://x.com/michaeldinelle) · [Ko-fi](https://ko-fi.com/michaeldinelle) ·
 [GitHub](https://github.com/michaelDinelle)

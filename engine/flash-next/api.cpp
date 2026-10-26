@@ -37,7 +37,7 @@ void chrysalis_seq_push(int id, const int *tokens, int n) {
     Seq &s = E->seqs.at(id);
     for (int i = 0; i < n; i++) s.seen.push(tokens[i], 0);
 }
-int chrysalis_free_tokens() { return (int)E->free_pages.size() * PAGE; }
+int chrysalis_free_tokens() { return E->free_tokens(); }
 void chrysalis_seq_lookup(int id, const int *tokens, int n) { E->seqs.at(id).look.set(tokens, n); }
 void chrysalis_masked_top(const uint32_t *mask, float *v, int *ids, float *stats) {
     CK(hipMemcpyAsync(E->mask_rows(), mask, VOCAB / 32 * 4, hipMemcpyHostToDevice, E->st));

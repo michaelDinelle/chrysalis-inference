@@ -71,11 +71,17 @@ __host__ __device__ constexpr int qbytes_of(int type) {
 }
 inline size_t qrow_bytes(int type, int cols) { return (size_t)cols / qk_of(type) * qbytes_of(type); }
 
+constexpr size_t XGU = (size_t)FE * D / 4 + (size_t)FE * D / 8 + (size_t)FE * D / 16 + (size_t)FE * D / 128;
+constexpr size_t XDN = (size_t)FE * D / 2 + (size_t)FE * D / 16;
+constexpr size_t XSB = 2 * XGU + XDN;
+constexpr int MAX_EXTRA = 8192;
+
 __host__ __device__ inline QTensor slot_view(const QTensor &pool, int s, int type) {
     constexpr size_t n = (size_t)FE * D;
     QTensor t;
     t.type = type; t.rows = FE; t.cols = D;
-    uint8_t *base = pool.q + (size_t)s * (n / 2);
+    const int nb = pool.rows / FE;
+    uint8_t *base = s < nb ? pool.q + (size_t)s * (n / 2) : (uint8_t *)pool.f + (size_t)(s - nb) * XSB;
     if (type == Q3_K) {
         t.q = base; t.qh = base + n / 4; t.sc = t.qh + n / 8; t.d = (half *)(t.sc + n / 16);
     } else if (type == Q2_K) {
@@ -83,6 +89,16 @@ __host__ __device__ inline QTensor slot_view(const QTensor &pool, int s, int typ
     } else {
         t.q = base; t.sc = pool.sc + (size_t)s * (n / 64); t.sh = pool.sh + (size_t)s * (n / 256); t.d = pool.d + (size_t)s * (n / 256);
     }
+    return t;
+}
+
+__host__ __device__ inline QTensor down_view(const QTensor &pool, int s, int &row0) {
+    const int nb = pool.rows / D;
+    if (s < nb || !pool.f) { row0 = s * D; return pool; }
+    QTensor t = pool;
+    uint8_t *base = (uint8_t *)pool.f + (size_t)(s - nb) * XSB;
+    t.q = base; t.d = (half *)(base + (size_t)FE * D / 2); t.rows = D;
+    row0 = 0;
     return t;
 }
 

@@ -95,6 +95,59 @@ void Engine::experts_init() {
     x.loader = std::thread(&Engine::experts_loader, this);
 }
 
+static int pages_under(int n) { return (int)(((size_t)n * XSB + KV_PAGE - 1) / KV_PAGE); }
+
+void Engine::extra_init() {
+    Experts &x = xc;
+    n_extra_max = x.owner.empty() ? 0 : (int)std::min<size_t>(MAX_EXTRA, (size_t)n_pages * KV_PAGE / XSB);
+    n_extra = extra_pages = 0;
+    x.owner.resize(n_slots + n_extra_max, -1);
+    x.fmt.resize(n_slots + n_extra_max, IQ4_XS);
+    x.busy.resize(n_slots + n_extra_max, 0);
+    pool_gate.f = kv_pool; pool_up.f = kv_pool + XGU; pool_down.f = kv_pool + 2 * XGU;
+    for (int l = 0; l < NL; l++) { L[l].hot_gate.f = pool_gate.f; L[l].hot_up.f = pool_up.f; L[l].hot_down.f = pool_down.f; }
+    extra_grow();
+}
+
+void Engine::extra_grow() {
+    constexpr int SPARE = 64;
+    while (n_extra < n_extra_max) {
+        const int next = pages_under(n_extra + 1), add = next - extra_pages;
+        if ((int)free_pages.size() < add + SPARE) break;
+        for (int i = 0; i < add; i++) if (free_pages[i] != extra_pages + i) return;
+        free_pages.erase(free_pages.begin(), free_pages.begin() + add);
+        extra_pages = next;
+        n_extra++;
+    }
+}
+
+void Engine::kv_need(int need) {
+    Experts &x = xc;
+    if ((int)free_pages.size() >= need || !n_extra) return;
+    PlaceArgs pa;
+    pa.gate = pool_gate; pa.up = pool_up; pa.down = pool_down; pa.slot_of = d_slot_of; pa.fmt = d_fmt;
+    while ((int)free_pages.size() < need && n_extra > 0) {
+        const int s = n_slots + --n_extra;
+        for (Experts::Load &ld : x.loads)
+            if (ld.slot == s && ld.state.load(std::memory_order_acquire) != Experts::FREE) ld.slot = -1;
+        const int k = x.owner[s];
+        if (k >= 0) {
+            if (pa.npatch == 3 * PLACE_MAX) { place_experts(pa, st); pa.npatch = 0; }
+            pa.patch[pa.npatch++] = {k, -1, -1 - x.home[k]};
+            x.slot[k] = -1;
+            L[k / NE].slot_h[k % NE] = -1 - x.home[k];
+            x.owner[s] = -1;
+        }
+        x.busy[s] = 0;
+        const int keep = pages_under(n_extra);
+        std::vector<int> back;
+        for (int p = keep; p < extra_pages; p++) back.push_back(p);
+        free_pages.insert(free_pages.begin(), back.begin(), back.end());
+        extra_pages = keep;
+    }
+    if (pa.npatch) place_experts(pa, st);
+}
+
 constexpr uint64_t POOL_MAGIC = 0x324c4f4f50465243ull;
 
 uint64_t Engine::model_bytes() const {
@@ -122,10 +175,10 @@ int Engine::pool_warm(const char *path) {
     if (!f) return -1;
     uint64_t head[4];
     std::vector<float> s(x.score.size());
-    std::vector<int> owner(x.owner.size());
-    const bool ok = fread(head, sizeof head, 1, f) == 1 && head[0] == POOL_MAGIC && head[1] == s.size() && head[2] == owner.size() &&
-                    head[3] == model_bytes() && fread(s.data(), 4, s.size(), f) == s.size() &&
-                    fread(owner.data(), 4, owner.size(), f) == owner.size();
+    std::vector<int> owner;
+    bool ok = fread(head, sizeof head, 1, f) == 1 && head[0] == POOL_MAGIC && head[1] == s.size() && head[2] <= (uint64_t)n_slots + MAX_EXTRA &&
+              head[3] == model_bytes() && fread(s.data(), 4, s.size(), f) == s.size();
+    if (ok) { owner.resize(head[2]); ok = fread(owner.data(), 4, owner.size(), f) == owner.size(); }
     fclose(f);
     if (!ok) return -1;
     std::vector<float> want(s.size(), 0.0f);
@@ -228,8 +281,9 @@ void Engine::experts_loader() {
 void Engine::experts_place(int T) {
     Experts &x = xc;
     if (x.owner.empty()) return;
-    x.tokens += T;
     x.decoding = T > 0 && T <= 8;
+    x.reading = T > 8;
+    if (x.decoding) x.tokens += T;
     const size_t keys = (size_t)NL * NE;
     if (!x.counts_pending) {
         CK(hipMemcpyAsync(x.h_counts, x.d_counts, keys * 4, hipMemcpyDeviceToHost, st));
@@ -246,6 +300,12 @@ void Engine::experts_place(int T) {
     for (int k = 0; k < PLACE_MAX; k++) {
         Experts::Load &ld = x.loads[k];
         if (ld.state.load(std::memory_order_acquire) != Experts::COPYING || hipEventQuery(ld.copied) != hipSuccess) continue;
+        if (ld.slot < 0) {
+            x.coming[ld.key] = 0;
+            CK(hipEventRecord(ld.done, st));
+            ld.state.store(Experts::FREE, std::memory_order_release);
+            continue;
+        }
         const int key = ld.key, s = ld.slot, old = x.owner[s];
         float ms = 0;
         if (!x.decoding && hipEventElapsedTime(&ms, ld.start, ld.copied) == hipSuccess && ms > 0) {
@@ -316,7 +376,8 @@ void Engine::experts_plan() {
     if (!x.on) return;
     int free_k[PLACE_MAX], nf = 0, busy = 0;
     for (int k = 0; k < PLACE_MAX; k++) if (x.loads[k].state.load(std::memory_order_acquire) == Experts::FREE) free_k[nf++] = k; else busy++;
-    if (x.decoding) nf = std::max(0, std::min(nf, x.decode_loads - busy));
+    if (x.decoding) extra_grow();
+    nf = x.reading ? 0 : x.decoding ? std::max(0, std::min(nf, x.decode_loads - busy)) : nf;
     if (!nf) return;
     std::vector<std::pair<float, int>> in, out;
     in.reserve(nf + 1); out.reserve(nf + 1);
@@ -334,15 +395,29 @@ void Engine::experts_plan() {
     if (in.empty()) return;
     int room = x.spill_cap - x.spilled;
     if (room > 0 && avail < x.spare) room = 0;
-    for (int s = 0; s < n_slots; s++)
-        if (!x.busy[s] && (room > 0 || !file_tier(x.owner[s])))
-            keep(out, {x.owner[s] >= 0 ? x.score[x.owner[s]] * x.mb[x.owner[s]] : -1.0f, s}, false);
+    std::vector<std::pair<float, int>> base;
+    base.reserve(nf + 1);
+    for (int s = 0; s < n_slots + n_extra; s++)
+        if (!x.busy[s] && (room > 0 || !file_tier(x.owner[s]))) {
+            const std::pair<float, int> v{x.owner[s] >= 0 ? x.score[x.owner[s]] * x.mb[x.owner[s]] : -1.0f, s};
+            keep(out, v, false);
+            if (s < n_slots) keep(base, v, false);
+        }
     bool queued = false;
-    for (int i = 0, j = 0, q = 0; i < (int)in.size() && j < (int)out.size(); i++, j++) {
-        while (j < (int)out.size() && room <= 0 && file_tier(x.owner[out[j].second])) j++;
-        if (j == (int)out.size() || (!yield && in[i].first <= out[j].first * (1 + MARGIN) + MIN_GAIN)) break;
+    std::vector<int> taken;
+    for (int i = 0, q = 0; i < (int)in.size(); i++) {
+        const bool wide = x.type[in[i].second] != IQ4_XS;
+        const std::vector<std::pair<float, int>> &from = wide ? out : base;
+        int j = 0;
+        while (j < (int)from.size() && (std::find(taken.begin(), taken.end(), from[j].second) != taken.end() ||
+                                        (room <= 0 && file_tier(x.owner[from[j].second])))) j++;
+        if (j == (int)from.size() || (!yield && in[i].first <= from[j].first * (1 + MARGIN) + MIN_GAIN)) {
+            if (wide) break;
+            continue;
+        }
+        taken.push_back(from[j].second);
         Experts::Load &ld = x.loads[free_k[q]];
-        ld.key = in[i].second; ld.slot = out[j].second;
+        ld.key = in[i].second; ld.slot = from[j].second;
         ld.out = file_tier(x.owner[ld.slot]) ? x.owner[ld.slot] : -1;
         if (ld.out >= 0) { x.spilled++; room--; }
         x.coming[ld.key] = 1; x.busy[ld.slot] = 1;
