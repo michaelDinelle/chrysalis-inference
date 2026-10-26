@@ -106,6 +106,117 @@ void Engine::calibrate() {
     CK(hipEventDestroy(e0)); CK(hipEventDestroy(e1));
     cal_dma_bw = 48.0 * piece / (best_ms * 1e-3);
     gfrac = (float)(cal_dma_bw / (cal_dma_bw + cal_cpu_bw));
+    std::vector<const ColdLayer *> tier;
+    for (const ColdLayer &c : cold) if (c.n2) tier.push_back(&c);
+    if (file_fd >= 0 && !tier.empty()) {
+        const int reps = 8;
+        std::vector<uint8_t> scratch(3 * ((size_t)FE * tier[0]->row_gu[2] + (size_t)D * tier[0]->row_dn));
+        double spent = 0;
+        for (int i = 0; i < reps; i++) {
+            const ColdLayer &c = *tier[(size_t)i * 7 % tier.size()];
+            const int h = c.n + (int)((size_t)i * 131 % (size_t)c.n2);
+            const uint8_t *const mb[3] = {c.gate[2], c.up[2], c.down2}, *const fb[3] = {c.file_gate, c.file_up, c.file_down2};
+            const uint8_t *m[3] = {c.gu_row(false, h, 0), c.gu_row(true, h, 0), c.dn_row(h, 0)}, *src[3];
+            const size_t n[3] = {(size_t)FE * c.row_gu[2], (size_t)FE * c.row_gu[2], (size_t)D * c.row_dn};
+            uint8_t *dst[3] = {scratch.data(), scratch.data() + n[0], scratch.data() + n[0] + n[1]};
+            for (int k = 0; k < 3; k++) {
+                src[k] = fb[k] + (m[k] - mb[k]);
+                posix_fadvise(file_fd, (off_t)(src[k] - file_base), (off_t)n[k], POSIX_FADV_DONTNEED);
+            }
+            const double t0 = now();
+            file_read3(dst, src, n);
+            spent += now() - t0;
+        }
+        restore_s = spent / reps;
+    }
+}
+
+double Engine::split_bias(int T) const {
+    const int i = T < SPLIT_AT[1] ? 0 : 1;
+    const double a = std::log2((double)SPLIT_AT[i]), b = std::log2((double)SPLIT_AT[i + 1]);
+    const double f = (std::log2((double)std::clamp(T, SPLIT_AT[0], SPLIT_AT[2])) - a) / (b - a);
+    return cpu_bias[i] * std::pow(cpu_bias[i + 1] / cpu_bias[i], std::clamp(f, 0.0, 1.0));
+}
+
+std::string Engine::cal_key() const {
+    std::string cpu;
+    if (FILE *f = fopen("/proc/cpuinfo", "r")) {
+        char line[256];
+        while (fgets(line, sizeof line, f))
+            if (!strncmp(line, "model name", 10) && strchr(line, ':')) { cpu = strchr(line, ':') + 2; break; }
+        fclose(f);
+    }
+    cpu.erase(cpu.find_last_not_of(" \n") + 1);
+    const long long ram = (long long)sysconf(_SC_PHYS_PAGES) * sysconf(_SC_PAGESIZE) >> 30;
+    return lt_tune::device(lt) + " | " + cpu + " | " + std::to_string(n_workers) + " workers | " + std::to_string(ram) + " GiB | " +
+           std::to_string(cold_bytes);
+}
+
+bool Engine::cal_load() {
+    FILE *f = cal_path.empty() ? nullptr : fopen(cal_path.c_str(), "r");
+    if (!f) return false;
+    const std::string key = cal_key();
+    double v[7], got[7];
+    bool found = false;
+    char line[1024];
+    while (fgets(line, sizeof line, f)) {
+        const char *tab = strchr(line, '\t');
+        if (tab && std::string(line, (size_t)(tab - line)) == key &&
+            sscanf(tab + 1, "%lf %lf %lf %lf %lf %lf %lf", &got[0], &got[1], &got[2], &got[3], &got[4], &got[5], &got[6]) == 7 &&
+            std::all_of(got, got + 7, [](double g) { return g > 0; })) {
+            std::copy(got, got + 7, v);
+            found = true;
+        }
+    }
+    fclose(f);
+    if (!found) return false;
+    cal_cpu_bw = v[0]; cal_cpu_mac = v[1]; cal_dma_bw = v[2]; std::copy(v + 3, v + 6, cpu_bias); restore_s = v[6];
+    gfrac = (float)(cal_dma_bw / (cal_dma_bw + cal_cpu_bw));
+    calibrated = true;
+    return true;
+}
+
+void Engine::cal_split(int id) {
+    std::vector<int> toks(std::min(smax, SPLIT_AT[2]));
+    uint64_t r = 1;
+    for (int &t : toks) {
+        r = r * 6364136223846793005ull + 1442695040888963407ull;
+        t = (int)((r >> 33) % 200000);
+    }
+    double picked[3], speed[3];
+    for (int s = 0; s < 3; s++) {
+        const int n = std::min((int)toks.size(), SPLIT_AT[s]);
+        double best = 1e30, pick = 1.0;
+        for (int i = -1; i < 7; i++) {
+            std::fill(cpu_bias, cpu_bias + 3, i < 0 ? 1.0 : std::exp2((i - 2) / 4.0));
+            double t = 1e30;
+            for (int rep = 0; rep < (n < 1024 ? 3 : 1); rep++) {
+                seq_truncate(id, 0);
+                const double t0 = now();
+                prefill(id, toks.data(), nullptr, n);
+                CK(hipStreamSynchronize(st));
+                t = std::min(t, now() - t0);
+            }
+            if (i >= 0 && t < best) best = t, pick = cpu_bias[0];
+        }
+        picked[s] = pick;
+        speed[s] = n / best;
+    }
+    std::copy(picked, picked + 3, cpu_bias);
+    seq_truncate(id, 0);
+    cal_save();
+    fprintf(stderr, "chrysalis-fn: prefill split measured for this machine: CPU cost x%.2f / x%.2f / x%.2f at %d / %d / %d tokens (%.0f / %.0f / %.0f tok/s), "
+            "an expert read back from disk in %.2f ms\n", cpu_bias[0], cpu_bias[1], cpu_bias[2], SPLIT_AT[0], SPLIT_AT[1], SPLIT_AT[2], speed[0], speed[1], speed[2],
+            restore_s * 1e3);
+}
+
+void Engine::cal_save() {
+    calibrated = true;
+    if (FILE *f = cal_path.empty() ? nullptr : fopen(cal_path.c_str(), "a")) {
+        fprintf(f, "%s\t%.17g %.17g %.17g %.17g %.17g %.17g %.17g\n", cal_key().c_str(), cal_cpu_bw, cal_cpu_mac, cal_dma_bw, cpu_bias[0], cpu_bias[1],
+                cpu_bias[2], restore_s);
+        fclose(f);
+    }
 }
 
 void Engine::load(const std::string &path, int max_seqs, size_t reserve_bytes) {
@@ -126,7 +237,6 @@ void Engine::load(const std::string &path, int max_seqs, size_t reserve_bytes) {
     CK(hipSetDevice(0));
     CK(hipStreamCreateWithFlags(&st, hipStreamNonBlocking));
     CK(hipStreamCreateWithFlags(&cst, hipStreamNonBlocking));
-    CK(hipEventCreateWithFlags(&moe_gpu_done, hipEventDisableTiming));
     CK(hipEventCreateWithFlags(&staged, hipEventDisableTiming));
     CK(hipEventCreateWithFlags(&copied, hipEventDisableTiming));
     CK(hipEventCreateWithFlags(&topk_ready, hipEventDisableTiming));
@@ -461,7 +571,7 @@ void Engine::load(const std::string &path, int max_seqs, size_t reserve_bytes) {
     if (n_pages < 64) FAIL("not enough VRAM left for the KV cache");
     CK(hipMalloc(&kv_pool, (size_t)n_pages * KV_PAGE));
     load_phase = 1;
-    if (cold_bytes) calibrate();
+    if (cold_bytes && !cal_load()) calibrate();
     free_pages.clear();
     for (int p = 0; p < n_pages; p++) free_pages.push_back(p);
     page_ref.assign(n_pages, 0);
@@ -627,6 +737,7 @@ void Engine::warmup() {
     int out[4];
     generate(id, sp, out, 4);
     CK(hipStreamSynchronize(st));
+    if (!calibrated && cold_bytes) cal_split(id);
     xc.on = on;
     std::fill(xc.fresh.begin(), xc.fresh.end(), 0u);
     std::fill(xc.total.begin(), xc.total.end(), 0ull);

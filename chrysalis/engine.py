@@ -3,6 +3,7 @@ import os
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 LT_CACHE = os.path.join(ROOT, "data", "cache", "hipblaslt.txt")
+CALIBRATION = os.path.join(ROOT, "data", "cache", "flash-next-calibration.txt")
 
 
 class KVFull(RuntimeError):
@@ -117,6 +118,10 @@ class Engine:
         if "CHRYSALIS_LT_CACHE" not in os.environ:
             os.makedirs(os.path.dirname(LT_CACHE), exist_ok=True)
             os.environ["CHRYSALIS_LT_CACHE"] = LT_CACHE
+        if hasattr(L, "chrysalis_calibration"):
+            os.makedirs(os.path.dirname(CALIBRATION), exist_ok=True)
+            L.chrysalis_calibration.argtypes = [C.c_char_p]
+            L.chrysalis_calibration(CALIBRATION.encode())
         global _loading
         _loading = L
         try:
@@ -343,10 +348,11 @@ class Engine:
     def expert_stats(self):
         if not hasattr(self.lib, "chrysalis_expert_stats"):
             return None
-        out = (C.c_int64 * 8)()
+        out = (C.c_int64 * 12)()
         self.lib.chrysalis_expert_stats(out)
         return {"placed": out[0], "placed_file_tier": out[1], "decode_picks": out[2], "decode_picks_in_pool": out[3],
-                "dma_bytes_per_s": out[4] * 1e6, "gpu_share": out[5] / 1e6, "mirrored": out[6], "mirror_cap": out[7]}
+                "dma_bytes_per_s": out[4] * 1e6, "gpu_share": out[5] / 1e6, "mirrored": out[6], "mirror_cap": out[7],
+                "memory_limited": out[8], "waited_s": out[9] / 1e6, "waited_steps": out[10], "decode_steps": out[11]}
 
     def last_logits(self):
         import numpy as np

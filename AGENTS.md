@@ -15,7 +15,9 @@ None: no comments or docstrings anywhere in the repo, in any language, including
   nothing), and a case is named for what it exercises.
 - Prove a new or fixed check: break the product code on purpose, watch the check fail, revert.
 - Flash-Next's CPU / GPU split and its expert pool move with history and change results by rounding: a check that
-  needs bit-identical repeats pins them (`chrysalis_tune` "split", "gfrac", "experts"), as tests/test_snapshot.py does.
+  needs bit-identical repeats within one process pins them (`chrysalis_tune` "split", "gfrac", "experts"), as
+  tests/test_snapshot.py does. Fresh processes given the same requests repeat each other to the bit: its CPU, DMA, disk
+  and prompt-split calibration is kept in data/cache/flash-next-calibration.txt, and pool moves land at fixed steps.
 - Tests check, they don't time: a timing is not a check.
 
 ## Running them

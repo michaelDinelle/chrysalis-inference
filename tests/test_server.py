@@ -16,7 +16,6 @@ def pin(engine):
     if hasattr(engine.lib, "chrysalis_tune"):
         import ctypes as C
         engine.lib.chrysalis_tune.restype, engine.lib.chrysalis_tune.argtypes = C.c_double, [C.c_char_p, C.c_double]
-        engine.lib.chrysalis_tune(b"adapt_left", 0)
         engine.lib.chrysalis_tune(b"split", 1)
         engine.lib.chrysalis_tune(b"gfrac", 0.3)
         engine.lib.chrysalis_tune(b"experts", 0)

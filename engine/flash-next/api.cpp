@@ -5,13 +5,16 @@
 #include <string>
 
 static Engine *E = nullptr;
+static std::string cal_file;
 
 float load_progress();
 
 extern "C" {
 
+void chrysalis_calibration(const char *path) { cal_file = path ? path : ""; }
 int chrysalis_init(const char *path, int max_seqs, int chunk, long long reserve_mb) {
     E = new Engine;
+    E->cal_path = cal_file;
     if (chunk > 0) E->smax = chunk;
     E->umax = std::min(E->smax, 1024);
     E->load(path, max_seqs, (size_t)reserve_mb << 20);
@@ -103,10 +106,8 @@ double chrysalis_tune(const char *key, double value) {
     if (k == "gfrac") { old = E->gfrac; E->gfrac = (float)value; E->gfrac_pinned = true; }
     if (k == "split") { old = E->split; E->split = (int)value; }
     if (k == "vnni") old = E->cpu.use_vnni((int)value);
-    if (k == "cpu_bias") { old = E->cpu_bias; if (value > 0) E->cpu_bias = value; }
-    if (k == "adapt") { old = E->adapt; E->adapt = value != 0; }
+    if (k == "cpu_bias") { old = E->cpu_bias[2]; if (value > 0) std::fill(E->cpu_bias, E->cpu_bias + 3, value); }
     if (k == "lookahead") { old = E->la_on; E->la_on = value != 0; }
-    if (k == "adapt_left") { old = E->adapt_left; if (value >= 0) E->adapt_left = (int)value; }
     if (k == "experts") { old = E->xc.on; E->xc.on = value != 0; }
     if (k == "experts_half_life") { old = E->xc.half_life; if (value > 0) E->xc.half_life = value; }
     if (k == "spill") { old = E->xc.spill_cap; if (value >= 0) E->xc.spill_cap = (int)value; }
@@ -118,7 +119,8 @@ int chrysalis_pool_warm(const char *path) { return E ? E->pool_warm(path) : -1; 
 void chrysalis_expert_stats(int64_t *out) {
     out[0] = E->xc.placed; out[1] = E->xc.loaded_file; out[2] = (int64_t)E->xc.picks; out[3] = (int64_t)E->xc.hits;
     out[4] = (int64_t)(E->cal_dma_bw / 1e6); out[5] = (int64_t)(E->gfrac * 1e6);
-    out[6] = E->xc.spilled; out[7] = E->xc.spill_cap;
+    out[6] = E->xc.spilled; out[7] = E->xc.spill_cap; out[8] = (int64_t)E->xc.mem_limited;
+    out[9] = (int64_t)(E->xc.waited_s * 1e6); out[10] = (int64_t)E->xc.waited_steps; out[11] = (int64_t)E->xc.step;
 }
 void chrysalis_route_counts(int64_t *out) {
     if (!out) E->route_counts.assign((size_t)NL * NE, 0);

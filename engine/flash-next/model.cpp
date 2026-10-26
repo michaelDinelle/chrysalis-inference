@@ -520,12 +520,13 @@ void Engine::moe_back(const Layer &w, int layer, int T) {
     auto ebytes = [&](int e) { return (double)cl->bytes(cslot(e)); };
     int kc = 0, kmax = 0;
     {
+        const double bias = split_bias(T);
         double best = 1e30, macs = 0, cb = 0, gb = 0;
         for (int e : ce) gb += ebytes(e);
         const int K = (int)ce.size();
         for (int k = 0, picks = 0; k <= K; k++) {
             const double ta = cb / cal_cpu_bw, tm = macs / cal_cpu_mac;
-            const double t = std::max(cpu_bias * (std::max(ta, tm) + 0.25 * std::min(ta, tm)), gb / cal_dma_bw + (K - k) * GPU_PER_EXPERT);
+            const double t = std::max(bias * (std::max(ta, tm) + 0.25 * std::min(ta, tm)), gb / cal_dma_bw + (K - k) * GPU_PER_EXPERT);
             if (t < best) { best = t; kc = k; }
             kmax = k;
             if (k == K || picks + cnt[ce[k]] > P) break;
@@ -687,12 +688,7 @@ void Engine::moe_back(const Layer &w, int layer, int T) {
     }
     pmark(5);
     if (!cpu_cold.empty()) {
-        if (!gpu_cold.empty()) CK(hipEventRecord(moe_gpu_done, st));
         cpu.wait();
-        if (!gpu_cold.empty() && split < 0 && adapt && adapt_left > 0) {
-            cpu_bias = std::clamp(cpu_bias * (hipEventQuery(moe_gpu_done) == hipSuccess ? 1.03 : 1 / 1.03), 0.1, 10.0);
-            if (--adapt_left == 0) fprintf(stderr, "chrysalis-fn: prefill split settled (CPU cost x%.2f)\n", cpu_bias);
-        }
         pmark(6);
         CK(hipMemcpyAsync(b.Ys, b.h_cout, (size_t)(N - pc0) * D * 2, hipMemcpyHostToDevice, st));
         accum((int)ranges.size() - 1, b.Ys);

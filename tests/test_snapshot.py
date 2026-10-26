@@ -10,7 +10,6 @@ eng = Engine(os.path.join(ROOT, spec["path"]), max_seqs=8, umax=spec["chunk"], l
 if hasattr(eng.lib, "chrysalis_tune"):
     import ctypes as C
     eng.lib.chrysalis_tune.restype, eng.lib.chrysalis_tune.argtypes = C.c_double, [C.c_char_p, C.c_double]
-    eng.lib.chrysalis_tune(b"adapt_left", 0)
     eng.lib.chrysalis_tune(b"split", 1); eng.lib.chrysalis_tune(b"gfrac", 0.3)
     eng.lib.chrysalis_tune(b"experts", 0)
 random.seed(3)

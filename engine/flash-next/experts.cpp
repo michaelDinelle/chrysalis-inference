@@ -9,9 +9,11 @@
 #include <unistd.h>
 
 namespace {
+double now() { return std::chrono::duration<double>(std::chrono::steady_clock::now().time_since_epoch()).count(); }
 constexpr float PRIOR = 8;
 constexpr float MARGIN = 0.25f;
 constexpr float MIN_GAIN = 2.0f;
+constexpr double READ_BUDGET_S = 0.012;
 constexpr size_t STAGE_BYTES = 2 * (size_t)FE * D / 256 * 136 + (size_t)D * FE / 32 * 18;
 
 struct HotCopy { uint8_t *mirror[3]; const uint8_t *file[3]; size_t n[3]; };
@@ -49,6 +51,13 @@ void Engine::file_read(uint8_t *dst, const uint8_t *src, size_t n) const {
         got += (size_t)r;
     }
     posix_fadvise(file_fd, off, (off_t)n, POSIX_FADV_DONTNEED);
+}
+
+void Engine::file_read3(uint8_t *const dst[3], const uint8_t *const src[3], const size_t n[3]) const {
+    std::thread a([&] { file_read(dst[1], src[1], n[1]); }), b([&] { file_read(dst[2], src[2], n[2]); });
+    file_read(dst[0], src[0], n[0]);
+    a.join();
+    b.join();
 }
 
 void Engine::experts_init() {
@@ -254,7 +263,7 @@ void Engine::experts_loader() {
         Experts::Load &ld = x.loads[job.what];
         if (ld.out >= 0) {
             const HotCopy hc = hot_copy(cold[ld.out / NE], x.home[ld.out]);
-            for (int m = 0; m < 3; m++) file_read(hc.mirror[m], hc.file[m], hc.n[m]);
+            file_read3(hc.mirror, hc.file, hc.n);
         }
         const int l = ld.key / NE, h = x.home[ld.key];
         const ColdLayer &c = cold[l];
@@ -291,15 +300,21 @@ void Engine::experts_place(int T) {
         CK(hipEventRecord(x.counted, st));
         x.counts_pending = true;
     }
-    if (!x.on) return;
+    if (!x.on || x.reading) return;
+    if (x.decoding) x.step++;
     PlaceArgs pa;
     pa.gate = pool_gate; pa.up = pool_up; pa.down = pool_down; pa.slot_of = d_slot_of; pa.fmt = d_fmt;
     int placed[PLACE_MAX], np = 0;
     Experts::Job freed[PLACE_MAX];
     int nfreed = 0;
+    double waited = 0;
     for (int k = 0; k < PLACE_MAX; k++) {
         Experts::Load &ld = x.loads[k];
-        if (ld.state.load(std::memory_order_acquire) != Experts::COPYING || hipEventQuery(ld.copied) != hipSuccess) continue;
+        if (ld.state.load(std::memory_order_acquire) == Experts::FREE || x.decoding && ld.due > x.step) continue;
+        const double t0 = now();
+        while (ld.state.load(std::memory_order_acquire) != Experts::COPYING) std::this_thread::yield();
+        CK(hipEventSynchronize(ld.copied));
+        waited += now() - t0;
         if (ld.slot < 0) {
             x.coming[ld.key] = 0;
             CK(hipEventRecord(ld.done, st));
@@ -308,7 +323,7 @@ void Engine::experts_place(int T) {
         }
         const int key = ld.key, s = ld.slot, old = x.owner[s];
         float ms = 0;
-        if (!x.decoding && hipEventElapsedTime(&ms, ld.start, ld.copied) == hipSuccess && ms > 0) {
+        if (!calibrated && !x.decoding && hipEventElapsedTime(&ms, ld.start, ld.copied) == hipSuccess && ms > 0) {
             x.copied_bytes += cold[key / NE].bytes(x.home[key]); x.copied_ms += ms;
         }
         pa.p[pa.n++] = {ld.stage, s, x.type[key]};
@@ -330,6 +345,10 @@ void Engine::experts_place(int T) {
             freed[nfreed++] = {-1 - key, k};
         }
         placed[np++] = k;
+    }
+    if (x.decoding) {
+        x.waited_s += waited;
+        x.waited_steps += waited > 1e-3;
     }
     if (x.copied_ms > 0 && x.copied_bytes >= 64 * 2.0e6) {
         cal_dma_bw = 0.5 * cal_dma_bw + 0.5 * x.copied_bytes / (x.copied_ms * 1e-3);
@@ -354,7 +373,8 @@ void Engine::experts_plan() {
     Experts &x = xc;
     if (x.owner.empty()) return;
     const size_t keys = (size_t)NL * NE;
-    if (x.counts_pending && hipEventQuery(x.counted) == hipSuccess) {
+    if (x.counts_pending) {
+        CK(hipEventSynchronize(x.counted));
         uint64_t picks = 0, hits = 0;
         for (size_t k = 0; k < keys; k++) {
             const uint32_t c = x.h_counts[k];
@@ -390,11 +410,15 @@ void Engine::experts_plan() {
     auto file_tier = [&](int k) { return k >= 0 && cold[k / NE].grp(x.home[k]) == 2; };
     const double avail = mem_available(x);
     const bool yield = x.spilled > 0 && avail < 0.75 * x.spare;
+    x.mem_limited += yield;
     for (size_t k = 0; k < keys; k++)
         if (x.slot[k] < 0 && !x.coming[k] && (yield ? file_tier((int)k) : x.score[k] > 0)) keep(in, {x.score[k] * x.mb[k], (int)k}, true);
     if (in.empty()) return;
     int room = x.spill_cap - x.spilled;
-    if (room > 0 && avail < x.spare) room = 0;
+    if (room > 0 && avail < x.spare) {
+        room = 0;
+        x.mem_limited++;
+    }
     std::vector<std::pair<float, int>> base;
     base.reserve(nf + 1);
     for (int s = 0; s < n_slots + n_extra; s++)
@@ -404,13 +428,14 @@ void Engine::experts_plan() {
             if (s < n_slots) keep(base, v, false);
         }
     bool queued = false;
+    int reads = x.decoding ? std::clamp((int)(READ_BUDGET_S / restore_s), 1, PLACE_MAX) : PLACE_MAX;
     std::vector<int> taken;
     for (int i = 0, q = 0; i < (int)in.size(); i++) {
         const bool wide = x.type[in[i].second] != IQ4_XS;
         const std::vector<std::pair<float, int>> &from = wide ? out : base;
         int j = 0;
         while (j < (int)from.size() && (std::find(taken.begin(), taken.end(), from[j].second) != taken.end() ||
-                                        (room <= 0 && file_tier(x.owner[from[j].second])))) j++;
+                                        ((room <= 0 || reads <= 0) && file_tier(x.owner[from[j].second])))) j++;
         if (j == (int)from.size() || (!yield && in[i].first <= from[j].first * (1 + MARGIN) + MIN_GAIN)) {
             if (wide) break;
             continue;
@@ -419,7 +444,8 @@ void Engine::experts_plan() {
         Experts::Load &ld = x.loads[free_k[q]];
         ld.key = in[i].second; ld.slot = from[j].second;
         ld.out = file_tier(x.owner[ld.slot]) ? x.owner[ld.slot] : -1;
-        if (ld.out >= 0) { x.spilled++; room--; }
+        ld.due = x.step + 1 + (ld.out >= 0);
+        if (ld.out >= 0) { x.spilled++; room--; reads--; }
         x.coming[ld.key] = 1; x.busy[ld.slot] = 1;
         {
             std::lock_guard<std::mutex> lk(x.mu);

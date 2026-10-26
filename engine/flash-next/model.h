@@ -109,7 +109,8 @@ struct Engine {
         bool counts_pending = false;
         int placed = 0, loaded_file = 0;
         double copied_bytes = 0, copied_ms = 0;
-        uint64_t picks = 0, hits = 0;
+        uint64_t picks = 0, hits = 0, mem_limited = 0, step = 0, waited_steps = 0;
+        double waited_s = 0;
         double recent_hits = 0;
         bool decoding = false, reading = false;
         int decode_loads = 16;
@@ -119,6 +120,7 @@ struct Engine {
             std::atomic<int> state{FREE};
             int key = -1, slot = -1;
             int out = -1;
+            uint64_t due = 0;
             uint8_t *stage = nullptr;
             uint8_t *bounce = nullptr;
             hipEvent_t start = nullptr, copied = nullptr, done = nullptr;
@@ -145,6 +147,7 @@ struct Engine {
     int pool_warm(const char *path);
     uint64_t model_bytes() const;
     void file_read(uint8_t *dst, const uint8_t *src, size_t n) const;
+    void file_read3(uint8_t *const dst[3], const uint8_t *const src[3], const size_t n[3]) const;
     std::vector<ColdLayer> cold;
     std::vector<ColdDec> cold_dev;
     uint8_t *cold_mem = nullptr; size_t cold_bytes = 0;
@@ -153,12 +156,17 @@ struct Engine {
     float gfrac = 0.3f;
     bool gfrac_pinned = false;
     double cal_cpu_bw = 50e9, cal_cpu_mac = 150e9, cal_dma_bw = 25e9;
-    double cpu_bias = 1.0;
-    int adapt_left = 480;
-    hipEvent_t moe_gpu_done;
+    static constexpr int SPLIT_AT[3] = {32, 256, 4096};
+    double cpu_bias[3] = {1.0, 1.0, 1.0}, restore_s = 4e-3;
+    double split_bias(int T) const;
+    std::string cal_path;
+    bool calibrated = false;
+    std::string cal_key() const;
+    bool cal_load();
+    void cal_split(int id);
+    void cal_save();
     int n_workers = 0;
     int split = -1;
-    bool adapt = true;
     bool prof = getenv("CHRYSALIS_FN_PROF") != nullptr;
     std::vector<int64_t> route_counts;
     const char *route_dec_file = getenv("CHRYSALIS_FN_DECODE_COUNTS");
