@@ -5,7 +5,7 @@ import katex from "katex";
 import "katex/dist/katex.min.css";
 import { marked, type Links, type Token, type Tokens } from "marked";
 import { type Attachment, KINDS, attach, dataUrl, fmtBytes, get as getFile, put as putFile, textBlock } from "./files";
-import { type Cand, type Odds, type SamplerKey, type Stage, dryRuns, sample } from "./sampler";
+import { type Cand, type Odds, type SamplerKey, type Stage, DEFAULT_STAGES, sample } from "./sampler";
 import { type Part, type VoiceAsk, type VoiceInfo, type VoiceReady, Speaker, VoiceClient } from "./voice";
 import { type Fix, applyFixes, fixedParts, readHeard } from "./heard";
 import { pointOf, shownWords, unitOf } from "./spoken";
@@ -53,7 +53,7 @@ interface Conversation { id: string; title: string; named?: boolean; updated: nu
 type Sampler = Partial<Record<SamplerKey, number>> & { order?: Stage[] };
 type Mode = "think" | "fast";
 interface Settings {
-  v?: 4;
+  v?: 5;
   system: string; think: Sampler; fast: Sampler; max_tokens?: number; seed?: number; allow?: string[]; fetchChars?: number; voice?: VoiceSettings;
   artifacts?: false;
 }
@@ -92,30 +92,60 @@ const MODELS: [string, string, string][] = [
   ["qwen3.8-flash-next", "Qwen3.8-Flash-Next", "Fast at any length · 20 s to load"],
 ];
 const modelName = (id?: string) => MODELS.find(([m]) => m === id)?.[1] ?? id?.split("/").pop()?.replace(/\.gguf$/i, "") ?? "";
+const NEUTRAL = { dynatemp_range: 0, dynatemp_exponent: 1, typical_p: 1, xtc_probability: 0, xtc_threshold: 0.1, top_n_sigma: -1, min_keep: 0,
+  repeat_last_n: 64, repeat_penalty: 1, frequency_penalty: 0, dry_multiplier: 0, dry_base: 1.75, dry_allowed_length: 2, dry_penalty_last_n: -1,
+  mirostat: 0, mirostat_tau: 5, mirostat_eta: 0.1 };
 const RECOMMENDED: Record<Mode, Record<SamplerKey, number>> = {
-  think: { temperature: 1, top_p: 0.95, top_k: 20, min_p: 0, presence_penalty: 0, dry_multiplier: 0, dry_allowed_length: 2, dry_base: 1.75 },
-  fast: { temperature: 0.7, top_p: 0.8, top_k: 20, min_p: 0, presence_penalty: 1.5, dry_multiplier: 0, dry_allowed_length: 2, dry_base: 1.75 },
+  think: { ...NEUTRAL, temperature: 1, top_p: 0.95, top_k: 20, min_p: 0, presence_penalty: 0 },
+  fast: { ...NEUTRAL, temperature: 0.7, top_p: 0.8, top_k: 20, min_p: 0, presence_penalty: 1.5 },
 };
 const MAX_REPLY = 131072;
-const STAGES: Stage[] = ["top_k", "temperature", "top_p", "min_p"];
-const SAMPLERS: Record<SamplerKey, { label: string; short: string; min: number; max: number; step: number; slider?: [number, number]; help: string }> = {
-  temperature: { label: "Temperature", short: "temp", min: 0, max: 2, step: 0.01, help: "Temperature: under 1 sharpens the odds, over 1 flattens them; 0 always takes the likeliest." },
-  top_p: { label: "Top P", short: "top-p", min: 0, max: 1, step: 0.01, help: "Top P: keeps the likeliest tokens until together they reach this share." },
-  top_k: { label: "Top K", short: "top-k", min: 1, max: 64, step: 1, help: "Top K: keeps at most this many tokens (Chrysalis looks at the 64 likeliest)." },
-  min_p: { label: "Min P", short: "min-p", min: 0, max: 1, step: 0.01, slider: [0, 0.5], help: "Min P: drops tokens less likely than this share of the likeliest." },
-  presence_penalty: { label: "Presence", short: "presence", min: -2, max: 2, step: 0.05, slider: [0, 2], help: "Presence penalty: lowers every token the reply has already used." },
-  dry_multiplier: { label: "DRY", short: "dry", min: 0, max: 5, step: 0.05, slider: [0, 2], help: "DRY: lowers a token that would repeat a run of text already in the chat. Off at 0." },
-  dry_allowed_length: { label: "Allowed run", short: "dry-run", min: 1, max: 20, step: 1, slider: [1, 8], help: "DRY's allowed run: repeats up to this many tokens long go unpenalized." },
-  dry_base: { label: "Growth", short: "dry-base", min: 1, max: 4, step: 0.05, slider: [1, 3], help: "DRY's growth: how fast the penalty rises with each token a repeat goes on." },
+const STAGE_ALIASES: Record<string, Stage> = { penalties: "penalties", dry: "dry", top_n_sigma: "top_n_sigma", top_k: "top_k", typ_p: "typ_p",
+  typical_p: "typ_p", typical: "typ_p", top_p: "top_p", nucleus: "top_p", min_p: "min_p", xtc: "xtc", temperature: "temperature", temp: "temperature" };
+interface SamplerSpec { label: string; short: string; min: number; max: number; step: number; slider?: [number, number]; help: string; off?: number; all?: number }
+const SAMPLERS: Record<SamplerKey, SamplerSpec> = {
+  temperature: { label: "Temperature", short: "temp", min: 0, max: 5, step: 0.01, slider: [0, 2],
+    help: "Controls the randomness of the generated text by affecting the probability distribution of the output tokens. Higher = more random, lower = more focused." },
+  dynatemp_range: { label: "Dynamic temperature range", short: "dynatemp", min: 0, max: 5, step: 0.01, slider: [0, 2], off: 0,
+    help: "Addon for the temperature sampler. The added value to the range of dynamic temperature, which adjusts probabilities by entropy of tokens." },
+  dynatemp_exponent: { label: "Dynamic temperature exponent", short: "dynatemp-exp", min: 0, max: 10, step: 0.01, slider: [0, 3],
+    help: "Addon for the temperature sampler. Smoothes out the probability redistribution based on the most probable token." },
+  top_k: { label: "Top K", short: "top-k", min: 0, max: 64, step: 1, off: 0, help: "Keeps only k top tokens (Chrysalis samples from the 64 likeliest)." },
+  top_p: { label: "Top P", short: "top-p", min: 0, max: 1, step: 0.01, help: "Limits tokens to those that together have a cumulative probability of at least p." },
+  min_p: { label: "Min P", short: "min-p", min: 0, max: 1, step: 0.01, slider: [0, 0.5],
+    help: "Limits tokens based on the minimum probability for a token to be considered, relative to the probability of the most likely token." },
+  xtc_probability: { label: "XTC probability", short: "xtc", min: 0, max: 1, step: 0.01, off: 0,
+    help: "XTC sampler cuts out top tokens; this parameter controls the chance of cutting tokens at all. 0 disables XTC." },
+  xtc_threshold: { label: "XTC threshold", short: "xtc-t", min: 0, max: 1, step: 0.01, slider: [0, 0.5],
+    help: "XTC sampler cuts out top tokens; this parameter controls the token probability that is required to cut that token." },
+  typical_p: { label: "Typical P", short: "typ-p", min: 0, max: 1, step: 0.01, help: "Sorts and limits tokens based on the difference between log-probability and entropy." },
+  top_n_sigma: { label: "Top n sigma", short: "top-nσ", min: -1, max: 10, step: 0.01, slider: [0, 4], off: -1,
+    help: "Keeps tokens whose logit is within n standard deviations of the top logit. Off at -1." },
+  min_keep: { label: "Min keep", short: "min-keep", min: 0, max: 64, step: 1, slider: [0, 16], help: "The samplers that cut tokens keep at least this many." },
+  repeat_last_n: { label: "Repeat last N", short: "last-n", min: -1, max: 262144, step: 1, slider: [0, 2048], off: 0, all: -1,
+    help: "Last n tokens to consider for penalizing repetition. 0 disables the penalties, -1 is the whole context." },
+  repeat_penalty: { label: "Repeat penalty", short: "repeat", min: 0, max: 5, step: 0.01, slider: [1, 2], help: "Controls the repetition of token sequences in the generated text." },
+  presence_penalty: { label: "Presence penalty", short: "presence", min: -2, max: 2, step: 0.05, slider: [0, 2],
+    help: "Limits tokens based on whether they appear in the output or not." },
+  frequency_penalty: { label: "Frequency penalty", short: "frequency", min: -2, max: 2, step: 0.05, slider: [0, 2],
+    help: "Limits tokens based on how often they appear in the output." },
+  dry_multiplier: { label: "DRY multiplier", short: "dry", min: 0, max: 5, step: 0.05, slider: [0, 2], off: 0,
+    help: "DRY sampling reduces repetition in generated text even across long contexts. This parameter sets the DRY sampling multiplier." },
+  dry_base: { label: "DRY base", short: "dry-base", min: 1, max: 4, step: 0.05, slider: [1, 3],
+    help: "DRY sampling reduces repetition in generated text even across long contexts. This parameter sets the DRY sampling base value." },
+  dry_allowed_length: { label: "DRY allowed length", short: "dry-len", min: 1, max: 20, step: 1, slider: [1, 8],
+    help: "DRY sampling reduces repetition in generated text even across long contexts. This parameter sets the allowed length for DRY sampling." },
+  dry_penalty_last_n: { label: "DRY penalty last N", short: "dry-last-n", min: -1, max: 262144, step: 1, slider: [0, 8192], off: 0, all: -1,
+    help: "DRY sampling reduces repetition in generated text even across long contexts. This parameter sets DRY penalty for the last n tokens. -1 is the whole context." },
+  mirostat: { label: "Mirostat", short: "mirostat", min: 0, max: 2, step: 1, off: 0,
+    help: "Mirostat replaces the other samplers with one that keeps the text's surprise near tau: 1 is Mirostat, 2 Mirostat 2.0." },
+  mirostat_tau: { label: "Mirostat tau", short: "tau", min: 0, max: 20, step: 0.1, slider: [0, 10], help: "Mirostat's target entropy." },
+  mirostat_eta: { label: "Mirostat eta", short: "eta", min: 0, max: 1, step: 0.01, help: "Mirostat's learning rate." },
 };
 const ODDS: [string, number][] = [["Luna", 703], ["Mochi", 470], ["Whiskers", 312], ["Milo", 182], ["Mittens", 78], ["Shadow", 39],
   ["Miso", 31], ["Whisper", 29], ["Moon", 14], ["Pumpkin", 14], ["Pixel", 13], ["Whisker", 11], ["Willow", 9], ["Muffin", 8], ["Echo", 7],
   ["Momo", 6], ["Jasper", 5], ["Nimbus", 5], ["Nebula", 4], ["Simba", 4], ["Noodle", 3], ["Misty", 3], ["Mocha", 3], ["Mimi", 2],
   ["Munchkin", 2], ["Zephyr", 2], ["Moss", 2]];
-const LOOP: { reply: [string, number][]; cands: [string, number, number][] } = {
-  reply: [["Here",8160],[" are",513],[" some",1010],[" cat",7993],[" names",4874],[":",25],[" Luna",48130],[",",11],[" Milo",81533],[",",11],[" Shadow",23536],[",",11],[" Luna",48130],[",",11],[" Milo",81533],[",",11]],
-  cands: [[" Shadow",-0.0896,23536],[" Bella",-3.5744,52670],[" Sim",-4.8584,4319],[" Wh",-4.8871,1190],[" Oliver",-5.0203,29260],[" Luna",-5.2131,48130],[" Cle",-5.7006,34809],[" Felix",-6.2065,54048],[" Charlie",-6.3093,24137],[" Max",-6.3492,7252],[" Leo",-6.3968,35530],[" N",-6.4557,443],[" Chloe",-6.4601,57365],[" Sm",-6.6385,4245],[" and",-6.8932,321],[" Snow",-7.1383,18331],[" Tiger",-7.1712,34560],[" shadow",-7.2331,12098],[" Willow",-7.2804,62177],[" Midnight",-7.311,61432],[" Ginger",-7.3367,65023],[" Bailey",-7.3892,40814],[" T",-7.5099,345],[" C",-7.6189,351],[" Fl",-7.664,2893],[" Belle",-7.6838,48808],[" Daisy",-7.8786,67789],[" Kitty",-7.9955,63947],[" Cookie",-8.0238,23588],[" Pepper",-8.026,50038],[" Jasper",-8.0536,68103],[" B",-8.1631,417],["Shadow",-8.196,22926],[" Stella",-8.2029,72059],[" Oscar",-8.2098,29695],[" Lily",-8.4152,45714],[" O",-8.4355,496],[" Simon",-8.4382,20660],[" Ch",-8.4431,882],[" S",-8.4961,326],[" Shadows",-8.5475,64206],[" Bear",-8.576,23237],[" M",-8.5788,380],[" Whisper",-8.5826,93630],[" Mitt",-8.6306,31539],[" Bell",-8.7311,17349],[" Mist",-8.7477,32969],[" Milo",-8.7748,81533],[" Barn",-8.7777,21722],[" Pumpkin",-8.7798,72693],[" Coco",-8.7924,80506],[" Princess",-8.8369,28330],[" Gus",-8.8442,78575],[" Lucy",-8.8952,42610],[" Olivia",-8.932,57283],[" Sophie",-8.9338,57306],[" Pop",-8.9441,9948],[" Jasmine",-8.9874,78548],[" Buddy",-9.0182,57515],[" Gar",-9.0378,11845],[" J",-9.0965,604],[" K",-9.1184,710],[" Cloud",-9.1404,14388],[" Call",-9.1473,6920]],
-};
 const DEFAULT_SYSTEM = "You are {{MODEL}}, running locally in Chrysalis Inference. There are no tools or files in this chat. Answer directly.";
 const DEFAULT_SYSTEM_TOOLS = "You are {{MODEL}}, running locally in Chrysalis Inference. The tools offered here are the only ones in this chat, and there are no files or projects to explore. Use a tool when it helps; otherwise answer directly.";
 const PLAIN_SYSTEM = "There are no tools or files in this chat. Answer directly.";
@@ -174,6 +204,12 @@ const ICONS = {
   mic: '<rect x="9" y="3" width="6" height="11" rx="3"/><path d="M5.5 11a6.5 6.5 0 0 0 13 0M12 17.5V21"/>',
   phone: '<rect x="6.5" y="2.5" width="11" height="19" rx="2.5"/><path d="M10.5 18.5h3"/>',
   shapes: '<rect x="3.5" y="10.5" width="10" height="10" rx="2"/><circle cx="15.5" cy="8.5" r="5"/>',
+  gear: '<circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.7 1.7 0 0 0 .3 1.8l.1.1a2 2 0 1 1-2.8 2.8l-.1-.1a1.7 1.7 0 0 0-1.8-.3 1.7 1.7 0 0 0-1 1.5V21a2 2 0 1 1-4 0v-.1a1.7 1.7 0 0 0-1.1-1.5 1.7 1.7 0 0 0-1.8.3l-.1.1a2 2 0 1 1-2.8-2.8l.1-.1a1.7 1.7 0 0 0 .3-1.8 1.7 1.7 0 0 0-1.5-1H3a2 2 0 1 1 0-4h.1a1.7 1.7 0 0 0 1.5-1.1 1.7 1.7 0 0 0-.3-1.8l-.1-.1a2 2 0 1 1 2.8-2.8l.1.1a1.7 1.7 0 0 0 1.8.3H9a1.7 1.7 0 0 0 1-1.5V3a2 2 0 1 1 4 0v.1a1.7 1.7 0 0 0 1 1.5 1.7 1.7 0 0 0 1.8-.3l.1-.1a2 2 0 1 1 2.8 2.8l-.1.1a1.7 1.7 0 0 0-.3 1.8V9a1.7 1.7 0 0 0 1.5 1H21a2 2 0 1 1 0 4h-.1a1.7 1.7 0 0 0-1.5 1z"/>',
+  page: '<rect x="3" y="4" width="18" height="16" rx="2.5"/><path d="M3 9h18M6.5 6.5h.01M9.5 6.5h.01"/>',
+  image: '<rect x="3" y="4" width="18" height="16" rx="2.5"/><circle cx="9" cy="10" r="1.8"/><path d="m21 16-5-5-9 9"/>',
+  doc: '<path d="M14 3H7a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h10a2 2 0 0 0 2-2V8z"/><path d="M14 3v5h5M9 13h6M9 17h6"/>',
+  diagram: '<rect x="3" y="3" width="7" height="6" rx="1.5"/><rect x="14" y="15" width="7" height="6" rx="1.5"/><path d="M6.5 9v4.5a1.5 1.5 0 0 0 1.5 1.5h6"/>',
+  code: '<path d="m8 8-4 4 4 4M16 8l4 4-4 4M13.5 5l-3 14"/>',
   speak: '<path d="M4 9.5h3.5L12 5.5v13l-4.5-4H4z"/><path d="M15.5 9a4 4 0 0 1 0 6M18 6.5a7.5 7.5 0 0 1 0 11"/>',
   person: '<circle cx="12" cy="8" r="4"/><path d="M4 21c1.5-4 4.5-6 8-6s6.5 2 8 6"/>',
   personAdd: '<circle cx="10" cy="8" r="4"/><path d="M2.5 21c1.4-4 4.2-6 7.5-6 1.6 0 3 .5 4.3 1.3M19 14v6M16 17h6"/>',
@@ -185,7 +221,7 @@ const icon = (name: keyof typeof ICONS) => `<svg class="i" viewBox="0 0 24 24" a
 
 const $ = <T extends HTMLElement = HTMLElement>(id: string) => document.getElementById(id) as T;
 const thread = $("thread"), scroller = $("scroller"), input = $<HTMLTextAreaElement>("input"), sendBtn = $<HTMLButtonElement>("send");
-const panel = $("settings"), systemInput = $<HTMLTextAreaElement>("system-input");
+const panel = $<HTMLDialogElement>("settings"), systemInput = $<HTMLTextAreaElement>("system-input");
 interface Pane {
   name: string; el: HTMLElement; toggle: HTMLElement; key: string; beside: MediaQueryList; byDefault: boolean;
   widthVar: string; min: number; def: number; preferred: number; width: number; onOpen?: () => void;
@@ -197,7 +233,7 @@ const pane = (name: string, el: HTMLElement, key: string, besideFrom: number, wi
 };
 const panes = {
   conversations: pane("conversations", $("sidebar"), "b", 761, "--side-open", 208),
-  settings: pane("settings", panel, ",", 1460, "--panel-open", 340, () => { syncSettings(); growSystem(); void loadCatalog(); }),
+  artifacts: pane("artifacts", $("shelf"), ".", 1100, "--panel-open", 340, () => renderShelf()),
 };
 const PANES = Object.values(panes);
 
@@ -963,7 +999,6 @@ const place = (into: Node, n: Node, at: Node | null) => {
   if (n.isConnected && into.isConnected && "moveBefore" in into) (into as Element).moveBefore(n, at);
   else into.insertBefore(n, at);
 };
-let carried: { slot: Comment; canvas: HTMLElement; b: Blocks }[] | null = null;
 
 function renderBlocks(v: { body: HTMLElement; blocks?: Blocks }, src: string, live: boolean, art?: { c: Conversation; holder: object }) {
   if (!v.blocks) { v.body.replaceChildren(); v.blocks = { raws: [], nodes: [] }; }
@@ -971,25 +1006,10 @@ function renderBlocks(v: { body: HTMLElement; blocks?: Blocks }, src: string, li
   const b = v.blocks, tokens = chatTokens(live ? settle(text) : text), blocks = tokens.filter((t) => t.type !== "space");
   let seen = 0, all: Map<string, Version[]> | undefined;
   const nth = art ? blocks.map((t) => (t.type === "code" && artifactOf(t.lang, t.text) ? seen++ : -1)) : [];
-  const artNodes = (k: number, old: Node | undefined, drawing: boolean): Node[] => {
+  const artNodes = (k: number, old: Node | undefined): Node[] => {
     const ver = versionAt(all ??= artifactsOf(art!.c), art!.holder, nth[k]);
     if (!ver) return unknownEdit(blocks[k] as Tokens.Code, tokens.links);
-    const list = all.get(ver.id)!, last = list.at(-1)!;
-    if (list.findLast((x) => x.block.by !== "user") !== ver) return [artLine(ver, list.length)];
-    let canvas = thread.querySelector<HTMLElement>(`.art-canvas[data-art="${CSS.escape(ver.id)}"]`) ?? undefined;
-    const carry = carried && canvas && canvas !== old ? carried : null;
-    if (canvas && canvas !== old && !carry) {
-      const was = list[Number(canvas.dataset.made) - 1], line = was ? artLine(was, list.length) : h("span");
-      canvas.before(line);
-      const j = b.nodes.findIndex((n) => n[0] === canvas);
-      if (j >= 0) b.nodes[j] = [line];
-    } else if (!canvas && old instanceof HTMLElement && !old.classList.contains("art-line")) canvas = old;
-    const el = drawVersion(canvas, last, drawing && last === ver, list.length);
-    el.dataset.made = String(ver.v);
-    if (!carry || el !== canvas) return [el];
-    const slot = document.createComment(ver.id);
-    carry.push({ slot, canvas: el, b });
-    return [slot];
+    return [artCard(old, ver, all.get(ver.id)!.length)];
   };
   let k = 0;
   while (k < blocks.length && k < b.raws.length && b.raws[k] === blocks[k].raw) k++;
@@ -997,7 +1017,7 @@ function renderBlocks(v: { body: HTMLElement; blocks?: Blocks }, src: string, li
     const t = blocks[k], old = b.nodes[k] ?? [];
     const tail = live && k === blocks.length - 1;
     const page = t.type === "code" && !tail && PAGE_LANGS.has((t.lang ?? "").toLowerCase()) && (PAGE_DOC.test(t.text) || previewed.has(t.text));
-    const now = t.type !== "code" ? htmlNodes(t, tokens.links) : nth[k] >= 0 ? artNodes(k, old[0], tail)
+    const now = t.type !== "code" ? htmlNodes(t, tokens.links) : nth[k] >= 0 ? artNodes(k, old[0])
       : SVG_START.test(t.text) ? [svgFigure(old[0], t.text, tail)]
       : /^mermaid$/i.test(t.lang ?? "") ? [mermaidFigure(old[0], t.text, tail)] : page ? [pageFigure(old[0], t.text)] : htmlNodes(t, tokens.links);
     if (art && t.type === "paragraph") speakLine(now[0], art.c, k ? b.nodes[k - 1]?.[0] : undefined, (art.holder as Message).as);
@@ -1012,9 +1032,9 @@ function renderBlocks(v: { body: HTMLElement; blocks?: Blocks }, src: string, li
   b.nodes.length = b.raws.length = blocks.length;
   b.nodes.forEach((n, k) => {
     const f = n[0], t = blocks[k];
-    if (!(f instanceof HTMLElement && f.classList.contains("drawing") && !(live && k === blocks.length - 1) && t.type === "code")) return;
+    if (!(f instanceof HTMLElement && f.classList.contains(nth[k] < 0 ? "drawing" : "live") && !(live && k === blocks.length - 1) && t.type === "code")) return;
     if (nth[k] < 0) return void (f.dataset.kind === "mermaid" ? mermaidFigure : svgFigure)(f, t.text, false);
-    const now = artNodes(k, f, false);
+    const now = artNodes(k, f);
     if (now[0] !== f) f.replaceWith(...now);
     b.nodes[k] = now;
   });
@@ -1151,13 +1171,16 @@ function svgFigure(old: Node | undefined, text: string, drawing: boolean, fade =
 function fitFigure(fig: HTMLElement) {
   const paper = fig.querySelector<HTMLElement>(".svg-paper"), vb = pictureOf(paper?.shadowRoot)?.viewBox.baseVal;
   if (!paper || !vb || !vb.width || !vb.height) return;
-  const room = thread.clientWidth - 48 - 30;
-  const tall = Math.max(scroller.clientHeight - 74, 320);
+  const stage = fig.closest<HTMLElement>(".shelf-stage");
+  if (stage && !fig.isConnected) return;
+  const room = stage ? paper.clientWidth - 30 : thread.clientWidth - 48 - 30;
+  const tall = stage ? Math.max(paper.clientHeight - 30, 120) : Math.max(scroller.clientHeight - 74, 320);
   const natural = fig.dataset.kind === "mermaid" ? vb.width : Infinity;
   const w = `${Math.floor(Math.min(room, tall * (vb.width / vb.height), natural))}px`;
   if (paper.style.getPropertyValue("--fig-w") !== w) paper.style.setProperty("--fig-w", w);
 }
 addEventListener("resize", () => thread.querySelectorAll<HTMLElement>(".svg-fig").forEach(fitFigure));
+new ResizeObserver(() => $("shelf-stage").querySelectorAll<HTMLElement>(".svg-fig").forEach(fitFigure)).observe($("shelf-stage"));
 
 function svgCode(fig: HTMLElement) {
   const code = fig.querySelector(".svg-code code")!, text = svgSource.get(fig) ?? "";
@@ -1346,7 +1369,7 @@ function swapIn(next: HTMLIFrameElement) {
   next.classList.remove("next");
 }
 
-function pageFigure(old: Node | undefined, text: string, live = false): HTMLElement {
+function pageFigure(old: Node | undefined, text: string, live = false, fixed = false): HTMLElement {
   let fig = old instanceof HTMLElement && old.dataset.kind === "page" ? old : undefined;
   if (!fig) {
     fig = h("figure", "svg-fig page-fig");
@@ -1355,7 +1378,7 @@ function pageFigure(old: Node | undefined, text: string, live = false): HTMLElem
       ["code:Code", "copy:Copy", "save:Download", "reload:Reload", "zoom:Expand"].map((a) => `<button type="button" data-page="${a.split(":")[0]}">${a.split(":")[1]}</button>`).join("") +
       `</span></figcaption><div class="code svg-code"><div class="code-head"><span>html</span><button type="button" class="copy">Copy</button></div>` +
       `<pre><code class="hljs"></code></pre></div>`;
-    fig.prepend(pagePaper(false));
+    fig.prepend(pagePaper(fixed));
   }
   if (svgSource.get(fig) !== text) {
     svgSource.set(fig, text);
@@ -1499,7 +1522,7 @@ function drawVersion(prev: HTMLElement | undefined, ver: Version, drawing: boole
   let el: HTMLElement;
   if (ver.kind === "svg" || (["xml", "html"].includes(ver.kind) && SVG_START.test(src))) el = svgFigure(prev?.dataset.kind === "svg" ? prev : undefined, src, drawing, fade);
   else if (ver.kind === "mermaid") el = mermaidFigure(prev?.dataset.kind === "mermaid" ? prev : undefined, src, drawing);
-  else if (isPage(ver.kind, src)) el = pageFigure(prev?.dataset.kind === "page" ? prev : undefined, src, drawing);
+  else if (isPage(ver.kind, src)) el = pageFigure(prev?.dataset.kind === "page" ? prev : undefined, src, drawing, true);
   else if (DOC_KINDS.has(ver.kind)) el = docFigure(prev?.dataset.kind === "doc" ? prev : undefined, ver.kind, src, drawing);
   else el = htmlNodes({ type: "code", raw: "", lang: ver.kind, text: src } as Tokens.Code, {} as Links)[0] as HTMLElement;
   el.classList.add("art-canvas");
@@ -1511,7 +1534,7 @@ function drawVersion(prev: HTMLElement | undefined, ver: Version, drawing: boole
     step.append(actButton("prev", "‹", "Earlier version"), h("span", "art-label"), actButton("next", "›", "Later version"));
     head.prepend(step);
     head.querySelector(".svg-acts, .code-acts")?.prepend(actButton("use", "Use this version", "Make this version the latest, as your own edit"),
-      actButton("open", "Open"), actButton("changes", "Changes"), ...(el.dataset.kind === "mermaid" ? []
+      actButton("changes", "Changes"), ...(el.dataset.kind === "mermaid" ? []
         : [actButton("edit", "Edit", el.classList.contains("code") ? "Change the code here, by hand" : "Change it by hand: select, retype, fill, move")]));
   }
   if (head) {
@@ -1532,37 +1555,67 @@ function drawVersion(prev: HTMLElement | undefined, ver: Version, drawing: boole
   let fail = el.querySelector<HTMLElement>(":scope > .art-fail");
   if (failedOf(ver).length && !fail) el.append(fail = h("p", "art-fail"));
   if (fail) fail.textContent = failedOf(ver).length ? `Not applied: ${failedOf(ver).map((a) => a.how).join("; ")}` : "";
-  el.querySelector(":scope > .art-changes")?.remove();
   return el;
 }
 
-function artLine(ver: Version, count: number): HTMLElement {
-  const el = h("div", "art-line");
+const KINDS_SHOWN: Record<string, [keyof typeof ICONS, string]> = { svg: ["image", "SVG"], mermaid: ["diagram", "Diagram"], page: ["page", "Page"],
+  doc: ["doc", "Document"], code: ["code", "Code"] };
+const canvasKind = (ver: Version) => ver.kind === "svg" || (["xml", "html"].includes(ver.kind) && SVG_START.test(ver.src)) ? "svg"
+  : ver.kind === "mermaid" ? "mermaid" : isPage(ver.kind, ver.src) ? "page" : DOC_KINDS.has(ver.kind) ? "doc" : "code";
+function cardText(ver: Version, count: number) {
+  const done = (ver.applied ?? []).filter((a) => a.ok).length, [, kind] = KINDS_SHOWN[canvasKind(ver)];
+  const what = ver.block.live ? (ver.applied ? `Changing${done ? `, ${done} so far` : ""}` : "Writing") : ver.block.by === "user"
+    ? `your edit${ver.block.at === conv ? ", not sent yet" : ""}` : ver.applied ? `${done} change${done === 1 ? "" : "s"}` : "";
+  return [kind, `v${ver.v}`, ver.from ? `from ${ver.from.id} v${ver.from.v}` : "", what, ver.v < count && !ver.block.live ? `now v${count}` : ""]
+    .filter(Boolean).join(" · ");
+}
+function artCard(old: Node | undefined, ver: Version, count: number): HTMLElement {
+  let el = old instanceof HTMLElement && old.classList.contains("art-card") ? old : undefined;
+  if (!el) {
+    el = h("div", "art-card");
+    el.tabIndex = 0;
+    el.setAttribute("role", "button");
+    const text = h("span", "art-text");
+    text.append(h("b", "art-name"), h("span", "art-sub"));
+    el.append(h("span", "art-icon"), text, h("span", "art-go", "Open"));
+  }
+  paintCard(el, ver, count);
+  return el;
+}
+function paintCard(el: HTMLElement, ver: Version, count: number) {
+  const kind = canvasKind(ver);
+  if (el.dataset.shape !== kind) {
+    el.dataset.shape = kind;
+    el.querySelector(".art-icon")!.innerHTML = icon(KINDS_SHOWN[kind][0]);
+  }
   el.dataset.art = ver.id;
   el.dataset.v = String(ver.v);
-  el.append(h("span", "art-label", captionOf(ver)), h("span", "art-later", `· now v${count}`));
-  const acts = h("span", "art-acts");
-  acts.append(actButton("goto", "Show"), actButton("open", "Open"), ...(beforeOf(ver) ? [actButton("changes", "Changes")] : []));
-  el.append(acts);
-  if (failedOf(ver).length) el.append(h("p", "art-fail", `Not applied: ${failedOf(ver).map((a) => a.how).join("; ")}`));
-  return el;
+  el.querySelector(".art-name")!.textContent = ver.id;
+  el.querySelector(".art-sub")!.textContent = cardText(ver, count);
+  el.classList.toggle("live", ver.block.live);
+  el.title = `Open ${ver.id} v${ver.v}`;
+  const failed = failedOf(ver);
+  let fail = el.querySelector<HTMLElement>(":scope > .art-fail");
+  if (failed.length && !fail) el.append(fail = h("span", "art-fail"));
+  if (fail) fail.textContent = failed.length ? `Not applied: ${failed.map((a) => a.how).join("; ")}` : "";
 }
 
 function artAction(btn: HTMLElement) {
   const el = btn.closest<HTMLElement>("[data-v]")!, all = artifactsOf(conv), list = all.get(el.dataset.art!) ?? [];
   const ver = list[Number(el.dataset.v) - 1];
   if (!ver) return;
-  const act = btn.dataset.art;
-  if (act === "open") return openShelf(ver.id, ver.v);
-  if (act === "use") return editByHand(ver.id, list.at(-1)!, ver.src);
-  if (act === "goto") return void thread.querySelector(`.art-canvas[data-art="${CSS.escape(ver.id)}"]`)?.scrollIntoView({ block: "center", behavior: "smooth" });
+  const act = btn.dataset.art, which = el.dataset.which === "other" ? "other" : "main";
+  if (act === "use") {
+    shelf.main = { id: ver.id };
+    shelf.other = undefined;
+    return editByHand(ver.id, list.at(-1)!, ver.src);
+  }
   if (act === "prev" || act === "next") {
     const to = list[ver.v - 1 + (act === "prev" ? -1 : 1)];
     if (!to) return;
-    const now = drawVersion(el, to, false, list.length, true);
-    now.dataset.made = el.dataset.made;
-    if (now !== el) el.replaceWith(now);
-    now.querySelector<HTMLElement>(`[data-art=${act}]`)?.focus();
+    shelf[which] = { id: ver.id, v: which === "main" && to.v === list.length ? undefined : to.v };
+    renderShelf();
+    $("shelf-stage").querySelector<HTMLElement>(`:scope > [data-which=${which}] [data-art=${act}]`)?.focus();
     return;
   }
   if (act === "edit") {
@@ -1581,15 +1634,23 @@ function artAction(btn: HTMLElement) {
 }
 
 interface Side { id: string; v?: number }
-const shelf: { open: boolean; main?: Side; other?: Side; compare: boolean; code: boolean } = { open: false, compare: false, code: false };
+const shelf: { open: boolean; main?: Side; other?: Side; compare: boolean; shut?: string; known?: Set<string>; of?: string } = { open: false, compare: false };
 const pickVersion = (all: Map<string, Version[]>, s: Side) => {
   const list = all.get(s.id)!;
   return (s.v && list.find((x) => x.v === s.v)) || list.at(-1)!;
 };
+const liveKey = (ver: Version) => `${conv.id}/${ver.id}/${ver.v}`;
 function openShelf(id?: string, v?: number) {
   shelf.open = true;
   shelf.main = id ? { id, v: v === artifactsOf(conv).get(id)?.length ? undefined : v } : undefined;
   shelf.other = undefined;
+  renderShelf();
+  if (!panes.artifacts.beside.matches) $("shelf").focus({ preventScroll: true });
+}
+function closeShelf() {
+  const live = [...artifactsOf(conv).values()].flat().find((x) => x.block.live);
+  shelf.open = false;
+  shelf.shut = live && liveKey(live);
   renderShelf();
 }
 function besideOf(ver: Version): Side | undefined {
@@ -1598,19 +1659,37 @@ function besideOf(ver: Version): Side | undefined {
 let shelfAt = 0, shelfLater: number | undefined;
 function shelfSoon() {
   if (shelfLater) return;
-  const wait = Math.max(0, 100 - (performance.now() - shelfAt));
+  const wait = Math.max(0, 60 - (performance.now() - shelfAt));
   shelfLater = window.setTimeout(() => { shelfLater = undefined; renderShelf(); }, wait);
 }
 function renderShelf() {
   shelfAt = performance.now();
-  const all = artifactsOf(conv), ids = [...all.keys()], btn = $<HTMLButtonElement>("artifacts"), el = $("shelf");
+  const all = artifactsOf(conv), ids = [...all.keys()], btn = $<HTMLButtonElement>("artifacts-toggle"), el = $("shelf"), p = panes.artifacts;
+  const live = [...all.values()].flat().find((x) => x.block.live), made = [...all.values()].flat().filter((x) => x.block.by !== "user");
+  if (shelf.of !== conv.id) {
+    shelf.of = conv.id;
+    shelf.known = new Set(made.filter((x) => !x.block.live).map(liveKey));
+    shelf.main = shelf.other = undefined;
+  }
+  const fresh = made.filter((x) => !shelf.known!.has(liveKey(x))).at(-1);
+  for (const x of made) if (!x.block.live) shelf.known!.add(liveKey(x));
+  if (fresh && p.beside.matches && shelf.shut !== liveKey(fresh) && (!shelf.open || !shelf.main?.v)) {
+    shelf.open = true;
+    shelf.main = { id: fresh.id };
+    shelf.other = undefined;
+  }
+  const want = shelf.open && ids.length > 0;
   btn.hidden = !ids.length;
   btn.innerHTML = icon("shapes") + `<span class="art-count">${ids.length}</span>`;
   btn.title = btn.ariaLabel = `Artifacts in this chat: ${ids.length}`;
-  btn.classList.toggle("on", shelf.open);
-  el.hidden = !shelf.open || !ids.length;
-  if (el.hidden) return;
-  const live = [...all.values()].flat().find((x) => x.block.live);
+  btn.classList.toggle("on", want);
+  btn.setAttribute("aria-expanded", String(want));
+  if (isOpen(p) !== want || (want && el.hasAttribute("data-over") === p.beside.matches)) setPane(p, want, { focus: false });
+  const stage = $("shelf-stage");
+  if (!want) {
+    stage.replaceChildren();
+    return markCards(all);
+  }
   if (!shelf.main || !all.has(shelf.main.id)) shelf.main = { id: live?.id ?? ids.at(-1)! };
   else if (live && !shelf.main.v && shelf.main.id !== live.id) shelf.main = { id: live.id };
   const main = pickVersion(all, shelf.main);
@@ -1620,138 +1699,47 @@ function renderShelf() {
   if (tabs.dataset.key !== JSON.stringify([ids, main.id])) {
     tabs.dataset.key = JSON.stringify([ids, main.id]);
     tabs.replaceChildren(...ids.map((id) => {
-      const b = h("button", id === main.id ? "shelf-tab on" : "shelf-tab", id);
+      const list = all.get(id)!, b = h("button", id === main.id ? "shelf-tab on" : "shelf-tab");
       b.type = "button";
       b.setAttribute("role", "tab");
       b.setAttribute("aria-selected", String(id === main.id));
+      b.innerHTML = icon(KINDS_SHOWN[canvasKind(list.at(-1)!)][0]);
+      b.append(id);
       b.onclick = () => { shelf.main = { id }; shelf.other = undefined; renderShelf(); };
       return b;
     }));
   }
   $("shelf-compare").setAttribute("aria-pressed", String(shelf.compare));
   $("shelf-compare").classList.toggle("on", shelf.compare);
-  const stage = $("shelf-stage"), want = other ? 2 : 1;
-  while (stage.childElementCount < want) stage.append(shelfSide());
-  while (stage.childElementCount > want) stage.lastElementChild!.remove();
-  stage.classList.toggle("two", want === 2);
-  if (other) paintSide(stage.children[0] as HTMLElement, other, "other");
-  paintSide(stage.lastElementChild as HTMLElement, main, "main");
-  $("shelf").querySelector<HTMLElement>("[data-shelf=edit]")!.hidden = !stage.lastElementChild?.querySelector("[data-edit]");
+  const show = (which: "main" | "other", ver: Version | undefined) => {
+    const was = stage.querySelector<HTMLElement>(`:scope > [data-which=${which}]`) ?? undefined;
+    if (!ver) return void was?.remove();
+    const count = all.get(ver.id)!.length, drawing = ver.block.live && ver.v === count;
+    const key = JSON.stringify([ver.id, ver.v, count, ver.src.length, ver.src.slice(-64), drawing, cardText(ver, count)]);
+    if (was?.dataset.key === key) return;
+    const now = drawVersion(was?.dataset.art === ver.id ? was : undefined, ver, drawing, count);
+    now.dataset.which = which;
+    now.dataset.key = key;
+    if (now !== was) {
+      if (was) was.replaceWith(now);
+      else if (which === "other") stage.prepend(now);
+      else stage.append(now);
+    }
+    if (now.dataset.kind === "svg" || now.dataset.kind === "mermaid") fitFigure(now);
+  };
+  show("other", other);
+  show("main", main);
+  stage.classList.toggle("two", !!other);
   if (shelf.compare && !other) stage.dataset.note = "Only one version so far: nothing to compare it with";
   else delete stage.dataset.note;
-  const versions = $("shelf-versions"), list = all.get(main.id)!;
-  const vkey = JSON.stringify([main.id, list.length, main.v]);
-  if (versions.dataset.key !== vkey) {
-    versions.dataset.key = vkey;
-    versions.replaceChildren(...list.map((x) => {
-      const b = h("button", x.v === main.v ? "shelf-v on" : "shelf-v", `v${x.v}`);
-      b.type = "button";
-      b.setAttribute("role", "tab");
-      b.setAttribute("aria-selected", String(x.v === main.v));
-      const failed = (x.applied ?? []).filter((a) => !a.ok).length;
-      b.title = `${x.block.label.trim().split("\n")[0].slice(0, 120) || "v" + x.v}${x.from ? `\n(a copy of ${x.from.id} v${x.from.v})` : ""}${failed ? `\n${failed} change${failed > 1 ? "s" : ""} not applied` : ""}`;
-      b.onclick = () => { shelf.main = { id: main.id, v: x.v === list.length ? undefined : x.v }; shelf.other = undefined; renderShelf(); };
-      return b;
-    }));
+  markCards(all, main);
+}
+function markCards(all: Map<string, Version[]>, main?: Version) {
+  for (const card of thread.querySelectorAll<HTMLElement>(".art-card")) {
+    const list = all.get(card.dataset.art!), ver = list?.[Number(card.dataset.v) - 1];
+    if (ver) paintCard(card, ver, list!.length);
+    card.classList.toggle("on", !!main && card.dataset.art === main.id && card.dataset.v === String(main.v));
   }
-}
-function shelfSide(): HTMLElement {
-  const side = h("div", "shelf-side"), label = h("div", "shelf-label"), paper = h("div", "shelf-paper");
-  label.innerHTML = `<button type="button" class="act" data-step="-1" aria-label="Earlier version">${icon("prev")}</button><span></span>` +
-    `<button type="button" class="act" data-step="1" aria-label="Later version">${icon("next")}</button>`;
-  side.append(label, paper);
-  return side;
-}
-function paintSide(side: HTMLElement, ver: Version, which: "main" | "other") {
-  side.dataset.art = ver.id;
-  side.dataset.v = String(ver.v);
-  side.dataset.which = which;
-  side.querySelector(".shelf-label span")!.textContent = `${ver.id} · v${ver.v}${ver.block.live ? " · drawing" : ""}`;
-  const count = artifactsOf(conv).get(ver.id)!.length;
-  side.querySelector<HTMLButtonElement>("[data-step='-1']")!.disabled = ver.v <= 1;
-  side.querySelector<HTMLButtonElement>("[data-step='1']")!.disabled = ver.v >= count;
-  const old = side.querySelector<HTMLElement>(".shelf-paper")!, picture = !shelf.code || which === "other";
-  const kind = picture && (ver.kind === "svg" || SVG_START.test(ver.src)) ? "svg" : picture && ver.kind === "mermaid" ? "mermaid"
-    : picture && isPage(ver.kind, ver.src) ? "page" : picture && DOC_KINDS.has(ver.kind) ? "doc" : "code";
-  let paper = old;
-  if (paper.dataset.kind !== kind) {
-    paper = h("div", "shelf-paper");
-    paper.dataset.kind = kind;
-    if (kind === "svg" || kind === "mermaid") {
-      paper.attachShadow({ mode: "open" }).innerHTML = `<style>${SVG_SHADOW}</style>`;
-      paper.classList.add("fill");
-    }
-    old.replaceWith(paper);
-    side.querySelectorAll(":scope > .art-tools").forEach((b) => b.remove());
-    if (kind === "svg") pointable(paper);
-  }
-  if (paper.dataset.src === ver.src && paper.dataset.live === String(ver.block.live)) return;
-  paper.dataset.src = ver.src;
-  paper.dataset.live = String(ver.block.live);
-  if (kind === "svg") {
-    drawSvg(paper.shadowRoot!, svgPrefix(ver.src), ver.block.live);
-    paper.classList.toggle("busy", ver.block.live);
-    glow();
-  } else if (kind === "mermaid") {
-    const seq = String(++mermaidSeq);
-    paper.dataset.seq = seq;
-    void loadMermaid().then(async (m) => {
-      if (!(await m.parse(ver.src, { suppressErrors: true }))) return;
-      const out = await m.render(`chrysalis-mermaid-${seq}`, ver.src).catch(() => null);
-      if (out && paper.dataset.seq === seq) drawSvg(paper.shadowRoot!, out.svg, false);
-    });
-  } else if (kind === "doc") {
-    let doc = paper.querySelector<HTMLElement>(":scope > .doc-paper");
-    if (!doc || doc.dataset.doc !== (isTex(ver.kind) ? "tex" : "md")) {
-      paper.replaceChildren(doc = docPaper(ver.kind));
-      docPointable(doc);
-    }
-    doc.classList.toggle("busy", ver.block.live);
-    showDoc(doc, ver.kind, ver.src, ver.block.live);
-    glow();
-  } else if (kind === "page") {
-    let page = paper.querySelector<HTMLElement>(":scope > .page-paper");
-    if (!page) {
-      paper.replaceChildren(page = pagePaper(true));
-      pagePointable(page);
-    }
-    page.classList.toggle("busy", ver.block.live);
-    showPage(page, ver.src, ver.block.live);
-    glow();
-  } else {
-    const lang = hljs.getLanguage(ver.kind) ? ver.kind : ver.kind === "svg" ? "xml" : "";
-    paper.innerHTML = `<pre><code class="hljs">${lang ? hljs.highlight(ver.src, { language: lang, ignoreIllegals: true }).value : escapeHtml(ver.src)}</code></pre>`;
-  }
-}
-const EXT: Record<string, string> = { svg: "svg", html: "html", htm: "html", mermaid: "mmd", latex: "tex", tex: "tex", markdown: "md", md: "md",
-  python: "py", javascript: "js", typescript: "ts", json: "json", css: "css" };
-function shelfAction(btn: HTMLElement) {
-  const all = artifactsOf(conv);
-  if (!shelf.main || !all.has(shelf.main.id)) return;
-  const ver = pickVersion(all, shelf.main), act = btn.dataset.shelf;
-  if (act === "edit") {
-    const paper = $("shelf-stage").lastElementChild?.querySelector<HTMLElement>("[data-edit]");
-    if (paper) setEditing(paper, paper.dataset.editing !== "1");
-    return;
-  }
-  if (act === "code") {
-    shelf.code = !shelf.code;
-    btn.textContent = shelf.code ? "Picture" : "Code";
-    renderShelf();
-  } else if (act === "copy") copy(ver.src, btn);
-  else if (act === "save") download(`${ver.id}.${EXT[ver.kind] ?? "txt"}`, ver.kind === "svg" ? svgFile(ver.src) : ver.src, "text/plain");
-}
-function placeShelf(geo?: { x: number; y: number; w: number; h: number }) {
-  const el = $("shelf");
-  let g = geo;
-  if (!g) try { g = JSON.parse(pref("shelf-geo", "null")) ?? undefined; } catch {  }
-  const w = Math.min(g?.w ?? 560, innerWidth - 24), hh = Math.min(g?.h ?? Math.min(640, innerHeight - 120), innerHeight - 24);
-  const x = Math.min(Math.max(g?.x ?? innerWidth - w - 28, 12), innerWidth - w - 12), y = Math.min(Math.max(g?.y ?? 72, 12), innerHeight - hh - 12);
-  Object.assign(el.style, { left: `${x}px`, top: `${y}px`, width: `${w}px`, height: `${hh}px` });
-}
-function keepShelfPlace() {
-  const r = $("shelf").getBoundingClientRect();
-  if (r.width && r.height) setPref("shelf-geo", JSON.stringify({ x: Math.round(r.left), y: Math.round(r.top), w: Math.round(r.width), h: Math.round(r.height) }));
 }
 
 interface Point { art: string; sel: string; partId?: string; markup?: string; tag?: string; paper?: HTMLElement; cx?: number; at?: number; label?: string }
@@ -1813,7 +1801,7 @@ function addToolbar(paper: HTMLElement, kind: EditKind) {
   paper.dataset.edit = kind;
   paper.dataset.tool ??= "select";
   const bar = h("div", "art-tools"), button = ([k, name, i]: [string, string, keyof typeof TOOL_ICONS], attr: string) =>
-    `<button type="button" data-${attr}="${k}">${toolIcon(i)}<span>${name}</span></button>`;
+    `<button type="button" data-${attr}="${k}" title="${name}">${toolIcon(i)}<span>${name}</span></button>`;
   bar.setAttribute("role", "toolbar");
   bar.ariaLabel = "Change it by hand";
   bar.innerHTML = `<span class="seg">${TOOLS[kind].map((t) => button(t, "tool")).join("")}</span>` +
@@ -1856,7 +1844,6 @@ function syncToolbars() {
     const bar = toolbars.get(paper), on = editMode(paper), kind = paper.dataset.edit as EditKind, tool = toolOf(paper);
     const art = paper.closest<HTMLElement>("[data-art]")?.dataset.art;
     paper.closest(".art-canvas")?.querySelector("[data-art=edit]")?.setAttribute("aria-pressed", String(on));
-    if (paper.closest<HTMLElement>(".shelf-side")?.dataset.which === "main") document.querySelector("[data-shelf=edit]")?.setAttribute("aria-pressed", String(on));
     if (!bar) continue;
     bar.classList.toggle("on", on);
     if (!on) continue;
@@ -1869,6 +1856,11 @@ function syncToolbars() {
     bar.querySelector<HTMLElement>(".hint")!.textContent = HINTS[kind][tool] ?? "";
     bar.querySelector<HTMLElement>(".picked")!.hidden = !picked;
     bar.querySelector(".picked b")!.textContent = picked ? pointName(picked).split(" · ").slice(1).join(" · ") || "Selected" : "";
+  }
+  for (const fig of $("shelf-stage").querySelectorAll<HTMLElement>(":scope > .svg-fig")) {
+    fitFigure(fig);
+    const paper = fig.querySelector<HTMLElement>(".svg-paper");
+    if (paper) placeSelection(paper);
   }
 }
 
@@ -1954,12 +1946,7 @@ function undoHand(id: string) {
   repaintArtifact(id);
 }
 function repaintArtifact(id: string) {
-  const list = artifactsOf(conv).get(id), canvas = thread.querySelector<HTMLElement>(`.art-canvas[data-art="${CSS.escape(id)}"]`);
-  if (canvas && list) {
-    const now = drawVersion(canvas, list.at(-1)!, false, list.length, true);
-    now.dataset.made = canvas.dataset.made;
-    if (now !== canvas) canvas.replaceWith(now);
-  }
+  if (shelf.main?.id === id) shelf.main = { id };
   renderShelf();
   glow();
 }
@@ -2359,8 +2346,8 @@ function placeSelection(paper: HTMLElement) {
   Object.assign(box.style, { left: `${r.left - at.left - 3}px`, top: `${r.top - at.top - 3}px`, width: `${r.width + 6}px`, height: `${r.height + 6}px` });
 }
 function glow() {
-  if (pinned && !pinned.paper?.isConnected) pinned.paper = thread.querySelector<HTMLElement>(`.art-canvas[data-art="${CSS.escape(pinned.art)}"] :is(.svg-paper, .page-paper, .doc-paper)`) ?? undefined;
-  for (const paper of document.querySelectorAll<HTMLElement>(".svg-paper, .shelf-paper")) {
+  if (pinned && !pinned.paper?.isConnected) pinned.paper = $("shelf-stage").querySelector<HTMLElement>(`.art-canvas[data-art="${CSS.escape(pinned.art)}"] :is(.svg-paper, .page-paper, .doc-paper)`) ?? undefined;
+  for (const paper of document.querySelectorAll<HTMLElement>(".svg-paper")) {
     const root = paper.shadowRoot, art = paper.closest<HTMLElement>("[data-art]")?.dataset.art;
     if (!root || !art || paper.closest<HTMLElement>("[data-kind]")?.dataset.kind === "mermaid" || paper.dataset.kind === "mermaid" || paper.querySelector(".doc-paper")) continue;
     let style = root.querySelector<HTMLStyleElement>("style.point");
@@ -2458,17 +2445,8 @@ function blank(): Conversation {
 function render() {
   views.clear();
   renderCastNext();
-  const was = [...thread.children], carry: NonNullable<typeof carried> = carried = [];
-  try {
-    thread.append(...(conv.messages.length ? conv.messages.map(messageView) : [emptyState()]));
-    for (const { slot, canvas, b } of carry) {
-      place(slot.parentNode!, canvas, slot);
-      for (const n of b.nodes) if (n[0] === slot) n[0] = canvas;
-      slot.remove();
-    }
-  } finally {
-    carried = null;
-  }
+  const was = [...thread.children];
+  thread.append(...(conv.messages.length ? conv.messages.map(messageView) : [emptyState()]));
   for (const el of was) el.remove();
   $("title").textContent = conv.title;
   $("export").hidden = !conv.messages.length;
@@ -4632,19 +4610,33 @@ function grow() {
   input.style.height = `${Math.min(input.scrollHeight, 240)}px`;
 }
 
+function figureClick(t: HTMLElement): boolean {
+  const code = t.closest<HTMLElement>(".copy");
+  if (code) return void copy(code.closest(".code")?.querySelector("code")?.textContent ?? "", code), true;
+  const art = t.closest<HTMLElement>("[data-art]:is(button)");
+  if (art) return artAction(art), true;
+  const svg = t.closest<HTMLElement>("[data-svg]");
+  if (svg) return svgAction(svg), true;
+  const page = t.closest<HTMLElement>("[data-page]");
+  if (page) return pageAction(page), true;
+  const doc = t.closest<HTMLElement>("[data-doc]:is(button)");
+  if (doc) return docAction(doc), true;
+  return false;
+}
+$("shelf-stage").addEventListener("click", (e) => { figureClick(e.target as HTMLElement); });
+thread.addEventListener("keydown", (e) => {
+  const card = (e.target as HTMLElement).closest<HTMLElement>(".art-card");
+  if (!card || (e.key !== "Enter" && e.key !== " ")) return;
+  e.preventDefault();
+  openShelf(card.dataset.art, Number(card.dataset.v));
+});
 thread.addEventListener("click", (e) => {
-  const t = e.target as HTMLElement, code = t.closest<HTMLElement>(".copy"), act = t.closest<HTMLElement>("[data-act]");
+  const t = e.target as HTMLElement, act = t.closest<HTMLElement>("[data-act]");
   const tok = t.closest<HTMLElement>(".tok");
   if (tok) return void openTokPop(tok);
-  if (code) return void copy(code.closest(".code")?.querySelector("code")?.textContent ?? "", code);
-  const art = t.closest<HTMLElement>("[data-art]:is(button)");
-  if (art) return void artAction(art);
-  const svg = t.closest<HTMLElement>("[data-svg]");
-  if (svg) return void svgAction(svg);
-  const page = t.closest<HTMLElement>("[data-page]");
-  if (page) return void pageAction(page);
-  const doc = t.closest<HTMLElement>("[data-doc]:is(button)");
-  if (doc) return void docAction(doc);
+  const card = t.closest<HTMLElement>(".art-card");
+  if (card) return openShelf(card.dataset.art, Number(card.dataset.v));
+  if (figureClick(t)) return;
   if (t instanceof HTMLImageElement && t.dataset.zoom) {
     const big = h("img");
     big.src = t.src;
@@ -4739,9 +4731,14 @@ input.addEventListener("keydown", (e) => {
   }
 });
 document.addEventListener("keydown", (e) => {
-  const keyed = (e.ctrlKey || e.metaKey) && !e.altKey && !e.shiftKey && PANES.find((p) => e.key.toLowerCase() === p.key);
+  const ctrl = (e.ctrlKey || e.metaKey) && !e.altKey && !e.shiftKey, keyed = ctrl && PANES.find((p) => e.key.toLowerCase() === p.key);
+  if (ctrl && e.key === ",") {
+    e.preventDefault();
+    return panel.open ? panel.close() : openSettings();
+  }
   if (keyed) {
     e.preventDefault();
+    if (keyed === panes.artifacts) return isOpen(keyed) ? closeShelf() : openShelf();
     return setPane(keyed, !isOpen(keyed));
   }
   if (e.key !== "Escape" || e.defaultPrevented) return;
@@ -4751,7 +4748,7 @@ document.addEventListener("keydown", (e) => {
   if (voicePop) return setVoicePop(false, true);
   if (document.querySelector("dialog[open]")) return;
   const over = PANES.find((p) => isOpen(p) && !p.beside.matches);
-  if (over) return setPane(over, false);
+  if (over) return over === panes.artifacts ? closeShelf() : setPane(over, false);
   if (voice) return voice.reply || voice.client.playing ? cutVoice(true) : closeVoice();
   const r = running();
   if (r) stopRun(r);
@@ -4835,7 +4832,7 @@ function unhush() {
   requestAnimationFrame(() => requestAnimationFrame(() => { if (--still === 0) document.documentElement.classList.remove("no-anim"); }));
 }
 function fitPanes() {
-  const { conversations: c, settings: s } = panes, room = innerWidth - MAIN_MIN;
+  const { conversations: c, artifacts: s } = panes, room = innerWidth - MAIN_MIN;
   c.width = Math.round(Math.max(c.min, Math.min(c.preferred, room - (besideOpen(s) ? s.min : 0))));
   s.width = Math.round(Math.max(s.min, Math.min(s.preferred, room - (besideOpen(c) ? c.width : 0))));
   for (const p of PANES) document.documentElement.style.setProperty(p.widthVar, `${p.width}px`);
@@ -4846,7 +4843,7 @@ function setPane(p: Pane, open: boolean, { focus = true, animate = true } = {}) 
   p.el.toggleAttribute("data-over", !p.beside.matches);
   p.el.inert = !open;
   p.toggle.setAttribute("aria-expanded", String(open));
-  if (p.beside.matches) setPref(`pane-${p.name}`, open ? "open" : "closed");
+  if (p.beside.matches && p !== panes.artifacts) setPref(`pane-${p.name}`, open ? "open" : "closed");
   if (open && !p.beside.matches) for (const q of PANES) if (q !== p) closeOver(q);
   fitPanes();
   if (open) {
@@ -4856,7 +4853,9 @@ function setPane(p: Pane, open: boolean, { focus = true, animate = true } = {}) 
   if (!animate) unhush();
 }
 function closeOver(p: Pane) {
-  if (isOpen(p) && !p.beside.matches) setPane(p, false, { focus: false });
+  if (!isOpen(p) || p.beside.matches) return;
+  if (p === panes.artifacts) return closeShelf();
+  setPane(p, false, { focus: false });
 }
 function restorePane(p: Pane) {
   const saved = pref(`pane-${p.name}`, "");
@@ -4913,19 +4912,19 @@ function resizeWith(p: Pane, rail: HTMLElement) {
 }
 for (const p of PANES) {
   const label = p.toggle.getAttribute("aria-label")!;
-  p.toggle.innerHTML = icon(p.el.dataset.side === "left" ? "paneLeft" : "paneRight");
+  if (p.toggle.classList.contains("pane-toggle")) p.toggle.innerHTML = icon(p.el.dataset.side === "left" ? "paneLeft" : "paneRight");
   p.toggle.title = `${label} (Ctrl+${p.key.toUpperCase()})`;
-  p.toggle.addEventListener("click", () => setPane(p, !isOpen(p)));
+  p.toggle.addEventListener("click", () => p === panes.artifacts ? (isOpen(p) ? closeShelf() : openShelf()) : setPane(p, !isOpen(p)));
   const rail = p.el.querySelector<HTMLElement>(".pane-rail")!;
   rail.title = "Drag to resize · double-click for the default width";
   rail.setAttribute("aria-label", `Resize ${label.toLowerCase()}`);
   resizeWith(p, rail);
-  p.beside.addEventListener("change", () => restorePane(p));
+  p.beside.addEventListener("change", () => p === panes.artifacts ? renderShelf() : restorePane(p));
 }
 addEventListener("resize", () => { hush(); fitPanes(); unhush(); });
 document.addEventListener("pointerdown", (e) => {
   const t = e.target as Node;
-  for (const p of PANES) if (!p.el.contains(t) && !p.toggle.contains(t) && !$("toast").contains(t)) closeOver(p);
+  for (const p of PANES) if (!p.el.contains(t) && !p.toggle.contains(t) && !$("toast").contains(t) && !(t as Element).closest?.(".art-card")) closeOver(p);
 });
 let modelsOpen = false;
 
@@ -5120,7 +5119,7 @@ function setTools(next: NonNullable<Conversation["tools"]>) {
   setPref("tools", JSON.stringify(conv.tools ?? {}));
   save(conv);
   renderTools();
-  if (isOpen(panes.settings)) syncSettings();
+  if (panel.open) syncSettings();
 }
 function setSource(id: string, on: boolean, only?: string) {
   const next = { ...conv.tools }, s = catalog?.sources.find((x) => x.id === id);
@@ -5385,20 +5384,21 @@ function otherRows(down: string): HTMLElement[] {
 
 
 const modeOf = (c: Conversation): Mode => (c.effort === "off" ? "fast" : "think");
-let chatMode: Mode | undefined;
-const shownMode = (): Mode => modeOf(conv);
+let chatMode: Mode | undefined, settingsMode: Mode | undefined;
+const shownMode = (): Mode => (panel.open && settingsMode) || modeOf(conv);
 
 function loadSettings(): Settings {
   const s = load<(Settings & Record<string, unknown>) | null>("settings2", null);
   if (s) {
     if (s.system === PLAIN_SYSTEM) s.system = DEFAULT_SYSTEM;
     for (const k of ["systemTools", "prompts", "descriptions"]) delete s[k];
-    s.v = 4;
+    if (s.v !== 5) for (const m of [s.think, s.fast]) if (m?.order && m.order.length < DEFAULT_STAGES.length) delete m.order;
+    s.v = 5;
     return s;
   }
   const old = load<{ system?: string; sampling?: Record<string, number> } | null>("settings", null);
   const { max_tokens, seed, ...rest } = old?.sampling ?? {};
-  return { v: 4, system: [DEFAULT_SYSTEM, old?.system?.trim()].filter(Boolean).join("\n\n"), think: { ...rest }, fast: { ...rest }, max_tokens, seed };
+  return { v: 5, system: [DEFAULT_SYSTEM, old?.system?.trim()].filter(Boolean).join("\n\n"), think: { ...rest }, fast: { ...rest }, max_tokens, seed };
 }
 function saveSettings() {
   store("settings2", settings);
@@ -5407,8 +5407,13 @@ function saveSettings() {
   syncSettings();
 }
 const value = (mode: Mode, key: SamplerKey) => settings[mode][key] ?? RECOMMENDED[mode][key];
-const orderOf = (mode: Mode) => settings[mode].order ?? STAGES;
-const fmtValue = (key: SamplerKey, v: number) => SAMPLERS[key].step >= 1 ? String(v) : v.toFixed(2);
+const orderOf = (mode: Mode) => settings[mode].order ?? DEFAULT_STAGES;
+const fmtValue = (key: SamplerKey, v: number) => {
+  const d = SAMPLERS[key];
+  if (d.all !== undefined && v === d.all) return "all";
+  if (d.off !== undefined && (v === d.off || (d.off < 0 && v <= 0))) return "off";
+  return d.step >= 1 ? String(v) : v.toFixed(2);
+};
 function samplerFields(mode: Mode) {
   const { order, ...rest } = settings[mode];
   return { ...rest, ...(order ? { samplers: order } : {}) };
@@ -5416,7 +5421,7 @@ function samplerFields(mode: Mode) {
 function changed(mode: Mode) {
   const out = (Object.keys(SAMPLERS) as SamplerKey[]).filter((k) => settings[mode][k] !== undefined)
     .map((k) => `${SAMPLERS[k].short} ${fmtValue(k, settings[mode][k]!)}`);
-  if (settings[mode].order) out.push(settings[mode].order!.map((s) => SAMPLERS[s].short).join("›"));
+  if (settings[mode].order) out.push(settings[mode].order!.join("›"));
   if (settings.max_tokens) out.push(`max ${fmtK(settings.max_tokens)}`);
   return out.join(" · ");
 }
@@ -5441,108 +5446,69 @@ function useSeed(seed: number) {
 
 
 const FIRST: Cand[] = ODDS.map(([word, c], i) => ({ word, logit: Math.log(c), id: -1 - i }));
-const NEXT: Cand[] = LOOP.cands.map(([t, lp, id]) => ({ word: t.trim(), logit: lp, id }));
-
-const pct = (p: number) => (p >= 0.995 ? "100%" : p >= 0.01 ? `${Math.round(p * 100)}%` : p > 0 ? "<1%" : "");
-const CUT_BY: Record<Stage, string> = { top_k: "top-k", top_p: "top-p", min_p: "min-p", temperature: "temp 0" };
-
-function chart(fig: HTMLElement, shown: number[], tagOf: (r: Odds) => string) {
-  const box = h("div", "odd-rows"), min = h("div", "odd-min"), caption = h("figcaption", "odd-caption");
-  const els = [...shown, -1].map(() => {
+const pct = (p: number) => (p >= 0.995 ? "100%" : p >= 0.01 ? `${Math.round(p * 100)}%` : p > 0 ? "<1%" : "0%");
+const CUT_BY: Record<string, string> = { penalties: "penalties", dry: "DRY", top_n_sigma: "top-nσ", top_k: "top-k", typ_p: "typical-p", top_p: "top-p",
+  min_p: "min-p", xtc: "XTC", temperature: "temp 0", mirostat: "mirostat" };
+const SHOWN = [0, 1, 2, 3, 4, 5];
+function oddsChart(fig: HTMLElement) {
+  const head = h("div", "odd-head"), count = h("span", "odd-count"), box = h("div", "odd-rows"), min = h("div", "odd-min"), caption = h("figcaption", "odd-caption");
+  head.append(h("span", "odd-title", "Qwen names a cat"), count);
+  const els = [...SHOWN, -1].map(() => {
     const el = h("div", "odd"), word = h("span", "odd-word"), track = h("span", "odd-track"), p = h("span", "odd-p");
-    const base = h("i", "odd-base"), bar = h("i", "odd-bar"), tick = h("b", "odd-tick"), tag = h("em", "odd-tag");
-    track.append(base, bar, tick, tag);
+    const base = h("i", "odd-base"), bar = h("i", "odd-bar");
+    track.append(base, bar);
     el.append(word, track, p);
     box.append(el);
-    return { el, word, base, bar, tick, tag, p };
+    return { el, word, base, bar, p };
   });
   min.append(h("span", "", "min-p"));
   box.append(min);
-  fig.append(box, caption);
+  fig.replaceChildren(head, box, caption);
   let at = -1, last: (() => void) | null = null;
   box.addEventListener("pointerover", (e) => {
     const i = els.findIndex((x) => x.el.contains(e.target as Node));
     if (i !== at) { at = i; last?.(); }
   });
   box.addEventListener("pointerleave", () => { at = -1; last?.(); });
-  return (rows: Odds[], minLine: { at: number; tempered: boolean } | undefined, explain: (r: Odds | null, rest?: Odds[]) => string) => {
+  return (rows: Odds[], minLine: { at: number; tempered: boolean } | undefined, xtc: number) => {
     last = () => {
-      const rest = rows.filter((_, i) => !shown.includes(i)), cuts = rest.filter((r) => r.cut).length;
+      const rest = rows.filter((_, i) => !SHOWN.includes(i)), restCut = rest.filter((r) => r.cut).length;
       const agg: Odds = { word: `${rest.length} more`, raw: rest.reduce((a, r) => a + r.raw, 0), p: rest.reduce((a, r) => a + r.p, 0),
-        cut: cuts === rest.length ? rest[0].cut : "", pres: 0, dry: 0 };
-      [...shown.map((i) => rows[i]), agg].forEach((r, k) => {
-        const o = els[k], isRest = k === shown.length;
+        cut: restCut === rest.length ? rest[0].cut : "", penalty: 0 };
+      [...SHOWN.map((i) => rows[i]), agg].forEach((r, k) => {
+        const o = els[k];
         o.el.classList.toggle("cut", !!r.cut);
-        o.el.classList.toggle("rest", isRest);
+        o.el.classList.toggle("rest", k === SHOWN.length);
         o.el.classList.toggle("at", k === at);
         o.word.textContent = r.word;
         o.base.style.width = `${r.raw * 100}%`;
         o.bar.style.width = `${r.cut ? 0 : r.p * 100}%`;
-        o.tick.style.left = `${r.raw * 100}%`;
-        o.tag.style.setProperty("--w", `${(r.cut ? r.raw : r.p) * 100}%`);
-        o.tag.classList.toggle("inside", !r.cut && r.p > 0.62);
-        o.tag.textContent = isRest ? (cuts && !r.cut ? `${cuts} cut` : "") : tagOf(r);
         o.p.textContent = r.cut ? CUT_BY[r.cut] : pct(r.p);
       });
       const kept = rows.filter((r) => !r.cut), topNow = kept.reduce((a, r) => (r.p > a.p ? r : a), kept[0]);
+      count.textContent = kept.length === 1 ? `always ${kept[0].word}` : `${kept.length} of ${rows.length} can be drawn`;
       min.classList.toggle("on", !!minLine);
       min.classList.toggle("untempered", !!minLine && !minLine.tempered);
       if (minLine) min.style.setProperty("--at", String(Math.min(1, minLine.at * topNow.p)));
-      caption.innerHTML = at < 0 ? explain(null) : at === shown.length ? explain(null, rest) : explain(rows[shown[at]]);
+      const by = Object.entries(Object.groupBy(rows.filter((r) => r.cut), (r) => r.cut)).map(([c, l]) => `${l!.length} by ${CUT_BY[c]}`);
+      const r = at >= 0 && at < SHOWN.length ? rows[SHOWN[at]] : undefined;
+      caption.innerHTML = r ? `<b>${r.word}</b> ${pct(r.raw)} → ${r.cut ? `cut by ${CUT_BY[r.cut]}` : pct(r.p)}`
+        : at === SHOWN.length ? `<b>${rest.length} more names</b> ${pct(agg.p)} together${restCut ? ` · ${restCut} cut` : ""}`
+        : `${by.length ? `Cut ${by.join(", ")}` : "Nothing cut"}${xtc > 0 && xtc < 1 ? ` · XTC shown cutting, as ${pct(xtc)} of draws do` : ""}<span> · faint bars: before sampling</span>`;
     };
     last();
   };
 }
-
-let drawFirst: ReturnType<typeof chart> | null = null, drawNext: ReturnType<typeof chart> | null = null;
-const LOOP_FROM = LOOP.reply.findIndex(([t]) => t === ":") + 1;
+let drawOdds: ReturnType<typeof oddsChart> | null = null;
 function drawCharts() {
-  const mode = shownMode();
-  drawFirst ??= chart($("odds-first"), [0, 1, 2, 3, 4, 5], () => "");
-  const first = sample(FIRST, [], (k) => value(mode, k), orderOf(mode));
-  drawFirst(first.rows, first.minLine, (r, rest) => {
-    if (rest) {
-      const by = STAGES.map((s) => [s, rest.filter((x) => x.cut === s).length] as const).filter(([, c]) => c);
-      return `<b>${rest.length} more names</b> ${pct(rest.reduce((a, x) => a + x.p, 0)) || "0%"} together` +
-        (by.length ? `<span> · cut: ${by.map(([s, c]) => `${c} by ${CUT_BY[s]}`).join(", ")}</span>` : "");
-    }
-    if (r) return `<b>${r.word}</b> ${r.cut ? `cut by ${CUT_BY[r.cut]}` : pct(r.p)} <span>· ${pct(r.raw)} before</span>`;
-    const kept = first.rows.filter((x) => !x.cut);
-    return kept.length === 1 ? `Always <b>${kept[0].word}</b>` : `<b>${kept.length}</b> of ${first.rows.length} names can be drawn <span>· Luna ${pct(first.rows[0].p)}</span>`;
-  });
-  drawNext ??= chart($("odds-next"), [0, 1, 4, 5], (r) => [r.pres > 0 ? "used" : r.pres < 0 ? "used, boosted" : "", r.dry ? "repeats" : ""].filter(Boolean).join(" · "));
-  const next = sample(NEXT, LOOP.reply, (k) => value(mode, k), orderOf(mode)), { best } = dryRuns(LOOP.reply), allowed = value(mode, "dry_allowed_length");
-  const dryOn = value(mode, "dry_multiplier") > 0 && !!best && best.run >= allowed, presOn = value(mode, "presence_penalty") !== 0;
-  const runText = best ? LOOP.reply.slice(best.at - best.run + 1, best.at + 2).map(([t]) => t).join("").trim() : "";
-  drawNext(next.rows, next.minLine, (r, rest) => {
-    if (rest) return `<b>${rest.length} more</b> ${pct(rest.reduce((a, x) => a + x.p, 0)) || "0%"} together`;
-    if (r) {
-      const why = [r.pres ? `already used (presence ${r.pres > 0 ? "−" : "+"}${Math.abs(r.pres).toFixed(2)})` : "",
-        r.dry ? `would repeat “${runText}” (DRY −${r.dry.toFixed(2)})` : ""].filter(Boolean);
-      return `<b>${r.word}</b> ${pct(r.raw)} → ${r.cut ? `cut by ${CUT_BY[r.cut]}` : pct(r.p)}${why.length ? `<span> · ${why.join(", ")}</span>` : ""}`;
-    }
-    const kept = next.rows.filter((x) => !x.cut), topNow = kept.reduce((a, x) => (x.p > a.p ? x : a), kept[0]);
-    return `<b>${kept.length}</b> of ${next.rows.length} can be drawn <span>· ${topNow.word} ${pct(topNow.p)}${topNow.word === "Shadow" ? ", the loop goes on" : ""}</span>`;
-  });
-  const line = $("odds-line");
-  line.replaceChildren(h("span", "faint", "…"));
-  let group: HTMLElement | null = null, groupCls = "";
-  LOOP.reply.slice(LOOP_FROM).forEach(([t], j) => {
-    const i = j + LOOP_FROM, [, space, word] = /^(\s*)([\s\S]*)$/.exec(t)!;
-    const cls = dryOn && best && (i > best.at - best.run && i <= best.at || i >= LOOP.reply.length - best.run) ? "run" : dryOn && best && i === best.at + 1 ? "echo" : "";
-    if (cls !== groupCls) {
-      if (space) line.append(space);
-      group = cls ? h("span", cls) : null;
-      groupCls = cls;
-      if (group) line.append(group);
-    } else if (space) (group ?? line).append(space);
-    (group ?? line).append(h("span", presOn && /\w/.test(word) ? "used" : "", word));
-  });
-  line.append(h("i", "caret"));
+  const mode = shownMode(), v = (k: SamplerKey) => value(mode, k);
+  drawOdds ??= oddsChart($("odds"));
+  const { rows, minLine } = sample(FIRST, [], v, orderOf(mode));
+  drawOdds(rows, minLine, v("xtc_probability"));
 }
 
 interface KnobSpec {
-  id: string; label: string; help: string; min: number; max: number; step: number;
+  id: string; label: string; help: string; min: number; max: number; step: number; parse?(text: string): number;
   get(): number; rec(): number; custom(): boolean; set(v: number | undefined): void; fmt(v: number): string;
   pos(v: number): number; val(pos: number): number;
 }
@@ -5576,7 +5542,7 @@ function knob(k: KnobSpec) {
     saveSettings();
     sync();
   };
-  const typed = () => Number(num.value.replace(/[,_\s]/g, "").replace(/^off$/i, "0"));
+  const typed = () => k.parse ? k.parse(num.value.trim()) : Number(num.value.replace(/[,_\s]/g, "").replace(/^off$/i, "0"));
   range.addEventListener("input", () => commit(k.val(range.valueAsNumber)));
   range.addEventListener("dblclick", () => { k.set(undefined); saveSettings(); sync(true); });
   reset.addEventListener("click", () => { k.set(undefined); saveSettings(); sync(true); });
@@ -5609,59 +5575,102 @@ function knob(k: KnobSpec) {
 function samplerKnob(key: SamplerKey) {
   const d = SAMPLERS[key], [lo, hi] = d.slider ?? [d.min, d.max];
   return knob({
-    id: key, label: d.label, help: d.help, min: d.min, max: d.max, step: d.step,
-    fmt: (v) => (key === "dry_multiplier" && v === 0 ? "off" : fmtValue(key, v)),
+    id: key, label: d.label, help: d.help, min: d.min, max: d.max, step: d.step, fmt: (v) => fmtValue(key, v),
+    parse: (t) => /^off$/i.test(t) ? d.off ?? 0 : /^all$/i.test(t) && d.all !== undefined ? d.all : Number(t.replace(/[,_\s]/g, "")),
     get: () => value(shownMode(), key), rec: () => RECOMMENDED[shownMode()][key], custom: () => settings[shownMode()][key] !== undefined,
     set: (v) => { if (v === undefined) delete settings[shownMode()][key]; else settings[shownMode()][key] = v; },
-    pos: (v) => Math.min(1, Math.max(0, (v - lo) / (hi - lo))), val: (p) => lo + p * (hi - lo),
+    pos: (v) => d.all !== undefined && v === d.all ? 1 : Math.min(1, Math.max(0, (v - lo) / (hi - lo))),
+    val: (p) => d.all !== undefined && p >= 0.999 ? d.all : lo + p * (hi - lo),
   });
+}
+function dims(row: HTMLElement, key: SamplerKey, on: (v: number) => boolean) {
+  knobs.push(() => row.classList.toggle("off", !on(value(shownMode(), key))));
+  return row;
+}
+function choiceKnob(key: SamplerKey, options: [number, string][]) {
+  const d = SAMPLERS[key], row = h("div", "knob seg-knob"), label = h("span", "knob-label", d.label), seg = h("div", "segmented"), reset = h("button", "act knob-reset");
+  row.title = d.help;
+  seg.setAttribute("role", "radiogroup");
+  seg.setAttribute("aria-label", d.label);
+  reset.type = "button";
+  reset.innerHTML = icon("retry");
+  const set = (v: number | undefined) => { if (v === undefined) delete settings[shownMode()][key]; else settings[shownMode()][key] = v; saveSettings(); };
+  for (const [v, text] of options) {
+    const b = h("button", "", text);
+    b.type = "button";
+    b.setAttribute("role", "radio");
+    b.onclick = () => set(onChrysalis() && v === RECOMMENDED[shownMode()][key] ? undefined : v);
+    b.dataset.v = String(v);
+    seg.append(b);
+  }
+  reset.onclick = () => set(undefined);
+  row.append(label, seg, reset);
+  knobs.push(() => {
+    const v = value(shownMode(), key), custom = settings[shownMode()][key] !== undefined;
+    row.classList.toggle("custom", custom);
+    seg.querySelectorAll<HTMLElement>("button").forEach((b) => b.setAttribute("aria-checked", String((custom || onChrysalis()) && Number(b.dataset.v) === v)));
+    reset.title = onChrysalis() ? `Recommended: ${options.find(([x]) => x === RECOMMENDED[shownMode()][key])?.[1]}` : "The backend's own value (not sent)";
+  });
+  return row;
+}
+function orderKnob() {
+  const row = h("div", "knob order-knob"), label = h("label", "", "Samplers"), text = h("input", "knob-text"), reset = h("button", "act knob-reset");
+  row.title = `The order the samplers are applied in, separated by semicolons. Default: ${DEFAULT_STAGES.join(";")}. Leaving one out turns it off.`;
+  label.htmlFor = text.id = "knob-samplers";
+  text.type = "text";
+  text.spellcheck = false;
+  text.autocomplete = "off";
+  reset.type = "button";
+  reset.innerHTML = icon("retry");
+  const commit = () => {
+    const names = text.value.split(/[;,\s]+/).filter(Boolean), order = names.map((n) => STAGE_ALIASES[n.toLowerCase()]);
+    const bad = names.filter((_, i) => !order[i]);
+    if (bad.length) return void toast(`Not a sampler: ${bad.join(", ")}. They are ${DEFAULT_STAGES.join(", ")}`);
+    const uniq = [...new Set(order)];
+    if (!uniq.length || uniq.join() === DEFAULT_STAGES.join()) delete settings[shownMode()].order;
+    else settings[shownMode()].order = uniq;
+    saveSettings();
+  };
+  text.addEventListener("change", commit);
+  text.addEventListener("keydown", (e) => {
+    if (e.key === "Enter") commit();
+    else if (e.key === "Escape") { e.preventDefault(); text.value = orderOf(shownMode()).join(";"); text.blur(); }
+  });
+  reset.onclick = () => { delete settings[shownMode()].order; saveSettings(); };
+  row.append(label, text, reset);
+  knobs.push(() => {
+    const custom = !!settings[shownMode()].order;
+    row.classList.toggle("custom", custom);
+    row.classList.toggle("unset", !custom && !onChrysalis());
+    text.placeholder = onChrysalis() ? "" : "default";
+    if (document.activeElement !== text) text.value = custom || onChrysalis() ? orderOf(shownMode()).join(";") : "";
+    reset.title = onChrysalis() ? `Default: ${DEFAULT_STAGES.join(";")}` : "The backend's own order (not sent)";
+  });
+  return row;
 }
 
 function buildSettings() {
-  for (const st of STAGES) {
-    const row = samplerKnob(st), grip = h("button", "grip");
-    row.dataset.stage = st;
-    grip.type = "button";
-    grip.title = "Drag to reorder: the sampler applies these top to bottom";
-    grip.setAttribute("aria-label", `Move ${SAMPLERS[st].label}`);
-    grip.innerHTML = icon("grip");
-    grip.addEventListener("pointerdown", (e) => {
-      e.preventDefault();
-      grip.setPointerCapture(e.pointerId);
-      row.classList.add("dragging");
-      const move = (ev: PointerEvent) => {
-        const rows = [...$("samplers").children] as HTMLElement[], i = rows.indexOf(row), mid = (el: HTMLElement) => el.getBoundingClientRect().top + el.offsetHeight / 2;
-        if (i > 0 && ev.clientY < mid(rows[i - 1])) moveStage(st, i - 1);
-        else if (i < rows.length - 1 && ev.clientY > mid(rows[i + 1])) moveStage(st, i + 1);
-      };
-      const up = () => {
-        row.classList.remove("dragging");
-        grip.removeEventListener("pointermove", move);
-        grip.removeEventListener("pointerup", up);
-        grip.removeEventListener("pointercancel", up);
-      };
-      grip.addEventListener("pointermove", move);
-      grip.addEventListener("pointerup", up);
-      grip.addEventListener("pointercancel", up);
-    });
-    grip.addEventListener("keydown", (e) => {
-      if (e.key !== "ArrowUp" && e.key !== "ArrowDown") return;
-      e.preventDefault();
-      moveStage(st, orderOf(shownMode()).indexOf(st) + (e.key === "ArrowUp" ? -1 : 1));
-      grip.focus();
-    });
-    row.prepend(grip);
-    stageRows.set(st, row);
+  for (const [m, text] of [["think", "With thinking"], ["fast", "Without thinking"]] as const) {
+    const b = h("button", "", text);
+    b.type = "button";
+    b.setAttribute("role", "radio");
+    b.dataset.mode = m;
+    b.onclick = () => { settingsMode = m; syncSettings(); };
+    $("mode-pick").append(b);
   }
-  $("order-reset").onclick = () => { delete settings[shownMode()].order; saveSettings(); };
-  const dryMore = h("div", "knob-more");
-  dryMore.append(samplerKnob("dry_allowed_length"), samplerKnob("dry_base"));
-  knobs.push(() => { dryMore.classList.toggle("off", value(shownMode(), "dry_multiplier") <= 0); });
-  $("repetition").replaceChildren(samplerKnob("presence_penalty"), samplerKnob("dry_multiplier"), dryMore);
+  knobs.push(() => $("mode-pick").querySelectorAll<HTMLElement>("button").forEach((b) => b.setAttribute("aria-checked", String(b.dataset.mode === shownMode()))));
+  const k = samplerKnob;
+  $("samplers").replaceChildren(k("temperature"), k("dynatemp_range"), dims(k("dynatemp_exponent"), "dynatemp_range", (v) => v > 0), k("top_k"), k("top_p"),
+    k("min_p"), k("xtc_probability"), dims(k("xtc_threshold"), "xtc_probability", (v) => v > 0), k("typical_p"), k("top_n_sigma"), k("min_keep"), orderKnob());
+  const dry = (key: SamplerKey) => dims(k(key), "dry_multiplier", (v) => v > 0);
+  $("penalties").replaceChildren(k("repeat_last_n"), k("repeat_penalty"), k("presence_penalty"), k("frequency_penalty"), k("dry_multiplier"),
+    dry("dry_base"), dry("dry_allowed_length"), dry("dry_penalty_last_n"));
+  const miro = (key: SamplerKey) => dims(k(key), "mirostat", (v) => v > 0);
+  $("mirostat").replaceChildren(choiceKnob("mirostat", [[0, "Off"], [1, "Mirostat"], [2, "Mirostat 2.0"]]), miro("mirostat_tau"), miro("mirostat_eta"));
 
   const LO = 256, HI = () => status.context ?? 262144;
   const maxLen = knob({
-    id: "max_tokens", label: "Max length", help: "Max length: the reply stops here; thinking counts toward it.", min: 1, max: 262144, step: 1,
+    id: "max_tokens", label: "Max tokens", help: "The maximum number of tokens per reply; thinking counts toward it.", min: 1, max: 262144, step: 1,
     fmt: (v) => v.toLocaleString("en-US"), get: () => settings.max_tokens ?? MAX_REPLY, rec: () => MAX_REPLY,
     custom: () => settings.max_tokens !== undefined, set: (v) => { settings.max_tokens = v; },
     pos: (v) => Math.min(1, Math.max(0, Math.log(v / LO) / Math.log(HI() / LO))),
@@ -5789,7 +5798,7 @@ function buildSettings() {
   $("settings-reset").onclick = () => {
     if (!customized()) return toast("Everything is already at the recommended values");
     const before = structuredClone(settings);
-    settings = { v: 4, system: DEFAULT_SYSTEM, think: {}, fast: {} };
+    settings = { v: 5, system: DEFAULT_SYSTEM, think: {}, fast: {} };
     saveSettings();
     growSystem();
     toast("Everything is back to the recommended values", () => { settings = before; saveSettings(); growSystem(); });
@@ -5834,38 +5843,30 @@ function growSystem() {
   systemInput.style.height = `${Math.min(systemInput.scrollHeight + 2, innerHeight * 0.4)}px`;
 }
 
-const stageRows = new Map<Stage, HTMLElement>();
-function moveStage(stage: Stage, to: number) {
-  const order = orderOf(shownMode()).filter((x) => x !== stage);
-  order.splice(Math.max(0, Math.min(order.length, to)), 0, stage);
-  if (order.join() === STAGES.join()) delete settings[shownMode()].order;
-  else settings[shownMode()].order = order;
-  saveSettings();
+function openSettings(sec?: string) {
+  settingsMode = modeOf(conv);
+  if (!panel.open) panel.showModal();
+  showSettingsSec(sec ?? pref("settings-sec", "chat"));
+  growSystem();
+  void loadCatalog();
 }
-function placeStages() {
-  const box = $("samplers"), order = orderOf(shownMode()), rows = [...box.children] as HTMLElement[];
-  if (rows.map((x) => x.dataset.stage).join() === order.join()) return;
-  const before = new Map(rows.map((el) => [el, el.getBoundingClientRect().top]));
-  box.append(...order.map((st) => stageRows.get(st)!));
-  if (reducedMotion.matches) return;
-  for (const [el, top] of before) {
-    const dy = top - el.getBoundingClientRect().top;
-    if (dy && top) el.animate([{ transform: `translateY(${dy}px)` }, { transform: "none" }], { duration: 160, easing: "cubic-bezier(0.2, 0.7, 0.2, 1)" });
-  }
+function showSettingsSec(sec: string) {
+  if (!panel.querySelector(`.set-sec[data-sec="${sec}"]`)) sec = "chat";
+  for (const b of panel.querySelectorAll<HTMLElement>(".set-nav [data-sec]")) b.setAttribute("aria-current", String(b.dataset.sec === sec));
+  for (const el of panel.querySelectorAll<HTMLElement>(".set-sec")) el.hidden = el.dataset.sec !== sec;
+  setPref("settings-sec", sec);
+  syncSettings();
 }
 
 function syncSettings() {
-  if (!isOpen(panes.settings)) return;
+  if (!panel.open) return;
   if (document.activeElement !== systemInput && systemInput.value !== settings.system) systemInput.value = settings.system;
   $("system-reset").classList.toggle("on", settings.system !== DEFAULT_SYSTEM);
   const vp = $<HTMLTextAreaElement>("voice-prompt");
   if (document.activeElement !== vp && vp.value !== voicePrompt()) { vp.value = voicePrompt(); fit(vp); }
   $("voice-prompt-reset").classList.toggle("on", settings.voice?.prompt !== undefined);
-  $("mode-note").textContent = shownMode() === "think" ? "with thinking" : "thinking off";
   $("artifacts-switch").setAttribute("aria-checked", String(settings.artifacts !== false));
   $("settings").classList.toggle("other-backend", !onChrysalis());
-  $("order-reset").classList.toggle("on", !!settings[shownMode()].order);
-  placeStages();
   for (const sync of knobs) sync();
   drawCharts();
 }
@@ -5899,47 +5900,35 @@ $("artifacts-switch").addEventListener("click", () => {
   else settings.artifacts = false;
   saveSettings();
 });
-$("artifacts").addEventListener("click", () => { if (shelf.open) { shelf.open = false; renderShelf(); } else openShelf(); });
 $("shelf-close").innerHTML = icon("x");
-$("shelf-close").addEventListener("click", () => { shelf.open = false; renderShelf(); });
+$("shelf-close").addEventListener("click", closeShelf);
 $("shelf-compare").addEventListener("click", () => { shelf.compare = !shelf.compare; shelf.other = undefined; renderShelf(); });
-$("shelf").addEventListener("click", (e) => {
-  const t = e.target as HTMLElement, act = t.closest<HTMLElement>("[data-shelf]"), step = t.closest<HTMLElement>("[data-step]");
-  if (act) return shelfAction(act);
-  if (!step) return;
-  const side = step.closest<HTMLElement>(".shelf-side")!, all = artifactsOf(conv), id = side.dataset.art!, v = Number(side.dataset.v) + Number(step.dataset.step);
-  const at = { id, v: v >= (all.get(id)?.length ?? 0) && side.dataset.which === "main" ? undefined : v };
-  if (side.dataset.which === "main") shelf.main = at; else shelf.other = at;
-  renderShelf();
+$("shelf").addEventListener("keydown", (e) => {
+  if (e.key !== "Escape" || e.defaultPrevented || document.querySelector("[data-editing]")) return;
+  e.preventDefault();
+  closeShelf();
+  $("artifacts-toggle").focus();
 });
-$("shelf").addEventListener("keydown", (e) => { if (e.key === "Escape") { shelf.open = false; renderShelf(); $("artifacts").focus(); } });
-$("shelf-head").addEventListener("pointerdown", (e) => {
-  if ((e.target as Element).closest("button") || e.button !== 0) return;
-  const el = $("shelf"), r = el.getBoundingClientRect(), dx = e.clientX - r.left, dy = e.clientY - r.top, head = e.currentTarget as HTMLElement;
-  head.setPointerCapture(e.pointerId);
-  el.classList.add("moving");
-  const move = (ev: PointerEvent) => placeShelf({ x: ev.clientX - dx, y: ev.clientY - dy, w: r.width, h: r.height });
-  const up = () => {
-    el.classList.remove("moving");
-    head.removeEventListener("pointermove", move);
-    keepShelfPlace();
-  };
-  head.addEventListener("pointermove", move);
-  head.addEventListener("pointerup", up, { once: true });
-  head.addEventListener("pointercancel", up, { once: true });
-});
-new ResizeObserver(() => { if (!$("shelf").hidden && !$("shelf").classList.contains("moving")) keepShelfPlace(); }).observe($("shelf"));
-addEventListener("resize", () => { placeShelf(); glow(); });
-placeShelf();
+addEventListener("resize", () => glow());
 buildControls();
 buildTools();
 if (location.protocol === "https:") await checkTrust();
 void loadCatalog();
 $("to-latest").innerHTML = icon("down");
 $("settings-reset").insertAdjacentHTML("afterbegin", icon("retry"));
-for (const id of ["system-reset", "order-reset", "voice-prompt-reset"]) $(id).innerHTML = icon("retry");
+for (const id of ["system-reset", "voice-prompt-reset"]) $(id).innerHTML = icon("retry");
+$("settings-open").innerHTML = icon("gear");
+$("settings-open").addEventListener("click", () => openSettings());
+$("settings-close").innerHTML = icon("x");
+$("settings-close").addEventListener("click", () => panel.close());
+panel.addEventListener("click", (e) => { if (e.target === panel) panel.close(); });
+panel.addEventListener("close", () => { settingsMode = undefined; });
+$("set-nav").addEventListener("click", (e) => {
+  const b = (e.target as Element).closest<HTMLElement>("[data-sec]");
+  if (b) showSettingsSec(b.dataset.sec!);
+});
 buildSettings();
-for (const p of PANES) restorePane(p);
+restorePane(panes.conversations);
 await refreshStatus();
 for (const c of Object.values(chats)) {
   const m = [...walk(c.messages)].find((x) => x.role === "assistant" && x.job);

@@ -13,6 +13,8 @@ const NAMES: Record<string, string> = { chrysalis: "Chrysalis", llamacpp: "llama
 
 const STANDARD = new Set(["model", "messages", "tools", "tool_choice", "parallel_tool_calls", "stream", "stream_options", "max_tokens",
   "temperature", "top_p", "top_k", "min_p", "presence_penalty", "frequency_penalty", "dry_multiplier", "dry_base", "dry_allowed_length",
+  "dynatemp_range", "dynatemp_exponent", "typical_p", "xtc_probability", "xtc_threshold", "top_n_sigma", "min_keep", "repeat_last_n", "repeat_penalty",
+  "dry_penalty_last_n", "mirostat", "mirostat_tau", "mirostat_eta", "samplers",
   "seed", "stop", "reasoning_effort", "logprobs", "top_logprobs", "response_format"]);
 export const standard = (req: Record<string, unknown>) => Object.fromEntries(Object.entries(req).filter(([k]) => STANDARD.has(k)));
 

@@ -232,35 +232,37 @@ test("the context in the message box counts up while a reply is written (the pro
 }, 30_000);
 
 async function still(page: Page) {
-  await page.$eval(".art-canvas", (e) => e.scrollIntoView({ block: "center" }));
+  await page.waitForSelector("#shelf .art-canvas");
   await page.waitForFunction(() => new Promise<boolean>((done) => {
-    const s = document.getElementById("scroller")!, at = s.scrollTop;
-    requestAnimationFrame(() => requestAnimationFrame(() => done(s.scrollTop === at)));
+    const at = () => JSON.stringify(document.querySelector("#shelf .art-canvas")!.getBoundingClientRect()), was = at();
+    requestAnimationFrame(() => requestAnimationFrame(() => done(at() === was)));
   }));
 }
 const fill = (page: Page, id: string, attr = "fill") => page.$eval(".art-canvas .svg-paper", (p, id, attr) =>
   p.shadowRoot!.querySelector(`[id="${id}"]`)?.getAttribute(attr as string) ?? null, id, attr);
 
-test("an artifact is changed in place: one canvas, in the reply that changed it last, the edit's changes (a whole element by its id, a search) painted into the picture as it was; the reply before keeps a line, the canvas steps back to it, and the shelf shows both side by side", async () => {
+test("an artifact is changed in place: each reply that makes a version has a card; the panel shows the latest, the edit's changes (a whole element by its id, a search) painted into the picture as it was, steps back to the version before, opens the version a card names, and Compare shows both side by side", async () => {
   const page = await open();
   await send(page, "draw the panda");
   await send(page, "red coat");
-  expect(await page.$$eval(".art-canvas", (c) => c.map((x) => [x.closest("article")!.dataset.i, x.querySelector(".art-label")!.textContent])))
-    .toEqual([["3", "panda · v2 · 2 changes"]]);
-  expect(await page.$$eval(".art-line", (l) => l.map((x) => [x.closest("article")!.dataset.i, x.querySelector(".art-label")!.textContent])))
-    .toEqual([["1", "panda · v1"]]);
+  expect(await page.$$eval(".art-card", (c) => c.map((x) => [x.closest("article")!.dataset.i, x.querySelector(".art-name")!.textContent, x.querySelector(".art-sub")!.textContent])))
+    .toEqual([["1", "panda", "SVG · v1 · now v2"], ["3", "panda", "SVG · v2 · 2 changes"]]);
+  await still(page);
+  expect(await page.$eval("#shelf .art-canvas .art-label", (l) => l.textContent)).toBe("panda · v2 · 2 changes");
   expect([await fill(page, "coat"), await fill(page, "background"), await fill(page, "burger")]).toEqual(["#d32f2f", "#fff3cd", null]);
   expect(await page.$eval(".art-canvas .svg-paper", (p) => p.shadowRoot!.querySelector("#burger rect")?.getAttribute("fill"))).toBe("#8b4513");
   await page.click(".art-canvas [data-art=prev]");
   expect([await page.$eval(".art-canvas .art-label", (l) => l.textContent), await fill(page, "coat")]).toEqual(["panda · v1", "#ffffff"]);
   await page.click(".art-canvas [data-art=next]");
   expect(await fill(page, "coat")).toBe("#d32f2f");
-  await page.click("#artifacts");
+  await page.click('.art-card[data-v="1"]');
+  expect([await page.$eval(".art-canvas .art-label", (l) => l.textContent), await page.$$eval(".art-card.on", (c) => c.map((x) => (x as HTMLElement).dataset.v))])
+    .toEqual(["panda · v1", ["1"]]);
+  await page.click('.art-card[data-v="2"]');
   await page.click("#shelf-compare");
-  const sides = () => page.$$eval(".shelf-side", (s) => s.map((x) => [x.querySelector(".shelf-label span")!.textContent,
-    x.querySelector(".shelf-paper")!.shadowRoot!.querySelector("#coat")?.getAttribute("fill")]));
-  expect(await sides()).toEqual([["panda · v1", "#ffffff"], ["panda · v2", "#d32f2f"]]);
-  expect(await page.$$eval(".shelf-v", (v) => v.map((x) => x.textContent))).toEqual(["v1", "v2"]);
+  const sides = () => page.$$eval("#shelf-stage > .art-canvas", (s) => s.map((x) => [x.querySelector(".art-label")!.textContent,
+    x.querySelector(".svg-paper")!.shadowRoot!.querySelector("#coat")?.getAttribute("fill")]));
+  expect(await sides()).toEqual([["panda · v1", "#ffffff"], ["panda · v2 · 2 changes", "#d32f2f"]]);
   await page.close();
 }, 30_000);
 
@@ -371,23 +373,26 @@ test("a page artifact is drawn as it is written, its script waiting, and runs on
 }, 40_000);
 
 test("pages labelled as models also label them, the id alone on the block's first line (its fence left open as the reply ends) or as an attribute, are artifacts by that id, and one with none is \"page\": each runs as a page with the tools, and an edit by its id changes it", async () => {
-  const page = await open(), caption = () => page.$$eval(".art-canvas .art-label", (l) => l.map((x) => x.textContent));
+  const page = await open(), shown = (label: string) => page.waitForFunction((label) => document.querySelector("#shelf .art-canvas .art-label")?.textContent === label, { timeout: 10_000 }, label);
   await send(page, "a hall on its line");
-  await page.waitForFunction(() => [...document.querySelectorAll(".art-canvas .art-label")].some((l) => l.textContent === "hall · v1"), { timeout: 10_000 });
-  const sign = async () => (await pageFrame(page)).$eval("#sign", (e) => e.textContent);
-  expect(await sign()).toBe("Welcome");
+  await shown("hall · v1");
+  const sign = (text: string) => pageFrame(page).then((f) => f.waitForFunction((text) => document.querySelector("#sign")?.textContent === text, { timeout: 10_000 }, text));
+  await sign("Welcome");
   await send(page, "rename the sign");
-  await (await pageFrame(page)).waitForFunction(() => document.querySelector("#sign")?.textContent === "Goodbye", { timeout: 10_000 });
+  await sign("Goodbye");
   await send(page, "a gate as an attribute");
-  await page.waitForFunction(() => [...document.querySelectorAll(".art-canvas .art-label")].some((l) => l.textContent === "gate · v1"), { timeout: 10_000 });
-  expect(await caption()).toEqual(["hall · v2 · 1 change", "gate · v1"]);
-  expect(await page.$$eval(".art-canvas iframe.page-frame", (f) => f.length)).toBe(2);
+  await shown("gate · v1");
+  expect(await page.$$eval(".art-card", (c) => c.map((x) => `${x.querySelector(".art-name")!.textContent}: ${x.querySelector(".art-sub")!.textContent}`)))
+    .toEqual(["hall: Page · v1 · now v2", "hall: Page · v2 · 1 change", "gate: Page · v1"]);
+  expect(await page.$$eval(".shelf-tab", (t) => t.map((x) => x.textContent))).toEqual(["hall", "gate"]);
   await send(page, "a page with no name");
-  await page.waitForFunction(() => [...document.querySelectorAll(".art-canvas .art-label")].some((l) => l.textContent === "page · v1"), { timeout: 10_000 });
-  const room = (await page.$$(".art-canvas")).at(-1)!;
-  await (await room.$("[data-art=edit]"))!.click();
-  await room.waitForSelector(".art-tools.on");
-  expect(await (await (await room.$("iframe.page-frame"))!.contentFrame()).$eval("#lamp", (e) => e.textContent)).toBe("Lamp");
+  await shown("page · v1");
+  await page.click("#shelf .art-canvas [data-art=edit]");
+  await page.waitForSelector("#shelf .art-canvas .art-tools.on");
+  expect(await (await pageFrame(page)).$eval("#lamp", (e) => e.textContent)).toBe("Lamp");
+  await page.click(".shelf-tab:first-child");
+  await shown("hall · v2 · 1 change");
+  await sign("Goodbye");
   await page.close();
 }, 30_000);
 
@@ -786,28 +791,20 @@ test("code is changed by hand where it is shown: Edit, type, Done; the change is
   await page.close();
 }, 30_000);
 
-test("3D pages load three.js and A-Frame from their usual addresses, which they cannot reach: three as a module with addons by an import map's names and by address, and the classic build older pages load", async () => {
+test("3D pages load three.js and A-Frame from their usual addresses, which they cannot reach: three as a module with addons by an import map's names and by address, and the classic build older pages load; each fills the panel", async () => {
   const page = await open();
-  await page.evaluate(() => {
-    const low = (window as any).low = new Map<Element, number>();
-    const look = () => {
-      for (const f of document.querySelectorAll<HTMLElement>(".art-canvas iframe.page-frame:not(.next)")) low.set(f, Math.min(low.get(f) ?? Infinity, f.offsetHeight));
-      requestAnimationFrame(look);
-    };
-    look();
-  });
-  for (const [ask, want] of [["three cube", "186 true"], ["steady old cube", "186 true"]]) {
+  for (const [ask, id, want] of [["three cube", "cube", "186 true"], ["steady old cube", "old", "186 true"]]) {
     await send(page, ask);
-    const frame = (await (await page.$$(".art-canvas iframe.page-frame")).at(-1)!.contentFrame());
+    await page.waitForFunction((id) => document.querySelector("#shelf .art-canvas")?.getAttribute("data-art") === id, { timeout: 10_000 }, id);
+    const frame = await pageFrame(page);
     await frame.waitForFunction(() => !!document.body?.dataset.three, { timeout: 10_000 });
     expect(await frame.$eval("body", (b) => b.dataset.three)).toBe(want);
+    expect(await page.$eval("#shelf .art-canvas iframe.page-frame:not(.next)", (f) => f.getBoundingClientRect().bottom > innerHeight - 40 && (f as HTMLElement).offsetHeight > 500)).toBe(true);
   }
-  await page.waitForFunction(() => (document.querySelectorAll(".art-canvas iframe.page-frame")[1] as HTMLElement).offsetHeight >= 400, { timeout: 5_000 });
-  const wide = await page.$$eval(".art-canvas iframe.page-frame", (f) => [f[1].clientWidth, f[1].offsetHeight, (window as any).low.get(f[1]), f[0].offsetHeight]);
-  expect(Math.abs(wide[1] - Math.round(wide[0] * 0.62))).toBeLessThan(4);
-  expect(wide[2]).toBeGreaterThan(wide[1] - 4);
-  expect(wide[3]).toBeLessThan(260);
-  const frame = (await (await page.$$(".art-canvas iframe.page-frame"))[0].contentFrame());
+  await page.click(".shelf-tab:first-child");
+  await page.waitForFunction(() => document.querySelector("#shelf .art-canvas")?.getAttribute("data-art") === "cube");
+  const frame = await pageFrame(page);
+  await frame.waitForFunction(() => !!document.body?.dataset.three, { timeout: 10_000 });
   const lit = await frame.$eval("canvas", (c) => {
     const g = (c as HTMLCanvasElement).getContext("webgl2")!, px = new Uint8Array(4);
     g.readPixels(150, 100, 1, 1, g.RGBA, g.UNSIGNED_BYTE, px);
@@ -1384,7 +1381,12 @@ test("export and import keep versions and tool rounds, and the imported chat res
   for (const p of [page, other, third]) await p.close();
 }, 90_000);
 
-const noteShown = async (page: Page) => (await openSettings(page), page.$eval("#voice-prompt", (e) => (e as HTMLTextAreaElement).value));
+const noteShown = async (page: Page) => {
+  await openSettings(page);
+  const note = await page.$eval("#voice-prompt", (e) => (e as HTMLTextAreaElement).value);
+  await closeSettings(page);
+  return note;
+};
 const sent = (b: any) => b.messages;
 const voiceLog = (): any[] => { try { return readFileSync(VOICE_LOG, "utf8").trim().split("\n").filter(Boolean).map((l) => JSON.parse(l)); } catch { return []; } };
 const voicePages: Page[] = [];
@@ -1579,6 +1581,7 @@ test("voice mode's note goes before the first question said and again when it ch
   await openSettings(page);
   await page.$eval("#voice-prompt", (el, v) => { (el as HTMLTextAreaElement).value = v; el.dispatchEvent(new Event("input")); }, CHANGED);
   await page.$eval("#knob-voice_speed", (el) => { (el as HTMLInputElement).value = "1.2"; el.dispatchEvent(new Event("change")); });
+  await closeSettings(page);
   await page.waitForFunction(() => /^voice /.test(document.querySelector('#thread > article[data-i="7"] .stats')?.textContent ?? ""), { timeout: 15_000 });
   await page.click("#send");
   await send(page, "typed again");
@@ -1602,11 +1605,12 @@ test("What the model is sent shows the next request as Chrysalis gets it: the to
   await page.click(sw("fetch"));
   await page.keyboard.press("Escape");
   await send(page, "first");
-  await openSettings(page);
+  await openSettings(page, "chat");
   await page.click("#sent-open");
   await page.waitForFunction(() => (document.querySelector("#sent-view") as HTMLDialogElement).open && !!document.querySelector("#sent-text")?.textContent);
   const shown = await page.$eval("#sent-text", (e) => e.textContent!);
   await page.keyboard.press("Escape");
+  await closeSettings(page);
   await send(page, "second");
   const next = lastStream;
   expect(shown).toContain(JSON.stringify(next.tools, null, 2));
@@ -1664,13 +1668,13 @@ test("the theme is the system's until Settings chooses one, which overrides it a
   expect(await bg("dark")).toBeLessThan(60);
   await scheme("light");
   expect(await bg("light")).toBeGreaterThan(200);
-  await openSettings(page);
+  await openSettings(page, "look");
   await page.click('#theme-pick [data-theme="dark"]');
   expect(await bg("dark")).toBeLessThan(60);
   await page.reload({ waitUntil: "networkidle0" });
   expect(await bg("dark")).toBeLessThan(60);
   expect(await page.$eval('#theme-pick [aria-checked="true"]', (b) => (b as HTMLElement).dataset.theme)).toBe("dark");
-  await openSettings(page);
+  await openSettings(page, "look");
   await page.click('#theme-pick [data-theme="system"]');
   expect(await bg("light")).toBeGreaterThan(200);
   await scheme("dark");
@@ -1678,9 +1682,14 @@ test("the theme is the system's until Settings chooses one, which overrides it a
   await page.close();
 }, 30_000);
 
-async function openSettings(page: Page) {
-  await page.click("#settings-toggle");
-  await page.waitForFunction(() => { const r = document.querySelector("#voice-knobs")!.getBoundingClientRect(); return r.width > 0 && r.right <= innerWidth; });
+async function openSettings(page: Page, sec = "voice") {
+  if (!(await page.$eval("#settings", (d) => (d as HTMLDialogElement).open))) await page.click("#settings-open");
+  await page.click(`.set-nav [data-sec="${sec}"]`);
+  await page.waitForFunction((sec) => { const r = document.querySelector(`.set-sec[data-sec="${sec}"]`)!.getBoundingClientRect(); return r.width > 0 && r.right <= innerWidth; }, {}, sec);
+}
+async function closeSettings(page: Page) {
+  await page.click("#settings-close");
+  await page.waitForFunction(() => !(document.getElementById("settings") as HTMLDialogElement).open);
 }
 const stored = (page: Page) => page.evaluate(() => JSON.parse(sessionStorage.getItem("settings2") ?? "{}").voice);
 const settled = async (ok: () => boolean, ms = 5000) => { for (const t = Date.now(); !ok() && Date.now() - t < ms; ) await Bun.sleep(25); return ok(); };
@@ -1719,14 +1728,21 @@ test("voice picker: the voice models' voices by language and gender; a pick swit
   await openSettings(page);
   await page.waitForFunction(() => (document.querySelector("#voice-name") as HTMLSelectElement)?.value === JSON.stringify(["other-tts", "bob"]));
   await page.select("#voice-name", JSON.stringify(["other-tts", "ana"]));
+  await closeSettings(page);
   await page.waitForFunction(() => document.querySelector("#voice-pick .voice-pick-name")?.textContent === "Ana");
   expect(await settled(() => configs().length === 2)).toBe(true);
   expect(configs()[1]).toEqual({ stack: undefined, voice: "ana", speed: undefined });
   await page.click("#voice-pick");
   await page.click('#voice-pop [data-voice="fake-tts/echo"]');
+  await page.waitForSelector("#toast:not([hidden]) .btn");
+  await openSettings(page);
   await page.waitForFunction(() => (document.querySelector("#voice-name") as HTMLSelectElement)?.value === JSON.stringify(["fake-tts", "echo"]));
+  await closeSettings(page);
   await page.click("#toast .btn");
-  await page.waitForFunction(() => document.querySelector("#voice-pick .voice-pick-name")?.textContent === "Ana" && (document.querySelector("#voice-name") as HTMLSelectElement)?.value === JSON.stringify(["other-tts", "ana"]));
+  await page.waitForFunction(() => document.querySelector("#voice-pick .voice-pick-name")?.textContent === "Ana");
+  await openSettings(page);
+  await page.waitForFunction(() => (document.querySelector("#voice-name") as HTMLSelectElement)?.value === JSON.stringify(["other-tts", "ana"]));
+  await closeSettings(page);
   expect(await settled(() => configs().length === 4)).toBe(true);
   expect(configs().slice(2)).toEqual([{ stack: { tts: "fake-tts" }, voice: "echo", speed: undefined }, { stack: { tts: "other-tts" }, voice: "ana", speed: undefined }]);
   expect(await stored(page)).toEqual({ tts: "other-tts", name: "ana" });
@@ -2052,6 +2068,7 @@ test("voice mode: the thinking bar is the chat's, one setting for spoken and wri
   expect(await bar()).toEqual(["Medium", "Thinking: Medium"]);
   await openSettings(page);
   expect(await page.$(".voice-think")).toBeNull();
+  await closeSettings(page);
   await page.click("#send");
   expect(await bar()).toEqual(["Medium", "Thinking: Medium"]);
   await page.close();
@@ -2230,9 +2247,9 @@ test("the sea stays behind a chat, the butterfly sunk into it and every click th
     expect([rising < 0.7 * full, await risen(0.9 * full) > 0.9 * full]).toEqual([true, true]);
 
     await page.click(".conv");
-    await page.click("#settings-toggle");
+    await openSettings(page, "look");
     await page.click("#sea-switch");
-    await page.click("#settings-toggle");
+    await closeSettings(page);
     await page.waitForFunction((x) => document.getElementById("thread")!.getBoundingClientRect().x === x, {}, column.x);
     expect((await look(page, margin)).lit).toBe(0);
     await page.click("#new-chat");
@@ -2241,9 +2258,9 @@ test("the sea stays behind a chat, the butterfly sunk into it and every click th
     expect(await page.$eval("#sea-switch", (b) => b.getAttribute("aria-checked"))).toBe("false");
 
     const cores = async () => (await look(page, middle, "", "var(--accent-hi)")).close;
-    await openSettings(page);
+    await openSettings(page, "look");
     await page.click('#theme-pick [data-theme="light"]');
-    await page.click("#settings-toggle");
+    await closeSettings(page);
     await Bun.sleep(600);
     expect(await page.evaluate(() => document.documentElement.dataset.theme)).toBe("light");
     expect(await cores()).toBeGreaterThan(100);

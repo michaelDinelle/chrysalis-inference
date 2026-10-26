@@ -8,9 +8,14 @@ REPO = "michaelDinelle/chrysalis"
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
 
-def missing(name):
+def files(name):
     spec = MODELS[name]
-    return [p.removeprefix("data/models/") for p in (spec["path"], spec["vision"]) if not os.path.exists(os.path.join(ROOT, p))]
+    repo, rev, into, names = spec.get("upstream") or (None, None, None, [])
+    return [(REPO, None, "data/models", p.removeprefix("data/models/")) for p in (spec["path"], spec["vision"])] + [(repo, rev, into, f) for f in names]
+
+
+def missing(name):
+    return [f for f in files(name) if not os.path.exists(os.path.join(ROOT, f[2], f[3]))]
 
 
 def fetch(name):
@@ -20,7 +25,7 @@ def fetch(name):
     from huggingface_hub import HfApi, hf_hub_download
     from tqdm.auto import tqdm
     try:
-        total = sum(i.size for i in HfApi().get_paths_info(REPO, todo)) or 1
+        total = sum(i.size for repo, rev, _, f in todo for i in HfApi().get_paths_info(repo, [f], revision=rev)) or 1
     except Exception as e:
         sys.exit(f"  the models' repo cannot be reached ({type(e).__name__}): it tries again as Chrysalis next starts")
     done, t0, last, tty = 0, time.time(), 0.0, sys.stderr.isatty()
@@ -46,8 +51,8 @@ def fetch(name):
             return super().update(n)
 
     try:
-        for f in todo:
-            hf_hub_download(REPO, f, local_dir=os.path.join(ROOT, "data/models"), tqdm_class=Bar)
+        for repo, rev, into, f in todo:
+            hf_hub_download(repo, f, revision=rev, local_dir=os.path.join(ROOT, into), tqdm_class=Bar)
     except Exception as e:
         sys.exit(f"\n  the download stopped ({type(e).__name__}): it carries on from where it was as Chrysalis next starts")
     done = total

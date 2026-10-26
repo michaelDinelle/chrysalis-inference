@@ -199,7 +199,7 @@ test("a backend is kept only once it answers: an address where nothing does is s
   expect((await (await fetch(`${base}/api/status`)).json()).backend).toMatchObject({ chrysalis: true, name: "Chrysalis" });
 });
 
-test("a backend is Chrysalis by what its model list says, wherever it is: one that says so gets Chrysalis's own fields as the page sent them, one that does not gets OpenAI's fields alone, its thinking sent as reasoning reaching the page as reasoning_content", async () => {
+test("a backend is Chrysalis by what its model list says, wherever it is: one that says so gets Chrysalis's own fields as the page sent them, one that does not gets OpenAI's fields and llama.cpp's sampling fields alone, its thinking sent as reasoning reaching the page as reasoning_content", async () => {
   const got: Record<string, any> = {};
   const backend = (owner: string) => Bun.serve({ hostname: "127.0.0.1", port: 0, async fetch(req) {
     const path = new URL(req.url).pathname;
@@ -210,7 +210,7 @@ test("a backend is Chrysalis by what its model list says, wherever it is: one th
   } });
   const chrysalis = backend("chrysalis"), other = backend("llamacpp");
   const sent = { model: "m", stream: true, messages: [{ role: "user", content: "hi" }, { role: "assistant", content: "Hel" }], continue_final_message: true,
-    chrysalis_original: { role: "assistant", content: "Hello" }, chrysalis_append_token: 7, samplers: ["temperature"], logprobs: true, top_logprobs: 5, temperature: 0.5 };
+    chrysalis_original: { role: "assistant", content: "Hello" }, chrysalis_append_token: 7, samplers: ["temperature"], typical_p: 0.9, logprobs: true, top_logprobs: 5, temperature: 0.5 };
   const status = async () => (await (await fetch(`${base}/api/status`)).json()).backend;
   const ask = async () => [...(await (await fetch(`${base}/api/chat`, { method: "POST", headers: json, body: JSON.stringify(sent) })).text()).matchAll(/data: (\{.*\})/g)]
     .map((m) => JSON.parse(m[1]).choices?.[0]?.delta).filter(Boolean);
@@ -222,7 +222,8 @@ test("a backend is Chrysalis by what its model list says, wherever it is: one th
     }
     const { stream, ...rest } = sent;
     expect(got.chrysalis).toEqual({ ...rest, stream });
-    expect(got.llamacpp).toEqual({ model: "m", stream: true, messages: sent.messages, logprobs: true, top_logprobs: 5, temperature: 0.5 });
+    expect(got.llamacpp).toEqual({ model: "m", stream: true, messages: sent.messages, samplers: ["temperature"], typical_p: 0.9, logprobs: true, top_logprobs: 5,
+      temperature: 0.5 });
   } finally {
     expect((await fetch(`${base}/api/backend`, { method: "POST", headers: json, body: JSON.stringify({ url: `127.0.0.1:${fake.port}/v1` }) })).status).toBe(200);
     expect(await status()).toMatchObject({ chrysalis: true, service: true });
