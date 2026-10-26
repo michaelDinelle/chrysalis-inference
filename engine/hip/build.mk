@@ -1,0 +1,49 @@
+ROCM  ?= $(CURDIR)/data/rocm
+HIPCC := $(ROCM)/bin/hipcc
+FLAGS := -O3 -std=c++20 -fPIC --offload-arch=gfx1100 -Wno-unused-result
+H     := engine/hip
+SRC   := $(H)/27b/relayout.hip $(H)/27b/quant.hip $(H)/27b/ops.hip $(H)/gdn.hip $(H)/27b/attn.hip $(H)/vision.hip $(H)/27b/model.cpp $(H)/27b/load.cpp \
+         $(H)/27b/api.cpp
+KERN  := $(filter %.hip,$(SRC))
+LIBS  := -L$(ROCM)/lib -lhipblaslt -Wl,-rpath,$(ROCM)/lib -Wl,--no-undefined
+
+build/libchrysalis.so: $(SRC) $(wildcard engine/*.h $(H)/*.h $(H)/27b/*.h)
+	@mkdir -p build
+	$(HIPCC) $(FLAGS) -I$(H)/27b -x hip -shared -o $@ $(SRC) $(LIBS)
+
+build/test_quant build/test_attn build/test_gdn build/test_vision: build/%: tests/hip/%.hip $(KERN) $(wildcard engine/*.h $(H)/*.h $(H)/27b/*.h)
+	@mkdir -p build
+	$(HIPCC) $(FLAGS) -I$(H)/27b -o $@ $< $(KERN) $(LIBS)
+
+FN_SRC := $(H)/flash-next/relayout.hip $(H)/flash-next/quant.hip $(H)/flash-next/ops.hip $(H)/gdn.hip $(H)/flash-next/attn.hip \
+          $(H)/flash-next/moe.hip $(H)/flash-next/ple.hip $(H)/vision.hip $(H)/flash-next/model.cpp $(H)/flash-next/load.cpp \
+          $(H)/flash-next/experts.cpp $(H)/flash-next/api.cpp $(H)/flash-next/cpu_moe.cpp $(H)/flash-next/cpu_vnni.cpp
+FN_LIBS := $(LIBS) -L$(GGML)/build/bin -lggml-cpu -lggml-base -Wl,-rpath,$(GGML)/build/bin
+
+build/libchrysalis_fn.so: $(FN_SRC) $(wildcard engine/*.h $(H)/*.h $(H)/flash-next/*.h)
+	@mkdir -p build
+	$(HIPCC) $(FLAGS) -I$(H)/flash-next -I$(GGML)/ggml/include -x hip -shared -o $@ $(FN_SRC) $(FN_LIBS)
+
+FN_KERN := $(filter-out $(H)/flash-next/model.cpp $(H)/flash-next/load.cpp $(H)/flash-next/experts.cpp $(H)/flash-next/api.cpp,$(FN_SRC))
+build/test_%_fn: tests/hip/test_%_fn.cpp $(FN_KERN) $(wildcard $(H)/flash-next/*.h)
+	@mkdir -p build
+	$(HIPCC) $(FLAGS) -I$(H)/flash-next -I$(GGML)/ggml/include -x hip -o $@ $< $(FN_KERN) $(FN_LIBS)
+
+build/test_linear_fn: tests/hip/test_linear_fn.cpp $(FN_SRC) $(wildcard $(H)/flash-next/*.h)
+	@mkdir -p build
+	$(HIPCC) $(FLAGS) -I$(H)/flash-next -I$(GGML)/ggml/include -x hip -o $@ $< $(filter-out $(H)/flash-next/api.cpp,$(FN_SRC)) $(FN_LIBS)
+
+build/test_gdn_fn: tests/hip/test_gdn.hip
+
+kernels: build/test_quant build/test_attn build/test_gdn
+	./build/test_quant data/models/chrysalis-mix.gguf && ./build/test_attn && ./build/test_gdn
+
+kernels_fn: build/test_quant_fn build/test_attn_fn build/test_gdn_fn build/test_mix_fn build/test_moe_fn build/test_cpujob_fn build/test_linear_fn
+	./build/test_quant_fn && ./build/test_attn_fn && ./build/test_gdn_fn && ./build/test_mix_fn && ./build/test_moe_fn && \
+	./build/test_cpujob_fn && ./build/test_linear_fn
+
+LLAMA      := -O2 -std=c++17 -I$(GGML)/include -I$(GGML)/ggml/include
+LLAMA_LIBS := -L$(GGML)/build/bin -lllama -lggml -lggml-base -Wl,-rpath,$(GGML)/build/bin:$(ROCM)/lib
+CXX_HOST   := g++
+
+.PHONY: kernels kernels_fn

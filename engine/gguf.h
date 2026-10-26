@@ -103,7 +103,9 @@ struct GGUF {
     void drop(const void *p, size_t n) const {
         const size_t off = (size_t)((const uint8_t *)p - base) & ~size_t(4095);
         madvise(base + off, n + ((const uint8_t *)p - base - off), MADV_DONTNEED);
+#ifdef POSIX_FADV_DONTNEED
         posix_fadvise(fd, (off_t)off, (off_t)(n + ((const uint8_t *)p - base - off)), POSIX_FADV_DONTNEED);
+#endif
     }
     ~GGUF() { if (base && base != MAP_FAILED) munmap(base, size); if (fd >= 0) ::close(fd); }
 };

@@ -382,8 +382,8 @@ st = claude.messages.create(model=MODEL, max_tokens=60, stop_sequences=["4"], th
                             messages=[{"role": "user", "content": "Count from 1 to 9, separated by spaces."}])
 check("Messages: a stop sequence", st.stop_reason == "stop_sequence" and st.stop_sequence == "4" and "4" not in st.content[0].text,
       f"{st.stop_reason} {st.stop_sequence!r} {st.content[0].text!r}")
-photo = base64.b64encode(open("data/llama.cpp/tools/mtmd/test-1.jpeg", "rb").read()).decode()
 if srv.pictures:
+    photo = base64.b64encode(open("data/llama.cpp/tools/mtmd/test-1.jpeg", "rb").read()).decode()
     pic = claude.messages.create(model=MODEL, max_tokens=40, thinking={"type": "disabled"}, messages=[{"role": "user", "content": [
         {"type": "image", "source": {"type": "base64", "media_type": "image/jpeg", "data": photo}},
         {"type": "text", "text": "What is this front page's headline? Just the headline."}]}])
@@ -441,6 +441,20 @@ if srv.pictures:
                                  "what does the text say? One short sentence."}]}])
     said = r.choices[0].message.content or ""
     check("a video: what it shows, in order", "red" in said.lower() and "58" in said, repr(said[:70]))
+else:
+    from chrysalis.chat import NO_VISION
+    from chrysalis.server import merge_system
+    from pdf_fixture import pdf
+    asked = [{"role": "user", "content": [{"type": "image_url", "image_url": {"url": "data:image/png;base64,iVBORw0KGgo="}},
+                                          {"type": "text", "text": "What is this?"}]}]
+    prompt, _ = srv.renderer.render(srv.read_documents(merge_system(asked)), None, False, "xhigh", True, images=None)
+    check("a picture without a vision tower: the model is told", NO_VISION in srv.tok.full.decode(prompt))
+    doc = base64.b64encode(pdf([("text", "The secret code is CHRYSALIS-4217.")])).decode()
+    r = oai.chat.completions.create(model=MODEL, max_tokens=60, extra_body={"enable_thinking": False}, messages=[{"role": "user", "content": [
+        {"type": "file", "file": {"file_data": "data:application/pdf;base64," + doc, "filename": "code.pdf"}},
+        {"type": "text", "text": "What is the secret code in this document? Answer in one short sentence."}]}])
+    said = r.choices[0].message.content or ""
+    check("a PDF without a vision tower: its text", "4217" in said, repr(said[:60]))
 
 raw = oai.responses.with_raw_response.create(model=MODEL, input="Say hello in French.", reasoning={"effort": "none"}, max_output_tokens=40)
 resp = raw.http_response.json()
@@ -516,7 +530,7 @@ check("metrics: a reply's tokens", moved("chrysalis_completion_tokens_total", mo
       and moved("chrysalis_time_to_first_token_seconds_count", model=MODEL) == 1, f"{r.usage.completion_tokens} tokens")
 check("metrics: a refused request", moved("chrysalis_http_errors_total", status="400") == 1)
 now, dma = link.status(srv.link_dev), m1.get(("chrysalis_dma_bytes_per_second", ()))
-if srv.engine.expert_stats():
+if srv.engine.expert_stats() and srv.link_dev:
     lanes = now and now["gts"] * 1e9 * now["width"] * (0.8 if now["gts"] < 8 else 128 / 130) / 8
     check("metrics: the PCIe link bounds the DMA rate", bool(now and dma and 0.25 * lanes < dma <= lanes),
           f"link {now and now['gts']} GT/s x{now and now['width']} ({lanes and lanes / 1e9:.1f} GB/s), DMA {dma and dma / 1e9:.1f} GB/s")

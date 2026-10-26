@@ -295,12 +295,13 @@ native() {
     local FLAGS=(-O3 -std=c++20 -fPIC --offload-arch=gfx1100 -Wno-unused-result --gcc-toolchain=$GCC)
     local LIBS=(-L$ROCM/lib -lhipblaslt -pthread -ldl -Wl,--no-undefined)
     cd "$W"
-    local SRC=(engine/27b/relayout.hip engine/27b/quant.hip engine/27b/ops.hip engine/gdn.hip engine/27b/attn.hip engine/vision.hip engine/27b/model.cpp engine/27b/load.cpp engine/27b/api.cpp)
-    local FN_SRC=(engine/flash-next/relayout.hip engine/flash-next/quant.hip engine/flash-next/ops.hip engine/gdn.hip engine/flash-next/attn.hip engine/flash-next/moe.hip engine/flash-next/ple.hip
-                  engine/vision.hip engine/flash-next/model.cpp engine/flash-next/load.cpp engine/flash-next/experts.cpp engine/flash-next/api.cpp engine/flash-next/cpu_moe.cpp engine/flash-next/cpu_vnni.cpp)
+    local H=engine/hip
+    local SRC=($H/27b/relayout.hip $H/27b/quant.hip $H/27b/ops.hip $H/gdn.hip $H/27b/attn.hip $H/vision.hip $H/27b/model.cpp $H/27b/load.cpp $H/27b/api.cpp)
+    local FN_SRC=($H/flash-next/relayout.hip $H/flash-next/quant.hip $H/flash-next/ops.hip $H/gdn.hip $H/flash-next/attn.hip $H/flash-next/moe.hip $H/flash-next/ple.hip
+                  $H/vision.hip $H/flash-next/model.cpp $H/flash-next/load.cpp $H/flash-next/experts.cpp $H/flash-next/api.cpp $H/flash-next/cpu_moe.cpp $H/flash-next/cpu_vnni.cpp)
     mkdir -p /out/build
-    $ROCM/bin/hipcc "${FLAGS[@]}" -Iengine/27b -x hip -shared -o /out/build/libchrysalis.so "${SRC[@]}" "${LIBS[@]}" & a=$!
-    $ROCM/bin/hipcc "${FLAGS[@]}" -Iengine/flash-next -I$W/llama.cpp/ggml/include -x hip -shared -o /out/build/libchrysalis_fn.so "${FN_SRC[@]}" "${LIBS[@]}" \
+    $ROCM/bin/hipcc "${FLAGS[@]}" -I$H/27b -x hip -shared -o /out/build/libchrysalis.so "${SRC[@]}" "${LIBS[@]}" & a=$!
+    $ROCM/bin/hipcc "${FLAGS[@]}" -I$H/flash-next -I$W/llama.cpp/ggml/include -x hip -shared -o /out/build/libchrysalis_fn.so "${FN_SRC[@]}" "${LIBS[@]}" \
         -L/out/ggml/avx2 -lggml-cpu -lggml-base & b=$!
     wait $a && wait $b
     chown -R "$OWNER" /out

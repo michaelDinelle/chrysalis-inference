@@ -1,6 +1,8 @@
 import glob
+import re
 import shutil
 import subprocess
+import sys
 import threading
 import time
 
@@ -8,6 +10,10 @@ LOGIND = ["--system", "--dest", "org.freedesktop.login1", "--object-path", "/org
 
 
 def vram_used():
+    if sys.platform == "darwin":
+        out = subprocess.run(["ioreg", "-r", "-d", "1", "-c", "IOAccelerator"], capture_output=True, text=True).stdout
+        found = re.search(r'"In use system memory"=(\d+)', out)
+        return int(found.group(1)) if found else None
     cards = [(int(open(f).read()), f.replace("_total", "_used")) for f in glob.glob("/sys/class/drm/card*/device/mem_info_vram_total")]
     return int(open(max(cards)[1]).read()) if cards else None
 

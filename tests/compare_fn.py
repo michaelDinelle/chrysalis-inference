@@ -85,7 +85,7 @@ def stats(name, pairs, max_kl):
     return np.mean(kls) <= max_kl and top1 / len(pairs) >= MIN_TOP1
 
 
-eng = Engine(MODEL, max_seqs=2, umax=MODELS["qwen3.8-flash-next"]["chunk"], lib=os.path.join(ROOT, "build/libchrysalis_fn.so"))
+eng = Engine(MODEL, max_seqs=2, umax=MODELS["qwen3.8-flash-next"]["chunk"], lib=os.path.join(ROOT, MODELS["qwen3.8-flash-next"]["lib"]))
 eng.lib.chrysalis_tune.restype, eng.lib.chrysalis_tune.argtypes = C.c_double, [C.c_char_p, C.c_double]
 eng.lib.chrysalis_tune(b"split", 1); eng.lib.chrysalis_tune(b"gfrac", 0.3); eng.lib.chrysalis_tune(b"experts", 0)
 

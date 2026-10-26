@@ -1,6 +1,8 @@
 import ctypes as C
 import os
 
+from .models import LIB
+
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 LT_CACHE = os.path.join(ROOT, "data", "cache", "hipblaslt.txt")
 CALIBRATION = os.path.join(ROOT, "data", "cache", "flash-next-calibration.txt")
@@ -75,7 +77,7 @@ def load_async(*args, **kw):
 
 class Engine:
 
-    def __init__(self, model, max_seqs=4, umax=2048, reserve_mb=256, lib=os.path.join(ROOT, "build", "libchrysalis.so"), warmup=True):
+    def __init__(self, model, max_seqs=4, umax=2048, reserve_mb=256, lib=os.path.join(ROOT, "build", "libchrysalis" + LIB), warmup=True):
         self.lib = L = C.CDLL(lib)
         L.chrysalis_init.restype = C.c_int
         L.chrysalis_init.argtypes = [C.c_char_p, C.c_int, C.c_int, C.c_longlong]
