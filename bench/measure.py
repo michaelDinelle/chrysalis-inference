@@ -1,3 +1,4 @@
+import ctypes as C
 import glob
 import hashlib
 import json
@@ -25,15 +26,25 @@ RECORDS = lambda a, b: "\n".join(f"record{i:06d}: alpha beta gamma delta epsilon
 LONG = "[trial 1]\n" + RECORDS(1, 5201) + "\n\nSummarize the structure of these records and explain how to look up a record by its ID."
 MORE = RECORDS(5201, 5261) + "\n\nThese records were added since. Which ID is the last one now?"
 BENCH = {
-    "fn": dict(use="qwen3.8-flash-next", pin=True, skip=("engine/27b/",),
+    "fn": dict(use="qwen3.8-flash-next", skip=("engine/27b/",), env={"CHRYSALIS_FN_SPILL_GB": "1"}, tune=[("spill_spare", 0)],
                files=["data/models/flash-next/chrysalis-fn.gguf", "data/models/flash-next/src/Q8_0/Qwen3.8-Flash-Next-Q8_0-00003-of-00006.gguf",
-                      "data/models/tokenizer.json", "data/llama.cpp/build/bin/libggml-cpu.so", "data/llama.cpp/build/bin/libggml-base.so"],
+                      "data/models/tokenizer.json", "data/llama.cpp/build/bin/libggml-cpu.so", "data/llama.cpp/build/bin/libggml-base.so",
+                      "data/cache/hipblaslt.txt", "data/cache/flash-next-calibration.txt"],
                ref="build/cmp_strata/ref.bin",
                make_ref=["build/ref_logits_fn", "data/models/flash-next/src/Q8_0/Qwen3.8-Flash-Next-Q8_0-00001-of-00006.gguf"]),
-    "27b": dict(use="qwen3.8-27b", pin=False, skip=("engine/flash-next/",),
-                files=["data/models/chrysalis-mix.gguf", "data/models/tokenizer.json"],
+    "27b": dict(use="qwen3.8-27b", skip=("engine/flash-next/",), env={}, tune=[],
+                files=["data/models/chrysalis-mix.gguf", "data/models/tokenizer.json", "data/cache/hipblaslt.txt"],
                 ref="build/bench/ref-27b.bin", make_ref=["build/ref_logits", "data/models/chrysalis-mix.gguf"]),
 }
+
+
+def tuned(engine, name):
+    if BENCH[name]["tune"]:
+        tune = engine.lib.chrysalis_tune
+        tune.restype, tune.argtypes = C.c_double, [C.c_char_p, C.c_double]
+        for key, value in BENCH[name]["tune"]:
+            tune(key.encode(), value)
+    return engine
 
 
 def free_port():
@@ -109,6 +120,10 @@ def kl_tokens():
     return path
 
 
+def p99(gaps):
+    return gaps[min(len(gaps) - 1, math.ceil(0.99 * len(gaps)) - 1)] if gaps else None
+
+
 def run_pass(name, with_kl):
     B, b = strata(), BENCH[name]
     use, start = b["use"], time.monotonic()
@@ -119,11 +134,12 @@ def run_pass(name, with_kl):
     if os.path.exists(vram_out):
         os.remove(vram_out)
     cmd = ["systemd-run", "--user", "--scope", "-q", "-p", "MemorySwapMax=0", "env", f"LD_PRELOAD={os.path.join(ROOT, 'build/vram_peak.so')}",
-           f"BENCH_VRAM_OUT={vram_out}", f"CHRYSALIS_SNAPSHOTS={snap}", PY, os.path.join(ROOT, "bench/serve.py"), use, str(port)] + (["--pin"] if b["pin"] else [])
+           f"BENCH_VRAM_OUT={vram_out}", f"CHRYSALIS_SNAPSHOTS={snap}", *(f"{k}={v}" for k, v in b["env"].items()), PY, os.path.join(ROOT, "bench/serve.py"),
+           name, str(port)]
     url = f"http://127.0.0.1:{port}"
     t0 = time.monotonic()
     srv = subprocess.Popen(cmd, stdout=open(log_path, "w"), stderr=subprocess.STDOUT, start_new_session=True)
-    m, digest = {}, hashlib.sha256()
+    m, digest, answers = {}, hashlib.sha256(), []
     try:
         while True:
             if srv.poll() is not None:
@@ -150,15 +166,21 @@ def run_pass(name, with_kl):
             if stat.get("completion_tokens") != n:
                 sys.exit(f"bench: {name} {spec['id']}: the server's last reply is not this request's")
             content = "".join(raw["content"])
-            digest.update(json.dumps([spec["id"], "".join(raw["reasoning"]), content, sorted(raw["tool_calls"].items())]).encode())
+            said = json.dumps([spec["id"], "".join(raw["reasoning"]), content, [[c["name"], c["arguments"]] for _, c in sorted(raw["tool_calls"].items())]]).encode()
+            digest.update(said)
             gaps = sorted(b2[0] - a2[0] for a2, b2 in zip(raw["events"], raw["events"][1:]))
+            answers.append({"id": spec["id"], "answer": hashlib.sha256(said).hexdigest()[:16], "prompt": stat["prompt_tokens"], "cached": stat["cached_tokens"],
+                            "written": stat["completion_tokens"], "decode_tps": stat["decode_tps"], "per_pass": stat["tokens_per_step"],
+                            "gap_p99": p99(gaps)})
             return raw, stat, content, gaps
 
         def record(case, raw, stat, gaps):
             m[f"ttft.{case}"] = raw["events"][0][0]
             m[f"prompt_tps.{case}"] = (stat["prompt_tokens"] - stat["cached_tokens"]) / stat["prefill_s"]
             m[f"decode_tps.{case}"] = stat["decode_tps"]
-            m[f"itl_p99.{case}"] = gaps[min(len(gaps) - 1, math.ceil(0.99 * len(gaps)) - 1)] if gaps else None
+            m[f"per_pass.{case}"] = stat["tokens_per_step"]
+            m[f"pass_rate.{case}"] = stat["decode_tps"] / stat["tokens_per_step"]
+            m[f"itl_p99.{case}"] = p99(gaps)
 
         ask(next(s for s in specs.values() if s["phase"] == "warmup"))
         for case, sid in STRATA_CASES.items():
@@ -178,6 +200,9 @@ def run_pass(name, with_kl):
         raw, stat, _, gaps = ask(more)
         record("followup", raw, stat, gaps)
         m["reused.followup"] = stat["cached_tokens"]
+        experts = http(url + "/chrysalis/stats").get("experts")
+        if experts and "memory_limited" in experts:
+            m["mem_limited"] = experts["memory_limited"]
         pid = server_pid(srv.pid)
         m["ram_gb"] = next(int(l.split()[1]) for l in open(f"/proc/{pid}/status") if l.startswith("VmHWM:")) * 1024 / 1e9
     finally:
@@ -193,9 +218,10 @@ def run_pass(name, with_kl):
     m["vram_gb"] = int(open(vram_out).read()) / 1e9
     if with_kl:
         tokens = kl_tokens()
-        out = subprocess.run([PY, os.path.join(ROOT, "bench/kl.py"), use, tokens, kl_ref(name, tokens)], capture_output=True, text=True)
+        out = subprocess.run([PY, os.path.join(ROOT, "bench/kl.py"), name, tokens, kl_ref(name, tokens)], capture_output=True, text=True,
+                             env={**os.environ, **b["env"]})
         if out.returncode:
             sys.exit(f"bench: {name} KL failed:\n{out.stderr[-2000:]}")
         m.update(json.loads(out.stdout.strip().split("\n")[-1]))
     m["pass_s"] = time.monotonic() - start
-    return {"at": time.strftime("%Y-%m-%dT%H:%M:%S"), "metrics": m, "outputs": digest.hexdigest()[:16], "load": os.getloadavg()[0]}
+    return {"at": time.strftime("%Y-%m-%dT%H:%M:%S"), "metrics": m, "outputs": digest.hexdigest()[:16], "answers": answers, "load": os.getloadavg()[0]}

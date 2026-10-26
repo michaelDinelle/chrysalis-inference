@@ -1,4 +1,3 @@
-import ctypes as C
 import json
 import os
 import sys
@@ -8,7 +7,7 @@ import numpy as np
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, ROOT)
 from chrysalis.engine import Engine
-from chrysalis.models import MODELS
+from measure import BENCH, MODELS, tuned
 
 
 def logsoftmax(x):
@@ -18,14 +17,11 @@ def logsoftmax(x):
 
 
 if __name__ == "__main__":
-    use, tokens_path, ref_path = sys.argv[1:4]
-    spec = MODELS[use]
+    name, tokens_path, ref_path = sys.argv[1:4]
+    spec = MODELS[BENCH[name]["use"]]
     ids = np.fromfile(tokens_path, dtype=np.int32)
     ref = np.fromfile(ref_path, dtype=np.float32).reshape(len(ids), -1)
-    eng = Engine(os.path.join(ROOT, spec["path"]), max_seqs=2, umax=spec["chunk"], lib=os.path.join(ROOT, spec["lib"]))
-    if hasattr(eng.lib, "chrysalis_tune"):
-        eng.lib.chrysalis_tune.restype, eng.lib.chrysalis_tune.argtypes = C.c_double, [C.c_char_p, C.c_double]
-        eng.lib.chrysalis_tune(b"split", 1); eng.lib.chrysalis_tune(b"gfrac", 0.3); eng.lib.chrysalis_tune(b"experts", 0)
+    eng = tuned(Engine(os.path.join(ROOT, spec["path"]), max_seqs=3, umax=spec["chunk"], lib=os.path.join(ROOT, spec["lib"])), name)
     s = eng.new_seq()
     kls, top1 = [], 0
     for i, t in enumerate(ids):

@@ -14,14 +14,17 @@ RESULTS = os.path.join(ROOT, "bench/results.json")
 PROTOCOL = ["bench/measure.py", "bench/serve.py", "bench/kl.py", "bench/vram.c", "bench/kl.txt"]
 CODE = ["engine", "chrysalis", "Makefile"] + PROTOCOL
 SKIP = ("chrysalis/voice/",)
+CONTENT = ("decode_tps.", "itl_p99.", "per_pass.", "pass_rate.", "ttft.followup", "reused.followup")
+WRITING = (("decode_tps", "writing speed", 1), ("per_pass", "tokens per pass", 1), ("pass_rate", "passes per second", 1), ("gap_p99", "token gap p99", -1))
 
 
 def metric_dirs(name):
     d = {}
     for c in CASES:
         d[f"ttft.{c}"], d[f"prompt_tps.{c}"], d[f"decode_tps.{c}"], d[f"itl_p99.{c}"] = -1, 1, 1, -1
+        d[f"per_pass.{c}"], d[f"pass_rate.{c}"] = 1, 1
     d.update({"reused.followup": 1, "sanity": 1, "kl_mean": -1, "kl_p999": -1, "kl_max": -1, "top1": 1, "ram_gb": -1,
-              "kv_tokens": 1, "vram_gb": 0, "load_s": -1, "pass_s": 0})
+              "kv_tokens": 1, "vram_gb": 0, "load_s": -1, "pass_s": 0, "mem_limited": -1})
     return d
 
 
@@ -79,18 +82,23 @@ def env_files():
            [os.path.relpath(p, ROOT) for p in sorted(glob.glob(os.path.join(STRATA, "bench/prompts/standard-v1/MANIFEST.sha256")))]
 
 
+def digest(value):
+    return hashlib.sha256(json.dumps(value, sort_keys=True).encode()).hexdigest()[:16]
+
+
 def keys(tree, names=BENCH):
     os.makedirs(WORK, exist_ok=True)
     cache_path = os.path.join(WORK, "sha.json")
     cache = json.load(open(cache_path)) if os.path.exists(cache_path) else {}
     env = fingerprint()
-    env_id = hashlib.sha256(json.dumps(env, sort_keys=True).encode()).hexdigest()[:16]
+    env_id = digest(env)
     shared = {p: file_sha(os.path.join(ROOT, p), cache) for p in env_files()}
     out = {}
     for name in names:
         files = {p: file_sha(os.path.join(ROOT, p), cache) for p in BENCH[name]["files"] + [BENCH[name]["ref"]] if os.path.exists(os.path.join(ROOT, p))}
-        blob = {"code": code_pairs(name, tree), "files": files, "shared": shared, "env": env_id}
-        out[name] = hashlib.sha256(json.dumps(blob, sort_keys=True).encode()).hexdigest()[:16]
+        code = code_pairs(name, tree)
+        out[name] = {"key": digest({"code": code, "files": files, "shared": shared, "env": env_id}),
+                     "protocol": digest([c for c in code if c[0] in PROTOCOL]), "product": digest([c for c in code if c[0] not in PROTOCOL])}
     json.dump(cache, open(cache_path, "w"))
     return out, env_id, env
 
@@ -144,8 +152,13 @@ def t_quantile(p, dof):
     return (lo + hi) / 2
 
 
-def noise(data, name, env_id):
-    groups = [[p["metrics"] for p in e["passes"]] for e in data[name].values() if e["env"] == env_id and len(e["passes"]) > 1]
+def repeats(e):
+    return len(e["passes"]) > 1 and len({p["outputs"] for p in e["passes"]}) == 1
+
+
+def noise(data, name, env_id, protocol):
+    groups = [[p["metrics"] for p in e["passes"]] for e in data[name].values()
+              if e["env"] == env_id and e.get("protocol") == protocol and repeats(e)]
     out = {}
     for m in metric_dirs(name):
         ss, dof, seen = 0.0, 0, False
@@ -161,27 +174,65 @@ def noise(data, name, env_id):
     return out
 
 
+def same_answers(ea, eb):
+    a = {p["outputs"] for p in ea["passes"]}
+    return len(a) == 1 and a == {p["outputs"] for p in eb["passes"]}
+
+
+def paired(ea, eb, key, way):
+    def per(e):
+        vals = {}
+        for p in e["passes"]:
+            for a in p.get("answers", []):
+                if a["written"] >= 32 and a["per_pass"] and a.get(key if key != "pass_rate" else "decode_tps"):
+                    vals.setdefault(a["id"], []).append(a["decode_tps"] / a["per_pass"] if key == "pass_rate" else a[key])
+        return {k: statistics.fmean(v) for k, v in vals.items()}
+    a, b = per(ea), per(eb)
+    d = [way * math.log(b[k] / a[k]) for k in a if k in b]
+    if len(d) < 3:
+        return None
+    return len(d), statistics.fmean(d), t_quantile(0.99, len(d) - 1) * statistics.stdev(d) / math.sqrt(len(d))
+
+
 def compare(data, name, parent, child, env_id):
-    a, b = data[name][parent]["passes"], data[name][child]["passes"]
-    sig, dirs, steps, unknown = noise(data, name, env_id), metric_dirs(name), [], []
+    ea, eb = data[name][parent], data[name][child]
+    sig, dirs, steps, unknown = noise(data, name, env_id, eb.get("protocol")), metric_dirs(name), [], []
+
+    def side(e, m):
+        vals = [p["metrics"][m] for p in e["passes"] if p["metrics"].get(m) is not None]
+        if len(vals) > 1 and len({p["outputs"] for p in e["passes"]}) > 1:
+            return vals, statistics.variance(vals), len(vals) - 1
+        if m in sig:
+            return vals, sig[m][0] ** 2, sig[m][1]
+        return vals, None, None
+    same = same_answers(ea, eb)
     for m, d in dirs.items():
-        if d == 0:
+        if d == 0 or not same and m.startswith(CONTENT):
             continue
-        va, vb = [p["metrics"][m] for p in a if p["metrics"].get(m) is not None], [p["metrics"][m] for p in b if p["metrics"].get(m) is not None]
+        (va, sa, fa), (vb, sb, fb) = side(ea, m), side(eb, m)
         if not va or not vb:
             continue
         diff = d * (statistics.fmean(vb) - statistics.fmean(va))
-        if m not in sig:
+        if sa is None or sb is None:
             unknown.append(m)
             continue
-        s, dof = sig[m]
-        if s == 0:
+        ua, ub = sa / len(va), sb / len(vb)
+        if ua + ub == 0:
             if diff < 0:
                 steps.append((m, statistics.fmean(va), statistics.fmean(vb), 0.0))
-        else:
-            thr = t_quantile(0.99, dof) * s * math.sqrt(1 / len(va) + 1 / len(vb))
-            if diff < -thr:
-                steps.append((m, statistics.fmean(va), statistics.fmean(vb), thr))
+            continue
+        dof = (ua + ub) ** 2 / ((ua * ua / fa if ua else 0) + (ub * ub / fb if ub else 0))
+        thr = t_quantile(0.99, dof) * math.sqrt(ua + ub)
+        if diff < -thr:
+            steps.append((m, statistics.fmean(va), statistics.fmean(vb), thr))
+    if repeats(ea) and len(eb["passes"]) > 1 and not repeats(eb):
+        steps.append(("repeats its answers", 1, 0, 0.0))
+    for key, label, way in () if same else WRITING:
+        r = paired(ea, eb, key, way)
+        if r is None:
+            unknown.append(f"{label} over the answers")
+        elif r[1] < -r[2]:
+            steps.append((f"{label} over {r[0]} answers", 1.0, math.exp(r[1]), r[2]))
     return steps, unknown
 
 
@@ -210,8 +261,10 @@ def fmt(m, v):
         return "–"
     if m.startswith(("ttft", "load_s", "pass_s", "itl")):
         return f"{v * 1000:.0f} ms" if m.startswith("itl") else f"{v:.2f} s"
-    if m.startswith(("prompt_tps", "decode_tps")):
+    if m.startswith(("prompt_tps", "decode_tps", "pass_rate")):
         return f"{v:,.1f}"
+    if m.startswith("per_pass"):
+        return f"{v:.2f}"
     if m.startswith("kl"):
         return f"{v:.5f}"
     if m == "top1":
@@ -226,15 +279,24 @@ def table(data, name, key, env_id):
     if not e:
         print(f"{name}: not measured for this code and machine")
         return
-    sig = noise(data, name, env_id)
+    sig = noise(data, name, env_id, e.get("protocol"))
     mean = lambda m: statistics.fmean(v) if (v := [p["metrics"][m] for p in e["passes"] if p["metrics"].get(m) is not None]) else None
     res = lambda m: (t_quantile(0.99, sig[m][1]) * sig[m][0] * math.sqrt(2) / abs(mean(m)) * 100) if m in sig and sig[m][0] and mean(m) else None
-    print(f"\n{BENCH[name]['use']} ({len(e['passes'])} pass{'es' if len(e['passes']) > 1 else ''}, key {key})")
+    print(f"\n{BENCH[name]['use']} ({len(e['passes'])} pass{'es' if len(e['passes']) > 1 else ''}, key {key}, bench {e.get('protocol')})")
     print("| | " + " | ".join(CASES) + " |\n|---|" + "---:|" * len(CASES))
-    for row, label in (("ttft", "Time to first token"), ("prompt_tps", "Prompt tok/s"), ("decode_tps", "Decode tok/s"), ("itl_p99", "Token gap p99")):
+    for row, label in (("ttft", "Time to first token"), ("prompt_tps", "Prompt tok/s"), ("decode_tps", "Decode tok/s"), ("per_pass", "Tokens per pass"),
+                       ("pass_rate", "Passes per second"), ("itl_p99", "Token gap p99")):
         print(f"| {label} | " + " | ".join(fmt(f"{row}.{c}", mean(f"{row}.{c}")) for c in CASES) + " |")
+    try:
+        import limits
+        share = limits.shares(name, e["passes"])
+    except (OSError, StopIteration, KeyError, ImportError):
+        share = {}
+    if share:
+        for i, label in ((0, "Prompt, share of the theoretical max"), (1, "Writing, share of the theoretical max per pass")):
+            print(f"| {label} | " + " | ".join(f"{100 * share[c][i]:.0f}%" if c in share else "–" for c in CASES) + " |")
     print("\n| Metric | Value | Resolution |\n|---|---:|---:|")
-    for m in ("reused.followup", "sanity", "kl_mean", "kl_p999", "kl_max", "top1", "kv_tokens", "ram_gb", "vram_gb", "load_s"):
+    for m in ("reused.followup", "sanity", "kl_mean", "kl_p999", "kl_max", "top1", "kv_tokens", "ram_gb", "vram_gb", "load_s", "mem_limited"):
         r = res(m)
         print(f"| {m} | {fmt(m, mean(m))} | {'exact' if m in sig and sig[m][0] == 0 else f'{r:.2f}%' if r is not None else '–'} |")
     timed = [res(f"{row}.{c}") for row in ("ttft", "prompt_tps", "decode_tps") for c in CASES]
@@ -256,6 +318,24 @@ def make(names):
     subprocess.run(["make", "-s", "-C", ROOT, *targets], check=True)
 
 
+def measure(data, name, env_id, head, dirty, spread, confirm=False):
+    for _ in range(3):
+        before = keys("worktree", [name])[0][name]
+        entry = data[name].get(before["key"])
+        p = run_pass(name, with_kl=not entry or len(entry["passes"]) < 2)
+        after = keys("worktree", [name])[0][name]
+        if after["key"] != before["key"]:
+            print(f"bench: {name}'s machine caches changed during the pass (its calibration or hipBLASLt's picks); measuring again", flush=True)
+            continue
+        p["spread"] = spread
+        if confirm:
+            p["confirm"] = True
+        data[name].setdefault(after["key"], {"env": env_id, "protocol": after["protocol"], "head": head, "dirty": dirty, "passes": []})["passes"].append(p)
+        save_results(data)
+        return after["key"]
+    sys.exit(f"bench: {name}'s machine caches changed in three passes in a row")
+
+
 def cmd_run(argv):
     names = [n for n in BENCH if n in argv] or list(BENCH)
     passes = int(argv[argv.index("--passes") + 1]) if "--passes" in argv else 0
@@ -265,38 +345,42 @@ def cmd_run(argv):
     for name in names:
         kl_ref(name, tokens)
     data = load_results()
-    have, env_id, env = keys("worktree", names)
-    parent, _, _ = keys("HEAD", names)
+    _, env_id, env = keys("worktree", names)
     data["envs"][env_id] = env
     head = git("rev-parse", "HEAD").strip()
     dirty = bool(git("status", "--porcelain", "--", *CODE).strip())
     verdict = 0
     for name in names:
-        key = have[name]
-        entry = data[name].setdefault(key, {"env": env_id, "head": head, "dirty": dirty, "passes": []})
-        n = passes or (0 if entry["passes"] else 1)
+        key = keys("worktree", [name])[0][name]["key"]
+        n = passes or (0 if key in data[name] else 1)
         for i in range(n):
-            print(f"bench: {name} pass {len(entry['passes']) + 1}{' (spread)' if passes else ''}", flush=True)
-            p = run_pass(name, with_kl=len(entry["passes"]) < 2)
-            p["spread"] = bool(passes)
-            entry["passes"].append(p)
-            save_results(data)
-        if not passes and key != parent[name] and parent[name] in data[name]:
-            steps, unknown = compare(data, name, parent[name], key, env_id)
-            if steps and len(entry["passes"]) == 1 and all(s[3] > 0 for s in steps):
-                print(f"bench: {name} looks worse on {', '.join(s[0] for s in steps)}; confirming with a second pass", flush=True)
-                p = run_pass(name, with_kl=False)
-                p["confirm"] = True
-                entry["passes"].append(p)
-                save_results(data)
-                steps, unknown = compare(data, name, parent[name], key, env_id)
-            verdict |= report(name, steps, unknown)
+            print(f"bench: {name} pass {len(data[name].get(key, {'passes': []})['passes']) + 1}{' (spread)' if passes else ''}", flush=True)
+            key = measure(data, name, env_id, head, dirty, bool(passes))
+        have, parent = keys("worktree", [name])[0][name], keys("HEAD", [name])[0][name]
+        if not passes and key != parent["key"]:
+            if have["protocol"] != parent["protocol"]:
+                print(f"bench: {name}: the bench itself changed since HEAD, so these numbers start its new baseline", flush=True)
+            elif parent["key"] in data[name]:
+                steps, unknown = compare(data, name, parent["key"], key, env_id)
+                if steps and len(data[name][key]["passes"]) == 1 and all(s[3] > 0 for s in steps):
+                    print(f"bench: {name} looks worse on {', '.join(s[0] for s in steps)}; confirming with a second pass", flush=True)
+                    key = measure(data, name, env_id, head, dirty, False, confirm=True)
+                    steps, unknown = compare(data, name, parent["key"], key, env_id)
+                verdict |= report(name, steps, unknown)
+                same = {p["outputs"] for p in data[name][key]["passes"]} == {p["outputs"] for p in data[name][parent["key"]]["passes"]}
+                print(f"bench: {name} writes {'the same answers as' if same else 'different answers from'} HEAD", flush=True)
         table(data, name, key, env_id)
     sys.exit(verdict)
 
 
 def report(name, steps, unknown):
     for m, a, b, thr in steps:
+        if m == "repeats its answers":
+            print(f"bench: {name} stepped back: its answers no longer repeat from one pass to the next")
+            continue
+        if " over " in m:
+            print(f"bench: {name} {m} stepped back {100 * (1 - b):.1f}%, paired answer by answer (beyond its noise, {100 * (1 - math.exp(-thr)):.1f}%)")
+            continue
         print(f"bench: {name} {m} stepped back: {a:.6g} -> {b:.6g}" + (f" (beyond its noise, {thr:.3g})" if thr else " (repeats to the bit)"))
     if unknown:
         print(f"bench: {name} has no spread for {', '.join(unknown)}; run `bench.py run --passes 5` on a clean tree")
@@ -311,18 +395,22 @@ def check(child_tree, parent_tree, text, label, parent_measured):
     pk, _, _ = keys(parent_tree)
     bad = 0
     for name in BENCH:
-        if ck[name] == pk[name]:
+        c, p = ck[name], pk[name]
+        if c["key"] == p["key"]:
             continue
-        if ck[name] not in data[name]:
+        if c["protocol"] != p["protocol"] and c["product"] != p["product"]:
+            print(f"bench: {label}: {name}'s code and the bench both changed; commit them separately, so the bench's change can't hide a step back")
+            bad = 1
+        elif c["key"] not in data[name]:
             print(f"bench: {label}: {name} changed and has no numbers for this code and machine; run `make bench`")
             bad = 1
-        elif pk[name] not in data[name] and not parent_measured:
+        elif c["protocol"] != p["protocol"] or p["key"] not in data[name] and not parent_measured:
             continue
-        elif pk[name] not in data[name]:
+        elif p["key"] not in data[name]:
             print(f"bench: {label}: {name}'s parent has no numbers for this machine; run `make bench` on it first")
             bad = 1
         else:
-            bad |= report(name, *compare(data, name, pk[name], ck[name], env_id))
+            bad |= report(name, *compare(data, name, p["key"], c["key"], env_id))
     return bad
 
 
@@ -341,7 +429,7 @@ def instant_share():
         parents = git("rev-list", "--parents", "-n", "1", r).split()[1:]
         if parents:
             total += 1
-            same += keys(r)[0] == keys(parents[0])[0]
+            same += all(v["key"] == keys(parents[0])[0][n]["key"] for n, v in keys(r)[0].items())
     print(f"\n| Meta | Value |\n|---|---:|\n| Commits settled by the hash alone | {same} of {total} |")
 
 
@@ -371,5 +459,5 @@ if __name__ == "__main__":
         data = load_results()
         have, env_id, _ = keys("worktree")
         for name in BENCH:
-            table(data, name, have[name], env_id)
+            table(data, name, have[name]["key"], env_id)
         instant_share()
