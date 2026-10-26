@@ -555,6 +555,7 @@ void Engine::alloc_buffers(int max_seqs) {
         b.tsi = a.get<int>((size_t)T8 * nb * TOPK);
         b.topv = a.get<float>((size_t)T8 * TOPK);
         b.topi = a.get<int>((size_t)T8 * TOPK);
+        b.tops = a.get<float>((size_t)T8 * LOGIT_STATS);
         b.mtp_res = a.get<float>(MC * HCD);
         b.mtp_e = a.get<float>(MC * D);
         b.mtp_in = a.get<float>((size_t)8 * HC * 2 * D);
@@ -590,6 +591,7 @@ void Engine::alloc_buffers(int max_seqs) {
     CK(hipHostMalloc(&b.h_work, (N / 64 + 2 * NE) * sizeof(MoeWork)));
     CK(hipHostMalloc(&b.h_x16, (size_t)S * D * 2)); CK(hipHostMalloc(&b.h_cout, P * D * 2));
     CK(hipHostMalloc(&b.h_topv, (size_t)8 * TOPK * 4)); CK(hipHostMalloc(&b.h_topi, (size_t)8 * TOPK * 4)); CK(hipHostMalloc(&b.h_draft, 64));
+    CK(hipHostMalloc(&b.h_tops, (size_t)8 * LOGIT_STATS * 4));
     for (int k = 0; k < NSLOT; k++) {
         CK(hipHostMalloc(&b.bounce[k], raw_bytes));
         CK(hipEventCreateWithFlags(&raw_free[k], hipEventDisableTiming));
@@ -656,7 +658,7 @@ void Engine::shutdown() {
     if (barena.base) (void)hipFree(barena.base);
     warena = Arena{}; barena = Arena{};
     for (void *p : {(void *)b.ple_rows, (void *)b.h_ids, (void *)b.h_wts, (void *)b.h_tok, (void *)b.h_entw, (void *)b.h_pos, (void *)b.h_btok,
-                    (void *)b.h_work, (void *)b.h_x16, (void *)b.h_cout, (void *)b.h_topv, (void *)b.h_topi, (void *)b.h_draft, (void *)sh,
+                    (void *)b.h_work, (void *)b.h_x16, (void *)b.h_cout, (void *)b.h_topv, (void *)b.h_tops, (void *)b.h_topi, (void *)b.h_draft, (void *)sh,
                     (void *)sh_pred})
         if (p) (void)hipHostFree(p);
     if (embd.q) { void *h = nullptr; (void)hipHostGetDevicePointer(&h, embd.q, 0); }

@@ -391,6 +391,7 @@ void Engine::alloc_buffers(int max_seqs) {
         add((size_t)MAX_SPLITS * 8 * NH * HD * 4); add((size_t)MAX_SPLITS * 8 * NH * 2 * 4);
         add(8 * 2 * D * 5 / 4 * 3);
         add(8 * 64 * TOPK * 8 * 2);
+        add(8 * LOGIT_STATS * 4);
         add(48 * 8 * (QKV + GK * GD + GV * GD + 2 * GV) * 4);
         add(8 * D * 4 * 2); add(64);
         add(U * sizeof(half *)); add(U * 3 * 4);
@@ -411,6 +412,7 @@ void Engine::alloc_buffers(int max_seqs) {
     b.mq = {barena.get<int8_t>(8 * 2 * D), barena.get<float>(8 * 2 * D / 32)};
     b.aq = {barena.get<int8_t>(8 * FF), barena.get<float>(8 * FF / 32)};
     b.topv = barena.get<float>(8 * TOPK); b.topi = barena.get<int>(8 * TOPK);
+    b.tops = barena.get<float>(8 * LOGIT_STATS);
     b.tsv = barena.get<float>(8 * 64 * TOPK); b.tsi = barena.get<int>(8 * 64 * TOPK);
     b.v_raw = barena.get<float>(48 * 8 * QKV); b.v_kn = barena.get<float>(48 * 8 * GK * GD);
     b.v_vc = barena.get<float>(48 * 8 * GV * GD); b.v_ab = barena.get<float>(48 * 8 * 2 * GV);

@@ -16,22 +16,28 @@ class MissingImage(ValueError):
 IMG_BASE, IMG_ROWS = 1 << 30, 1 << 14
 
 
-STAGES = ("top_k", "temperature", "top_p", "min_p")
+STAGES = ("penalties", "dry", "top_n_sigma", "top_k", "typ_p", "top_p", "min_p", "xtc", "temperature")
+MAX_ORDER, NSTAT = 32, 6
 
 
 class Sampling(C.Structure):
-    _fields_ = [("temperature", C.c_float), ("top_p", C.c_float), ("min_p", C.c_float),
-                ("presence_penalty", C.c_float), ("top_k", C.c_int), ("n_draft", C.c_int), ("ban", C.c_int),
-                ("dry_multiplier", C.c_float), ("dry_base", C.c_float), ("dry_allowed_length", C.c_int),
-                ("order", C.c_int * 4), ("lookup", C.c_int), ("halt", C.c_int)]
+    _fields_ = [("temperature", C.c_float), ("dynatemp_range", C.c_float), ("dynatemp_exponent", C.c_float), ("top_k", C.c_int),
+                ("top_p", C.c_float), ("min_p", C.c_float), ("typical_p", C.c_float), ("xtc_probability", C.c_float),
+                ("xtc_threshold", C.c_float), ("top_n_sigma", C.c_float), ("repeat_last_n", C.c_int), ("repeat_penalty", C.c_float),
+                ("frequency_penalty", C.c_float), ("presence_penalty", C.c_float), ("dry_multiplier", C.c_float), ("dry_base", C.c_float),
+                ("dry_allowed_length", C.c_int), ("dry_penalty_last_n", C.c_int), ("mirostat", C.c_int), ("mirostat_tau", C.c_float),
+                ("mirostat_eta", C.c_float), ("min_keep", C.c_int), ("n_order", C.c_int), ("order", C.c_int * MAX_ORDER),
+                ("n_draft", C.c_int), ("lookup", C.c_int), ("ban", C.c_int), ("halt", C.c_int)]
+    DEFAULTS = dict(temperature=1.0, dynatemp_exponent=1.0, top_k=20, top_p=0.95, typical_p=1.0, xtc_threshold=0.1, top_n_sigma=-1.0,
+                    repeat_last_n=64, repeat_penalty=1.0, dry_base=1.75, dry_allowed_length=2, dry_penalty_last_n=-1, mirostat_tau=5.0,
+                    mirostat_eta=0.1, n_draft=3, ban=-1, halt=-1)
 
     def __init__(self, order=STAGES, **kw):
-        kw.setdefault("ban", -1)
-        kw.setdefault("halt", -1)
-        kw.setdefault("dry_base", 1.75)
-        kw.setdefault("dry_allowed_length", 2)
-        super().__init__(**kw)
-        self.order[:] = [STAGES.index(s) for s in order]
+        if len(order) > MAX_ORDER:
+            raise ValueError(f"samplers lists at most {MAX_ORDER} samplers")
+        super().__init__(**{**self.DEFAULTS, **kw})
+        self.n_order = len(order)
+        self.order[:len(order)] = [STAGES.index(s) for s in order]
 
 
 def wake_gpus():
@@ -92,8 +98,8 @@ class Engine:
             L.chrysalis_snap_export.argtypes, L.chrysalis_snap_export.restype = [C.c_int, C.c_void_p], C.c_int
             L.chrysalis_snap_import.argtypes, L.chrysalis_snap_import.restype = [C.c_void_p, C.c_int64], C.c_int
         L.chrysalis_generate.argtypes = [C.c_int, C.POINTER(Sampling), C.POINTER(C.c_int), C.c_int, C.c_void_p, C.c_void_p]
-        L.chrysalis_draw.argtypes, L.chrysalis_draw.restype = [C.c_int, C.c_void_p, C.c_void_p, C.POINTER(Sampling)], C.c_int
-        L.chrysalis_masked_top.argtypes = [C.c_void_p, C.c_void_p, C.c_void_p]
+        L.chrysalis_draw.argtypes, L.chrysalis_draw.restype = [C.c_int, C.c_void_p, C.c_void_p, C.c_void_p, C.POINTER(Sampling)], C.c_int
+        L.chrysalis_masked_top.argtypes = [C.c_void_p, C.c_void_p, C.c_void_p, C.c_void_p]
         self.masked = hasattr(L, "chrysalis_generate_masked")
         if self.masked:
             L.chrysalis_draft.argtypes = [C.c_int, C.POINTER(Sampling), C.c_void_p, C.c_int, C.c_int, C.c_void_p]
@@ -102,9 +108,11 @@ class Engine:
         self.batched = hasattr(L, "chrysalis_generate_batch")
         if self.batched:
             L.chrysalis_generate_batch.argtypes = [C.c_int, C.c_void_p, C.c_void_p, C.c_void_p, C.c_int, C.c_void_p, C.c_void_p, C.c_void_p]
-        L.chrysalis_seq_context.argtypes = [C.c_int, C.POINTER(C.c_int), C.c_int]
-        L.chrysalis_dry_breakers.argtypes = [C.POINTER(C.c_int), C.c_int]
-        L.chrysalis_seq_begin.argtypes = [C.c_int, C.c_uint64]
+        L.chrysalis_seq_context.argtypes = [C.c_int, C.c_void_p, C.c_int]
+        L.chrysalis_seq_breakers.argtypes = [C.c_int, C.c_void_p, C.c_int]
+        L.chrysalis_seq_bias.argtypes = [C.c_int, C.c_void_p, C.c_void_p, C.c_int]
+        L.chrysalis_seq_push.argtypes = [C.c_int, C.c_void_p, C.c_int]
+        L.chrysalis_seq_begin.argtypes = [C.c_int, C.c_uint64, C.POINTER(Sampling)]
         L.chrysalis_last_logits.argtypes = [C.POINTER(C.c_float)]
         if "CHRYSALIS_LT_CACHE" not in os.environ:
             os.makedirs(os.path.dirname(LT_CACHE), exist_ok=True)
@@ -188,8 +196,8 @@ class Engine:
         out = np.empty((rows, width), np.float32)
         return out[:self.lib.chrysalis_image_read(slot, out.ctypes.data)]
 
-    def begin(self, sid, seed):
-        self.lib.chrysalis_seq_begin(sid, seed)
+    def begin(self, sid, seed, sampling=None):
+        self.lib.chrysalis_seq_begin(sid, seed, None if sampling is None else C.byref(sampling))
 
     def generate(self, sid, sampling, max_out=16, rows=False):
         import numpy as np
@@ -206,16 +214,18 @@ class Engine:
     def masked_top(self, bitmask):
         import numpy as np
         bitmask = np.ascontiguousarray(bitmask, np.uint32)
-        v, ids = np.empty(64, np.float32), np.empty(64, np.int32)
-        self.lib.chrysalis_masked_top(bitmask.ctypes.data, v.ctypes.data, ids.ctypes.data)
-        return v, ids
+        v, ids, stats = np.empty(64, np.float32), np.empty(64, np.int32), np.empty(NSTAT, np.float32)
+        self.lib.chrysalis_masked_top(bitmask.ctypes.data, v.ctypes.data, ids.ctypes.data, stats.ctypes.data)
+        return v, ids, stats
 
-    def draw(self, sid, values, ids, sampling):
+    def draw(self, sid, values, ids, stats, sampling):
         import numpy as np
         values = np.ascontiguousarray(values, np.float32)
         ids = np.ascontiguousarray(ids, np.int32)
         assert len(values) == len(ids) == 64
-        return self.lib.chrysalis_draw(sid, values.ctypes.data, ids.ctypes.data, C.byref(sampling))
+        stats = None if stats is None else np.ascontiguousarray(stats, np.float32)
+        return self.lib.chrysalis_draw(sid, values.ctypes.data, ids.ctypes.data, None if stats is None else stats.ctypes.data,
+                                       C.byref(sampling))
 
     def set_pending(self, sid, tok):
         self.lib.chrysalis_seq_pending(sid, tok)
@@ -263,12 +273,25 @@ class Engine:
             self.lib.chrysalis_seq_lookup(sid, C.c_void_p(tokens.ctypes.data), len(tokens))
 
     def set_context(self, sid, tokens):
-        arr = (C.c_int * len(tokens))(*tokens)
-        self.lib.chrysalis_seq_context(sid, arr, len(tokens))
+        import numpy as np
+        tokens = np.ascontiguousarray(tokens, np.int32)
+        self.lib.chrysalis_seq_context(sid, tokens.ctypes.data, len(tokens))
 
-    def set_dry_breakers(self, ids):
-        arr = (C.c_int * len(ids))(*ids)
-        self.lib.chrysalis_dry_breakers(arr, len(ids))
+    def set_bias(self, sid, bias):
+        import numpy as np
+        ids = np.ascontiguousarray([t for t, _ in bias], np.int32)
+        vals = np.ascontiguousarray([b for _, b in bias], np.float32)
+        self.lib.chrysalis_seq_bias(sid, ids.ctypes.data, vals.ctypes.data, len(ids))
+
+    def set_breakers(self, sid, flat):
+        import numpy as np
+        flat = np.ascontiguousarray(flat, np.int32)
+        self.lib.chrysalis_seq_breakers(sid, flat.ctypes.data, len(flat))
+
+    def push(self, sid, tokens):
+        import numpy as np
+        tokens = np.ascontiguousarray(tokens, np.int32)
+        self.lib.chrysalis_seq_push(sid, tokens.ctypes.data, len(tokens))
 
     def snapshot(self, sid):
         return self.lib.chrysalis_snapshot(sid)

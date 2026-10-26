@@ -24,6 +24,8 @@ void norm_rows(const float *x, const float *w, int T, float *of, half *oh, QAct 
 void swiglu_h(half *g, const half *u, int64_t n, hipStream_t st);
 void store_f16(const half *x, int n, int T, float *y, int ldy, bool accumulate, hipStream_t st);
 void topk(const float *logits, int T, int n, int ld, float *scratch_v, int *scratch_i, float *ov, int *oi, hipStream_t st);
+constexpr int LOGIT_STATS = 6;
+void logit_stats(const float *logits, int T, int n, int ld, float *out, hipStream_t st);
 void mask_logits(float *logits, const uint32_t *mask, int n, int rows, hipStream_t st);
 void argmax(const float *logits, int T, int n, int ld, int *out, hipStream_t st);
 

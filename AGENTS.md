@@ -20,7 +20,9 @@ None: no comments or docstrings anywhere in the repo, in any language, including
 
 ## Running them
 
-- CPU only: `make build/test_sampler && build/test_sampler`, `data/venv/bin/python tests/test_cache.py`,
+- CPU only: `make build/test_sampler && build/test_sampler` (the sampler against llama.cpp's own samplers),
+  `make build/llama_params && data/venv/bin/python tests/test_requests.py` (requests against llama.cpp's server's parser),
+  `data/venv/bin/python tests/test_cache.py`,
   `data/venv/bin/python tests/test_lanes.py` (requests in flight, sub-agents beside a session's title),
   `data/venv/bin/python tests/test_chat.py`, `data/venv/bin/python tests/test_documents.py` (which PDF pages are
   pictured), `make build/test_cpujob_fn && build/test_cpujob_fn`, `make test_voice` (the voice service: its features against

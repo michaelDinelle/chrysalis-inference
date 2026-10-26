@@ -3,6 +3,7 @@ import hashlib
 import ipaddress
 import itertools
 import json
+import math
 import os
 import random
 import re
@@ -23,7 +24,7 @@ from .chat import Clip, Content, OutputParser, Renderer, StopText, Tokens, messa
 from .documents import DocumentError, Documents
 from .structured import Grammars
 from .warm import Warmer
-from .engine import IMG_BASE, IMG_ROWS, STAGES, Engine, KVFull, Sampling, load_async, load_progress
+from .engine import IMG_BASE, IMG_ROWS, MAX_ORDER, STAGES, Engine, KVFull, Sampling, load_async, load_progress
 from .metrics import Metrics
 from .models import MODELS
 from .sleep import SleepGuard, vram_used, wait_vram_freed
@@ -52,6 +53,116 @@ class ContextError(RequestError):
 
 class Asleep(RequestError):
     code, status = "unavailable", 503
+
+
+INT32 = 2**31 - 1
+SAMPLER_LETTERS = {"e": "penalties", "d": "dry", "s": "top_n_sigma", "k": "top_k", "y": "typ_p", "p": "top_p", "m": "min_p", "x": "xtc",
+                   "t": "temperature", "i": "infill", "a": "adaptive_p"}
+SAMPLER_NAMES = {**{n: n for n in SAMPLER_LETTERS.values()}, "nucleus": "top_p", "temp": "temperature", "typ": "typ_p",
+                 **{alias: n for n in SAMPLER_LETTERS.values() if "_" in n for alias in (n.replace("_", "-"), n.replace("_", ""))}}
+DRY_BREAKERS = ("\n", ":", "\"", "*")
+EOG = ("<|im_end|>", "<|endoftext|>", "<|fim_pad|>", "<|repo_name|>", "<|file_sep|>")
+TOKEN_KEY = re.compile(r"\s*[+-]?\d+")
+
+
+def number(body, key, default, low=-math.inf, high=math.inf, clamp=False, whole=False):
+    v = body.get(key)
+    if v is None:
+        return default
+    if isinstance(v, bool) or not isinstance(v, (int, float)) or not math.isfinite(v) or whole and v != int(v):
+        raise RequestError(f"{key} must be a {'whole ' if whole else ''}number")
+    v = int(v) if whole else float(v)
+    if clamp:
+        return max(low, min(high, v))
+    if v < low or v > high:
+        raise RequestError(f"{key} must be at least {low}" if high in (INT32, math.inf) else f"{key} must be between {low} and {high}")
+    return v
+
+
+def samplers_of(value):
+    if value is None:
+        return list(STAGES)
+    if isinstance(value, str):
+        bad = next((c for c in value if c not in SAMPLER_LETTERS), None)
+        if bad is not None:
+            raise RequestError(f"samplers: {bad!r} is not a sampler letter; they are {''.join(SAMPLER_LETTERS)}")
+        names = [SAMPLER_LETTERS[c] for c in value]
+    elif isinstance(value, list) and all(isinstance(x, str) for x in value):
+        bad = next((x for x in value if x.lower() not in SAMPLER_NAMES), None)
+        if bad is not None:
+            raise RequestError(f"samplers: {bad!r} is not a sampler; they are {', '.join(STAGES)}")
+        names = [SAMPLER_NAMES[x.lower()] for x in value]
+    else:
+        raise RequestError("samplers must be a list of sampler names or a string of sampler letters")
+    missing = next((n for n in names if n not in STAGES), None)
+    if missing:
+        raise RequestError(f"samplers: Chrysalis has no {missing} sampler")
+    if len(names) > MAX_ORDER:
+        raise RequestError(f"samplers lists at most {MAX_ORDER} samplers")
+    return names
+
+
+def logit_bias_of(value, tok):
+    if value is None:
+        return []
+    vocab = tok.full.get_vocab_size()
+    if isinstance(value, dict):
+        pairs = [(int(k) if TOKEN_KEY.fullmatch(k) else k, v) for k, v in value.items()]
+    elif isinstance(value, list) and all(isinstance(x, list) and len(x) == 2 for x in value):
+        pairs = [tuple(x) for x in value]
+    else:
+        raise RequestError("logit_bias must be an object of token: bias or a list of [token, bias] pairs")
+    out = []
+    for key, bias in pairs:
+        if bias is not False and (isinstance(bias, bool) or not isinstance(bias, (int, float)) or not math.isfinite(bias)):
+            raise RequestError(f"logit_bias: the bias for {key!r} must be a number, or false to ban the token")
+        if isinstance(key, str):
+            ids = tok.encode_plain(key)
+        elif isinstance(key, int) and not isinstance(key, bool) and 0 <= key < vocab:
+            ids = [key]
+        else:
+            raise RequestError(f"logit_bias: {key!r} is not a token id (0 to {vocab - 1}) or a string")
+        out += [(t, -math.inf if bias is False else float(bias)) for t in ids]
+    return out
+
+
+def breakers_of(value):
+    if value is None:
+        return DRY_BREAKERS
+    if not isinstance(value, list) or not value or not all(isinstance(x, str) for x in value):
+        raise RequestError("dry_sequence_breakers must be a non-empty list of strings")
+    return tuple(value)
+
+
+def sampling_of(body, defaults, tok, ban):
+    d = defaults
+    dry_base = number(body, "dry_base", 1.75)
+    if body.get("ignore_eos") is not None and not isinstance(body.get("ignore_eos"), bool):
+        raise RequestError("ignore_eos must be true or false")
+    sp = Sampling(order=samplers_of(body.get("samplers")),
+                  temperature=number(body, "temperature", d["temperature"], 0.0, math.inf, clamp=True),
+                  dynatemp_range=number(body, "dynatemp_range", 0.0), dynatemp_exponent=number(body, "dynatemp_exponent", 1.0),
+                  top_k=number(body, "top_k", d["top_k"], 0, INT32, clamp=True, whole=True),
+                  top_p=number(body, "top_p", d["top_p"], 0.0, 1.0, clamp=True), min_p=number(body, "min_p", d["min_p"], 0.0, 1.0, clamp=True),
+                  typical_p=number(body, "typical_p", 1.0),
+                  xtc_probability=number(body, "xtc_probability", 0.0, 0.0, 1.0, clamp=True),
+                  xtc_threshold=number(body, "xtc_threshold", 0.1, 0.0, 1.0, clamp=True), top_n_sigma=number(body, "top_n_sigma", -1.0),
+                  repeat_last_n=number(body, "repeat_last_n", 64, -1, INT32, whole=True),
+                  repeat_penalty=number(body, "repeat_penalty", 1.0),
+                  frequency_penalty=number(body, "frequency_penalty", 0.0),
+                  presence_penalty=number(body, "presence_penalty", d["presence_penalty"]),
+                  dry_multiplier=number(body, "dry_multiplier", 0.0), dry_base=dry_base if dry_base >= 1 else 1.75,
+                  dry_allowed_length=number(body, "dry_allowed_length", 2, 0, INT32, whole=True),
+                  dry_penalty_last_n=number(body, "dry_penalty_last_n", -1, -1, INT32, whole=True),
+                  mirostat=number(body, "mirostat", 0, 0, 2, clamp=True, whole=True), mirostat_tau=number(body, "mirostat_tau", 5.0),
+                  mirostat_eta=number(body, "mirostat_eta", 0.1), min_keep=number(body, "min_keep", 0, 0, INT32, whole=True), ban=ban)
+    if sp.repeat_penalty <= 0:
+        raise RequestError("repeat_penalty must be greater than 0")
+    bias = logit_bias_of(body.get("logit_bias"), tok)
+    if body.get("ignore_eos"):
+        bias += [(t, -math.inf) for t in map(tok.full.token_to_id, EOG) if t is not None]
+    return (sp, bias, breakers_of(body.get("dry_sequence_breakers")), number(body, "n_probs", 0, whole=True),
+            number(body, "n_predict", None, -1, INT32, whole=True))
 
 
 def first_text(content):
@@ -655,17 +766,8 @@ class Server:
             yield "prefix", {"reasoning_content": reasoning, "content": content}
         if aside:
             thinking = False
-        d = DEFAULTS[bool(thinking)]
-        order = body.get("samplers") or STAGES
-        order = [x for x in order if x in STAGES]
-        sp = Sampling(temperature=float(body.get("temperature", d["temperature"])), top_p=float(body.get("top_p", d["top_p"])),
-                      min_p=float(body.get("min_p", d["min_p"])), presence_penalty=float(body.get("presence_penalty", d["presence_penalty"])),
-                      top_k=int(body.get("top_k", d["top_k"])), n_draft=self.n_draft, lookup=self.lookup,
-                      dry_multiplier=float(body.get("dry_multiplier") or 0), dry_base=float(body.get("dry_base") or 1.75),
-                      dry_allowed_length=int(body.get("dry_allowed_length") or 2),
-                      order=order + [x for x in STAGES if x not in order],
-                      ban=-1 if tools else self.tok.id["<tool_call>"])
-        top_lp = int(body.get("top_logprobs") or 0) if body.get("logprobs") else -1
+        sp, bias, breakers, n_probs, n_predict = sampling_of(body, DEFAULTS[bool(thinking)], self.tok, -1 if tools else self.tok.id["<tool_call>"])
+        top_lp = int(body.get("top_logprobs") or 0) if body.get("logprobs") else n_probs if n_probs > 0 else -1
         stops = body.get("stop") or []
         stops = [stops] if isinstance(stops, str) else stops
         if not isinstance(stops, list) or not all(isinstance(x, str) for x in stops):
@@ -678,7 +780,8 @@ class Server:
         budget = body.get("thinking_budget", kw.get("thinking_budget", (body.get("reasoning") or {}).get("max_tokens")))
         if budget is not None and (isinstance(budget, bool) or not isinstance(budget, int) or budget < 0):
             raise RequestError("thinking_budget must be a whole number of tokens")
-        max_tokens = int(body.get("max_completion_tokens") or body.get("max_tokens") or MAX_OUTPUT)
+        max_tokens = (int(body.get("max_completion_tokens") or body.get("max_tokens") or MAX_OUTPUT) if n_predict is None
+                      else MAX_OUTPUT if n_predict < 0 else n_predict)
         if side:
             max_tokens = min(max_tokens, 256)
         if len(prompt) + 1 >= self.capacity:
@@ -712,7 +815,7 @@ class Server:
                 prompt += prefix
             yield from self.run(np.array(prompt, np.int32), marks, sp, seed, max_tokens, bool(thinking), schemas, record, side,
                                 cont=cont, top_lp=min(top_lp, 64), aside=aside, stops=stops, seen=seen, answer=answer, held=held,
-                                strict=strict, budget=budget if thinking else None)
+                                strict=strict, budget=budget if thinking else None, bias=bias, breakers=breakers)
         finally:
             held.drop()
             if held.slot:
@@ -776,6 +879,7 @@ class Server:
         except BaseException:
             held.drop()
             raise
+        self.engine.push(slot.sid, toks)
         if not keep:
             held.drop()
 
@@ -838,14 +942,34 @@ class Server:
     def piece(self, tid):
         return self.tok.decode([tid])
 
-    def dry_breakers(self):
-        if getattr(self.engine, "_dry_set", False):
-            return
-        if not hasattr(self, "_breakers"):
-            texts = self.tok.full.decode_batch([[i] for i in range(self.tok.full.get_vocab_size())], skip_special_tokens=False)
-            self._breakers = [i for i, t in enumerate(texts) if any(ch in t for ch in "\n:\"*")]
-        self.engine.set_dry_breakers(self._breakers)
-        self.engine._dry_set = True
+    @functools.cached_property
+    def token_bytes(self):
+        printable = [*range(33, 127), *range(161, 173), *range(174, 256)]
+        byte_of = {chr(b): b for b in printable} | {chr(256 + i): b for i, b in enumerate(b for b in range(256) if b not in printable)}
+        added = set(self.tok.added)
+        words = (self.tok.full.id_to_token(i) or "" for i in range(self.tok.full.get_vocab_size()))
+        return [w.encode() if w in added else bytes(byte_of[c] for c in w) for w in words]
+
+    @functools.lru_cache(maxsize=16)
+    def restart_sequences(self, breakers):
+        out, known = [], set()
+        for text in breakers:
+            b = text.encode()[:40]
+            for tid, word in enumerate(self.token_bytes if b else ()):
+                if b in word:
+                    out += [1, tid]
+                    continue
+                for k in range(1, len(b)):
+                    if not word.endswith(b[:k]):
+                        continue
+                    try:
+                        tail = tuple(self.tok.encode_plain(b[k:].decode())[:20])
+                    except UnicodeDecodeError:
+                        continue
+                    if (tid, tail) not in known:
+                        known.add((tid, tail))
+                        out += [1 + len(tail), tid, *tail]
+        return out
 
     def compaction(self, messages):
         user = text_of(messages[-1].get("content"))
@@ -896,7 +1020,7 @@ class Server:
         return self.engine.free_tokens() >= need
 
     def run(self, prompt, marks, sp, seed, max_tokens, thinking, schemas, record, side=False, cont=None, top_lp=-1, aside=False,
-            stops=(), seen=None, answer=None, held=None, strict=None, budget=None):
+            stops=(), seen=None, answer=None, held=None, strict=None, budget=None, bias=(), breakers=DRY_BREAKERS):
         t0 = time.time()
         trace = [] if TRACE else None
         slot, cached = self.cache.acquire(prompt[:-1] if answer else prompt)
@@ -935,12 +1059,17 @@ class Server:
                 if trace is not None:
                     trace.append(("checkpoint", time.time() - t))
         t_prefill = time.time()
-        if sp.dry_multiplier > 0:
-            self.dry_breakers()
-            self.engine.set_context(slot.sid, prompt[-32768:].tolist())
+        text = prompt[prompt < IMG_BASE]
+        dry = sp.dry_multiplier != 0
+        need = len(text) if sp.repeat_last_n < 0 or dry and sp.dry_penalty_last_n < 0 else max(sp.repeat_last_n, sp.dry_penalty_last_n * dry)
+        self.engine.set_context(slot.sid, text[len(text) - min(need, len(text)):])
         if sp.lookup > 0:
             self.engine.set_lookup(slot.sid, prompt)
-        self.engine.begin(slot.sid, seed)
+        self.engine.begin(slot.sid, seed, sp)
+        if bias:
+            self.engine.set_bias(slot.sid, bias)
+        if dry:
+            self.engine.set_breakers(slot.sid, self.restart_sequences(breakers))
         prefix, parser = cont or ([], OutputParser(self.tok, thinking, schemas))
         stop_text = StopText(stops)
         out, finish, steps, completed, calls = [], "stop", 0, False, []
@@ -1429,7 +1558,7 @@ def seed_of(body):
         seed = int(seed)
     if not isinstance(seed, int) or isinstance(seed, bool):
         raise RequestError("seed must be an integer")
-    return seed % 2**64
+    return random.getrandbits(32) if seed == -1 else seed % 2**64
 
 
 def usage_of(info):

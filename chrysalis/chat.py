@@ -96,6 +96,15 @@ class Tokens:
     def decode(self, ids):
         return self.full.decode(ids, skip_special_tokens=False)
 
+    @functools.cached_property
+    def plain(self):
+        t = Tokenizer.from_str(self.full.to_str())
+        t.encode_special_tokens = True
+        return t
+
+    def encode_plain(self, text):
+        return self.plain.encode(text, add_special_tokens=False).ids
+
 
 class Picture(NamedTuple):
     url: str

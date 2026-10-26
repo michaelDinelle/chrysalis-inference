@@ -25,33 +25,36 @@ int chrysalis_seq_new() { return E->seq_new(); }
 void chrysalis_seq_free(int id) { E->seq_free(id); }
 int chrysalis_seq_len(int id) { return E->seqs.at(id).n; }
 void chrysalis_seq_truncate(int id, int n) { E->seq_truncate(id, n); }
-void chrysalis_seq_begin(int id, uint64_t seed) {
+void chrysalis_seq_begin(int id, uint64_t seed, const Sampling *sp) {
     Seq &s = E->seqs.at(id);
     s.rng.seed(seed);
-    s.seen.clear();
+    s.seen.begin(s.ctx, sp ? *sp : Sampling{});
 }
 void chrysalis_seq_lookup(int id, const int *tokens, int n) { E->seqs.at(id).look.set(tokens, n); }
 void chrysalis_seq_context(int id, const int *tokens, int n) { E->seqs.at(id).ctx.assign(tokens, tokens + n); }
-void chrysalis_dry_breakers(const int *ids, int n) {
-    dry_breakers.assign(VOCAB, 0);
-    for (int i = 0; i < n; i++) if (ids[i] >= 0 && ids[i] < VOCAB) dry_breakers[ids[i]] = 1;
+void chrysalis_seq_breakers(int id, const int *flat, int n) { E->seqs.at(id).seen.set_breakers(flat, n); }
+void chrysalis_seq_bias(int id, const int *ids, const float *vals, int n) { E->seqs.at(id).seen.set_bias(ids, vals, n); }
+void chrysalis_seq_push(int id, const int *tokens, int n) {
+    Seq &s = E->seqs.at(id);
+    for (int i = 0; i < n; i++) s.seen.push(tokens[i], 0);
 }
 int chrysalis_free_tokens() { return (int)E->free_pages.size() * PAGE; }
 int chrysalis_generate_batch(int n, const int *ids, const Sampling *sps, int *out, int max_out, int *counts, float *rows_v, int *rows_i) {
     try { E->generate_batch(n, ids, sps, out, max_out, counts, rows_v, rows_i); return 0; } catch (const std::exception &) { return -1; }
 }
-void chrysalis_masked_top(const uint32_t *mask, float *v, int *ids) {
+void chrysalis_masked_top(const uint32_t *mask, float *v, int *ids, float *stats) {
     CK(hipMemcpyAsync(E->mask_rows(), mask, VOCAB / 32 * 4, hipMemcpyHostToDevice, E->st));
     mask_logits(E->b.logits, E->d_mask, VOCAB, 1, E->st);
     topk(E->b.logits, 1, VOCAB, VOCAB, E->b.tsv, E->b.tsi, E->b.topv, E->b.topi, E->st);
+    logit_stats(E->b.logits, 1, VOCAB, VOCAB, E->b.tops, E->st);
     CK(hipMemcpyAsync(v, E->b.topv, SAMPLE_N * 4, hipMemcpyDeviceToHost, E->st));
     CK(hipMemcpyAsync(ids, E->b.topi, SAMPLE_N * 4, hipMemcpyDeviceToHost, E->st));
+    CK(hipMemcpyAsync(stats, E->b.tops, NSTAT * 4, hipMemcpyDeviceToHost, E->st));
     CK(hipStreamSynchronize(E->st));
 }
-int chrysalis_draw(int id, const float *v, const int *ids, const Sampling *sp) {
+int chrysalis_draw(int id, const float *v, const int *ids, const float *stats, const Sampling *sp) {
     Seq &s = E->seqs.at(id);
-    const int t = draw(make_dist(v, ids, *sp, s.seen, s.ctx), s.rng);
-    s.seen.push(t);
+    const int t = sample(s.seen, v, ids, stats, *sp, s.rng);
     if (sp->lookup > 0) s.look.push(t);
     return t;
 }

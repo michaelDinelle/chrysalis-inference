@@ -3,6 +3,7 @@
 #include "../sampler.h"
 #include "../lookup.h"
 static_assert(TOPK == SAMPLE_N, "the sampler takes the engine's rows as they are");
+static_assert(LOGIT_STATS == NSTAT, "the sampler reads the statistics the engine writes");
 #include "cpu_moe.h"
 #include "../vision.h"
 #include <hipblaslt/hipblaslt.h>
@@ -195,7 +196,7 @@ struct Engine {
         float *logits_e, *sg, *wts, *y, *moe; int *ids, *hot;
         QAct hq_e;
         uint8_t *ple_rows, *d_ple_rows; float *emb, *key, *value, *xconv; half *emb_h; QAct emb_q;
-        float *logits, *topv, *tsv; int *topi, *tsi;
+        float *logits, *topv, *tsv, *tops; int *topi, *tsi;
         float *mtp_res, *mtp_e, *mtp_in; half *mtp_in_h; QAct mtp_in_q; int *draft;
         float *fin; QAct fin_q; half *fin_h;
         float *inv;
@@ -205,7 +206,7 @@ struct Engine {
         half *Xs, *Hs, *Ys, *hmoe;
         int *h_ids; float *h_wts; int *h_tok; float *h_entw; int *h_pos, *h_btok; MoeWork *h_work;
         uint16_t *h_x16, *h_cout;
-        float *h_topv; int *h_topi, *h_draft;
+        float *h_topv, *h_tops; int *h_topi, *h_draft;
         uint8_t *raw[4], *sgu[4]; QTensor sd_[4];
         uint8_t *bounce[4];
         const half **img;

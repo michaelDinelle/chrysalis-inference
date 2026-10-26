@@ -130,6 +130,41 @@ void topk(const float *logits, int T, int n, int ld, float *scratch_v, int *scra
     k_topk2<<<T, 512, 0, st>>>(scratch_v, scratch_i, nb * TOPK, ov, oi);
 }
 
+__global__ __launch_bounds__(1024) void k_logit_stats(const float *logits, int n, int ld, float *out) {
+    __shared__ float tops[32];
+    __shared__ double red[1024];
+    const float *r = logits + (size_t)blockIdx.x * ld;
+    float m = -INFINITY;
+    for (int i = threadIdx.x; i < n; i += 1024) m = fmaxf(m, r[i]);
+    m = warp_max(m);
+    if ((threadIdx.x & 31) == 0) tops[threadIdx.x >> 5] = m;
+    __syncthreads();
+    m = tops[0];
+    for (int w = 1; w < 32; w++) m = fmaxf(m, tops[w]);
+    float acc[5] = {0, 0, 0, 0, 0};
+    for (int i = threadIdx.x; i < n; i += 1024) {
+        const float v = r[i];
+        if (!(v > -INFINITY)) continue;
+        const float d = v - m, e = expf(d);
+        acc[0] += 1; acc[1] += v; acc[2] += v * v; acc[3] += e; acc[4] += d * e;
+    }
+    float *o = out + (size_t)blockIdx.x * LOGIT_STATS;
+    for (int k = 0; k < 5; k++) {
+        red[threadIdx.x] = acc[k];
+        __syncthreads();
+        for (int w = 512; w > 0; w >>= 1) {
+            if (threadIdx.x < w) red[threadIdx.x] += red[threadIdx.x + w];
+            __syncthreads();
+        }
+        if (threadIdx.x == 0) o[1 + k] = (float)red[0];
+        __syncthreads();
+    }
+    if (threadIdx.x == 0) o[0] = (float)n;
+}
+void logit_stats(const float *logits, int T, int n, int ld, float *out, hipStream_t st) {
+    k_logit_stats<<<T, 1024, 0, st>>>(logits, n, ld, out);
+}
+
 __global__ void k_mask_logits(float *logits, const uint32_t *mask, int n) {
     const int i = blockIdx.x * blockDim.x + threadIdx.x;
     logits += (size_t)blockIdx.y * n;

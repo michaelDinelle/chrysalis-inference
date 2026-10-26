@@ -4,6 +4,7 @@
 #include "../lookup.h"
 #include "../vision.h"
 static_assert(TOPK == SAMPLE_N, "the sampler takes the engine's rows as they are");
+static_assert(LOGIT_STATS == NSTAT, "the sampler reads the statistics the engine writes");
 #include <random>
 #include <hipblaslt/hipblaslt.h>
 #include <map>
@@ -70,7 +71,7 @@ struct Engine {
         int *tokens; float *x, *hfin, *proj, *k, *v, *qn, *kn, *vc, *o, *act, *logits, *part_o, *part_ml;
         half *hh, *deq, *Q16, *mix, *ffn_g, *ffn_u, *gemm16;
         QAct hq, mq, aq;
-        float *topv, *tsv; int *topi, *tsi;
+        float *topv, *tsv, *tops; int *topi, *tsi;
         float *v_raw, *v_kn, *v_vc, *v_ab;
         float *mtp_h, *mtp_x; int *draft;
         const half **img;

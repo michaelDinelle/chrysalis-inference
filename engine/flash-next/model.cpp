@@ -947,8 +947,10 @@ void Engine::prefill(int id, const int *tokens, const int *pos3, int n) {
         if (done + T == n) {
             head(*this, hc_head, b.res + (size_t)(T - 1) * HCD, 1, VOCAB);
             topk(b.logits, 1, VOCAB, VOCAB, b.tsv, b.tsi, b.topv, b.topi, st);
-            s.top_v.resize(TOPK); s.top_i.resize(TOPK);
+            logit_stats(b.logits, 1, VOCAB, VOCAB, b.tops, st);
+            s.top_v.resize(TOPK + NSTAT); s.top_i.assign(TOPK + NSTAT, 0);
             CK(hipMemcpyAsync(s.top_v.data(), b.topv, TOPK * 4, hipMemcpyDeviceToHost, st));
+            CK(hipMemcpyAsync(s.top_v.data() + TOPK, b.tops, NSTAT * 4, hipMemcpyDeviceToHost, st));
             CK(hipMemcpyAsync(s.top_i.data(), b.topi, TOPK * 4, hipMemcpyDeviceToHost, st));
         }
         CK(hipMemcpyAsync(s.h_last, b.res + (size_t)(T - 1) * HCD, (size_t)HCD * 4, hipMemcpyDeviceToDevice, st));
@@ -983,6 +985,11 @@ static void keep_row(const float *v, const int *i, float *rows_v, int *rows_i, i
     std::copy(i, i + TOPK, rows_i + (size_t)at * TOPK);
 }
 
+static const float *top_stats(const Seq &s) {
+    static const float unknown[NSTAT] = {(float)VOCAB, -1, 0, 0, 0, 0};
+    return s.top_v.size() >= (size_t)(TOPK + NSTAT) ? s.top_v.data() + TOPK : unknown;
+}
+
 int Engine::image_encode(int slot, const float *patches, int gh, int gw, int frames) {
     const int rows = gh * gw / 4;
     if (slot < 0 || slot >= (INT32_MAX - IMG_BASE) / IMG_ROWS || rows > IMG_ROWS || vision.scratch_need(gh * gw) > barena.cap) return -1;
@@ -1007,8 +1014,7 @@ int Engine::generate(int id, const Sampling &sp, int *out, int max_out, float *r
         if (FILE *f = fopen(route_dec_file, "wb")) { fwrite(xc.total.data(), 8, xc.total.size(), f); fclose(f); }
     if (s.pending < 0) {
         if (s.top_v.empty()) FAIL("generate: nothing to continue from");
-        s.pending = draw(make_dist(s.top_v.data(), s.top_i.data(), sp, s.seen, s.ctx), s.rng);
-        s.seen.push(s.pending);
+        s.pending = sample(s.seen, s.top_v.data(), s.top_i.data(), top_stats(s), sp, s.rng);
         if (rows_v) keep_row(s.top_v.data(), s.top_i.data(), rows_v, rows_i, nout);
         out[nout++] = s.pending;
         if (sp.lookup > 0) s.look.push(s.pending);
@@ -1053,8 +1059,10 @@ int Engine::verify(Seq &s, const Sampling &sp, const std::vector<int> &drafts, b
     head(*this, hc_head, b.res, T, VOCAB);
     if (masked) mask_logits(b.logits, d_mask, VOCAB, T, st);
     topk(b.logits, T, VOCAB, VOCAB, b.tsv, b.tsi, b.topv, b.topi, st);
+    logit_stats(b.logits, T, VOCAB, VOCAB, b.tops, st);
     CK(hipMemcpyAsync(b.h_topv, b.topv, T * TOPK * 4, hipMemcpyDeviceToHost, st));
     CK(hipMemcpyAsync(b.h_topi, b.topi, T * TOPK * 4, hipMemcpyDeviceToHost, st));
+    CK(hipMemcpyAsync(b.h_tops, b.tops, T * NSTAT * 4, hipMemcpyDeviceToHost, st));
     CK(hipEventRecord(topk_ready, st));
     CK(hipMemcpyAsync(b.tokens, b.draft, T * 4, hipMemcpyDeviceToDevice, st));
     mtp_catch_up(s, T, q, k > 0);
@@ -1063,26 +1071,14 @@ int Engine::verify(Seq &s, const Sampling &sp, const std::vector<int> &drafts, b
     const float *tv = b.h_topv;
     const int *ti = b.h_topi;
 
-    int a = 0, next = -1;
-    for (; a < k; a++) {
-        const Dist d = make_dist(&tv[a * TOPK], &ti[a * TOPK], sp, s.seen, s.ctx);
-        const int tok = drafts[a + 1];
-        const float pa = prob(d, tok);
-        if (std::uniform_real_distribution<float>(0, 1)(s.rng) < pa) {
-            if (is_eos(tok) || tok == sp.halt) { next = tok; break; }
-            if (rows_v) keep_row(&tv[a * TOPK], &ti[a * TOPK], rows_v, rows_i, nout);
-            out[nout++] = tok; s.seen.push(tok);
-            if (sp.lookup > 0) s.look.push(tok);
-            continue;
-        }
-        next = draw_without(d, tok, s.rng);
-        break;
-    }
-    if (next < 0) next = draw(make_dist(&tv[a * TOPK], &ti[a * TOPK], sp, s.seen, s.ctx), s.rng);
-    if (rows_v) keep_row(&tv[a * TOPK], &ti[a * TOPK], rows_v, rows_i, nout);
-    out[nout++] = next;
-    s.seen.push(next);
-    if (sp.lookup > 0) s.look.push(next);
+    const int a = verify_drafts(s.seen, tv, ti, b.h_tops, drafts.data(), k, sp, s.rng,
+                                [&](int t) { return is_eos(t) || t == sp.halt; },
+                                [&](int r, int t) {
+                                    if (rows_v) keep_row(&tv[r * TOPK], &ti[r * TOPK], rows_v, rows_i, nout);
+                                    out[nout++] = t;
+                                    if (sp.lookup > 0) s.look.push(t);
+                                });
+    const int next = out[nout - 1];
 
     if (k > 0) {
         GdnScanArgs sa{};
@@ -1183,8 +1179,7 @@ void Engine::generate_batch(int n, const int *ids, const Sampling *sps, int *out
         if (max_out < 1) continue;
         if (s.pending < 0) {
             if (s.top_v.empty()) FAIL("generate: nothing to continue from");
-            s.pending = draw(make_dist(s.top_v.data(), s.top_i.data(), sp, s.seen, s.ctx), s.rng);
-            s.seen.push(s.pending);
+            s.pending = sample(s.seen, s.top_v.data(), s.top_i.data(), top_stats(s), sp, s.rng);
             if (rows_v) keep_row(s.top_v.data(), s.top_i.data(), rows_v, rows_i, i * max_out + counts[i]);
             o[counts[i]++] = s.pending;
             if (sp.lookup > 0) s.look.push(s.pending);
@@ -1225,8 +1220,10 @@ void Engine::generate_batch(int n, const int *ids, const Sampling *sps, int *out
     forward_parts(parts.data(), (int)parts.size(), drafts.data(), T);
     head(*this, hc_head, b.res, T, VOCAB, true);
     topk(b.logits, T, VOCAB, VOCAB, b.tsv, b.tsi, b.topv, b.topi, st);
+    logit_stats(b.logits, T, VOCAB, VOCAB, b.tops, st);
     CK(hipMemcpyAsync(b.h_topv, b.topv, T * TOPK * 4, hipMemcpyDeviceToHost, st));
     CK(hipMemcpyAsync(b.h_topi, b.topi, T * TOPK * 4, hipMemcpyDeviceToHost, st));
+    CK(hipMemcpyAsync(b.h_tops, b.tops, T * NSTAT * 4, hipMemcpyDeviceToHost, st));
     CK(hipEventRecord(topk_ready, st));
     for (const Part &p : parts) mtp_catch_up(*p.s, p.T, p.s->n, p.verify, nullptr, false, p.off);
     CK(hipEventSynchronize(topk_ready));
@@ -1240,26 +1237,15 @@ void Engine::generate_batch(int n, const int *ids, const Sampling *sps, int *out
         const Sampling &sp = sps[i];
         int *o = out + (size_t)i * max_out;
         const int *dr = drafts.data() + p.off;
-        int a = 0, next = -1;
-        for (; a < k[i]; a++) {
-            const int r = p.off + a;
-            const Dist d = make_dist(&tv[r * TOPK], &ti[r * TOPK], sp, s.seen, s.ctx);
-            const int tok = dr[a + 1];
-            if (std::uniform_real_distribution<float>(0, 1)(s.rng) < prob(d, tok)) {
-                if (is_eos(tok) || tok == sp.halt) { next = tok; break; }
-                if (rows_v) keep_row(&tv[r * TOPK], &ti[r * TOPK], rows_v, rows_i, i * max_out + counts[i]);
-                o[counts[i]++] = tok; s.seen.push(tok);
-                if (sp.lookup > 0) s.look.push(tok);
-                continue;
-            }
-            next = draw_without(d, tok, s.rng);
-            break;
-        }
-        if (next < 0) next = draw(make_dist(&tv[(p.off + a) * TOPK], &ti[(p.off + a) * TOPK], sp, s.seen, s.ctx), s.rng);
-        if (rows_v) keep_row(&tv[(p.off + a) * TOPK], &ti[(p.off + a) * TOPK], rows_v, rows_i, i * max_out + counts[i]);
-        o[counts[i]++] = next;
-        s.seen.push(next);
-        if (sp.lookup > 0) s.look.push(next);
+        const int a = verify_drafts(s.seen, &tv[p.off * TOPK], &ti[p.off * TOPK], &b.h_tops[p.off * NSTAT], dr, k[i], sp, s.rng,
+                                    [&](int t) { return is_eos(t) || t == sp.halt; },
+                                    [&](int r, int t) {
+                                        if (rows_v) keep_row(&tv[(p.off + r) * TOPK], &ti[(p.off + r) * TOPK], rows_v, rows_i,
+                                                             i * max_out + counts[i]);
+                                        o[counts[i]++] = t;
+                                        if (sp.lookup > 0) s.look.push(t);
+                                    });
+        const int next = o[counts[i] - 1];
         if (k[i] > 0) {
             GdnScanArgs sa{};
             sa.S = s.ssm; sa.S_layer = (size_t)GV * GD * GD;

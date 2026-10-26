@@ -15,7 +15,7 @@ build/%: tests/%.hip $(KERN) $(wildcard engine/*.h engine/27b/*.h)
 
 build/test_sampler: tests/test_sampler.cpp engine/sampler.h
 	@mkdir -p build
-	g++ -O2 -std=c++20 -o $@ $<
+	g++ -O2 -std=c++20 -I$(GGML)/include -I$(GGML)/ggml/include -o $@ $< $(LLAMA_LIBS)
 
 build/sampler_cases: tests/sampler_cases.cpp engine/sampler.h
 	@mkdir -p build
@@ -30,9 +30,10 @@ test_backends:
 test_chaos:
 	cd web && bun test --timeout 1800000 ./chaos.check.ts
 
-test: test_web build/libchrysalis.so build/test_quant build/test_attn build/test_gdn build/test_sampler build/ref_logits build/ref_logits_mm
+test: test_web build/libchrysalis.so build/test_quant build/test_attn build/test_gdn build/test_sampler build/llama_params build/ref_logits build/ref_logits_mm
 	./build/test_quant data/models/chrysalis-mix.gguf && ./build/test_attn && ./build/test_gdn && ./build/test_sampler
 	data/venv/bin/python tests/test_chat.py
+	data/venv/bin/python tests/test_requests.py
 	data/venv/bin/python tests/test_cache.py
 	data/venv/bin/python tests/test_documents.py
 	data/venv/bin/python tests/test_snapshot.py
@@ -76,6 +77,12 @@ test_fn_model: build/libchrysalis_fn.so build/ref_logits_fn build/ref_logits_mm_
 
 LLAMA      := -O2 -std=c++17 -I$(GGML)/include -I$(GGML)/ggml/include
 LLAMA_LIBS := -L$(GGML)/build/bin -lllama -lggml -lggml-base -Wl,-rpath,$(GGML)/build/bin:$(ROCM)/lib
+SERVER_INC := -DGGML_BACKEND_SHARED -DGGML_SHARED -DGGML_USE_CPU -DGGML_USE_CUDA -DGGML_USE_HIP -DLLAMA_SHARED -DLLAMA_SUBPROCESS \
+              -I$(GGML)/tools/server -I$(GGML)/build/tools/server -I$(GGML)/tools/mtmd -I$(GGML) -I$(GGML)/common -I$(GGML)/vendor
+build/llama_params: tests/llama_params.cpp
+	@mkdir -p build
+	g++ $(LLAMA) $(SERVER_INC) -o $@ $< -L$(GGML)/build/bin -lllama-server-impl -lllama-common -lmtmd $(LLAMA_LIBS)
+
 build/ref_logits: tests/ref_logits.cpp
 	@mkdir -p build
 	g++ $(LLAMA) -o $@ $< $(LLAMA_LIBS)
