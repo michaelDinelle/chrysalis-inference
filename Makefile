@@ -104,4 +104,13 @@ test_voice:
 
 .PHONY: test_voice
 
+build/vram_peak.so: bench/vram.c
+	@mkdir -p build
+	gcc -O2 -shared -fPIC -o $@ $< -ldl -lpthread
+
+bench:
+	data/venv/bin/python bench/bench.py run
+
+.PHONY: bench
+
 .PHONY: test test_web test_backends test_chaos fn test_fn test_fn_model

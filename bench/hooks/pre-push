@@ -1,0 +1,2 @@
+#!/bin/sh
+exec "$(git rev-parse --show-toplevel)/data/venv/bin/python" "$(git rev-parse --show-toplevel)/bench/bench.py" check

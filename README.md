@@ -42,7 +42,7 @@ RX 7900 XTX (24 GB), Ryzen 7 7800X3D, 64 GB DDR5, Linux, one engine at a time.
   a time, as it writes; Strata's files ran in llama.cpp.
 - Memory is the peak private RAM of each server. File pages, which the kernel can drop at any time, are not counted.
 
-| | Chrysalis, 3.8-bit IQ4/Q3_K/Q2_K mix | Strata IQ3_S, 3.3-bit | Strata Q2_0, 2.3-bit |
+| | Chrysalis, 3.8-bit | Strata IQ3_S, 3.3-bit | Strata Q2_0, 2.3-bit |
 | --- | ---: | ---: | ---: |
 | First token, short prompt | **0.25 s** | 0.64 s | 0.41 s |
 | First token, 4K prompt | **1.9 s** | 3.4 s | 3.0 s |
@@ -70,8 +70,8 @@ Chrysalis reads prompts 1.4-2.8x sooner, writes 1.2-2.1x faster, starts 2.4x soo
 
 <details><summary>How it was measured, and every number</summary>
 
-- **The file**: Chrysalis's 27B mix, 4.65 bits per weight, 16 GB, entirely in VRAM: IQ4_XS for most weights, Q6_K and
-  Q8_0 for the most sensitive.
+- **The file**: Chrysalis's own 27B file, one file for both engines: 16 GB, entirely in VRAM, 4.65 bits per weight on
+  average because each tensor has its own type, IQ4_XS for most and Q6_K or Q8_0 for the most sensitive.
 - **llama.cpp** commit 9c2e0e4 (October 7, 2026) built for HIP, at its best on this card: every layer on the GPU, flash
   attention with an 8-bit KV cache (its 16-bit decode kernel for this model's 256-wide heads isn't built for this card),
   MTP speculative decoding with 3 drafts as Chrysalis uses, one slot, a 131K context, and prompt batches of 2,048 tokens
@@ -80,7 +80,7 @@ Chrysalis reads prompts 1.4-2.8x sooner, writes 1.2-2.1x faster, starts 2.4x soo
   and 5 trials at 100K. Sanity checks: Chrysalis 24/24, llama.cpp 10/12 (its misses were answers that were not strict
   JSON).
 
-| | Chrysalis, 4.65-bit IQ4_XS/Q6_K/Q8_0 mix | llama.cpp, the same file |
+| | Chrysalis, 4.65-bit file | llama.cpp, the same file |
 | --- | ---: | ---: |
 | First token, short prompt | **0.12 s** | 0.35 s |
 | First token, 4K prompt | **2.8 s** | 4.1 s |
