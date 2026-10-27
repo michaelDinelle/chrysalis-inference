@@ -73,7 +73,7 @@ The same file in Chrysalis and in llama.cpp, on the same GPU.
 
 <p align="center"><img src="media/27b-vs-llamacpp.png" width="860" alt="Qwen3.8-27B in Chrysalis and in llama.cpp: time to first token and writing speed at five prompt lengths, load time, memory, and each one's share of this GPU's limit"></p>
 
-Chrysalis reads prompts 1.4-2.8x sooner, writes 1.2-2.1x faster, starts 2.4x sooner and keeps 11 GB less in RAM. At
+Chrysalis reads prompts 1.4-2.6x sooner, writes 1.5-2.1x faster, starts 2.1x sooner and keeps 11 GB less in RAM. At
 100K it reaches 62% of this GPU's limit reading the prompt and 55% writing, llama.cpp 40% and 27%.
 
 <details><summary>How it was measured, and every number</summary>
@@ -85,23 +85,24 @@ Chrysalis reads prompts 1.4-2.8x sooner, writes 1.2-2.1x faster, starts 2.4x soo
   MTP speculative decoding with 3 drafts as Chrysalis uses, one slot, a 131K context, and prompt batches of 2,048 tokens
   (4,096 was 3% faster on prompts but doesn't fit beside that context).
 - The same benchmark and PC as above. Chrysalis ran it twice and llama.cpp once; medians over every round, and over 10
-  and 5 trials at 100K. Sanity checks: Chrysalis 24/24, llama.cpp 10/12 (its misses were answers that were not strict
-  JSON).
+  and 5 trials at 100K. Sanity checks: Chrysalis 24/24, llama.cpp 12/12.
+- Strata's requests ask for a thinking budget of 0, which Strata reads as no cap and llama.cpp as no thinking at all, so
+  the benchmark leaves it out and every engine thinks as Strata's does.
 - **Share of this GPU's limit**: as above, with each engine's tokens per pass from its own log.
 
 | | Chrysalis, 4.65-bit file | llama.cpp, the same file |
 | --- | ---: | ---: |
-| First token, short prompt | **0.12 s** | 0.35 s |
-| First token, 4K prompt | **2.8 s** | 4.1 s |
+| First token, short prompt | **0.12 s** | 0.31 s |
+| First token, 4K prompt | **2.8 s** | 4.0 s |
 | First token, 16K prompt | **11.6 s** | 16.8 s |
 | First token, 100K prompt | **93.5 s** | 145.3 s |
 | First token, follow-up in the 100K chat | **1.7 s** | 2.9 s |
-| Writing, short prompt | **103.7 tok/s** | 74.3 tok/s |
-| Writing, 4K prompt | **90.6 tok/s** | 70.5 tok/s |
-| Writing, 16K prompt | **80.9 tok/s** | 68.3 tok/s |
+| Writing, short prompt | **103.7 tok/s** | 68.4 tok/s |
+| Writing, 4K prompt | **90.6 tok/s** | 57.3 tok/s |
+| Writing, 16K prompt | **80.9 tok/s** | 51.5 tok/s |
 | Writing, 100K prompt | **73.1 tok/s** | 34.7 tok/s |
 | Writing, follow-up in the 100K chat | **74.3 tok/s** | 38.5 tok/s |
-| Load time, to a first answer | **1.6 s** | 3.7 s |
+| Load time, to a first answer | **1.6 s** | 3.3 s |
 | Peak private RAM | **0.5 GB** | 11.9 GB |
 | Share of this GPU's limit, reading 100K | **62%** | 40% |
 | Share of this GPU's limit, writing at 100K | **55%** | 27% |
