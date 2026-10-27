@@ -20,6 +20,12 @@ README.md shows what Chrysalis is. This file is how to change it.
 
 ## Bench
 
+Not one step back, on any number, for any reason, on any commit: a commit lands only when every number the bench
+records, for each model on each machine, is as good as its parent's or better. A change that makes one number better
+and another worse is a side-grade and doesn't land, however large the net gain; neither does one that only reshuffles
+results through rounding or chance. The gate is strict on purpose: never loosen it, drop or re-key numbers, or skip the
+hooks to let a change through.
+
 `make bench` measures both models and the hooks (`git config core.hooksPath bench/hooks`) hold every commit to its
 parent on every machine bench/results.json has numbers from: a change to a backend's engine needs its numbers from a
 machine running that backend. Measure there, then `data/venv/bin/python bench/bench.py merge <its bench/results.json>`
