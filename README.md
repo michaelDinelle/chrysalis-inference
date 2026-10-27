@@ -109,6 +109,57 @@ Chrysalis reads prompts 1.4-2.6x sooner, writes 1.5-2.1x faster, starts 2.1x soo
 
 </details>
 
+## Chrysalis vs MLX and llama.cpp on a Mac
+
+Qwen3.8-27B on a Mac Studio with an M4 Max: Chrysalis on its Metal engine, MLX and llama.cpp, each at its best on this
+Mac.
+
+<p align="center"><img src="media/mac-27b.png" width="860" alt="Qwen3.8-27B on an M4 Max in Chrysalis, MLX and llama.cpp: time to first token and writing speed at five prompt lengths, load time, memory, and each one's share of this GPU's limit"></p>
+
+Chrysalis writes 1.5x faster than MLX up to 16K and 1.1x at 100K, 1.1-1.3x faster than llama.cpp, and answers a
+short prompt 1.8x sooner than MLX and 2.5x sooner than llama.cpp. Up to 16K the three read prompts at about the same
+speed; at 100K MLX reads 1.2x faster than the other two, then runs out of GPU memory on the follow-up in that chat.
+
+<details><summary>How it was measured, and every number</summary>
+
+Mac Studio, M4 Max with a 32-core GPU (410 GB/s, 25.9 TFLOPS FP16), 36 GB, macOS 27.2, one engine at a time.
+
+- **Chrysalis**: the same 4.65-bit file as on the RX 7900, on its Metal engine, with MTP drafting 3 tokens.
+- **MLX** 0.32.4 with mlx-lm 0.32.2 and mlx-community's 4-bit Qwen3.8-27B (4.5 bits per weight with its scales),
+  through `mlx_lm.server`, which has no MTP for this model. Its 100K prompt runs out of GPU memory with the default
+  prefill steps of 2,048, so that case ran with steps of 512; its follow-up re-read the whole chat and ran out of memory
+  even then.
+- **llama.cpp** build 11669 (Homebrew 0.7.0) with the same file as Chrysalis: every layer on the GPU, flash attention,
+  MTP with 3 drafts as Chrysalis uses, one slot and a 131K context.
+- The same benchmark as above, its thinking budget of 0 left out here too. Chrysalis ran it twice, MLX and llama.cpp
+  once; medians over every round. Sanity checks: Chrysalis 24/24, MLX 12/12, llama.cpp 12/12.
+- Memory is each server's peak footprint, macOS's count of the memory a process holds, its GPU buffers included.
+  Chrysalis's holds snapshots of the conversation, which a follow-up reads back instead of the prompt.
+- **Share of this GPU's limit**: as above, with Apple's published bandwidth for this chip and its GPU's FP16 rate, which
+  counts the packed half-precision math an M4 runs at twice its FP32 rate.
+
+| | Chrysalis, 4.65-bit file | MLX, 4-bit | llama.cpp, the same file |
+| --- | ---: | ---: | ---: |
+| First token, short prompt | **0.31 s** | 0.56 s | 0.78 s |
+| First token, 4K prompt | 19.8 s | **19.5 s** | 20.7 s |
+| First token, 16K prompt | **82.0 s** | 82.4 s | 88.8 s |
+| First token, 100K prompt | 800.2 s | **666.1 s** | 818.9 s |
+| First token, follow-up in the 100K chat | **14.2 s** | out of memory | 14.9 s |
+| Writing, short prompt | **32.6 tok/s** | 21.3 tok/s | 29.4 tok/s |
+| Writing, 4K prompt | **30.4 tok/s** | 20.4 tok/s | 27.0 tok/s |
+| Writing, 16K prompt | **28.6 tok/s** | 19.5 tok/s | 25.2 tok/s |
+| Writing, 100K prompt | **16.9 tok/s** | 15.2 tok/s | 14.8 tok/s |
+| Writing, follow-up in the 100K chat | **21.6 tok/s** | out of memory | 17.2 tok/s |
+| Load time, to a first answer | 7.5 s | **6.0 s** | 8.7 s |
+| Peak memory footprint | 25.2 GB | 30.6 GB | **20.9 GB** |
+| Share of this GPU's limit, reading 100K | 33% | **39%** | 32% |
+| Share of this GPU's limit, writing at 100K | 35% | **68%** | 30% |
+
+</details>
+
+Flash-Next runs on this Mac too, keeping the experts its replies use most in memory and reading the others from the
+SSD. In the same benchmark it answers a short prompt in 2.4 s and reads a 100K one in 255 s, and writes 6-8 tok/s.
+
 ## Editing artifacts by pointing at them
 
 <p align="center"><img src="media/paint.webp" width="900" alt="An SVG cabin drawn live; pointing at the roof and asking to make it red changes only the roof; the paint bucket fills the door by hand"></p>
@@ -141,7 +192,8 @@ network, and only devices you allow get past the connect page.</sub>
 - **Claude Code** and **OpenCode**, through OpenAI and Anthropic APIs
 - The same chat on **llama.cpp, Ollama, LM Studio, KoboldCpp or vLLM**
 - **Qwen3.8-27B** with its full 262K context: 104 tok/s on short prompts, 73 at 100K
-- **Apple Silicon**: both models on a Mac with 32 GB or more, on Metal kernels written for its GPU
+- **Apple Silicon**: both models on a Mac with 32 GB or more, on Metal kernels written for its GPU; on an M4 Max the 27B
+  writes 1.5x faster than MLX
 
 ## Run it
 

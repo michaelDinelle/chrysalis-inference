@@ -3508,6 +3508,232 @@
      },
      "outputs": "2740547e25954b9a",
      "spread": true
+    },
+    {
+     "answers": [
+      {
+       "answer": "c131625876f5806d",
+       "cached": 0,
+       "decode_tps": 29.748014435669564,
+       "gap_p99": 0.07299999999999995,
+       "id": "warmup",
+       "per_pass": 2.1147540983606556,
+       "prompt": 75,
+       "written": 128
+      },
+      {
+       "answer": "5b373c6476fdaf48",
+       "cached": 42,
+       "decode_tps": 32.49811528403664,
+       "gap_p99": 0.0737400000000008,
+       "id": "performance-short-r1",
+       "per_pass": 2.3577981651376145,
+       "prompt": 77,
+       "written": 512
+      },
+      {
+       "answer": "930cd66e0778c201",
+       "cached": 42,
+       "decode_tps": 30.50539966731744,
+       "gap_p99": 0.0756059999999934,
+       "id": "performance-prompt-4k-r1",
+       "per_pass": 2.2755555555555556,
+       "prompt": 4093,
+       "written": 512
+      },
+      {
+       "answer": "428ed44420e87ddf",
+       "cached": 42,
+       "decode_tps": 29.651974174446515,
+       "gap_p99": 0.08338200000000029,
+       "id": "performance-prompt-16k-r1",
+       "per_pass": 2.442857142857143,
+       "prompt": 16387,
+       "written": 512
+      },
+      {
+       "answer": "b164a95605ac6f95",
+       "cached": 42,
+       "decode_tps": 44.965995059127415,
+       "gap_p99": 0.0731139999999999,
+       "id": "sanity-I1",
+       "per_pass": 3.1,
+       "prompt": 82,
+       "written": 62
+      },
+      {
+       "answer": "198b5c70a9135872",
+       "cached": 0,
+       "decode_tps": 47.702190846346305,
+       "gap_p99": 0.07328000000000001,
+       "id": "sanity-I2",
+       "per_pass": 3.3181818181818183,
+       "prompt": 90,
+       "written": 73
+      },
+      {
+       "answer": "3636f60a07a3879d",
+       "cached": 0,
+       "decode_tps": 49.95318634897564,
+       "gap_p99": 0.07364100000000007,
+       "id": "sanity-I3",
+       "per_pass": 3.5,
+       "prompt": 85,
+       "written": 98
+      },
+      {
+       "answer": "3a4497df3f0159bd",
+       "cached": 0,
+       "decode_tps": 38.98164991660047,
+       "gap_p99": 0.07311500000000004,
+       "id": "sanity-I4",
+       "per_pass": 2.6153846153846154,
+       "prompt": 71,
+       "written": 34
+      },
+      {
+       "answer": "3285397b11f08741",
+       "cached": 0,
+       "decode_tps": 42.19643292865985,
+       "gap_p99": 0.14989500000000078,
+       "id": "sanity-R1",
+       "per_pass": 3.0,
+       "prompt": 4089,
+       "written": 63
+      },
+      {
+       "answer": "c4e89d384cf68b59",
+       "cached": 0,
+       "decode_tps": 39.61210916390309,
+       "gap_p99": 0.07537300000000258,
+       "id": "sanity-R2",
+       "per_pass": 2.8518518518518516,
+       "prompt": 4089,
+       "written": 77
+      },
+      {
+       "answer": "766725bbda6bab2d",
+       "cached": 0,
+       "decode_tps": 38.68411678921343,
+       "gap_p99": 0.16557699999999897,
+       "id": "sanity-R3",
+       "per_pass": 3.0454545454545454,
+       "prompt": 16382,
+       "written": 67
+      },
+      {
+       "answer": "7d570ef1a1c3fe4c",
+       "cached": 0,
+       "decode_tps": 34.70846989236599,
+       "gap_p99": 0.08329100000000267,
+       "id": "sanity-R4",
+       "per_pass": 2.8,
+       "prompt": 16390,
+       "written": 126
+      },
+      {
+       "answer": "ca225ce19e89bdfa",
+       "cached": 0,
+       "decode_tps": 41.9549700987555,
+       "gap_p99": 0.6660269999999997,
+       "id": "sanity-T1",
+       "per_pass": 2.9523809523809526,
+       "prompt": 334,
+       "written": 62
+      },
+      {
+       "answer": "f0575c8852234c24",
+       "cached": 0,
+       "decode_tps": 39.059269122679545,
+       "gap_p99": 0.9610370000000001,
+       "id": "sanity-T2",
+       "per_pass": 2.7857142857142856,
+       "prompt": 344,
+       "written": 78
+      },
+      {
+       "answer": "3a415b6b0561dd89",
+       "cached": 0,
+       "decode_tps": 47.31272732599874,
+       "gap_p99": 1.036982,
+       "id": "sanity-T3",
+       "per_pass": 3.347826086956522,
+       "prompt": 361,
+       "written": 77
+      },
+      {
+       "answer": "2f97ec0785f901b5",
+       "cached": 0,
+       "decode_tps": 46.61752176780518,
+       "gap_p99": 0.8141430000000001,
+       "id": "sanity-T4",
+       "per_pass": 3.263157894736842,
+       "prompt": 348,
+       "written": 62
+      },
+      {
+       "answer": "43d291a206889e6e",
+       "cached": 0,
+       "decode_tps": 16.930977849902234,
+       "gap_p99": 0.12961299999994935,
+       "id": "long-100k",
+       "per_pass": 2.178723404255319,
+       "prompt": 98878,
+       "written": 512
+      },
+      {
+       "answer": "45cf28d6e467b11d",
+       "cached": 99389,
+       "decode_tps": 21.241176738697767,
+       "gap_p99": 0.13096700000000183,
+       "id": "follow-up",
+       "per_pass": 2.6944444444444446,
+       "prompt": 100556,
+       "written": 97
+      }
+     ],
+     "at": "2026-10-26T20:01:09",
+     "load": 1.55859375,
+     "metrics": {
+      "decode_tps.100k": 16.930977849902234,
+      "decode_tps.16k": 29.651974174446515,
+      "decode_tps.4k": 30.50539966731744,
+      "decode_tps.followup": 21.241176738697767,
+      "decode_tps.short": 32.49811528403664,
+      "itl_p99.100k": 0.12961299999994935,
+      "itl_p99.16k": 0.08338200000000029,
+      "itl_p99.4k": 0.0756059999999934,
+      "itl_p99.followup": 0.13096700000000183,
+      "itl_p99.short": 0.0737400000000008,
+      "kv_tokens": 263168,
+      "load_s": 7.342478499980643,
+      "pass_rate.100k": 7.771054286576221,
+      "pass_rate.16k": 12.138235042171088,
+      "pass_rate.4k": 13.40569321317661,
+      "pass_rate.followup": 7.883323325702263,
+      "pass_rate.short": 13.783247338365737,
+      "pass_s": 1236.9055002909154,
+      "per_pass.100k": 2.178723404255319,
+      "per_pass.16k": 2.442857142857143,
+      "per_pass.4k": 2.2755555555555556,
+      "per_pass.followup": 2.6944444444444446,
+      "per_pass.short": 2.3577981651376145,
+      "prompt_tps.100k": 125.20002483518103,
+      "prompt_tps.16k": 200.88709640932802,
+      "prompt_tps.4k": 207.80699724323568,
+      "prompt_tps.followup": 82.88232743027831,
+      "prompt_tps.short": 115.23500616991281,
+      "ram_gb": 25.203340368,
+      "reused.followup": 99389,
+      "sanity": 12,
+      "ttft.100k": 789.832037,
+      "ttft.16k": 81.375873,
+      "ttft.4k": 19.498611,
+      "ttft.followup": 14.084135,
+      "ttft.short": 0.305971
+     },
+     "outputs": "2740547e25954b9a",
+     "spread": true
     }
    ],
    "protocol": "75728ff2783bf369"
@@ -6323,6 +6549,233 @@
       "ttft.4k": 12.693033,
       "ttft.followup": 12.209505,
       "ttft.short": 2.333251
+     },
+     "outputs": "149a60c56cb19327",
+     "spread": true
+    },
+    {
+     "answers": [
+      {
+       "answer": "0e974ac795d70223",
+       "cached": 0,
+       "decode_tps": 7.390165468011128,
+       "gap_p99": 0.41833400000000154,
+       "id": "warmup",
+       "per_pass": 2.1333333333333333,
+       "prompt": 75,
+       "written": 128
+      },
+      {
+       "answer": "7f766e94d998c289",
+       "cached": 42,
+       "decode_tps": 7.526867443092245,
+       "gap_p99": 0.4617400000000025,
+       "id": "performance-short-r1",
+       "per_pass": 2.227272727272727,
+       "prompt": 77,
+       "written": 294
+      },
+      {
+       "answer": "265c7ac8bdf05ddf",
+       "cached": 42,
+       "decode_tps": 7.73826130513273,
+       "gap_p99": 0.40881000000000256,
+       "id": "performance-prompt-4k-r1",
+       "per_pass": 2.0979591836734692,
+       "prompt": 4093,
+       "written": 512
+      },
+      {
+       "answer": "c15bfa071fbe1f3e",
+       "cached": 42,
+       "decode_tps": 7.18138555708333,
+       "gap_p99": 0.40113600000000105,
+       "id": "performance-prompt-16k-r1",
+       "per_pass": 1.8962962962962964,
+       "prompt": 16387,
+       "written": 512
+      },
+      {
+       "answer": "cfa9e1b8a9d04b3c",
+       "cached": 42,
+       "decode_tps": 7.053426504832028,
+       "gap_p99": 0.756608,
+       "id": "sanity-I1",
+       "per_pass": 2.7241379310344827,
+       "prompt": 82,
+       "written": 79
+      },
+      {
+       "answer": "e4910d0333064de1",
+       "cached": 42,
+       "decode_tps": 7.355423709365494,
+       "gap_p99": 0.6459879999999991,
+       "id": "sanity-I2",
+       "per_pass": 2.4827586206896552,
+       "prompt": 90,
+       "written": 72
+      },
+      {
+       "answer": "6bfd77dddf50f8f1",
+       "cached": 42,
+       "decode_tps": 7.798052352779845,
+       "gap_p99": 0.6020540000000008,
+       "id": "sanity-I3",
+       "per_pass": 2.6363636363636362,
+       "prompt": 85,
+       "written": 87
+      },
+      {
+       "answer": "69f4cbed6459450b",
+       "cached": 0,
+       "decode_tps": 10.2304695034161,
+       "gap_p99": 0.5387760000000004,
+       "id": "sanity-I4",
+       "per_pass": 2.6666666666666665,
+       "prompt": 71,
+       "written": 40
+      },
+      {
+       "answer": "a0a52f16a273bedd",
+       "cached": 0,
+       "decode_tps": 9.16393617308827,
+       "gap_p99": 0.47062300000000334,
+       "id": "sanity-R1",
+       "per_pass": 2.6923076923076925,
+       "prompt": 4089,
+       "written": 70
+      },
+      {
+       "answer": "825333f178aa3cdf",
+       "cached": 0,
+       "decode_tps": 8.948755669724166,
+       "gap_p99": 0.44268399999999986,
+       "id": "sanity-R2",
+       "per_pass": 2.5217391304347827,
+       "prompt": 4089,
+       "written": 58
+      },
+      {
+       "answer": "6cc1e63a28dc8bac",
+       "cached": 0,
+       "decode_tps": 9.505306962972085,
+       "gap_p99": 0.4432649999999967,
+       "id": "sanity-R3",
+       "per_pass": 2.6,
+       "prompt": 16382,
+       "written": 65
+      },
+      {
+       "answer": "28e36729034284d1",
+       "cached": 0,
+       "decode_tps": 6.628628121554032,
+       "gap_p99": 0.5077829999999892,
+       "id": "sanity-R4",
+       "per_pass": 2.1542056074766354,
+       "prompt": 16390,
+       "written": 461
+      },
+      {
+       "answer": "b8937e7305b3fb47",
+       "cached": 0,
+       "decode_tps": 8.16396798913975,
+       "gap_p99": 4.0132309999999976,
+       "id": "sanity-T1",
+       "per_pass": 2.5416666666666665,
+       "prompt": 334,
+       "written": 61
+      },
+      {
+       "answer": "2f1a91d359a1252b",
+       "cached": 0,
+       "decode_tps": 7.123621174889824,
+       "gap_p99": 6.214838,
+       "id": "sanity-T2",
+       "per_pass": 2.341463414634146,
+       "prompt": 344,
+       "written": 96
+      },
+      {
+       "answer": "1f530f5bc516f62d",
+       "cached": 0,
+       "decode_tps": 8.108458704948625,
+       "gap_p99": 7.077908999999998,
+       "id": "sanity-T3",
+       "per_pass": 2.710526315789474,
+       "prompt": 361,
+       "written": 103
+      },
+      {
+       "answer": "dea7dde5a6ef8ef6",
+       "cached": 0,
+       "decode_tps": 7.58809107255298,
+       "gap_p99": 5.645613999999998,
+       "id": "sanity-T4",
+       "per_pass": 2.8181818181818183,
+       "prompt": 348,
+       "written": 62
+      },
+      {
+       "answer": "b98dda907180c644",
+       "cached": 0,
+       "decode_tps": 6.359038024171464,
+       "gap_p99": 0.6874779999999987,
+       "id": "long-100k",
+       "per_pass": 1.9248120300751879,
+       "prompt": 98878,
+       "written": 512
+      },
+      {
+       "answer": "8c251deeebcae04e",
+       "cached": 98873,
+       "decode_tps": 7.86200797271157,
+       "gap_p99": 0.40941399999999817,
+       "id": "follow-up",
+       "per_pass": 2.1333333333333333,
+       "prompt": 100046,
+       "written": 512
+      }
+     ],
+     "at": "2026-10-26T20:18:15",
+     "load": 3.59912109375,
+     "metrics": {
+      "decode_tps.100k": 6.359038024171464,
+      "decode_tps.16k": 7.18138555708333,
+      "decode_tps.4k": 7.73826130513273,
+      "decode_tps.followup": 7.86200797271157,
+      "decode_tps.short": 7.526867443092245,
+      "itl_p99.100k": 0.6874779999999987,
+      "itl_p99.16k": 0.40113600000000105,
+      "itl_p99.4k": 0.40881000000000256,
+      "itl_p99.followup": 0.40941399999999817,
+      "itl_p99.short": 0.4617400000000025,
+      "kv_tokens": 163840,
+      "load_s": 7.816149624995887,
+      "mem_limited": 0,
+      "pass_rate.100k": 3.303718973495331,
+      "pass_rate.16k": 3.7870587898681625,
+      "pass_rate.4k": 3.6884708555593755,
+      "pass_rate.followup": 3.6853162372085486,
+      "pass_rate.short": 3.3794098724087633,
+      "pass_s": 1024.6325067500584,
+      "per_pass.100k": 1.9248120300751879,
+      "per_pass.16k": 1.8962962962962964,
+      "per_pass.4k": 2.0979591836734692,
+      "per_pass.followup": 2.1333333333333333,
+      "per_pass.short": 2.227272727272727,
+      "prompt_tps.100k": 388.02438051728956,
+      "prompt_tps.16k": 414.4373290411759,
+      "prompt_tps.4k": 317.48783165073746,
+      "prompt_tps.followup": 97.33526440196995,
+      "prompt_tps.short": 16.38273838287007,
+      "ram_gb": 29.076790832,
+      "reused.followup": 98873,
+      "sanity": 12,
+      "ttft.100k": 255.054691,
+      "ttft.16k": 39.849262,
+      "ttft.4k": 13.001264,
+      "ttft.followup": 12.30299,
+      "ttft.short": 2.668851
      },
      "outputs": "149a60c56cb19327",
      "spread": true
@@ -9570,7 +10023,7 @@
    }
   },
   "metal: Apple M4 Max, 36 GB": {
-   "at": "2026-10-26T18:40:31",
+   "at": "2026-10-26T20:01:10",
    "backend": "metal",
    "env": "70c0c4795afefafb",
    "inputs": {
