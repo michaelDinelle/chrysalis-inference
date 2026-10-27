@@ -13,8 +13,7 @@ from measure import BACKEND, BENCH, CASES, MAC, MODELS, ROOT, STRATA, WORK, benc
 
 RESULTS = os.path.join(ROOT, "bench/results.json")
 PROTOCOL = ["bench/measure.py", "bench/serve.py", "bench/kl.py", "bench/vram.c", "bench/kl.txt"]
-CODE = ["engine", "chrysalis", "Makefile"] + PROTOCOL
-SKIP = ("chrysalis/voice/",)
+CODE = ["engine", "Makefile"] + PROTOCOL
 CONTENT = ("decode_tps.", "itl_p99.", "per_pass.", "pass_rate.", "ttft.followup", "reused.followup")
 WRITING = (("decode_tps", "writing speed", 1), ("per_pass", "tokens per pass", 1), ("pass_rate", "passes per second", 1), ("gap_p99", "token gap p99", -1))
 
@@ -34,7 +33,7 @@ def git(*args, stdin=None):
 
 
 def code_pairs(name, tree, backend=BACKEND):
-    skip = SKIP + bench_for(backend)[name]["skip"]
+    skip = bench_for(backend)[name]["skip"]
     if tree == "worktree":
         paths = [p for p in git("ls-files", "-co", "--exclude-standard", "--", *CODE).split("\n") if p and os.path.isfile(os.path.join(ROOT, p))]
         shas = git("hash-object", "--stdin-paths", stdin="\n".join(paths) + "\n").split()
@@ -118,8 +117,9 @@ def keys(tree, names=BENCH):
 
 
 def key_of(code, inputs, env_id):
-    return {"key": digest({"code": code, "files": sorted(inputs["files"].values()), "shared": sorted(inputs["shared"].values()), "env": env_id}), "inputs": inputs,
-            "protocol": digest([c for c in code if c[0] in PROTOCOL]), "product": digest([c for c in code if c[0] not in PROTOCOL])}
+    return {"key": digest({"code": sorted(s for _, s in code), "files": sorted(inputs["files"].values()), "shared": sorted(inputs["shared"].values()),
+                           "env": env_id}), "inputs": inputs,
+            "protocol": digest([c for c in code if c[0] in PROTOCOL]), "product": digest(sorted(s for p, s in code if p not in PROTOCOL))}
 
 
 def target_name(env):
