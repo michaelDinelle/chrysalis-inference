@@ -27,15 +27,15 @@ LONG = "[trial 1]\n" + RECORDS(1, 5201) + "\n\nSummarize the structure of these 
 MORE = RECORDS(5201, 5261) + "\n\nThese records were added since. Which ID is the last one now?"
 MAC = sys.platform == "darwin"
 BACKENDS = ("hip", "metal")
-FN_FILES = ["data/models/flash-next/chrysalis-fn.gguf", "data/models/flash-next/src/Q8_0/Qwen3.8-Flash-Next-Q8_0-00003-of-00006.gguf",
+FN_FILES = ["data/models/qwen3.8-flash-next/qwen3.8-flash-next.gguf", "data/models/qwen3.8-flash-next/src/Q8_0/Qwen3.8-Flash-Next-Q8_0-00003-of-00006.gguf",
             "data/models/tokenizer.json"]
 ON = {
     "hip": {"fn": dict(env={"CHRYSALIS_FN_SPILL_GB": "1"}, tune=[("spill_spare", 0)],
                        files=FN_FILES + ["data/llama.cpp/build/bin/libggml-cpu.so", "data/llama.cpp/build/bin/libggml-base.so",
                                          "data/cache/hipblaslt.txt", "data/cache/flash-next-calibration.txt"]),
-            "27b": dict(env={}, tune=[], files=["data/models/chrysalis-mix.gguf", "data/models/tokenizer.json", "data/cache/hipblaslt.txt"])},
+            "27b": dict(env={}, tune=[], files=["data/models/qwen3.8-27b/qwen3.8-27b.gguf", "data/models/tokenizer.json", "data/cache/hipblaslt.txt"])},
     "metal": {"fn": dict(env={"CHRYSALIS_FN_CACHE_GB": "16", "CHRYSALIS_FN_CTX": "131072"}, tune=[], files=FN_FILES),
-              "27b": dict(env={}, tune=[], files=["data/models/chrysalis-mix.gguf", "data/models/tokenizer.json"])},
+              "27b": dict(env={}, tune=[], files=["data/models/qwen3.8-27b/qwen3.8-27b.gguf", "data/models/tokenizer.json"])},
 }
 DIRS = {"fn": "flash-next", "27b": "27b"}
 
@@ -43,8 +43,8 @@ DIRS = {"fn": "flash-next", "27b": "27b"}
 def bench_for(backend):
     out = {
         "fn": dict(use="qwen3.8-flash-next", ref="build/cmp_strata/ref.bin",
-                   make_ref=["build/ref_logits_fn", "data/models/flash-next/src/Q8_0/Qwen3.8-Flash-Next-Q8_0-00001-of-00006.gguf"]),
-        "27b": dict(use="qwen3.8-27b", ref="build/bench/ref-27b.bin", make_ref=["build/ref_logits", "data/models/chrysalis-mix.gguf"]),
+                   make_ref=["build/ref_logits_fn", "data/models/qwen3.8-flash-next/src/Q8_0/Qwen3.8-Flash-Next-Q8_0-00001-of-00006.gguf"]),
+        "27b": dict(use="qwen3.8-27b", ref="build/bench/ref-27b.bin", make_ref=["build/ref_logits", "data/models/qwen3.8-27b/qwen3.8-27b.gguf"]),
     }
     for name, b in out.items():
         b.update(ON[backend][name])

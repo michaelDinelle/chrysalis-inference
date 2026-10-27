@@ -4,7 +4,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from tokenizers import Tokenizer
 from chrysalis.engine import Engine
 
-MODEL = "data/models/chrysalis-mix.gguf"
+MODEL = "data/models/qwen3.8-27b/qwen3.8-27b.gguf"
 MAX_KL, MIN_TOP1 = {"decode": 0.004, "prefill": 0.008, "mixed": 0.004}, 0.95
 TEXT = '''<|im_start|>user
 Write a Python function that merges overlapping intervals.<|im_end|>

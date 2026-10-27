@@ -36,7 +36,7 @@ build/test_linear_fn: tests/hip/test_linear_fn.cpp $(FN_SRC) $(wildcard $(H)/fla
 build/test_gdn_fn: tests/hip/test_gdn.hip
 
 kernels: build/test_quant build/test_attn build/test_gdn
-	./build/test_quant data/models/chrysalis-mix.gguf && ./build/test_attn && ./build/test_gdn
+	./build/test_quant data/models/qwen3.8-27b/qwen3.8-27b.gguf && ./build/test_attn && ./build/test_gdn
 
 kernels_fn: build/test_quant_fn build/test_attn_fn build/test_gdn_fn build/test_mix_fn build/test_moe_fn build/test_cpujob_fn build/test_linear_fn
 	./build/test_quant_fn && ./build/test_attn_fn && ./build/test_gdn_fn && ./build/test_mix_fn && ./build/test_moe_fn && \

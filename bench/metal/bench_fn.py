@@ -10,7 +10,7 @@ ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)
 sys.path.insert(0, ROOT)
 from chrysalis.engine import Engine, Sampling
 
-MODEL = os.path.join(ROOT, "data/models/flash-next/chrysalis-fn.gguf")
+MODEL = os.path.join(ROOT, "data/models/qwen3.8-flash-next/qwen3.8-flash-next.gguf")
 TOKENIZER = os.path.join(ROOT, "data/models/tokenizer.json")
 SHORT = "Why is the sky blue?"
 STORY = "Write a long story about a lighthouse keeper who finds a message in a bottle. Make it detailed."

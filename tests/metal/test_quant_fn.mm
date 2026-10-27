@@ -15,7 +15,7 @@ static const char *tname(int t) {
 struct GemvArgs { uint32_t rows, cols, rb, T, ldx, ldy, add; float scale; uint32_t ggml; };
 
 int main(int argc, char **argv) {
-    if (argc < 2) { fprintf(stderr, "usage: %s <chrysalis-fn.gguf>\n", argv[0]); return 2; }
+    if (argc < 2) { fprintf(stderr, "usage: %s <qwen3.8-flash-next.gguf>\n", argv[0]); return 2; }
     GGUF g;
     if (!g.open(argv[1])) FAIL("cannot open %s", argv[1]);
     Mtl m;

@@ -8,7 +8,7 @@ import time
 
 ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
 sys.path.insert(0, ROOT)
-MODEL = os.path.join(ROOT, "data/models/flash-next/chrysalis-fn.gguf")
+MODEL = os.path.join(ROOT, "data/models/qwen3.8-flash-next/qwen3.8-flash-next.gguf")
 TOKENIZER = os.path.join(ROOT, "data/models/tokenizer.json")
 REQUESTS = [
     "Explain how a hash table works and when to use one.",

@@ -10,7 +10,7 @@ static const char *tn(int t) {
 
 int main(int argc, char **argv) {
     GGUF g;
-    if (argc < 2 || !g.open(argv[1])) FAIL("usage: %s <chrysalis-fn.gguf> [prefix]", argv[0]);
+    if (argc < 2 || !g.open(argv[1])) FAIL("usage: %s <qwen3.8-flash-next.gguf> [prefix]", argv[0]);
     const std::string pre = argc > 2 ? argv[2] : "gemv";
     Mtl m; m.init();
     const char *names[] = {"blk.0.attn_qkv.weight", "blk.0.attn_gate.weight", "blk.0.ssm_out.weight", "blk.0.hc_attn_down.weight",

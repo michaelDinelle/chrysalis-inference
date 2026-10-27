@@ -13,7 +13,7 @@ USE = sys.argv[sys.argv.index("--use") + 1] if "--use" in sys.argv else "qwen3.8
 FN = USE == "qwen3.8-flash-next"
 MODEL, MMPROJ, LIB = MODELS[USE]["path"], MODELS[USE]["vision"], MODELS[USE]["lib"]
 D = 2560 if FN else 5120
-REF_LOGITS = (["build/ref_logits_mm_fn", "data/models/flash-next/src/Q8_0/Qwen3.8-Flash-Next-Q8_0-00001-of-00006.gguf"] if FN
+REF_LOGITS = (["build/ref_logits_mm_fn", "data/models/qwen3.8-flash-next/src/Q8_0/Qwen3.8-Flash-Next-Q8_0-00001-of-00006.gguf"] if FN
               else ["build/ref_logits_mm", MODEL])
 REF = "data/ref-venv/bin/python"
 OUT = "build/vision" + ("/fn" if FN else "")

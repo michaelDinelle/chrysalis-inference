@@ -63,7 +63,7 @@ build/pf/test_prefill_fn: tests/metal/test_prefill_fn.mm $(MFN)/prefill.h $(HFN)
 build/bench_gemv build/bench_kern: build/%: bench/metal/%.mm $(HFN) build/chrysalis_fn.metallib
 	$(OBJCXX) $(FFN) -o $@ $< $(FW) $(GGML_REF)
 
-FN_FILE := data/models/flash-next/chrysalis-fn.gguf
+FN_FILE := data/models/qwen3.8-flash-next/qwen3.8-flash-next.gguf
 
 kernels: build/test_27b
 	./build/test_27b

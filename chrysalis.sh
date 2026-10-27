@@ -260,7 +260,7 @@ release() {
     set -uo pipefail
     local VER="${1:-$(git -C "$ROOT" describe --tags --always)}" OUT=dist/chrysalis R=data/rocm/lib
     cd "$ROOT"
-    rm -rf dist && mkdir -p "$OUT"/{bin,data/rocm/lib/rocm_sysdeps/lib,data/rocm/lib/llvm/lib,data/rocm/lib/hipblaslt/library,data/models/vision,web} dist/native
+    rm -rf dist && mkdir -p "$OUT"/{bin,data/rocm/lib/rocm_sysdeps/lib,data/rocm/lib/llvm/lib,data/rocm/lib/hipblaslt/library,data/models/qwen3.8-27b,data/models/qwen3.8-flash-next,web} dist/native
     docker run --rm -e OWNER="$(id -u):$(id -g)" -v "$PWD:/src:ro" -v "$PWD/dist/native:/out" quay.io/pypa/manylinux_2_28_x86_64 bash /src/chrysalis.sh native
     cp -r dist/native/build dist/native/ggml "$OUT/"
     LD_LIBRARY_PATH="$PWD/$R:$PWD/$R/rocm_sysdeps/lib:$PWD/dist/native/ggml/avx2" ldd "$OUT"/build/*.so |
@@ -270,8 +270,9 @@ release() {
     cp -r "$R/hipblaslt/library/gfx1100" "$OUT/data/rocm/lib/hipblaslt/library/"
     cp chrysalis.sh LICENSE "$OUT/"
     cp -r chrysalis "$OUT/" && rm -rf "$OUT/chrysalis/__pycache__"
-    cp data/models/{tokenizer.json,tokenizer_config.json,chat_template.jinja,config.json,generation_config.json} "$OUT/data/models/"
-    cp data/models/vision/preprocessor_config.json "$OUT/data/models/vision/"
+    cp data/models/{tokenizer.json,tokenizer_config.json,chat_template.jinja} "$OUT/data/models/"
+    cp data/models/qwen3.8-27b/{config.json,generation_config.json,preprocessor_config.json} "$OUT/data/models/qwen3.8-27b/"
+    cp data/models/qwen3.8-flash-next/preprocessor_config.json "$OUT/data/models/qwen3.8-flash-next/"
     UV=$(mktemp -d) && trap 'rm -rf "$UV"' EXIT
     curl -fsSL https://github.com/astral-sh/uv/releases/latest/download/uv-x86_64-unknown-linux-gnu.tar.gz | tar -xz -C "$UV" --strip-components=1
     "$UV/uv" python install -q --no-bin 3.12 --install-dir "$UV/python"

@@ -15,8 +15,8 @@ from chrysalis.models import MODELS
 sys.path.insert(0, os.path.join(ROOT, "data/llama.cpp/gguf-py"))
 from gguf import GGUFReader
 
-MODEL = os.path.join(ROOT, "data/models/flash-next/chrysalis-fn.gguf")
-REF = os.path.join(ROOT, "data/models/flash-next/src/Q8_0/Qwen3.8-Flash-Next-Q8_0-00001-of-00006.gguf")
+MODEL = os.path.join(ROOT, "data/models/qwen3.8-flash-next/qwen3.8-flash-next.gguf")
+REF = os.path.join(ROOT, "data/models/qwen3.8-flash-next/src/Q8_0/Qwen3.8-Flash-Next-Q8_0-00001-of-00006.gguf")
 MAX_KL, MIN_TOP1 = {"decode": 0.021, "prefill": 0.021, "mixed": 0.016}, 0.92
 SELF_KL = 0.012
 TEXT = '''<|im_start|>user

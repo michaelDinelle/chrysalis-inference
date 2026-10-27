@@ -6,7 +6,7 @@ cmd, src, dst = sys.argv[1:4]
 if cmd == "processor":
     from PIL import Image
     from transformers.models.qwen2_vl.image_processing_qwen2_vl import Qwen2VLImageProcessor
-    cfg = json.load(open(f"{ROOT}/data/models/vision/preprocessor_config.json"))
+    cfg = json.load(open(f"{ROOT}/data/models/qwen3.8-27b/preprocessor_config.json"))
     extra = {"max_pixels": int(sys.argv[4])} if len(sys.argv) > 4 else {}
     proc = Qwen2VLImageProcessor(**{k: v for k, v in cfg.items() if k not in ("processor_class", "image_processor_type")}, **extra)
     out = proc(images=[Image.open(src).convert("RGB")], return_tensors="np")
@@ -20,11 +20,11 @@ elif cmd == "tower":
     if sys.argv[4:5] == ["fn"]:
         from transformers.models.qwen4_exp.configuration_qwen4_exp import Qwen4ExpConfig as Config
         from transformers.models.qwen4_exp.modeling_qwen4_exp import Qwen4ExpVisionModel as Tower
-        config, shard = "data/models/vision/flash-next-config.json", "data/models/vision/qwen3.8-flash-next-shard1.safetensors"
+        config, shard = "data/models/qwen3.8-flash-next/config.json", "data/models/qwen3.8-flash-next/qwen3.8-flash-next-shard1.safetensors"
     else:
         from transformers.models.qwen3_5.configuration_qwen3_5 import Qwen3_5Config as Config
         from transformers.models.qwen3_5.modeling_qwen3_5 import Qwen3_5VisionModel as Tower
-        config, shard = "data/models/config.json", "data/models/vision/qwen3.8-27b-shard1.safetensors"
+        config, shard = "data/models/qwen3.8-27b/config.json", "data/models/qwen3.8-27b/qwen3.8-27b-shard1.safetensors"
     vcfg = Config.from_dict(json.load(open(f"{ROOT}/{config}"))).vision_config
     vcfg._attn_implementation = "sdpa"
     model = Tower(vcfg).float().eval()

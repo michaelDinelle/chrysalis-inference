@@ -41,7 +41,7 @@ static void cpu_dequant(int type, const uint8_t *raw, int64_t n, float *y) {
 }
 
 int main(int argc, char **argv) {
-    GGUF g; if (!g.open(argc > 1 ? argv[1] : "data/models/chrysalis-mix.gguf")) FAIL("open gguf");
+    GGUF g; if (!g.open(argc > 1 ? argv[1] : "data/models/qwen3.8-27b/qwen3.8-27b.gguf")) FAIL("open gguf");
     hipStream_t st; CK(hipStreamCreate(&st));
     Arena arena; arena.init(2ull << 30);
     const char *names[] = {"blk.0.ffn_up.weight", "blk.0.ssm_out.weight", "blk.3.attn_k.weight", "blk.0.ffn_gate.weight"};

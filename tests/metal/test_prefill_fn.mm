@@ -295,7 +295,7 @@ static void bench_moe(Mtl &m, const Moe &x, const std::vector<int> &Ts) {
 }
 
 int main(int argc, char **argv) {
-    if (argc < 2) { fprintf(stderr, "usage: %s <chrysalis-fn.gguf> [check | dense | bench]\n", argv[0]); return 2; }
+    if (argc < 2) { fprintf(stderr, "usage: %s <qwen3.8-flash-next.gguf> [check | dense | bench]\n", argv[0]); return 2; }
     const std::string mode = argc > 2 ? argv[2] : "check";
     GGUF g;
     if (!g.open(argv[1])) FAIL("cannot open %s", argv[1]);

@@ -6,7 +6,7 @@ from tokenizers import Tokenizer
 from chrysalis.engine import Engine, Sampling
 
 DATA = os.path.join(ROOT, "data")
-MODEL = os.path.join(DATA, "models/chrysalis-mix.gguf")
+MODEL = os.path.join(DATA, "models/qwen3.8-27b/qwen3.8-27b.gguf")
 tok = Tokenizer.from_file(os.path.join(DATA, "models/tokenizer.json"))
 what = [a for a in sys.argv[1:] if not a.startswith("--")] or ["decode", "prefill", "ttft", "depth"]
 depths = [32768, 131072, 262144]
