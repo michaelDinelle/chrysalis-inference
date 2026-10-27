@@ -118,7 +118,7 @@ def keys(tree, names=BENCH):
 
 
 def key_of(code, inputs, env_id):
-    return {"key": digest({"code": code, "files": inputs["files"], "shared": inputs["shared"], "env": env_id}), "inputs": inputs,
+    return {"key": digest({"code": code, "files": sorted(inputs["files"].values()), "shared": sorted(inputs["shared"].values()), "env": env_id}), "inputs": inputs,
             "protocol": digest([c for c in code if c[0] in PROTOCOL]), "product": digest([c for c in code if c[0] not in PROTOCOL])}
 
 
