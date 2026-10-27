@@ -2,7 +2,7 @@
 
 <h1 align="center">Chrysalis</h1>
 
-<p align="center">A local inference engine, API server and web chat for Qwen3.8-27B and Qwen3.8-Flash-Next on an AMD Radeon RX 7900 XTX.</p>
+<p align="center">A local inference engine, API server and web chat for Qwen3.8-27B and Qwen3.8-Flash-Next on an AMD Radeon RX 7900 XTX or a Mac with Apple Silicon.</p>
 
 <p align="center">
   <a href="LICENSE"><img alt="MIT license" src="https://img.shields.io/badge/license-MIT-e24d85"></a>
@@ -140,6 +140,7 @@ network, and only devices you allow get past the connect page.</sub>
 - **Claude Code** and **OpenCode**, through OpenAI and Anthropic APIs
 - The same chat on **llama.cpp, Ollama, LM Studio, KoboldCpp or vLLM**
 - **Qwen3.8-27B** with its full 262K context: 104 tok/s on short prompts, 73 at 100K
+- **Apple Silicon**: both models on a Mac with 32 GB or more, on Metal kernels written for its GPU
 
 ## Run it
 
@@ -159,7 +160,10 @@ Chrysalis, finds yours by itself, and asks in both terminals with the same code:
 use your GPU at `http://127.0.0.1:8080`, as if it were there. A phone scans the QR code, trusts Chrysalis once, and gets the chat. No RX 7900 at all? You get the chat
 alone, for Ollama, LM Studio or llama.cpp.
 
-A Mac is such a laptop: the same two lines with `chrysalis-macos-arm64.tar.gz`; after that, `chrysalis/Chrysalis.app` opens it in Terminal.
+A Mac with Apple Silicon and 32 GB or more runs the models itself from a clone of this repository: the first
+`./chrysalis.sh` gets Python and Bun into the folder and builds the Metal engines with Xcode's Metal compiler. The
+release for a Mac, the same two lines with `chrysalis-macos-arm64.tar.gz`, is a laptop's chat for now; after that,
+`chrysalis/Chrysalis.app` opens it in Terminal.
 
 Windows: double-click [chrysalis.wsl](https://github.com/michaelDinelle/chrysalis-inference/releases/latest/download/chrysalis.wsl) (with WSL on: `wsl --install` as an administrator, once). Then Chrysalis is in the Start menu: its window is Chrysalis, asks there, and closing it stops it. On your network instead: `wsl -d Chrysalis --cd ~ -- chrysalis/chrysalis.sh --host 0.0.0.0` in PowerShell.
 
@@ -171,12 +175,15 @@ docker run -d --device /dev/kfd --device /dev/dri -p 127.0.0.1:8080:8080 -v chry
 
 ## How it works
 
-Chrysalis has its own engine for this GPU: hand-written kernels for each quantized format, MTP speculative decoding,
+Chrysalis has its own engine for the RX 7900: hand-written kernels for each quantized format, MTP speculative decoding,
 and a prompt cache that turns each agent turn into an append. Flash-Next's 24,576 experts are placed by how often its
 replies use them: the most used in VRAM, following the conversation, and the rest in RAM, computed by the CPU. VRAM the
 KV cache isn't using holds about 1,300 more experts, until a long context needs it back. Each machine's speeds are
 measured once and kept, and experts move at fixed steps, so a run repeats to the bit: that is how every engine change
-is checked against the last, and none may make any measure worse.
+is checked against the last, and none may make any measure worse on any machine that runs it.
+
+On a Mac the same files run on Metal kernels written for Apple's GPU, with the same sampler and MTP drafts. Flash-Next
+keeps the experts its replies use most in memory and reads the others from the SSD as they are needed.
 
 ## Links
 

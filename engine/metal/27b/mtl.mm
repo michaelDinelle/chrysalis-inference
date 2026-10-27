@@ -142,7 +142,7 @@ void *Mtl::enc_begin() {
     if (!cb) begin();
     if (!enc) {
         id<MTLComputeCommandEncoder> en = [OBJ(id<MTLCommandBuffer>, cb) computeCommandEncoderWithDispatchType:MTLDispatchTypeConcurrent];
-        enc = (__bridge void *)en;
+        enc = (void *)CFBridgingRetain(en);
         skip_barrier = true;
         for (void *b : bufs) [en useResource:OBJ(id<MTLBuffer>, b) usage:MTLResourceUsageRead | MTLResourceUsageWrite];
     }
@@ -158,7 +158,7 @@ void Mtl::gemm(uint64_t A, int lda, uint64_t B, uint64_t C, int ldc, bool c_f32,
     size_t oa, ob, oc;
     id<MTLBuffer> ba = find(A, oa), bb = find(B, ob), bc = find(C, oc);
     if (!cb) begin();
-    if (enc) { [OBJ(id<MTLComputeCommandEncoder>, enc) endEncoding]; enc = nullptr; }
+    if (enc) { [OBJ(id<MTLComputeCommandEncoder>, enc) endEncoding]; CFBridgingRelease(enc); enc = nullptr; }
     MPSMatrix *ma = [[MPSMatrix alloc] initWithBuffer:ba offset:oa descriptor:[MPSMatrixDescriptor matrixDescriptorWithRows:M columns:K rowBytes:(size_t)lda * 2 dataType:MPSDataTypeFloat16]];
     MPSMatrix *mb = [[MPSMatrix alloc] initWithBuffer:bb offset:ob descriptor:[MPSMatrixDescriptor matrixDescriptorWithRows:N columns:K rowBytes:(size_t)(ldb ? ldb : K) * 2 dataType:MPSDataTypeFloat16]];
     MPSMatrix *mc = [[MPSMatrix alloc] initWithBuffer:bc offset:oc descriptor:[MPSMatrixDescriptor matrixDescriptorWithRows:M columns:N
@@ -187,7 +187,7 @@ void Mtl::run(void *pso, const void *args, size_t nargs, int gx, int gy, int gz,
 
 void Mtl::commit() {
     if (!cb) return;
-    if (enc) [OBJ(id<MTLComputeCommandEncoder>, enc) endEncoding];
+    if (enc) { [OBJ(id<MTLComputeCommandEncoder>, enc) endEncoding]; CFBridgingRelease(enc); }
     id<MTLCommandBuffer> c = (__bridge_transfer id<MTLCommandBuffer>)cb;
     commit_time = CACurrentMediaTime();
     [c commit];
@@ -210,13 +210,15 @@ void Mtl::warm_start() {
             const double t0 = w->idle.load();
             lk.unlock();
             while (w->idle.load() == t0 && CACurrentMediaTime() - t0 < 0.005) {
-                id<MTLCommandBuffer> c = [q2 commandBufferWithUnretainedReferences];
-                id<MTLComputeCommandEncoder> en = [c computeCommandEncoder];
-                [en setComputePipelineState:pso];
-                [en setBytes:none length:sizeof none atIndex:0];
-                [en dispatchThreads:MTLSizeMake(32, 1, 1) threadsPerThreadgroup:MTLSizeMake(32, 1, 1)];
-                [en endEncoding];
-                [c commit];
+                @autoreleasepool {
+                    id<MTLCommandBuffer> c = [q2 commandBufferWithUnretainedReferences];
+                    id<MTLComputeCommandEncoder> en = [c computeCommandEncoder];
+                    [en setComputePipelineState:pso];
+                    [en setBytes:none length:sizeof none atIndex:0];
+                    [en dispatchThreads:MTLSizeMake(32, 1, 1) threadsPerThreadgroup:MTLSizeMake(32, 1, 1)];
+                    [en endEncoding];
+                    [c commit];
+                }
                 usleep(50);
             }
             done = t0;

@@ -37,7 +37,7 @@ struct Seq {
     int pending = -1;
     std::vector<int> pages;
     View d_pages;
-    View ssm, conv, ple, tail;
+    View ssm, conv, ple, tail, h_last;
     int hist[2] = {-1, -1};
     std::vector<float> top_v;
     std::vector<int> top_i;
@@ -50,8 +50,8 @@ struct Seq {
 inline size_t ssm_bytes() { return (size_t)NGDN * GV * GD * GD * 4; }
 inline size_t conv_bytes() { return (size_t)NGDN * QKV * 3 * 4; }
 inline size_t ple_bytes() { return (size_t)PLE_HIST * HCD * 4; }
-inline size_t tail_bytes() { return (size_t)NATT * KPOOL * IDX_D * 2; }
-inline size_t state_bytes() { return ssm_bytes() + conv_bytes() + ple_bytes() + tail_bytes(); }
+inline size_t tail_bytes() { return (size_t)NKVL * KPOOL * IDX_D * 2; }
+inline size_t state_bytes() { return ssm_bytes() + conv_bytes() + ple_bytes() + tail_bytes() + (size_t)HCD * 4; }
 
 struct Experts {
     int n_slots = 0, n_stage = 0;
@@ -99,6 +99,14 @@ struct Engine {
     WT embd, out;
     Mix hc_head;
     Layer L[NL];
+    Layer M;
+    WT eh_e, eh_h, dout;
+    View enorm, hnorm, mtp_x;
+    Mix mtp_head;
+    bool has_mtp = false;
+    id<MTLCommandBuffer> pending = nil;
+    int npass = 0;
+    void settle();
     Arena warena, barena;
     View kv;
     int n_pages = 0, max_pages_seq = 0;
@@ -124,11 +132,13 @@ struct Engine {
         View rlog, ids, wts, sgv, shg, shu, shh, shout, xh, xy;
         View emb, embh, key, value, xconv, ple_rows;
         View logits, topv, topi, tops, topv1, topi1, tokens, mask, inv, done, ind_args, ind_grids, desc, ids_pred, wts_pred, rlog_pred;
+        View vraw, vab, vkir, memb, mhp, mres, dlog, dtok;
     } b;
+    int last_row = 0;
     int U = 1024, PMAX = 8192;
     struct {
         View res, xn, lo, gate, inj, inj2, mx, mxh, raw, z, ab, qn, kn, vc, blk, qg, kb, vb, qir, kir, Q, Qi, score, sel, nsel,
-             part_o, part_ml, att, atth, rlog, ids, wts, sgv, shg, shu, shh, shout, Y, emb, embh, key, value, xconv, ple_rows, moe, tokens;
+             part_o, part_ml, att, atth, rlog, ids, wts, sgv, shg, shu, shh, shout, Y, emb, embh, key, value, xconv, ple_rows, moe, tokens, tokens2;
     } pb;
     void alloc_prompt_buffers();
     void prompt_pass(Seq &s, const int *tokens, int P);
@@ -154,7 +164,15 @@ struct Engine {
 
     void prefill(int id, const int *tokens, int n);
     int generate(int id, const Sampling &sp, int *out, int max_out, float *rows_v, int *rows_i);
-    void forward_small(Seq &s, const int *tokens, int T, bool all_logits);
+    int draft(int id, const Sampling &sp, const int *fixed, int nfixed, int max_k, int *out);
+    int generate_masked(int id, const Sampling &sp, const int *drafts, int k, const uint32_t *masks, int *out, int max_out);
+    int verify(Seq &s, const Sampling &sp, const int *drafts, int k, bool masked, int *out, int nout, float *rows_v, int *rows_i);
+    void commit(Seq &s, int q, int n);
+    void mtp_layer(Enc &e, Seq &s, int T, uint32_t pos0, View hp, View tok, bool spec);
+    void mtp_catch_up(Seq &s, int T, int pos0, bool spec);
+    void mtp_draft(Seq &s, int k, int *out, int nfixed = 0);
+    void load_mtp();
+    void forward_small(Seq &s, const int *tokens, int T, bool all_logits, bool verify = false);
     void ple_ids(int h0, int h1, const int *tokens, int T, size_t *rows) const;
     void ple_gather(const Seq &s, const int *tokens, int T, uint8_t *dst) const;
     void advance(Seq &s, const int *tokens, int T);
@@ -163,7 +181,7 @@ struct Engine {
     void gemv_combine(Enc &e, const WT &w, View x, int ldx, int T, View inj) { gemv(e, w, x, ldx, b.res, HCD, T, 2, 1.0f, inj); }
     void mixer(Enc &e, const Mix &mx, View res, int T, View inj);
     void topk(Enc &e, int rows);
-    void keep_top(Seq &s);
+    void keep_top(Seq &s, int row = 0);
     void wait_event(id<MTLSharedEvent> ev, uint64_t v, id<MTLCommandBuffer> cb);
 
     void experts_init(size_t cache_bytes, int n_stage);

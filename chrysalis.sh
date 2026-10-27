@@ -11,8 +11,59 @@ APP="$ROOT/Chrysalis.app"
 BUN="$ROOT/bin/bun"; [ -n "$MAC" ] && BUN="$APP/Contents/MacOS/Chrysalis"; [ -x "$BUN" ] || BUN=bun
 export BUN_BE_BUN=1
 get() { (cd "$ROOT" && "$PY" -m chrysalis get "$@"); }
-roomy() { awk '/^MemTotal/ { exit !($2 >= 58 * 1024 * 1024) }' /proc/meminfo; }
+PKGS=(numpy tokenizers pillow llguidance "huggingface_hub[hf_xet]" onnxruntime==1.31.0 sherpa-onnx==1.13.8 kokoro-onnx==0.4.7 websockets==17.2)
+fetch() {
+    curl -fsSL -o "$3" "$1" && [ "$( (sha256sum "$3" 2>/dev/null || shasum -a 256 "$3") | cut -d' ' -f1)" = "$2" ]
+}
+uv_get() {
+    local os sum
+    case "$(uname -s)-$(uname -m)" in
+        Darwin-arm64) os=aarch64-apple-darwin sum=743f85035a1996ecb350659e01cd9faea9709829be09b1b4b03c73eaf3c9cd73 ;;
+        Linux-x86_64) os=x86_64-unknown-linux-gnu sum=f68d291c75783122dad58ab77def0e13f3233f358731db5d6d7e8715603b928f ;;
+        *) return 1 ;;
+    esac
+    fetch "https://github.com/astral-sh/uv/releases/download/0.13.5/uv-$os.tar.gz" $sum "$1/uv.tar.gz" &&
+        tar -xzf "$1/uv.tar.gz" -C "$1" --strip-components=1
+}
+setup() {
+    local T
+    if [ ! -x "$PY" ]; then
+        echo "getting Python and the packages Chrysalis uses (once)"
+        T=$(mktemp -d)
+        if uv_get "$T" && "$T/uv" python install -q --no-bin 3.12 --install-dir "$T/python" && mkdir -p "$ROOT/data" &&
+            mv "$(find "$T/python" -mindepth 1 -maxdepth 1 -type d -name 'cpython-3.12.*')" "$ROOT/data/venv" &&
+            "$T/uv" pip install -q --python "$ROOT/data/venv/bin/python3" --break-system-packages "${PKGS[@]}"; then
+            ln -sf python3 "$ROOT/data/venv/bin/python"
+        else
+            echo "  that failed: start Chrysalis again to try again"
+            rm -rf "$ROOT/data/venv"
+        fi
+        rm -rf "$T"
+    fi
+    if [ "$BUN" = bun ] && ! command -v bun >/dev/null; then
+        local arch=linux-x64 sum=3e730528d89775f03f87f05c06787c4df4099d0a37f3f252e7b829cb23816e18
+        [ -z "$MAC" ] || { arch=darwin-aarch64; sum=80afd4c069b46a6fa8f3ec520bebc750a7843e4a8d5b9583d29ad436c00a3403; }
+        echo "getting Bun for the web chat (once)"
+        T=$(mktemp -d)
+        mkdir -p "$ROOT/bin" && fetch "https://github.com/oven-sh/bun/releases/download/bun-v1.4.3/bun-$arch.zip" $sum "$T/bun.zip" &&
+            unzip -q -j "$T/bun.zip" -d "$ROOT/bin" && BUN="$ROOT/bin/bun"
+        rm -rf "$T"
+    fi
+}
+mem_gb() { if [ -n "$MAC" ]; then echo $(( $(sysctl -n hw.memsize) >> 30 )); else awk '/^MemTotal/ { printf "%d", $2 / 1048576 }' /proc/meminfo; fi; }
+roomy() { (( $(mem_gb) >= 58 )); }
+apple() { [ -n "$MAC" ] && [ "$(uname -m)" = arm64 ] && (( $(mem_gb) >= 30 )); }
+build() {
+    apple && [ -f "$ROOT/Makefile" ] || return 0
+    [ -f "$ROOT/build/libchrysalis.dylib" ] && [ -f "$ROOT/build/libchrysalis_fn.dylib" ] && return 0
+    if ! xcrun -f clang >/dev/null 2>&1; then
+        echo "the Metal engines build with Apple's command line tools: 'xcode-select --install', then start Chrysalis again"; return 0
+    fi
+    echo "building Chrysalis's Metal engines (once, about a minute)"
+    make -C "$ROOT" -s engines >/dev/null 2>&1 || echo "  that failed: 'xcodebuild -downloadComponent MetalToolchain' gets Metal's compiler"
+}
 has_gpu() {
+    if [ -n "$MAC" ]; then apple && [ -f "$ROOT/build/libchrysalis.dylib" ]; return; fi
     [ -e /dev/kfd ] && grep -qs "gfx_target_version 110000" /sys/class/kfd/kfd/topology/nodes/*/properties && return 0
     [ -e /dev/dxg ] && [ -x "$PY" ] || return 1
     LD_LIBRARY_PATH="$ROOT/data/rocm/lib:$ROOT/data/rocm/lib/rocm_sysdeps/lib" HSA_ENABLE_DXG_DETECTION=1 "$PY" -Ic '
@@ -75,7 +126,10 @@ pick() {
     mkdir -p "$TLS_DIR" && printf %s "${ids[at]}" > "$TLS_DIR/model"
 }
 
-lan_ip() { ip -4 route get 1.1.1.1 2>/dev/null | awk '{ for (i = 1; i < NF; i++) if ($i == "src") { print $(i + 1); exit } }'; }
+lan_ip() {
+    if [ -n "$MAC" ]; then ipconfig getifaddr "$(route -n get default 2>/dev/null | awk '/interface:/ { print $2 }')"; return; fi
+    ip -4 route get 1.1.1.1 2>/dev/null | awk '{ for (i = 1; i < NF; i++) if ($i == "src") { print $(i + 1); exit } }'
+}
 lan_subnet() {
     local dev
     dev=$(ip -4 route show default | awk '{ for (i = 1; i < NF; i++) if ($i == "dev") { print $(i + 1); exit } }')
@@ -222,7 +276,7 @@ release() {
     curl -fsSL https://github.com/astral-sh/uv/releases/latest/download/uv-x86_64-unknown-linux-gnu.tar.gz | tar -xz -C "$UV" --strip-components=1
     "$UV/uv" python install -q --no-bin 3.12 --install-dir "$UV/python"
     mv "$(find "$UV/python" -mindepth 1 -maxdepth 1 -type d -name 'cpython-3.12.*')" "$OUT/data/venv"
-    "$UV/uv" pip install -q --python "$OUT/data/venv/bin/python3" --break-system-packages numpy tokenizers pillow llguidance "huggingface_hub[hf_xet]" onnxruntime==1.31.0 sherpa-onnx==1.13.8 kokoro-onnx==0.4.7 websockets==17.2
+    "$UV/uv" pip install -q --python "$OUT/data/venv/bin/python3" --break-system-packages "${PKGS[@]}"
     ln -sf python3 "$OUT/data/venv/bin/python"
     find web -maxdepth 1 -type f \( -name '*.ts' -o -name '*.html' -o -name '*.css' -o -name '*.js' -o -name '*.svg' -o -name '*.json' -o -name 'bun.lock' \) \
         ! -name '*.test.ts' ! -name '*.check.ts' ! -name 'fake-*' ! -name 'bench-*' -exec cp {} "$OUT/web/" \;
@@ -309,10 +363,6 @@ native() {
 
 case "${1:-}" in
   ""|--host) case "${1:-}:${2:-}" in --host:0.0.0.0) to=0.0.0.0 ;; --host:127.0.0.1|:) to=127.0.0.1 ;; *) usage; exit 1 ;; esac
-            if [ -n "$MAC" ] && [ $to = 0.0.0.0 ]; then
-                echo "a Mac has no RX 7900 to share: its Chrysalis is the one on the computer with the GPU, which"
-                echo "'chrysalis.sh --host 0.0.0.0' there puts on the network"; exit 1
-            fi
             if here -f -o /dev/null "$WEB_URL/"; then echo "Chrysalis is running already, in another terminal (Ctrl+C there stops it)"; exit 1; fi
             wsl_ready
             if [ $to = 0.0.0.0 ]; then let_in; fi
@@ -320,6 +370,8 @@ case "${1:-}" in
                 codesign -v "$APP" 2>/dev/null || codesign --force -s - "$APP" 2>/dev/null
             fi
             trap 'trap - EXIT; [ ! -t 1 ] || printf "\e[?25h"; kill 0' EXIT
+            setup
+            build
             if has_gpu; then
                 pick
                 model=$(cat "$TLS_DIR/model" 2>/dev/null || true)
@@ -332,17 +384,19 @@ case "${1:-}" in
                 loading <&3
                 grep --line-buffered -vE "$CHATTER" <&3 &
             else
-                echo "no RX 7900 here: the web chat uses Chrysalis on another computer on your network, or your Ollama, LM Studio or llama.cpp"
+                echo "no GPU Chrysalis runs on here: the web chat uses Chrysalis on another computer on your network, or your Ollama, LM Studio or llama.cpp"
             fi
             urls $to
             web=server.ts; [ -f "$ROOT/web/server.js" ] && web=server.js
             [ -d "$ROOT/web/node_modules" ] || (cd "$ROOT/web" && "$BUN" install --frozen-lockfile >/dev/null)
             cd "$ROOT/web" && NODE_ENV=production CHRYSALIS_HOST=$to "$BUN" $web ;;
   gpu)      has_gpu ;;
-  get)      get "${@:2}" ;;
-  serve)    ggml="$ROOT/ggml/avx2"; grep -qw avx512_vnni /proc/cpuinfo && ggml="$ROOT/ggml/avx512"
-            export LD_LIBRARY_PATH="$ROOT/data/rocm/lib:$ROOT/data/rocm/lib/rocm_sysdeps/lib:$ggml${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
-            [ -e /dev/dxg ] && export HSA_ENABLE_DXG_DETECTION=1
+  get)      setup; get "${@:2}" ;;
+  serve)    if [ -z "$MAC" ]; then
+                ggml="$ROOT/ggml/avx2"; grep -qw avx512_vnni /proc/cpuinfo && ggml="$ROOT/ggml/avx512"
+                export LD_LIBRARY_PATH="$ROOT/data/rocm/lib:$ROOT/data/rocm/lib/rocm_sysdeps/lib:$ggml${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
+                [ -e /dev/dxg ] && export HSA_ENABLE_DXG_DETECTION=1
+            fi
             m=$(cat "$TLS_DIR/model" 2>/dev/null || true)
             cd "$ROOT" && exec "$PY" -m chrysalis serve --host 127.0.0.1 ${m:+--use "$m"} "${@:2}" ;;
   stats)    here "$API/chrysalis/stats" ;;

@@ -2,7 +2,7 @@
 using namespace metal;
 
 constant int NH = 24, NKV = 2, HD = 256, QPK = 12, IDX_H = 4, IDX_D = 128, PAGE = 64, KPOOL = 4, SEL = 512;
-constant size_t KV_K = (size_t)NKV * PAGE * HD * 2, KV_LAYER = 2 * KV_K + (PAGE / KPOOL) * IDX_D * 2, KV_PAGE = KV_LAYER * 12;
+constant size_t KV_K = (size_t)NKV * PAGE * HD * 2, KV_LAYER = 2 * KV_K + (PAGE / KPOOL) * IDX_D * 2, KV_PAGE = KV_LAYER * 13;
 constant float EPS = 1e-6f, ROPE_BASE = 1e7f;
 inline float sigm(float x) { return 1.f / (1.f + exp(-x)); }
 

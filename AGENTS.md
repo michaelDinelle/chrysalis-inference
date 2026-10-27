@@ -2,6 +2,29 @@
 
 README.md shows what Chrysalis is. This file is how to change it.
 
+## Layout
+
+- engine/api.h declares the C API every engine implements, the chrysalis_* functions chrysalis/engine.py calls;
+  engine/gguf.h, sampler.h and lookup.h are the host code every backend shares: the GGUF reader, the sampler that
+  matches llama.cpp's, and prompt lookup.
+- engine/<backend>/ (hip for the RX 7900, metal for Apple Silicon) has a build.mk and one engine per model, 27b/ and
+  flash-next/, each a shared library that includes engine/api.h. Every backend reads the same model files.
+- chrysalis/models.py picks the backend from the platform (CHRYSALIS_BACKEND overrides it), with each backend's own
+  settings in ON; bench/measure.py does the same for the bench.
+- tests/<backend>/ hold kernel checks; tests/*.py check any backend through the C API.
+- A new backend: engine/<name>/build.mk building build/libchrysalis and build/libchrysalis_fn, with `kernels` and
+  `kernels_fn`, its model checks in BACKEND_TESTS and BACKEND_TESTS_FN (the builds they need in TEST_BUILDS and
+  TEST_BUILDS_FN), and LLAMA_INC, LLAMA, LLAMA_LIBS and CXX_HOST for the llama.cpp references; its name in
+  chrysalis/models.py and bench/measure.py; its kernel checks in tests/<name>/; and in bench/limits.py, how to read its
+  GPU's memory bandwidth and FP16 rate, which the bench's share of the GPU's limit divides by.
+
+## Bench
+
+`make bench` measures both models and the hooks (`git config core.hooksPath bench/hooks`) hold every commit to its
+parent on every machine bench/results.json has numbers from: a change to a backend's engine needs its numbers from a
+machine running that backend. Measure there, then `data/venv/bin/python bench/bench.py merge <its bench/results.json>`
+here before committing.
+
 ## Comments
 
 None: no comments or docstrings anywhere in the repo, in any language, including code inside strings.
@@ -43,5 +66,9 @@ None: no comments or docstrings anywhere in the repo, in any language, including
   against llama.cpp; the transformers references need data/ref-venv: CPU torch, torchvision, transformers, Pillow, safetensors), `make test_fn` (Flash-Next
   kernels) and `make test_fn_model` (the Flash-Next model in-process: generation and snapshots, the server, llama.cpp's
   logits, pictures and videos).
-- Flash-Next takes ~47 GiB of system RAM, in Chrysalis or in-process, and more as its expert pool moves (until 4 GB is left, given back below 3 GB). Check MemAvailable before loading it, and run it
+- On a Mac with Apple Silicon and 32 GB or more, the same targets build and check the Metal engines: `make kernels`,
+  `make kernels_fn`, `make test` and `make test_fn_model`. Their references come from data/llama.cpp at the commit Linux
+  pins, built with Metal (`cmake -B build && cmake --build build --target llama ggml ggml-base`), and the PDF checks
+  need poppler (`brew install poppler`). The Metal engines have no vision tower yet, so their tests leave pictures out.
+- On the RX 7900, Flash-Next takes ~47 GiB of system RAM, in Chrysalis or in-process, and more as its expert pool moves (until 4 GB is left, given back below 3 GB). Check MemAvailable before loading it, and run it
   in its own scope (`systemd-run --user --scope ...`): systemd-oomd kills whole terminal scopes under memory pressure.

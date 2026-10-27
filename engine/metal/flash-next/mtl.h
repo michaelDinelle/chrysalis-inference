@@ -1,6 +1,7 @@
 #pragma once
 #import <Metal/Metal.h>
 #include <dlfcn.h>
+#include <sys/mman.h>
 #include <string>
 #include <unordered_map>
 #include "fn.h"
@@ -72,6 +73,7 @@ struct Mtl {
     void release_all() {
         [rs removeAllAllocations];
         [rs commit];
+        for (id<MTLBuffer> b : owned) munlock(b.contents, b.length);
         owned.clear();
         allocated = 0;
     }
@@ -94,11 +96,10 @@ struct Enc {
     Mtl *m = nullptr;
     id<MTLCounterSampleBuffer> ts = nil;
     uint32_t ts_n = 0;
-    bool fenced = false;
     void begin(Mtl &mt, id<MTLCommandBuffer> cb) {
         m = &mt;
         start(cb);
-        if (fenced) [e waitForFence:m->fence];
+        [e waitForFence:m->fence];
     }
     void start(id<MTLCommandBuffer> cb) {
         if (!ts) { e = [cb computeCommandEncoderWithDispatchType:MTLDispatchTypeConcurrent]; return; }
@@ -114,7 +115,6 @@ struct Enc {
         [e updateFence:m->fence];
         [e endEncoding];
         e = nil;
-        fenced = true;
     }
     Enc &k(const char *name) { [e setComputePipelineState:m->pipe(name)]; return *this; }
     Enc &k(const std::string &name) { return k(name.c_str()); }

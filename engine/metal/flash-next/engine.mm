@@ -93,11 +93,13 @@ void Engine::load(const std::string &path, int max_seqs) {
     }
     m.init();
     const std::string mtp = "blk." + std::to_string(NL) + ".";
-    size_t dense = 0;
+    size_t dense = 0, mtp_dense = 0;
     for (auto &[n, t] : g.tensors) {
         if (n.find("_hot.") != std::string::npos || n.find("_cold") != std::string::npos || n.find("ffn_exp_slot") != std::string::npos ||
-            n.rfind(mtp, 0) == 0) continue;
-        dense += ((t.type == 1 && t.ne[1] == 1 ? t.nbytes * 2 : t.nbytes) + 255) & ~size_t(255);
+            n.find("_mtp.") != std::string::npos) continue;
+        const size_t b = ((t.type == 1 && t.ne[1] == 1 ? t.nbytes * 2 : t.nbytes) + 255) & ~size_t(255);
+        dense += b;
+        if (n.rfind(mtp, 0) == 0) mtp_dense += b;
     }
     warena.init(m, dense + (1 << 20));
     embd = weight("token_embd.weight");
@@ -146,6 +148,29 @@ void Engine::load(const std::string &path, int max_seqs) {
         expert_sources(g, l, &xc.src[(size_t)l * NE]);
     }
     if (gl != NGDN) FAIL("%d GDN layers", gl);
+    if (g.get(mtp + "nextn.eh_proj.weight")) {
+        Layer &w = M;
+        mix(mtp + "hc_attn_", w.hca, true);
+        mix(mtp + "hc_ffn_", w.hcf, true);
+        w.q = weight(mtp + "attn_q.weight"); w.k = weight(mtp + "attn_k.weight"); w.v = weight(mtp + "attn_v.weight");
+        w.o = weight(mtp + "attn_output.weight");
+        w.qn = small(mtp + "attn_q_norm.weight"); w.kn = small(mtp + "attn_k_norm.weight");
+        w.iq = weight(mtp + "indexer.q_proj.weight"); w.ik = weight(mtp + "indexer.k_proj.weight");
+        w.iqn = small(mtp + "indexer.q_norm.weight"); w.ikn = small(mtp + "indexer.k_norm.weight");
+        if (w.q.rows != 2 * NH * HD || w.k.rows != NKV * HD || w.iq.rows != IDX_H * IDX_D) FAIL("MTP layer: attention shapes");
+        w.router = weight(mtp + "ffn_router.weight");
+        w.sg = weight(mtp + "ffn_gate_inp_shexp.weight");
+        w.sh_gate = weight(mtp + "ffn_gate_shexp.weight"); w.sh_up = weight(mtp + "ffn_up_shexp.weight");
+        w.sh_down = weight(mtp + "ffn_down_shexp.weight");
+        const WT eh = weight(mtp + "nextn.eh_proj.weight");
+        if (eh.rows != D || eh.cols != 2 * D || eh.type != 8) FAIL("MTP layer: eh_proj is not Q8_0 [%d, %d]", 2 * D, D);
+        eh_e = eh; eh_e.cols = D;
+        eh_h = eh; eh_h.cols = D; eh_h.v = eh.v.at(ggml_row_bytes(eh.type, D));
+        enorm = small(mtp + "nextn.enorm.weight"); hnorm = small(mtp + "nextn.hnorm.weight");
+        mix(mtp + "nextn.hc_head_", mtp_head, false);
+        dout = out; dout.rows = DRAFT_VOCAB;
+        has_mtp = true;
+    }
     read_all(g_reads, 8);
     g_reads.clear();
     const double t_dense = now_s();
@@ -180,16 +205,24 @@ void Engine::load(const std::string &path, int max_seqs) {
     alloc_buffers(max_seqs);
     alloc_prompt_buffers();
     mlock(warena.base.host(), warena.cap);
+    if (has_mtp) {
+        mtp_x = m.alloc((size_t)NE * XSLOT_MTP);
+        if (mlock(mtp_x.host(), (size_t)NE * XSLOT_MTP)) fprintf(stderr, "chrysalis-fn: cannot wire the MTP experts (%s)\n", strerror(errno));
+    }
     const double ws = m.dev.recommendedMaxWorkingSetSize, avail = mem_available(), total = mem_total();
     const double keep = env_d("CHRYSALIS_FN_KEEP_GB", 6.5) * 1e9 + env_d("CHRYSALIS_FN_SNAPSHOTS", 8) * state_bytes();
     double cache = std::min(ws - m.allocated - 0.75e9, avail - keep);
     cache = std::min(cache, total - keep - m.allocated - 1.0e9);
-    if (getenv("CHRYSALIS_FN_CACHE_GB")) cache = env_d("CHRYSALIS_FN_CACHE_GB", 0) * 1e9;
+    if (getenv("CHRYSALIS_FN_CACHE_GB")) {
+        cache = env_d("CHRYSALIS_FN_CACHE_GB", 0) * 1e9;
+        if (has_mtp) cache -= (double)NE * XSLOT_MTP + mtp_dense + (double)n_pages * KV_LAYER;
+    }
     const int stage = (int)env_d("CHRYSALIS_FN_STAGE", 256);
     if (cache < 2e9) FAIL("only %.1f GB of memory for the expert cache (%.1f GB available, %.1f GB kept for macOS)", cache / 1e9, avail / 1e9, keep / 1e9);
     fprintf(stderr, "chrysalis-fn: dense %.2f GB (%.1f s), buffers %.2f GB, expert cache %.2f GB (%.0f%% of the experts); %.1f GB available, working set %.1f GB\n",
             warena.cap / 1e9, t_dense - t0, (m.allocated - warena.cap) / 1e9, cache / 1e9, 100.0 * cache / (XSLOT * NL * NE), avail / 1e9, ws / 1e9);
     experts_init((size_t)cache, stage);
+    if (has_mtp) load_mtp();
     experts_fill(60);
     g_progress = 1.0f;
     fprintf(stderr, "chrysalis-fn: loaded in %.1f s\n", now_s() - t0);
@@ -209,28 +242,39 @@ void Engine::alloc_buffers(int max_seqs) {
     const size_t sizes[] = {f(HCD), f(HCD), f(HCR), f(HCR), f(HCD), f(HC), f(HC), f(D), f(D), f(QKV), f(GV * GD), f(96), f(GV * GD), f(D),
                             f(2 * NH * HD), f(NKV * HD), f(NKV * HD), f(IDX_H * IDX_D), f(IDX_D), f(NH * HD), f(IDX_H * IDX_D),
                             f(max_blocks), f(SEL_BLOCKS + 1), f(1), f(NH * 16 * HD), f(NH * 16 * 2), f(NH * HD), f(NH * HD),
-                            f(NE), f(NL * TOPK_E), f(NL * TOPK_E), f(1), f(FS), f(FS), f(FS), f(D), f(TOPK_E * FE), f(TOPK_E * D),
+                            f(NE), f((NL + 1) * TOPK_E), f((NL + 1) * TOPK_E), f(1), f(FS), f(FS), f(FS), f(D), f(TOPK_E * FE), f(TOPK_E * D),
                             f(D), f(D), f(HCD), f(D), f(HCD), (size_t)T * PLE_HEADS * PLE_ROW, f(VOCAB), f(SAMPLE_N), f(SAMPLE_N), f(NSTAT),
-                            f(128 * SAMPLE_N), f(128 * SAMPLE_N), f(1), (size_t)T * VOCAB / 8, f(HC), f(NL * TOPK_E),
-                            (size_t)12 * 8192, (size_t)12 * 8192, (size_t)16 * NL, f(NL * TOPK_E), f(NL * TOPK_E), f(NE)};
+                            f(128 * SAMPLE_N), f(128 * SAMPLE_N), f(1), (size_t)T * VOCAB / 8, f(HC), f((NL + 1) * TOPK_E),
+                            (size_t)12 * 8192, (size_t)12 * 8192, (size_t)16 * NL, f(NL * TOPK_E), f(NL * TOPK_E), f(NE),
+                            f((size_t)NGDN * QKV), f((size_t)NGDN * 96), f((size_t)NKVL * IDX_D), f(HCD), f(HCD), f(HCD), (size_t)DRAFT_VOCAB * 4, f(1)};
     for (size_t s : sizes) need += (s + 255) & ~size_t(255);
     barena.init(m, need);
     View *dst[] = {&b.res, &b.xn, &b.lo, &b.loh, &b.gate, &b.inj, &b.inj2, &b.mx, &b.mxh, &b.raw, &b.z, &b.ab, &b.go, &b.blk,
                    &b.qg, &b.kb, &b.vb, &b.qir, &b.kir, &b.Q, &b.Qi, &b.score, &b.sel, &b.nsel, &b.part_o, &b.part_ml, &b.att, &b.atth,
                    &b.rlog, &b.ids, &b.wts, &b.sgv, &b.shg, &b.shu, &b.shh, &b.shout, &b.xh, &b.xy,
                    &b.emb, &b.embh, &b.key, &b.value, &b.xconv, &b.ple_rows, &b.logits, &b.topv, &b.topi, &b.tops, &b.topv1, &b.topi1,
-                   &b.tokens, &b.mask, &b.inv, &b.done, &b.ind_args, &b.ind_grids, &b.desc, &b.ids_pred, &b.wts_pred, &b.rlog_pred};
+                   &b.tokens, &b.mask, &b.inv, &b.done, &b.ind_args, &b.ind_grids, &b.desc, &b.ids_pred, &b.wts_pred, &b.rlog_pred,
+                   &b.vraw, &b.vab, &b.vkir, &b.memb, &b.mhp, &b.mres, &b.dlog, &b.dtok};
     static_assert(sizeof(sizes) / sizeof(sizes[0]) == sizeof(dst) / sizeof(dst[0]), "a size per buffer");
     for (size_t i = 0; i < sizeof(dst) / sizeof(dst[0]); i++) *dst[i] = barena.get(sizes[i]);
     seqs.assign(max_seqs, Seq{});
     for (Seq &s : seqs) {
         s.d_pages = m.alloc((size_t)max_pages_seq * 4);
         View st = m.alloc(state_bytes());
-        s.ssm = st; s.conv = st.at(ssm_bytes()); s.ple = s.conv.at(conv_bytes()); s.tail = s.ple.at(ple_bytes());
+        s.ssm = st; s.conv = st.at(ssm_bytes()); s.ple = s.conv.at(conv_bytes()); s.tail = s.ple.at(ple_bytes()); s.h_last = s.tail.at(tail_bytes());
     }
 }
 
+void Engine::settle() {
+    if (!pending) return;
+    id<MTLCommandBuffer> cb = pending;
+    pending = nil;
+    [cb waitUntilCompleted];
+    if (cb.status == MTLCommandBufferStatusError) FAIL("GPU error: %s", cb.error.localizedDescription.UTF8String);
+}
+
 void Engine::shutdown() {
+    settle();
     experts_stop();
     if (ngram_map) munmap(ngram_map, ngram_bytes);
     ngram_map = nullptr;
@@ -253,6 +297,7 @@ int Engine::seq_new() {
 }
 
 void Engine::seq_reset(Seq &s) {
+    settle();
     for (int p : s.pages) page_release(p);
     s.n = 0; s.pending = -1; s.pages.clear(); s.seen.clear(); s.top_v.clear(); s.top_i.clear();
     s.hist[0] = s.hist[1] = -1;
@@ -278,6 +323,7 @@ int Engine::page_alloc() {
 void Engine::page_release(int p) { if (--page_ref[p] == 0) free_pages.push_back(p); }
 
 void Engine::ensure_pages(Seq &s, int n_tokens, int from) {
+    settle();
     if (n_tokens > max_ctx) throw std::runtime_error("past the context size");
     const int need = (n_tokens + PAGE - 1) / PAGE;
     int shared = 0;
@@ -295,6 +341,7 @@ void Engine::ensure_pages(Seq &s, int n_tokens, int from) {
 }
 
 int Engine::snapshot(int id) {
+    settle();
     Seq &s = seqs.at(id);
     size_t si = 0;
     while (si < snaps.size() && snaps[si].used) si++;
@@ -311,6 +358,7 @@ int Engine::snapshot(int id) {
 }
 
 void Engine::restore(int id, int snap) {
+    settle();
     Seq &s = seqs.at(id);
     Snap &sn = snaps.at(snap);
     if (!sn.used) throw std::runtime_error("restore of a freed snapshot");
@@ -406,8 +454,9 @@ void Engine::mixer(Enc &e, const Mix &mx, View res, int T, View inj) {
     e.barrier();
 }
 
-void Engine::forward_small(Seq &s, const int *tokens, int T, bool all_logits) {
+void Engine::forward_small(Seq &s, const int *tokens, int T, bool all_logits, bool verify) {
     if (T > TM) FAIL("forward_small: %d tokens", T);
+    settle();
     memcpy(b.tokens.host(), tokens, T * 4);
     experts_tick(T);
     ple_gather(s, tokens, T, b.ple_rows.host<uint8_t>());
@@ -450,7 +499,7 @@ void Engine::forward_small(Seq &s, const int *tokens, int T, bool all_logits) {
             e.barrier();
             e.k("ple_conv").b(0, b.xconv).b(1, s.ple).b(2, w.ple_conv).b(3, b.res).c(4, tt).grid((T * HCD + 255) / 256, 256);
             e.barrier();
-            e.k("ple_commit").b(0, s.ple).b(1, b.xconv).c(2, tt).grid(HCD / 256, 256);
+            if (!verify) e.k("ple_commit").b(0, s.ple).b(1, b.xconv).c(2, tt).grid(HCD / 256, 256);
             e.barrier();
         }
         if (!skip("mix")) mixer(e, w.hca, b.res, T, b.inj);
@@ -458,11 +507,12 @@ void Engine::forward_small(Seq &s, const int *tokens, int T, bool all_logits) {
         } else if (!is_attn_layer(l) && skip("gdn")) {
         } else if (is_attn_layer(l)) {
             const int al = l / 4;
+            const View kir = verify ? b.vkir.at((size_t)al * TM * IDX_D * 4) : b.kir;
             gemv(e, w.q, b.mx, D, b.qg, 2 * NH * HD, T);
             gemv(e, w.k, b.mx, D, b.kb, NKV * HD, T);
             gemv(e, w.v, b.mx, D, b.vb, NKV * HD, T);
             gemv(e, w.iq, b.mx, D, b.qir, IDX_H * IDX_D, T);
-            gemv(e, w.ik, b.mx, D, b.kir, IDX_D, T);
+            gemv(e, w.ik, b.mx, D, kir, IDX_D, T);
             e.barrier();
             const int nb_end = (pos0 + T) / KPOOL;
             const int nsel_max = std::min(nb_end, SEL_BLOCKS) + 1;
@@ -472,9 +522,9 @@ void Engine::forward_small(Seq &s, const int *tokens, int T, bool all_logits) {
             e.k("attn_prep").c(0, ka).b(1, b.qg).b(2, b.kb).b(3, b.vb).b(4, w.qn).b(5, w.kn).b(6, kv).b(7, s.d_pages).b(8, b.Q).grid(NH + 2 * NKV, T, 1, 256);
             e.k("idx_qprep").c(0, ka).b(1, b.qir).b(2, w.iqn).b(3, b.Qi).grid(IDX_H, T, 1, 128);
             const int first = pos0 / KPOOL, last = (pos0 + T) / KPOOL - 1;
-            if (last >= first) e.k("idx_pool").c(0, ka).b(1, b.kir).b(2, tail).b(3, w.ikn).b(4, kv).b(5, s.d_pages).grid(last - first + 1, 128);
+            if (last >= first) e.k("idx_pool").c(0, ka).b(1, kir).b(2, tail).b(3, w.ikn).b(4, kv).b(5, s.d_pages).grid(last - first + 1, 128);
             e.barrier();
-            e.k("idx_tail").c(0, ka).b(1, b.kir).b(2, tail).grid(1, 128);
+            if (!verify) e.k("idx_tail").c(0, ka).b(1, kir).b(2, tail).grid(1, 128);
             const uint32_t ld = std::max(1, nb_end);
             if (nb_end > SEL_BLOCKS) e.k("idx_score").c(0, ka).b(1, b.Qi).b(2, kv).b(3, s.d_pages).b(4, b.score).c(5, ld).grid((ld + 255) / 256, T, 1, 256);
             e.barrier();
@@ -487,16 +537,17 @@ void Engine::forward_small(Seq &s, const int *tokens, int T, bool all_logits) {
             gemv_combine(e, w.o, b.att, NH * HD, T, b.inj);
         } else {
             const int gl = gdn_index(l);
-            gemv(e, w.qkv, b.mx, D, b.raw, QKV, T);
+            const View raw = verify ? b.vraw.at((size_t)gl * TM * QKV * 4) : b.raw, ab = verify ? b.vab.at((size_t)gl * TM * 96 * 4) : b.ab;
+            gemv(e, w.qkv, b.mx, D, raw, QKV, T);
             gemv(e, w.z, b.mx, D, b.z, GV * GD, T);
-            gemv(e, w.ab, b.mx, D, b.ab, 2 * GV, T);
+            gemv(e, w.ab, b.mx, D, ab, 2 * GV, T);
             e.barrier();
-            GdnStepArgs ga{tt, 1};
+            GdnStepArgs ga{tt, verify ? 0u : 1u};
             View conv = s.conv.at((size_t)gl * QKV * 3 * 4), S = s.ssm.at((size_t)gl * GV * GD * GD * 4);
-            e.k("gdn_step").c(0, ga).b(1, b.raw).b(2, b.ab).b(3, b.z).b(4, w.conv_w).b(5, conv).b(6, w.A).b(7, w.dt).b(8, S)
+            e.k("gdn_step").c(0, ga).b(1, raw).b(2, ab).b(3, b.z).b(4, w.conv_w).b(5, conv).b(6, w.A).b(7, w.dt).b(8, S)
                 .b(9, w.ssm_norm).b(10, b.go).grid(GV, 512);
             e.barrier();
-            e.k("gdn_conv_commit").b(0, conv).b(1, b.raw).c(2, tt).grid(QKV / 256, 256);
+            if (!verify) e.k("gdn_conv_commit").b(0, conv).b(1, raw).c(2, tt).grid(QKV / 256, 256);
             gemv_combine(e, w.ssm_out, b.go, GV * GD, T, b.inj);
         }
         e.barrier();
@@ -691,6 +742,7 @@ void Engine::prefill(int id, const int *tokens, int n) {
         if (T <= TM || getenv("CHRYSALIS_FN_DECODE_PREFILL")) {
             const int t = std::min(TM, T);
             forward_small(s, tokens + done, t, false);
+            if (has_mtp) mtp_catch_up(s, t, s.n, false);
             advance(s, tokens + done, t);
             done += t;
             continue;
@@ -702,11 +754,14 @@ void Engine::prefill(int id, const int *tokens, int n) {
     keep_top(s);
 }
 
-void Engine::keep_top(Seq &s) {
-    s.top_v.assign(b.topv.host<float>(), b.topv.host<float>() + SAMPLE_N);
-    s.top_v.insert(s.top_v.end(), b.tops.host<float>(), b.tops.host<float>() + NSTAT);
-    s.top_i.assign(b.topi.host<int>(), b.topi.host<int>() + SAMPLE_N);
+void Engine::keep_top(Seq &s, int row) {
+    const float *v = b.topv.host<float>() + (size_t)row * SAMPLE_N, *st = b.tops.host<float>() + (size_t)row * NSTAT;
+    const int *i = b.topi.host<int>() + (size_t)row * SAMPLE_N;
+    s.top_v.assign(v, v + SAMPLE_N);
+    s.top_v.insert(s.top_v.end(), st, st + NSTAT);
+    s.top_i.assign(i, i + SAMPLE_N);
     s.top_i.resize(SAMPLE_N + NSTAT, 0);
+    last_row = row;
 }
 
 const float *top_stats(const Seq &s) {
@@ -731,15 +786,227 @@ int Engine::generate(int id, const Sampling &sp, int *out_, int max_out, float *
         if (sp.lookup > 0) s.look.push(s.pending);
         if (is_eos(s.pending) || s.pending == sp.halt || nout == max_out) return nout;
     }
-    ensure_pages(s, s.n + 1, s.n);
-    const int tok = s.pending;
-    forward_small(s, &tok, 1, false);
-    advance(s, &tok, 1);
-    keep_top(s);
-    const int next = sample(s.seen, s.top_v.data(), s.top_i.data(), top_stats(s), sp, s.rng);
-    if (rows_v) keep_row(s.top_v.data(), s.top_i.data(), rows_v, rows_i, nout);
-    out_[nout++] = next;
-    if (sp.lookup > 0) s.look.push(next);
-    s.pending = next;
+    const int room = std::min(3, max_out - nout - 1);
+    int copied[4] = {s.pending};
+    int k = sp.lookup > 0 && room > 0 ? s.look.find(std::min(sp.lookup, room), VOCAB, copied + 1) : 0;
+    if (k == 0 && has_mtp && room > 0 && sp.n_draft > 0) {
+        k = std::min(sp.n_draft, room);
+        ensure_pages(s, s.n + k + 1, s.n);
+        mtp_draft(s, k, copied + 1);
+    }
+    return verify(s, sp, copied, k, false, out_, nout, rows_v, rows_i);
+}
+
+int Engine::verify(Seq &s, const Sampling &sp, const int *drafts, int k, bool masked, int *out, int nout, float *rows_v, int *rows_i) {
+    const int q = s.n, T = k + 1;
+    ensure_pages(s, q + T, q);
+    forward_small(s, drafts, T, true, k > 0);
+    if (has_mtp) mtp_catch_up(s, T, q, k > 0);
+    if (masked) {
+        id<MTLCommandBuffer> cb = [m.q commandBufferWithUnretainedReferences];
+        Enc en; en.begin(m, cb);
+        const uint32_t n = VOCAB;
+        en.k("mask_logits").b(0, b.logits).b(1, b.mask).c(2, n).grid((VOCAB + 255) / 256, T, 1, 256);
+        en.barrier();
+        topk(en, T);
+        en.end();
+        [cb commit]; [cb waitUntilCompleted];
+    }
+    const float *tv = b.topv.host<float>(), *ts = b.tops.host<float>();
+    const int *ti = b.topi.host<int>();
+    const int a = verify_drafts(s.seen, tv, ti, ts, drafts, k, sp, s.rng, [&](int t) { return is_eos(t) || t == sp.halt; },
+                                [&](int r, int t) {
+                                    if (rows_v) keep_row(tv + (size_t)r * SAMPLE_N, ti + (size_t)r * SAMPLE_N, rows_v, rows_i, nout);
+                                    out[nout++] = t;
+                                    if (sp.lookup > 0) s.look.push(t);
+                                });
+    if (k > 0) commit(s, q, a + 1);
+    advance(s, drafts, a + 1);
+    keep_top(s, a);
+    s.pending = out[nout - 1];
     return nout;
+}
+
+void Engine::commit(Seq &s, int q, int n) {
+    id<MTLCommandBuffer> cb = [m.q commandBufferWithUnretainedReferences];
+    Enc e; e.begin(m, cb);
+    const uint32_t nn = n;
+    const GdnStepArgs ga{nn, 1};
+    for (int l = 0; l < NL; l++) {
+        if (is_attn_layer(l)) continue;
+        const int gl = l - (l + 1) / 4;
+        const Layer &w = L[l];
+        e.k("gdn_step").c(0, ga).b(1, b.vraw.at((size_t)gl * TM * QKV * 4)).b(2, b.vab.at((size_t)gl * TM * 96 * 4)).b(3, b.z).b(4, w.conv_w)
+            .b(5, s.conv.at((size_t)gl * QKV * 3 * 4)).b(6, w.A).b(7, w.dt).b(8, s.ssm.at((size_t)gl * GV * GD * GD * 4)).b(9, w.ssm_norm)
+            .b(10, b.go).grid(GV, 512);
+    }
+    e.barrier();
+    for (int gl = 0; gl < NGDN; gl++)
+        e.k("gdn_conv_commit").b(0, s.conv.at((size_t)gl * QKV * 3 * 4)).b(1, b.vraw.at((size_t)gl * TM * QKV * 4)).c(2, nn).grid(QKV / 256, 256);
+    e.k("ple_commit").b(0, s.ple).b(1, b.xconv).c(2, nn).grid(HCD / 256, 256);
+    if (has_mtp) {
+        const uint32_t nh = HCD;
+        e.k("copy_f32").b(0, b.res.at((size_t)(n - 1) * HCD * 4)).b(1, s.h_last).c(2, nh).grid(HCD / 256, 256);
+    }
+    for (int al = 0; al < (has_mtp ? NKVL : NATT); al++) {
+        const KVArgs ka{nn, (uint32_t)q, (uint32_t)al, 1};
+        e.k("idx_tail").c(0, ka).b(1, b.vkir.at((size_t)al * TM * IDX_D * 4)).b(2, s.tail.at((size_t)al * KPOOL * IDX_D * 2)).grid(1, 128);
+    }
+    e.end();
+    [cb commit]; [cb waitUntilCompleted];
+    if (cb.status == MTLCommandBufferStatusError) FAIL("GPU error: %s", cb.error.localizedDescription.UTF8String);
+}
+
+void Engine::mtp_layer(Enc &e, Seq &s, int T, uint32_t pos0, View hp, View tok, bool spec) {
+    const uint32_t tt = T, erb = (uint32_t)embd.rb;
+    e.k("embed_q8_0").b(0, tok).b(1, embd.v).c(2, erb).b(3, b.memb).grid(T, 80);
+    e.barrier();
+    e.k("mtp_norm").b(0, b.memb).b(1, hp).b(2, enorm).b(3, hnorm).b(4, b.emb).b(5, b.key).grid(HC, T, 1, 256);
+    e.barrier();
+    gemv(e, eh_e, b.emb, D, b.blk, D, T);
+    for (int r0 = 0; r0 < T * HC; r0 += 8)
+        gemv(e, eh_h, b.key.at((size_t)r0 * D * 4), D, b.mres.at((size_t)r0 * D * 4), D, std::min(8, T * HC - r0));
+    e.barrier();
+    const uint32_t nr = T * HCD;
+    e.k("hc_add_row").b(0, b.mres).b(1, b.blk).c(2, tt).grid((nr + 255) / 256, 256);
+    e.barrier();
+    const Layer &w = M;
+    mixer(e, w.hca, b.mres, T, b.inj);
+    const View kir = spec ? b.vkir.at((size_t)NATT * TM * IDX_D * 4) : b.kir;
+    gemv(e, w.q, b.mx, D, b.qg, 2 * NH * HD, T);
+    gemv(e, w.k, b.mx, D, b.kb, NKV * HD, T);
+    gemv(e, w.v, b.mx, D, b.vb, NKV * HD, T);
+    gemv(e, w.iq, b.mx, D, b.qir, IDX_H * IDX_D, T);
+    gemv(e, w.ik, b.mx, D, kir, IDX_D, T);
+    e.barrier();
+    const int nb_end = (pos0 + T) / KPOOL;
+    const int nsel_max = std::min(nb_end, SEL_BLOCKS) + 1;
+    const uint32_t nsplit = std::max(1, std::min(16, nsel_max / 16));
+    const KVArgs ka{tt, pos0, (uint32_t)NATT, nsplit};
+    const View tail = s.tail.at((size_t)NATT * KPOOL * IDX_D * 2);
+    e.k("attn_prep").c(0, ka).b(1, b.qg).b(2, b.kb).b(3, b.vb).b(4, w.qn).b(5, w.kn).b(6, kv).b(7, s.d_pages).b(8, b.Q).grid(NH + 2 * NKV, T, 1, 256);
+    e.k("idx_qprep").c(0, ka).b(1, b.qir).b(2, w.iqn).b(3, b.Qi).grid(IDX_H, T, 1, 128);
+    const int first = pos0 / KPOOL, last = (pos0 + T) / KPOOL - 1;
+    if (last >= first) e.k("idx_pool").c(0, ka).b(1, kir).b(2, tail).b(3, w.ikn).b(4, kv).b(5, s.d_pages).grid(last - first + 1, 128);
+    e.barrier();
+    if (!spec) e.k("idx_tail").c(0, ka).b(1, kir).b(2, tail).grid(1, 128);
+    const uint32_t ld = std::max(1, nb_end);
+    if (nb_end > SEL_BLOCKS) e.k("idx_score").c(0, ka).b(1, b.Qi).b(2, kv).b(3, s.d_pages).b(4, b.score).c(5, ld).grid((ld + 255) / 256, T, 1, 256);
+    e.barrier();
+    e.k("idx_select").c(0, ka).b(1, b.score).c(2, ld).b(3, b.sel).b(4, b.nsel).grid(T, 1024);
+    e.barrier();
+    e.k("attn_dec").c(0, ka).b(1, b.Q).b(2, kv).b(3, s.d_pages).b(4, b.sel).b(5, b.nsel).b(6, b.part_o).b(7, b.part_ml).grid(nsplit, T, NKV, 32 * QPK);
+    e.barrier();
+    e.k("attn_combine").c(0, ka).b(1, b.part_o).b(2, b.part_ml).b(3, b.qg).b(4, b.att).b(5, b.atth).grid(NH, T, 1, 256);
+    e.barrier();
+    gemv(e, w.o, b.att, NH * HD, b.mres, HCD, T, 2, 1.0f, b.inj);
+    e.barrier();
+    mixer(e, w.hcf, b.mres, T, b.inj2);
+    gemv(e, w.router, b.mx, D, b.rlog, NE, T);
+    gemv(e, w.sg, b.mx, D, b.sgv, 1, T);
+    gemv(e, w.sh_gate, b.mx, D, b.shg, FS, T);
+    gemv(e, w.sh_up, b.mx, D, b.shu, FS, T);
+    e.barrier();
+    const View ids = b.ids.at((size_t)NL * TM * TOPK_E * 4), wts = b.wts.at((size_t)NL * TM * TOPK_E * 4), done = b.done.at((size_t)NL * TM * TOPK_E * 4);
+    e.k("route_topk").b(0, b.rlog).b(1, ids).b(2, wts).grid(T, 32);
+    const uint32_t nsh = T * FS;
+    e.k("swiglu").b(0, b.shg).b(1, b.shu).b(2, b.shh).c(3, nsh).grid((nsh + 255) / 256, 256);
+    e.barrier();
+    const MoeArgs ma{tt, (uint32_t)NL, 0, GGML_ACT};
+    e.k("moe_gu").c(0, ma).b(1, xc.table).b(2, ids).b(3, b.mx).b(4, b.xh).b(5, done).b(6, xc.fmt).grid(T * TOPK_E * FE / 16, 128);
+    gemv(e, w.sh_down, b.shg, FS, b.shout, D, T);
+    e.barrier();
+    e.k("moe_down").c(0, ma).b(1, xc.table).b(2, ids).b(3, b.xh).b(4, b.xy).b(5, done).grid(T * TOPK_E * D / 16, 128);
+    e.barrier();
+    e.k("moe_combine").c(0, ma).b(1, b.xy).b(2, wts).b(3, b.sgv).b(4, b.shout).b(5, b.inj2).b(6, b.mres).grid((T * D + 255) / 256, 256);
+    e.barrier();
+}
+
+void Engine::mtp_catch_up(Seq &s, int T, int pos0, bool spec) {
+    id<MTLCommandBuffer> cb = [m.q commandBufferWithUnretainedReferences];
+    Enc e; e.begin(m, cb);
+    const uint32_t nh = HCD, nr = (T - 1) * HCD;
+    e.k("copy_f32").b(0, s.h_last).b(1, b.mhp).c(2, nh).grid(HCD / 256, 256);
+    if (T > 1) e.k("copy_f32").b(0, b.res).b(1, b.mhp.at((size_t)HCD * 4)).c(2, nr).grid((nr + 255) / 256, 256);
+    e.barrier();
+    mtp_layer(e, s, T, (uint32_t)pos0, b.mhp, b.tokens, spec);
+    if (!spec) e.k("copy_f32").b(0, b.res.at((size_t)(T - 1) * HCD * 4)).b(1, s.h_last).c(2, nh).grid(HCD / 256, 256);
+    e.end();
+    [cb commit];
+    pending = cb;
+}
+
+void Engine::mtp_draft(Seq &s, int k, int *out, int nfixed) {
+    int *tok = b.dtok.host<int>();
+    tok[0] = s.pending;
+    for (int i = 0; i < nfixed; i++) tok[i + 1] = out[i];
+    id<MTLCommandBuffer> cb = [m.q commandBufferWithUnretainedReferences];
+    Enc e; e.begin(m, cb);
+    const uint32_t nh = HCD, nv = DRAFT_VOCAB;
+    for (int i = 0; i < k; i++) {
+        if (i > 0) {
+            e.k("copy_f32").b(0, b.mres).b(1, b.mhp).c(2, nh).grid(HCD / 256, 256);
+            e.barrier();
+        }
+        mtp_layer(e, s, 1, (uint32_t)(s.n + i), i == 0 ? s.h_last : b.mhp, b.dtok.at((size_t)i * 4), true);
+        if (i < nfixed) continue;
+        mixer(e, mtp_head, b.mres, 1, View{});
+        gemv(e, dout, b.mx, D, b.dlog, DRAFT_VOCAB, 1);
+        e.barrier();
+        e.k("argmax").b(0, b.dlog).c(1, nv).b(2, b.dtok.at((size_t)(i + 1) * 4)).grid(1, 1024);
+        e.barrier();
+    }
+    e.end();
+    [cb commit]; [cb waitUntilCompleted];
+    if (cb.status == MTLCommandBufferStatusError) FAIL("GPU error: %s", cb.error.localizedDescription.UTF8String);
+    for (int i = nfixed; i < k; i++) out[i] = tok[i + 1];
+}
+
+void Engine::load_mtp() {
+    const std::string p = "blk." + std::to_string(NL) + ".";
+    const GGUFTensor *gt = g.get(p + "ffn_gate_mtp.weight"), *ut = g.get(p + "ffn_up_mtp.weight"), *dt = g.get(p + "ffn_down_mtp.weight");
+    auto shaped = [](const GGUFTensor *t, int type, int64_t cols, int64_t rows) { return t && t->type == type && t->ne[0] == cols && t->ne[1] == rows && t->ne[2] == NE; };
+    if (!shaped(gt, T_Q3_K, D, FE) || !shaped(ut, T_Q3_K, D, FE) || !shaped(dt, T_IQ4_NL, FE, D))
+        FAIL("MTP layer: its experts are not Q3_K gate / up and IQ4_NL down, %d of them", NE);
+    const size_t gu = xgu_bytes(T_Q3_K);
+    std::vector<Experts::Job> jobs;
+    uint64_t *table = (uint64_t *)xc.table.host();
+    for (int e = 0; e < NE; e++) {
+        uint8_t *dst = mtp_x.host<uint8_t>() + (size_t)e * XSLOT_MTP;
+        jobs.push_back({xc.fd, dt->off + (size_t)e * XDN, XDN, dst, nullptr});
+        jobs.push_back({xc.fd, gt->off + (size_t)e * gu, gu, dst + XDN, nullptr});
+        jobs.push_back({xc.fd, ut->off + (size_t)e * gu, gu, dst + XDN + gu, nullptr});
+        table[(size_t)NL * NE + e] = mtp_x.gpu() + (size_t)e * XSLOT_MTP;
+        xc.fmt.host<uint8_t>()[(size_t)NL * NE + e] = T_Q3_K;
+    }
+    io_submit(jobs);
+}
+
+int Engine::draft(int id, const Sampling &sp, const int *fixed, int nfixed, int max_k, int *out) {
+    Seq &s = seqs.at(id);
+    if (s.pending < 0) FAIL("draft: no pending token");
+    const int room = std::min(3, max_k);
+    if (room < 1) return 0;
+    int copied[4] = {s.pending};
+    const int nf = std::min(nfixed, room);
+    std::copy(fixed, fixed + nf, copied + 1);
+    const int nl = nf == 0 && sp.lookup > 0 ? s.look.find(std::min(sp.lookup, room), VOCAB, copied + 1) : 0;
+    const int k = nl > 0 ? nl : has_mtp ? std::min(room, nf + std::max(0, sp.n_draft)) : nf;
+    if (k > nf + nl) {
+        ensure_pages(s, s.n + k + 1, s.n);
+        mtp_draft(s, k, copied + 1, nf);
+    }
+    std::copy(copied + 1, copied + 1 + k, out);
+    return k;
+}
+
+int Engine::generate_masked(int id, const Sampling &sp, const int *drafts, int k, const uint32_t *masks, int *out, int max_out) {
+    if (max_out < 1) return 0;
+    Seq &s = seqs.at(id);
+    if (s.pending < 0) FAIL("generate_masked: no pending token");
+    k = std::max(0, std::min({k, 3, max_out - 1}));
+    int toks[4] = {s.pending};
+    std::copy(drafts, drafts + k, toks + 1);
+    memcpy(b.mask.host(), masks, (size_t)(k + 1) * (VOCAB / 32) * 4);
+    return verify(s, sp, toks, k, true, out, 0, nullptr, nullptr);
 }

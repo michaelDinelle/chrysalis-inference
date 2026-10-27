@@ -332,7 +332,11 @@ inline Dist make_dist(const float *v, const int *ids, const float *full, const S
             const float s_hat = tb / tt, eps = s_hat - 1;
             const float vocab = full ? full[STAT_VOCAB] : (float)SAMPLE_N;
             const float k = powf((eps * powf(2, st.mu)) / (1 - powf(vocab, -eps)), 1 / s_hat);
+#if defined(__aarch64__)
+            n = std::min(n, k >= 2147483648.0f ? n : k >= 1.0f ? (int)k : 1);
+#else
             n = std::min(n, k >= 1.0f && k < 2147483648.0f ? (int)k : 1);
+#endif
         } else {
             int m = 0;
             while (m < n && !(-log2f(p[m]) > st.mu)) m++;

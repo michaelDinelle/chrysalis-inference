@@ -24,7 +24,7 @@ constexpr int NH = 24, NKV = 2, HD = 256, ROT = 64;
 constexpr int QPK = NH / NKV;
 constexpr int GK = 16, GV = 48, GD = 128;
 constexpr int QKV = 2 * GK * GD + GV * GD;
-constexpr int NGDN = 36, NATT = 12;
+constexpr int NGDN = 36, NATT = 12, NKVL = NATT + 1;
 constexpr int NE = 512, TOPK_E = 10, FE = 640, FS = 640;
 constexpr int IDX_H = 4, IDX_D = 128, KPOOL = 4, SEL_BLOCKS = 512;
 constexpr int PLE_LAYER = 1, PLE_HEADS = 16, PLE_DIM = 160, PLE_K = 4, PLE_DIL = 3;
@@ -39,12 +39,14 @@ constexpr int T_IQ4_NL = 20, T_IQ4_XS = 23, T_Q3_K = 11, T_Q2_K = 10;
 constexpr size_t XDN = (size_t)D * FE / 32 * 18;
 constexpr size_t xgu_bytes(int type) { return (size_t)FE * (D / 256) * (type == T_IQ4_XS ? 136 : type == T_Q3_K ? 110 : 84); }
 constexpr size_t XSLOT = XDN + 2 * xgu_bytes(T_IQ4_XS);
+constexpr size_t XSLOT_MTP = XDN + 2 * xgu_bytes(T_Q3_K);
 
 constexpr int PAGE = 64;
 constexpr size_t KV_K = (size_t)NKV * PAGE * HD * 2;
 constexpr size_t KV_IDX = (size_t)(PAGE / KPOOL) * IDX_D * 2;
 constexpr size_t KV_LAYER = 2 * KV_K + KV_IDX;
-constexpr size_t KV_PAGE = KV_LAYER * NATT;
+constexpr size_t KV_PAGE = KV_LAYER * NKVL;
+constexpr int DRAFT_VOCAB = 65536;
 
 inline size_t ggml_row_bytes(int type, int64_t cols) {
     switch (type) {

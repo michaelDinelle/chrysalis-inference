@@ -84,8 +84,9 @@ def apple():
     raw = bytes.fromhex(states.group(1)) if states else b""
     clock = max((struct.unpack_from("<I", raw, i)[0] for i in range(0, len(raw) - 7, 8)), default=0)
     bw = APPLE_BANDWIDTH.get((name, cores), APPLE_BANDWIDTH.get((name, None)))
+    per_lane = 4 if name.startswith("Apple M4") else 2
     gpu = {"name": name, "gfx": "apple", "cus": cores, "clock_mhz": clock / 1e6, "memory": "unified", "bus_bits": None,
-           "memory_clock_mhz": None, "bandwidth": bw, "fp16": cores * 128 * 2 * clock if clock else None, "integrated": True,
+           "memory_clock_mhz": None, "bandwidth": bw, "fp16": cores * 128 * per_lane * clock if clock else None, "integrated": True,
            "pcie": None, "link": "unified memory"}
     return {"gpus": [gpu], "ram": {"source": name, "memory": "unified", "bus_bits": None, "memory_clock_mhz": None, "bandwidth": bw}}
 

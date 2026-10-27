@@ -42,7 +42,25 @@ kernels_fn: build/test_quant_fn build/test_attn_fn build/test_gdn_fn build/test_
 	./build/test_quant_fn && ./build/test_attn_fn && ./build/test_gdn_fn && ./build/test_mix_fn && ./build/test_moe_fn && \
 	./build/test_cpujob_fn && ./build/test_linear_fn
 
-LLAMA      := -O2 -std=c++17 -I$(GGML)/include -I$(GGML)/ggml/include
+TEST_BUILDS := build/llama_params build/ref_logits build/ref_logits_mm
+define BACKEND_TESTS
+	$(PY) tests/test_requests.py
+	$(PY) tests/test_snapshot.py
+	$(PY) tests/test_server.py
+	$(PY) tests/compare_ref.py
+	$(PY) tests/test_vision.py
+endef
+
+TEST_BUILDS_FN := build/ref_logits_fn build/ref_logits_mm_fn
+define BACKEND_TESTS_FN
+	$(PY) tests/test_snapshot.py --use qwen3.8-flash-next
+	$(PY) tests/test_server.py --use qwen3.8-flash-next
+	$(PY) tests/compare_fn.py
+	$(PY) tests/test_vision.py --use qwen3.8-flash-next
+endef
+
+LLAMA_INC  := -I$(GGML)/include -I$(GGML)/ggml/include
+LLAMA      := -O2 -std=c++17 $(LLAMA_INC)
 LLAMA_LIBS := -L$(GGML)/build/bin -lllama -lggml -lggml-base -Wl,-rpath,$(GGML)/build/bin:$(ROCM)/lib
 CXX_HOST   := g++
 

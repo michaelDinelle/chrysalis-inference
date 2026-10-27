@@ -11,7 +11,7 @@ ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 def files(name):
     spec = MODELS[name]
     repo, rev, into, names = spec.get("upstream") or (None, None, None, [])
-    return [(REPO, None, "data/models", p.removeprefix("data/models/")) for p in (spec["path"], spec["vision"])] + [(repo, rev, into, f) for f in names]
+    return [(REPO, None, "data/models", p.removeprefix("data/models/")) for p in (spec["path"], spec["vision"]) if p] + [(repo, rev, into, f) for f in names]
 
 
 def missing(name):

@@ -56,7 +56,8 @@ def file_sha(path, cache):
         off = 0
         while chunk := os.read(fd, 64 << 20):
             h.update(chunk)
-            os.posix_fadvise(fd, off, len(chunk), os.POSIX_FADV_DONTNEED)
+            if hasattr(os, "posix_fadvise"):
+                os.posix_fadvise(fd, off, len(chunk), os.POSIX_FADV_DONTNEED)
             off += len(chunk)
     finally:
         os.close(fd)

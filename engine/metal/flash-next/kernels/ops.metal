@@ -317,6 +317,49 @@ kernel void mask_logits(device float *logits [[buffer(0)]], device const uint *m
     if (!((mask[g.y * (n / 32) + g.x / 32] >> (g.x % 32)) & 1)) logits[(size_t)g.y * n + g.x] = -INFINITY;
 }
 
+kernel void mtp_norm(device const float *emb [[buffer(0)]], device const float *hp [[buffer(1)]], device const float *enorm [[buffer(2)]],
+                     device const float *hnorm [[buffer(3)]], device float *en [[buffer(4)]], device float *hn [[buffer(5)]],
+                     uint2 g [[threadgroup_position_in_grid]], uint tid [[thread_index_in_threadgroup]]) {
+    threadgroup float red[8];
+    const uint s = g.x, t = g.y;
+    device const float *h = hp + (size_t)t * HCD + s * D;
+    float sh = 0;
+    for (int i = tid; i < D; i += 256) sh += h[i] * h[i];
+    const float ih = rsqrt(tg_sum256(sh, red, tid) / D + EPS);
+    for (int i = tid; i < D; i += 256) hn[(size_t)t * HCD + s * D + i] = h[i] * ih * hnorm[s * D + i];
+    if (s) return;
+    device const float *e = emb + (size_t)t * HCD;
+    float se = 0;
+    for (int i = tid; i < D; i += 256) se += e[i] * e[i];
+    const float ie = rsqrt(tg_sum256(se, red, tid) / D + EPS);
+    for (int i = tid; i < D; i += 256) en[(size_t)t * D + i] = e[i] * ie * enorm[i];
+}
+
+kernel void hc_add_row(device float *res [[buffer(0)]], device const float *y [[buffer(1)]], constant uint &T [[buffer(2)]],
+                       uint i [[thread_position_in_grid]]) {
+    if (i >= T * HCD) return;
+    res[i] += y[(i / HCD) * D + i % D];
+}
+
+kernel void argmax(device const float *v [[buffer(0)]], constant uint &n [[buffer(1)]], device int *out [[buffer(2)]],
+                   uint tid [[thread_index_in_threadgroup]]) {
+    threadgroup float bv[32];
+    threadgroup int bi[32];
+    float m = -INFINITY;
+    int mi = 0x7fffffff;
+    for (uint i = tid; i < n; i += 1024) { const float x = v[i]; if (x > m) { m = x; mi = (int)i; } }
+    for (int o = 16; o > 0; o /= 2) {
+        const float om = simd_shuffle_xor(m, o);
+        const int oi = simd_shuffle_xor(mi, o);
+        if (om > m || (om == m && oi < mi)) { m = om; mi = oi; }
+    }
+    if (tid % 32 == 0) { bv[tid / 32] = m; bi[tid / 32] = mi; }
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+    if (tid) return;
+    for (int k = 1; k < 32; k++) if (bv[k] > m || (bv[k] == m && bi[k] < mi)) { m = bv[k]; mi = bi[k]; }
+    out[0] = mi == 0x7fffffff ? 0 : mi;
+}
+
 kernel void copy_f32(device const float *src [[buffer(0)]], device float *dst [[buffer(1)]], constant uint &n [[buffer(2)]],
                      uint i [[thread_position_in_grid]]) {
     if (i < n) dst[i] = src[i];

@@ -11,7 +11,7 @@ MODELS = {
                                pictures=128 << 20, upstream=("unsloth/Qwen3.8-Flash-Next-GGUF", "766911a6b7369840a91dbcd95f9f997acaab6cd6",
                                                              "data/models/flash-next/src", ["Q8_0/Qwen3.8-Flash-Next-Q8_0-00003-of-00006.gguf"])),
 }
-ON = {"metal": {"qwen3.8-27b": dict(snapshots=12, warm=False)}}
+ON = {"metal": {"qwen3.8-27b": dict(snapshots=12, warm=False, vision=None), "qwen3.8-flash-next": dict(vision=None)}}
 for name, tuned in ON.get(BACKEND, {}).items():
     MODELS[name].update(tuned)
 DEFAULT = "qwen3.8-27b"

@@ -172,7 +172,7 @@ static void gemv_dram(Engine &e, std::mt19937 &rng) {
         const int copies = std::max(2, (int)(600e6 / bytes));
         std::vector<Mat> ms;
         for (int c = 0; c < copies; c++) ms.push_back(make_mat(e, s.type, s.rows, s.cols, rng, false));
-        for (int T : {1, 4}) {
+        for (int T : {1, 2, 4, 8}) {
             const int reps = std::max(copies, 24);
             for (int it = 0; it < copies; it++) e.gemv(ms[it].t, x, x16, s.cols, T, y, s.rows, GEMV_STORE);
             e.m.sync();
@@ -210,15 +210,16 @@ int main(int argc, char **argv) {
         for (int i = 0; i < 8 * K; i++) { x.h[i] = std::uniform_real_distribution<float>(-1, 1)(rng); x16.h[i] = (half_t)x.h[i]; }
         for (int ti = 0; ti < 3; ti++) {
             Mat m = make_mat(e, types[ti], R, K, rng, true), m2 = make_mat(e, types[ti], R, K, rng, true);
-            for (int T : {1, 3, 8})
+            for (int T : {1, 2, 3, 4, 8})
                 for (int mode : {(int)GEMV_STORE, (int)GEMV_ADD, 2}) {
                     if (mode == 2 && types[ti] == Q6_K) continue;
+                    const bool f32 = T == 1;
                     std::vector<double> want(T * R);
                     for (int t = 0; t < T; t++)
                         for (int r = 0; r < R; r++) {
                             double s = 0, s2 = 0;
                             for (int k = 0; k < K; k++) {
-                                const double xv = T == 1 ? (double)x.h[t * K + k] : (double)x16.h[t * K + k];
+                                const double xv = f32 ? (double)x.h[t * K + k] : (double)x16.h[t * K + k];
                                 s += (double)m.ref[(size_t)r * K + k] * xv; s2 += (double)m2.ref[(size_t)r * K + k] * xv;
                             }
                             const double y0 = 0.5 * (t + 1);
@@ -230,7 +231,7 @@ int main(int argc, char **argv) {
                         e.gemv_glu(m.t, m2.t, x, x16, T);
                         e.m.sync();
                         for (int t = 0; t < T; t++)
-                            for (int r = 0; r < R; r++) got[t * R + r] = T == 1 ? e.b.proj.h[r] : (float)e.b.ffn_g.h[(size_t)t * FF + r];
+                            for (int r = 0; r < R; r++) got[t * R + r] = f32 ? e.b.proj.h[(size_t)t * FF + r] : (float)e.b.ffn_g.h[(size_t)t * FF + r];
                     } else {
                         e.gemv(m.t, x, x16, K, T, y, R, mode);
                         e.m.sync();
@@ -238,7 +239,7 @@ int main(int argc, char **argv) {
                     }
                     char what[96];
                     snprintf(what, sizeof what, "gemv %s T=%d %s", names[ti], T, mode == 0 ? "store" : mode == 1 ? "add" : "swiglu");
-                    check(what, got.data(), want.data(), T * R, T == 1 ? 1e-4 : mode == 2 ? 2e-3 : 2e-3);
+                    check(what, got.data(), want.data(), T * R, f32 ? 1e-4 : 2e-3);
                 }
             {
                 DP<float> nw = e.m.alloc(K * 4, "nw").as<float>();
@@ -279,6 +280,55 @@ int main(int argc, char **argv) {
             check(what, yy.h, want.data(), T * R, 2e-3);
             }
         }
+        {
+            const int RD = 64, KD = 8704;
+            Mat m = make_mat(e, IQ4_XS, RD, KD, rng, true);
+            DP<float> xd = e.m.alloc(8 * KD * 4, "xd").as<float>(), yd = e.m.alloc(8 * RD * 4, "yd").as<float>();
+            DP<half_t> xd16 = e.m.alloc(8 * KD * 2, "xd16").as<half_t>();
+            for (int i = 0; i < 8 * KD; i++) { xd.h[i] = std::uniform_real_distribution<float>(-1, 1)(rng); xd16.h[i] = (half_t)xd.h[i]; }
+            for (int T : {1, 2, 4, 8}) {
+                const bool f32 = T == 1;
+                std::vector<double> want(T * RD);
+                for (int t = 0; t < T; t++)
+                    for (int r = 0; r < RD; r++) {
+                        double s = 0;
+                        for (int k = 0; k < KD; k++) s += (double)m.ref[(size_t)r * KD + k] * (f32 ? (double)xd.h[t * KD + k] : (double)xd16.h[t * KD + k]);
+                        want[t * RD + r] = s;
+                    }
+                e.gemv(m.t, xd, xd16, KD, T, yd, RD, GEMV_STORE);
+                e.m.sync();
+                char what[96];
+                snprintf(what, sizeof what, "gemv IQ4_XS %d columns T=%d store", KD, T);
+                check(what, yd.h, want.data(), T * RD, f32 ? 1e-4 : 2e-3);
+            }
+        }
+        for (int ti = 0; ti < 3; ti++)
+            for (const int K : {1024, 8704}) {
+                const int R = 64;
+                Mat m = make_mat(e, types[ti], R, K, rng, false), m2 = make_mat(e, types[ti], R, K, rng, false);
+                DP<half_t> xa = e.m.alloc(8 * K * 2, "xa").as<half_t>();
+                DP<float> ya = e.m.alloc(8 * R * 4, "ya").as<float>();
+                for (int i = 0; i < 8 * K; i++) xa.h[i] = (half_t)std::uniform_real_distribution<float>(-1, 1)(rng);
+                for (int glu = 0; glu < 2; glu++) {
+                    if (glu && types[ti] == Q6_K) continue;
+                    std::vector<float> all;
+                    int same = 0, compared = 0;
+                    for (int T = 8; T >= 2; T--) {
+                        if (glu) e.gemv_glu(m.t, m2.t, {}, xa, T);
+                        else e.gemv(m.t, {}, xa, K, T, ya, R, GEMV_STORE);
+                        e.m.sync();
+                        std::vector<float> got((size_t)T * R);
+                        for (int t = 0; t < T; t++)
+                            for (int r = 0; r < R; r++) got[(size_t)t * R + r] = glu ? (float)e.b.ffn_g.h[(size_t)t * FF + r] : ya.h[(size_t)t * R + r];
+                        if (T == 8) { all = got; continue; }
+                        for (size_t i = 0; i < got.size(); i++, compared++) same += !memcmp(&got[i], &all[i], 4);
+                    }
+                    const bool ok = compared > 0 && same == compared;
+                    printf("gemv %s %d columns%s: rows alone as in 8 (T=2-7, %d/%d)  %s\n", names[ti], K, glu ? " swiglu" : "", same, compared,
+                           ok ? "ok" : "FAIL");
+                    fails += !ok;
+                }
+            }
         attention_checks(e, rng);
         printf(fails ? "%d FAILURES\n" : "all ok\n", fails);
         return fails != 0;

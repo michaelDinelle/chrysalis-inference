@@ -23,13 +23,15 @@ static std::string profile_path() {
 }
 
 void Engine::keep_warm() {
-    id<MTLCommandBuffer> cb = [m.q2 commandBufferWithUnretainedReferences];
-    id<MTLComputeCommandEncoder> en = [cb computeCommandEncoder];
-    [en setComputePipelineState:m.pipe("keep_warm")];
-    [en setBuffer:warm_buf.buf offset:warm_buf.off atIndex:0];
-    [en dispatchThreads:MTLSizeMake(256, 1, 1) threadsPerThreadgroup:MTLSizeMake(256, 1, 1)];
-    [en endEncoding];
-    [cb commit];
+    @autoreleasepool {
+        id<MTLCommandBuffer> cb = [m.q2 commandBufferWithUnretainedReferences];
+        id<MTLComputeCommandEncoder> en = [cb computeCommandEncoder];
+        [en setComputePipelineState:m.pipe("keep_warm")];
+        [en setBuffer:warm_buf.buf offset:warm_buf.off atIndex:0];
+        [en dispatchThreads:MTLSizeMake(256, 1, 1) threadsPerThreadgroup:MTLSizeMake(256, 1, 1)];
+        [en endEncoding];
+        [cb commit];
+    }
 }
 
 void Engine::io_submit(const std::vector<Experts::Job> &jobs, bool warm) {
@@ -82,10 +84,10 @@ void Engine::experts_init(size_t cache_bytes, int n_stage) {
     for (int s = x.n_slots + n_stage - 1; s >= x.n_slots; s--) x.stage_free.push_back(s);
     x.ahead_of.assign((size_t)NL * NE, -1);
     x.reserved.assign(total, 0);
-    x.table = m.alloc((size_t)NL * NE * 8);
+    x.table = m.alloc((size_t)(NL + 1) * NE * 8);
     warm_buf = m.alloc(256);
-    memset(x.table.host(), 0, (size_t)NL * NE * 8);
-    x.fmt = m.alloc((size_t)NL * NE);
+    memset(x.table.host(), 0, (size_t)(NL + 1) * NE * 8);
+    x.fmt = m.alloc((size_t)(NL + 1) * NE);
     for (int i = 0; i < NL * NE; i++) x.fmt.host<uint8_t>()[i] = (uint8_t)x.src[i].type;
     x.fd = dup(g.fds[0]);
     fcntl(x.fd, F_NOCACHE, 1);
