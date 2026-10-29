@@ -18,18 +18,19 @@ README.md shows what Chrysalis is. This file is how to change it.
   chrysalis/models.py and bench/measure.py; its kernel checks in tests/<name>/; and in bench/limits.py, how to read its
   GPU's memory bandwidth and FP16 rate, which the bench's share of the GPU's limit divides by.
 
-## Bench
+## Rewards
 
-Not one step back, on any number, for any reason, on any commit: a commit lands only when every number the bench
-records, for each model on each machine, is as good as its parent's or better. A change that makes one number better
-and another worse is a side-grade and doesn't land, however large the net gain; neither does one that only reshuffles
-results through rounding or chance. The gate is strict on purpose: never loosen it, drop or re-key numbers, or skip the
-hooks to let a change through.
+Every number in the README's Rewards table is a reward, held by `.hill/hill`. A change is promoted only when no reward
+is worse on any machine with a record and at least one is better: no trade-offs, no net gains, no "within noise" after
+the fact, no blaming the machine. `.hill/hill gate` is the only judge; if it is wrong, fix it and gate again. The ledger
+is append-only. Rewards are never dropped, re-keyed or loosened. Only the user can make an exception, and agents never
+propose one. Harness changes (bench/, hill.json, .hill/) land on their own, never with a product change.
 
-`make bench` measures both models and the hooks (`git config core.hooksPath bench/hooks`) hold every commit to its
-parent on every machine bench/results.json has numbers from: a change to a backend's engine needs its numbers from a
-machine running that backend. Measure there, then `data/venv/bin/python bench/bench.py merge <its bench/results.json>`
-here before committing.
+A gate measures the working tree against HEAD in the same session, both models on the GPU with Chrysalis's model server
+stopped; bench/hill_ready.py refuses to start while anything else holds the GPU or free memory is short. Every machine
+with a record (the RX 7900 here, the M4 Max on studio) judges each change: run `.hill/hill gate` there and append its
+new .hill/ledger.jsonl lines here before committing. The hook (`git config core.hooksPath bench/hooks`) holds every
+commit to that.
 
 ## Comments
 

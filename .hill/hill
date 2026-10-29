@@ -1,0 +1,14 @@
+#!/bin/sh
+d=${0%/*}
+if [ "$d/bin.path" -nt "$d/hill.c" ] && read -r b < "$d/bin.path" && [ -x "$b" ]; then exec "$b" "$@"; fi
+v=$(sha256sum "$d/hill.c" 2>/dev/null || shasum -a 256 "$d/hill.c") || exit 2
+v=${v%% *}
+v=${v%"${v#????????????????}"}
+p=$(uname -sm)
+b="${HILL_HOME:-$HOME/.claude/skills/hill-climb-anything}/bin/${p% *}-${p#* }/hill-$v"
+if [ ! -x "$b" ]; then
+    b="${XDG_CACHE_HOME:-$HOME/.cache}/hill/$v/hill"
+    [ -x "$b" ] || { mkdir -p "${b%/*}" && cc -O2 -ffp-contract=off -o "$b.$$" "$d/hill.c" -lm && mv "$b.$$" "$b"; } || exit 2
+fi
+printf '%s\n' "$b" > "$d/bin.path"
+exec "$b" "$@"
