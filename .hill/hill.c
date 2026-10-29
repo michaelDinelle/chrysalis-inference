@@ -1725,8 +1725,21 @@ static Judged judge(Spec *s, Sample *samples, Noise *noise) {
                 xs[k] = log(mc / ma);
             }
             double d = fmean(xs, sm->blocks);
-            if (!noise[r].has) stop("ERROR", "%s now gives numbers but was calibrated as not applicable here: run hill calibrate", rid);
-            double fl = floor_of(s, noise[r], sm->blocks);
+            Noise nz = noise[r];
+            if (nz.na) stop("ERROR", "%s now gives numbers but was calibrated as not applicable here: run hill calibrate", rid);
+            if (!nz.has) {
+                double *reps = malloc(2 * sm->blocks * sizeof *reps);
+                size_t n = 0;
+                for (int side = 0; side < 2; side++)
+                    for (size_t k = 0; k < sm->blocks; k++, n++) {
+                        Vals *v = side ? &sm->b[k] : &sm->a[k];
+                        reps[n] = log(jd(v->v[v->n - 1]) / jd(v->v[0]));
+                        reps[n] *= reps[n];
+                    }
+                nz = (Noise){sqrt(fsum(reps, n) / (double)n / 2), (long long)n, 1, 0};
+                free(reps);
+            }
+            double fl = floor_of(s, nz, sm->blocks);
             jset(row, "best", median(&fa));
             jset(row, "candidate", median(&fc));
             jset(row, "change", jreal(expm1(d)));
@@ -2080,15 +2093,6 @@ static int cmd_gate(Spec *s) {
             stop("REFUSE", "this candidate already has a verdict on this machine (%s); a new verdict needs a new candidate", jtext(jget(e, "verdict")));
     }
     Noise *noise = calibration(s, &l, m.ident, best.harness);
-    J *rewards = jget(s->spec, "rewards");
-    Buf missing = {0};
-    int nm = 0;
-    for (size_t r = 0; r < rewards->len; r++)
-        if (!jtruthy(jget(rewards->v[r], "exact")) && !noise[r].has && !noise[r].na) {
-            if (nm++) bputs(&missing, ", ");
-            bputs(&missing, rewards->k[r]);
-        }
-    if (nm) stop("REFUSE", "no calibration on this machine for %s: run hill calibrate", bstr(&missing));
     lock_hill();
     char *tree = best_tree(s, commit);
     build(s, tree, "best");
@@ -2183,14 +2187,14 @@ static int cmd_check(void) {
                 J *e = l.v[i];
                 if (!is(e, "harness", best.harness)) continue;
                 if ((is(e, "type", "record") && is(e, "product", best.product)) ||
-                    (is(e, "type", "verdict") && is(e, "verdict", "PROMOTE") && is(e, "candidate", best.product))) {
+                    (is(e, "type", "verdict") && (is(e, "best", best.product) || (is(e, "verdict", "PROMOTE") && is(e, "candidate", best.product))))) {
                     size_t k = 0;
                     while (k < idents.n && strcmp(idents.v[k], jtext(jget(e, "machine")))) k++;
                     if (k == idents.n) spush(&idents, (char *)jtext(jget(e, "machine"))), spush(&labels, (char *)jtext(jget(e, "label")));
                     else labels.v[k] = (char *)jtext(jget(e, "label"));
                 }
             }
-            if (!idents.n) spush(&problems, "HEAD has no record on any machine: run hill calibrate and hill record first");
+            if (!idents.n) spush(&problems, "nothing has measured HEAD: run hill gate on every machine");
             size_t judged = 0, promoted = 0, rejected = 0;
             for (size_t k = 0; k < idents.n; k++) {
                 J *found = NULL;

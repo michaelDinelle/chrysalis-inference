@@ -143,12 +143,9 @@ class Server:
 
     def stop(self):
         try:
-            os.killpg(self.srv.pid, signal.SIGINT)
-            self.srv.wait(60)
-        except subprocess.TimeoutExpired:
             os.killpg(self.srv.pid, signal.SIGKILL)
-            self.srv.wait()
         except ProcessLookupError:
             pass
+        self.srv.wait()
         shutil.rmtree(self.snap, ignore_errors=True)
         settle()
