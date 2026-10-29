@@ -18,7 +18,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 import numpy as np
 
-from . import apis, gpu, vision
+from . import apis, vision
 from .cache import Cache, Disk
 from .chat import Clip, Content, OutputParser, Renderer, StopText, Tokens, message_key, text_of
 from .documents import DocumentError, Documents
@@ -544,7 +544,6 @@ class Server:
         self.max_pixels = vision.pixel_limit(max_pixels)
         if engine is None:
             engine = load_async(model_path, max_seqs=slots, umax=umax or MODELS.get(model, MODELS[MODEL])["chunk"], warmup=False,
-                                reserve_mb=gpu.reserve_mb(),
                                 lib=__import__("os").path.join(_ROOT, MODELS.get(model, MODELS[MODEL])["lib"]))
         self.active, self.slots, self.umax = model, slots, umax
         self.loading = None
@@ -634,7 +633,7 @@ class Server:
         import os
         spec = MODELS[name]
         self.engine = Engine(os.path.join(_ROOT, spec["path"]), max_seqs=self.slots, umax=self.umax or spec["chunk"],
-                             reserve_mb=gpu.reserve_mb(), lib=os.path.join(_ROOT, spec["lib"]), warmup=True)
+                             lib=os.path.join(_ROOT, spec["lib"]), warmup=True)
         self.capacity = min(MAX_CONTEXT, self.engine.capacity)
         self.cache = Cache(self.engine, self.slots, max_snapshots=spec["snapshots"],
                            disk=self.snapshot_disk(name, os.path.join(_ROOT, spec["path"])))

@@ -36,14 +36,12 @@ def main():
         if not a.model:
             from . import get
             get.fetch(a.use)
-        from . import gpu
         from .engine import load_async, wake_gpus
         wake_gpus()
         spec = MODELS[a.use]
         print(f"chrysalis: loading {a.use}", file=sys.stderr, flush=True)
         path = a.model or os.path.join(ROOT, spec["path"])
-        engine = load_async(path, max_seqs=a.slots, umax=a.chunk or spec["chunk"], warmup=False,
-                            reserve_mb=gpu.reserve_mb(), lib=os.path.join(ROOT, spec["lib"]))
+        engine = load_async(path, max_seqs=a.slots, umax=a.chunk or spec["chunk"], warmup=False, lib=os.path.join(ROOT, spec["lib"]))
         from .server import Server, serve
         serve(lambda: Server(path, a.tokenizer, slots=a.slots, n_draft=a.draft, umax=a.chunk, engine=engine, warmup=False,
                              model=a.use, lookup=a.lookup, max_pixels=a.max_pixels), a.host, a.port, model=a.use)
