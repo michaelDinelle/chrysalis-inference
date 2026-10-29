@@ -56,12 +56,14 @@
     "quality-27b": {
       "run": "data/venv/bin/python bench/hill_quality.py 27b",
       "memory_gb": 12,
-      "ready": "data/venv/bin/python bench/hill_ready.py 27b"
+      "ready": "data/venv/bin/python bench/hill_ready.py 27b",
+      "blocks": 1
     },
     "quality-fn": {
       "run": "data/venv/bin/python bench/hill_quality.py fn",
       "memory_gb": 12,
-      "ready": "data/venv/bin/python bench/hill_ready.py fn"
+      "ready": "data/venv/bin/python bench/hill_ready.py fn",
+      "blocks": 1
     },
     "build": {
       "run": "data/venv/bin/python bench/hill_build.py",
