@@ -81,7 +81,7 @@ def fingerprint():
         return mac_fingerprint()
     read = lambda p: open(p).read().strip() if os.path.exists(p) else ""
     cpu = {k.strip(): v.strip() for k, v in (l.split(":", 1) for l in open("/proc/cpuinfo") if ":" in l) if k.strip() in ("model name", "microcode")}
-    cards = [os.path.dirname(p) for p in sorted(glob.glob("/sys/class/drm/card*/device/mem_info_vram_total"))]
+    cards = sorted((os.path.dirname(p) for p in glob.glob("/sys/class/drm/card*/device/mem_info_vram_total")), key=os.path.realpath)
     site = glob.glob(os.path.join(ROOT, "data/venv/lib/python*/site-packages"))
     dists = sorted(os.path.basename(d) for d in glob.glob(os.path.join(site[0], "*.dist-info"))) if site else []
     fw = subprocess.run(["pacman", "-Q", "linux-firmware"], capture_output=True, text=True).stdout.strip() if shutil.which("pacman") else ""
