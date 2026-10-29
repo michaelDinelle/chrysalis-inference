@@ -244,3 +244,96 @@ keeps the experts its replies use most in memory and reads the others from the S
 [GitHub](https://github.com/michaelDinelle)
 
 MIT licensed.
+
+## Rewards
+
+Every number here is held by the gate: a change is promoted only when at least one of them gets better and none gets worse, on every machine with a record. ↑ higher is better, ↓ lower is better.
+
+### Speed
+
+**Flash-Next on RX 7900 XTX**
+
+|  |  | short | 4K | 16K deep | 100K deep | follow-up |
+| --- | :---: | ---: | ---: | ---: | ---: | ---: |
+| First token | ↓ | 1.21 s | 6.49 s | 4.46 s | 5.62 s | 0.713 s |
+| Reading the prompt | ↑ | 34.0 tok/s | 634 tok/s | 246 tok/s | 197 tok/s | 43.5 tok/s |
+| Writing | ↑ | 24.0 tok/s | 26.8 tok/s | 27.2 tok/s | 23.6 tok/s | 28.7 tok/s |
+| Longest gap between tokens, p99 | ↓ | 173 ms | 140 ms | 128 ms | 133 ms | 115 ms |
+| Tokens per pass | ↑ | 2.17 | 2.06 | 2.46 | 2.46 | 2.41 |
+
+**27B on RX 7900 XTX**
+
+|  |  | short | 4K | 16K deep | 100K deep | follow-up |
+| --- | :---: | ---: | ---: | ---: | ---: | ---: |
+| First token | ↓ | 0.184 s | 2.83 s | 1.24 s | 2.97 s | 0.287 s |
+| Reading the prompt | ↑ | 252 tok/s | 1,456 tok/s | 893 tok/s | 375 tok/s | 110 tok/s |
+| Writing | ↑ | 101 tok/s | 80.9 tok/s | 105 tok/s | 88.0 tok/s | 108 tok/s |
+| Longest gap between tokens, p99 | ↓ | 27.0 ms | 27.5 ms | 35.3 ms | 34.1 ms | 34.0 ms |
+| Tokens per pass | ↑ | 2.74 | 2.22 | 3.05 | 3 | 3.67 |
+
+|  |  | Flash-Next · RX 7900 XTX | 27B · RX 7900 XTX |
+| --- | :---: | ---: | ---: |
+| Load to a first answer | ↓ | 15.4 s | 7.92 s |
+
+### Quality
+
+|  |  | Flash-Next · RX 7900 XTX | 27B · RX 7900 XTX |
+| --- | :---: | ---: | ---: |
+| Sanity tasks solved, of 12 | ↑ | 12 | 12 |
+| KL vs Q8_0, mean | ↓ | 0.0339 | 0.00335 |
+| KL vs Q8_0, p99.9 | ↓ | 0.594 | 0.0422 |
+| KL vs Q8_0, max | ↓ | 0.772 | 0.0439 |
+| Same top token as Q8_0 | ↑ | 93.4% | 97.0% |
+
+### Memory and context
+
+|  |  | Flash-Next · RX 7900 XTX | 27B · RX 7900 XTX |
+| --- | :---: | ---: | ---: |
+| Context | ↑ | 257,920 tokens | 278,144 tokens |
+| Prompt the follow-up reuses | ↑ | 99,930 tokens | 99,930 tokens |
+| Peak RAM | ↓ | 48.7 GB | 6.35 GB |
+| Lowest free system memory during a run | ↑ | 12.3 GB | 54.7 GB |
+| Pool steps limited by memory | ↓ | 0 | — |
+
+### Energy
+
+|  |  | Flash-Next · RX 7900 XTX | 27B · RX 7900 XTX |
+| --- | :---: | ---: | ---: |
+| GPU energy for one speed run | ↓ | 12.0 kJ | 5.74 kJ |
+
+### Build
+
+|  |  | Flash-Next · RX 7900 XTX | 27B · RX 7900 XTX | RX 7900 XTX |
+| --- | :---: | ---: | ---: | ---: |
+| Clean build of both engines | ↓ | — | — | 43.0 s |
+| Engine library | ↓ | 2,780,664 bytes | 1,281,688 bytes | — |
+
+### Velocity
+
+|  |  | Flash-Next · RX 7900 XTX | 27B · RX 7900 XTX |
+| --- | :---: | ---: | ---: |
+| Time for one speed run | ↓ | 74.5 s | 26.8 s |
+
+### Against competitors
+
+**Flash-Next on RX 7900 XTX**
+
+|  |  | short | 4K |
+| --- | :---: | ---: | ---: |
+| First token, times sooner than Strata IQ3_S | ↑ | 0.528× | 0.517× |
+| Writing, times faster than Strata IQ3_S | ↑ | 0.329× | 0.403× |
+| First token, times sooner than Strata Q2_0 | ↑ | 0.343× | 0.460× |
+| Writing, times faster than Strata Q2_0 | ↑ | 0.223× | 0.280× |
+
+**27B on RX 7900 XTX**
+
+|  |  | short | 4K |
+| --- | :---: | ---: | ---: |
+| First token, times sooner than llama.cpp | ↑ | 1.71× | 1.43× |
+| Writing, times faster than llama.cpp | ↑ | 1.48× | 1.41× |
+
+|  |  | Flash-Next · RX 7900 XTX |
+| --- | :---: | ---: |
+| KL vs Q8_0, times lower than Strata IQ3_S | ↑ | 1.62× |
+| KL vs Q8_0, times lower than Strata Q2_0 | ↑ | 5.51× |
+
