@@ -57,11 +57,13 @@ BENCH = bench_for(BACKEND)
 
 def own_calibration():
     import chrysalis.engine as ce
-    mine = os.path.join(WORK, "flash-next-calibration.txt")
-    if not os.path.exists(mine) and os.path.exists(ce.CALIBRATION):
-        os.makedirs(WORK, exist_ok=True)
-        shutil.copy(ce.CALIBRATION, mine)
-    ce.CALIBRATION = mine
+    os.makedirs(WORK, exist_ok=True)
+    for shared in (ce.CALIBRATION, ce.LT_CACHE):
+        mine = os.path.join(WORK, os.path.basename(shared))
+        if not os.path.exists(mine) and os.path.exists(shared):
+            shutil.copy(shared, mine)
+    ce.CALIBRATION = os.path.join(WORK, os.path.basename(ce.CALIBRATION))
+    os.environ["CHRYSALIS_LT_CACHE"] = os.path.join(WORK, os.path.basename(ce.LT_CACHE))
 
 
 def tuned(engine, name):

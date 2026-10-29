@@ -8,7 +8,7 @@ import time
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from hill_lib import DOCS, SNAPS, Server, primed
-from measure import PY, ROOT, WORK
+from measure import MAC, PY, ROOT, WORK
 
 for name in ("fn", "27b"):
     folder = os.path.join(SNAPS, name)
@@ -33,8 +33,19 @@ for name in ("fn", "27b"):
         time.sleep(0.2)
     s.stop()
     open(mark, "w").close()
-if not os.path.exists(os.path.join(WORK, "flash-next-calibration.txt")):
-    ready = subprocess.run([PY, os.path.join(ROOT, "bench/hill_ready.py"), "fn"], capture_output=True, text=True)
-    if ready.returncode:
-        sys.exit(f"warming this tree's Flash-Next calibration: {(ready.stdout + ready.stderr).strip()}")
-    Server("fn").stop()
+lib = "dylib" if MAC else "so"
+for kept, sources, warm in (("hipblaslt.txt", (f"build/libchrysalis.{lib}", f"build/libchrysalis_fn.{lib}", "chrysalis/engine.py"), None),
+                            ("flash-next-calibration.txt", (f"build/libchrysalis_fn.{lib}", "chrysalis/engine.py"), "fn")):
+    built = hashlib.sha256(b"".join(open(os.path.join(ROOT, f), "rb").read() for f in sources)).hexdigest()
+    mark = os.path.join(WORK, kept + ".built")
+    if os.path.exists(os.path.join(WORK, kept)) and os.path.exists(mark) and open(mark).read() == built:
+        continue
+    if os.path.exists(os.path.join(WORK, kept)):
+        os.remove(os.path.join(WORK, kept))
+    if warm:
+        ready = subprocess.run([PY, os.path.join(ROOT, "bench/hill_ready.py"), warm], capture_output=True, text=True)
+        if ready.returncode:
+            sys.exit(f"warming this tree's Flash-Next calibration: {(ready.stdout + ready.stderr).strip()}")
+        Server(warm).stop()
+    os.makedirs(WORK, exist_ok=True)
+    open(mark, "w").write(built)

@@ -2194,6 +2194,9 @@ static int cmd_check(void) {
                     else labels.v[k] = (char *)jtext(jget(e, "label"));
                 }
             }
+            J *machines = jget(s.spec, "machines");
+            for (size_t m = 0; machines && machines->t == JOBJ && m < machines->len; m++)
+                if (!listed(&idents, machines->k[m])) spush(&idents, machines->k[m]), spush(&labels, (char *)jtext(machines->v[m]));
             if (!idents.n) spush(&problems, "nothing has measured HEAD: run hill gate on every machine");
             size_t judged = 0, promoted = 0, rejected = 0;
             for (size_t k = 0; k < idents.n; k++) {
