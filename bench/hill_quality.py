@@ -4,7 +4,7 @@ import subprocess
 import sys
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-from hill_lib import RIVALS, Server, rivals_here, settle
+from hill_lib import RIVALS, Server, rivals_here, settle, unused_gb
 from measure import BENCH, PY, ROOT, kl_ref, kl_tokens
 
 name = sys.argv[1]
@@ -16,9 +16,10 @@ for spec in (x for x in s.B.load_corpus().specs if x["phase"] == "sanity"):
     passed += bool(s.B.evaluate(spec, status, "".join(raw["content"]), [c for _, c in sorted(raw["tool_calls"].items())])["passed"])
 s.stop()
 tokens = kl_tokens()
+before = unused_gb() if sys.platform == "darwin" else None
 kl = subprocess.run([PY, os.path.join(ROOT, "bench/kl.py"), name, tokens, kl_ref(name, tokens)], capture_output=True, text=True,
                     env={**os.environ, **BENCH[name]["env"]})
-settle()
+settle(before)
 if kl.returncode:
     sys.exit(f"{name} KL failed:\n{kl.stderr[-2000:]}")
 out = {"sanity": passed, **json.loads(kl.stdout.strip().split("\n")[-1])}

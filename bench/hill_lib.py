@@ -58,10 +58,18 @@ def free_gb():
     return level.value / 100 * total.value / 1e9
 
 
-def settle():
-    if MAC:
-        return
+def unused_gb():
+    out = subprocess.run(["vm_stat"], capture_output=True, text=True).stdout
+    page = int(out.split("page size of ")[1].split()[0])
+    return sum(int(out.split(k + ":")[1].split()[0].rstrip(".")) for k in ("Pages free", "Pages inactive", "Pages speculative")) * page / 2**30
+
+
+def settle(before=None):
     deadline = time.monotonic() + 60
+    if MAC:
+        while before is not None and unused_gb() < before - 1 and time.monotonic() < deadline:
+            time.sleep(0.2)
+        return
     for total in glob.glob("/sys/class/drm/card[0-9]*/device/mem_info_vram_total"):
         if int(open(total).read()) >= 8 << 30:
             used = os.path.join(os.path.dirname(total), "mem_info_vram_used")
@@ -95,6 +103,7 @@ class Server:
         for f in b["files"]:
             drop_cache(os.path.join(ROOT, f))
         os.makedirs(WORK, exist_ok=True)
+        self.before = unused_gb() if MAC else None
         port, self.snap, self.log = free_port(), tempfile.mkdtemp(prefix=f"snap-{name}-", dir=WORK), os.path.join(WORK, f"server-{name}.log")
         env = [f"CHRYSALIS_SNAPSHOTS={self.snap}", f"CHRYSALIS_BENCH_SNAPS={os.path.join(SNAPS, name)}", *env, *(f"{k}={v}" for k, v in b["env"].items())]
         if MAC:
@@ -148,4 +157,4 @@ class Server:
             pass
         self.srv.wait()
         shutil.rmtree(self.snap, ignore_errors=True)
-        settle()
+        settle(self.before)
