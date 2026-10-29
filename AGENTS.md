@@ -27,10 +27,11 @@ is append-only. Rewards are never dropped, re-keyed or loosened. Only the user c
 propose one. Harness changes (bench/, hill.json, .hill/) land on their own, never with a product change.
 
 A gate measures the working tree against HEAD in the same session, both models on the GPU with Chrysalis's model server
-stopped; bench/hill_ready.py refuses to start while anything else holds the GPU or free memory is short. Every machine
-with a record (the RX 7900 here, the M4 Max on studio) judges each change: run `.hill/hill gate` there and append its
-new .hill/ledger.jsonl lines here before committing. The hook (`git config core.hooksPath bench/hooks`) holds every
-commit to that.
+stopped; bench/hill_ready.py refuses to start while anything else holds the GPU or free memory is short. Measuring time
+is a reward too: a gate takes minutes, deep context is restored from snapshots primed once per machine, and the bench
+only gets faster. Every machine with a record (the RX 7900 here, the M4 Max on studio) judges each change: run
+`.hill/hill gate` there and append its new .hill/ledger.jsonl lines here before committing. The hook (`git config
+core.hooksPath bench/hooks`) holds every commit to that.
 
 ## Comments
 

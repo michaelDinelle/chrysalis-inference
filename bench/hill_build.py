@@ -13,7 +13,7 @@ try:
     shutil.copy2(os.path.join(tree, "Makefile"), work)
     os.symlink(os.path.join(tree, "data"), os.path.join(work, "data"))
     t = time.monotonic()
-    out = subprocess.run(["make", "-s", "engines"], cwd=work, capture_output=True, text=True)
+    out = subprocess.run(["make", "-s", "-j", "engines"], cwd=work, capture_output=True, text=True)
     took = time.monotonic() - t
     if out.returncode:
         sys.exit(f"the clean build failed:\n{out.stderr[-2000:]}")

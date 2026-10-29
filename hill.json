@@ -12,7 +12,7 @@
     "build/cmp_strata/ref.bin",
     "build/bench/ref-27b.bin"
   ],
-  "build": "make -s engines && if [ \"$(uname -s)\" = Linux ]; then make -s build/vram_peak.so; fi",
+  "build": "make -s -j engines && data/venv/bin/python bench/hill_prime.py",
   "readme": "README.md",
   "machines": {
     "5f3343802dde1de1": "RX 7900 XTX",
@@ -24,13 +24,14 @@
     "Memory and context",
     "Energy",
     "Build",
+    "Velocity",
     "Against competitors"
   ],
   "cases": [
     "short",
     "4K",
-    "16K",
-    "100K",
+    "16K deep",
+    "100K deep",
     "follow-up"
   ],
   "configs": [
@@ -38,605 +39,40 @@
     "27B"
   ],
   "instruments": {
-    "bench-fn": {
-      "run": "data/venv/bin/python bench/hill_pass.py fn",
-      "memory_gb": 12,
-      "ready": "data/venv/bin/python bench/hill_ready.py fn"
-    },
-    "bench-27b": {
-      "run": "data/venv/bin/python bench/hill_pass.py 27b",
+    "speed-27b": {
+      "run": "data/venv/bin/python bench/hill_speed.py 27b",
+      "blocks": 1,
+      "calibration_blocks": 3,
       "memory_gb": 12,
       "ready": "data/venv/bin/python bench/hill_ready.py 27b"
     },
+    "speed-fn": {
+      "run": "data/venv/bin/python bench/hill_speed.py fn",
+      "blocks": 1,
+      "calibration_blocks": 3,
+      "memory_gb": 12,
+      "ready": "data/venv/bin/python bench/hill_ready.py fn"
+    },
+    "quality-27b": {
+      "run": "data/venv/bin/python bench/hill_quality.py 27b",
+      "memory_gb": 12,
+      "ready": "data/venv/bin/python bench/hill_ready.py 27b"
+    },
+    "quality-fn": {
+      "run": "data/venv/bin/python bench/hill_quality.py fn",
+      "memory_gb": 12,
+      "ready": "data/venv/bin/python bench/hill_ready.py fn"
+    },
     "build": {
       "run": "data/venv/bin/python bench/hill_build.py",
+      "blocks": 1,
+      "calibration_blocks": 3,
       "memory_gb": 4
     }
   },
   "rewards": {
-    "fn.ttft.short": {
-      "instrument": "bench-fn",
-      "field": "ttft.short",
-      "better": "lower",
-      "label": "First token",
-      "config": "Flash-Next",
-      "group": "Speed",
-      "case": "short",
-      "unit": "s"
-    },
-    "fn.prompt_tps.short": {
-      "instrument": "bench-fn",
-      "field": "prompt_tps.short",
-      "better": "higher",
-      "label": "Reading the prompt",
-      "config": "Flash-Next",
-      "group": "Speed",
-      "case": "short",
-      "unit": "tok/s"
-    },
-    "fn.decode_tps.short": {
-      "instrument": "bench-fn",
-      "field": "decode_tps.short",
-      "better": "higher",
-      "label": "Writing",
-      "config": "Flash-Next",
-      "group": "Speed",
-      "case": "short",
-      "unit": "tok/s"
-    },
-    "fn.gap_ms.short": {
-      "instrument": "bench-fn",
-      "field": "gap_ms.short",
-      "better": "lower",
-      "label": "Longest gap between tokens, p99",
-      "config": "Flash-Next",
-      "group": "Speed",
-      "case": "short",
-      "unit": "ms"
-    },
-    "fn.per_pass.short": {
-      "instrument": "bench-fn",
-      "field": "per_pass.short",
-      "better": "higher",
-      "label": "Tokens per pass",
-      "config": "Flash-Next",
-      "group": "Speed",
-      "case": "short",
-      "exact": true
-    },
-    "fn.ttft.4k": {
-      "instrument": "bench-fn",
-      "field": "ttft.4k",
-      "better": "lower",
-      "label": "First token",
-      "config": "Flash-Next",
-      "group": "Speed",
-      "case": "4K",
-      "unit": "s"
-    },
-    "fn.prompt_tps.4k": {
-      "instrument": "bench-fn",
-      "field": "prompt_tps.4k",
-      "better": "higher",
-      "label": "Reading the prompt",
-      "config": "Flash-Next",
-      "group": "Speed",
-      "case": "4K",
-      "unit": "tok/s"
-    },
-    "fn.decode_tps.4k": {
-      "instrument": "bench-fn",
-      "field": "decode_tps.4k",
-      "better": "higher",
-      "label": "Writing",
-      "config": "Flash-Next",
-      "group": "Speed",
-      "case": "4K",
-      "unit": "tok/s"
-    },
-    "fn.gap_ms.4k": {
-      "instrument": "bench-fn",
-      "field": "gap_ms.4k",
-      "better": "lower",
-      "label": "Longest gap between tokens, p99",
-      "config": "Flash-Next",
-      "group": "Speed",
-      "case": "4K",
-      "unit": "ms"
-    },
-    "fn.per_pass.4k": {
-      "instrument": "bench-fn",
-      "field": "per_pass.4k",
-      "better": "higher",
-      "label": "Tokens per pass",
-      "config": "Flash-Next",
-      "group": "Speed",
-      "case": "4K",
-      "exact": true
-    },
-    "fn.ttft.16k": {
-      "instrument": "bench-fn",
-      "field": "ttft.16k",
-      "better": "lower",
-      "label": "First token",
-      "config": "Flash-Next",
-      "group": "Speed",
-      "case": "16K",
-      "unit": "s"
-    },
-    "fn.prompt_tps.16k": {
-      "instrument": "bench-fn",
-      "field": "prompt_tps.16k",
-      "better": "higher",
-      "label": "Reading the prompt",
-      "config": "Flash-Next",
-      "group": "Speed",
-      "case": "16K",
-      "unit": "tok/s"
-    },
-    "fn.decode_tps.16k": {
-      "instrument": "bench-fn",
-      "field": "decode_tps.16k",
-      "better": "higher",
-      "label": "Writing",
-      "config": "Flash-Next",
-      "group": "Speed",
-      "case": "16K",
-      "unit": "tok/s"
-    },
-    "fn.gap_ms.16k": {
-      "instrument": "bench-fn",
-      "field": "gap_ms.16k",
-      "better": "lower",
-      "label": "Longest gap between tokens, p99",
-      "config": "Flash-Next",
-      "group": "Speed",
-      "case": "16K",
-      "unit": "ms"
-    },
-    "fn.per_pass.16k": {
-      "instrument": "bench-fn",
-      "field": "per_pass.16k",
-      "better": "higher",
-      "label": "Tokens per pass",
-      "config": "Flash-Next",
-      "group": "Speed",
-      "case": "16K",
-      "exact": true
-    },
-    "fn.ttft.100k": {
-      "instrument": "bench-fn",
-      "field": "ttft.100k",
-      "better": "lower",
-      "label": "First token",
-      "config": "Flash-Next",
-      "group": "Speed",
-      "case": "100K",
-      "unit": "s"
-    },
-    "fn.prompt_tps.100k": {
-      "instrument": "bench-fn",
-      "field": "prompt_tps.100k",
-      "better": "higher",
-      "label": "Reading the prompt",
-      "config": "Flash-Next",
-      "group": "Speed",
-      "case": "100K",
-      "unit": "tok/s"
-    },
-    "fn.decode_tps.100k": {
-      "instrument": "bench-fn",
-      "field": "decode_tps.100k",
-      "better": "higher",
-      "label": "Writing",
-      "config": "Flash-Next",
-      "group": "Speed",
-      "case": "100K",
-      "unit": "tok/s"
-    },
-    "fn.gap_ms.100k": {
-      "instrument": "bench-fn",
-      "field": "gap_ms.100k",
-      "better": "lower",
-      "label": "Longest gap between tokens, p99",
-      "config": "Flash-Next",
-      "group": "Speed",
-      "case": "100K",
-      "unit": "ms"
-    },
-    "fn.per_pass.100k": {
-      "instrument": "bench-fn",
-      "field": "per_pass.100k",
-      "better": "higher",
-      "label": "Tokens per pass",
-      "config": "Flash-Next",
-      "group": "Speed",
-      "case": "100K",
-      "exact": true
-    },
-    "fn.ttft.followup": {
-      "instrument": "bench-fn",
-      "field": "ttft.followup",
-      "better": "lower",
-      "label": "First token",
-      "config": "Flash-Next",
-      "group": "Speed",
-      "case": "follow-up",
-      "unit": "s"
-    },
-    "fn.prompt_tps.followup": {
-      "instrument": "bench-fn",
-      "field": "prompt_tps.followup",
-      "better": "higher",
-      "label": "Reading the prompt",
-      "config": "Flash-Next",
-      "group": "Speed",
-      "case": "follow-up",
-      "unit": "tok/s"
-    },
-    "fn.decode_tps.followup": {
-      "instrument": "bench-fn",
-      "field": "decode_tps.followup",
-      "better": "higher",
-      "label": "Writing",
-      "config": "Flash-Next",
-      "group": "Speed",
-      "case": "follow-up",
-      "unit": "tok/s"
-    },
-    "fn.gap_ms.followup": {
-      "instrument": "bench-fn",
-      "field": "gap_ms.followup",
-      "better": "lower",
-      "label": "Longest gap between tokens, p99",
-      "config": "Flash-Next",
-      "group": "Speed",
-      "case": "follow-up",
-      "unit": "ms"
-    },
-    "fn.per_pass.followup": {
-      "instrument": "bench-fn",
-      "field": "per_pass.followup",
-      "better": "higher",
-      "label": "Tokens per pass",
-      "config": "Flash-Next",
-      "group": "Speed",
-      "case": "follow-up",
-      "exact": true
-    },
-    "fn.load_s": {
-      "instrument": "bench-fn",
-      "field": "load_s",
-      "better": "lower",
-      "label": "Load to a first answer",
-      "config": "Flash-Next",
-      "group": "Speed",
-      "unit": "s"
-    },
-    "fn.sanity": {
-      "instrument": "bench-fn",
-      "field": "sanity",
-      "better": "higher",
-      "label": "Sanity tasks solved, of 12",
-      "config": "Flash-Next",
-      "group": "Quality",
-      "exact": true
-    },
-    "fn.kl_mean": {
-      "instrument": "bench-fn",
-      "field": "kl_mean",
-      "better": "lower",
-      "label": "KL vs Q8_0, mean",
-      "config": "Flash-Next",
-      "group": "Quality",
-      "exact": true
-    },
-    "fn.kl_p999": {
-      "instrument": "bench-fn",
-      "field": "kl_p999",
-      "better": "lower",
-      "label": "KL vs Q8_0, p99.9",
-      "config": "Flash-Next",
-      "group": "Quality",
-      "exact": true
-    },
-    "fn.kl_max": {
-      "instrument": "bench-fn",
-      "field": "kl_max",
-      "better": "lower",
-      "label": "KL vs Q8_0, max",
-      "config": "Flash-Next",
-      "group": "Quality",
-      "exact": true
-    },
-    "fn.top1": {
-      "instrument": "bench-fn",
-      "field": "top1",
-      "better": "higher",
-      "label": "Same top token as Q8_0",
-      "config": "Flash-Next",
-      "group": "Quality",
-      "exact": true,
-      "unit": "%"
-    },
-    "fn.kv_tokens": {
-      "instrument": "bench-fn",
-      "field": "kv_tokens",
-      "better": "higher",
-      "label": "Context",
-      "config": "Flash-Next",
-      "group": "Memory and context",
-      "exact": true,
-      "unit": "tokens"
-    },
-    "fn.reused": {
-      "instrument": "bench-fn",
-      "field": "reused.followup",
-      "better": "higher",
-      "label": "Prompt the follow-up reuses",
-      "config": "Flash-Next",
-      "group": "Memory and context",
-      "exact": true,
-      "unit": "tokens"
-    },
-    "fn.ram_gb": {
-      "instrument": "bench-fn",
-      "field": "ram_gb",
-      "better": "lower",
-      "label": "Peak RAM",
-      "config": "Flash-Next",
-      "group": "Memory and context",
-      "unit": "GB"
-    },
-    "fn.min_free_gb": {
-      "instrument": "bench-fn",
-      "field": "min_free_gb",
-      "better": "higher",
-      "label": "Lowest free system memory during a pass",
-      "config": "Flash-Next",
-      "group": "Memory and context",
-      "unit": "GB"
-    },
-    "fn.mem_limited": {
-      "instrument": "bench-fn",
-      "field": "mem_limited",
-      "better": "lower",
-      "label": "Pool steps limited by memory",
-      "config": "Flash-Next",
-      "group": "Memory and context",
-      "exact": true
-    },
-    "fn.energy_kj": {
-      "instrument": "bench-fn",
-      "field": "energy_kj",
-      "better": "lower",
-      "label": "GPU energy for one bench pass",
-      "config": "Flash-Next",
-      "group": "Energy",
-      "unit": "kJ"
-    },
-    "fn.strata_iq3s.ttft.short": {
-      "instrument": "bench-fn",
-      "field": "strata_iq3s.ttft.short",
-      "better": "higher",
-      "label": "First token, times sooner than Strata IQ3_S",
-      "config": "Flash-Next",
-      "group": "Against competitors",
-      "case": "short",
-      "unit": "×"
-    },
-    "fn.strata_iq3s.decode.short": {
-      "instrument": "bench-fn",
-      "field": "strata_iq3s.decode.short",
-      "better": "higher",
-      "label": "Writing, times faster than Strata IQ3_S",
-      "config": "Flash-Next",
-      "group": "Against competitors",
-      "case": "short",
-      "unit": "×"
-    },
-    "fn.strata_iq3s.ttft.4k": {
-      "instrument": "bench-fn",
-      "field": "strata_iq3s.ttft.4k",
-      "better": "higher",
-      "label": "First token, times sooner than Strata IQ3_S",
-      "config": "Flash-Next",
-      "group": "Against competitors",
-      "case": "4K",
-      "unit": "×"
-    },
-    "fn.strata_iq3s.decode.4k": {
-      "instrument": "bench-fn",
-      "field": "strata_iq3s.decode.4k",
-      "better": "higher",
-      "label": "Writing, times faster than Strata IQ3_S",
-      "config": "Flash-Next",
-      "group": "Against competitors",
-      "case": "4K",
-      "unit": "×"
-    },
-    "fn.strata_iq3s.ttft.16k": {
-      "instrument": "bench-fn",
-      "field": "strata_iq3s.ttft.16k",
-      "better": "higher",
-      "label": "First token, times sooner than Strata IQ3_S",
-      "config": "Flash-Next",
-      "group": "Against competitors",
-      "case": "16K",
-      "unit": "×"
-    },
-    "fn.strata_iq3s.decode.16k": {
-      "instrument": "bench-fn",
-      "field": "strata_iq3s.decode.16k",
-      "better": "higher",
-      "label": "Writing, times faster than Strata IQ3_S",
-      "config": "Flash-Next",
-      "group": "Against competitors",
-      "case": "16K",
-      "unit": "×"
-    },
-    "fn.strata_iq3s.ttft.100k": {
-      "instrument": "bench-fn",
-      "field": "strata_iq3s.ttft.100k",
-      "better": "higher",
-      "label": "First token, times sooner than Strata IQ3_S",
-      "config": "Flash-Next",
-      "group": "Against competitors",
-      "case": "100K",
-      "unit": "×"
-    },
-    "fn.strata_iq3s.decode.100k": {
-      "instrument": "bench-fn",
-      "field": "strata_iq3s.decode.100k",
-      "better": "higher",
-      "label": "Writing, times faster than Strata IQ3_S",
-      "config": "Flash-Next",
-      "group": "Against competitors",
-      "case": "100K",
-      "unit": "×"
-    },
-    "fn.strata_iq3s.ttft.followup": {
-      "instrument": "bench-fn",
-      "field": "strata_iq3s.ttft.followup",
-      "better": "higher",
-      "label": "First token, times sooner than Strata IQ3_S",
-      "config": "Flash-Next",
-      "group": "Against competitors",
-      "case": "follow-up",
-      "unit": "×"
-    },
-    "fn.strata_iq3s.decode.followup": {
-      "instrument": "bench-fn",
-      "field": "strata_iq3s.decode.followup",
-      "better": "higher",
-      "label": "Writing, times faster than Strata IQ3_S",
-      "config": "Flash-Next",
-      "group": "Against competitors",
-      "case": "follow-up",
-      "unit": "×"
-    },
-    "fn.strata_iq3s.kl": {
-      "instrument": "bench-fn",
-      "field": "strata_iq3s.kl",
-      "better": "higher",
-      "label": "KL vs Q8_0, times lower than Strata IQ3_S",
-      "config": "Flash-Next",
-      "group": "Against competitors",
-      "exact": true,
-      "unit": "×"
-    },
-    "fn.strata_q2.ttft.short": {
-      "instrument": "bench-fn",
-      "field": "strata_q2.ttft.short",
-      "better": "higher",
-      "label": "First token, times sooner than Strata Q2_0",
-      "config": "Flash-Next",
-      "group": "Against competitors",
-      "case": "short",
-      "unit": "×"
-    },
-    "fn.strata_q2.decode.short": {
-      "instrument": "bench-fn",
-      "field": "strata_q2.decode.short",
-      "better": "higher",
-      "label": "Writing, times faster than Strata Q2_0",
-      "config": "Flash-Next",
-      "group": "Against competitors",
-      "case": "short",
-      "unit": "×"
-    },
-    "fn.strata_q2.ttft.4k": {
-      "instrument": "bench-fn",
-      "field": "strata_q2.ttft.4k",
-      "better": "higher",
-      "label": "First token, times sooner than Strata Q2_0",
-      "config": "Flash-Next",
-      "group": "Against competitors",
-      "case": "4K",
-      "unit": "×"
-    },
-    "fn.strata_q2.decode.4k": {
-      "instrument": "bench-fn",
-      "field": "strata_q2.decode.4k",
-      "better": "higher",
-      "label": "Writing, times faster than Strata Q2_0",
-      "config": "Flash-Next",
-      "group": "Against competitors",
-      "case": "4K",
-      "unit": "×"
-    },
-    "fn.strata_q2.ttft.16k": {
-      "instrument": "bench-fn",
-      "field": "strata_q2.ttft.16k",
-      "better": "higher",
-      "label": "First token, times sooner than Strata Q2_0",
-      "config": "Flash-Next",
-      "group": "Against competitors",
-      "case": "16K",
-      "unit": "×"
-    },
-    "fn.strata_q2.decode.16k": {
-      "instrument": "bench-fn",
-      "field": "strata_q2.decode.16k",
-      "better": "higher",
-      "label": "Writing, times faster than Strata Q2_0",
-      "config": "Flash-Next",
-      "group": "Against competitors",
-      "case": "16K",
-      "unit": "×"
-    },
-    "fn.strata_q2.ttft.100k": {
-      "instrument": "bench-fn",
-      "field": "strata_q2.ttft.100k",
-      "better": "higher",
-      "label": "First token, times sooner than Strata Q2_0",
-      "config": "Flash-Next",
-      "group": "Against competitors",
-      "case": "100K",
-      "unit": "×"
-    },
-    "fn.strata_q2.decode.100k": {
-      "instrument": "bench-fn",
-      "field": "strata_q2.decode.100k",
-      "better": "higher",
-      "label": "Writing, times faster than Strata Q2_0",
-      "config": "Flash-Next",
-      "group": "Against competitors",
-      "case": "100K",
-      "unit": "×"
-    },
-    "fn.strata_q2.ttft.followup": {
-      "instrument": "bench-fn",
-      "field": "strata_q2.ttft.followup",
-      "better": "higher",
-      "label": "First token, times sooner than Strata Q2_0",
-      "config": "Flash-Next",
-      "group": "Against competitors",
-      "case": "follow-up",
-      "unit": "×"
-    },
-    "fn.strata_q2.decode.followup": {
-      "instrument": "bench-fn",
-      "field": "strata_q2.decode.followup",
-      "better": "higher",
-      "label": "Writing, times faster than Strata Q2_0",
-      "config": "Flash-Next",
-      "group": "Against competitors",
-      "case": "follow-up",
-      "unit": "×"
-    },
-    "fn.strata_q2.kl": {
-      "instrument": "bench-fn",
-      "field": "strata_q2.kl",
-      "better": "higher",
-      "label": "KL vs Q8_0, times lower than Strata Q2_0",
-      "config": "Flash-Next",
-      "group": "Against competitors",
-      "exact": true,
-      "unit": "×"
-    },
     "27b.ttft.short": {
-      "instrument": "bench-27b",
+      "instrument": "speed-27b",
       "field": "ttft.short",
       "better": "lower",
       "label": "First token",
@@ -646,7 +82,7 @@
       "unit": "s"
     },
     "27b.prompt_tps.short": {
-      "instrument": "bench-27b",
+      "instrument": "speed-27b",
       "field": "prompt_tps.short",
       "better": "higher",
       "label": "Reading the prompt",
@@ -656,7 +92,7 @@
       "unit": "tok/s"
     },
     "27b.decode_tps.short": {
-      "instrument": "bench-27b",
+      "instrument": "speed-27b",
       "field": "decode_tps.short",
       "better": "higher",
       "label": "Writing",
@@ -666,7 +102,7 @@
       "unit": "tok/s"
     },
     "27b.gap_ms.short": {
-      "instrument": "bench-27b",
+      "instrument": "speed-27b",
       "field": "gap_ms.short",
       "better": "lower",
       "label": "Longest gap between tokens, p99",
@@ -676,7 +112,7 @@
       "unit": "ms"
     },
     "27b.per_pass.short": {
-      "instrument": "bench-27b",
+      "instrument": "speed-27b",
       "field": "per_pass.short",
       "better": "higher",
       "label": "Tokens per pass",
@@ -686,7 +122,7 @@
       "exact": true
     },
     "27b.ttft.4k": {
-      "instrument": "bench-27b",
+      "instrument": "speed-27b",
       "field": "ttft.4k",
       "better": "lower",
       "label": "First token",
@@ -696,7 +132,7 @@
       "unit": "s"
     },
     "27b.prompt_tps.4k": {
-      "instrument": "bench-27b",
+      "instrument": "speed-27b",
       "field": "prompt_tps.4k",
       "better": "higher",
       "label": "Reading the prompt",
@@ -706,7 +142,7 @@
       "unit": "tok/s"
     },
     "27b.decode_tps.4k": {
-      "instrument": "bench-27b",
+      "instrument": "speed-27b",
       "field": "decode_tps.4k",
       "better": "higher",
       "label": "Writing",
@@ -716,7 +152,7 @@
       "unit": "tok/s"
     },
     "27b.gap_ms.4k": {
-      "instrument": "bench-27b",
+      "instrument": "speed-27b",
       "field": "gap_ms.4k",
       "better": "lower",
       "label": "Longest gap between tokens, p99",
@@ -726,7 +162,7 @@
       "unit": "ms"
     },
     "27b.per_pass.4k": {
-      "instrument": "bench-27b",
+      "instrument": "speed-27b",
       "field": "per_pass.4k",
       "better": "higher",
       "label": "Tokens per pass",
@@ -736,107 +172,107 @@
       "exact": true
     },
     "27b.ttft.16k": {
-      "instrument": "bench-27b",
+      "instrument": "speed-27b",
       "field": "ttft.16k",
       "better": "lower",
       "label": "First token",
       "config": "27B",
       "group": "Speed",
-      "case": "16K",
+      "case": "16K deep",
       "unit": "s"
     },
     "27b.prompt_tps.16k": {
-      "instrument": "bench-27b",
+      "instrument": "speed-27b",
       "field": "prompt_tps.16k",
       "better": "higher",
       "label": "Reading the prompt",
       "config": "27B",
       "group": "Speed",
-      "case": "16K",
+      "case": "16K deep",
       "unit": "tok/s"
     },
     "27b.decode_tps.16k": {
-      "instrument": "bench-27b",
+      "instrument": "speed-27b",
       "field": "decode_tps.16k",
       "better": "higher",
       "label": "Writing",
       "config": "27B",
       "group": "Speed",
-      "case": "16K",
+      "case": "16K deep",
       "unit": "tok/s"
     },
     "27b.gap_ms.16k": {
-      "instrument": "bench-27b",
+      "instrument": "speed-27b",
       "field": "gap_ms.16k",
       "better": "lower",
       "label": "Longest gap between tokens, p99",
       "config": "27B",
       "group": "Speed",
-      "case": "16K",
+      "case": "16K deep",
       "unit": "ms"
     },
     "27b.per_pass.16k": {
-      "instrument": "bench-27b",
+      "instrument": "speed-27b",
       "field": "per_pass.16k",
       "better": "higher",
       "label": "Tokens per pass",
       "config": "27B",
       "group": "Speed",
-      "case": "16K",
+      "case": "16K deep",
       "exact": true
     },
     "27b.ttft.100k": {
-      "instrument": "bench-27b",
+      "instrument": "speed-27b",
       "field": "ttft.100k",
       "better": "lower",
       "label": "First token",
       "config": "27B",
       "group": "Speed",
-      "case": "100K",
+      "case": "100K deep",
       "unit": "s"
     },
     "27b.prompt_tps.100k": {
-      "instrument": "bench-27b",
+      "instrument": "speed-27b",
       "field": "prompt_tps.100k",
       "better": "higher",
       "label": "Reading the prompt",
       "config": "27B",
       "group": "Speed",
-      "case": "100K",
+      "case": "100K deep",
       "unit": "tok/s"
     },
     "27b.decode_tps.100k": {
-      "instrument": "bench-27b",
+      "instrument": "speed-27b",
       "field": "decode_tps.100k",
       "better": "higher",
       "label": "Writing",
       "config": "27B",
       "group": "Speed",
-      "case": "100K",
+      "case": "100K deep",
       "unit": "tok/s"
     },
     "27b.gap_ms.100k": {
-      "instrument": "bench-27b",
+      "instrument": "speed-27b",
       "field": "gap_ms.100k",
       "better": "lower",
       "label": "Longest gap between tokens, p99",
       "config": "27B",
       "group": "Speed",
-      "case": "100K",
+      "case": "100K deep",
       "unit": "ms"
     },
     "27b.per_pass.100k": {
-      "instrument": "bench-27b",
+      "instrument": "speed-27b",
       "field": "per_pass.100k",
       "better": "higher",
       "label": "Tokens per pass",
       "config": "27B",
       "group": "Speed",
-      "case": "100K",
+      "case": "100K deep",
       "exact": true
     },
     "27b.ttft.followup": {
-      "instrument": "bench-27b",
+      "instrument": "speed-27b",
       "field": "ttft.followup",
       "better": "lower",
       "label": "First token",
@@ -846,7 +282,7 @@
       "unit": "s"
     },
     "27b.prompt_tps.followup": {
-      "instrument": "bench-27b",
+      "instrument": "speed-27b",
       "field": "prompt_tps.followup",
       "better": "higher",
       "label": "Reading the prompt",
@@ -856,7 +292,7 @@
       "unit": "tok/s"
     },
     "27b.decode_tps.followup": {
-      "instrument": "bench-27b",
+      "instrument": "speed-27b",
       "field": "decode_tps.followup",
       "better": "higher",
       "label": "Writing",
@@ -866,7 +302,7 @@
       "unit": "tok/s"
     },
     "27b.gap_ms.followup": {
-      "instrument": "bench-27b",
+      "instrument": "speed-27b",
       "field": "gap_ms.followup",
       "better": "lower",
       "label": "Longest gap between tokens, p99",
@@ -876,7 +312,7 @@
       "unit": "ms"
     },
     "27b.per_pass.followup": {
-      "instrument": "bench-27b",
+      "instrument": "speed-27b",
       "field": "per_pass.followup",
       "better": "higher",
       "label": "Tokens per pass",
@@ -886,7 +322,7 @@
       "exact": true
     },
     "27b.load_s": {
-      "instrument": "bench-27b",
+      "instrument": "speed-27b",
       "field": "load_s",
       "better": "lower",
       "label": "Load to a first answer",
@@ -894,54 +330,8 @@
       "group": "Speed",
       "unit": "s"
     },
-    "27b.sanity": {
-      "instrument": "bench-27b",
-      "field": "sanity",
-      "better": "higher",
-      "label": "Sanity tasks solved, of 12",
-      "config": "27B",
-      "group": "Quality",
-      "exact": true
-    },
-    "27b.kl_mean": {
-      "instrument": "bench-27b",
-      "field": "kl_mean",
-      "better": "lower",
-      "label": "KL vs Q8_0, mean",
-      "config": "27B",
-      "group": "Quality",
-      "exact": true
-    },
-    "27b.kl_p999": {
-      "instrument": "bench-27b",
-      "field": "kl_p999",
-      "better": "lower",
-      "label": "KL vs Q8_0, p99.9",
-      "config": "27B",
-      "group": "Quality",
-      "exact": true
-    },
-    "27b.kl_max": {
-      "instrument": "bench-27b",
-      "field": "kl_max",
-      "better": "lower",
-      "label": "KL vs Q8_0, max",
-      "config": "27B",
-      "group": "Quality",
-      "exact": true
-    },
-    "27b.top1": {
-      "instrument": "bench-27b",
-      "field": "top1",
-      "better": "higher",
-      "label": "Same top token as Q8_0",
-      "config": "27B",
-      "group": "Quality",
-      "exact": true,
-      "unit": "%"
-    },
     "27b.kv_tokens": {
-      "instrument": "bench-27b",
+      "instrument": "speed-27b",
       "field": "kv_tokens",
       "better": "higher",
       "label": "Context",
@@ -951,7 +341,7 @@
       "unit": "tokens"
     },
     "27b.reused": {
-      "instrument": "bench-27b",
+      "instrument": "speed-27b",
       "field": "reused.followup",
       "better": "higher",
       "label": "Prompt the follow-up reuses",
@@ -961,7 +351,7 @@
       "unit": "tokens"
     },
     "27b.ram_gb": {
-      "instrument": "bench-27b",
+      "instrument": "speed-27b",
       "field": "ram_gb",
       "better": "lower",
       "label": "Peak RAM",
@@ -970,25 +360,34 @@
       "unit": "GB"
     },
     "27b.min_free_gb": {
-      "instrument": "bench-27b",
+      "instrument": "speed-27b",
       "field": "min_free_gb",
       "better": "higher",
-      "label": "Lowest free system memory during a pass",
+      "label": "Lowest free system memory during a run",
       "config": "27B",
       "group": "Memory and context",
       "unit": "GB"
     },
     "27b.energy_kj": {
-      "instrument": "bench-27b",
+      "instrument": "speed-27b",
       "field": "energy_kj",
       "better": "lower",
-      "label": "GPU energy for one bench pass",
+      "label": "GPU energy for one speed run",
       "config": "27B",
       "group": "Energy",
       "unit": "kJ"
     },
+    "27b.run_s": {
+      "instrument": "speed-27b",
+      "field": "run_s",
+      "better": "lower",
+      "label": "Time for one speed run",
+      "config": "27B",
+      "group": "Velocity",
+      "unit": "s"
+    },
     "27b.llamacpp.ttft.short": {
-      "instrument": "bench-27b",
+      "instrument": "speed-27b",
       "field": "llamacpp.ttft.short",
       "better": "higher",
       "label": "First token, times sooner than llama.cpp",
@@ -998,7 +397,7 @@
       "unit": "×"
     },
     "27b.llamacpp.decode.short": {
-      "instrument": "bench-27b",
+      "instrument": "speed-27b",
       "field": "llamacpp.decode.short",
       "better": "higher",
       "label": "Writing, times faster than llama.cpp",
@@ -1008,7 +407,7 @@
       "unit": "×"
     },
     "27b.llamacpp.ttft.4k": {
-      "instrument": "bench-27b",
+      "instrument": "speed-27b",
       "field": "llamacpp.ttft.4k",
       "better": "higher",
       "label": "First token, times sooner than llama.cpp",
@@ -1018,7 +417,7 @@
       "unit": "×"
     },
     "27b.llamacpp.decode.4k": {
-      "instrument": "bench-27b",
+      "instrument": "speed-27b",
       "field": "llamacpp.decode.4k",
       "better": "higher",
       "label": "Writing, times faster than llama.cpp",
@@ -1027,65 +426,521 @@
       "case": "4K",
       "unit": "×"
     },
-    "27b.llamacpp.ttft.16k": {
-      "instrument": "bench-27b",
-      "field": "llamacpp.ttft.16k",
-      "better": "higher",
-      "label": "First token, times sooner than llama.cpp",
-      "config": "27B",
-      "group": "Against competitors",
-      "case": "16K",
-      "unit": "×"
+    "fn.ttft.short": {
+      "instrument": "speed-fn",
+      "field": "ttft.short",
+      "better": "lower",
+      "label": "First token",
+      "config": "Flash-Next",
+      "group": "Speed",
+      "case": "short",
+      "unit": "s"
     },
-    "27b.llamacpp.decode.16k": {
-      "instrument": "bench-27b",
-      "field": "llamacpp.decode.16k",
+    "fn.prompt_tps.short": {
+      "instrument": "speed-fn",
+      "field": "prompt_tps.short",
       "better": "higher",
-      "label": "Writing, times faster than llama.cpp",
-      "config": "27B",
-      "group": "Against competitors",
-      "case": "16K",
-      "unit": "×"
+      "label": "Reading the prompt",
+      "config": "Flash-Next",
+      "group": "Speed",
+      "case": "short",
+      "unit": "tok/s"
     },
-    "27b.llamacpp.ttft.100k": {
-      "instrument": "bench-27b",
-      "field": "llamacpp.ttft.100k",
+    "fn.decode_tps.short": {
+      "instrument": "speed-fn",
+      "field": "decode_tps.short",
       "better": "higher",
-      "label": "First token, times sooner than llama.cpp",
-      "config": "27B",
-      "group": "Against competitors",
-      "case": "100K",
-      "unit": "×"
+      "label": "Writing",
+      "config": "Flash-Next",
+      "group": "Speed",
+      "case": "short",
+      "unit": "tok/s"
     },
-    "27b.llamacpp.decode.100k": {
-      "instrument": "bench-27b",
-      "field": "llamacpp.decode.100k",
-      "better": "higher",
-      "label": "Writing, times faster than llama.cpp",
-      "config": "27B",
-      "group": "Against competitors",
-      "case": "100K",
-      "unit": "×"
+    "fn.gap_ms.short": {
+      "instrument": "speed-fn",
+      "field": "gap_ms.short",
+      "better": "lower",
+      "label": "Longest gap between tokens, p99",
+      "config": "Flash-Next",
+      "group": "Speed",
+      "case": "short",
+      "unit": "ms"
     },
-    "27b.llamacpp.ttft.followup": {
-      "instrument": "bench-27b",
-      "field": "llamacpp.ttft.followup",
+    "fn.per_pass.short": {
+      "instrument": "speed-fn",
+      "field": "per_pass.short",
       "better": "higher",
-      "label": "First token, times sooner than llama.cpp",
-      "config": "27B",
-      "group": "Against competitors",
+      "label": "Tokens per pass",
+      "config": "Flash-Next",
+      "group": "Speed",
+      "case": "short",
+      "exact": true
+    },
+    "fn.ttft.4k": {
+      "instrument": "speed-fn",
+      "field": "ttft.4k",
+      "better": "lower",
+      "label": "First token",
+      "config": "Flash-Next",
+      "group": "Speed",
+      "case": "4K",
+      "unit": "s"
+    },
+    "fn.prompt_tps.4k": {
+      "instrument": "speed-fn",
+      "field": "prompt_tps.4k",
+      "better": "higher",
+      "label": "Reading the prompt",
+      "config": "Flash-Next",
+      "group": "Speed",
+      "case": "4K",
+      "unit": "tok/s"
+    },
+    "fn.decode_tps.4k": {
+      "instrument": "speed-fn",
+      "field": "decode_tps.4k",
+      "better": "higher",
+      "label": "Writing",
+      "config": "Flash-Next",
+      "group": "Speed",
+      "case": "4K",
+      "unit": "tok/s"
+    },
+    "fn.gap_ms.4k": {
+      "instrument": "speed-fn",
+      "field": "gap_ms.4k",
+      "better": "lower",
+      "label": "Longest gap between tokens, p99",
+      "config": "Flash-Next",
+      "group": "Speed",
+      "case": "4K",
+      "unit": "ms"
+    },
+    "fn.per_pass.4k": {
+      "instrument": "speed-fn",
+      "field": "per_pass.4k",
+      "better": "higher",
+      "label": "Tokens per pass",
+      "config": "Flash-Next",
+      "group": "Speed",
+      "case": "4K",
+      "exact": true
+    },
+    "fn.ttft.16k": {
+      "instrument": "speed-fn",
+      "field": "ttft.16k",
+      "better": "lower",
+      "label": "First token",
+      "config": "Flash-Next",
+      "group": "Speed",
+      "case": "16K deep",
+      "unit": "s"
+    },
+    "fn.prompt_tps.16k": {
+      "instrument": "speed-fn",
+      "field": "prompt_tps.16k",
+      "better": "higher",
+      "label": "Reading the prompt",
+      "config": "Flash-Next",
+      "group": "Speed",
+      "case": "16K deep",
+      "unit": "tok/s"
+    },
+    "fn.decode_tps.16k": {
+      "instrument": "speed-fn",
+      "field": "decode_tps.16k",
+      "better": "higher",
+      "label": "Writing",
+      "config": "Flash-Next",
+      "group": "Speed",
+      "case": "16K deep",
+      "unit": "tok/s"
+    },
+    "fn.gap_ms.16k": {
+      "instrument": "speed-fn",
+      "field": "gap_ms.16k",
+      "better": "lower",
+      "label": "Longest gap between tokens, p99",
+      "config": "Flash-Next",
+      "group": "Speed",
+      "case": "16K deep",
+      "unit": "ms"
+    },
+    "fn.per_pass.16k": {
+      "instrument": "speed-fn",
+      "field": "per_pass.16k",
+      "better": "higher",
+      "label": "Tokens per pass",
+      "config": "Flash-Next",
+      "group": "Speed",
+      "case": "16K deep",
+      "exact": true
+    },
+    "fn.ttft.100k": {
+      "instrument": "speed-fn",
+      "field": "ttft.100k",
+      "better": "lower",
+      "label": "First token",
+      "config": "Flash-Next",
+      "group": "Speed",
+      "case": "100K deep",
+      "unit": "s"
+    },
+    "fn.prompt_tps.100k": {
+      "instrument": "speed-fn",
+      "field": "prompt_tps.100k",
+      "better": "higher",
+      "label": "Reading the prompt",
+      "config": "Flash-Next",
+      "group": "Speed",
+      "case": "100K deep",
+      "unit": "tok/s"
+    },
+    "fn.decode_tps.100k": {
+      "instrument": "speed-fn",
+      "field": "decode_tps.100k",
+      "better": "higher",
+      "label": "Writing",
+      "config": "Flash-Next",
+      "group": "Speed",
+      "case": "100K deep",
+      "unit": "tok/s"
+    },
+    "fn.gap_ms.100k": {
+      "instrument": "speed-fn",
+      "field": "gap_ms.100k",
+      "better": "lower",
+      "label": "Longest gap between tokens, p99",
+      "config": "Flash-Next",
+      "group": "Speed",
+      "case": "100K deep",
+      "unit": "ms"
+    },
+    "fn.per_pass.100k": {
+      "instrument": "speed-fn",
+      "field": "per_pass.100k",
+      "better": "higher",
+      "label": "Tokens per pass",
+      "config": "Flash-Next",
+      "group": "Speed",
+      "case": "100K deep",
+      "exact": true
+    },
+    "fn.ttft.followup": {
+      "instrument": "speed-fn",
+      "field": "ttft.followup",
+      "better": "lower",
+      "label": "First token",
+      "config": "Flash-Next",
+      "group": "Speed",
       "case": "follow-up",
+      "unit": "s"
+    },
+    "fn.prompt_tps.followup": {
+      "instrument": "speed-fn",
+      "field": "prompt_tps.followup",
+      "better": "higher",
+      "label": "Reading the prompt",
+      "config": "Flash-Next",
+      "group": "Speed",
+      "case": "follow-up",
+      "unit": "tok/s"
+    },
+    "fn.decode_tps.followup": {
+      "instrument": "speed-fn",
+      "field": "decode_tps.followup",
+      "better": "higher",
+      "label": "Writing",
+      "config": "Flash-Next",
+      "group": "Speed",
+      "case": "follow-up",
+      "unit": "tok/s"
+    },
+    "fn.gap_ms.followup": {
+      "instrument": "speed-fn",
+      "field": "gap_ms.followup",
+      "better": "lower",
+      "label": "Longest gap between tokens, p99",
+      "config": "Flash-Next",
+      "group": "Speed",
+      "case": "follow-up",
+      "unit": "ms"
+    },
+    "fn.per_pass.followup": {
+      "instrument": "speed-fn",
+      "field": "per_pass.followup",
+      "better": "higher",
+      "label": "Tokens per pass",
+      "config": "Flash-Next",
+      "group": "Speed",
+      "case": "follow-up",
+      "exact": true
+    },
+    "fn.load_s": {
+      "instrument": "speed-fn",
+      "field": "load_s",
+      "better": "lower",
+      "label": "Load to a first answer",
+      "config": "Flash-Next",
+      "group": "Speed",
+      "unit": "s"
+    },
+    "fn.kv_tokens": {
+      "instrument": "speed-fn",
+      "field": "kv_tokens",
+      "better": "higher",
+      "label": "Context",
+      "config": "Flash-Next",
+      "group": "Memory and context",
+      "exact": true,
+      "unit": "tokens"
+    },
+    "fn.reused": {
+      "instrument": "speed-fn",
+      "field": "reused.followup",
+      "better": "higher",
+      "label": "Prompt the follow-up reuses",
+      "config": "Flash-Next",
+      "group": "Memory and context",
+      "exact": true,
+      "unit": "tokens"
+    },
+    "fn.ram_gb": {
+      "instrument": "speed-fn",
+      "field": "ram_gb",
+      "better": "lower",
+      "label": "Peak RAM",
+      "config": "Flash-Next",
+      "group": "Memory and context",
+      "unit": "GB"
+    },
+    "fn.min_free_gb": {
+      "instrument": "speed-fn",
+      "field": "min_free_gb",
+      "better": "higher",
+      "label": "Lowest free system memory during a run",
+      "config": "Flash-Next",
+      "group": "Memory and context",
+      "unit": "GB"
+    },
+    "fn.mem_limited": {
+      "instrument": "speed-fn",
+      "field": "mem_limited",
+      "better": "lower",
+      "label": "Pool steps limited by memory",
+      "config": "Flash-Next",
+      "group": "Memory and context",
+      "exact": true
+    },
+    "fn.energy_kj": {
+      "instrument": "speed-fn",
+      "field": "energy_kj",
+      "better": "lower",
+      "label": "GPU energy for one speed run",
+      "config": "Flash-Next",
+      "group": "Energy",
+      "unit": "kJ"
+    },
+    "fn.run_s": {
+      "instrument": "speed-fn",
+      "field": "run_s",
+      "better": "lower",
+      "label": "Time for one speed run",
+      "config": "Flash-Next",
+      "group": "Velocity",
+      "unit": "s"
+    },
+    "fn.strata_iq3s.ttft.short": {
+      "instrument": "speed-fn",
+      "field": "strata_iq3s.ttft.short",
+      "better": "higher",
+      "label": "First token, times sooner than Strata IQ3_S",
+      "config": "Flash-Next",
+      "group": "Against competitors",
+      "case": "short",
       "unit": "×"
     },
-    "27b.llamacpp.decode.followup": {
-      "instrument": "bench-27b",
-      "field": "llamacpp.decode.followup",
+    "fn.strata_iq3s.decode.short": {
+      "instrument": "speed-fn",
+      "field": "strata_iq3s.decode.short",
       "better": "higher",
-      "label": "Writing, times faster than llama.cpp",
-      "config": "27B",
+      "label": "Writing, times faster than Strata IQ3_S",
+      "config": "Flash-Next",
       "group": "Against competitors",
-      "case": "follow-up",
+      "case": "short",
       "unit": "×"
+    },
+    "fn.strata_iq3s.ttft.4k": {
+      "instrument": "speed-fn",
+      "field": "strata_iq3s.ttft.4k",
+      "better": "higher",
+      "label": "First token, times sooner than Strata IQ3_S",
+      "config": "Flash-Next",
+      "group": "Against competitors",
+      "case": "4K",
+      "unit": "×"
+    },
+    "fn.strata_iq3s.decode.4k": {
+      "instrument": "speed-fn",
+      "field": "strata_iq3s.decode.4k",
+      "better": "higher",
+      "label": "Writing, times faster than Strata IQ3_S",
+      "config": "Flash-Next",
+      "group": "Against competitors",
+      "case": "4K",
+      "unit": "×"
+    },
+    "fn.strata_q2.ttft.short": {
+      "instrument": "speed-fn",
+      "field": "strata_q2.ttft.short",
+      "better": "higher",
+      "label": "First token, times sooner than Strata Q2_0",
+      "config": "Flash-Next",
+      "group": "Against competitors",
+      "case": "short",
+      "unit": "×"
+    },
+    "fn.strata_q2.decode.short": {
+      "instrument": "speed-fn",
+      "field": "strata_q2.decode.short",
+      "better": "higher",
+      "label": "Writing, times faster than Strata Q2_0",
+      "config": "Flash-Next",
+      "group": "Against competitors",
+      "case": "short",
+      "unit": "×"
+    },
+    "fn.strata_q2.ttft.4k": {
+      "instrument": "speed-fn",
+      "field": "strata_q2.ttft.4k",
+      "better": "higher",
+      "label": "First token, times sooner than Strata Q2_0",
+      "config": "Flash-Next",
+      "group": "Against competitors",
+      "case": "4K",
+      "unit": "×"
+    },
+    "fn.strata_q2.decode.4k": {
+      "instrument": "speed-fn",
+      "field": "strata_q2.decode.4k",
+      "better": "higher",
+      "label": "Writing, times faster than Strata Q2_0",
+      "config": "Flash-Next",
+      "group": "Against competitors",
+      "case": "4K",
+      "unit": "×"
+    },
+    "27b.sanity": {
+      "instrument": "quality-27b",
+      "field": "sanity",
+      "better": "higher",
+      "label": "Sanity tasks solved, of 12",
+      "config": "27B",
+      "group": "Quality",
+      "exact": true
+    },
+    "27b.kl_mean": {
+      "instrument": "quality-27b",
+      "field": "kl_mean",
+      "better": "lower",
+      "label": "KL vs Q8_0, mean",
+      "config": "27B",
+      "group": "Quality",
+      "exact": true
+    },
+    "27b.kl_p999": {
+      "instrument": "quality-27b",
+      "field": "kl_p999",
+      "better": "lower",
+      "label": "KL vs Q8_0, p99.9",
+      "config": "27B",
+      "group": "Quality",
+      "exact": true
+    },
+    "27b.kl_max": {
+      "instrument": "quality-27b",
+      "field": "kl_max",
+      "better": "lower",
+      "label": "KL vs Q8_0, max",
+      "config": "27B",
+      "group": "Quality",
+      "exact": true
+    },
+    "27b.top1": {
+      "instrument": "quality-27b",
+      "field": "top1",
+      "better": "higher",
+      "label": "Same top token as Q8_0",
+      "config": "27B",
+      "group": "Quality",
+      "exact": true,
+      "unit": "%"
+    },
+    "fn.strata_iq3s.kl": {
+      "instrument": "quality-fn",
+      "field": "strata_iq3s.kl",
+      "better": "higher",
+      "label": "KL vs Q8_0, times lower than Strata IQ3_S",
+      "config": "Flash-Next",
+      "group": "Against competitors",
+      "exact": true,
+      "unit": "×"
+    },
+    "fn.strata_q2.kl": {
+      "instrument": "quality-fn",
+      "field": "strata_q2.kl",
+      "better": "higher",
+      "label": "KL vs Q8_0, times lower than Strata Q2_0",
+      "config": "Flash-Next",
+      "group": "Against competitors",
+      "exact": true,
+      "unit": "×"
+    },
+    "fn.sanity": {
+      "instrument": "quality-fn",
+      "field": "sanity",
+      "better": "higher",
+      "label": "Sanity tasks solved, of 12",
+      "config": "Flash-Next",
+      "group": "Quality",
+      "exact": true
+    },
+    "fn.kl_mean": {
+      "instrument": "quality-fn",
+      "field": "kl_mean",
+      "better": "lower",
+      "label": "KL vs Q8_0, mean",
+      "config": "Flash-Next",
+      "group": "Quality",
+      "exact": true
+    },
+    "fn.kl_p999": {
+      "instrument": "quality-fn",
+      "field": "kl_p999",
+      "better": "lower",
+      "label": "KL vs Q8_0, p99.9",
+      "config": "Flash-Next",
+      "group": "Quality",
+      "exact": true
+    },
+    "fn.kl_max": {
+      "instrument": "quality-fn",
+      "field": "kl_max",
+      "better": "lower",
+      "label": "KL vs Q8_0, max",
+      "config": "Flash-Next",
+      "group": "Quality",
+      "exact": true
+    },
+    "fn.top1": {
+      "instrument": "quality-fn",
+      "field": "top1",
+      "better": "higher",
+      "label": "Same top token as Q8_0",
+      "config": "Flash-Next",
+      "group": "Quality",
+      "exact": true,
+      "unit": "%"
     },
     "build_s": {
       "instrument": "build",

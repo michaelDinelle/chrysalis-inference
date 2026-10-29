@@ -4,7 +4,7 @@ if [ "$d/bin.path" -nt "$d/hill.c" ] && read -r b < "$d/bin.path" && [ -x "$b" ]
 v=$(sha256sum "$d/hill.c" 2>/dev/null || shasum -a 256 "$d/hill.c") || exit 2
 v=${v%% *}
 v=${v%"${v#????????????????}"}
-p=$(uname -sm)
+{ read -r o < /proc/sys/kernel/ostype && read -r m < /proc/sys/kernel/arch; } 2>/dev/null && p="$o $m" || p=$(uname -sm)
 b="${HILL_HOME:-$HOME/.claude/skills/hill-climb-anything}/bin/${p% *}-${p#* }/hill-$v"
 if [ ! -x "$b" ]; then
     b="${XDG_CACHE_HOME:-$HOME/.cache}/hill/$v/hill"

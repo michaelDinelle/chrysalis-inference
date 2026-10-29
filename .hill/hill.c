@@ -2,7 +2,6 @@
 #include <ctype.h>
 #include <errno.h>
 #include <fcntl.h>
-#include <ftw.h>
 #include <dirent.h>
 #include <math.h>
 #include <poll.h>
@@ -1126,13 +1125,6 @@ static void unlock_hill(void) {
     lock_fd = -1;
 }
 
-static int rm_entry(const char *path, const struct stat *st, int flag, struct FTW *ftw) {
-    (void)st, (void)ftw;
-    if (flag == FTW_DP) rmdir(path);
-    else unlink(path);
-    return 0;
-}
-
 static char *best_tree(Spec *s, const char *commit) {
     char *trees = fmtstr("%s/trees", hill_dir());
     char *path = fmtstr("%s/%.12s", trees, commit);
@@ -1144,7 +1136,8 @@ static char *best_tree(Spec *s, const char *commit) {
             char *gone = fmtstr("%s/%s", trees, old.v[i]);
             char *argv[] = {"git", "worktree", "remove", "--force", gone, NULL};
             spawn(argv, root_dir, NULL, 0, 1, 1, -1, NULL);
-            if (!access(gone, F_OK)) nftw(gone, rm_entry, 16, FTW_DEPTH | FTW_PHYS);
+            char *rm[] = {"rm", "-rf", gone, NULL};
+            if (!access(gone, F_OK)) spawn(rm, root_dir, NULL, 0, 1, 1, -1, NULL);
         }
         GIT("worktree", "prune");
         GIT("worktree", "add", "--detach", path, commit);
@@ -1660,6 +1653,39 @@ static J *exact_value(const char *rid, Vals *v) {
     return v->v[0];
 }
 
+static int exact_only(Spec *s, const char *name) {
+    J *rewards = jget(s->spec, "rewards");
+    for (size_t r = 0; r < rewards->len; r++)
+        if (!strcmp(jget(rewards->v[r], "instrument")->s, name) && !jtruthy(jget(rewards->v[r], "exact"))) return 0;
+    return 1;
+}
+
+static Sample *once(Spec *s, const char *tree_a, const char *tree_b, const char *name) {
+    J *rewards = jget(s->spec, "rewards");
+    Sample *samples = calloc(rewards->len, sizeof *samples);
+    printf("hill: %s: best, candidate\n", name);
+    fflush(stdout);
+    J *best = measure(s, name, tree_a, "best"), *cand = measure(s, name, tree_b, "candidate");
+    int moved = 0;
+    for (size_t r = 0; r < rewards->len; r++) {
+        if (strcmp(jget(rewards->v[r], "instrument")->s, name)) continue;
+        samples[r].a = calloc(1, sizeof(Vals));
+        samples[r].b = calloc(1, sizeof(Vals));
+        samples[r].blocks = 1;
+        vpush(&samples[r].a[0], field(s, rewards->k[r], best, name));
+        vpush(&samples[r].b[0], field(s, rewards->k[r], cand, name));
+        moved |= !num_eq(samples[r].a[0].v[0], samples[r].b[0].v[0]);
+    }
+    if (moved) {
+        printf("hill: %s: candidate again\n", name);
+        fflush(stdout);
+        J *again = measure(s, name, tree_b, "candidate");
+        for (size_t r = 0; r < rewards->len; r++)
+            if (samples[r].blocks) vpush(&samples[r].b[0], field(s, rewards->k[r], again, name));
+    }
+    return samples;
+}
+
 typedef struct {
     J *rows;
     int wins, losses;
@@ -1669,6 +1695,7 @@ static Judged judge(Spec *s, Sample *samples, Noise *noise) {
     J *rewards = jget(s->spec, "rewards");
     Judged out = {jnew(JOBJ), 0, 0};
     for (size_t r = 0; r < rewards->len; r++) {
+        if (!samples[r].blocks) continue;
         const char *rid = rewards->k[r];
         J *spec = rewards->v[r];
         double sign = is(spec, "better", "higher") ? 1 : -1;
@@ -1716,30 +1743,38 @@ static Judged judge(Spec *s, Sample *samples, Noise *noise) {
 }
 
 static char *report(Spec *s, J *rows, const char *verdict) {
-    Buf b = {0};
+    Buf b = {0}, named = {0};
     bputs(&b, "| Reward | Best | Candidate | Change | Verdict |\n| --- | ---: | ---: | ---: | --- |");
+    const char *pick = !strcmp(verdict, "PROMOTE") ? "win" : !strcmp(verdict, "REJECT") ? "loss" : "";
     int counts[3] = {0};
     for (size_t i = 0; i < rows->len; i++) {
         J *row = rows->v[i];
         J *change = jget(row, "change");
-        Buf c = {0};
+        Buf c = {0}, d = {0};
         if (!change || change->t == JNULL) {
         } else if (jget(row, "floor")) {
-            bprintf(&c, "%+.2f%% (floor \xc2\xb1%.2f%%)", 100 * jd(change), 100 * jd(jget(row, "floor")));
+            bprintf(&d, "%+.2f%%", 100 * jd(change));
+            bprintf(&c, "%s (floor \xc2\xb1%.2f%%)", bstr(&d), 100 * jd(jget(row, "floor")));
         } else {
-            bprintf(&c, "%+.3g%%", 100 * jd(change));
+            bprintf(&d, "%+.3g%%", 100 * jd(change));
+            bputs(&c, bstr(&d));
         }
         char *fa, *fc;
         pair_fmt(s, rows->k[i], jget(row, "best"), jget(row, "candidate"), &fa, &fc);
         const char *result = jget(row, "result")->s;
         bprintf(&b, "\n| %s | %s | %s | %s | %s |", name_of(s, rows->k[i]), fa, fc, bstr(&c), result);
+        if (!strcmp(result, pick)) bprintf(&named, "\n  %s: %s \xe2\x86\x92 %s%s%s%s", name_of(s, rows->k[i]), fa, fc, d.n ? " (" : "", bstr(&d), d.n ? ")" : "");
         counts[!strcmp(result, "win") ? 0 : !strcmp(result, "tie") ? 1 : 2]++;
     }
-    char *tally = fmtstr("%d better, %d equal, %d worse.", counts[0], counts[1], counts[2]);
+    size_t total = jget(s->spec, "rewards")->len;
+    if (rows->len < total) bprintf(&b, "\n\nThe gate stopped at the first loss: %zu of %zu rewards were not measured.", total - rows->len, total);
     if (!strcmp(verdict, "PROMOTE"))
-        bprintf(&b, "\n\n\xf0\x9f\x91\x91 PROMOTE: %s Commit it with .hill/ledger.jsonl staged; it's the new best.", tally);
+        bprintf(&b, "\n\n\xf0\x9f\x91\x91 PROMOTE on %d reward%s, with %d equal and none worse:%s\nCommit it with .hill/ledger.jsonl staged; it's the new best.", counts[0],
+                counts[0] == 1 ? "" : "s", counts[1], bstr(&named));
+    else if (!strcmp(verdict, "REJECT"))
+        bprintf(&b, "\n\nREJECT on %d reward%s, with %d better and %d equal:%s\nThe best stays.", counts[2], counts[2] == 1 ? "" : "s", counts[0], counts[1], bstr(&named));
     else
-        bprintf(&b, "\n\n%s: %s The best stays.", verdict, tally);
+        bprintf(&b, "\n\nTIE: %d better, %d equal, %d worse. The best stays.", counts[0], counts[1], counts[2]);
     return bstr(&b);
 }
 
@@ -2058,14 +2093,24 @@ static int cmd_gate(Spec *s) {
     char *tree = best_tree(s, commit);
     build(s, tree, "best");
     build(s, root_dir, "candidate");
-    Sample *samples = paired(s, tree, root_dir, "best", "candidate", "blocks", BLOCKS, NULL);
+    Strs names = instrument_names(s);
+    Judged j = {jnew(JOBJ), 0, 0};
+    for (size_t ni = 0; ni < names.n && !j.losses; ni++) {
+        Strs one = {0};
+        spush(&one, names.v[ni]);
+        Sample *samples = exact_only(s, names.v[ni]) ? once(s, tree, root_dir, names.v[ni])
+                                                   : paired(s, tree, root_dir, "best", "candidate", "blocks", BLOCKS, &one);
+        Judged part = judge(s, samples, noise);
+        for (size_t r = 0; r < part.rows->len; r++) jset(j.rows, part.rows->k[r], part.rows->v[r]);
+        j.wins += part.wins;
+        j.losses += part.losses;
+    }
     unlock_hill();
     Pairs now = files_of(s);
     for (size_t i = 0; i < cand_files.n; i++) {
         Pair *found = bsearch(&cand_files.v[i], now.v, now.n, sizeof *now.v, pair_cmp);
         if (!found) stop("ERROR", "the working tree changed while it was being measured; gate it again once it is still");
     }
-    Judged j = judge(s, samples, noise);
     const char *verdict = j.wins && !j.losses ? "PROMOTE" : j.losses ? "REJECT" : "TIE";
     J *values = jnew(JOBJ);
     for (size_t r = 0; r < j.rows->len; r++) jset(values, j.rows->k[r], jget(j.rows->v[r], "candidate"));
@@ -2082,9 +2127,10 @@ static int cmd_gate(Spec *s) {
     return strcmp(verdict, "PROMOTE") ? 1 : 0;
 }
 
-static void loosened(Spec *old, Spec *new, Strs *found) {
+static void loosened(Spec *old, Spec *new, Strs *found, Strs *held) {
     J *orew = jget(old->spec, "rewards"), *nrew = jget(new->spec, "rewards");
     for (size_t i = 0; i < orew->len; i++) {
+        if (!listed(held, orew->k[i])) continue;
         J *n = jget(nrew, orew->k[i]);
         if (!n) {
             spush(found, fmtstr("%s was dropped", orew->k[i]));
@@ -2097,7 +2143,9 @@ static void loosened(Spec *old, Spec *new, Strs *found) {
     J *oi = jget(old->spec, "instruments"), *ni = jget(new->spec, "instruments");
     for (size_t i = 0; i < oi->len; i++) {
         J *n = jget(ni, oi->k[i]);
-        if (n && jint_or(n, "blocks", BLOCKS) < jint_or(oi->v[i], "blocks", BLOCKS)) spush(found, fmtstr("%s runs fewer blocks", oi->k[i]));
+        int kept = 0;
+        for (size_t r = 0; r < orew->len; r++) kept |= is(orew->v[r], "instrument", oi->k[i]) && listed(held, orew->k[r]);
+        if (kept && n && jint_or(n, "blocks", BLOCKS) < jint_or(oi->v[i], "blocks", BLOCKS)) spush(found, fmtstr("%s runs fewer blocks", oi->k[i]));
     }
 }
 
@@ -2110,7 +2158,14 @@ static int cmd_check(void) {
     Strs problems = {0};
     if (blobs.ok[2] && blobs.len[2]) {
         Spec old = load_spec(blobs.ok[2], blobs.len[2]);
-        loosened(&old, &s, &problems);
+        Ledger hl = read_ledger_text(blobs.ok[3] ? blobs.ok[3] : "", blobs.ok[3] ? blobs.len[3] : 0);
+        Strs held = {0};
+        for (size_t i = 0; i < hl.n; i++) {
+            J *v = jget(hl.v[i], "values");
+            for (size_t k = 0; v && k < v->len; k++)
+                if (!listed(&held, v->k[k])) spush(&held, v->k[k]);
+        }
+        loosened(&old, &s, &problems, &held);
     }
     const char *head_ledger = blobs.ok[3] ? blobs.ok[3] : "";
     size_t head_len = blobs.ok[3] ? blobs.len[3] : 0;
