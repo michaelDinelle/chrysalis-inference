@@ -18,7 +18,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 import numpy as np
 
-from . import apis, link, vision
+from . import apis, gpu, vision
 from .cache import Cache, Disk
 from .chat import Clip, Content, OutputParser, Renderer, StopText, Tokens, message_key, text_of
 from .documents import DocumentError, Documents
@@ -544,6 +544,7 @@ class Server:
         self.max_pixels = vision.pixel_limit(max_pixels)
         if engine is None:
             engine = load_async(model_path, max_seqs=slots, umax=umax or MODELS.get(model, MODELS[MODEL])["chunk"], warmup=False,
+                                reserve_mb=gpu.reserve_mb(),
                                 lib=__import__("os").path.join(_ROOT, MODELS.get(model, MODELS[MODEL])["lib"]))
         self.active, self.slots, self.umax = model, slots, umax
         self.loading = None
@@ -564,7 +565,6 @@ class Server:
         self.replying = set()
         self.pausing = threading.Event()
         self.log = log
-        self.link_dev = link.device()
         spec = MODELS.get(model, MODELS[MODEL])
         self.n_draft = spec["draft"] if n_draft is None else n_draft
         self.lookup = spec.get("lookup", 0) if lookup is None else lookup
@@ -634,7 +634,7 @@ class Server:
         import os
         spec = MODELS[name]
         self.engine = Engine(os.path.join(_ROOT, spec["path"]), max_seqs=self.slots, umax=self.umax or spec["chunk"],
-                             lib=os.path.join(_ROOT, spec["lib"]), warmup=True)
+                             reserve_mb=gpu.reserve_mb(), lib=os.path.join(_ROOT, spec["lib"]), warmup=True)
         self.capacity = min(MAX_CONTEXT, self.engine.capacity)
         self.cache = Cache(self.engine, self.slots, max_snapshots=spec["snapshots"],
                            disk=self.snapshot_disk(name, os.path.join(_ROOT, spec["path"])))
@@ -706,10 +706,6 @@ class Server:
             self.metrics.add("chrysalis_model_loads_total", model=self.active)
             self.metrics.add("chrysalis_model_load_seconds_total", time.time() - t0, model=self.active)
             print(f"chrysalis: awake: {self.active} loaded in {time.time() - t0:.1f} s", file=self.log, flush=True)
-            now = link.status(self.link_dev)
-            if now and now["slow"]:
-                print(f"chrysalis: PCIe link at {now['gts']:g} GT/s x{now['width']} after the wake, slower than this machine's "
-                      f"best ({now['best_gts']:g} GT/s): starting Chrysalis again trains it again", file=self.log, flush=True)
         finally:
             with self.state_lock:
                 self.loading = None
@@ -1222,7 +1218,7 @@ class Server:
             if self.loading:
                 return {"model": self.active, "loading": self.loading, "progress": load_progress(), "models": list(MODELS)}
             out = {"model": self.active, "models": list(MODELS), "context": self.capacity, "kv_tokens": self.engine.capacity,
-                   "cache": self.cache.stats(), "recent": [{"at": t, **v} for t, v in list(self.recent.items())[-16:]], "link": link.status(self.link_dev)}
+                   "cache": self.cache.stats(), "recent": [{"at": t, **v} for t, v in list(self.recent.items())[-16:]]}
             experts = self.engine.expert_stats()
             if experts:
                 out["experts"] = experts
@@ -1249,12 +1245,6 @@ class Server:
                           ("chrysalis_experts_mirror_cap", "How many of them RAM may hold (CHRYSALIS_FN_SPILL_GB)", [({}, x["mirror_cap"])]),
                           ("chrysalis_dma_bytes_per_second", "Host-to-GPU DMA rate the pool's copies measure", [({}, x["dma_bytes_per_s"])]),
                           ("chrysalis_experts_gpu_share", "Share of the cold picks the GPU computes in decode", [({}, x["gpu_share"])])]
-        ln = link.status(self.link_dev)
-        if ln:
-            g += [("chrysalis_pcie_link_gts", "PCIe link speed now, GT/s (the slowest link to the GPU)", [({}, ln["gts"])]),
-                  ("chrysalis_pcie_link_width", "PCIe link width now, lanes", [({}, ln["width"])]),
-                  ("chrysalis_pcie_link_best_gts", "The fastest link speed seen on this machine, GT/s", [({}, ln["best_gts"])]),
-                  ("chrysalis_pcie_link_slow", "1 when the link is slower than this machine's best (starting Chrysalis again trains it again)", [({}, int(ln["slow"]))])]
         return g
 
     def load(self, name):

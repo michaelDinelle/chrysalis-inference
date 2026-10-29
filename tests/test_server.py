@@ -511,7 +511,6 @@ except Exception as e:
 check("chat stream: the SDK reads it", isinstance(n, int) and n > 2, str(n))
 
 from prometheus_client.parser import text_string_to_metric_families
-from chrysalis import link
 
 
 def scrape():
@@ -529,11 +528,6 @@ check("metrics: a reply's tokens", moved("chrysalis_completion_tokens_total", mo
       and moved("chrysalis_replies_total", model=MODEL, finish=r.choices[0].finish_reason) == 1
       and moved("chrysalis_time_to_first_token_seconds_count", model=MODEL) == 1, f"{r.usage.completion_tokens} tokens")
 check("metrics: a refused request", moved("chrysalis_http_errors_total", status="400") == 1)
-now, dma = link.status(srv.link_dev), m1.get(("chrysalis_dma_bytes_per_second", ()))
-if srv.engine.expert_stats() and srv.link_dev:
-    lanes = now and now["gts"] * 1e9 * now["width"] * (0.8 if now["gts"] < 8 else 128 / 130) / 8
-    check("metrics: the PCIe link bounds the DMA rate", bool(now and dma and 0.25 * lanes < dma <= lanes),
-          f"link {now and now['gts']} GT/s x{now and now['width']} ({lanes and lanes / 1e9:.1f} GB/s), DMA {dma and dma / 1e9:.1f} GB/s")
 
 
 from chrysalis.sleep import vram_used

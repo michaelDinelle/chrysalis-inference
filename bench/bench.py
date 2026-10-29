@@ -280,13 +280,6 @@ def machine_ready(names):
             continue
         if vram > 4 << 20:
             sys.exit(f"bench: process {p.split('/')[2]} holds {vram >> 20} GiB of VRAM; stop its model (the chat's Stop), the bench needs the GPU to itself")
-    from chrysalis import link
-    from chrysalis.engine import wake_gpus
-    wake_gpus()
-    st = link.status(link.device())
-    if st and st["slow"]:
-        sys.exit(f"bench: the GPU's PCIe link is at {st['gts']:g} GT/s x{st['width']}, slower than this machine's best "
-                 f"{st['best_gts']:g} GT/s x{st['best_width']}")
     avail = int(next(l for l in open("/proc/meminfo") if l.startswith("MemAvailable")).split()[1]) << 10
     if "fn" in names and avail < 48 << 30:
         sys.exit(f"bench: {avail / 2**30:.1f} GiB of RAM is available; Flash-Next needs 48")

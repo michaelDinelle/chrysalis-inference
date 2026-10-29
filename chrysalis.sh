@@ -79,7 +79,23 @@ sys.exit(1)' 2>/dev/null
 engine() {
     local run=("$ROOT/chrysalis.sh" serve)
     systemd-run --user --scope -q true 2>/dev/null && run=(systemd-run --user --scope -q -p MemorySwapMax=0 "${run[@]}")
-    until "${run[@]}" </dev/null; do sleep 3; done
+    local rc t0 quick=0
+    while :; do
+        t0=$SECONDS rc=0
+        "${run[@]}" </dev/null || rc=$?
+        (( rc != 0 )) || return 0
+        if (( rc == 137 )); then
+            echo "chrysalis: the model server was killed, most likely by the kernel for memory (journalctl -k shows which):" \
+                "not starting it again, so the desktop keeps its memory; start Chrysalis again once there is room"
+            return 1
+        fi
+        (( SECONDS - t0 < 120 )) && quick=$((quick + 1)) || quick=0
+        if (( quick >= 3 )); then
+            echo "chrysalis: the model server stopped $quick times in a row within two minutes of starting (exit $rc): not starting it again"
+            return 1
+        fi
+        sleep 3
+    done
 }
 
 usage() {
