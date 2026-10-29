@@ -7,7 +7,7 @@ sys.path.insert(0, ROOT)
 from chrysalis.cache import Cache, Disk
 from chrysalis.engine import load_async, wake_gpus
 from chrysalis.server import Server, serve
-from measure import BENCH, MODELS, tuned
+from measure import BENCH, MODELS, own_calibration, tuned
 
 class Kept(Disk):
     def save(self, engine, snap, tokens):
@@ -29,6 +29,7 @@ if __name__ == "__main__":
         if PRIME:
             checkpoint = Cache.checkpoint
             Cache.checkpoint = lambda self, slot, pinned=False, logits=False: checkpoint(self, slot, True, logits)
+    own_calibration()
     wake_gpus()
     loading = load_async(path, max_seqs=3, umax=spec["chunk"], warmup=False, lib=os.path.join(ROOT, spec["lib"]))
     pool = ThreadPoolExecutor(1)

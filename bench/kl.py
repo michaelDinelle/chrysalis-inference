@@ -7,7 +7,7 @@ import numpy as np
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, ROOT)
 from chrysalis.engine import Engine
-from measure import BENCH, MODELS, tuned
+from measure import BENCH, MODELS, own_calibration, tuned
 
 
 def logsoftmax(x):
@@ -18,6 +18,7 @@ def logsoftmax(x):
 
 if __name__ == "__main__":
     name, tokens_path, ref_path = sys.argv[1:4]
+    own_calibration()
     spec = MODELS[BENCH[name]["use"]]
     ids = np.fromfile(tokens_path, dtype=np.int32)
     ref = np.fromfile(ref_path, dtype=np.float32).reshape(len(ids), -1)

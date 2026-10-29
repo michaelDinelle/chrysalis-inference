@@ -55,6 +55,15 @@ def bench_for(backend):
 BENCH = bench_for(BACKEND)
 
 
+def own_calibration():
+    import chrysalis.engine as ce
+    mine = os.path.join(WORK, "flash-next-calibration.txt")
+    if not os.path.exists(mine) and os.path.exists(ce.CALIBRATION):
+        os.makedirs(WORK, exist_ok=True)
+        shutil.copy(ce.CALIBRATION, mine)
+    ce.CALIBRATION = mine
+
+
 def tuned(engine, name):
     if BENCH[name]["tune"]:
         tune = engine.lib.chrysalis_tune
