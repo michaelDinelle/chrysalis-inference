@@ -34,18 +34,18 @@ for name in ("fn", "27b"):
     s.stop()
     open(mark, "w").close()
 lib = "dylib" if MAC else "so"
-for kept, sources, warm in (("hipblaslt.txt", (f"build/libchrysalis.{lib}", f"build/libchrysalis_fn.{lib}", "chrysalis/engine.py"), None),
+for kept, sources, warm in (("hipblaslt.txt", (f"build/libchrysalis.{lib}", f"build/libchrysalis_fn.{lib}", "chrysalis/engine.py"), "27b"),
                             ("flash-next-calibration.txt", (f"build/libchrysalis_fn.{lib}", "chrysalis/engine.py"), "fn")):
     built = hashlib.sha256(b"".join(open(os.path.join(ROOT, f), "rb").read() for f in sources)).hexdigest()
     mark = os.path.join(WORK, kept + ".built")
-    if os.path.exists(os.path.join(WORK, kept)) and os.path.exists(mark) and open(mark).read() == built:
+    if os.path.exists(mark) and open(mark).read() == built:
         continue
     if os.path.exists(os.path.join(WORK, kept)):
         os.remove(os.path.join(WORK, kept))
     if warm:
         ready = subprocess.run([PY, os.path.join(ROOT, "bench/hill_ready.py"), warm], capture_output=True, text=True)
         if ready.returncode:
-            sys.exit(f"warming this tree's Flash-Next calibration: {(ready.stdout + ready.stderr).strip()}")
+            sys.exit(f"warming this tree's {warm} engine: {(ready.stdout + ready.stderr).strip()}")
         Server(warm).stop()
     os.makedirs(WORK, exist_ok=True)
     open(mark, "w").write(built)

@@ -7,7 +7,8 @@ import tempfile
 import time
 
 tree = os.getcwd()
-work = tempfile.mkdtemp(prefix="chrysalis-build-")
+work = os.path.join(tempfile.gettempdir(), "chrysalis-build")
+shutil.rmtree(work, ignore_errors=True)
 try:
     shutil.copytree(os.path.join(tree, "engine"), os.path.join(work, "engine"))
     shutil.copy2(os.path.join(tree, "Makefile"), work)

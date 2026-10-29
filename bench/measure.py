@@ -3,6 +3,7 @@ import glob
 import hashlib
 import json
 import math
+import mmap
 import os
 import shutil
 import signal
@@ -82,11 +83,16 @@ def free_port():
 
 
 def drop_cache(path):
-    if MAC:
-        return
     fd = os.open(path, os.O_RDONLY)
     try:
-        os.posix_fadvise(fd, 0, 0, os.POSIX_FADV_DONTNEED)
+        if MAC:
+            libc, size = C.CDLL(None), os.fstat(fd).st_size
+            libc.mmap.restype, libc.mmap.argtypes = C.c_void_p, [C.c_void_p, C.c_size_t, C.c_int, C.c_int, C.c_int, C.c_longlong]
+            at = libc.mmap(None, size, mmap.PROT_READ, mmap.MAP_SHARED, fd, 0)
+            libc.msync(C.c_void_p(at), C.c_size_t(size), 2)
+            libc.munmap(C.c_void_p(at), C.c_size_t(size))
+        else:
+            os.posix_fadvise(fd, 0, 0, os.POSIX_FADV_DONTNEED)
     finally:
         os.close(fd)
 
