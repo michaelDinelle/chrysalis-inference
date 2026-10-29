@@ -367,23 +367,21 @@ void Engine::load(const std::string &path, int max_seqs, size_t reserve_bytes) {
         const GGUFTensor *te = g.get("token_embd.weight");
         load_total = cold_bytes + vram_bytes + (te ? te->nbytes : 0);
     }
-    std::atomic<size_t> next{0};
-    std::vector<std::thread> cold_th;
+    std::thread cold_th;
     if (cold_bytes) {
         cold_mem = (uint8_t *)mmap(nullptr, cold_bytes, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
         if (cold_mem == MAP_FAILED) FAIL("cannot allocate %.1f GB of system RAM for the experts", cold_bytes / 1e9);
         madvise(cold_mem, cold_bytes, MADV_HUGEPAGE);
-        for (int w = 0; w < 8; w++) cold_th.emplace_back([&] {
-            for (size_t i; (i = next.fetch_add(1)) < copies.size();) {
-                auto [src, n, off] = copies[i];
+        cold_th = std::thread([&] {
+            for (auto [src, n, off] : copies) {
                 read_file(g, cold_mem + off, src, n);
                 g.drop(src, n);
             }
         });
     }
     struct Joiner {
-        std::vector<std::thread> &th;
-        ~Joiner() { for (auto &t : th) if (t.joinable()) t.join(); }
+        std::thread &th;
+        ~Joiner() { if (th.joinable()) th.join(); }
     } joiner{cold_th};
 
     constexpr size_t STAGE = 64 << 20;
@@ -468,8 +466,7 @@ void Engine::load(const std::string &path, int max_seqs, size_t reserve_bytes) {
     for (int i = 0; i < 2; i++) { CK(hipHostFree(pin[i])); CK(hipFree(dev[i])); CK(hipEventDestroy(ev[i])); }
     const double t_vram = now();
 
-    for (auto &t : cold_th) t.join();
-    cold_th.clear();
+    if (cold_th.joinable()) cold_th.join();
     cold_dev.assign(NL, ColdDec{});
     if (cold_bytes) {
         CK(hipHostRegister(cold_mem, cold_bytes, hipHostRegisterMapped));
