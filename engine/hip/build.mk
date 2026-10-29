@@ -7,9 +7,13 @@ SRC   := $(H)/27b/relayout.hip $(H)/27b/quant.hip $(H)/27b/ops.hip $(H)/gdn.hip 
 KERN  := $(filter %.hip,$(SRC))
 LIBS  := -L$(ROCM)/lib -lhipblaslt -Wl,-rpath,$(ROCM)/lib -Wl,--no-undefined
 
-build/libchrysalis.so: $(SRC) $(wildcard engine/*.h $(H)/*.h $(H)/27b/*.h)
-	@mkdir -p build
-	$(HIPCC) $(FLAGS) -I$(H)/27b -x hip -shared -o $@ $(SRC) $(LIBS)
+OBJ := $(SRC:%=build/o27/%.o)
+build/o27/%.o: % $(wildcard engine/*.h $(H)/*.h $(H)/27b/*.h)
+	@mkdir -p $(@D)
+	$(HIPCC) $(FLAGS) -I$(H)/27b -x hip -c -o $@ $<
+
+build/libchrysalis.so: $(OBJ)
+	$(HIPCC) $(FLAGS) -shared -o $@ $(OBJ) $(LIBS)
 
 build/test_quant build/test_attn build/test_gdn build/test_vision: build/%: tests/hip/%.hip $(KERN) $(wildcard engine/*.h $(H)/*.h $(H)/27b/*.h)
 	@mkdir -p build
@@ -20,9 +24,13 @@ FN_SRC := $(H)/flash-next/relayout.hip $(H)/flash-next/quant.hip $(H)/flash-next
           $(H)/flash-next/experts.cpp $(H)/flash-next/api.cpp $(H)/flash-next/cpu_moe.cpp $(H)/flash-next/cpu_vnni.cpp
 FN_LIBS := $(LIBS) -L$(GGML)/build/bin -lggml-cpu -lggml-base -Wl,-rpath,$(GGML)/build/bin
 
-build/libchrysalis_fn.so: $(FN_SRC) $(wildcard engine/*.h $(H)/*.h $(H)/flash-next/*.h)
-	@mkdir -p build
-	$(HIPCC) $(FLAGS) -I$(H)/flash-next -I$(GGML)/ggml/include -x hip -shared -o $@ $(FN_SRC) $(FN_LIBS)
+FN_OBJ := $(FN_SRC:%=build/ofn/%.o)
+build/ofn/%.o: % $(wildcard engine/*.h $(H)/*.h $(H)/flash-next/*.h)
+	@mkdir -p $(@D)
+	$(HIPCC) $(FLAGS) -I$(H)/flash-next -I$(GGML)/ggml/include -x hip -c -o $@ $<
+
+build/libchrysalis_fn.so: $(FN_OBJ)
+	$(HIPCC) $(FLAGS) -shared -o $@ $(FN_OBJ) $(FN_LIBS)
 
 FN_KERN := $(filter-out $(H)/flash-next/model.cpp $(H)/flash-next/load.cpp $(H)/flash-next/experts.cpp $(H)/flash-next/api.cpp,$(FN_SRC))
 build/test_%_fn: tests/hip/test_%_fn.cpp $(FN_KERN) $(wildcard $(H)/flash-next/*.h)

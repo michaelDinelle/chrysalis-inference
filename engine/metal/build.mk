@@ -21,9 +21,13 @@ build/air/27b/%.air: $(M27)/%.metal $(M27)/kcommon.h $(M27)/args.h
 build/chrysalis.metallib: $(patsubst $(M27)/%.metal,build/air/27b/%.air,$(K27))
 	$(METALLIB) $^ -o $@.tmp && mv $@.tmp $@
 
-build/libchrysalis.dylib: $(SRC27) $(H27) build/chrysalis.metallib
-	@mkdir -p build
-	$(OBJCXX) $(F27) -dynamiclib -o $@.tmp $(SRC27) $(FW27) && mv $@.tmp $@
+OBJ := $(SRC27:%=build/o27/%.o)
+build/o27/%.o: % $(H27)
+	@mkdir -p $(@D)
+	$(OBJCXX) $(F27) -c -o $@ $<
+
+build/libchrysalis.dylib: $(OBJ) build/chrysalis.metallib
+	$(OBJCXX) $(F27) -dynamiclib -o $@.tmp $(OBJ) $(FW27) && mv $@.tmp $@
 
 build/test_27b: tests/metal/test_27b.mm $(SRC27) $(H27) build/chrysalis.metallib
 	$(OBJCXX) $(F27) -o $@ $< $(filter-out $(M27)/api.mm,$(SRC27)) $(FW27)
@@ -46,9 +50,13 @@ build/air/fn/prefill.air: $(MFN)/prefill.metal $(KHFN)
 build/chrysalis_fn.metallib: $(patsubst $(MFN)/kernels/%.metal,build/air/fn/%.air,$(KFN)) build/air/fn/prefill.air
 	$(METALLIB) $^ -o $@.tmp && mv $@.tmp $@
 
-build/libchrysalis_fn.dylib: $(SRCFN) $(HFN) build/chrysalis_fn.metallib
-	@mkdir -p build
-	$(OBJCXX) $(FFN) -dynamiclib -o $@.tmp $(SRCFN) $(FW) && mv $@.tmp $@
+FN_OBJ := $(SRCFN:%=build/ofn/%.o)
+build/ofn/%.o: % $(HFN)
+	@mkdir -p $(@D)
+	$(OBJCXX) $(FFN) -c -o $@ $<
+
+build/libchrysalis_fn.dylib: $(FN_OBJ) build/chrysalis_fn.metallib
+	$(OBJCXX) $(FFN) -dynamiclib -o $@.tmp $(FN_OBJ) $(FW) && mv $@.tmp $@
 
 build/pf/chrysalis_fn.metallib: build/air/fn/prefill.air
 	@mkdir -p build/pf
