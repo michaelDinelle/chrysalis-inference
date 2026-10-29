@@ -1272,13 +1272,8 @@ static J *field(Spec *s, const char *rid, J *values, const char *name) {
 
 static Strs instrument_names(Spec *s) {
     Strs out = {0};
-    J *rewards = jget(s->spec, "rewards");
-    for (size_t i = 0; i < rewards->len; i++) {
-        char *n = jget(rewards->v[i], "instrument")->s;
-        int seen = 0;
-        for (size_t k = 0; k < out.n; k++) seen |= !strcmp(out.v[k], n);
-        if (!seen) spush(&out, n);
-    }
+    J *inst = jget(s->spec, "instruments");
+    for (size_t i = 0; i < inst->len; i++) spush(&out, inst->k[i]);
     return out;
 }
 
@@ -1660,21 +1655,48 @@ static int exact_only(Spec *s, const char *name) {
     return 1;
 }
 
-static Sample *once(Spec *s, const char *tree_a, const char *tree_b, const char *name) {
+static J *known_best(Spec *s, Ledger *l, const char *machine, const char *harness, const char *product, const char *name) {
+    J *rewards = jget(s->spec, "rewards"), *found = NULL;
+    for (size_t i = 0; i < l->n; i++) {
+        J *e = l->v[i], *vals = jnew(JOBJ);
+        if (!is(e, "machine", machine) || !is(e, "harness", harness)) continue;
+        int all = 1;
+        for (size_t r = 0; r < rewards->len && all; r++) {
+            if (strcmp(jget(rewards->v[r], "instrument")->s, name)) continue;
+            J *v = NULL;
+            if (is(e, "type", "record") && is(e, "product", product)) v = jget(jget(e, "values"), rewards->k[r]);
+            else if (is(e, "type", "verdict") && is(e, "candidate", product)) v = jget(jget(e, "values"), rewards->k[r]);
+            else if (is(e, "type", "verdict") && is(e, "best", product)) v = jget(jget(jget(e, "rows"), rewards->k[r]), "best");
+            if (v) jset(vals, rewards->k[r], v);
+            else all = 0;
+        }
+        if (all) found = vals;
+    }
+    return found;
+}
+
+static Sample *once(Spec *s, const char *tree_a, const char *tree_b, const char *name, J *known) {
     J *rewards = jget(s->spec, "rewards");
     Sample *samples = calloc(rewards->len, sizeof *samples);
-    printf("hill: %s: best, candidate\n", name);
+    printf(known ? "hill: %s: candidate, against the best's values in the ledger\n" : "hill: %s: best, candidate\n", name);
     fflush(stdout);
-    J *best = measure(s, name, tree_a, "best"), *cand = measure(s, name, tree_b, "candidate");
+    J *best = known ? known : measure(s, name, tree_a, "best"), *cand = measure(s, name, tree_b, "candidate");
     int moved = 0;
     for (size_t r = 0; r < rewards->len; r++) {
         if (strcmp(jget(rewards->v[r], "instrument")->s, name)) continue;
         samples[r].a = calloc(1, sizeof(Vals));
         samples[r].b = calloc(1, sizeof(Vals));
         samples[r].blocks = 1;
-        vpush(&samples[r].a[0], field(s, rewards->k[r], best, name));
+        vpush(&samples[r].a[0], known ? jget(known, rewards->k[r]) : field(s, rewards->k[r], best, name));
         vpush(&samples[r].b[0], field(s, rewards->k[r], cand, name));
         moved |= !num_eq(samples[r].a[0].v[0], samples[r].b[0].v[0]);
+    }
+    if (moved && known) {
+        printf("hill: %s: best, to confirm the ledger\n", name);
+        fflush(stdout);
+        J *fresh = measure(s, name, tree_a, "best");
+        for (size_t r = 0; r < rewards->len; r++)
+            if (samples[r].blocks) vpush(&samples[r].a[0], field(s, rewards->k[r], fresh, name));
     }
     if (moved) {
         printf("hill: %s: candidate again\n", name);
@@ -2102,7 +2124,7 @@ static int cmd_gate(Spec *s) {
     for (size_t ni = 0; ni < names.n && !j.losses; ni++) {
         Strs one = {0};
         spush(&one, names.v[ni]);
-        Sample *samples = exact_only(s, names.v[ni]) ? once(s, tree, root_dir, names.v[ni])
+        Sample *samples = exact_only(s, names.v[ni]) ? once(s, tree, root_dir, names.v[ni], known_best(s, &l, m.ident, best.harness, best.product, names.v[ni]))
                                                    : paired(s, tree, root_dir, "best", "candidate", "blocks", BLOCKS, &one);
         Judged part = judge(s, samples, noise);
         for (size_t r = 0; r < part.rows->len; r++) jset(j.rows, part.rows->k[r], part.rows->v[r]);

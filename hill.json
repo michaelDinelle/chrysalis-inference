@@ -39,12 +39,24 @@
     "27B"
   ],
   "instruments": {
+    "build": {
+      "run": "data/venv/bin/python bench/hill_build.py",
+      "blocks": 1,
+      "calibration_blocks": 3,
+      "memory_gb": 4
+    },
     "speed-27b": {
       "run": "data/venv/bin/python bench/hill_speed.py 27b",
       "blocks": 1,
       "calibration_blocks": 3,
       "memory_gb": 12,
       "ready": "data/venv/bin/python bench/hill_ready.py 27b"
+    },
+    "quality-27b": {
+      "run": "data/venv/bin/python bench/hill_quality.py 27b",
+      "memory_gb": 12,
+      "ready": "data/venv/bin/python bench/hill_ready.py 27b",
+      "blocks": 1
     },
     "speed-fn": {
       "run": "data/venv/bin/python bench/hill_speed.py fn",
@@ -53,23 +65,11 @@
       "memory_gb": 12,
       "ready": "data/venv/bin/python bench/hill_ready.py fn"
     },
-    "quality-27b": {
-      "run": "data/venv/bin/python bench/hill_quality.py 27b",
-      "memory_gb": 12,
-      "ready": "data/venv/bin/python bench/hill_ready.py 27b",
-      "blocks": 1
-    },
     "quality-fn": {
       "run": "data/venv/bin/python bench/hill_quality.py fn",
       "memory_gb": 12,
       "ready": "data/venv/bin/python bench/hill_ready.py fn",
       "blocks": 1
-    },
-    "build": {
-      "run": "data/venv/bin/python bench/hill_build.py",
-      "blocks": 1,
-      "calibration_blocks": 3,
-      "memory_gb": 4
     }
   },
   "rewards": {
