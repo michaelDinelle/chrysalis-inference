@@ -1,13 +1,22 @@
 #pragma once
 #include <hip/hip_runtime.h>
 #include <hip/hip_fp16.h>
+#include <cstdarg>
 #include <cstdint>
 #include <cstdio>
 #include <cstdlib>
 
-#define CK(x) do { hipError_t e_ = (x); if (e_ != hipSuccess) { \
-    fprintf(stderr, "chrysalis: HIP error '%s' at %s:%d\n", hipGetErrorString(e_), __FILE__, __LINE__); abort(); } } while (0)
-#define FAIL(...) do { fprintf(stderr, "chrysalis: " __VA_ARGS__); fprintf(stderr, "\n"); abort(); } while (0)
+[[noreturn, gnu::cold, gnu::noinline, gnu::format(printf, 1, 2)]] inline void fail(const char *fmt, ...) {
+    va_list ap;
+    va_start(ap, fmt);
+    fputs("chrysalis: ", stderr);
+    vfprintf(stderr, fmt, ap);
+    va_end(ap);
+    fputc('\n', stderr);
+    abort();
+}
+#define CK(x) do { hipError_t e_ = (x); if (e_ != hipSuccess) fail("HIP error '%s' at %s:%d", hipGetErrorString(e_), __FILE__, __LINE__); } while (0)
+#define FAIL(...) fail(__VA_ARGS__)
 
 constexpr int D = 2560;
 constexpr int HC = 4;

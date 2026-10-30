@@ -4,6 +4,7 @@
 #include <cstring>
 #include <stdexcept>
 #include <chrono>
+#include <unistd.h>
 
 static double now_ms() { return std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now().time_since_epoch()).count(); }
 
@@ -274,10 +275,18 @@ void Engine::snap_export(int snap, uint8_t *dst) {
     for (int pg : sn.pages) { memcpy(p, page_mem[pg].h, KV_PAGE); p += KV_PAGE; }
 }
 
-int Engine::snap_import(const uint8_t *src, size_t bytes) {
+int Engine::snap_import(int fd, int64_t off, size_t bytes) {
+    auto get = [&](void *dst, size_t n) {
+        for (size_t got = 0; got < n;) {
+            const ssize_t r = pread(fd, (uint8_t *)dst + got, n - got, off + (int64_t)got);
+            if (r <= 0) return false;
+            got += (size_t)r;
+        }
+        off += (int64_t)n;
+        return true;
+    };
     SnapHeader h;
-    if (bytes < sizeof h) return -1;
-    memcpy(&h, src, sizeof h);
+    if (bytes < sizeof h || !get(&h, sizeof h)) return -1;
     if (memcmp(h.magic, SNAP_MAGIC, 8) || h.kv_page != KV_PAGE || h.state != state_bytes() || h.n <= 0 || h.n_top < 0 ||
         h.n_pages != (h.n + PAGE - 1) / PAGE || bytes != sizeof h + (size_t)h.n_top * 8 + h.state + (size_t)h.n_pages * KV_PAGE)
         return -1;
@@ -288,16 +297,18 @@ int Engine::snap_import(const uint8_t *src, size_t bytes) {
     if (si == snaps.size()) snaps.emplace_back();
     Snap &sn = snaps[si];
     if (!sn.host) sn.host = m.alloc(state_bytes(), "a snapshot");
-    const uint8_t *p = src + sizeof h;
-    sn.top_v.assign((const float *)p, (const float *)p + h.n_top); p += (size_t)h.n_top * 4;
-    sn.top_i.assign((const int *)p, (const int *)p + h.n_top); p += (size_t)h.n_top * 4;
-    memcpy(sn.host.h, p, h.state); p += h.state;
+    sn.top_v.resize(h.n_top);
+    sn.top_i.resize(h.n_top);
+    bool ok = get(sn.top_v.data(), (size_t)h.n_top * 4) && get(sn.top_i.data(), (size_t)h.n_top * 4) && get(sn.host.h, h.state);
     sn.pages.clear();
-    for (int i = 0; i < h.n_pages; i++) {
-        const int pg = page_alloc();
-        sn.pages.push_back(pg);
-        memcpy(page_mem[pg].h, p, KV_PAGE);
-        p += KV_PAGE;
+    for (int i = 0; ok && i < h.n_pages; i++) {
+        sn.pages.push_back(page_alloc());
+        ok = get(page_mem[sn.pages.back()].h, KV_PAGE);
+    }
+    if (!ok) {
+        for (int p : sn.pages) page_release(p);
+        sn.pages.clear();
+        return -1;
     }
     sn.n = h.n;
     sn.pos = h.pos;

@@ -1,4 +1,5 @@
 #pragma once
+#include <cstdarg>
 #include <cstddef>
 #include <cstdint>
 #include <cstdio>
@@ -6,7 +7,16 @@
 #include <string>
 #include <vector>
 
-#define FAIL(...) do { fprintf(stderr, "chrysalis: " __VA_ARGS__); fprintf(stderr, "\n"); abort(); } while (0)
+[[noreturn, gnu::cold, gnu::noinline, gnu::format(printf, 1, 2)]] inline void fail(const char *fmt, ...) {
+    va_list ap;
+    va_start(ap, fmt);
+    fputs("chrysalis: ", stderr);
+    vfprintf(stderr, fmt, ap);
+    va_end(ap);
+    fputc('\n', stderr);
+    abort();
+}
+#define FAIL(...) fail(__VA_ARGS__)
 
 template <typename T> struct DP {
     uint64_t g = 0;

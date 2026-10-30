@@ -99,11 +99,10 @@ class Disk:
             with open(path, "rb") as f:
                 f.readline()
                 f.readline()
-                data = np.fromfile(f, np.uint8)
-            os.utime(path)
+                os.utime(path)
+                snap = engine.import_snapshot(f)
         except OSError:
-            data = None
-        snap = None if data is None else engine.import_snapshot(data)
+            snap = None
         if snap is None:
             with self.lock:
                 self.index.pop(path, None)

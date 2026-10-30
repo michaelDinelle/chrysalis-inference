@@ -104,7 +104,7 @@ struct Engine {
     void snap_free(int snap);
     size_t snap_bytes(int snap) const;
     void snap_export(int snap, uint8_t *dst);
-    int snap_import(const uint8_t *src, size_t bytes);
+    int snap_import(int fd, int64_t off, size_t bytes);
     void prefill(int id, const int *tokens, const int *pos3, int n);
     int image_encode(int slot, const float *patches, int gh, int gw, int frames = 1);
     int generate(int id, const Sampling &sp, int *out, int max_out, float *rows_v = nullptr, int *rows_i = nullptr);

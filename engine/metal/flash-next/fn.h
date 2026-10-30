@@ -1,5 +1,6 @@
 #pragma once
 #include <algorithm>
+#include <cstdarg>
 #include <cstdint>
 #include <cstdio>
 #include <cstdlib>
@@ -12,7 +13,16 @@
 #include <sys/stat.h>
 #include <unistd.h>
 
-#define FAIL(...) do { fprintf(stderr, "chrysalis-fn: " __VA_ARGS__); fprintf(stderr, "\n"); abort(); } while (0)
+[[noreturn, gnu::cold, gnu::noinline, gnu::format(printf, 1, 2)]] inline void fail(const char *fmt, ...) {
+    va_list ap;
+    va_start(ap, fmt);
+    fputs("chrysalis-fn: ", stderr);
+    vfprintf(stderr, fmt, ap);
+    va_end(ap);
+    fputc('\n', stderr);
+    abort();
+}
+#define FAIL(...) fail(__VA_ARGS__)
 
 constexpr int D = 2560;
 constexpr int HC = 4;

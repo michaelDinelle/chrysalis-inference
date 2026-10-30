@@ -3,6 +3,7 @@
 #include <cmath>
 #include <pthread/qos.h>
 #include <stdexcept>
+#include <unistd.h>
 
 static void interactive() {
     static thread_local bool done = false;
@@ -138,12 +139,20 @@ int chrysalis_snap_export(int snap, void *dst) {
         } catch (const std::exception &) { return -1; }
     }
 }
-int chrysalis_snap_import(const void *src, int64_t bytes) {
+int chrysalis_snap_import(int fd, int64_t offset, int64_t bytes) {
     @autoreleasepool {
         E->settle();
+        auto get = [&](void *dst, size_t n) {
+            for (size_t got = 0; got < n;) {
+                const ssize_t r = pread(fd, (uint8_t *)dst + got, n - got, offset + (int64_t)got);
+                if (r <= 0) return false;
+                got += (size_t)r;
+            }
+            offset += (int64_t)n;
+            return true;
+        };
         SnapHeader h;
-        if (bytes < (int64_t)sizeof h) return -1;
-        memcpy(&h, src, sizeof h);
+        if (bytes < (int64_t)sizeof h || !get(&h, sizeof h)) return -1;
         if (memcmp(h.magic, SNAP_MAGIC, 8) || h.kv_page != KV_PAGE || h.state != state_bytes() || h.n <= 0 || h.n_top < 0 ||
             h.n_pages != (h.n + PAGE - 1) / PAGE || (size_t)bytes != sizeof h + (size_t)h.n_top * 8 + h.state + (size_t)h.n_pages * KV_PAGE)
             return -1;
@@ -152,16 +161,19 @@ int chrysalis_snap_import(const void *src, int64_t bytes) {
         while (si < E->snaps.size() && E->snaps[si].used) si++;
         if (si == E->snaps.size()) E->snaps.emplace_back();
         Engine::Snap &sn = E->snaps[si];
-        const uint8_t *p = (const uint8_t *)src + sizeof h;
-        sn.top_v.assign((const float *)p, (const float *)p + h.n_top); p += (size_t)h.n_top * 4;
-        sn.top_i.assign((const int *)p, (const int *)p + h.n_top); p += (size_t)h.n_top * 4;
-        sn.state.assign(p, p + h.state); p += h.state;
+        sn.top_v.resize(h.n_top);
+        sn.top_i.resize(h.n_top);
+        sn.state.resize(h.state);
+        bool ok = get(sn.top_v.data(), (size_t)h.n_top * 4) && get(sn.top_i.data(), (size_t)h.n_top * 4) && get(sn.state.data(), h.state);
         sn.pages.clear();
-        for (int i = 0; i < h.n_pages; i++) {
-            const int pg = E->page_alloc();
-            sn.pages.push_back(pg);
-            memcpy(E->kv.host<uint8_t>() + (size_t)pg * KV_PAGE, p, KV_PAGE);
-            p += KV_PAGE;
+        for (int i = 0; ok && i < h.n_pages; i++) {
+            sn.pages.push_back(E->page_alloc());
+            ok = get(E->kv.host<uint8_t>() + (size_t)sn.pages.back() * KV_PAGE, KV_PAGE);
+        }
+        if (!ok) {
+            for (int p : sn.pages) E->page_release(p);
+            sn.pages.clear();
+            return -1;
         }
         sn.n = h.n; sn.hist[0] = h.hist[0]; sn.hist[1] = h.hist[1];
         sn.used = true;

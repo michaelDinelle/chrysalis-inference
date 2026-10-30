@@ -1,4 +1,4 @@
-import os, sys, random
+import os, sys, random, tempfile
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 import numpy as np
 from chrysalis.engine import Engine, Sampling
@@ -192,17 +192,24 @@ if getattr(eng, "batched", False):
     print(f"sequences stepped together = alone   {'ok' if ok else 'FAIL'}  two: {[len(t) for t in two]} tokens, three: {[len(t) for t in many]}")
 if eng.persistent:
     x, y = eng.new_seq(), eng.new_seq()
-    eng.prefill(x, p2 + p1)
+    long = (p2 + p1) * 23
+    eng.prefill(x, long)
     orig = eng.snapshot(x)
     data = eng.export_snapshot(orig)
+
+    def load(raw):
+        with tempfile.TemporaryFile() as f:
+            f.write(raw.tobytes())
+            f.seek(0)
+            return eng.import_snapshot(f)
     before = eng.free_tokens()
-    back = eng.import_snapshot(data)
+    back = load(data)
     taken = before - eng.free_tokens()
     eng.truncate(x, 0); eng.restore(x, orig); eng.prefill(x, p2); lo = eng.last_logits()
     eng.restore(y, back); eng.prefill(y, p2); lb = eng.last_logits()
     bad = data.copy(); bad[3] ^= 1
-    refused = eng.import_snapshot(bad) is None and eng.import_snapshot(data[:-1]) is None
-    ok = back is not None and np.array_equal(lo, lb) and taken >= len(p2 + p1) and refused; fails += not ok
+    refused = load(bad) is None and load(data[:-1]) is None
+    ok = back is not None and np.array_equal(lo, lb) and taken >= len(long) and refused; fails += not ok
     print(f"snapshot written out and read back   {'ok' if ok else 'FAIL'}  {len(data) / 1e6:.0f} MB, {taken} tokens of pages, "
           f"max diff {np.abs(lo - lb).max():.3g}, other bytes refused {refused}")
     for s_ in (x, y): eng.free_seq(s_)
