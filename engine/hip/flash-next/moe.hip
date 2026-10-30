@@ -79,9 +79,9 @@ void route_dec(const float *logits, int T, const int *slot_of, int n_ram, int *i
 
 __global__ __launch_bounds__(256) void k_router_route(const half *W, const float *wsg, const float *x, int T, float *logits,
         float *sg, const int *slot_of, int n_ram, int *ids, float *wts, int *hot_slot, MoeShared *sh, float gfrac, int layer,
-        uint32_t gen, unsigned *counter, unsigned *counts, unsigned starts) {
+        uint32_t gen, unsigned *counter, unsigned *counts, unsigned starts, float xfrac) {
     __shared__ bool last;
-    __shared__ int ram_n[8];
+    __shared__ int ram_n[8], gpu_n[8];
     const int tid = threadIdx.x, wave = tid / 32, lane = tid % 32;
     {
         const int e = blockIdx.x * 8 + wave;
@@ -152,12 +152,19 @@ __global__ __launch_bounds__(256) void k_router_route(const half *W, const float
     for (int w = wave; w > 0 && !(starts >> w & 1u); w--) nc += ram_n[w - 1];
     const int before = nc + __popc(bal & ((1u << lane) - 1u));
     const bool gpu = ram && floorf((before + 1) * gfrac) > floorf(before * gfrac);
+    const uint32_t gbal = (uint32_t)__ballot(gpu);
+    if (lane == 0) gpu_n[wave] = __popc(gbal);
+    __syncthreads();
+    int gc = 0;
+    for (int w = wave; w > 0 && !(starts >> w & 1u); w--) gc += gpu_n[w - 1];
+    const int gb = gc + __popc(gbal & ((1u << lane) - 1u));
+    const bool emu = gpu && floorf((gb + 1) * xfrac) <= floorf(gb * xfrac);
     if (wave < T && lane < TOPK_E) {
         const int j = wave * TOPK_E + lane;
         if (counts && layer < NL) atomicAdd(&counts[layer * NE + pe], 1u);
         ids[j] = pe; wts[j] = wk;
-        hot_slot[j] = sl >= 0 ? sl : gpu ? -2 - (-1 - sl) : -1;
-        if (sh) { sh->slot[j] = cold && !gpu ? -1 - sl : -1; sh->w[j] = wk; }
+        hot_slot[j] = sl >= 0 ? sl : emu ? EMU_PICK : gpu ? -2 - (-1 - sl) : -1;
+        if (sh) { sh->slot[j] = cold && !gpu ? -1 - sl : emu ? -2 - (-1 - sl) : -1; sh->w[j] = wk; }
     }
     if (tid == 0) *counter = 0;
     if (!sh) return;
@@ -171,13 +178,14 @@ __global__ __launch_bounds__(256) void k_router_route(const half *W, const float
 }
 void router_route_dec(const half *W, const float *wsg, const float *x, int T, float *logits, float *sg, const int *slot_of,
                       int n_ram, int *ids, float *wts, int *hot_slot, MoeShared *sh, float gfrac, int layer, uint32_t gen,
-                      unsigned *counter, hipStream_t st, unsigned *counts, unsigned starts) {
+                      unsigned *counter, hipStream_t st, unsigned *counts, unsigned starts, float xfrac) {
     k_router_route<<<NE / 8, 256, 0, st>>>(W, wsg, x, T, logits, sg, slot_of, n_ram, ids, wts, hot_slot, sh, gfrac, layer, gen,
-                                           counter, counts, starts);
+                                           counter, counts, starts, xfrac);
 }
 
 __global__ __launch_bounds__(256) void k_moe_finish(const uint32_t *done, uint32_t gen, const float *y, const int *hot_slot,
-                                                    const float *shared, const float *sg, const float *cold, const float *inject, float *res) {
+                                                    const float *shared, const float *sg, const float *cold, const float *inject, float *res,
+                                                    const float *ye) {
     const int i = blockIdx.x * 256 + threadIdx.x, t = blockIdx.y;
     if (done) {
         if (threadIdx.x == 0)
@@ -188,15 +196,33 @@ __global__ __launch_bounds__(256) void k_moe_finish(const uint32_t *done, uint32
     float s = (sg ? sg[t] : 1.0f) * shared[(size_t)t * D + i];
     for (int k = 0; k < TOPK_E; k++) {
         const int j = t * TOPK_E + k;
-        if (hot_slot[j] != -1) s += y[(size_t)j * D + i];
+        const int hs = hot_slot[j];
+        if (hs != -1) s += (hs == EMU_PICK ? ye : y)[(size_t)j * D + i];
     }
     if (cold) s += cold[(size_t)t * D + i];
 #pragma unroll
     for (int st = 0; st < HC; st++) res[((size_t)t * HC + st) * D + i] += 2.0f * sigmoid(inject[t * HC + st] * (1.0f / HC)) * s;
 }
 void moe_finish(const uint32_t *done, uint32_t gen, const float *y, const int *hot_slot, const float *shared, const float *sg,
-                const float *cold, const float *inject, float *res, int T, hipStream_t st) {
-    k_moe_finish<<<dim3(D / 256, T), 256, 0, st>>>(done, gen, y, hot_slot, shared, sg, cold, inject, res);
+                const float *cold, const float *inject, float *res, int T, hipStream_t st, const float *ye) {
+    k_moe_finish<<<dim3(D / 256, T), 256, 0, st>>>(done, gen, y, hot_slot, shared, sg, cold, inject, res, ye);
+}
+
+__global__ __launch_bounds__(32) void k_emu_glu(const int *hot_slot, MoeEmu *me, uint32_t gen) {
+    const int j = blockIdx.y, lane = threadIdx.x, r = blockIdx.x * 32 + lane;
+    if (hot_slot[j] != EMU_PICK) return;
+    if (lane == 0)
+        while (__hip_atomic_load(&me->ready, __ATOMIC_ACQUIRE, __HIP_MEMORY_SCOPE_SYSTEM) != gen) __builtin_amdgcn_s_sleep(1);
+    __syncthreads();
+    __atomic_thread_fence(__ATOMIC_ACQUIRE);
+    const float v = silu(me->gu[j][r]) * me->gu[j][FE + r], d = warp_max(fabsf(v)) / 127.0f;
+    me->hq[j][r] = (int8_t)__float2int_rn(d > 0 ? v / d : 0.0f);
+    if (lane == 0) me->hd[j][blockIdx.x] = d;
+    __threadfence_system();
+    if (lane == 0) __hip_atomic_store(&me->flag[j][blockIdx.x], gen, __ATOMIC_RELEASE, __HIP_MEMORY_SCOPE_SYSTEM);
+}
+void emu_glu(const int *hot_slot, MoeEmu *me, uint32_t gen, int T, hipStream_t st) {
+    k_emu_glu<<<dim3(FE / 32, T * TOPK_E), 32, 0, st>>>(hot_slot, me, gen);
 }
 
 

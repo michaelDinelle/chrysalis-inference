@@ -105,6 +105,7 @@ double chrysalis_tune(const char *key, double value) {
     double old = NAN;
     if (k == "decode_loads") { old = E->xc.decode_loads; if (value >= 0) E->xc.decode_loads = (int)value; }
     if (k == "gfrac") { old = E->gfrac; E->gfrac = (float)value; E->gfrac_pinned = true; }
+    if (k == "xfrac") { old = E->xfrac; E->xfrac = E->cpu.can_emulate() ? (float)value : 1.0f; E->xfrac_pinned = true; }
     if (k == "split") { old = E->split; E->split = (int)value; }
     if (k == "vnni") old = E->cpu.use_vnni((int)value);
     if (k == "cpu_bias") { old = E->cpu_bias[2]; if (value > 0) std::fill(E->cpu_bias, E->cpu_bias + 3, value); }

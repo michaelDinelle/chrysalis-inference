@@ -74,10 +74,12 @@ struct GdnStepArgs {
 void gdn_step(const GdnStepArgs &a, hipStream_t st);
 
 struct MoeShared;
+struct MoeEmu;
+constexpr int EMU_PICK = -(1 << 30);
 void router_dec(const half *W, const float *wsg, const float *x, int T, float *logits, float *sg, hipStream_t st);
 void router_route_dec(const half *W, const float *wsg, const float *x, int T, float *logits, float *sg, const int *slot_of,
                       int n_ram, int *ids, float *wts, int *hot_slot, MoeShared *sh, float gfrac, int layer, uint32_t gen,
-                      unsigned *counter, hipStream_t st, unsigned *counts = nullptr, unsigned starts = 1);
+                      unsigned *counter, hipStream_t st, unsigned *counts = nullptr, unsigned starts = 1, float xfrac = 1.0f);
 void route_dec(const float *logits, int T, const int *slot_of, int n_ram, int *ids, float *wts, int *hot_slot, MoeShared *sh,
                float gfrac, const float *x, int layer, uint32_t gen, hipStream_t st);
 void moe_experts_dec(const QTensor &gate, const QTensor &up, const QTensor &down, const uint8_t *fmt, const QTensor &sgate,
@@ -93,7 +95,8 @@ void moe_dec(const QTensor &gate, const QTensor &up, const QTensor &down, const 
              const QTensor &sdown, const ColdDec *c, const int *hot_slot, int T, QAct x, QAct hq, const float *wts, const float *sg,
              float *y, hipStream_t st);
 void moe_finish(const uint32_t *done, uint32_t gen, const float *y, const int *hot_slot, const float *shared, const float *sg,
-                const float *cold, const float *inject, float *res, int T, hipStream_t st);
+                const float *cold, const float *inject, float *res, int T, hipStream_t st, const float *ye = nullptr);
+void emu_glu(const int *hot_slot, MoeEmu *me, uint32_t gen, int T, hipStream_t st);
 
 constexpr int MAX_SPLITS = 256;
 constexpr int PART_ROWS = 1024;

@@ -13,7 +13,7 @@ build/o27/%.o: % $(wildcard engine/*.h $(H)/*.h $(H)/27b/*.h)
 	$(HIPCC) $(FLAGS) -I$(H)/27b -x hip -c -o $@ $<
 
 build/libchrysalis.so: $(OBJ)
-	$(HIPCC) $(FLAGS) -shared -o $@ $(OBJ) $(LIBS)
+	$(HIPCC) $(FLAGS) -shared -s -o $@ $(OBJ) $(LIBS)
 
 build/test_quant build/test_attn build/test_gdn build/test_vision: build/%: tests/hip/%.hip $(KERN) $(wildcard engine/*.h $(H)/*.h $(H)/27b/*.h)
 	@mkdir -p build
@@ -30,7 +30,7 @@ build/ofn/%.o: % $(wildcard engine/*.h $(H)/*.h $(H)/flash-next/*.h)
 	$(HIPCC) $(FLAGS) -I$(H)/flash-next -I$(GGML)/ggml/include -x hip -c -o $@ $<
 
 build/libchrysalis_fn.so: $(FN_OBJ)
-	$(HIPCC) $(FLAGS) -shared -o $@ $(FN_OBJ) $(FN_LIBS)
+	$(HIPCC) $(FLAGS) -shared -s -o $@ $(FN_OBJ) $(FN_LIBS)
 
 FN_KERN := $(filter-out $(H)/flash-next/model.cpp $(H)/flash-next/load.cpp $(H)/flash-next/experts.cpp $(H)/flash-next/api.cpp,$(FN_SRC))
 build/test_%_fn: tests/hip/test_%_fn.cpp $(FN_KERN) $(wildcard $(H)/flash-next/*.h)

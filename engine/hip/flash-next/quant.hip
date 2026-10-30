@@ -807,7 +807,7 @@ __global__ __launch_bounds__(256) void k_glu_dec(QTensor gate, QTensor up, const
     const int j = blockIdx.y;
     const bool shared = j >= T * TOPK_E;
     const int hs = shared ? 0 : hot_slot[j];
-    if (hs == -1 || (hs >= 0 && !shared && gate.type < 0) || (hs <= -2 && !c.down)) return;
+    if (hs == -1 || hs == EMU_PICK || (hs >= 0 && !shared && gate.type < 0) || (hs <= -2 && !c.down)) return;
     if (hs <= -2) {
         const int slot = -2 - hs, grp = slot >= c.n0, s = grp ? slot - c.n0 : slot;
         switch (c.type[grp]) {
@@ -850,7 +850,7 @@ __global__ __launch_bounds__(256) void k_down_dec(QTensor down, QTensor sdown, c
     const int j = blockIdx.y, r0 = blockIdx.x * CD_ROWS;
     const bool shared = j >= T * TOPK_E;
     const int hs = shared ? 0 : hot_slot[j];
-    if (hs == -1 || (hs >= 0 && !shared && down.type < 0) || (hs <= -2 && !cdown)) return;
+    if (hs == -1 || hs == EMU_PICK || (hs >= 0 && !shared && down.type < 0) || (hs <= -2 && !cdown)) return;
     if (hs <= -2) { cold_down(cdown, -2 - hs, j, r0, hq, wts, y, tile); return; }
     const int wave = threadIdx.x / 32, lane = threadIdx.x % 32;
     int d0 = 0;

@@ -50,6 +50,22 @@ int physical_cores() {
 }
 }
 
+double Engine::measure_dma() {
+    const size_t piece = std::min<size_t>(stage_gu ? stage_gu / STAGE_G : (size_t)1 << 20, cold_bytes / 64);
+    hipEvent_t e0, e1;
+    CK(hipEventCreate(&e0)); CK(hipEventCreate(&e1));
+    float best_ms = 1e30f;
+    for (int rep = 0; rep < 3; rep++) {
+        CK(hipEventRecord(e0, cst));
+        for (int i = 0; i < 48; i++) CK(hipMemcpyAsync(b.raw[i % NSLOT], cold_mem + (size_t)i * 7 * piece % (cold_bytes - piece), piece, hipMemcpyHostToDevice, cst));
+        CK(hipEventRecord(e1, cst)); CK(hipEventSynchronize(e1));
+        float ms; CK(hipEventElapsedTime(&ms, e0, e1));
+        best_ms = std::min(best_ms, ms);
+    }
+    CK(hipEventDestroy(e0)); CK(hipEventDestroy(e1));
+    return 48.0 * piece / (best_ms * 1e-3);
+}
+
 void Engine::calibrate() {
     const size_t slice = (size_t)64 << 20, nw = std::min<size_t>(n_workers, cold_bytes / slice);
     double best = 1e30;
@@ -92,19 +108,7 @@ void Engine::calibrate() {
         }
         cal_cpu_mac = (double)n_workers * per * n * (3.0 * FE * D) / tb;
     } else cal_cpu_mac = cal_cpu_bw;
-    const size_t piece = std::min<size_t>(stage_gu ? stage_gu / STAGE_G : (size_t)1 << 20, cold_bytes / 64);
-    hipEvent_t e0, e1;
-    CK(hipEventCreate(&e0)); CK(hipEventCreate(&e1));
-    float best_ms = 1e30f;
-    for (int rep = 0; rep < 3; rep++) {
-        CK(hipEventRecord(e0, cst));
-        for (int i = 0; i < 48; i++) CK(hipMemcpyAsync(b.raw[i % NSLOT], cold_mem + (size_t)i * 7 * piece % (cold_bytes - piece), piece, hipMemcpyHostToDevice, cst));
-        CK(hipEventRecord(e1, cst)); CK(hipEventSynchronize(e1));
-        float ms; CK(hipEventElapsedTime(&ms, e0, e1));
-        best_ms = std::min(best_ms, ms);
-    }
-    CK(hipEventDestroy(e0)); CK(hipEventDestroy(e1));
-    cal_dma_bw = 48.0 * piece / (best_ms * 1e-3);
+    cal_dma_bw = measure_dma();
     gfrac = (float)(cal_dma_bw / (cal_dma_bw + cal_cpu_bw));
     std::vector<const ColdLayer *> tier;
     for (const ColdLayer &c : cold) if (c.n2) tier.push_back(&c);
@@ -553,8 +557,13 @@ void Engine::load(const std::string &path, int max_seqs, size_t reserve_bytes) {
         };
         shared(sh, d_sh);
         shared(sh_pred, d_sh_pred);
+        void *p;
+        CK(hipHostMalloc(&p, sizeof(MoeEmu), hipHostMallocCoherent | hipHostMallocMapped));
+        memset(p, 0, sizeof(MoeEmu));
+        me = (MoeEmu *)p;
+        CK(hipHostGetDevicePointer((void **)&d_me, p, 0));
         n_workers = std::max(1, physical_cores() - 1);
-        cpu.start(sh, sh_pred, cold, n_workers);
+        cpu.start(sh, sh_pred, cold, n_workers, me);
     }
     hipblasLtCreate(&lt);
     CK(hipMalloc(&lt_ws, lt_ws_size));
@@ -569,12 +578,18 @@ void Engine::load(const std::string &path, int max_seqs, size_t reserve_bytes) {
     CK(hipMalloc(&kv_pool, (size_t)n_pages * KV_PAGE));
     load_phase = 1;
     if (cold_bytes && !cal_load()) calibrate();
+    if (cold_bytes && cpu.can_emulate() && !xfrac_pinned) {
+        const ColdLayer *c0 = nullptr;
+        for (const ColdLayer &c : cold) if (c.n) { c0 = &c; break; }
+        const double dma = measure_dma(), gu = 2.0 * FE * c0->row_gu[0], a = gu / (gu + (double)D * c0->row_dn);
+        xfrac = gfrac * (cal_cpu_bw + a * dma) > dma ? (float)std::min(1.0, a * dma / (gfrac * (cal_cpu_bw + a * dma))) : 1.0f;
+    }
     free_pages.clear();
     for (int p = 0; p < n_pages; p++) free_pages.push_back(p);
     page_ref.assign(n_pages, 0);
     extra_init();
-    fprintf(stderr, "chrysalis-fn: CPU %d workers %.0f GB/s %.0f GMAC/s, DMA %.0f GB/s: decode GPU share of cold picks %.2f\n",
-            n_workers, cal_cpu_bw / 1e9, cal_cpu_mac / 1e9, cal_dma_bw / 1e9, gfrac);
+    fprintf(stderr, "chrysalis-fn: CPU %d workers %.0f GB/s %.0f GMAC/s, DMA %.0f GB/s: decode GPU share of cold picks %.2f, %.2f of it run on the GPU\n",
+            n_workers, cal_cpu_bw / 1e9, cal_cpu_mac / 1e9, cal_dma_bw / 1e9, gfrac, xfrac);
     fprintf(stderr, "chrysalis-fn: weights %.2f GB VRAM (%.1f s), cold experts %.2f GB RAM (%.1f s), buffers %.2f GB (passes of %d tokens), "
             "KV pool %d pages = %d tokens (%.2f GB), load %.1f s\n",
             warena.used / 1e9, t_vram - t0, cold_bytes / 1e9, t_cold - t_vram, barena.used / 1e9, smax, n_pages, n_pages * PAGE,
@@ -768,11 +783,11 @@ void Engine::shutdown() {
     warena = Arena{}; barena = Arena{};
     for (void *p : {(void *)b.ple_rows, (void *)b.h_ids, (void *)b.h_wts, (void *)b.h_tok, (void *)b.h_entw, (void *)b.h_pos, (void *)b.h_btok,
                     (void *)b.h_work, (void *)b.h_x16, (void *)b.h_cout, (void *)b.h_topv, (void *)b.h_tops, (void *)b.h_topi, (void *)b.h_draft, (void *)sh,
-                    (void *)sh_pred})
+                    (void *)sh_pred, (void *)me})
         if (p) (void)hipHostFree(p);
     if (embd.q) { void *h = nullptr; (void)hipHostGetDevicePointer(&h, embd.q, 0); }
     if (embd_host) (void)hipHostFree(embd_host);
-    embd_host = nullptr; embd.q = nullptr; sh = d_sh = nullptr; sh_pred = d_sh_pred = nullptr;
+    embd_host = nullptr; embd.q = nullptr; sh = d_sh = nullptr; sh_pred = d_sh_pred = nullptr; me = d_me = nullptr;
     if (stage_state) (void)hipFree(stage_state);
     if (d_mask) (void)hipFree(d_mask);
     d_mask = nullptr;

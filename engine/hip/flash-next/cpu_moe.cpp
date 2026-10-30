@@ -15,9 +15,10 @@ inline uint32_t load_acq(const uint32_t *p) { return __atomic_load_n(p, __ATOMIC
 inline void store_rel(uint32_t *p, uint32_t v) { __atomic_store_n(p, v, __ATOMIC_RELEASE); }
 }
 
-void CpuMoe::start(MoeShared *shared, MoeShared *pred, const std::vector<ColdLayer> &layers, int threads) {
+void CpuMoe::start(MoeShared *shared, MoeShared *pred, const std::vector<ColdLayer> &layers, int threads, MoeEmu *emu) {
     ggml_cpu_init();
     sh = shared;
+    me = emu;
     pr = pred;
     L = layers;
     n = threads;
@@ -164,7 +165,7 @@ void CpuMoe::preload(int id, uint32_t real, uint32_t job) {
     if (layer < 0 || layer >= (int)L.size()) return;
     const ColdLayer &c = L[layer];
     int slot[MOE_MAX_T * MOE_MAX_E], np = 0;
-    for (int j = 0; j < T * MOE_MAX_E; j++) { const int s = pr->slot[j]; if (s >= 0 && s < c.n + c.n2) slot[np++] = s; }
+    for (int j = 0; j < T * MOE_MAX_E; j++) { const int s = pr->slot[j] <= -2 ? -2 - pr->slot[j] : pr->slot[j]; if (s >= 0 && s < c.n + c.n2) slot[np++] = s; }
     uint64_t sink = 0;
     for (int p = 0; p < np; p++) {
         const uint8_t *seg[3] = {c.gu_row(false, slot[p], 0), c.gu_row(true, slot[p], 0), c.dn_row(slot[p], 0)};
@@ -207,15 +208,19 @@ void CpuMoe::worker(int id) {
         last = g;
         const int layer = sh->layer, T = sh->T;
         const ColdLayer &c = L[layer];
-        int pick[MOE_MAX_T * MOE_MAX_E], np = 0;
-        for (int j = 0; j < T * MOE_MAX_E; j++) if (sh->slot[j] >= 0) pick[np++] = j;
+        int pick[MOE_MAX_T * MOE_MAX_E], np = 0, emu[MOE_MAX_T * MOE_MAX_E], ne = 0;
+        for (int j = 0; j < T * MOE_MAX_E; j++) {
+            if (sh->slot[j] >= 0) pick[np++] = j;
+            else if (sh->slot[j] <= -2) emu[ne++] = j;
+        }
         const ggml_type_traits_cpu *tr_gu[3] = {ggml_get_type_traits_cpu((ggml_type)c.type_gu[0]),
                                                 ggml_get_type_traits_cpu((ggml_type)(c.gate[1] ? c.type_gu[1] : c.type_gu[0])),
                                                 ggml_get_type_traits_cpu((ggml_type)(c.gate[2] ? c.type_gu[2] : c.type_gu[0]))};
         const auto *tr_dn = ggml_get_type_traits_cpu((ggml_type)c.type_dn);
         const bool vx = vnni;
-        if (np > 0) {
-            if (id < T) {
+        if (np + ne > 0) {
+            for (int t = id; t < T && ne; t += n) emu_quant_x(sh->x + (size_t)t * D_, ea[t]);
+            if (id < T && np) {
                 if (vx) {
                     int32_t *xsum = dxsum.data() + id * (D_ / 16);
                     vnni_quant_x(sh->x + (size_t)id * D_, dxq.data() + (size_t)id * D_, dxs.data() + id * (D_ / 32), xsum);
@@ -226,8 +231,13 @@ void CpuMoe::worker(int id) {
                 }
             }
             barrier();
-            const int R1 = np * 2 * FE_;
+            const int R1 = (np + ne) * 2 * FE_;
             for (int r = id * R1 / n; r < (id + 1) * R1 / n; r++) {
+                if (r / (2 * FE_) >= np) {
+                    const int j = emu[r / (2 * FE_) - np], k = r % (2 * FE_), slot = -2 - sh->slot[j];
+                    me->gu[j][k] = emu_gu_row(c.gu_row(k >= FE_, slot, k % FE_), c.type_gu[c.grp(slot)], ea[j / MOE_MAX_E], scr[id].v);
+                    continue;
+                }
                 const int p = r / (2 * FE_), k = r % (2 * FE_), j = pick[p], slot = sh->slot[j], g = c.grp(slot), gx = dot_same ? 0 : g;
                 const uint8_t *row = c.gu_row(k >= FE_, slot, k % FE_);
                 const int t = j / MOE_MAX_E;
@@ -238,6 +248,7 @@ void CpuMoe::worker(int id) {
                 else tr_gu[g]->vec_dot(D_, &gu[(size_t)p * 2 * FE_ + k], 0, row, 0, xq[gx].data() + xq_row[gx] * t, 0, 1);
             }
             barrier();
+            if (ne && id == 0) store_rel(&me->ready, g);
             for (int p = id; p < np; p += n) {
                 float h[FE_];
                 const float *g2 = &gu[(size_t)p * 2 * FE_];
@@ -257,6 +268,14 @@ void CpuMoe::worker(int id) {
                 acc[j / MOE_MAX_E] += sh->w[j] * v;
             }
             for (int t = 0; t < T; t++) sh->y[(size_t)t * D_ + r] = acc[t];
+        }
+        for (int e = 0; e < ne; e++) {
+            const int j = emu[e], slot = -2 - sh->slot[j];
+            for (int b = 0; b < FE_ / 32; b++) while (load_acq(&me->flag[j][b]) != g) _mm_pause();
+            alignas(64) int32_t hc[FE_ / 32];
+            for (int b = 0; b < FE_ / 32; b++) { int s = 0; for (int i = 0; i < 32; i++) s += me->hq[j][b * 32 + i]; hc[b] = 128 * s; }
+            for (int r = id * D_ / n; r < (id + 1) * D_ / n; r++)
+                me->y[j][r] = sh->w[j] * emu_dn_row(c.dn_row(slot, r), me->hq[j], me->hd[j], hc, scr[id].v);
         }
         barrier();
         if (id == 0) { std::atomic_thread_fence(std::memory_order_release); store_rel(&sh->done, g); }

@@ -164,14 +164,14 @@ __global__ __launch_bounds__(1024) void k_gemv_glu(GemvArgs a) {
     }
 }
 
-template <int T, int CW> struct Slabs {
-    alignas(16) int8_t q[2][T][32 * CW];
-    float d[2][T][CW];
+template <int T, int CW, int P = 1> struct Slabs {
+    alignas(16) int8_t q[2][T][32 * CW * P];
+    float d[2][T][CW * P];
 };
 
-template <int T, int CW>
-__device__ __forceinline__ void stage(Slabs<T, CW> &S, int buf, QAct x, int K, int s) {
-    constexpr int SLAB = 32 * CW;
+template <int T, int CW, int P>
+__device__ __forceinline__ void stage(Slabs<T, CW, P> &S, int buf, QAct x, int K, int s) {
+    constexpr int SLAB = 32 * CW * P;
     const int k0 = s * SLAB, n = min(SLAB, K - k0), nb = n / 32;
     for (int i = threadIdx.x * 16; i < T * n; i += 256 * 16) {
         const int t = i / n, k = i - t * n;
@@ -183,8 +183,8 @@ __device__ __forceinline__ void stage(Slabs<T, CW> &S, int buf, QAct x, int K, i
     }
 }
 
-template <int QT, int T, int R, int CW>
-__device__ __forceinline__ void chunk_dot(const QTensor &W, int row0, int ch, const Slabs<T, CW> &S, int buf, int c, float acc[R][T]) {
+template <int QT, int T, int R, int CW, int P>
+__device__ __forceinline__ void chunk_dot(const QTensor &W, int row0, int ch, const Slabs<T, CW, P> &S, int buf, int c, float acc[R][T]) {
     const int K = W.cols;
     if constexpr (QT == Q8_0) {
         int4 w0[R], w1[R]; float dw[R];
@@ -254,25 +254,29 @@ __device__ __forceinline__ void chunk_dot(const QTensor &W, int row0, int ch, co
     }
 }
 
-template <int T, int R, int CW>
-__device__ __forceinline__ void rows_staged(const QTensor &W, int row0, bool live, QAct x, Slabs<T, CW> &S, float acc[R][T]) {
-    const int K = W.cols, lane = threadIdx.x % 32, nslab = (K + 32 * CW - 1) / (32 * CW);
-    stage<T, CW>(S, 0, x, K, 0);
+template <int T, int R, int CW, int P>
+__device__ __forceinline__ void rows_staged(const QTensor &W, int row0, bool live, QAct x, Slabs<T, CW, P> &S, float acc[R][T]) {
+    const int K = W.cols, lane = threadIdx.x % 32, nslab = (K + 32 * CW * P - 1) / (32 * CW * P);
+    stage<T, CW, P>(S, 0, x, K, 0);
     for (int s = 0; s < nslab; s++) {
-        const int buf = s & 1, nch = min(32, (K - s * 32 * CW) / CW);
+        const int buf = s & 1, nch = min(32 * P, (K - s * 32 * CW * P) / CW);
         __syncthreads();
-        if (s + 1 < nslab) stage<T, CW>(S, buf ^ 1, x, K, s + 1);
-        if (live && lane < nch) {
-            if constexpr (CW == 64) chunk_dot<Q6_K, T, R, CW>(W, row0, s * 32 + lane, S, buf, lane, acc);
-            else if (W.type == IQ4_XS) chunk_dot<IQ4_XS, T, R, CW>(W, row0, s * 32 + lane, S, buf, lane, acc);
-            else chunk_dot<Q8_0, T, R, CW>(W, row0, s * 32 + lane, S, buf, lane, acc);
+        if (s + 1 < nslab) stage<T, CW, P>(S, buf ^ 1, x, K, s + 1);
+#pragma unroll
+        for (int p = 0; p < P; p++) {
+            const int c = p * 32 + lane;
+            if (live && c < nch) {
+                if constexpr (CW == 64) chunk_dot<Q6_K, T, R, CW, P>(W, row0, s * 32 * P + c, S, buf, c, acc);
+                else if (W.type == IQ4_XS) chunk_dot<IQ4_XS, T, R, CW, P>(W, row0, s * 32 * P + c, S, buf, c, acc);
+                else chunk_dot<Q8_0, T, R, CW, P>(W, row0, s * 32 * P + c, S, buf, c, acc);
+            }
         }
     }
 }
 
-template <int T, int R, int CW>
+template <int T, int R, int CW, int P = 1>
 __global__ __launch_bounds__(256) void k_gemv_staged(GemvArgs a) {
-    __shared__ Slabs<T, CW> S;
+    __shared__ Slabs<T, CW, P> S;
     int row = (blockIdx.x * 8 + threadIdx.x / 32) * R, s = 0;
     const int lane = threadIdx.x % 32;
     while (s < a.nseg - 1 && row >= a.seg[s].W.rows) row -= a.seg[s++].W.rows;
@@ -281,7 +285,7 @@ __global__ __launch_bounds__(256) void k_gemv_staged(GemvArgs a) {
     const QTensor &W = a.seg[s].W;
     const bool live = row < W.rows;
     float acc[R][T] = {};
-    rows_staged<T, R, CW>(W, row, live, a.x, S, acc);
+    rows_staged<T, R, CW, P>(W, row, live, a.x, S, acc);
     if (!live) return;
 #pragma unroll
     for (int r = 0; r < R; r++)
@@ -298,8 +302,9 @@ __global__ __launch_bounds__(256) void k_gemv_staged(GemvArgs a) {
 template <int T>
 static void gemv_launch(const GemvArgs &a, int rows, hipStream_t st) {
     if (a.mode == GEMV_GLU) k_gemv_glu<T><<<rows / 32, 1024, 0, st>>>(a);
-    else if (T <= 4) k_gemv<T, 1><<<(rows + 7) / 8, 256, 0, st>>>(a);
+    else if constexpr (T <= 4) k_gemv<T, 1><<<(rows + 7) / 8, 256, 0, st>>>(a);
     else if (a.seg[0].W.type == Q6_K) k_gemv_staged<T, 2, 64><<<(rows + 15) / 16, 256, 0, st>>>(a);
+    else if constexpr (T < 8) k_gemv_staged<T, 2, 32, 2><<<(rows + 15) / 16, 256, 0, st>>>(a);
     else k_gemv_staged<T, 2, 32><<<(rows + 15) / 16, 256, 0, st>>>(a);
 }
 

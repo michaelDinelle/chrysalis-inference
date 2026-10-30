@@ -486,13 +486,15 @@ void Engine::moe_block(const Layer &w, int layer, int T, bool cpu_cold, float *r
     }
     const float gf = cpu_cold && w.n_cold ? gfrac : 0.0f;
     const bool pooled = layer < NL;
+    const float xf = cpu_cold ? xfrac : 1.0f;
     router_route_dec(w.router, w.sg_w, b.mx, T, b.logits_e, b.sg, w.slot_of, pooled ? cold[layer].n : 0, b.ids, b.wts, b.hot,
-                     cpu_cold ? d_sh : nullptr, gf, layer, gen + 1, b.rr_counter, st, pooled ? xc.d_counts : nullptr, starts);
+                     cpu_cold ? d_sh : nullptr, gf, layer, gen + 1, b.rr_counter, st, pooled ? xc.d_counts : nullptr, starts, xf);
     if (cpu_cold) gen++;
     moe_dec(w.hot_gate, w.hot_up, w.hot_down, pooled ? d_fmt : nullptr, w.sh_gate, w.sh_up, w.sh_down, gf > 0 ? &cold_dev[layer] : nullptr,
             b.hot, T, b.hq, b.hq_e, b.wts, b.sg, b.y, st);
+    if (gf > 0 && xf < 1.0f) emu_glu(b.hot, d_me, gen, T, st);
     moe_finish(cpu_cold ? &d_sh->done : nullptr, gen, b.y, b.hot, b.y + (size_t)T * TOPK_E * D, nullptr, cpu_cold ? d_sh->y : nullptr,
-               inject, res, T, st);
+               inject, res, T, st, d_me ? d_me->y[0] : nullptr);
 }
 
 namespace {
@@ -781,7 +783,7 @@ void Engine::lookahead(const Layer &w, int layer, int T, const float *res, unsig
         hc_mix_fused(res + (size_t)t0 * HCD, w.hcf.norm, w.hcf.down, w.hcf.up, nullptr, std::min(4, T - t0), la.lo + (size_t)t0 * HCR,
                      nullptr, HC, la.inv + t0 * HC, la.mx + (size_t)t0 * D, la.hh + (size_t)t0 * D, qoff(la.hq, (size_t)t0 * D), st);
     router_route_dec(w.router, w.sg_w, la.mx, T, la.logits, la.sg, w.slot_of, cold[layer].n, la.ids, la.wts, la.hot, d_sh_pred, gfrac,
-                     layer, gen + 1, la.counter, st, nullptr, starts);
+                     layer, gen + 1, la.counter, st, nullptr, starts, xfrac);
 }
 
 static Pos3 cell_pos(const Seq &s, int p0, const int *pos3, int cell) {

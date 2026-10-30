@@ -264,6 +264,55 @@ int main() {
                    "%d of them the file's IQ4_XS): rel diff %.2e %s\n", hf.name, n_gpu, n_g1, n_cpu, n_g2, r, ok ? "ok" : "FAIL");
             fails += !ok;
         }
+        if (hf.gt_gu == GGML_TYPE_IQ4_XS) {
+            const int T = 3;
+            cpu.disarm();
+            MoeShared *hs, *ds; MoeEmu *me, *dme;
+            CK(hipHostMalloc((void **)&hs, sizeof(MoeShared), hipHostMallocCoherent | hipHostMallocMapped)); memset(hs, 0, sizeof(MoeShared));
+            CK(hipHostMalloc((void **)&me, sizeof(MoeEmu), hipHostMallocCoherent | hipHostMallocMapped)); memset(me, 0, sizeof(MoeEmu));
+            CK(hipHostGetDevicePointer((void **)&ds, hs, 0)); CK(hipHostGetDevicePointer((void **)&dme, me, 0));
+            CpuMoe ecpu; ecpu.start(hs, nullptr, cl, 8, me); ecpu.arm();
+            std::vector<half> wr((size_t)NE * D); std::vector<float> wsg(D), x((size_t)T * D), sgv(T);
+            std::normal_distribution<float> wd(0.f, 0.02f);
+            for (int e = 0; e < NE; e++) for (int k = 0; k < D; k++) wr[(size_t)e * D + k] = __float2half((e < NX ? 0.05f : -0.05f) + wd(rng));
+            for (auto &v : wsg) v = wd(rng);
+            for (auto &v : x) v = std::abs(nd(rng)) + 0.1f;
+            half *dw = a.get<half>(wr.size()); float *dwsg = a.get<float>(D), *dx = a.get<float>(x.size()), *dlg = a.get<float>((size_t)T * NE);
+            float *dsg = a.get<float>(T), *dwts = a.get<float>(80), *dy = a.get<float>((size_t)90 * D), *dres = a.get<float>((size_t)T * HC * D);
+            float *dinj = a.get<float>(T * HC);
+            int *dids = a.get<int>(80), *dhot = a.get<int>(80); unsigned *dcnt = a.get<unsigned>(1);
+            QAct xq{a.get<int8_t>(x.size()), a.get<float>(x.size() / 32)}, hq{a.get<int8_t>(90 * FE), a.get<float>(90 * FE / 32)};
+            CK(hipMemcpy(dw, wr.data(), wr.size() * 2, hipMemcpyHostToDevice)); CK(hipMemcpy(dwsg, wsg.data(), D * 4, hipMemcpyHostToDevice));
+            CK(hipMemcpy(dx, x.data(), x.size() * 4, hipMemcpyHostToDevice)); CK(hipMemset(dcnt, 0, 4)); CK(hipMemset(dinj, 0, T * HC * 4));
+            quant_act(dx, (int64_t)x.size(), xq, st);
+            std::vector<float> res[3];
+            int n_emu = 0, n_emu_g1 = 0, n_gpu = 0;
+            const float xfracs[3] = {1.0f, 0.0f, 0.5f};
+            for (int run = 0; run < 3; run++) {
+                gen++;
+                CK(hipMemset(dres, 0, (size_t)T * HC * D * 4)); CK(hipMemset(dy, 0, (size_t)90 * D * 4));
+                router_route_dec(dw, dwsg, dx, T, dlg, dsg, dslot, NC_, dids, dwts, dhot, ds, 0.5f, 0, gen, dcnt, st, nullptr, 1, xfracs[run]);
+                moe_dec(hg, hu, hd, nullptr, sgate, sup, sdown, &cd, dhot, T, xq, hq, dwts, dsg, dy, st);
+                if (xfracs[run] < 1) emu_glu(dhot, dme, gen, T, st);
+                moe_finish(&ds->done, gen, dy, dhot, dy + (size_t)T * TOPK_E * D, nullptr, ds->y, dinj, dres, T, st, dme->y[0]);
+                res[run].resize((size_t)T * HC * D);
+                CK(hipMemcpy(res[run].data(), dres, res[run].size() * 4, hipMemcpyDeviceToHost));
+                std::vector<int> hs_(T * 10);
+                CK(hipMemcpy(hs_.data(), dhot, hs_.size() * 4, hipMemcpyDeviceToHost));
+                for (int j = 0; j < T * 10; j++) {
+                    if (run == 0) n_gpu += hs_[j] <= -2;
+                    if (run == 1 && hs_[j] == EMU_PICK) { n_emu++; n_emu_g1 += -2 - hs->slot[j] >= NC0; }
+                }
+            }
+            ecpu.stop();
+            const bool same = !memcmp(res[0].data(), res[1].data(), res[0].size() * 4) && !memcmp(res[0].data(), res[2].data(), res[0].size() * 4);
+            const bool ok = same && n_gpu > 0 && n_emu == n_gpu && n_emu_g1 > 0 && n_emu_g1 < n_emu && ecpu.can_emulate();
+            printf("decode cold picks run on the CPU in the GPU's arithmetic (T=3, %d picks of them, %d Q2_K, the rest Q3_K): %s the GPU's to the bit %s\n",
+                   n_emu, n_emu_g1, same ? "same as" : "differ from", ok ? "ok" : "FAIL");
+            fails += !ok;
+            CK(hipHostFree(hs)); CK(hipHostFree(me));
+            cpu.arm();
+        }
         {
             const int T = 64, N = T * 10;
             std::vector<float> x((size_t)T * D);

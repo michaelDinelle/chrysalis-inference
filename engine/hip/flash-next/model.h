@@ -153,8 +153,10 @@ struct Engine {
     uint8_t *cold_mem = nullptr; size_t cold_bytes = 0;
     MoeShared *sh = nullptr, *d_sh = nullptr;
     CpuMoe cpu;
-    float gfrac = 0.3f;
-    bool gfrac_pinned = false;
+    float gfrac = 0.3f, xfrac = 1.0f;
+    bool gfrac_pinned = false, xfrac_pinned = false;
+    MoeEmu *me = nullptr, *d_me = nullptr;
+    double measure_dma();
     double cal_cpu_bw = 50e9, cal_cpu_mac = 150e9, cal_dma_bw = 25e9;
     static constexpr int SPLIT_AT[3] = {32, 256, 4096};
     double cpu_bias[3] = {1.0, 1.0, 1.0}, restore_s = 4e-3;

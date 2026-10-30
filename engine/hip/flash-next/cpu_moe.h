@@ -19,6 +19,22 @@ struct MoeShared {
     alignas(64) float y[MOE_MAX_T * 2560];
 };
 
+struct MoeEmu {
+    alignas(64) uint32_t ready;
+    alignas(64) uint32_t flag[MOE_MAX_T * MOE_MAX_E][20];
+    alignas(64) float gu[MOE_MAX_T * MOE_MAX_E][2 * 640];
+    alignas(64) float y[MOE_MAX_T * MOE_MAX_E][2560];
+    alignas(64) int8_t hq[MOE_MAX_T * MOE_MAX_E][640];
+    float hd[MOE_MAX_T * MOE_MAX_E][20];
+};
+
+struct EmuAct {
+    alignas(64) int8_t q[2560];
+    alignas(64) float d[80];
+    alignas(64) int32_t s16[160];
+    alignas(64) int32_t c32[80];
+};
+
 struct ColdLayer {
     const uint8_t *gate[3] = {}, *up[3] = {}, *down = nullptr, *down2 = nullptr;
     const uint8_t *file_gate = nullptr, *file_up = nullptr, *file_down2 = nullptr;
@@ -66,10 +82,14 @@ float vnni_dot_gu1(const uint8_t *row, int type, const int8_t *xq, const float *
                    const float *f16, VnniScratch &S);
 void vnni_quant_h(const float *h, int8_t *q, float *s, float *c);
 float vnni_dot_dn1(const uint8_t *row, const int8_t *hq, const float *hs, const float *hc);
+void emu_quant_x(const float *x, EmuAct &a);
+float emu_gu_row(const uint8_t *row, int type, const EmuAct &a, VnniScratch &S);
+float emu_dn_row(const uint8_t *row, const int8_t *hq, const float *hd, const int32_t *hc, VnniScratch &S);
 
 class CpuMoe {
 public:
-    void start(MoeShared *shared, MoeShared *pred, const std::vector<ColdLayer> &layers, int threads);
+    void start(MoeShared *shared, MoeShared *pred, const std::vector<ColdLayer> &layers, int threads, MoeEmu *emu = nullptr);
+    bool can_emulate() const { return me && vnni_ok; }
     void stop();
     void arm();
     void disarm();
@@ -83,6 +103,8 @@ private:
     void prefill_work(int id);
     void preload(int id, uint32_t real, uint32_t job);
     MoeShared *sh = nullptr, *pr = nullptr;
+    MoeEmu *me = nullptr;
+    EmuAct ea[MOE_MAX_T];
     std::vector<ColdLayer> L;
     std::vector<std::thread> th;
     int n = 0;
