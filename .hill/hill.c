@@ -1817,19 +1817,15 @@ typedef struct {
     char *ident, *label;
 } Machine;
 
-static int path_parts_cmp(const void *a, const void *b) {
-    const char *x = *(const char *const *)a, *y = *(const char *const *)b;
-    while (*x && *y) {
-        size_t nx = strcspn(x, "/"), ny = strcspn(y, "/");
-        size_t m = nx < ny ? nx : ny;
-        int c = strncmp(x, y, m);
-        if (c) return c;
-        if (nx != ny) return nx < ny ? -1 : 1;
-        x += nx, y += ny;
-        if (*x == '/') x++;
-        if (*y == '/') y++;
-    }
-    return (*x != 0) - (*y != 0);
+typedef struct {
+    long long vram;
+    char *id, *name;
+} Card;
+
+static int card_cmp(const void *a, const void *b) {
+    const Card *x = a, *y = b;
+    if (x->vram != y->vram) return x->vram < y->vram ? 1 : -1;
+    return strcmp(x->id, y->id);
 }
 
 static char *on_path(const char *program) {
@@ -1901,54 +1897,43 @@ static Machine machine(Spec *s) {
         if (!strncmp(line, "MemTotal:", 9)) kb = atoll(line + 9);
     if (f) fclose(f);
     J *mem = jnew(JINT);
-    mem->i = kb >> 20;
+    mem->i = (kb + (1LL << 19)) >> 20;
     J *cards = jnew(JARR);
-    Strs names = entries_of("/sys/class/drm"), devices = {0};
+    Strs names = entries_of("/sys/class/drm");
+    Card *found = malloc((names.n + 1) * sizeof *found);
+    size_t nfound = 0;
+    char *lspci = on_path("lspci");
     for (size_t i = 0; i < names.n; i++) {
         struct stat st;
-        char *device = fmtstr("/sys/class/drm/%s/device", names.v[i]);
-        if (!strncmp(names.v[i], "card", 4) && isdigit((unsigned char)names.v[i][4]) && !lstat(device, &st)) spush(&devices, device);
-    }
-    if (devices.n) {
-        qsort(devices.v, devices.n, sizeof *devices.v, path_parts_cmp);
-        char *lspci = on_path("lspci");
-        for (size_t i = 0; i < devices.n; i++) {
-            char *vf = fmtstr("%s/mem_info_vram_total", devices.v[i]);
-            char *text = read_file(vf, NULL);
-            long long vram = 0;
-            if (text) {
-                char *end;
-                char *t = strip(text);
-                vram = strtoll(t, &end, 10);
-                if (*end || !*t) vram = 0;
-            }
-            char *real = realpath(devices.v[i], NULL);
-            char *name = strdup(real ? strrchr(real, '/') + 1 : devices.v[i]);
-            char *address = strdup(name);
-            if (lspci) {
-                char *argv[] = {lspci, "-mm", "-s", address, NULL};
-                Proc r = spawn(argv, NULL, NULL, 0, 1, 1, -1, NULL);
-                Strs fields = shlex(r.out.n ? r.out.p : "\"\"");
-                if (fields.n > 3) name = fields.v[3];
-            }
-            J *card = jnew(JOBJ);
-            J *gb = jnew(JINT);
-            gb->i = vram >> 30;
-            jset(card, "name", jstr(name));
-            jset(card, "vram_gb", gb);
-            jpush(cards, card);
+        const char *n = names.v[i];
+        char *device = fmtstr("/sys/class/drm/%s/device", n);
+        if (strncmp(n, "card", 4) || !n[4] || n[4 + strspn(n + 4, "0123456789")] || lstat(device, &st)) continue;
+        char *text = read_file(fmtstr("%s/mem_info_vram_total", device), NULL), *end = NULL;
+        long long vram = text ? strtoll(strip(text), &end, 10) : 0;
+        if (end && *end) vram = 0;
+        char *vendor = read_file(fmtstr("%s/vendor", device), NULL), *product = read_file(fmtstr("%s/device", device), NULL);
+        char *real = realpath(device, NULL);
+        char *name = strdup(real ? strrchr(real, '/') + 1 : device);
+        if (lspci) {
+            char *argv[] = {lspci, "-mm", "-s", name, NULL};
+            Proc r = spawn(argv, NULL, NULL, 0, 1, 1, -1, NULL);
+            Strs fields = shlex(r.out.n ? r.out.p : "\"\"");
+            if (fields.n > 3) name = fields.v[3];
         }
+        found[nfound++] = (Card){vram, fmtstr("%s:%s", vendor ? strip(vendor) : "?", product ? strip(product) : "?"), name};
     }
-    for (size_t i = 1; i < cards->len; i++) {
-        J *key = cards->v[i];
-        size_t k = i;
-        while (k > 0 && jget(cards->v[k - 1], "vram_gb")->i < jget(key, "vram_gb")->i) cards->v[k] = cards->v[k - 1], k--;
-        cards->v[k] = key;
+    qsort(found, nfound, sizeof *found, card_cmp);
+    for (size_t i = 0; i < nfound; i++) {
+        J *card = jnew(JOBJ), *gb = jnew(JINT);
+        gb->i = found[i].vram >> 30;
+        jset(card, "id", jstr(found[i].id));
+        jset(card, "vram_gb", gb);
+        jpush(cards, card);
     }
     jset(info, "cpu", jstr(cpu));
     jset(info, "memory_gb", mem);
     jset(info, "gpus", cards);
-    label = cards->len && jget(cards->v[0], "vram_gb")->i >= 2 ? jget(cards->v[0], "name")->s : cpu;
+    label = nfound && found[0].vram >> 30 >= 2 ? found[0].name : cpu;
 #endif
     struct utsname u;
     uname(&u);

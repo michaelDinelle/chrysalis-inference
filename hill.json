@@ -15,7 +15,7 @@
   "build": "make -s -j engines && data/venv/bin/python bench/hill_prime.py",
   "readme": "README.md",
   "machines": {
-    "5f3343802dde1de1": "RX 7900 XTX",
+    "e20a368548adfcc2": "7900 XTX",
     "37faa95555ab4a0d": "M4 Max"
   },
   "groups": [
