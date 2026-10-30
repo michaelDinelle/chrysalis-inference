@@ -251,34 +251,34 @@ Every number here is held by the gate: a change is promoted only when at least o
 
 ### Speed
 
-**Flash-Next on RX 7900 XTX**
+**Flash-Next on Navi 31 [Radeon RX 7900 XT/7900 XTX/7900 GRE/7900M]**
 
 |  |  | short | 4K | 16K deep | 100K deep | follow-up |
 | --- | :---: | ---: | ---: | ---: | ---: | ---: |
-| First token | ↓ | 0.850 s | 6.28 s | 4.21 s | 4.64 s | 0.509 s |
-| Reading the prompt | ↑ | 43.6 tok/s | 649 tok/s | 257 tok/s | 236 tok/s | 57.2 tok/s |
-| Writing | ↑ | 69.3 tok/s | 71.8 tok/s | 80.3 tok/s | 72.6 tok/s | 83.1 tok/s |
-| Longest gap between tokens, p99 | ↓ | 43.1 ms | 39.4 ms | 40.8 ms | 41.7 ms | 33.2 ms |
+| First token | ↓ | 0.295 s | 1.98 s | 1.01 s | 1.26 s | 0.188 s |
+| Reading the prompt | ↑ | 137 tok/s | 2,108 tok/s | 1,101 tok/s | 928 tok/s | 170 tok/s |
+| Writing | ↑ | 78.5 tok/s | 78.9 tok/s | 89.9 tok/s | 83.5 tok/s | 89.7 tok/s |
+| Longest gap between tokens, p99 | ↓ | 38.8 ms | 37.1 ms | 33.0 ms | 33.9 ms | 30.8 ms |
 | Tokens per pass | ↑ | 2.17 | 2.06 | 2.46 | 2.46 | 2.41 |
 
 **Flash-Next on M4 Max**
 
 |  |  | short | 4K | 16K deep | 100K deep | follow-up |
 | --- | :---: | ---: | ---: | ---: | ---: | ---: |
-| First token | ↓ | 3.31 s | 12.4 s | 12.2 s | 12.7 s | 1.81 s |
-| Reading the prompt | ↑ | 11.6 tok/s | 331 tok/s | 88.6 tok/s | 85.5 tok/s | 16.3 tok/s |
-| Writing | ↑ | 7.32 tok/s | 8.86 tok/s | 7.78 tok/s | 8.18 tok/s | 10.00 tok/s |
-| Longest gap between tokens, p99 | ↓ | 562 ms | 471 ms | 674 ms | 503 ms | 350 ms |
+| First token | ↓ | 3.09 s | 12.4 s | 12.2 s | 12.8 s | 1.65 s |
+| Reading the prompt | ↑ | 12.4 tok/s | 330 tok/s | 88.5 tok/s | 85.0 tok/s | 17.8 tok/s |
+| Writing | ↑ | 7.65 tok/s | 8.83 tok/s | 8.06 tok/s | 8.20 tok/s | 9.99 tok/s |
+| Longest gap between tokens, p99 | ↓ | 475 ms | 474 ms | 444 ms | 455 ms | 352 ms |
 | Tokens per pass | ↑ | 2.41 | 2.56 | 2.46 | 2.10 | 2.36 |
 
-**27B on RX 7900 XTX**
+**27B on Navi 31 [Radeon RX 7900 XT/7900 XTX/7900 GRE/7900M]**
 
 |  |  | short | 4K | 16K deep | 100K deep | follow-up |
 | --- | :---: | ---: | ---: | ---: | ---: | ---: |
-| First token | ↓ | 0.144 s | 2.82 s | 1.14 s | 2.61 s | 0.250 s |
-| Reading the prompt | ↑ | 356 tok/s | 1,461 tok/s | 976 tok/s | 429 tok/s | 129 tok/s |
-| Writing | ↑ | 101 tok/s | 80.9 tok/s | 105 tok/s | 88.0 tok/s | 107 tok/s |
-| Longest gap between tokens, p99 | ↓ | 27.0 ms | 27.5 ms | 35.3 ms | 34.0 ms | 34.1 ms |
+| First token | ↓ | 0.124 s | 2.80 s | 1.08 s | 2.17 s | 0.198 s |
+| Reading the prompt | ↑ | 369 tok/s | 1,462 tok/s | 1,028 tok/s | 526 tok/s | 167 tok/s |
+| Writing | ↑ | 103 tok/s | 82.1 tok/s | 107 tok/s | 89.4 tok/s | 109 tok/s |
+| Longest gap between tokens, p99 | ↓ | 26.6 ms | 27.2 ms | 35.0 ms | 33.7 ms | 33.8 ms |
 | Tokens per pass | ↑ | 2.74 | 2.22 | 3.05 | 3 | 3.67 |
 
 **27B on M4 Max**
@@ -288,16 +288,16 @@ Every number here is held by the gate: a change is promoted only when at least o
 | First token | ↓ | 0.346 s | 19.6 s | 6.19 s | 13.7 s | 0.569 s |
 | Reading the prompt | ↑ | 102 tok/s | 207 tok/s | 173 tok/s | 78.2 tok/s | 47.8 tok/s |
 | Writing | ↑ | 31.6 tok/s | 43.8 tok/s | 28.6 tok/s | 22.8 tok/s | 23.1 tok/s |
-| Longest gap between tokens, p99 | ↓ | 73.0 ms | 74.7 ms | 86.4 ms | 130 ms | 259 ms |
+| Longest gap between tokens, p99 | ↓ | 73.1 ms | 74.8 ms | 86.7 ms | 130 ms | 259 ms |
 | Tokens per pass | ↑ | 2.21 | 3.10 | 2.29 | 2.83 | 2.81 |
 
-|  |  | Flash-Next · RX 7900 XTX | Flash-Next · M4 Max | 27B · RX 7900 XTX | 27B · M4 Max |
+|  |  | Flash-Next · Navi 31 [Radeon RX 7900 XT/7900 XTX/7900 GRE/7900M] | Flash-Next · M4 Max | 27B · Navi 31 [Radeon RX 7900 XT/7900 XTX/7900 GRE/7900M] | 27B · M4 Max |
 | --- | :---: | ---: | ---: | ---: | ---: |
-| Load to a first answer | ↓ | 14.7 s | 6.25 s | 7.82 s | 7.19 s |
+| Load to a first answer | ↓ | 14.7 s | 6.31 s | 4.09 s | 8.56 s |
 
 ### Quality
 
-|  |  | Flash-Next · RX 7900 XTX | Flash-Next · M4 Max | 27B · RX 7900 XTX | 27B · M4 Max |
+|  |  | Flash-Next · Navi 31 [Radeon RX 7900 XT/7900 XTX/7900 GRE/7900M] | Flash-Next · M4 Max | 27B · Navi 31 [Radeon RX 7900 XT/7900 XTX/7900 GRE/7900M] | 27B · M4 Max |
 | --- | :---: | ---: | ---: | ---: | ---: |
 | Sanity tasks solved, of 12 | ↑ | 12 | 12 | 12 | 12 |
 | KL vs Q8_0, mean | ↓ | 0.0339 | 0.0351 | 0.00335 | 0.00308 |
@@ -307,43 +307,43 @@ Every number here is held by the gate: a change is promoted only when at least o
 
 ### Memory and context
 
-|  |  | Flash-Next · RX 7900 XTX | Flash-Next · M4 Max | 27B · RX 7900 XTX | 27B · M4 Max |
+|  |  | Flash-Next · Navi 31 [Radeon RX 7900 XT/7900 XTX/7900 GRE/7900M] | Flash-Next · M4 Max | 27B · Navi 31 [Radeon RX 7900 XT/7900 XTX/7900 GRE/7900M] | 27B · M4 Max |
 | --- | :---: | ---: | ---: | ---: | ---: |
 | Context | ↑ | 257,920 tokens | 163,840 tokens | 278,144 tokens | 263,168 tokens |
 | Prompt the follow-up reuses | ↑ | 99,930 tokens | 99,930 tokens | 99,930 tokens | 99,930 tokens |
-| Peak RAM | ↓ | 47.4 GB | 28.6 GB | 3.96 GB | 25.0 GB |
-| Lowest free system memory during a run | ↑ | 13.1 GB | 5.22 GB | 56.5 GB | 8.31 GB |
+| Peak RAM | ↓ | 47.4 GB | 28.6 GB | 3.96 GB | 25.1 GB |
+| Lowest free system memory during a run | ↑ | 13.9 GB | 5.60 GB | 57.1 GB | 8.12 GB |
 | Pool steps limited by memory | ↓ | 0 | 0 | — | — |
 
 ### Energy
 
-|  |  | Flash-Next · RX 7900 XTX | Flash-Next · M4 Max | 27B · RX 7900 XTX | 27B · M4 Max |
+|  |  | Flash-Next · Navi 31 [Radeon RX 7900 XT/7900 XTX/7900 GRE/7900M] | Flash-Next · M4 Max | 27B · Navi 31 [Radeon RX 7900 XT/7900 XTX/7900 GRE/7900M] | 27B · M4 Max |
 | --- | :---: | ---: | ---: | ---: | ---: |
-| GPU energy for one speed run | ↓ | 7.44 kJ | — | 5.65 kJ | — |
+| GPU energy for one speed run | ↓ | 5.23 kJ | — | 5.33 kJ | — |
 
 ### Build
 
-|  |  | Flash-Next · RX 7900 XTX | Flash-Next · M4 Max | 27B · RX 7900 XTX | 27B · M4 Max | RX 7900 XTX | M4 Max |
+|  |  | Flash-Next · Navi 31 [Radeon RX 7900 XT/7900 XTX/7900 GRE/7900M] | Flash-Next · M4 Max | 27B · Navi 31 [Radeon RX 7900 XT/7900 XTX/7900 GRE/7900M] | 27B · M4 Max | Navi 31 [Radeon RX 7900 XT/7900 XTX/7900 GRE/7900M] | M4 Max |
 | --- | :---: | ---: | ---: | ---: | ---: | ---: | ---: |
-| Clean build of both engines | ↓ | — | — | — | — | 13.5 s | 1.97 s |
+| Clean build of both engines | ↓ | — | — | — | — | 14.1 s | 2.11 s |
 | Engine library | ↓ | 2,323,128 bytes | 331,512 bytes | 1,098,368 bytes | 219,736 bytes | — | — |
 
 ### Velocity
 
-|  |  | Flash-Next · RX 7900 XTX | Flash-Next · M4 Max | 27B · RX 7900 XTX | 27B · M4 Max |
+|  |  | Flash-Next · Navi 31 [Radeon RX 7900 XT/7900 XTX/7900 GRE/7900M] | Flash-Next · M4 Max | 27B · Navi 31 [Radeon RX 7900 XT/7900 XTX/7900 GRE/7900M] | 27B · M4 Max |
 | --- | :---: | ---: | ---: | ---: | ---: |
-| Time for one speed run | ↓ | 45.5 s | 86.8 s | 25.9 s | 58.2 s |
+| Time for one speed run | ↓ | 32.3 s | 86.0 s | 21.5 s | 59.6 s |
 
 ### Against competitors
 
-**Flash-Next on RX 7900 XTX**
+**Flash-Next on Navi 31 [Radeon RX 7900 XT/7900 XTX/7900 GRE/7900M]**
 
 |  |  | short | 4K |
 | --- | :---: | ---: | ---: |
-| First token, times sooner than Strata IQ3_S | ↑ | 0.751× | 0.534× |
-| Writing, times faster than Strata IQ3_S | ↑ | 0.950× | 1.08× |
-| First token, times sooner than Strata Q2_0 | ↑ | 0.489× | 0.475× |
-| Writing, times faster than Strata Q2_0 | ↑ | 0.646× | 0.751× |
+| First token, times sooner than Strata IQ3_S | ↑ | 2.16× | 1.72× |
+| Writing, times faster than Strata IQ3_S | ↑ | 1.08× | 1.19× |
+| First token, times sooner than Strata Q2_0 | ↑ | 1.40× | 1.53× |
+| Writing, times faster than Strata Q2_0 | ↑ | 0.732× | 0.826× |
 
 **Flash-Next on M4 Max**
 
@@ -354,12 +354,12 @@ Every number here is held by the gate: a change is promoted only when at least o
 | First token, times sooner than Strata Q2_0 | ↑ | — | — |
 | Writing, times faster than Strata Q2_0 | ↑ | — | — |
 
-**27B on RX 7900 XTX**
+**27B on Navi 31 [Radeon RX 7900 XT/7900 XTX/7900 GRE/7900M]**
 
 |  |  | short | 4K |
 | --- | :---: | ---: | ---: |
-| First token, times sooner than llama.cpp | ↑ | 2.17× | 1.43× |
-| Writing, times faster than llama.cpp | ↑ | 1.48× | 1.41× |
+| First token, times sooner than llama.cpp | ↑ | 2.57× | 1.44× |
+| Writing, times faster than llama.cpp | ↑ | 1.51× | 1.43× |
 
 **27B on M4 Max**
 
@@ -368,7 +368,7 @@ Every number here is held by the gate: a change is promoted only when at least o
 | First token, times sooner than llama.cpp | ↑ | — | — |
 | Writing, times faster than llama.cpp | ↑ | — | — |
 
-|  |  | Flash-Next · RX 7900 XTX | Flash-Next · M4 Max |
+|  |  | Flash-Next · Navi 31 [Radeon RX 7900 XT/7900 XTX/7900 GRE/7900M] | Flash-Next · M4 Max |
 | --- | :---: | ---: | ---: |
 | KL vs Q8_0, times lower than Strata IQ3_S | ↑ | 1.62× | — |
 | KL vs Q8_0, times lower than Strata Q2_0 | ↑ | 5.51× | — |
