@@ -45,8 +45,10 @@ void hc_norm(const float *res, const float *gamma, int T, float *of, half *oh, Q
 void hc_lo(float *lo, int T, half *oh, QAct oq, hipStream_t st);
 void hc_mix(const float *xn, const float *gate, int T, float *of, half *oh, QAct oq, hipStream_t st);
 void hc_combine(float *res, const float *inject, int ld_inject, const float *out, const float *out2, int T, hipStream_t st);
+void wait_flag(const unsigned *flag, unsigned gen, hipStream_t st);
 void hc_mix_fused(const float *res, const float *gamma, const QTensor &down, const QTensor &up, const QTensor *inj, int T,
-                  float *lo, float *inject, int ld_inject, float *inv, float *mx, half *hh, QAct hq, QAct xq, hipStream_t st);
+                  float *lo, float *inject, int ld_inject, float *inv, float *mx, half *hh, QAct hq, QAct xq, int slot, hipStream_t st,
+                  unsigned *flags = nullptr, unsigned gen = 0, int role = 0);
 void mtp_pack(const float *e, const float *xn, int T, float *out, half *out_h, hipStream_t st);
 
 struct GdnScanArgs {

@@ -271,123 +271,160 @@ __device__ __forceinline__ int dot16i(int4 w, int4 x, int acc) {
     return dot4(w.w, x.w, dot4(w.z, x.z, dot4(w.y, x.y, dot4(w.x, x.x, acc))));
 }
 
-constexpr int MIX_WG = 1024;
-__global__ __launch_bounds__(MIX_WG) void k_mix_norm(const float *res, const float *gamma, QAct xq, float *inv_out) {
-    constexpr int NW = MIX_WG / 32;
-    __shared__ float part[NW];
-    __shared__ float inv;
-    const int st = blockIdx.x, t = blockIdx.y, tid = threadIdx.x, wave = tid / 32, lane = tid % 32;
-    float ss = 0;
-    const float4 *r = (const float4 *)(res + ((size_t)t * HC + st) * D);
-    for (int i = tid; i < D / 4; i += MIX_WG) { const float4 v = r[i]; ss += v.x * v.x + v.y * v.y + v.z * v.z + v.w * v.w; }
-    const float sw = warp_sum(ss);
-    if (lane == 0) part[wave] = sw;
-    __syncthreads();
-    if (tid == 0) {
-        float v = 0;
-        for (int w = 0; w < NW; w++) v += part[w];
-        inv = rsqrtf(v / D + EPS);
-        inv_out[t * HC + st] = inv;
-    }
-    __syncthreads();
-    for (int blk = wave; blk < D / 32; blk += NW) {
-        const int c = st * D + blk * 32 + lane;
-        const float v = res[(size_t)t * HCD + c] * inv * gamma[c];
-        const float d = warp_max(fabsf(v)) / 127.0f;
-        xq.q[(size_t)t * HCD + c] = (int8_t)__float2int_rn(d > 0 ? v / d : 0.0f);
-        if (lane == 0) xq.d[((size_t)t * HCD + c) / 32] = d;
-    }
-}
+__device__ unsigned g_mix_bar[2][2];
 
-template <int T>
-__global__ __launch_bounds__(256) void k_mix_down(QTensor down, QTensor inj, QAct xq, float *lo, float *inject, int ld_inject) {
-    const int wave = threadIdx.x / 32, lane = threadIdx.x % 32, row = blockIdx.x * 8 + wave;
-    const QTensor *W = row < HCR ? &down : &inj;
-    const int r = row < HCR ? row : row - HCR;
-    if (row >= HCR && (!inject || r >= HC)) return;
-    float acc[T] = {};
-    for (int ch = lane; ch < HCD / 32; ch += 32) {
-        const int8_t *wr = (const int8_t *)W->q + (size_t)r * HCD + ch * 32;
-        const int4 w0 = *(const int4 *)wr, w1 = *(const int4 *)(wr + 16);
-        const float dw = __half2float(W->d[(size_t)r * (HCD / 32) + ch]);
-#pragma unroll
-        for (int t = 0; t < T; t++) {
-            const int4 *x4 = (const int4 *)(xq.q + (size_t)t * HCD + ch * 32);
-            acc[t] += dw * xq.d[(size_t)t * (HCD / 32) + ch] * dot16i(w1, x4[1], dot16i(w0, x4[0], 0));
+__device__ __forceinline__ void mix_barrier(unsigned *bar) {
+    __threadfence();
+    __syncthreads();
+    if (threadIdx.x == 0) {
+        const unsigned gen = __hip_atomic_load(&bar[1], __ATOMIC_RELAXED, __HIP_MEMORY_SCOPE_AGENT);
+        if (atomicAdd(&bar[0], 1u) == gridDim.x - 1) {
+            __hip_atomic_store(&bar[0], 0u, __ATOMIC_RELAXED, __HIP_MEMORY_SCOPE_AGENT);
+            __hip_atomic_store(&bar[1], gen + 1, __ATOMIC_RELEASE, __HIP_MEMORY_SCOPE_AGENT);
+        } else {
+            while (__hip_atomic_load(&bar[1], __ATOMIC_ACQUIRE, __HIP_MEMORY_SCOPE_AGENT) == gen) __builtin_amdgcn_s_sleep(1);
         }
     }
-#pragma unroll
-    for (int t = 0; t < T; t++) {
-        const float v = warp_sum(acc[t]);
-        if (lane == 0) {
-            if (row < HCR) lo[(size_t)t * HCR + r] = v;
-            else inject[(size_t)t * ld_inject + r] = v;
-        }
-    }
+    __syncthreads();
+    __threadfence();
 }
 
-template <int T>
-__global__ __launch_bounds__(256) void k_mix_up(const float *lo, QTensor up, const float *res, const float *gamma, const float *inv,
-                                                float *mx, half *hh, QAct hq) {
-    __shared__ int4 lq4[T][HCR / 16];
-    __shared__ float ld_[T][HCR / 32];
-    __shared__ float g[T][HC][64];
-    const int tid = threadIdx.x, wave = tid / 32, lane = tid % 32, i0 = blockIdx.x * 64;
+constexpr int MIX_T = 4;
+__global__ __launch_bounds__(256) void k_mix(const float *res, const float *gamma, QTensor down, QTensor inj, QTensor up, QAct xq,
+                                             float *inv, float *lo, float *inject, int ld_inject, float *mx, half *hh, QAct hq, int T,
+                                             int slot, unsigned *flags, unsigned gen, int role) {
+    __shared__ float part[32];
+    __shared__ float iv;
+    __shared__ int4 lq4[MIX_T][HCR / 16];
+    __shared__ float ld_[MIX_T][HCR / 32];
+    __shared__ float g[MIX_T][HC][64];
+    const int tid = threadIdx.x, wave = tid / 32, lane = tid % 32;
+    if (role == 1 && blockIdx.x == 0 && tid == 0) __hip_atomic_store(&flags[0], gen, __ATOMIC_RELEASE, __HIP_MEMORY_SCOPE_AGENT);
+    for (int u = blockIdx.x; u < HC * T; u += gridDim.x) {
+        const int s = u % HC, t = u / HC;
+        if (tid < 32) part[tid] = 0.0f;
+        __syncthreads();
+        const float4 *r = (const float4 *)(res + ((size_t)t * HC + s) * D);
+        for (int w = wave; w < D / 4 / 32; w += 8) {
+            float ss = 0;
+            const float4 v = r[w * 32 + lane];
+            ss += v.x * v.x + v.y * v.y + v.z * v.z + v.w * v.w;
+            const float sw = warp_sum(ss);
+            if (lane == 0) part[w] = sw;
+        }
+        __syncthreads();
+        if (tid == 0) {
+            float v = 0;
+            for (int w = 0; w < 32; w++) v += part[w];
+            iv = rsqrtf(v / D + EPS);
+            inv[t * HC + s] = iv;
+        }
+        __syncthreads();
+        for (int blk = wave; blk < D / 32; blk += 8) {
+            const int c = s * D + blk * 32 + lane;
+            const float v = res[(size_t)t * HCD + c] * iv * gamma[c];
+            const float d = warp_max(fabsf(v)) / 127.0f;
+            xq.q[(size_t)t * HCD + c] = (int8_t)__float2int_rn(d > 0 ? v / d : 0.0f);
+            if (lane == 0) xq.d[((size_t)t * HCD + c) / 32] = d;
+        }
+        __syncthreads();
+    }
+    mix_barrier(g_mix_bar[slot]);
+    const int rows = HCR + (inject ? HC : 0);
+    for (int task = blockIdx.x; task * 8 < rows; task += gridDim.x) {
+        const int row = task * 8 + wave;
+        if (row >= rows) continue;
+        const QTensor *W = row < HCR ? &down : &inj;
+        const int r = row < HCR ? row : row - HCR;
+        float acc[MIX_T] = {};
+#pragma unroll
+        for (int k = 0; k < HCD / 32 / 32; k++) {
+            const int ch = lane + 32 * k;
+            const int8_t *wr = (const int8_t *)W->q + (size_t)r * HCD + ch * 32;
+            const int4 w0 = *(const int4 *)wr, w1 = *(const int4 *)(wr + 16);
+            const float dw = __half2float(W->d[(size_t)r * (HCD / 32) + ch]);
+#pragma unroll
+            for (int t = 0; t < MIX_T; t++) {
+                if (t >= T) break;
+                const int4 *x4 = (const int4 *)(xq.q + (size_t)t * HCD + ch * 32);
+                acc[t] += dw * xq.d[(size_t)t * (HCD / 32) + ch] * dot16i(w1, x4[1], dot16i(w0, x4[0], 0));
+            }
+        }
+#pragma unroll
+        for (int t = 0; t < MIX_T; t++) {
+            if (t >= T) break;
+            const float v = warp_sum(acc[t]);
+            if (lane == 0) {
+                if (row < HCR) lo[(size_t)t * HCR + r] = v;
+                else inject[(size_t)t * ld_inject + r] = v;
+            }
+        }
+    }
+    mix_barrier(g_mix_bar[slot]);
     int8_t *lq = (int8_t *)lq4;
-    for (int k = wave; k < T * HCR / 32; k += 8) {
-        const int t = k / (HCR / 32), blk = k % (HCR / 32);
-        const float v = silu(lo[(size_t)t * HCR + blk * 32 + lane] * (1.0f / HC));
-        const float d = warp_max(fabsf(v)) / 127.0f;
-        lq[(size_t)t * HCR + blk * 32 + lane] = (int8_t)__float2int_rn(d > 0 ? v / d : 0.0f);
-        if (lane == 0) ld_[t][blk] = d;
-    }
-    __syncthreads();
-    const int st = tid / 64, p = tid % 64, row = st * D + i0 + p;
-    const int8_t *wr = (const int8_t *)up.q + (size_t)row * HCR;
-    float acc[T] = {};
-#pragma unroll
-    for (int ch = 0; ch < HCR / 32; ch++) {
-        const int4 w0 = *(const int4 *)(wr + ch * 32), w1 = *(const int4 *)(wr + ch * 32 + 16);
-        const float dw = __half2float(up.d[(size_t)row * (HCR / 32) + ch]);
-#pragma unroll
-        for (int t = 0; t < T; t++) acc[t] += dw * ld_[t][ch] * dot16i(w1, lq4[t][ch * 2 + 1], dot16i(w0, lq4[t][ch * 2], 0));
-    }
-#pragma unroll
-    for (int t = 0; t < T; t++) g[t][st][p] = acc[t];
-    __syncthreads();
-    if (tid >= 64) return;
-    const int i = i0 + tid;
-#pragma unroll
-    for (int t = 0; t < T; t++) {
-        float m = 0;
-#pragma unroll
-        for (int s2 = 0; s2 < HC; s2++) {
-            const int c = s2 * D + i;
-            m += res[(size_t)t * HCD + c] * inv[t * HC + s2] * gamma[c] * sigmoid(g[t][s2][tid]);
+    for (int u = blockIdx.x; u < D / 64; u += gridDim.x) {
+        const int i0 = u * 64;
+        for (int k = wave; k < T * HCR / 32; k += 8) {
+            const int t = k / (HCR / 32), blk = k % (HCR / 32);
+            const float v = silu(lo[(size_t)t * HCR + blk * 32 + lane] * (1.0f / HC));
+            const float d = warp_max(fabsf(v)) / 127.0f;
+            lq[(size_t)t * HCR + blk * 32 + lane] = (int8_t)__float2int_rn(d > 0 ? v / d : 0.0f);
+            if (lane == 0) ld_[t][blk] = d;
         }
-        m *= 1.0f / HC;
-        const size_t o = (size_t)t * D + i;
-        mx[o] = m;
-        if (hh) hh[o] = __float2half(m);
-        if (hq.q) {
-            const float d = warp_max(fabsf(m)) / 127.0f;
-            hq.q[o] = (int8_t)__float2int_rn(d > 0 ? m / d : 0.0f);
-            if (lane == 0) hq.d[o / 32] = d;
+        __syncthreads();
+        const int s = tid / 64, p = tid % 64, row = s * D + i0 + p;
+        const int8_t *wr = (const int8_t *)up.q + (size_t)row * HCR;
+        float acc[MIX_T] = {};
+#pragma unroll
+        for (int ch = 0; ch < HCR / 32; ch++) {
+            const int4 w0 = *(const int4 *)(wr + ch * 32), w1 = *(const int4 *)(wr + ch * 32 + 16);
+            const float dw = __half2float(up.d[(size_t)row * (HCR / 32) + ch]);
+#pragma unroll
+            for (int t = 0; t < MIX_T; t++) {
+                if (t >= T) break;
+                acc[t] += dw * ld_[t][ch] * dot16i(w1, lq4[t][ch * 2 + 1], dot16i(w0, lq4[t][ch * 2], 0));
+            }
         }
+#pragma unroll
+        for (int t = 0; t < MIX_T; t++) g[t][s][p] = acc[t];
+        __syncthreads();
+        if (tid < 64) {
+            const int i = i0 + tid;
+            for (int t = 0; t < T; t++) {
+                float m = 0;
+#pragma unroll
+                for (int s2 = 0; s2 < HC; s2++) {
+                    const int c = s2 * D + i;
+                    m += res[(size_t)t * HCD + c] * inv[t * HC + s2] * gamma[c] * sigmoid(g[t][s2][tid]);
+                }
+                m *= 1.0f / HC;
+                const size_t o = (size_t)t * D + i;
+                mx[o] = m;
+                if (hh) hh[o] = __float2half(m);
+                if (hq.q) {
+                    const float d = warp_max(fabsf(m)) / 127.0f;
+                    hq.q[o] = (int8_t)__float2int_rn(d > 0 ? m / d : 0.0f);
+                    if (lane == 0) hq.d[o / 32] = d;
+                }
+            }
+        }
+        __syncthreads();
+    }
+    if (role != 2) return;
+    __threadfence();
+    __syncthreads();
+    if (tid == 0 && atomicAdd(&flags[2], 1u) == gridDim.x - 1) {
+        __hip_atomic_store(&flags[2], 0u, __ATOMIC_RELAXED, __HIP_MEMORY_SCOPE_AGENT);
+        __hip_atomic_store(&flags[1], gen, __ATOMIC_RELEASE, __HIP_MEMORY_SCOPE_AGENT);
     }
 }
 
 void hc_mix_fused(const float *res, const float *gamma, const QTensor &down, const QTensor &up, const QTensor *inj, int T,
-                  float *lo, float *inject, int ld_inject, float *inv, float *mx, half *hh, QAct hq, QAct xq, hipStream_t st) {
+                  float *lo, float *inject, int ld_inject, float *inv, float *mx, half *hh, QAct hq, QAct xq, int slot, hipStream_t st,
+                  unsigned *flags, unsigned gen, int role) {
+    if (T < 1 || T > MIX_T) FAIL("hc_mix_fused: T=%d", T);
     const QTensor none{};
-    const int rows = HCR + (inj ? HC : 0);
-    if (T >= 1 && T <= 4) k_mix_norm<<<dim3(HC, T), MIX_WG, 0, st>>>(res, gamma, xq, inv);
-    switch (T) {
-#define MIX_CASE(N) case N: \
-        k_mix_down<N><<<(rows + 7) / 8, 256, 0, st>>>(down, inj ? *inj : none, xq, lo, inj ? inject : nullptr, ld_inject); \
-        k_mix_up<N><<<D / 64, 256, 0, st>>>(lo, up, res, gamma, inv, mx, hh, hq); break;
-        MIX_CASE(1) MIX_CASE(2) MIX_CASE(3) MIX_CASE(4)
-#undef MIX_CASE
-        default: FAIL("hc_mix_fused: T=%d", T);
-    }
+    const int grid = std::max((HCR + (inj ? HC : 0) + 7) / 8, D / 64);
+    k_mix<<<grid, 256, 0, st>>>(res, gamma, down, inj ? *inj : none, up, xq, inv, lo, inj ? inject : nullptr, ld_inject, mx, hh, hq, T, slot,
+                                flags, gen, role);
 }

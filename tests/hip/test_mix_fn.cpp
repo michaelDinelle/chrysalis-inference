@@ -48,7 +48,7 @@ int main() {
         gemv(inj, xq, T, in1, HC, GEMV_STORE, st);
         hc_mix(xn, gate, T, mx1, hh1, hq1, st);
     };
-    auto new_path = [&](int T) { hc_mix_fused(dres, dgam, down, up, &inj, T, lo2, in2, HC, inv, mx2, hh2, hq2, xq2, st); };
+    auto new_path = [&](int T) { hc_mix_fused(dres, dgam, down, up, &inj, T, lo2, in2, HC, inv, mx2, hh2, hq2, xq2, 0, st); };
     int fails = 0;
     for (int T = 1; T <= TM; T++) {
         old_path(T); new_path(T);

@@ -180,10 +180,16 @@ struct Engine {
     hipStream_t st, cst, lst;
     hipEvent_t la_in, la_read;
     bool la_wait = false;
+    unsigned la_gen = 0, la_pend = 0;
     MoeShared *sh_pred = nullptr, *d_sh_pred = nullptr;
     struct { float *lo, *inv, *mx, *logits, *sg, *wts; half *hh; QAct hq; int *ids, *hot; unsigned *counter; } la{};
     bool la_on = getenv("CHRYSALIS_FN_NO_LOOKAHEAD") == nullptr;
     void lookahead(const Layer &w, int layer, int T, const float *res, unsigned starts = 1);
+    void lookahead_flags(const Layer &w, int layer, int T, const float *res);
+    void la_sync() {
+        if (la_wait) { CK(hipStreamWaitEvent(st, la_read, 0)); la_wait = false; }
+        if (la_pend) { wait_flag(la.counter + 17, la_pend, st); la_pend = 0; }
+    }
     hipEvent_t staged, copied, topk_ready;
     hipEvent_t front_ready, front_copied;
     uint8_t *stage_state = nullptr;

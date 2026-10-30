@@ -182,6 +182,10 @@ void router_route_dec(const half *W, const float *wsg, const float *x, int T, fl
     k_router_route<<<NE / 8, 256, 0, st>>>(W, wsg, x, T, logits, sg, slot_of, n_ram, ids, wts, hot_slot, sh, gfrac, layer, gen,
                                            counter, counts, starts, xfrac, hand_x);
 }
+__global__ void k_wait_flag(const unsigned *flag, unsigned gen) {
+    while ((int)(__hip_atomic_load(flag, __ATOMIC_ACQUIRE, __HIP_MEMORY_SCOPE_AGENT) - gen) < 0) __builtin_amdgcn_s_sleep(2);
+}
+void wait_flag(const unsigned *flag, unsigned gen, hipStream_t st) { k_wait_flag<<<1, 1, 0, st>>>(flag, gen); }
 
 __global__ __launch_bounds__(256) void k_moe_finish(const uint32_t *done, uint32_t gen, const float *y, const int *hot_slot,
                                                     const float *shared, const float *sg, const float *cold, const float *inject, float *res,

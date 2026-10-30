@@ -710,7 +710,7 @@ void Engine::alloc_buffers(int max_seqs) {
     barena.init(dry.used + (1 << 20));
     carve(barena);
     CK(hipMemsetAsync(b.rr_counter, 0, 4, st));
-    CK(hipMemsetAsync(la.counter, 0, 4, st));
+    CK(hipMemsetAsync(la.counter, 0, 64 * 4, st));
     CK(hipHostMalloc(&b.ple_rows, (size_t)S * PLE_HEADS * 170));
     CK(hipHostMalloc(&b.h_ids, N * 4)); CK(hipHostMalloc(&b.h_wts, N * 4)); CK(hipHostMalloc(&b.h_tok, N * 4));
     CK(hipHostMalloc(&b.h_entw, N * 4)); CK(hipHostMalloc(&b.h_pos, N * 4)); CK(hipHostMalloc(&b.h_btok, N * 4));
