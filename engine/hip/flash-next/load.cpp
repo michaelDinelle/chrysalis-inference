@@ -242,8 +242,6 @@ void Engine::load(const std::string &path, int max_seqs, size_t reserve_bytes) {
     CK(hipStreamCreateWithFlags(&st, hipStreamNonBlocking));
     CK(hipStreamCreateWithFlags(&cst, hipStreamNonBlocking));
     CK(hipStreamCreateWithFlags(&lst, hipStreamNonBlocking));
-    CK(hipEventCreateWithFlags(&la_in, hipEventDisableTiming));
-    CK(hipEventCreateWithFlags(&la_read, hipEventDisableTiming));
     CK(hipEventCreateWithFlags(&staged, hipEventDisableTiming));
     CK(hipEventCreateWithFlags(&copied, hipEventDisableTiming));
     CK(hipEventCreateWithFlags(&topk_ready, hipEventDisableTiming));

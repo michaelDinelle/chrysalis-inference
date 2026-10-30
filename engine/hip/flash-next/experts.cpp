@@ -382,10 +382,6 @@ void Engine::experts_plan() {
             picks += c; hits += x.slot[k] >= 0 ? c : 0;
         }
         x.picks += picks; x.hits += hits;
-        if (picks) {
-            const double a = std::min(1.0, picks / (32.0 * 30 * NL));
-            x.recent_hits = (1 - a) * x.recent_hits + a * (double)hits / picks;
-        }
         x.counts_pending = false;
     }
     if (x.tokens > 0) {

@@ -309,19 +309,8 @@ __global__ __launch_bounds__(1024) void k_gemv_glu(GemvArgs a) {
 template <int T>
 static void gemv_launch(const GemvArgs &a, int rows, hipStream_t st) {
     if (a.mode == GEMV_GLU) k_gemv_glu<T><<<rows / 32, 1024, 0, st>>>(a);
-    else if (a.seg[0].W.cols >= 4096 && rows >= 1024 && rows <= 8192 && a.nseg == 1) {
-        const dim3 g((rows + 1) / 2);
-        switch (a.seg[0].W.type) {
-            case Q8_0: k_gemv_sk<Q8_0, T><<<g, 256, 0, st>>>(a); break;
-            case Q6_K: k_gemv_sk<Q6_K, T><<<g, 256, 0, st>>>(a); break;
-            case IQ4_XS: k_gemv_sk<IQ4_XS, T><<<g, 256, 0, st>>>(a); break;
-            case IQ4_NL: k_gemv_sk<IQ4_NL, T><<<g, 256, 0, st>>>(a); break;
-            case Q3_K: k_gemv_sk<Q3_K, T><<<g, 256, 0, st>>>(a); break;
-            case Q2_K: k_gemv_sk<Q2_K, T><<<g, 256, 0, st>>>(a); break;
-            case Q5_0: k_gemv_sk<Q5_0, T><<<g, 256, 0, st>>>(a); break;
-            default: FAIL("gemv: type %d", a.seg[0].W.type);
-        }
-    }
+    else if (a.seg[0].W.type == Q8_0 && a.seg[0].W.cols >= 4096 && rows >= 1024 && rows <= 8192 && a.nseg == 1)
+        k_gemv_sk<Q8_0, T><<<(rows + 1) / 2, 256, 0, st>>>(a);
     else if (T >= 5) k_gemv<T, 2><<<(rows + 15) / 16, 256, 0, st>>>(a);
     else k_gemv<T, 1><<<(rows + 7) / 8, 256, 0, st>>>(a);
 }

@@ -41,6 +41,7 @@ void CpuMoe::start(MoeShared *shared, MoeShared *pred, const std::vector<ColdLay
     gu.resize((size_t)MOE_MAX_T * MOE_MAX_E * 2 * FE_);
     hq.resize(hq_row * MOE_MAX_T * MOE_MAX_E);
     seen = load_acq(&sh->go);
+    jstart = jgen.load();
     scr = std::vector<Scratch>(n);
     vnni = vnni_supported();
     for (const ColdLayer &c : L) if (c.n && !vnni_formats(c)) vnni = false;
@@ -183,7 +184,7 @@ void CpuMoe::preload(int id, uint32_t real, uint32_t job) {
 }
 
 void CpuMoe::worker(int id) {
-    uint32_t last = seen.load(), jlast = jgen.load(), plast = pr ? load_acq(&pr->go) : 0;
+    uint32_t last = seen.load(), jlast = jstart, plast = pr ? load_acq(&pr->go) : 0;
     for (;;) {
         uint32_t g;
         bool host_job = false;

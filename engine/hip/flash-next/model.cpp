@@ -348,7 +348,7 @@ static void hc_mix_run(Engine &e, const HcMix &m, const float *res, int T, float
             const int n = std::min(4, T - t0);
             hc_mix_fused(res + (size_t)t0 * HCD, m.norm, m.down, m.up, inject ? &m.inject : nullptr, n, b.lo + (size_t)t0 * HCR,
                          inject ? inject + (size_t)t0 * HC : nullptr, HC, b.inv + t0 * HC, b.mx + (size_t)t0 * D,
-                         b.hh + (size_t)t0 * D, qoff(b.hq, (size_t)t0 * D), b.xn_q, 0, e.st, e.la.counter + 16, la_g, la_g ? 1 : 0);
+                         b.hh + (size_t)t0 * D, qoff(b.hq, (size_t)t0 * D), b.xn_q, 0, e.st, e.la.counter + 16, la_g, la_g && !t0 ? 1 : 0);
         }
         return;
     }
@@ -781,18 +781,6 @@ void Engine::ple_block_run(Seq &s, int c0, int n, bool verify, float *res) {
     if (!verify) ple_commit(s.ple, b.xconv, n, st);
 }
 
-void Engine::lookahead(const Layer &w, int layer, int T, const float *res, unsigned starts) {
-    CK(hipEventRecord(la_in, st));
-    CK(hipStreamWaitEvent(lst, la_in, 0));
-    for (int t0 = 0; t0 < T; t0 += 4)
-        hc_mix_fused(res + (size_t)t0 * HCD, w.hcf.norm, w.hcf.down, w.hcf.up, nullptr, std::min(4, T - t0), la.lo + (size_t)t0 * HCR,
-                     nullptr, HC, la.inv + t0 * HC, la.mx + (size_t)t0 * D, la.hh + (size_t)t0 * D, qoff(la.hq, (size_t)t0 * D),
-                     qoff(b.xn_q, (size_t)4 * HCD), 1, lst);
-    CK(hipEventRecord(la_read, lst));
-    router_route_dec(w.router, w.sg_w, la.mx, T, la.logits, la.sg, w.slot_of, cold[layer].n, la.ids, la.wts, la.hot, d_sh_pred, gfrac,
-                     layer, gen + 1, la.counter, lst, nullptr, starts, xfrac, false);
-    la_wait = true;
-}
 
 static Pos3 cell_pos(const Seq &s, int p0, const int *pos3, int cell) {
     if (cell < p0) return s.tail_pos;
@@ -801,13 +789,15 @@ static Pos3 cell_pos(const Seq &s, int p0, const int *pos3, int cell) {
     return {s.pos + i, s.pos + i, s.pos + i};
 }
 
-void Engine::lookahead_flags(const Layer &w, int layer, int T, const float *res) {
+void Engine::lookahead_flags(const Layer &w, int layer, int T, const float *res, unsigned starts) {
     const unsigned g = ++la_gen;
     wait_flag(la.counter + 16, g, lst);
-    hc_mix_fused(res, w.hcf.norm, w.hcf.down, w.hcf.up, nullptr, T, la.lo, nullptr, HC, la.inv, la.mx, la.hh, la.hq,
-                 qoff(b.xn_q, (size_t)4 * HCD), 1, lst, la.counter + 16, g, 2);
+    for (int t0 = 0; t0 < T; t0 += 4)
+        hc_mix_fused(res + (size_t)t0 * HCD, w.hcf.norm, w.hcf.down, w.hcf.up, nullptr, std::min(4, T - t0), la.lo + (size_t)t0 * HCR,
+                     nullptr, HC, la.inv + t0 * HC, la.mx + (size_t)t0 * D, la.hh + (size_t)t0 * D, qoff(la.hq, (size_t)t0 * D),
+                     qoff(b.xn_q, (size_t)4 * HCD), 1, lst, la.counter + 16, g, t0 + 4 >= T ? 2 : 0);
     router_route_dec(w.router, w.sg_w, la.mx, T, la.logits, la.sg, w.slot_of, cold[layer].n, la.ids, la.wts, la.hot, d_sh_pred, gfrac,
-                     layer, gen + 1, la.counter, lst, nullptr, 1, xfrac, false);
+                     layer, gen + 1, la.counter, lst, nullptr, starts, xfrac, false);
     la_pend = g;
 }
 void Engine::forward(Seq &s, const int *tokens, int T, bool verify, const int *pos3, bool img) {
@@ -843,7 +833,7 @@ void Engine::forward(Seq &s, const int *tokens, int T, bool verify, const int *p
                 if (ple_th.joinable()) ple_th.join();
                 ple_block_run(s, c0, n, verify, res);
             }
-            if (T <= 4 && la_on && xc.recent_hits < Experts::CPU_HEAVY && w.n_cold) lookahead_flags(w, l, n, res);
+            if (T <= 4 && la_on && w.n_cold) lookahead_flags(w, l, n, res);
             hc_mix_run(*this, w.hca, res, n, b.inj_a, false, la_pend);
             if (is_attn_layer(l))
                 attn_block(w, l / 4, s, n, s.n + c0, res, b.inj_a, verify, s.pos + c0, pos3 ? b.rpos + 3 * c0 : nullptr,
@@ -894,8 +884,8 @@ void Engine::forward_parts(const Part *p, int np, const int *tokens, int T) {
     for (int l = 0, gl = 0; l < NL; l++) {
         const Layer &w = L[l];
         if (l == PLE_LAYER) ple_parts(p, np, T, b.res);
-        if (la_on && xc.recent_hits < Experts::CPU_HEAVY && w.n_cold) lookahead(w, l, T, b.res, starts);
-        hc_mix_run(*this, w.hca, b.res, T, b.inj_a, true);
+        if (la_on && w.n_cold) lookahead_flags(w, l, T, b.res, starts);
+        hc_mix_run(*this, w.hca, b.res, T, b.inj_a, true, la_pend);
         if (is_attn_layer(l)) attn_parts(w, l / 4, p, np, T, b.res, b.inj_a);
         else gdn_parts(w, gl++, p, np, T, b.res, b.inj_a);
         hc_mix_run(*this, w.hcf, b.res, T, b.inj_f, true);

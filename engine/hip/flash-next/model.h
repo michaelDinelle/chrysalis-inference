@@ -111,10 +111,8 @@ struct Engine {
         double copied_bytes = 0, copied_ms = 0;
         uint64_t picks = 0, hits = 0, mem_limited = 0, step = 0, waited_steps = 0;
         double waited_s = 0;
-        double recent_hits = 0;
         bool decoding = false, reading = false;
         int decode_loads = 16;
-        static constexpr double CPU_HEAVY = 0.75;
         enum { FREE, QUEUED, COPYING };
         struct Load {
             std::atomic<int> state{FREE};
@@ -178,16 +176,12 @@ struct Engine {
     uint32_t gen = 0;
 
     hipStream_t st, cst, lst;
-    hipEvent_t la_in, la_read;
-    bool la_wait = false;
     unsigned la_gen = 0, la_pend = 0;
     MoeShared *sh_pred = nullptr, *d_sh_pred = nullptr;
     struct { float *lo, *inv, *mx, *logits, *sg, *wts; half *hh; QAct hq; int *ids, *hot; unsigned *counter; } la{};
     bool la_on = getenv("CHRYSALIS_FN_NO_LOOKAHEAD") == nullptr;
-    void lookahead(const Layer &w, int layer, int T, const float *res, unsigned starts = 1);
-    void lookahead_flags(const Layer &w, int layer, int T, const float *res);
+    void lookahead_flags(const Layer &w, int layer, int T, const float *res, unsigned starts = 1);
     void la_sync() {
-        if (la_wait) { CK(hipStreamWaitEvent(st, la_read, 0)); la_wait = false; }
         if (la_pend) { wait_flag(la.counter + 17, la_pend, st); la_pend = 0; }
     }
     hipEvent_t staged, copied, topk_ready;

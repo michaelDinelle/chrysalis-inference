@@ -124,6 +124,7 @@ private:
     bool dot_same = true;
     MoeJob job;
     std::atomic<uint32_t> jgen{0};
+    uint32_t jstart = 0;
     std::atomic<uint64_t> sink_{0};
 
     std::atomic<int> jtok{0}, jexp{0}, jfin{0};
