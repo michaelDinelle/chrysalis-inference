@@ -255,45 +255,45 @@ Every number here is held by the gate: a change is promoted only when at least o
 
 |  |  | short | 4K | 16K deep | 100K deep | follow-up |
 | --- | :---: | ---: | ---: | ---: | ---: | ---: |
-| First token | ↓ | 0.915 s | 6.39 s | 4.26 s | 4.64 s | 0.514 s |
-| Reading the prompt | ↑ | 40.8 tok/s | 639 tok/s | 254 tok/s | 237 tok/s | 57.0 tok/s |
-| Writing | ↑ | 65.5 tok/s | 67.3 tok/s | 76.1 tok/s | 58.4 tok/s | 78.9 tok/s |
-| Longest gap between tokens, p99 | ↓ | 45.2 ms | 42.1 ms | 43.4 ms | 181 ms | 35.1 ms |
+| First token | ↓ | 0.844 s | 6.28 s | 4.27 s | 4.64 s | 0.508 s |
+| Reading the prompt | ↑ | 43.9 tok/s | 649 tok/s | 254 tok/s | 236 tok/s | 57.3 tok/s |
+| Writing | ↑ | 68.9 tok/s | 69.3 tok/s | 80.9 tok/s | 73.4 tok/s | 72.9 tok/s |
+| Longest gap between tokens, p99 | ↓ | 44.1 ms | 40.0 ms | 42.7 ms | 40.4 ms | 159 ms |
 | Tokens per pass | ↑ | 2.17 | 2.06 | 2.46 | 2.46 | 2.41 |
 
 **Flash-Next on M4 Max**
 
 |  |  | short | 4K | 16K deep | 100K deep | follow-up |
 | --- | :---: | ---: | ---: | ---: | ---: | ---: |
-| First token | ↓ | 3.13 s | 12.4 s | 12.2 s | 13.6 s | 1.66 s |
-| Reading the prompt | ↑ | 12.3 tok/s | 330 tok/s | 88.9 tok/s | 80.2 tok/s | 17.8 tok/s |
-| Writing | ↑ | 7.52 tok/s | 8.80 tok/s | 8.15 tok/s | 8.43 tok/s | 9.97 tok/s |
-| Longest gap between tokens, p99 | ↓ | 484 ms | 474 ms | 442 ms | 339 ms | 354 ms |
+| First token | ↓ | 3.11 s | 12.4 s | 12.1 s | 12.6 s | 1.68 s |
+| Reading the prompt | ↑ | 12.3 tok/s | 331 tok/s | 89.7 tok/s | 86.0 tok/s | 17.5 tok/s |
+| Writing | ↑ | 7.52 tok/s | 8.90 tok/s | 8.18 tok/s | 8.30 tok/s | 9.77 tok/s |
+| Longest gap between tokens, p99 | ↓ | 501 ms | 469 ms | 485 ms | 443 ms | 482 ms |
 | Tokens per pass | ↑ | 2.41 | 2.56 | 2.46 | 2.10 | 2.36 |
 
 **27B on RX 7900 XTX**
 
 |  |  | short | 4K | 16K deep | 100K deep | follow-up |
 | --- | :---: | ---: | ---: | ---: | ---: | ---: |
-| First token | ↓ | 0.145 s | 2.83 s | 1.14 s | 2.62 s | 0.252 s |
-| Reading the prompt | ↑ | 354 tok/s | 1,456 tok/s | 975 tok/s | 428 tok/s | 128 tok/s |
-| Writing | ↑ | 101 tok/s | 80.8 tok/s | 105 tok/s | 87.9 tok/s | 107 tok/s |
-| Longest gap between tokens, p99 | ↓ | 27.0 ms | 27.5 ms | 35.3 ms | 34.1 ms | 34.1 ms |
+| First token | ↓ | 0.145 s | 2.82 s | 1.15 s | 2.61 s | 0.250 s |
+| Reading the prompt | ↑ | 354 tok/s | 1,460 tok/s | 973 tok/s | 428 tok/s | 129 tok/s |
+| Writing | ↑ | 101 tok/s | 80.8 tok/s | 105 tok/s | 88.0 tok/s | 107 tok/s |
+| Longest gap between tokens, p99 | ↓ | 27.0 ms | 27.5 ms | 35.2 ms | 34.0 ms | 34.0 ms |
 | Tokens per pass | ↑ | 2.74 | 2.22 | 3.05 | 3 | 3.67 |
 
 **27B on M4 Max**
 
 |  |  | short | 4K | 16K deep | 100K deep | follow-up |
 | --- | :---: | ---: | ---: | ---: | ---: | ---: |
-| First token | ↓ | 0.345 s | 19.6 s | 6.19 s | 13.7 s | 0.569 s |
-| Reading the prompt | ↑ | 102 tok/s | 207 tok/s | 173 tok/s | 78.3 tok/s | 47.8 tok/s |
-| Writing | ↑ | 31.6 tok/s | 43.8 tok/s | 28.6 tok/s | 22.8 tok/s | 23.1 tok/s |
-| Longest gap between tokens, p99 | ↓ | 73.0 ms | 74.8 ms | 86.9 ms | 130 ms | 259 ms |
+| First token | ↓ | 0.346 s | 19.6 s | 6.19 s | 13.8 s | 0.568 s |
+| Reading the prompt | ↑ | 102 tok/s | 207 tok/s | 173 tok/s | 78.0 tok/s | 47.9 tok/s |
+| Writing | ↑ | 31.6 tok/s | 43.9 tok/s | 28.6 tok/s | 22.8 tok/s | 23.2 tok/s |
+| Longest gap between tokens, p99 | ↓ | 72.8 ms | 74.7 ms | 86.7 ms | 130 ms | 259 ms |
 | Tokens per pass | ↑ | 2.21 | 3.10 | 2.29 | 2.83 | 2.81 |
 
 |  |  | Flash-Next · RX 7900 XTX | Flash-Next · M4 Max | 27B · RX 7900 XTX | 27B · M4 Max |
 | --- | :---: | ---: | ---: | ---: | ---: |
-| Load to a first answer | ↓ | 15.0 s | 6.24 s | 7.93 s | 7.18 s |
+| Load to a first answer | ↓ | 14.7 s | 6.27 s | 7.87 s | 7.27 s |
 
 ### Quality
 
@@ -311,28 +311,28 @@ Every number here is held by the gate: a change is promoted only when at least o
 | --- | :---: | ---: | ---: | ---: | ---: |
 | Context | ↑ | 257,920 tokens | 163,840 tokens | 278,144 tokens | 263,168 tokens |
 | Prompt the follow-up reuses | ↑ | 99,930 tokens | 99,930 tokens | 99,930 tokens | 99,930 tokens |
-| Peak RAM | ↓ | 47.4 GB | 28.6 GB | 3.96 GB | 25.0 GB |
-| Lowest free system memory during a run | ↑ | 13.5 GB | 6.18 GB | 56.8 GB | 8.89 GB |
+| Peak RAM | ↓ | 47.4 GB | 28.6 GB | 3.96 GB | 25.1 GB |
+| Lowest free system memory during a run | ↑ | 12.8 GB | 5.99 GB | 56.2 GB | 8.89 GB |
 | Pool steps limited by memory | ↓ | 0 | 0 | — | — |
 
 ### Energy
 
 |  |  | Flash-Next · RX 7900 XTX | Flash-Next · M4 Max | 27B · RX 7900 XTX | 27B · M4 Max |
 | --- | :---: | ---: | ---: | ---: | ---: |
-| GPU energy for one speed run | ↓ | 7.57 kJ | — | 5.67 kJ | — |
+| GPU energy for one speed run | ↓ | 7.45 kJ | — | 5.67 kJ | — |
 
 ### Build
 
 |  |  | Flash-Next · RX 7900 XTX | Flash-Next · M4 Max | 27B · RX 7900 XTX | 27B · M4 Max | RX 7900 XTX | M4 Max |
 | --- | :---: | ---: | ---: | ---: | ---: | ---: | ---: |
-| Clean build of both engines | ↓ | — | — | — | — | 14.7 s | 1.96 s |
-| Engine library | ↓ | 2,608,264 bytes | 331,512 bytes | 1,098,368 bytes | 219,736 bytes | — | — |
+| Clean build of both engines | ↓ | — | — | — | — | 14.4 s | 1.94 s |
+| Engine library | ↓ | 2,580,264 bytes | 331,512 bytes | 1,098,368 bytes | 219,736 bytes | — | — |
 
 ### Velocity
 
 |  |  | Flash-Next · RX 7900 XTX | Flash-Next · M4 Max | 27B · RX 7900 XTX | 27B · M4 Max |
 | --- | :---: | ---: | ---: | ---: | ---: |
-| Time for one speed run | ↓ | 47.1 s | 86.6 s | 26.1 s | 58.2 s |
+| Time for one speed run | ↓ | 46.0 s | 85.7 s | 26.0 s | 58.3 s |
 
 ### Against competitors
 
@@ -340,10 +340,10 @@ Every number here is held by the gate: a change is promoted only when at least o
 
 |  |  | short | 4K |
 | --- | :---: | ---: | ---: |
-| First token, times sooner than Strata IQ3_S | ↑ | 0.702× | 0.525× |
-| Writing, times faster than Strata IQ3_S | ↑ | 0.899× | 1.01× |
-| First token, times sooner than Strata Q2_0 | ↑ | 0.457× | 0.467× |
-| Writing, times faster than Strata Q2_0 | ↑ | 0.611× | 0.705× |
+| First token, times sooner than Strata IQ3_S | ↑ | 0.756× | 0.534× |
+| Writing, times faster than Strata IQ3_S | ↑ | 0.945× | 1.04× |
+| First token, times sooner than Strata Q2_0 | ↑ | 0.492× | 0.475× |
+| Writing, times faster than Strata Q2_0 | ↑ | 0.642× | 0.726× |
 
 **Flash-Next on M4 Max**
 
