@@ -3,7 +3,7 @@
 #include <utility>
 #include <vector>
 
-enum { GEMV_STORE = 0, GEMV_ADD = 1, GEMV_GLU = 2, GEMV_HC = 3 };
+enum { GEMV_STORE = 0, GEMV_ADD = 1, GEMV_HC = 3 };
 QTensor make_qtensor(Arena &a, int type, int rows, int cols);
 void qtensor_rows(QTensor &t, const QTensor &W, int r0);
 void relayout(const QTensor &t, const uint8_t *raw_dev, hipStream_t st, int64_t b0 = 0, int64_t nb = -1);
@@ -21,7 +21,6 @@ struct GemvSeg { QTensor W; float *y = nullptr; int ldy = 0; };
 struct GemvArgs {
     GemvSeg seg[3]; int nseg = 1;
     QAct x{}; int T = 1, mode = GEMV_STORE;
-    QTensor up; QAct gq{};
     const float *inj = nullptr; float *res = nullptr;
 };
 void gemv(const GemvArgs &a, hipStream_t st);

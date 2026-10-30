@@ -65,16 +65,14 @@ kernel void deq_rows(constant uint4 &a [[buffer(0)]], device const uchar *W [[bu
     for (int i = 0; i < 32; i++) out[(size_t)r * a.x + u * 32 + i] = w[i];
 }
 
-#define GEMV_TYPES(X) X(T_F32, f32) X(T_F16, f16) X(T_BF16, bf16) X(T_Q2_0, q2_0) X(T_Q4_0, q4_0) X(T_Q5_0, q5_0) X(T_Q8_0, q8_0) \
-    X(T_IQ4_NL, iq4_nl) X(T_IQ4_XS, iq4_xs) X(T_Q2_K, q2_k) X(T_Q3_K, q3_k) X(T_Q4_K, q4_k) X(T_Q5_K, q5_k) X(T_Q6_K, q6_k)
+#define GEMV_TYPES(X) X(T_F32, f32) X(T_F16, f16) X(T_Q8_0, q8_0) X(T_IQ4_NL, iq4_nl) X(T_IQ4_XS, iq4_xs) X(T_Q2_K, q2_k) \
+    X(T_Q3_K, q3_k) X(T_Q6_K, q6_k)
 
 #define INST_GEMV(F, name) \
     template [[host_name("gemv32_" #name)]] kernel void gemv<F, 32, 4, 1>(constant GemvArgs &, device const uchar *, device const float *, device float *, device const float *, uint, uint, uint); \
     template [[host_name("gemv8_" #name)]] kernel void gemv<F, 8, 2, 1>(constant GemvArgs &, device const uchar *, device const float *, device float *, device const float *, uint, uint, uint); \
     template [[host_name("gemv32t_" #name)]] kernel void gemv<F, 32, 4, 8>(constant GemvArgs &, device const uchar *, device const float *, device float *, device const float *, uint, uint, uint); \
     template [[host_name("gemv8t_" #name)]] kernel void gemv<F, 8, 2, 8>(constant GemvArgs &, device const uchar *, device const float *, device float *, device const float *, uint, uint, uint); \
-    template [[host_name("gemvr1_" #name)]] kernel void gemv<F, 32, 1, 1>(constant GemvArgs &, device const uchar *, device const float *, device float *, device const float *, uint, uint, uint); \
     template [[host_name("gemvr2_" #name)]] kernel void gemv<F, 32, 2, 1>(constant GemvArgs &, device const uchar *, device const float *, device float *, device const float *, uint, uint, uint); \
-    template [[host_name("gemvr8_" #name)]] kernel void gemv<F, 32, 8, 1>(constant GemvArgs &, device const uchar *, device const float *, device float *, device const float *, uint, uint, uint); \
     template [[host_name("deq_rows_" #name)]] kernel void deq_rows<F>(constant uint4 &, device const uchar *, device float *, uint2);
 GEMV_TYPES(INST_GEMV)

@@ -88,7 +88,6 @@ void relayout(const QTensor &t, const uint8_t *raw_dev, hipStream_t st, int64_t 
     if (t.type == Q8_0) ranges = {{0, 2, (uint8_t *)t.d}, {2, 32, t.q}};
     else if (t.type == Q6_K) ranges = {{0, 128, t.q}, {128, 64, t.qh}, {192, 16, t.sc}, {208, 2, (uint8_t *)t.d}};
     else if (t.type == IQ4_XS) ranges = {{0, 2, (uint8_t *)t.d}, {2, 2, (uint8_t *)t.sh}, {4, 4, t.sc}, {8, 128, t.q}};
-    else if (t.type == Q5_0) ranges = {{0, 2, (uint8_t *)t.d}, {2, 4, t.qh}, {6, 16, t.q}};
     else if (t.type == IQ4_NL) ranges = {{0, 2, (uint8_t *)t.d}, {2, 16, t.q}};
     else if (t.type == Q3_K) ranges = {{0, 32, t.qh}, {32, 64, t.q}, {108, 2, (uint8_t *)t.d}};
     else if (t.type == Q2_K) ranges = {{0, 16, t.sc}, {16, 64, t.q}, {80, 2, (uint8_t *)t.d}, {82, 2, (uint8_t *)t.dm}};

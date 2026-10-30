@@ -4,46 +4,30 @@ using namespace metal;
 
 #define T_F32 0
 #define T_F16 1
-#define T_Q4_0 2
-#define T_Q5_0 6
 #define T_Q8_0 8
 #define T_Q2_K 10
 #define T_Q3_K 11
-#define T_Q4_K 12
-#define T_Q5_K 13
 #define T_Q6_K 14
 #define T_IQ4_NL 20
 #define T_IQ4_XS 23
-#define T_BF16 30
-#define T_Q2_0 42
 
 constant float kv_iq4nl[16] = {-127.f, -104.f, -83.f, -65.f, -49.f, -35.f, -22.f, -10.f, 1.f, 13.f, 25.f, 38.f, 53.f, 69.f, 89.f, 113.f};
 
 inline float rdh(device const uchar *p) { return float(as_type<half>(*(device const ushort *)p)); }
 inline uint rd16(device const uchar *p) { return *(device const ushort *)p; }
-inline uint rd32(device const uchar *p) { return rd16(p) | (rd16(p + 2) << 16); }
 
 inline uint row_bytes(int F, uint cols) {
     switch (F) {
         case T_F32: return cols * 4;
-        case T_F16: case T_BF16: return cols * 2;
-        case T_Q4_0: case T_IQ4_NL: return cols / 32 * 18;
-        case T_Q5_0: return cols / 32 * 22;
+        case T_F16: return cols * 2;
+        case T_IQ4_NL: return cols / 32 * 18;
         case T_Q8_0: return cols / 32 * 34;
-        case T_Q2_0: return cols / 64 * 18;
         case T_Q2_K: return cols / 256 * 84;
         case T_Q3_K: return cols / 256 * 110;
-        case T_Q4_K: return cols / 256 * 144;
-        case T_Q5_K: return cols / 256 * 176;
         case T_Q6_K: return cols / 256 * 210;
         case T_IQ4_XS: return cols / 256 * 136;
     }
     return 0;
-}
-
-inline void scale_min_k4(int j, device const uchar *q, thread float &sc, thread float &m) {
-    if (j < 4) { sc = q[j] & 63; m = q[j + 4] & 63; }
-    else { sc = (q[j + 4] & 0xF) | ((q[j - 4] >> 6) << 4); m = (q[j + 4] >> 4) | ((q[j] >> 6) << 4); }
 }
 
 template <int F> inline void deq32(device const uchar *row, uint u, thread float *w);
@@ -55,38 +39,6 @@ template <> inline void deq32<T_F32>(device const uchar *row, uint u, thread flo
 template <> inline void deq32<T_F16>(device const uchar *row, uint u, thread float *w) {
     device const half4 *p = (device const half4 *)(row + u * 64);
     for (int i = 0; i < 8; i++) { float4 v = float4(p[i]); w[4 * i] = v.x; w[4 * i + 1] = v.y; w[4 * i + 2] = v.z; w[4 * i + 3] = v.w; }
-}
-template <> inline void deq32<T_BF16>(device const uchar *row, uint u, thread float *w) {
-    device const uint4 *p = (device const uint4 *)(row + u * 64);
-    for (int i = 0; i < 4; i++) {
-        uint4 v = p[i];
-        for (int k = 0; k < 4; k++) { w[8 * i + 2 * k] = as_type<float>(v[k] << 16); w[8 * i + 2 * k + 1] = as_type<float>(v[k] & 0xFFFF0000u); }
-    }
-}
-template <> inline void deq32<T_Q2_0>(device const uchar *row, uint u, thread float *w) {
-    device const uchar *b = row + (u / 2) * 18;
-    const float d = rdh(b);
-    device const uchar *q = b + 2 + (u % 2) * 8;
-    for (int i = 0; i < 8; i++) {
-        const uint x = q[i];
-        w[4 * i] = (float(x & 3) - 1.f) * d; w[4 * i + 1] = (float((x >> 2) & 3) - 1.f) * d;
-        w[4 * i + 2] = (float((x >> 4) & 3) - 1.f) * d; w[4 * i + 3] = (float(x >> 6) - 1.f) * d;
-    }
-}
-template <> inline void deq32<T_Q4_0>(device const uchar *row, uint u, thread float *w) {
-    device const uchar *b = row + u * 18;
-    const float d = rdh(b);
-    for (int i = 0; i < 16; i++) { const uint x = b[2 + i]; w[i] = (float(x & 15) - 8.f) * d; w[i + 16] = (float(x >> 4) - 8.f) * d; }
-}
-template <> inline void deq32<T_Q5_0>(device const uchar *row, uint u, thread float *w) {
-    device const uchar *b = row + u * 22;
-    const float d = rdh(b);
-    const uint qh = rd32(b + 2);
-    for (int i = 0; i < 16; i++) {
-        const uint x = b[6 + i];
-        w[i] = (float((x & 15) | (((qh >> i) & 1) << 4)) - 16.f) * d;
-        w[i + 16] = (float((x >> 4) | (((qh >> (i + 16)) & 1) << 4)) - 16.f) * d;
-    }
 }
 template <> inline void deq32<T_Q8_0>(device const uchar *row, uint u, thread float *w) {
     device const uchar *b = row + u * 34;
@@ -107,26 +59,6 @@ template <> inline void deq32<T_IQ4_XS>(device const uchar *row, uint u, thread 
     const float dl = rdh(b) * float(ls - 32);
     device const uchar *q = b + 8 + 16 * ib;
     for (int i = 0; i < 16; i++) { const uint x = q[i]; w[i] = kv_iq4nl[x & 15] * dl; w[i + 16] = kv_iq4nl[x >> 4] * dl; }
-}
-template <> inline void deq32<T_Q4_K>(device const uchar *row, uint u, thread float *w) {
-    device const uchar *b = row + (u / 8) * 144;
-    const uint j = u % 8;
-    float sc, m;
-    scale_min_k4(j, b + 4, sc, m);
-    const float d = rdh(b) * sc, mn = rdh(b + 2) * m;
-    device const uchar *q = b + 16 + 32 * (j / 2);
-    const uint sft = (j % 2) * 4;
-    for (int i = 0; i < 32; i++) w[i] = d * float((q[i] >> sft) & 15) - mn;
-}
-template <> inline void deq32<T_Q5_K>(device const uchar *row, uint u, thread float *w) {
-    device const uchar *b = row + (u / 8) * 176;
-    const uint j = u % 8;
-    float sc, m;
-    scale_min_k4(j, b + 4, sc, m);
-    const float d = rdh(b) * sc, mn = rdh(b + 2) * m;
-    device const uchar *qh = b + 16, *q = b + 48 + 32 * (j / 2);
-    const uint sft = (j % 2) * 4;
-    for (int i = 0; i < 32; i++) w[i] = d * float(((q[i] >> sft) & 15) | (((qh[i] >> j) & 1) << 4)) - mn;
 }
 template <> inline void deq32<T_Q6_K>(device const uchar *row, uint u, thread float *w) {
     device const uchar *b = row + (u / 8) * 210;
@@ -178,45 +110,6 @@ template <int F> inline float dot32(device const uchar *row, uint u, thread cons
     float s = 0;
     for (int i = 0; i < 32; i++) s += w[i] * x[i];
     return s;
-}
-template <> inline float dot32<T_Q2_0>(device const uchar *row, uint u, thread const float *x, float2 sx, threadgroup const float *) {
-    device const uchar *b = row + (u / 2) * 18;
-    device const ushort *q = (device const ushort *)(b + 2 + (u % 2) * 8);
-    float s = 0;
-    for (int k = 0; k < 4; k++) {
-        const uint w = q[k];
-        thread const float *xk = x + 8 * k;
-        s += float(w & 3) * xk[0] + float((w >> 2) & 3) * xk[1] + float((w >> 4) & 3) * xk[2] + float((w >> 6) & 3) * xk[3]
-           + float((w >> 8) & 3) * xk[4] + float((w >> 10) & 3) * xk[5] + float((w >> 12) & 3) * xk[6] + float(w >> 14) * xk[7];
-    }
-    return rdh(b) * (s - sx.x - sx.y);
-}
-template <> inline float dot32<T_Q4_K>(device const uchar *row, uint u, thread const float *x, float2 sx, threadgroup const float *) {
-    device const uchar *b = row + (u / 8) * 144;
-    const uint j = u % 8, sft = (j % 2) * 4;
-    float sc, m;
-    scale_min_k4(j, b + 4, sc, m);
-    device const uint *q = (device const uint *)(b + 16 + 32 * (j / 2));
-    float s = 0;
-    for (int k = 0; k < 8; k++) {
-        const uint w = q[k] >> sft;
-        s += float(w & 15) * x[4 * k] + float((w >> 8) & 15) * x[4 * k + 1] + float((w >> 16) & 15) * x[4 * k + 2] + float((w >> 24) & 15) * x[4 * k + 3];
-    }
-    return rdh(b) * sc * s - rdh(b + 2) * m * (sx.x + sx.y);
-}
-template <> inline float dot32<T_Q5_K>(device const uchar *row, uint u, thread const float *x, float2 sx, threadgroup const float *) {
-    device const uchar *b = row + (u / 8) * 176;
-    const uint j = u % 8, sft = (j % 2) * 4;
-    float sc, m;
-    scale_min_k4(j, b + 4, sc, m);
-    device const uint *qh = (device const uint *)(b + 16), *q = (device const uint *)(b + 48 + 32 * (j / 2));
-    float s = 0;
-    for (int k = 0; k < 8; k++) {
-        const uint w = q[k] >> sft, h = (qh[k] >> j) << 4;
-        s += float((w & 15) | (h & 16)) * x[4 * k] + float(((w >> 8) & 15) | ((h >> 8) & 16)) * x[4 * k + 1]
-           + float(((w >> 16) & 15) | ((h >> 16) & 16)) * x[4 * k + 2] + float(((w >> 24) & 15) | ((h >> 24) & 16)) * x[4 * k + 3];
-    }
-    return rdh(b) * sc * s - rdh(b + 2) * m * (sx.x + sx.y);
 }
 template <> inline float dot32<T_Q3_K>(device const uchar *row, uint u, thread const float *x, float2 sx, threadgroup const float *) {
     device const uchar *b = row + (u / 8) * 110;
@@ -300,7 +193,6 @@ template <> inline float dot32<T_Q8_0>(device const uchar *row, uint u, thread c
     return rdh(b) * s;
 }
 
-inline float bf16_round(float x) { uint u = as_type<uint>(x); u = (u + 0x7fffu + ((u >> 16) & 1u)) & 0xffff0000u; return as_type<float>(u); }
 inline void q8_0_round(thread float *x) {
     float amax = 0;
     for (int i = 0; i < 32; i++) amax = max(amax, fabs(x[i]));
@@ -319,7 +211,6 @@ inline void q8_K_round(thread float *x) {
     for (int i = 0; i < 32; i++) x[i] = min(127.f, rint(iscale * x[i])) * d;
 }
 template <int F> inline void ggml_round(thread float *x) {
-    if (F == T_BF16) { for (int i = 0; i < 32; i++) x[i] = bf16_round(x[i]); }
-    else if (F == T_Q2_K || F == T_Q3_K || F == T_Q4_K || F == T_Q5_K || F == T_Q6_K || F == T_IQ4_XS) q8_K_round(x);
+    if (F == T_Q2_K || F == T_Q3_K || F == T_Q6_K || F == T_IQ4_XS) q8_K_round(x);
     else if (F != T_F32 && F != T_F16) q8_0_round(x);
 }

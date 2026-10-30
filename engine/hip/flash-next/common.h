@@ -60,7 +60,7 @@ constexpr size_t IDX_TAIL = (size_t)KPOOL * IDX_D;
 constexpr size_t KV_PAGE = KV_LAYER * NKVL;
 struct KVRef { uint8_t *pool; const int *pages; };
 
-enum QType : int { F32 = 0, F16 = 1, Q5_0 = 6, Q8_0 = 8, Q2_K = 10, Q3_K = 11, Q6_K = 14, IQ4_NL = 20, IQ4_XS = 23 };
+enum QType : int { F32 = 0, F16 = 1, Q8_0 = 8, Q2_K = 10, Q3_K = 11, Q6_K = 14, IQ4_NL = 20, IQ4_XS = 23 };
 
 struct QTensor {
     int type = -1;
@@ -73,9 +73,9 @@ struct QTensor {
     half *dm = nullptr;
     void *f = nullptr;
 };
-__host__ __device__ constexpr int qk_of(int type) { return (type == Q8_0 || type == Q5_0 || type == IQ4_NL) ? 32 : type == F32 || type == F16 ? 1 : 256; }
+__host__ __device__ constexpr int qk_of(int type) { return (type == Q8_0 || type == IQ4_NL) ? 32 : type == F32 || type == F16 ? 1 : 256; }
 __host__ __device__ constexpr int qbytes_of(int type) {
-    return type == Q8_0 ? 34 : type == Q5_0 ? 22 : type == IQ4_NL ? 18 : type == Q2_K ? 84 : type == Q3_K ? 110 : type == Q6_K ? 210
+    return type == Q8_0 ? 34 : type == IQ4_NL ? 18 : type == Q2_K ? 84 : type == Q3_K ? 110 : type == Q6_K ? 210
          : type == IQ4_XS ? 136 : type == F32 ? 4 : type == F16 ? 2 : 0;
 }
 inline size_t qrow_bytes(int type, int cols) { return (size_t)cols / qk_of(type) * qbytes_of(type); }

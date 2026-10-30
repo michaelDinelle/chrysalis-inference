@@ -5,9 +5,8 @@
 
 static const char *tname(int t) {
     switch (t) {
-        case 0: return "f32"; case 1: return "f16"; case 30: return "bf16"; case 42: return "q2_0"; case 2: return "q4_0";
-        case 6: return "q5_0"; case 8: return "q8_0"; case 20: return "iq4_nl"; case 23: return "iq4_xs"; case 11: return "q3_k";
-        case 12: return "q4_k"; case 13: return "q5_k"; case 14: return "q6_k"; case 10: return "q2_k";
+        case 0: return "f32"; case 1: return "f16"; case 8: return "q8_0"; case 20: return "iq4_nl"; case 23: return "iq4_xs";
+        case 11: return "q3_k"; case 14: return "q6_k"; case 10: return "q2_k";
     }
     return nullptr;
 }

@@ -16,7 +16,7 @@ struct PfMoeArgs { uint layer, ldx, P, pad; };
 struct XPtr { device const uchar *p; };
 
 typedef simdgroup_float8x8 acc_t;
-template <int F> constexpr float wpre() { return F == T_BF16 || F == T_F32 ? 2048.f : 1.f; }
+template <int F> constexpr float wpre() { return F == T_F32 ? 2048.f : 1.f; }
 
 template <int F, int BM, int BT, int SGM>
 inline void mm_loop(device const uchar *wr, device const float *xr, uint units, threadgroup half *Ws, threadgroup half *Xs,
@@ -198,8 +198,8 @@ kernel void pf_moe_wsum(constant uint &T [[buffer(0)]], device const float4 *Yp 
     Y[i] = s;
 }
 
-#define PF_TYPES(X) X(T_F32, f32) X(T_F16, f16) X(T_BF16, bf16) X(T_Q2_0, q2_0) X(T_Q4_0, q4_0) X(T_Q5_0, q5_0) X(T_Q8_0, q8_0) \
-    X(T_IQ4_NL, iq4_nl) X(T_IQ4_XS, iq4_xs) X(T_Q3_K, q3_k) X(T_Q4_K, q4_k) X(T_Q5_K, q5_k) X(T_Q6_K, q6_k)
+#define PF_TYPES(X) X(T_F32, f32) X(T_F16, f16) X(T_Q8_0, q8_0) X(T_IQ4_NL, iq4_nl) X(T_IQ4_XS, iq4_xs) X(T_Q3_K, q3_k) \
+    X(T_Q6_K, q6_k)
 #define PF_MM(F, name) \
     template [[host_name("pf_mm_" #name)]] kernel void pf_mm<F, 64, 64, 2>(constant PfMmArgs &, device const uchar *, \
         device const float *, device float *, uint2, ushort, ushort, ushort);

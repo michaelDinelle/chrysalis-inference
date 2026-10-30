@@ -200,7 +200,7 @@ int main() {
 
     struct HotFmt { int gt_gu, gt_dn; const char *name; };
     for (const HotFmt hf : {HotFmt{GGML_TYPE_IQ4_XS, GGML_TYPE_IQ4_NL, "IQ4_XS"}, HotFmt{GGML_TYPE_Q3_K, GGML_TYPE_IQ4_NL, "Q3_K"},
-                            HotFmt{GGML_TYPE_Q2_K, GGML_TYPE_IQ4_NL, "Q2_K"}, HotFmt{GGML_TYPE_Q5_0, GGML_TYPE_Q5_0, "Q5_0"}}) {
+                            HotFmt{GGML_TYPE_Q2_K, GGML_TYPE_IQ4_NL, "Q2_K"}}) {
         const size_t mark = a.used;
         Experts hot = make_experts(NH_, NH_, hf.gt_gu, hf.gt_gu, hf.gt_dn, rng);
         QTensor hg = make_qtensor(a, hf.gt_gu, NH_ * FE, D), hu = make_qtensor(a, hf.gt_gu, NH_ * FE, D), hd = make_qtensor(a, hf.gt_dn, NH_ * D, FE);
