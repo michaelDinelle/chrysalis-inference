@@ -67,7 +67,11 @@ def unused_gb():
 def settle(before=None):
     deadline = time.monotonic() + 60
     if MAC:
-        while before is not None and unused_gb() < before - 1 and time.monotonic() < deadline:
+        seen, start = [], time.monotonic()
+        while before is not None and time.monotonic() < deadline:
+            seen.append(unused_gb())
+            if seen[-1] >= before - 1 or time.monotonic() - start >= 3 and len(seen) > 10 and seen[-1] < seen[-11] + 0.25:
+                break
             time.sleep(0.2)
         return
     for total in glob.glob("/sys/class/drm/card[0-9]*/device/mem_info_vram_total"):
