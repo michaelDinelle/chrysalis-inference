@@ -1,5 +1,6 @@
 import ctypes as C
 import ctypes.util
+import errno
 import glob
 import json
 import os
@@ -92,7 +93,11 @@ class Sampler(threading.Thread):
         while not self.done.wait(0.1):
             now = time.monotonic()
             if self.power:
-                self.joules += int(open(self.power).read()) / 1e6 * (now - last)
+                try:
+                    self.joules += int(open(self.power).read()) / 1e6 * (now - last)
+                except OSError as e:
+                    if e.errno != errno.EBUSY:
+                        raise
             self.low, last = min(self.low, free_gb()), now
 
     def stop(self):
