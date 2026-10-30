@@ -241,6 +241,9 @@ void Engine::load(const std::string &path, int max_seqs, size_t reserve_bytes) {
     CK(hipSetDevice(0));
     CK(hipStreamCreateWithFlags(&st, hipStreamNonBlocking));
     CK(hipStreamCreateWithFlags(&cst, hipStreamNonBlocking));
+    CK(hipStreamCreateWithFlags(&lst, hipStreamNonBlocking));
+    CK(hipEventCreateWithFlags(&la_in, hipEventDisableTiming));
+    CK(hipEventCreateWithFlags(&la_read, hipEventDisableTiming));
     CK(hipEventCreateWithFlags(&staged, hipEventDisableTiming));
     CK(hipEventCreateWithFlags(&copied, hipEventDisableTiming));
     CK(hipEventCreateWithFlags(&topk_ready, hipEventDisableTiming));
@@ -799,7 +802,7 @@ void Engine::shutdown() {
     free_pages.clear(); page_ref.clear();
     if (cold_mem) (void)hipHostUnregister(cold_mem);
     (void)hipGetLastError();
-    (void)hipStreamDestroy(st); (void)hipStreamDestroy(cst);
+    (void)hipStreamDestroy(st); (void)hipStreamDestroy(cst); (void)hipStreamDestroy(lst);
     if (cold_mem) munmap(cold_mem, cold_bytes);
     if (spill_mem) munmap(spill_mem, spill_bytes);
     if (ngram_map) munmap(ngram_map, ngram_map_bytes);

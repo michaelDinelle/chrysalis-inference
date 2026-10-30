@@ -46,7 +46,7 @@ void hc_lo(float *lo, int T, half *oh, QAct oq, hipStream_t st);
 void hc_mix(const float *xn, const float *gate, int T, float *of, half *oh, QAct oq, hipStream_t st);
 void hc_combine(float *res, const float *inject, int ld_inject, const float *out, const float *out2, int T, hipStream_t st);
 void hc_mix_fused(const float *res, const float *gamma, const QTensor &down, const QTensor &up, const QTensor *inj, int T,
-                  float *lo, float *inject, int ld_inject, float *inv, float *mx, half *hh, QAct hq, hipStream_t st);
+                  float *lo, float *inject, int ld_inject, float *inv, float *mx, half *hh, QAct hq, QAct xq, hipStream_t st);
 void mtp_pack(const float *e, const float *xn, int T, float *out, half *out_h, hipStream_t st);
 
 struct GdnScanArgs {
@@ -79,7 +79,7 @@ constexpr int EMU_PICK = -(1 << 30);
 void router_dec(const half *W, const float *wsg, const float *x, int T, float *logits, float *sg, hipStream_t st);
 void router_route_dec(const half *W, const float *wsg, const float *x, int T, float *logits, float *sg, const int *slot_of,
                       int n_ram, int *ids, float *wts, int *hot_slot, MoeShared *sh, float gfrac, int layer, uint32_t gen,
-                      unsigned *counter, hipStream_t st, unsigned *counts = nullptr, unsigned starts = 1, float xfrac = 1.0f);
+                      unsigned *counter, hipStream_t st, unsigned *counts = nullptr, unsigned starts = 1, float xfrac = 1.0f, bool hand_x = true);
 void route_dec(const float *logits, int T, const int *slot_of, int n_ram, int *ids, float *wts, int *hot_slot, MoeShared *sh,
                float gfrac, const float *x, int layer, uint32_t gen, hipStream_t st);
 void moe_experts_dec(const QTensor &gate, const QTensor &up, const QTensor &down, const uint8_t *fmt, const QTensor &sgate,

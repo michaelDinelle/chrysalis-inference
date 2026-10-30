@@ -348,7 +348,7 @@ static void hc_mix_run(Engine &e, const HcMix &m, const float *res, int T, float
             const int n = std::min(4, T - t0);
             hc_mix_fused(res + (size_t)t0 * HCD, m.norm, m.down, m.up, inject ? &m.inject : nullptr, n, b.lo + (size_t)t0 * HCR,
                          inject ? inject + (size_t)t0 * HC : nullptr, HC, b.inv + t0 * HC, b.mx + (size_t)t0 * D,
-                         b.hh + (size_t)t0 * D, qoff(b.hq, (size_t)t0 * D), e.st);
+                         b.hh + (size_t)t0 * D, qoff(b.hq, (size_t)t0 * D), b.xn_q, e.st);
         }
         return;
     }
@@ -779,11 +779,16 @@ void Engine::ple_block_run(Seq &s, int c0, int n, bool verify, float *res) {
 }
 
 void Engine::lookahead(const Layer &w, int layer, int T, const float *res, unsigned starts) {
+    CK(hipEventRecord(la_in, st));
+    CK(hipStreamWaitEvent(lst, la_in, 0));
     for (int t0 = 0; t0 < T; t0 += 4)
         hc_mix_fused(res + (size_t)t0 * HCD, w.hcf.norm, w.hcf.down, w.hcf.up, nullptr, std::min(4, T - t0), la.lo + (size_t)t0 * HCR,
-                     nullptr, HC, la.inv + t0 * HC, la.mx + (size_t)t0 * D, la.hh + (size_t)t0 * D, qoff(la.hq, (size_t)t0 * D), st);
+                     nullptr, HC, la.inv + t0 * HC, la.mx + (size_t)t0 * D, la.hh + (size_t)t0 * D, qoff(la.hq, (size_t)t0 * D),
+                     qoff(b.xn_q, (size_t)4 * HCD), lst);
+    CK(hipEventRecord(la_read, lst));
     router_route_dec(w.router, w.sg_w, la.mx, T, la.logits, la.sg, w.slot_of, cold[layer].n, la.ids, la.wts, la.hot, d_sh_pred, gfrac,
-                     layer, gen + 1, la.counter, st, nullptr, starts, xfrac);
+                     layer, gen + 1, la.counter, lst, nullptr, starts, xfrac, false);
+    la_wait = true;
 }
 
 static Pos3 cell_pos(const Seq &s, int p0, const int *pos3, int cell) {
@@ -828,6 +833,7 @@ void Engine::forward(Seq &s, const int *tokens, int T, bool verify, const int *p
             }
             if (T <= 4 && la_on && xc.recent_hits < Experts::CPU_HEAVY && w.n_cold) lookahead(w, l, n, res);
             hc_mix_run(*this, w.hca, res, n, b.inj_a);
+            if (la_wait) { CK(hipStreamWaitEvent(st, la_read, 0)); la_wait = false; }
             if (is_attn_layer(l))
                 attn_block(w, l / 4, s, n, s.n + c0, res, b.inj_a, verify, s.pos + c0, pos3 ? b.rpos + 3 * c0 : nullptr,
                            cell_pos(s, s.n, pos3, (s.n + c0) / KPOOL * KPOOL));
@@ -879,6 +885,7 @@ void Engine::forward_parts(const Part *p, int np, const int *tokens, int T) {
         if (l == PLE_LAYER) ple_parts(p, np, T, b.res);
         if (la_on && xc.recent_hits < Experts::CPU_HEAVY && w.n_cold) lookahead(w, l, T, b.res, starts);
         hc_mix_run(*this, w.hca, b.res, T, b.inj_a, true);
+        if (la_wait) { CK(hipStreamWaitEvent(st, la_read, 0)); la_wait = false; }
         if (is_attn_layer(l)) attn_parts(w, l / 4, p, np, T, b.res, b.inj_a);
         else gdn_parts(w, gl++, p, np, T, b.res, b.inj_a);
         hc_mix_run(*this, w.hcf, b.res, T, b.inj_f, true);

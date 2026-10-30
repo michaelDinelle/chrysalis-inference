@@ -177,7 +177,9 @@ struct Engine {
     void pmark(int phase);
     uint32_t gen = 0;
 
-    hipStream_t st, cst;
+    hipStream_t st, cst, lst;
+    hipEvent_t la_in, la_read;
+    bool la_wait = false;
     MoeShared *sh_pred = nullptr, *d_sh_pred = nullptr;
     struct { float *lo, *inv, *mx, *logits, *sg, *wts; half *hh; QAct hq; int *ids, *hot; unsigned *counter; } la{};
     bool la_on = getenv("CHRYSALIS_FN_NO_LOOKAHEAD") == nullptr;

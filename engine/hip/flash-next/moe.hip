@@ -79,7 +79,7 @@ void route_dec(const float *logits, int T, const int *slot_of, int n_ram, int *i
 
 __global__ __launch_bounds__(256) void k_router_route(const half *W, const float *wsg, const float *x, int T, float *logits,
         float *sg, const int *slot_of, int n_ram, int *ids, float *wts, int *hot_slot, MoeShared *sh, float gfrac, int layer,
-        uint32_t gen, unsigned *counter, unsigned *counts, unsigned starts, float xfrac) {
+        uint32_t gen, unsigned *counter, unsigned *counts, unsigned starts, float xfrac, bool hand_x) {
     __shared__ bool last;
     __shared__ int ram_n[8], gpu_n[8];
     const int tid = threadIdx.x, wave = tid / 32, lane = tid % 32;
@@ -115,7 +115,7 @@ __global__ __launch_bounds__(256) void k_router_route(const half *W, const float
             if (lane == 0) sg[wave] = sigmoid(v);
         }
     }
-    if (sh) {
+    if (sh && hand_x) {
         const int n = T * D, per = (n + gridDim.x - 1) / gridDim.x, a = blockIdx.x * per, z = min(n, a + per);
         for (int i = a + tid; i < z; i += 256) sh->x[i] = x[i];
         __threadfence_system();
@@ -178,9 +178,9 @@ __global__ __launch_bounds__(256) void k_router_route(const half *W, const float
 }
 void router_route_dec(const half *W, const float *wsg, const float *x, int T, float *logits, float *sg, const int *slot_of,
                       int n_ram, int *ids, float *wts, int *hot_slot, MoeShared *sh, float gfrac, int layer, uint32_t gen,
-                      unsigned *counter, hipStream_t st, unsigned *counts, unsigned starts, float xfrac) {
+                      unsigned *counter, hipStream_t st, unsigned *counts, unsigned starts, float xfrac, bool hand_x) {
     k_router_route<<<NE / 8, 256, 0, st>>>(W, wsg, x, T, logits, sg, slot_of, n_ram, ids, wts, hot_slot, sh, gfrac, layer, gen,
-                                           counter, counts, starts, xfrac);
+                                           counter, counts, starts, xfrac, hand_x);
 }
 
 __global__ __launch_bounds__(256) void k_moe_finish(const uint32_t *done, uint32_t gen, const float *y, const int *hot_slot,

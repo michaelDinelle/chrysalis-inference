@@ -39,7 +39,7 @@ int main() {
     float *lo2 = a.get<float>((size_t)TM * HCR), *inv = a.get<float>(TM * HC);
     half *hh1 = a.get<half>((size_t)TM * D), *hh2 = a.get<half>((size_t)TM * D);
     auto qact = [&](size_t n) { QAct q; q.q = a.get<int8_t>(n); q.d = a.get<float>(n / 32); return q; };
-    QAct xq = qact((size_t)TM * HCD), lq = qact((size_t)TM * HCR), hq1 = qact((size_t)TM * D), hq2 = qact((size_t)TM * D);
+    QAct xq = qact((size_t)TM * HCD), xq2 = qact((size_t)TM * HCD), lq = qact((size_t)TM * HCR), hq1 = qact((size_t)TM * D), hq2 = qact((size_t)TM * D);
     auto old_path = [&](int T) {
         hc_norm(dres, dgam, T, xn, nullptr, xq, st);
         gemv(down, xq, T, lo, HCR, GEMV_STORE, st);
@@ -48,7 +48,7 @@ int main() {
         gemv(inj, xq, T, in1, HC, GEMV_STORE, st);
         hc_mix(xn, gate, T, mx1, hh1, hq1, st);
     };
-    auto new_path = [&](int T) { hc_mix_fused(dres, dgam, down, up, &inj, T, lo2, in2, HC, inv, mx2, hh2, hq2, st); };
+    auto new_path = [&](int T) { hc_mix_fused(dres, dgam, down, up, &inj, T, lo2, in2, HC, inv, mx2, hh2, hq2, xq2, st); };
     int fails = 0;
     for (int T = 1; T <= TM; T++) {
         old_path(T); new_path(T);
