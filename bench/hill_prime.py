@@ -1,6 +1,7 @@
 import glob
 import hashlib
 import os
+import platform
 import shutil
 import subprocess
 import sys
@@ -36,12 +37,15 @@ for name in ("fn", "27b"):
 lib = "dylib" if MAC else "so"
 for kept, sources, warm in (("hipblaslt.txt", (f"build/libchrysalis.{lib}", f"build/libchrysalis_fn.{lib}", "chrysalis/engine.py"), "27b"),
                             ("flash-next-calibration.txt", (f"build/libchrysalis_fn.{lib}", "chrysalis/engine.py"), "fn")):
-    built = hashlib.sha256(b"".join(open(os.path.join(ROOT, f), "rb").read() for f in sources)).hexdigest()
+    built = hashlib.sha256(b"".join(open(os.path.join(ROOT, f), "rb").read() for f in sources) + platform.platform().encode()).hexdigest()
     mark = os.path.join(WORK, kept + ".built")
     if os.path.exists(mark) and open(mark).read() == built:
         continue
     if os.path.exists(os.path.join(WORK, kept)):
         os.remove(os.path.join(WORK, kept))
+    if warm == "27b":
+        for archive in glob.glob(os.path.join(ROOT, "build", "*.archive")):
+            os.remove(archive)
     if warm:
         ready = subprocess.run([PY, os.path.join(ROOT, "bench/hill_ready.py"), warm], capture_output=True, text=True)
         if ready.returncode:
