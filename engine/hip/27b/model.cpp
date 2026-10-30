@@ -18,7 +18,13 @@ int Engine::seq_new() {
     return -1;
 }
 
+void Engine::settle(Seq &s) {
+    if (s.restoring) CK(hipStreamWaitEvent(st, s.ev[11], 0));
+    s.restoring = false;
+}
+
 void Engine::seq_reset(Seq &s) {
+    settle(s);
     for (int p : s.pages) page_release(p);
     s.n = 0; s.pos = 0; s.pending = -1; s.pages.clear(); s.seen.clear(); s.top_v.clear(); s.top_i.clear();
     s.look.clear();
@@ -92,6 +98,7 @@ int Engine::snapshot(int id) {
     sn.pages.assign(s.pages.begin(), s.pages.begin() + (s.n + PAGE - 1) / PAGE);
     for (int p : sn.pages) page_ref[p]++;
     const size_t ssm = (size_t)48 * GV * GD * GD * 4, conv = (size_t)48 * QKV * 3 * 4;
+    settle(s);
     CK(hipStreamWaitEvent(st, copied, 0));
     CK(hipMemcpyAsync(stage_state, s.ssm, ssm, hipMemcpyDeviceToDevice, st));
     CK(hipMemcpyAsync(stage_state + ssm, s.conv, conv, hipMemcpyDeviceToDevice, st));
@@ -117,10 +124,17 @@ void Engine::restore(int id, int snap) {
     s.pending = -1;
     s.top_v = sn.top_v; s.top_i = sn.top_i; s.seen.clear();
     const uint8_t *h = (const uint8_t *)sn.host;
-    const size_t ssm = (size_t)48 * GV * GD * GD * 4, conv = (size_t)48 * QKV * 3 * 4;
-    CK(hipMemcpyAsync(s.ssm, h, ssm, hipMemcpyHostToDevice, st));
-    CK(hipMemcpyAsync(s.conv, h + ssm, conv, hipMemcpyHostToDevice, st));
-    CK(hipMemcpyAsync(s.h_last, h + ssm + conv, D * 4, hipMemcpyHostToDevice, st));
+    const size_t ssm = (size_t)GV * GD * GD * 4, conv = (size_t)QKV * 3 * 4;
+    if (!s.ev[0]) for (hipEvent_t &e : s.ev) CK(hipEventCreateWithFlags(&e, hipEventDisableTiming));
+    CK(hipEventRecord(staged, st));
+    CK(hipStreamWaitEvent(cst, staged, 0));
+    for (int gl = 0; gl < 48; gl += 4) {
+        CK(hipMemcpyAsync((uint8_t *)s.ssm + gl * ssm, h + gl * ssm, 4 * ssm, hipMemcpyHostToDevice, cst));
+        CK(hipMemcpyAsync((uint8_t *)s.conv + gl * conv, h + 48 * ssm + gl * conv, 4 * conv, hipMemcpyHostToDevice, cst));
+        CK(hipEventRecord(s.ev[gl / 4], cst));
+    }
+    s.restoring = true;
+    CK(hipMemcpyAsync(s.h_last, h + 48 * (ssm + conv), D * 4, hipMemcpyHostToDevice, st));
 }
 
 struct SnapHeader { char magic[8]; uint64_t kv_page, state; int32_t n, pos, n_top, n_pages; };
@@ -311,6 +325,7 @@ void Engine::gdn_block(const Layer &w, int gl, Seq &s, int T, bool verify, float
     linear(w.qkv, T, NO_Q, b.hh, D, raw, QKV, GEMV_STORE);
     linear(w.z, T, NO_Q, b.hh, D, z, GV * GD, GEMV_STORE);
     gemm32((const half *)w.ab.f, 2 * GV, D, b.hh, D, T, ab, 2 * GV);
+    if (s.restoring) CK(hipStreamWaitEvent(st, s.ev[gl / 4], 0));
     gdn_conv(raw, T, w.conv, s.conv + (size_t)gl * QKV * 3, true, b.qn, b.kn, b.vc, st);
     GdnScanArgs sa{};
     sa.S = s.ssm + (size_t)gl * GV * GD * GD; sa.qn = b.qn; sa.kn = b.kn; sa.vc = b.vc; sa.ab = ab;
@@ -336,6 +351,7 @@ void Engine::gdn_parts(const Layer &w, int gl, const Part *p, int np, int T, flo
         g.kn_out = b.v_kn + ((size_t)gl * 8 + q.off) * GK * GD; g.vc_out = b.v_vc + ((size_t)gl * 8 + q.off) * GV * GD;
         g.ab_out = b.v_ab + ((size_t)gl * 8 + q.off) * 2 * GV;
         g.out = QAct{b.mq.q + (size_t)q.off * GV * GD, b.mq.d + (size_t)q.off * GV * GD / 32};
+        if (q.s->restoring) CK(hipStreamWaitEvent(st, q.s->ev[gl / 4], 0));
         gdn_step(g, st);
     }
     residual(w.ssm_out, T, b.mq, nullptr, GV * GD, x, w.post_norm, nullptr);
@@ -366,6 +382,7 @@ void Engine::forward(Seq &s, int T, bool verify, int rope0, bool rpos, bool img)
         const bool last = l == NL - 1;
         ffn_block(L[l], T, b.x, last ? out_norm : L[l + 1].attn_norm, last ? b.hfin : nullptr);
     }
+    s.restoring = false;
     if (T <= 8 && !verify) gdn_conv_commit(s.conv, b.v_raw, T, 8 * QKV, 48, st);
 }
 
@@ -379,8 +396,10 @@ void Engine::forward_parts(const Part *p, int np, int T) {
         const bool last = l == NL - 1;
         ffn_block(L[l], T, b.x, last ? out_norm : L[l + 1].attn_norm, last ? b.hfin : nullptr);
     }
-    for (int i = 0; i < np; i++)
+    for (int i = 0; i < np; i++) {
+        p[i].s->restoring = false;
         if (!p[i].verify) gdn_conv_commit(p[i].s->conv, b.v_raw + (size_t)p[i].off * QKV, p[i].T, 8 * QKV, 48, st);
+    }
 }
 
 void Engine::mtp_forward(Seq &s, int T, int pos0, const float *h_prev, const int *tokens, int rope0, bool rpos, bool img) {

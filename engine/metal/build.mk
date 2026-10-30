@@ -11,7 +11,7 @@ GGML_REF := -I$(GGML)/ggml/include -L$(GGML)/build/bin -lggml-base -Wl,-rpath,$(
 K27   := $(wildcard $(M27)/*.metal)
 SRC27 := $(M27)/mtl.mm $(M27)/load.mm $(M27)/model.mm $(M27)/api.mm
 H27   := $(wildcard $(M27)/*.h) engine/api.h engine/sampler.h engine/lookup.h engine/gguf.h
-F27   := -std=c++20 -O2 -fobjc-arc -I$(M27) -Iengine -Wall -Wno-unused-function
+F27   := -std=c++20 -O2 -fobjc-arc -I$(M27) -Iengine -Wall -Wno-unused-function -fvisibility=hidden -fvisibility-inlines-hidden
 FW27  := $(FW) -framework MetalPerformanceShaders -framework QuartzCore
 
 build/air/27b/%.air: $(M27)/%.metal $(M27)/kcommon.h $(M27)/args.h
@@ -27,7 +27,7 @@ build/o27/%.o: % $(H27)
 	$(OBJCXX) $(F27) -c -o $@ $<
 
 build/libchrysalis.dylib: $(OBJ) build/chrysalis.metallib
-	$(OBJCXX) $(F27) -dynamiclib -o $@.tmp $(OBJ) $(FW27) && mv $@.tmp $@
+	$(OBJCXX) $(F27) -dynamiclib -Wl,-dead_strip -o $@.tmp $(OBJ) $(FW27) && mv $@.tmp $@
 
 build/test_27b: tests/metal/test_27b.mm $(SRC27) $(H27) build/chrysalis.metallib
 	$(OBJCXX) $(F27) -o $@ $< $(filter-out $(M27)/api.mm,$(SRC27)) $(FW27)
@@ -36,7 +36,7 @@ KFN   := $(wildcard $(MFN)/kernels/*.metal)
 KHFN  := $(wildcard $(MFN)/kernels/*.h)
 SRCFN := $(MFN)/engine.mm $(MFN)/experts.mm $(MFN)/pass.mm $(MFN)/api.mm
 HFN   := $(wildcard $(MFN)/*.h) engine/api.h engine/sampler.h engine/lookup.h
-FFN   := -O3 -std=c++20 -fobjc-arc -fPIC -Wall -Wno-unused-function -Wno-missing-braces -I.
+FFN   := -O3 -std=c++20 -fobjc-arc -fPIC -Wall -Wno-unused-function -Wno-missing-braces -I. -fvisibility=hidden -fvisibility-inlines-hidden
 MFLAGS := -O3 -std=metal3.2 -ffast-math -Wno-unused-variable
 
 build/air/fn/%.air: $(MFN)/kernels/%.metal $(KHFN)
@@ -56,7 +56,7 @@ build/ofn/%.o: % $(HFN)
 	$(OBJCXX) $(FFN) -c -o $@ $<
 
 build/libchrysalis_fn.dylib: $(FN_OBJ) build/chrysalis_fn.metallib
-	$(OBJCXX) $(FFN) -dynamiclib -o $@.tmp $(FN_OBJ) $(FW) && mv $@.tmp $@
+	$(OBJCXX) $(FFN) -dynamiclib -Wl,-dead_strip -o $@.tmp $(FN_OBJ) $(FW) && mv $@.tmp $@
 
 build/pf/chrysalis_fn.metallib: build/air/fn/prefill.air
 	@mkdir -p build/pf

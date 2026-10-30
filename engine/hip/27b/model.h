@@ -35,6 +35,8 @@ struct Seq {
     int *d_pages = nullptr;
     float *ssm = nullptr, *conv = nullptr;
     float *h_last = nullptr;
+    hipEvent_t ev[12] = {};
+    bool restoring = false;
     std::vector<float> top_v;
     std::vector<int> top_i;
     Seen seen;
@@ -97,6 +99,7 @@ struct Engine {
     void add_kv_memory(uint8_t *p, size_t bytes);
     int seq_new();
     void seq_reset(Seq &s);
+    void settle(Seq &s);
     void seq_free(int id);
     void seq_truncate(int id, int n);
     int snapshot(int id);

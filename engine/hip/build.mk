@@ -1,11 +1,11 @@
 ROCM  ?= $(CURDIR)/data/rocm
 HIPCC := $(ROCM)/bin/hipcc
-FLAGS := -O3 -std=c++20 -fPIC --offload-arch=gfx1100 -Wno-unused-result
+FLAGS := -O3 -std=c++20 -fPIC --offload-arch=gfx1100 -Wno-unused-result -ffunction-sections -fdata-sections -fvisibility=hidden -fvisibility-inlines-hidden
 H     := engine/hip
 SRC   := $(H)/27b/relayout.hip $(H)/27b/quant.hip $(H)/27b/ops.hip $(H)/gdn.hip $(H)/27b/attn.hip $(H)/vision.hip $(H)/27b/model.cpp $(H)/27b/load.cpp \
          $(H)/27b/api.cpp
 KERN  := $(filter %.hip,$(SRC))
-LIBS  := -L$(ROCM)/lib -lhipblaslt -Wl,-rpath,$(ROCM)/lib -Wl,--no-undefined
+LIBS  := -L$(ROCM)/lib -lhipblaslt -Wl,-rpath,$(ROCM)/lib -Wl,--no-undefined -Wl,--gc-sections
 
 OBJ := $(SRC:%=build/o27/%.o)
 build/o27/%.o: % $(wildcard engine/*.h $(H)/*.h $(H)/27b/*.h)

@@ -2,6 +2,7 @@
 #include "sampler.h"
 #include <cstdint>
 
+#pragma GCC visibility push(default)
 extern "C" {
 void chrysalis_calibration(const char *path);
 int chrysalis_init(const char *path, int max_seqs, int chunk, long long reserve_mb);
@@ -55,3 +56,4 @@ int chrysalis_pool_save(const char *path);
 int chrysalis_pool_warm(const char *path);
 int chrysalis_bench_fill(int id, int n);
 }
+#pragma GCC visibility pop
