@@ -38,12 +38,12 @@ stats = s.stats()
 out["kv_tokens"] = stats["kv_tokens"]
 out["mem_limited"] = (stats.get("experts") or {}).get("memory_limited")
 out["ram_gb"] = s.peak_ram_gb()
-s.stop()
 out.update(sampler.stop())
+out["run_s"] = time.monotonic() - start
+s.stop()
 for rival, r in RIVALS["rivals"].items():
     if r["model"] == name:
         for i, case in enumerate(("short", "4k")):
             out[f"{rival}.ttft.{case}"] = r["ttft"][i] / out[f"ttft.{case}"] if here else None
             out[f"{rival}.decode.{case}"] = out[f"decode_tps.{case}"] / r["tps"][i] if here else None
-out["run_s"] = time.monotonic() - start
 print(json.dumps(out))
