@@ -33,6 +33,11 @@ only gets faster. Every machine with a record (the RX 7900 here, the M4 Max on s
 `.hill/hill gate` there and append its new .hill/ledger.jsonl lines here before committing. The hook (`git config
 core.hooksPath bench/hooks`) holds every commit to that.
 
+These rules are the hill-climb-anything skill's
+([~/.claude/skills/hill-climb-anything/SKILL.md](../.claude/skills/hill-climb-anything/SKILL.md), source in
+~/Projects/hill-climb-anything). Load it before any change to a measured path and climb by it every time: choose a
+target, profile it, change one thing, gate it on every machine, and report each verdict's table.
+
 ## Comments
 
 None: no comments or docstrings anywhere in the repo, in any language, including code inside strings.
