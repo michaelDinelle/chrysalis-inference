@@ -2268,7 +2268,7 @@ static size_t values_at(Spec *s, const char *commit, Column **out) {
         J *e = l.v[i];
         if (!is(e, "harness", d.harness)) continue;
         if (!((is(e, "type", "record") && is(e, "product", d.product)) ||
-              (is(e, "type", "verdict") && is(e, "verdict", "PROMOTE") && is(e, "candidate", d.product))))
+              (is(e, "type", "verdict") && (is(e, "verdict", "PROMOTE") || is(e, "verdict", "TIE")) && is(e, "candidate", d.product))))
             continue;
         const char *ident = jtext(jget(e, "machine"));
         size_t k = 0;
