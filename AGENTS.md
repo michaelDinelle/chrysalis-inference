@@ -1,5 +1,11 @@
 # Chrysalis Inference: notes for coding agents
 
+**Using the Hill Climb Anything skill is mandatory, at all times, for every change:
+https://github.com/michaelDinelle/hill-climb-anything** (installed at ~/.claude/skills/hill-climb-anything). Load it
+before touching anything and climb by it: choose a target, profile it, change one thing, gate it with `.hill/hill gate`
+on every machine with a record, and report each verdict's table. It is not optional, and no task is too small or too
+urgent for it.
+
 README.md shows what Chrysalis is. This file is how to change it.
 
 ## Layout
@@ -32,11 +38,6 @@ is a reward too: a gate takes minutes, deep context is restored from snapshots p
 only gets faster. Every machine with a record (the RX 7900 here, the M4 Max on studio) judges each change: run
 `.hill/hill gate` there and append its new .hill/ledger.jsonl lines here before committing. The hook (`git config
 core.hooksPath bench/hooks`) holds every commit to that.
-
-These rules are the hill-climb-anything skill's
-([~/.claude/skills/hill-climb-anything/SKILL.md](../.claude/skills/hill-climb-anything/SKILL.md), source in
-~/Projects/hill-climb-anything). Load it before any change to a measured path and climb by it every time: choose a
-target, profile it, change one thing, gate it on every machine, and report each verdict's table.
 
 ## Comments
 
