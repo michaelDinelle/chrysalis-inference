@@ -1,0 +1,94 @@
+#!/bin/bash
+set -u
+command -v setpci >/dev/null || { echo "chrysalis-pcie-link: needs setpci (pciutils)"; exit 1; }
+speeds=(? 2.5 5.0 8.0 16.0 32.0 64.0)
+tries=${CHRYSALIS_LINK_TRIES:-12}
+gen() { case "$1" in 2.5*) echo 1 ;; 5.0*) echo 2 ;; 8.0*) echo 3 ;; 16.0*) echo 4 ;; 32.0*) echo 5 ;; 64.0*) echo 6 ;; *) echo 0 ;; esac; }
+reg() { local v; v=$(setpci -s "$1" "$2" 2>/dev/null) && echo $((0x$v)) || echo 0; }
+speed() { gen "$(cat "/sys/bus/pci/devices/$1/current_link_speed" 2>/dev/null)"; }
+passed() {
+    case $2 in
+        3) (( $(reg "$1" CAP_EXP+32.w) & 4 )) ;;
+        4) (( $(reg "$1" ECAP26+0c.l) & 2 )) ;;
+        5) (( $(reg "$1" ECAP2a+0c.l) & 2 )) ;;
+        *) true ;;
+    esac
+}
+answers() { [ "$(setpci -s "$1" 0.w 2>/dev/null)" != ffff ]; }
+card_cap_reg() {
+    local gpu=$1 d=/sys/bus/pci/devices/$1 nbif base
+    [ "$(basename "$(readlink -f "$d/driver" 2>/dev/null)")" = amdgpu ] || return 1
+    nbif=$d/ip_discovery/die/0/NBIF/0
+    [ "$(cat "$nbif/major" 2>/dev/null).$(cat "$nbif/minor" 2>/dev/null)" = 4.3 ] || return 1
+    base=$(sed -n 6p "$nbif/base_addr")
+    [ -n "$base" ] && [ -e "/sys/kernel/debug/dri/$gpu/amdgpu_regs_pcie" ] || return 1
+    echo "/sys/kernel/debug/dri/$gpu/amdgpu_regs_pcie $(( (base + 0x28900a4) * 4 ))"
+}
+lift_cap() {
+    local f a v want=$(( $2 - 1 ))
+    read -r f a <<< "$1" || return 0
+    [ -n "$f" ] || return 0
+    v=$((0x$(dd if="$f" bs=4 skip=$((a / 4)) count=1 status=none | od -An -tx4 | tr -d ' ')))
+    (( (v >> 11) & 1 )) || return 0
+    (( ((v >> 12) & 7) >= want )) && return 0
+    v=$(( (v & ~0x7000) | (want << 12) ))
+    printf "$(printf '\\x%02x\\x%02x\\x%02x\\x%02x' $((v & 255)) $(((v >> 8) & 255)) $(((v >> 16) & 255)) $(((v >> 24) & 255)))" |
+        dd of="$f" bs=4 seek=$((a / 4)) count=1 conv=notrunc status=none
+    echo "  the card had capped itself below ${speeds[$2]} GT/s; lifted"
+}
+retrain() {
+    local p=$1
+    setpci -s "$p" CAP_EXP+30.w="$2":f
+    setpci -s "$p" ECAP19+4.w=1:1
+    setpci -s "$p" CAP_EXP+10.w=20:20
+    for _ in $(seq 1 100); do
+        sleep 0.01
+        (( $(reg "$p" CAP_EXP+12.w) & 0x800 )) || break
+    done
+    sleep 0.1
+    setpci -s "$p" ECAP19+4.w=0:1
+}
+retune() {
+    local p=$1 c=$2 best=$3 gpu=$4 before want n cap
+    before=$(speed "$p")
+    cap=$(card_cap_reg "$gpu") || cap=
+    echo "$p -> $c: at ${speeds[$before]} GT/s, both ends support ${speeds[$best]}; power-on tuning failed, retuning"
+    for (( want = 3; want <= best; want++ )); do
+        passed "$p" $want && [ "$(speed "$p")" -ge $want ] && continue
+        for (( n = 1; n <= tries; n++ )); do
+            lift_cap "$cap" "$best"
+            retrain "$p" $want
+            if ! answers "$c"; then
+                retrain "$p" 1
+                setpci -s "$p" CAP_EXP+30.w="$best":f
+                echo "  the card stopped answering at ${speeds[$want]} GT/s; back at $(cat "/sys/bus/pci/devices/$p/current_link_speed")"
+                return 1
+            fi
+            passed "$p" $want && [ "$(speed "$p")" -ge $want ] && break
+        done
+        if (( n > tries )); then
+            echo "  ${speeds[$want]} GT/s tuning failed $tries times"
+            break
+        fi
+        echo "  ${speeds[$want]} GT/s tuning passed on try $n"
+    done
+    setpci -s "$p" CAP_EXP+30.w="$best":f
+    echo "  now $(cat "/sys/bus/pci/devices/$p/current_link_speed") x$(cat "/sys/bus/pci/devices/$p/current_link_width")"
+}
+for dev in /sys/bus/pci/devices/*; do
+    [[ $(cat "$dev/class") == 0x03* ]] || continue
+    gpu=$(basename "$dev") child=$(readlink -f "$dev")
+    while port=$(dirname "$child"); [[ $(basename "$port") =~ ^[0-9a-f]{4}:[0-9a-f]{2}:[0-9a-f]{2}\.[0-7]$ ]]; do
+        p=$(basename "$port") c=$(basename "$child")
+        type=$(( ($(reg "$p" CAP_EXP+2.w) >> 4) & 0xf ))
+        if (( type == 4 || type == 6 )) && [ "$(cat "$port/removable" 2>/dev/null)" != removable ]; then
+            best=$(gen "$(cat "$port/max_link_speed")") cmax=$(gen "$(cat "$child/max_link_speed")")
+            (( cmax < best )) && best=$cmax
+            failed=0
+            for (( g = 3; g <= best; g++ )); do passed "$p" $g || failed=1; done
+            (( failed && $(speed "$p") < best )) && retune "$p" "$c" "$best" "$gpu"
+        fi
+        child=$port
+    done
+done
+exit 0

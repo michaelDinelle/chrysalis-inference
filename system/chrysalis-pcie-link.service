@@ -1,0 +1,10 @@
+[Unit]
+Description=Retune GPU PCIe links whose power-on tuning failed
+After=sys-kernel-debug.mount suspend.target hibernate.target hybrid-sleep.target suspend-then-hibernate.target
+
+[Service]
+Type=exec
+ExecStart=/usr/local/libexec/chrysalis-pcie-link
+
+[Install]
+WantedBy=multi-user.target suspend.target hibernate.target hybrid-sleep.target suspend-then-hibernate.target

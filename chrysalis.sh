@@ -108,6 +108,7 @@ usage: chrysalis.sh [--host 0.0.0.0]
   Chrysalis on another computer finds this one and uses its GPU
 
   chrysalis.sh get <model>   download a model's files now (Chrysalis gets the one it loads by itself)
+  chrysalis.sh link          retune the GPU's PCIe link at every boot and wake, when the board's own tuning fails
 EOF
 }
 
@@ -218,6 +219,29 @@ EOF
         mkdir -p "${UFW_NOTE%/*}" && echo "$net 8081:8083 5353" >> "$UFW_NOTE"
     else
         echo "  not changed: run 'chrysalis.sh --host 0.0.0.0' in a terminal, which asks for the password"
+    fi
+}
+
+LINK_FIX=/usr/local/libexec/chrysalis-pcie-link
+LINK_NOTE=~/.config/chrysalis/pcie-link
+tune_link() {
+    [ -z "$MAC$WIN" ] && command -v systemctl >/dev/null || return 0
+    if cmp -s "$ROOT/system/chrysalis-pcie-link" "$LINK_FIX"; then return 0; fi
+    if [ "${1:-}" != ask ] && grep -qsx no "$LINK_NOTE"; then return 0; fi
+    local v big=
+    for v in /sys/class/drm/card*/device/mem_info_vram_total; do
+        if [ -r "$v" ] && (( $(cat "$v") >= 4 << 30 )); then big=1; fi
+    done
+    [ -n "$big" ] || return 0
+    echo "A GPU's PCIe link comes up below its speed when the board's power-on tuning fails: Chrysalis retunes it at every boot and wake, which takes your password, once"
+    if [ -t 0 ] && sudo sh -c "install -Dm755 '$ROOT/system/chrysalis-pcie-link' $LINK_FIX &&
+            install -Dm644 '$ROOT/system/chrysalis-pcie-link.service' /etc/systemd/system/chrysalis-pcie-link.service &&
+            install -Dm644 '$ROOT/system/90-chrysalis-pcie-link.rules' /etc/udev/rules.d/90-chrysalis-pcie-link.rules &&
+            systemctl daemon-reload && systemctl enable --now chrysalis-pcie-link.service" >/dev/null 2>&1; then
+        rm -f "$LINK_NOTE"
+    else
+        mkdir -p "${LINK_NOTE%/*}" && echo no > "$LINK_NOTE"
+        echo "  not installed: 'chrysalis.sh link' in a terminal installs it"
     fi
 }
 
@@ -382,6 +406,7 @@ case "${1:-}" in
   ""|--host) case "${1:-}:${2:-}" in --host:0.0.0.0) to=0.0.0.0 ;; --host:127.0.0.1|:) to=127.0.0.1 ;; *) usage; exit 1 ;; esac
             if here -f -o /dev/null "$WEB_URL/"; then echo "Chrysalis is running already, in another terminal (Ctrl+C there stops it)"; exit 1; fi
             wsl_ready
+            tune_link
             if [ $to = 0.0.0.0 ]; then let_in; fi
             if [ -n "$MAC" ]; then
                 codesign -v "$APP" 2>/dev/null || codesign --force -s - "$APP" 2>/dev/null
@@ -408,6 +433,7 @@ case "${1:-}" in
             [ -d "$ROOT/web/node_modules" ] || (cd "$ROOT/web" && "$BUN" install --frozen-lockfile >/dev/null)
             cd "$ROOT/web" && NODE_ENV=production CHRYSALIS_HOST=$to "$BUN" $web ;;
   gpu)      has_gpu ;;
+  link)     tune_link ask ;;
   get)      setup; get "${@:2}" ;;
   serve)    if [ -z "$MAC" ]; then
                 ggml="$ROOT/ggml/avx2"; grep -qw avx512_vnni /proc/cpuinfo && ggml="$ROOT/ggml/avx512"
