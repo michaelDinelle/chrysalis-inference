@@ -27,7 +27,12 @@ RECORDS = lambda a, b: "\n".join(f"record{i:06d}: alpha beta gamma delta epsilon
 LONG = "[trial 1]\n" + RECORDS(1, 5201) + "\n\nSummarize the structure of these records and explain how to look up a record by its ID."
 MORE = RECORDS(5201, 5261) + "\n\nThese records were added since. Which ID is the last one now?"
 MAC = sys.platform == "darwin"
-BACKENDS = ("hip", "metal")
+BACKENDS = ("hip", "metal", "cuda")
+MACHINE_BACKEND = "metal" if MAC else "cuda" if os.path.exists("/dev/nvidiactl") else "hip"
+
+
+def tree_supports(tree):
+    return os.path.exists(os.path.join(tree, "engine", MACHINE_BACKEND, "build.mk"))
 FN_FILES = ["data/models/qwen3.8-flash-next/qwen3.8-flash-next.gguf", "data/models/qwen3.8-flash-next/src/Q8_0/Qwen3.8-Flash-Next-Q8_0-00003-of-00006.gguf",
             "data/models/tokenizer.json"]
 ON = {
@@ -37,6 +42,11 @@ ON = {
             "27b": dict(env={}, tune=[], files=["data/models/qwen3.8-27b/qwen3.8-27b.gguf", "data/models/tokenizer.json", "data/cache/hipblaslt.txt"])},
     "metal": {"fn": dict(env={"CHRYSALIS_FN_CACHE_GB": "16", "CHRYSALIS_FN_CTX": "131072"}, tune=[], files=FN_FILES),
               "27b": dict(env={}, tune=[], files=["data/models/qwen3.8-27b/qwen3.8-27b.gguf", "data/models/tokenizer.json"])},
+    "cuda": {"fn": dict(env={"CHRYSALIS_FN_CTX": "131072"}, tune=[],
+                        files=FN_FILES + ["data/llama.cpp/build/bin/libggml-cpu.so", "data/llama.cpp/build/bin/libggml-base.so",
+                                          "data/cache/cublaslt.txt", "data/cache/flash-next-calibration.txt"]),
+             "27b": dict(env={"CHRYSALIS_CTX": "131072"}, tune=[],
+                         files=["data/models/qwen3.8-27b/qwen3.8-27b.gguf", "data/models/tokenizer.json", "data/cache/cublaslt.txt"])},
 }
 DIRS = {"fn": "flash-next", "27b": "27b"}
 
@@ -76,6 +86,88 @@ def tuned(engine, name):
     return engine
 
 
+SCOPE = ["systemd-run", "--user", "--scope", "-q", "-p", "MemorySwapMax=0"]
+_scope = []
+
+
+def scope():
+    if not _scope:
+        _scope.append(not MAC and shutil.which("systemd-run") is not None and
+                      subprocess.run([*SCOPE, "true"], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL).returncode == 0)
+    return SCOPE if _scope[0] else []
+
+
+def cgroup_free():
+    try:
+        line = open("/proc/self/cgroup").read().split("\n")[0]
+        base = os.path.join("/sys/fs/cgroup", line.split("::", 1)[1].lstrip("/")) if "::" in line else None
+        while base and base.startswith("/sys/fs/cgroup"):
+            limit = os.path.join(base, "memory.max")
+            if os.path.exists(limit) and open(limit).read().strip() != "max":
+                used = int(open(os.path.join(base, "memory.current")).read())
+                stat = dict(l.split() for l in open(os.path.join(base, "memory.stat")) if len(l.split()) == 2)
+                return int(open(limit).read()) - used + int(stat.get("file", 0))
+            base = os.path.dirname(base)
+    except (OSError, ValueError, IndexError):
+        pass
+    return None
+
+
+def free_bytes():
+    avail = next(int(l.split()[1]) for l in open("/proc/meminfo") if l.startswith("MemAvailable:")) * 1024
+    cg = cgroup_free()
+    return min(avail, cg) if cg is not None else avail
+
+
+class Nvml:
+    def __init__(self):
+        self.lib = None
+        try:
+            lib = C.CDLL("libnvidia-ml.so.1")
+            if lib.nvmlInit_v2() == 0:
+                n = C.c_uint(0)
+                lib.nvmlDeviceGetCount_v2(C.byref(n))
+                self.handles = []
+                for i in range(n.value):
+                    h = C.c_void_p()
+                    if lib.nvmlDeviceGetHandleByIndex_v2(i, C.byref(h)) == 0:
+                        self.handles.append(h)
+                self.lib = lib if self.handles else None
+        except OSError:
+            pass
+
+    def used(self):
+        class Info(C.Structure):
+            _fields_ = [("version", C.c_uint), ("total", C.c_ulonglong), ("reserved", C.c_ulonglong), ("free", C.c_ulonglong),
+                        ("used", C.c_ulonglong)]
+        total = 0
+        for h in self.handles:
+            info = Info(version=C.sizeof(Info) | 2 << 24)
+            if self.lib.nvmlDeviceGetMemoryInfo_v2(h, C.byref(info)) != 0:
+                raise OSError("nvmlDeviceGetMemoryInfo_v2 failed")
+            total += info.used
+        return total
+
+    def energy_mj(self):
+        total = 0
+        for h in self.handles:
+            mj = C.c_ulonglong(0)
+            if self.lib.nvmlDeviceGetTotalEnergyConsumption(h, C.byref(mj)) != 0:
+                return None
+            total += mj.value
+        return total
+
+    def display(self):
+        for h in self.handles:
+            on = C.c_int(0)
+            if self.lib.nvmlDeviceGetDisplayActive(h, C.byref(on)) == 0 and on.value:
+                return True
+        return False
+
+
+NVML = Nvml() if not MAC and MACHINE_BACKEND == "cuda" else None
+
+
 def free_port():
     with socket.socket() as s:
         s.bind(("127.0.0.1", 0))
@@ -83,6 +175,8 @@ def free_port():
 
 
 def drop_cache(path):
+    if not os.path.exists(path):
+        return
     fd = os.open(path, os.O_RDONLY)
     try:
         if MAC:
@@ -181,6 +275,8 @@ def run_pass(name, with_kl):
     env = [f"CHRYSALIS_SNAPSHOTS={snap}", *(f"{k}={v}" for k, v in b["env"].items())]
     if MAC:
         cmd = ["env", *env, f"CHRYSALIS_FN_STATS={os.path.join(snap, 'experts.bin')}", PY, os.path.join(ROOT, "bench/serve.py"), name, str(port)]
+    elif MACHINE_BACKEND == "cuda":
+        cmd = [*scope(), "env", *env, PY, os.path.join(ROOT, "bench/serve.py"), name, str(port)]
     else:
         cmd = ["systemd-run", "--user", "--scope", "-q", "-p", "MemorySwapMax=0", "env", f"LD_PRELOAD={os.path.join(ROOT, 'build/vram_peak.so')}",
                f"BENCH_VRAM_OUT={vram_out}", *env, PY, os.path.join(ROOT, "bench/serve.py"), name, str(port)]
@@ -266,7 +362,7 @@ def run_pass(name, with_kl):
         except ProcessLookupError:
             pass
         shutil.rmtree(snap, ignore_errors=True)
-    if not MAC:
+    if not MAC and MACHINE_BACKEND != "cuda":
         m["vram_gb"] = int(open(vram_out).read()) / 1e9
     if with_kl:
         tokens = kl_tokens()

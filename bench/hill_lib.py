@@ -14,7 +14,8 @@ import time
 import urllib.request
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-from measure import BENCH, MAC, PY, RECORDS, ROOT, WORK, drop_cache, free_port, http, peak_footprint, server_pid, strata
+from measure import BENCH, MAC, MACHINE_BACKEND, NVML, PY, RECORDS, ROOT, WORK, drop_cache, free_bytes, free_port, http, peak_footprint, scope, \
+    server_pid, strata
 
 SNAPS = os.path.join(ROOT, "data/cache/bench-snapshots")
 RIVALS = json.load(open(os.path.join(os.path.dirname(os.path.abspath(__file__)), "rivals.json")))
@@ -49,9 +50,15 @@ def gpu_power():
     return None
 
 
+def unsupported(instrument):
+    spec = json.load(open(os.path.join(ROOT, "hill.json")))
+    print(json.dumps({r.get("field", k): None for k, r in spec["rewards"].items() if r["instrument"] == instrument}))
+    sys.exit(0)
+
+
 def free_gb():
     if not MAC:
-        return next(int(l.split()[1]) for l in open("/proc/meminfo") if l.startswith("MemAvailable:")) * 1024 / 1e9
+        return free_bytes() / 1e9
     libc = C.CDLL(ctypes.util.find_library("c"))
     level, total = C.c_int(0), C.c_uint64(0)
     libc.sysctlbyname(b"kern.memorystatus_level", C.byref(level), C.byref(C.c_size_t(4)), None, 0)
@@ -75,6 +82,10 @@ def settle(before=None):
                 break
             time.sleep(0.2)
         return
+    if NVML:
+        while NVML.used() > 256 << 20 and time.monotonic() < deadline:
+            time.sleep(0.05)
+        return
     for total in glob.glob("/sys/class/drm/card[0-9]*/device/mem_info_vram_total"):
         if int(open(total).read()) >= 8 << 30:
             used = os.path.join(os.path.dirname(total), "mem_info_vram_used")
@@ -85,7 +96,8 @@ def settle(before=None):
 class Sampler(threading.Thread):
     def __init__(self):
         super().__init__(daemon=True)
-        self.power, self.joules, self.low, self.done = None if MAC else gpu_power(), 0.0, free_gb(), threading.Event()
+        self.power, self.joules, self.low, self.done = None if MAC or NVML else gpu_power(), 0.0, free_gb(), threading.Event()
+        self.mj0 = NVML.energy_mj() if NVML else None
         self.start()
 
     def run(self):
@@ -103,6 +115,9 @@ class Sampler(threading.Thread):
     def stop(self):
         self.done.set()
         self.join()
+        if self.mj0 is not None:
+            mj = NVML.energy_mj()
+            return {"energy_kj": (mj - self.mj0) / 1e6 if mj is not None else None, "min_free_gb": self.low}
         return {"energy_kj": self.joules / 1000 if self.power else None, "min_free_gb": self.low}
 
 
@@ -117,10 +132,10 @@ class Server:
         env = [f"CHRYSALIS_SNAPSHOTS={self.snap}", f"CHRYSALIS_BENCH_SNAPS={os.path.join(SNAPS, name)}", *env, *(f"{k}={v}" for k, v in b["env"].items())]
         if MAC:
             env.append(f"CHRYSALIS_FN_STATS={os.path.join(self.snap, 'experts.bin')}")
-        scope = [] if MAC else ["systemd-run", "--user", "--scope", "-q", "-p", "MemorySwapMax=0"]
+        wrap = scope()
         self.url = f"http://127.0.0.1:{port}"
         t0 = time.monotonic()
-        self.srv = subprocess.Popen([*scope, "env", *env, PY, os.path.join(ROOT, "bench/serve.py"), name, str(port)], stdout=open(self.log, "w"),
+        self.srv = subprocess.Popen([*wrap, "env", *env, PY, os.path.join(ROOT, "bench/serve.py"), name, str(port)], stdout=open(self.log, "w"),
                                     stderr=subprocess.STDOUT, start_new_session=True)
         while True:
             if self.srv.poll() is not None:

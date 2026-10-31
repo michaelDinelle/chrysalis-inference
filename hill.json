@@ -12,11 +12,12 @@
     "build/cmp_strata/ref.bin",
     "build/bench/ref-27b.bin"
   ],
-  "build": "make -s -j engines && data/venv/bin/python bench/hill_prime.py",
+  "build": "data/venv/bin/python bench/hill_tree.py",
   "readme": "README.md",
   "machines": {
     "e20a368548adfcc2": "7900 XTX",
-    "37faa95555ab4a0d": "M4 Max"
+    "37faa95555ab4a0d": "M4 Max",
+    "fc0844197a083008": "RTX 5070"
   },
   "groups": [
     "Speed",

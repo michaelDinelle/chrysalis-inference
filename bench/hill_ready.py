@@ -3,6 +3,9 @@ import os
 import subprocess
 import sys
 
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+from measure import NVML, free_bytes
+
 NEED_GB = {"linux": {"fn": 52, "27b": 12}, "darwin": {"fn": 30, "27b": 27}}
 name = sys.argv[1]
 procs = [p.split() for p in subprocess.run(["ps", "-axo", "pid=,args="], capture_output=True, text=True).stdout.splitlines()]
@@ -20,7 +23,12 @@ if sys.platform != "darwin":
         used = int(open(os.path.join(d, "mem_info_vram_used")).read())
         if used > 256 << 20:
             sys.exit(f"{used / 1e9:.1f} GB of video memory on the GPU at {where} is in use by another program")
-    free = next(int(l.split()[1]) for l in open("/proc/meminfo") if l.startswith("MemAvailable:")) * 1024 / 1e9
+    if NVML:
+        if NVML.display():
+            sys.exit("a display is connected to the NVIDIA GPU: the desktop would share its memory with the bench")
+        if NVML.used() > 256 << 20:
+            sys.exit(f"{NVML.used() / 1e9:.1f} GB of video memory on the NVIDIA GPU is in use by another program")
+    free = free_bytes() / 1e9
 else:
     sysctl = lambda key: int(subprocess.run(["sysctl", "-n", key], capture_output=True, text=True).stdout)
     free = sysctl("kern.memorystatus_level") / 100 * sysctl("hw.memsize") / 1e9

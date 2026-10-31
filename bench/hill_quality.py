@@ -4,10 +4,12 @@ import subprocess
 import sys
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-from hill_lib import RIVALS, Server, rivals_here, settle, unused_gb
-from measure import BENCH, PY, ROOT, kl_ref, kl_tokens
+from hill_lib import RIVALS, Server, rivals_here, settle, unsupported, unused_gb
+from measure import BENCH, PY, ROOT, kl_ref, kl_tokens, tree_supports
 
 name = sys.argv[1]
+if not tree_supports(ROOT):
+    unsupported(f"quality-{name}")
 s = Server(name)
 passed = 0
 for spec in (x for x in s.B.load_corpus().specs if x["phase"] == "sanity"):

@@ -9,7 +9,11 @@ import time
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from hill_lib import DOCS, SNAPS, Server, primed
-from measure import MAC, PY, ROOT, WORK
+from measure import MAC, PY, ROOT, WORK, tree_supports
+from chrysalis.engine import LT_CACHE
+
+if not tree_supports(ROOT):
+    sys.exit(0)
 
 for name in ("fn", "27b"):
     folder = os.path.join(SNAPS, name)
@@ -35,7 +39,7 @@ for name in ("fn", "27b"):
     s.stop()
     open(mark, "w").close()
 lib = "dylib" if MAC else "so"
-for kept, sources, warm in (("hipblaslt.txt", (f"build/libchrysalis.{lib}", f"build/libchrysalis_fn.{lib}", "chrysalis/engine.py"), "27b"),
+for kept, sources, warm in ((os.path.basename(LT_CACHE), (f"build/libchrysalis.{lib}", f"build/libchrysalis_fn.{lib}", "chrysalis/engine.py"), "27b"),
                             ("flash-next-calibration.txt", (f"build/libchrysalis_fn.{lib}", "chrysalis/engine.py"), "fn")):
     built = hashlib.sha256(b"".join(open(os.path.join(ROOT, f), "rb").read() for f in sources) + platform.platform().encode()).hexdigest()
     mark = os.path.join(WORK, kept + ".built")

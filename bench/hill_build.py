@@ -7,6 +7,12 @@ import tempfile
 import time
 
 tree = os.getcwd()
+sys.path.insert(0, os.path.join(tree, "bench"))
+from measure import MACHINE_BACKEND, tree_supports
+
+if not tree_supports(tree):
+    print(json.dumps({"build_s": None, "lib_27b_bytes": None, "lib_fn_bytes": None}))
+    sys.exit(0)
 work = os.path.join(tempfile.gettempdir(), "chrysalis-build")
 shutil.rmtree(work, ignore_errors=True)
 try:
@@ -14,7 +20,7 @@ try:
     shutil.copy2(os.path.join(tree, "Makefile"), work)
     os.symlink(os.path.join(tree, "data"), os.path.join(work, "data"))
     t = time.monotonic()
-    out = subprocess.run(["make", "-s", "-j", "engines"], cwd=work, capture_output=True, text=True)
+    out = subprocess.run(["make", "-s", "-j", f"BACKEND={MACHINE_BACKEND}", "engines"], cwd=work, capture_output=True, text=True)
     took = time.monotonic() - t
     if out.returncode:
         sys.exit(f"the clean build failed:\n{out.stderr[-2000:]}")

@@ -4,11 +4,13 @@ import sys
 import time
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-from hill_lib import DOCS, RIVALS, Sampler, Server, deep, rivals_here
-from measure import STRATA_CASES, p99
+from hill_lib import DOCS, RIVALS, Sampler, Server, deep, rivals_here, unsupported
+from measure import ROOT, STRATA_CASES, p99, tree_supports
 
 start = time.monotonic()
 name, here = sys.argv[1], rivals_here()
+if not tree_supports(ROOT):
+    unsupported(f"speed-{name}")
 sampler = Sampler()
 s = Server(name)
 out = {"load_s": s.load_s}

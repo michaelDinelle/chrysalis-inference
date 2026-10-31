@@ -67,6 +67,45 @@ def pcie(pci):
     return gts * 1e9 * lanes * (128 / 130 if gts >= 8 else 0.8) / 8, f"PCIe {gts:g} GT/s x{lanes}"
 
 
+NVIDIA_FP16 = {(7, 0): 1024, (7, 2): 1024, (7, 5): 1024, (8, 0): 2048, (8, 6): 1024, (8, 7): 1024, (8, 9): 1024, (9, 0): 4096,
+               (10, 0): 8192, (10, 3): 8192, (12, 0): 1024, (12, 1): 1024}
+PCIE_GTS = {1: 2.5, 2: 5.0, 3: 8.0, 4: 16.0, 5: 32.0, 6: 64.0}
+
+
+def nvidia():
+    try:
+        nv, cu = C.CDLL("libnvidia-ml.so.1"), C.CDLL("libcuda.so.1")
+    except OSError:
+        return None
+    if nv.nvmlInit_v2() or cu.cuInit(0):
+        return None
+    count = C.c_uint(0)
+    nv.nvmlDeviceGetCount_v2(C.byref(count))
+    gpus = []
+    for i in range(count.value):
+        h, dev = C.c_void_p(), C.c_int()
+        if nv.nvmlDeviceGetHandleByIndex_v2(i, C.byref(h)) or cu.cuDeviceGet(C.byref(dev), i):
+            continue
+        name = C.create_string_buffer(96)
+        nv.nvmlDeviceGetName(h, name, 96)
+        attr = lambda a: (lambda v: (cu.cuDeviceGetAttribute(C.byref(v), a, dev), v.value)[1])(C.c_int())
+        sms, major, minor = attr(16), attr(75), attr(76)
+        clock = lambda k: (lambda v: (nv.nvmlDeviceGetMaxClockInfo(h, k, C.byref(v)), v.value)[1])(C.c_uint())
+        sm_mhz, mem_mhz = clock(1), clock(2)
+        bits, gen, width = C.c_uint(), C.c_uint(), C.c_uint()
+        nv.nvmlDeviceGetMemoryBusWidth(h, C.byref(bits))
+        nv.nvmlDeviceGetMaxPcieLinkGeneration(h, C.byref(gen))
+        nv.nvmlDeviceGetMaxPcieLinkWidth(h, C.byref(width))
+        per_sm = NVIDIA_FP16.get((major, minor))
+        gts = PCIE_GTS.get(gen.value)
+        gpus.append({"name": name.value.decode(), "gfx": f"sm_{major}{minor}", "cus": sms, "clock_mhz": sm_mhz, "memory": "VRAM",
+                     "bus_bits": bits.value, "memory_clock_mhz": mem_mhz, "bandwidth": mem_mhz * 1e6 * 2 * bits.value / 8,
+                     "fp16": sms * sm_mhz * 1e6 * per_sm if per_sm else None, "integrated": False,
+                     "pcie": gts * 1e9 * width.value * (128 / 130 if gts >= 8 else 0.8) / 8 if gts else None,
+                     "link": f"PCIe {gts:g} GT/s x{width.value}" if gts else "PCIe"})
+    return {"gpus": gpus, "ram": None} if gpus else None
+
+
 APPLE_BANDWIDTH = {("Apple M1", None): 68.25e9, ("Apple M1 Pro", None): 200e9, ("Apple M1 Max", None): 400e9,
                    ("Apple M1 Ultra", None): 800e9, ("Apple M2", None): 100e9, ("Apple M2 Pro", None): 200e9, ("Apple M2 Max", None): 400e9,
                    ("Apple M2 Ultra", None): 800e9, ("Apple M3", None): 100e9, ("Apple M3 Pro", None): 150e9, ("Apple M3 Max", 30): 300e9,
@@ -94,6 +133,10 @@ def apple():
 def machine():
     if sys.platform == "darwin":
         return apple()
+    if os.path.exists("/dev/nvidiactl"):
+        found = nvidia()
+        if found:
+            return found
     gpus, cpu_ram = [], None
     for node in sorted(glob.glob("/sys/class/kfd/kfd/topology/nodes/*")):
         p = props(f"{node}/properties")
@@ -185,7 +228,7 @@ def write_limit(c, g, context, per_pass):
 
 CASE_IDS = {"short": "performance-short-r1", "4k": "performance-prompt-4k-r1", "16k": "performance-prompt-16k-r1", "100k": "long-100k",
             "followup": "follow-up"}
-KV = {"hip": {"27b": 1792, "fn": 896}, "metal": {"27b": 2176, "fn": 2112}}
+KV = {"hip": {"27b": 1792, "fn": 896}, "cuda": {"27b": 1792, "fn": 896}, "metal": {"27b": 2176, "fn": 2112}}
 
 
 def costs(name):
@@ -214,7 +257,7 @@ def shares(name, passes, g=None, c=None):
 
 def show(m):
     for g in m["gpus"]:
-        print(f"{g['name']} ({g['gfx']}): {g['cus']} {'GPU cores' if g['gfx'] == 'apple' else 'CUs'} at {g['clock_mhz']:.0f} MHz, "
+        print(f"{g['name']} ({g['gfx']}): {g['cus']} {'GPU cores' if g['gfx'] == 'apple' else 'SMs' if g['gfx'].startswith('sm_') else 'CUs'} at {g['clock_mhz']:.0f} MHz, "
               + (f"{g['memory']} {g['bus_bits']}-bit at {g['memory_clock_mhz']:.0f} MHz" if g["bus_bits"] else f"{g['memory']} memory"))
         print(f"  memory bandwidth {g['bandwidth'] / 1e9:.1f} GB/s, FP16 matrix {g['fp16'] / 1e12:.1f} TFLOPS, {g['link']}"
               + (f" {g['pcie'] / 1e9:.1f} GB/s each way" if g["pcie"] else ""))
