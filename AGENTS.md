@@ -26,11 +26,13 @@ README.md shows what Chrysalis is. This file is how to change it.
 
 ## Rewards
 
-Every number in the README's Rewards table is a reward, held by `.hill/hill`. A change is promoted only when no reward
-is worse on any machine with a record and at least one is better: no trade-offs, no net gains, no "within noise" after
-the fact, no blaming the machine. `.hill/hill gate` is the only judge; if it is wrong, fix it and gate again. The ledger
-is append-only. Rewards are never dropped, re-keyed or loosened. Only the user can make an exception, and agents never
-propose one. Harness changes (bench/, hill.json, .hill/) land on their own, never with a product change.
+Every reward in hill.json is held by `.hill/hill`. A change is promoted only when no reward is worse on any machine with
+a record and at least one is better: no trade-offs, no net gains, no "within noise" after the fact, no blaming the
+machine. `.hill/hill gate` is the only judge; if it is wrong, fix it and gate again. The ledger is append-only. Rewards
+are never dropped, re-keyed or loosened. Only the user can make an exception, and agents never propose one. Harness
+changes (bench/, hill.json, .hill/) land on their own, never with a product change. The README has no Rewards table and
+`hill table` isn't run: report each verdict's table to the user instead, and keep the README's charts and the numbers
+under them true to what Chrysalis does now.
 
 A gate measures the working tree against HEAD in the same session, both models on the GPU with Chrysalis's model server
 stopped; bench/hill_ready.py refuses to start while anything else holds the GPU or free memory is short. Measuring time
