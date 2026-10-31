@@ -20,10 +20,10 @@ Qwen3.8-Flash-Next on one PC. Each engine runs at its best for this PC, and the 
 <p align="center"><img src="media/vs-strata.png" width="860" alt="Chrysalis against Strata IQ3_S and Q2_0: time to first token and writing speed at five prompt lengths, error against Q8_0, load time, memory, and each one's share of this GPU's limit"></p>
 
 Strata's IQ3_S is the closest to Chrysalis in quality, and the best Strata's setup offers a 64 GB PC. Chrysalis beats it
-on every measure here: first tokens 1.8-2.9x sooner, writing 1.2-1.3x faster, 1.7x closer to the full model and 1.6x
-faster to load, in less memory. Strata's Q2_0 is its speed setting: it writes 1.0-1.2x faster than Chrysalis and needs
-10 GB less memory, at 5.6 times the error, and it failed one of its own sanity checks in one of the two runs. Reading a
-100K prompt, Chrysalis reaches 30% of this GPU's limit and Strata 17-18%.
+on every measure here: first tokens 1.7-2.2x sooner, writing 1.2-1.3x faster, 1.6x closer to the full model and 1.5x
+faster to load, in less memory. Strata's Q2_0 is its speed setting: it writes 1.0-1.3x faster than Chrysalis and needs
+10 GB less memory, at 5.5 times the error. Reading a 100K prompt, Chrysalis reaches 29% of this GPU's limit and Strata
+17-18%.
 
 <details><summary>How it was measured, and every number</summary>
 
@@ -49,21 +49,21 @@ RX 7900 XTX (24 GB), Ryzen 7 7800X3D, 64 GB DDR5, Linux, one engine at a time.
 
 | | Chrysalis, 3.8-bit | Strata IQ3_S, 3.3-bit | Strata Q2_0, 2.3-bit |
 | --- | ---: | ---: | ---: |
-| First token, short prompt | **0.22 s** | 0.64 s | 0.41 s |
-| First token, 4K prompt | **1.8 s** | 3.4 s | 3.0 s |
-| First token, 16K prompt | **6.0 s** | 10.6 s | 9.8 s |
-| First token, 100K prompt | **37.0 s** | 66.2 s | 60.7 s |
-| First token, follow-up in the 100K chat | **1.1 s** | 1.9 s | 1.9 s |
-| Writing, short prompt | 92.6 tok/s | 72.9 tok/s | **107.3 tok/s** |
-| Writing, 4K prompt | 89.1 tok/s | 66.5 tok/s | **95.6 tok/s** |
-| Writing, 16K prompt | 87.6 tok/s | 69.7 tok/s | **95.4 tok/s** |
-| Writing, 100K prompt | 80.0 tok/s | 65.8 tok/s | **81.0 tok/s** |
-| Writing, follow-up in the 100K chat | 82.3 tok/s | 69.7 tok/s | **97.4 tok/s** |
-| Error vs Q8_0, mean KL over 1,082 tokens | **0.033** | 0.055 | 0.187 |
-| Load time, to a first answer | **15.7 s** | 24.6 s | 17.4 s |
-| Peak private RAM | 50.6 GB | 52.0 GB | **40.8 GB** |
-| Share of this GPU's limit, reading 100K | **30%** | 17% | 18% |
-| Share of this GPU's limit, writing at 100K | **22%** | not reported | not reported |
+| First token, short prompt | **0.30 s** | 0.67 s | 0.37 s |
+| First token, 4K prompt | **2.0 s** | 3.4 s | 3.0 s |
+| First token, 16K prompt | **6.1 s** | 10.7 s | 9.8 s |
+| First token, 100K prompt | **38.5 s** | 66.1 s | 60.9 s |
+| First token, follow-up in the 100K chat | **1.2 s** | 2.1 s | 1.9 s |
+| Writing, short prompt | 87.4 tok/s | 72.4 tok/s | **110.0 tok/s** |
+| Writing, 4K prompt | 88.8 tok/s | 67.6 tok/s | **94.8 tok/s** |
+| Writing, 16K prompt | 83.9 tok/s | 72.5 tok/s | **96.3 tok/s** |
+| Writing, 100K prompt | 79.1 tok/s | 66.5 tok/s | **82.2 tok/s** |
+| Writing, follow-up in the 100K chat | 84.8 tok/s | 71.7 tok/s | **96.6 tok/s** |
+| Error vs Q8_0, mean KL over 1,082 tokens | **0.034** | 0.055 | 0.187 |
+| Load time, to a first answer | **14.6 s** | 21.6 s | 16.2 s |
+| Peak private RAM | 53.2 GB | 54.5 GB | **42.9 GB** |
+| Share of this GPU's limit, reading 100K | **29%** | 17% | 18% |
+| Share of this GPU's limit, writing at 100K | **23%** | not reported | not reported |
 
 </details>
 
@@ -73,7 +73,7 @@ The same file in Chrysalis and in llama.cpp, on the same GPU.
 
 <p align="center"><img src="media/27b-vs-llamacpp.png" width="860" alt="Qwen3.8-27B in Chrysalis and in llama.cpp: time to first token and writing speed at five prompt lengths, load time, memory, and each one's share of this GPU's limit"></p>
 
-Chrysalis reads prompts 1.4-2.6x sooner, writes 1.5-2.1x faster, starts 2.1x sooner and keeps 11 GB less in RAM. At
+Chrysalis reads prompts 1.4-2.6x sooner, writes 1.5-2.1x faster, starts 2.7x sooner and keeps 11 GB less in RAM. At
 100K it reaches 62% of this GPU's limit reading the prompt and 55% writing, llama.cpp 40% and 27%.
 
 <details><summary>How it was measured, and every number</summary>
@@ -94,15 +94,15 @@ Chrysalis reads prompts 1.4-2.6x sooner, writes 1.5-2.1x faster, starts 2.1x soo
 | --- | ---: | ---: |
 | First token, short prompt | **0.12 s** | 0.31 s |
 | First token, 4K prompt | **2.8 s** | 4.0 s |
-| First token, 16K prompt | **11.6 s** | 16.8 s |
-| First token, 100K prompt | **93.5 s** | 145.3 s |
-| First token, follow-up in the 100K chat | **1.7 s** | 2.9 s |
-| Writing, short prompt | **103.7 tok/s** | 68.4 tok/s |
-| Writing, 4K prompt | **90.6 tok/s** | 57.3 tok/s |
-| Writing, 16K prompt | **80.9 tok/s** | 51.5 tok/s |
-| Writing, 100K prompt | **73.1 tok/s** | 34.7 tok/s |
-| Writing, follow-up in the 100K chat | **74.3 tok/s** | 38.5 tok/s |
-| Load time, to a first answer | **1.6 s** | 3.3 s |
+| First token, 16K prompt | **11.6 s** | 16.9 s |
+| First token, 100K prompt | **94.1 s** | 145.9 s |
+| First token, follow-up in the 100K chat | **1.8 s** | 2.9 s |
+| Writing, short prompt | **104.0 tok/s** | 68.4 tok/s |
+| Writing, 4K prompt | **90.5 tok/s** | 57.2 tok/s |
+| Writing, 16K prompt | **80.8 tok/s** | 51.5 tok/s |
+| Writing, 100K prompt | **73.0 tok/s** | 34.7 tok/s |
+| Writing, follow-up in the 100K chat | **74.2 tok/s** | 38.5 tok/s |
+| Load time, to a first answer | **1.4 s** | 3.7 s |
 | Peak private RAM | **0.5 GB** | 11.9 GB |
 | Share of this GPU's limit, reading 100K | **62%** | 40% |
 | Share of this GPU's limit, writing at 100K | **55%** | 27% |
@@ -116,9 +116,9 @@ Mac.
 
 <p align="center"><img src="media/mac-27b.png" width="860" alt="Qwen3.8-27B on an M4 Max in Chrysalis, MLX and llama.cpp: time to first token and writing speed at five prompt lengths, load time, memory, and each one's share of this GPU's limit"></p>
 
-Chrysalis writes 1.5x faster than MLX up to 16K and 1.1x at 100K, 1.1-1.3x faster than llama.cpp, and answers a
-short prompt 1.8x sooner than MLX and 2.5x sooner than llama.cpp. Up to 16K the three read prompts at about the same
-speed; at 100K MLX reads 1.2x faster than the other two, then runs out of GPU memory on the follow-up in that chat.
+Chrysalis writes 1.5x faster than MLX up to 16K and 1.1x at 100K, 1.1-1.3x faster than llama.cpp, and answers a short
+prompt 1.8x sooner than MLX and 2.6x sooner than llama.cpp. Up to 16K the three read prompts at about the same speed; at
+100K MLX reads 1.2x faster than the other two, then runs out of GPU memory on the follow-up in that chat.
 
 <details><summary>How it was measured, and every number</summary>
 
@@ -132,7 +132,8 @@ Mac Studio, M4 Max with a 32-core GPU (410 GB/s, 25.9 TFLOPS FP16), 36 GB, macOS
 - **llama.cpp** build 11669 (Homebrew 0.7.0) with the same file as Chrysalis: every layer on the GPU, flash attention,
   MTP with 3 drafts as Chrysalis uses, one slot and a 131K context.
 - The same benchmark as above, its thinking budget of 0 left out here too. Chrysalis ran it twice, MLX and llama.cpp
-  once; medians over every round. Sanity checks: Chrysalis 24/24, MLX 12/12, llama.cpp 12/12.
+  once; medians over every round. Sanity checks: Chrysalis 24/24, MLX 12/12, llama.cpp 12/12. MLX and llama.cpp ran on
+  October 26 and Chrysalis on October 30, with the same macOS, versions and files.
 - Memory is each server's peak footprint, macOS's count of the memory a process holds, its GPU buffers included.
   Chrysalis's holds snapshots of the conversation, which a follow-up reads back instead of the prompt.
 - **Share of this GPU's limit**: as above, with Apple's published bandwidth for this chip and its GPU's FP16 rate, which
@@ -141,24 +142,25 @@ Mac Studio, M4 Max with a 32-core GPU (410 GB/s, 25.9 TFLOPS FP16), 36 GB, macOS
 | | Chrysalis, 4.65-bit file | MLX, 4-bit | llama.cpp, the same file |
 | --- | ---: | ---: | ---: |
 | First token, short prompt | **0.31 s** | 0.56 s | 0.78 s |
-| First token, 4K prompt | 19.8 s | **19.5 s** | 20.7 s |
-| First token, 16K prompt | **82.0 s** | 82.4 s | 88.8 s |
-| First token, 100K prompt | 800.2 s | **666.1 s** | 818.9 s |
-| First token, follow-up in the 100K chat | **14.2 s** | out of memory | 14.9 s |
-| Writing, short prompt | **32.6 tok/s** | 21.3 tok/s | 29.4 tok/s |
+| First token, 4K prompt | 19.9 s | **19.5 s** | 20.7 s |
+| First token, 16K prompt | **82.2 s** | 82.4 s | 88.8 s |
+| First token, 100K prompt | 787.9 s | **666.1 s** | 818.9 s |
+| First token, follow-up in the 100K chat | **14.0 s** | out of memory | 14.9 s |
+| Writing, short prompt | **32.4 tok/s** | 21.3 tok/s | 29.4 tok/s |
 | Writing, 4K prompt | **30.4 tok/s** | 20.4 tok/s | 27.0 tok/s |
 | Writing, 16K prompt | **28.6 tok/s** | 19.5 tok/s | 25.2 tok/s |
-| Writing, 100K prompt | **16.9 tok/s** | 15.2 tok/s | 14.8 tok/s |
-| Writing, follow-up in the 100K chat | **21.6 tok/s** | out of memory | 17.2 tok/s |
-| Load time, to a first answer | 7.5 s | **6.0 s** | 8.7 s |
+| Writing, 100K prompt | **17.0 tok/s** | 15.2 tok/s | 14.8 tok/s |
+| Writing, follow-up in the 100K chat | **21.7 tok/s** | out of memory | 17.2 tok/s |
+| Load time, to a first answer | 8.3 s | **6.0 s** | 8.7 s |
 | Peak memory footprint | 25.2 GB | 30.6 GB | **20.9 GB** |
 | Share of this GPU's limit, reading 100K | 33% | **39%** | 32% |
 | Share of this GPU's limit, writing at 100K | 35% | **68%** | 30% |
 
 </details>
 
-Flash-Next runs on this Mac too, keeping the experts its replies use most in memory and reading the others from the
-SSD. In the same benchmark it answers a short prompt in 2.4 s and reads a 100K one in 255 s, and writes 6-8 tok/s.
+Flash-Next runs on this Mac too, keeping the experts its replies use most in memory and reading the others from the SSD.
+In the same benchmark, with its context raised from the default 65,536 tokens to 131,072 for the 100K prompt, it answers
+a short prompt in 3.0 s and reads a 100K one in 254 s, and writes 8-10 tok/s.
 
 ## Editing artifacts by pointing at them
 
