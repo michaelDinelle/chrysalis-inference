@@ -1,4 +1,4 @@
-BACKEND ?= $(if $(filter Darwin,$(shell uname -s)),metal,hip)
+BACKEND ?= $(if $(filter Darwin,$(shell uname -s)),metal,$(if $(wildcard /dev/nvidiactl),cuda,hip))
 GGML    := $(CURDIR)/data/llama.cpp
 PY      := data/venv/bin/python
 

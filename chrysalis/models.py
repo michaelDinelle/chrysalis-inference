@@ -1,7 +1,7 @@
 import os
 import sys
 
-BACKEND = os.environ.get("CHRYSALIS_BACKEND") or ("metal" if sys.platform == "darwin" else "hip")
+BACKEND = os.environ.get("CHRYSALIS_BACKEND") or ("metal" if sys.platform == "darwin" else "cuda" if os.path.exists("/dev/nvidiactl") else "hip")
 LIB = ".dylib" if BACKEND == "metal" else ".so"
 MODELS = {
     "qwen3.8-27b": dict(path="data/models/qwen3.8-27b/qwen3.8-27b.gguf", lib="build/libchrysalis" + LIB, draft=3, lookup=7, chunk=2048, snapshots=40,

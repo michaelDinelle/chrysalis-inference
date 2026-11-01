@@ -6,7 +6,7 @@
 #include <vector>
 
 int main(int argc, char **argv) {
-    if (argc < 4) { fprintf(stderr, "usage: %s model tokens.bin out.bin [positions] [ubatch]\n", argv[0]); return 1; }
+    if (argc < 4) { fprintf(stderr, "usage: %s model tokens.bin out.bin [positions] [ubatch] [gpu layers]\n", argv[0]); return 1; }
     FILE *f = fopen(argv[2], "rb");
     std::vector<llama_token> toks;
     for (int t; fread(&t, 4, 1, f) == 1;) toks.push_back(t);
@@ -18,9 +18,12 @@ int main(int argc, char **argv) {
         for (size_t i = 0; i < toks.size(); i++) want.push_back((int)i);
     llama_backend_init();
     auto mp = llama_model_default_params();
-    mp.n_gpu_layers = 99;
+    mp.n_gpu_layers = argc > 6 ? atoi(argv[6]) : 99;
+    static ggml_backend_dev_t no_devices[] = {nullptr};
+    if (mp.n_gpu_layers == 0) mp.devices = no_devices;
     llama_model *model = llama_model_load_from_file(argv[1], mp);
     auto cp = llama_context_default_params();
+    cp.op_offload = mp.n_gpu_layers != 0;
     cp.n_ctx = toks.size() + 16;
     cp.n_batch = toks.size();
     cp.n_ubatch = argc > 5 ? std::min<size_t>(toks.size(), (size_t)atoi(argv[5])) : toks.size();

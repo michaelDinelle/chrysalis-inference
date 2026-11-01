@@ -124,7 +124,6 @@ struct Engine {
             hipEvent_t start = nullptr, copied = nullptr, done = nullptr;
         };
         Load loads[PLACE_MAX];
-        hipStream_t xst = nullptr;
         std::thread loader;
         std::mutex mu;
         std::condition_variable cv;

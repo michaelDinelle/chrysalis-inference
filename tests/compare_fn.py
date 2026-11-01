@@ -198,19 +198,33 @@ fails = paths("")
 prose = tok.encode("<|im_start|>user\nWrite a long story about a lighthouse keeper and a storm.<|im_end|>\n<|im_start|>assistant\n",
                    add_special_tokens=False).ids
 CAP = 500
-eng.lib.chrysalis_tune(b"spill", CAP)
+out0 = eng.expert_stats()["mirrored"]
+eng.lib.chrysalis_tune(b"spill", out0 + CAP)
 a = placed()
 move_pool(prose, 400)
 b, r1, out1 = placed(), mirror_rss(), eng.expert_stats()["mirrored"]
-ok = b[0] - a[0] >= 1000 and out1 <= CAP and 0.95 * CAP * HOT_EXPERT <= r1 <= CAP * HOT_EXPERT + 64e6
-print(f"pool after a prose reply: {b[0] - a[0]} experts placed, {out1} of the file's out of it (at most {CAP}), the mirror "
-      f"holding {r1 / 1e9:.2f} GB ({CAP * HOT_EXPERT / 1e9:.2f} GB for {CAP})  {'ok' if ok else 'FAIL'}", flush=True)
+ok = b[0] - a[0] >= 1000 and out1 <= out0 + CAP and 0.95 * (out0 + CAP) * HOT_EXPERT <= r1 <= (out0 + CAP) * HOT_EXPERT + 64e6
+print(f"pool after a prose reply: {b[0] - a[0]} experts placed, {out1} of the file's out of it (at most {out0} that never fit + {CAP}), the "
+      f"mirror holding {r1 / 1e9:.2f} GB ({(out0 + CAP) * HOT_EXPERT / 1e9:.2f} GB for {out0 + CAP})  {'ok' if ok else 'FAIL'}", flush=True)
 fails += not ok
 os.posix_fadvise(model_fd, 0, 0, os.POSIX_FADV_DONTNEED)
 fails += paths(", pool moved by prose")
 read = hot_cached() - cached0
 print(f"paths with the file's experts out of the pool: {read / 1e6:.0f} MB of them read from the model file  {'ok' if read <= 0 else 'FAIL'}", flush=True)
 fails += read > 0
+eng.lib.chrysalis_tune(b"spill", 100000)
+spare = eng.lib.chrysalis_tune(b"spill_spare", 1e6)
+c3, out3, r3 = placed(), eng.expert_stats()["mirrored"], mirror_rss()
+move_pool(prose, 200)
+d, out4, r4 = placed()[0] - c3[0], eng.expert_stats()["mirrored"], mirror_rss()
+ok = out3 >= out0 + 100 and out4 <= max(out3 // 4, out0) and r4 <= out4 * HOT_EXPERT + 64e6 and d >= max(300, out3 - out4)
+print(f"pool after prose with no RAM to spare: {d} experts placed, the file's back from the mirror, {out3} -> {out4} out of the pool, "
+      f"the mirror {r3 / 1e9:.2f} -> {r4 / 1e9:.2f} GB  {'ok' if ok else 'FAIL'}", flush=True)
+fails += not ok
+eng.lib.chrysalis_tune(b"spill_spare", spare)
+eng.lib.chrysalis_tune(b"spill", out0 + CAP)
+move_pool(prose, 400)
+b = placed()
 code_ids = tok.encode("<|im_start|>user\nWrite a C++ hash map with open addressing: insert, find, erase, resize and an iterator, "
                       "then a test for each.<|im_end|>\n<|im_start|>assistant\n<think>\n\n</think>\n\n```cpp\n", add_special_tokens=False).ids
 move_pool(code_ids, 400)
@@ -220,14 +234,5 @@ print(f"pool after code: {c[0] - b[0]} experts placed, {c[1] - b[1]} of them the
       f"the mirror holding {r2 / 1e9:.2f} GB ({out2 * HOT_EXPERT / 1e9:.2f} GB for {out2})  {'ok' if ok else 'FAIL'}", flush=True)
 fails += not ok
 fails += paths(", pool moved by code")
-eng.lib.chrysalis_tune(b"spill", 100000)
-eng.lib.chrysalis_tune(b"spill_spare", 1e6)
-out3, r3 = eng.expert_stats()["mirrored"], mirror_rss()
-move_pool(prose, 200)
-d, out4, r4 = placed()[0] - c[0], eng.expert_stats()["mirrored"], mirror_rss()
-ok = out3 >= 100 and out4 <= out3 // 4 and r4 <= out4 * HOT_EXPERT + 64e6 and d >= max(300, out3 - out4)
-print(f"pool after prose with no RAM to spare: {d} experts placed, the file's back from the mirror, {out3} -> {out4} out of the pool, "
-      f"the mirror {r3 / 1e9:.2f} -> {r4 / 1e9:.2f} GB  {'ok' if ok else 'FAIL'}", flush=True)
-fails += not ok
 print("all ok" if not fails else f"{fails} FAILURES")
 sys.exit(fails != 0)

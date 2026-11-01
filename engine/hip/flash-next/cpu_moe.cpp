@@ -221,14 +221,14 @@ void CpuMoe::worker(int id) {
         const bool vx = vnni;
         if (np + ne > 0) {
             for (int t = id; t < T && ne; t += n) emu_quant_x(sh->x + (size_t)t * D_, ea[t]);
-            if (id < T && np) {
+            for (int t = id; t < T && np; t += n) {
                 if (vx) {
-                    int32_t *xsum = dxsum.data() + id * (D_ / 16);
-                    vnni_quant_x(sh->x + (size_t)id * D_, dxq.data() + (size_t)id * D_, dxs.data() + id * (D_ / 32), xsum);
-                    vnni_act1(dxs.data() + id * (D_ / 32), xsum, ds16.data() + id * (D_ / 16), df16.data() + id * (D_ / 16));
+                    int32_t *xsum = dxsum.data() + t * (D_ / 16);
+                    vnni_quant_x(sh->x + (size_t)t * D_, dxq.data() + (size_t)t * D_, dxs.data() + t * (D_ / 32), xsum);
+                    vnni_act1(dxs.data() + t * (D_ / 32), xsum, ds16.data() + t * (D_ / 16), df16.data() + t * (D_ / 16));
                 } else {
                     for (int g = 0; g < (dot_same ? 1 : 3); g++)
-                        ggml_get_type_traits_cpu((ggml_type)dot_gu[g])->from_float(sh->x + (size_t)id * D_, xq[g].data() + xq_row[g] * id, D_);
+                        ggml_get_type_traits_cpu((ggml_type)dot_gu[g])->from_float(sh->x + (size_t)t * D_, xq[g].data() + xq_row[g] * t, D_);
                 }
             }
             barrier();

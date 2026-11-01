@@ -1,10 +1,10 @@
 import ctypes as C
 import os
 
-from .models import LIB
+from .models import BACKEND, LIB
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-LT_CACHE = os.path.join(ROOT, "data", "cache", "hipblaslt.txt")
+LT_CACHE = os.path.join(ROOT, "data", "cache", "cublaslt.txt" if BACKEND == "cuda" else "hipblaslt.txt")
 CALIBRATION = os.path.join(ROOT, "data", "cache", "flash-next-calibration.txt")
 
 

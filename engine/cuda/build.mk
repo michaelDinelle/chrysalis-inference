@@ -1,0 +1,84 @@
+CUDA  ?= /usr/local/cuda
+NVCC  := $(CUDA)/bin/nvcc
+ARCH  ?= native
+FLAGS := -O3 -std=c++20 -arch=$(ARCH) -Xcompiler -fPIC,-fvisibility=hidden,-fvisibility-inlines-hidden,-ffunction-sections,-fdata-sections,-Wno-unused-result
+C     := engine/cuda
+SRC   := $(C)/27b/relayout.cu $(C)/27b/quant.cu $(C)/27b/ops.cu $(C)/gdn.cu $(C)/27b/attn.cu $(C)/vision.cu $(C)/27b/model.cpp $(C)/27b/load.cpp \
+         $(C)/27b/api.cpp
+KERN  := $(filter %.cu,$(SRC))
+LIBS  := -L$(CUDA)/lib64 -lcublasLt -Xlinker -rpath,$(CUDA)/lib64 -Xlinker --no-undefined -Xlinker --gc-sections
+
+OBJ := $(SRC:%=build/o27/%.o)
+build/o27/%.o: % $(wildcard engine/*.h $(C)/*.h $(C)/27b/*.h)
+	@mkdir -p $(@D)
+	$(NVCC) $(FLAGS) -I$(C)/27b -I$(C) -x cu -c -o $@ $<
+
+build/libchrysalis.so: $(OBJ)
+	$(NVCC) $(FLAGS) -shared -Xlinker -s -o $@ $(OBJ) $(LIBS)
+
+build/test_quant build/test_attn build/test_gdn build/test_vision: build/%: tests/cuda/%.cu $(KERN) $(wildcard engine/*.h $(C)/*.h $(C)/27b/*.h)
+	@mkdir -p build
+	$(NVCC) $(FLAGS) -I$(C)/27b -I$(C) -o $@ $< $(KERN) $(LIBS)
+
+FN_SRC := $(C)/flash-next/relayout.cu $(C)/flash-next/quant.cu $(C)/flash-next/ops.cu $(C)/gdn.cu $(C)/flash-next/attn.cu \
+          $(C)/flash-next/moe.cu $(C)/flash-next/ple.cu $(C)/vision.cu $(C)/flash-next/model.cpp $(C)/flash-next/load.cpp \
+          $(C)/flash-next/experts.cpp $(C)/flash-next/api.cpp
+FN_CPU := $(C)/flash-next/cpu_moe.cpp $(C)/flash-next/cpu_vnni.cpp
+FN_LIBS := $(LIBS) -L$(GGML)/build/bin -lggml-cpu -lggml-base -Xlinker -rpath,$(GGML)/build/bin
+
+FN_OBJ := $(FN_SRC:%=build/ofn/%.o) $(FN_CPU:%=build/ofn/%.o)
+build/ofn/$(C)/flash-next/cpu_%.cpp.o: $(C)/flash-next/cpu_%.cpp $(wildcard $(C)/flash-next/*.h)
+	@mkdir -p $(@D)
+	$(CXX_HOST) -O3 -std=c++20 -fPIC -fvisibility=hidden -ffunction-sections -fdata-sections -I$(C)/flash-next -I$(GGML)/ggml/include -c -o $@ $<
+build/ofn/%.o: % $(wildcard engine/*.h $(C)/*.h $(C)/flash-next/*.h)
+	@mkdir -p $(@D)
+	$(NVCC) $(FLAGS) -I$(C)/flash-next -I$(C) -I$(GGML)/ggml/include -x cu -c -o $@ $<
+
+build/libchrysalis_fn.so: $(FN_OBJ)
+	$(NVCC) $(FLAGS) -shared -Xlinker -s -o $@ $(FN_OBJ) $(FN_LIBS)
+
+FN_KOBJ := $(filter %.cu.o,$(FN_OBJ))
+FN_CPUO := $(FN_CPU:%=build/ofn/%.o)
+build/test_%_fn: tests/cuda/test_%_fn.cpp $(FN_KOBJ) $(FN_CPUO) $(wildcard $(C)/flash-next/*.h)
+	@mkdir -p build
+	$(NVCC) $(FLAGS) -I$(C)/flash-next -I$(C) -I$(GGML)/ggml/include -x cu -c -o $@.o $<
+	$(NVCC) $(FLAGS) -o $@ $@.o $(FN_KOBJ) $(FN_CPUO) $(FN_LIBS)
+
+build/test_linear_fn: tests/cuda/test_linear_fn.cpp $(filter-out build/ofn/$(C)/flash-next/api.cpp.o,$(FN_OBJ)) $(wildcard $(C)/flash-next/*.h)
+	@mkdir -p build
+	$(NVCC) $(FLAGS) -I$(C)/flash-next -I$(C) -I$(GGML)/ggml/include -x cu -c -o $@.o $<
+	$(NVCC) $(FLAGS) -o $@ $@.o $(filter-out build/ofn/$(C)/flash-next/api.cpp.o,$(FN_OBJ)) $(FN_LIBS)
+
+build/test_gdn_fn: tests/cuda/test_gdn.cu
+
+kernels: build/test_quant build/test_attn build/test_gdn
+	./build/test_quant data/models/qwen3.8-27b/qwen3.8-27b.gguf && ./build/test_attn && ./build/test_gdn
+
+kernels_fn: build/test_quant_fn build/test_attn_fn build/test_gdn_fn build/test_mix_fn build/test_moe_fn build/test_cpujob_fn build/test_linear_fn
+	./build/test_quant_fn && ./build/test_attn_fn && ./build/test_gdn_fn && ./build/test_mix_fn && ./build/test_moe_fn && \
+	./build/test_cpujob_fn && ./build/test_linear_fn
+
+TEST_BUILDS := build/llama_params build/ref_logits build/ref_logits_mm
+define BACKEND_TESTS
+	$(PY) tests/test_requests.py
+	$(PY) tests/test_snapshot.py
+	$(PY) tests/test_server.py
+	$(PY) tests/compare_ref.py
+	$(PY) tests/test_vision.py
+endef
+
+TEST_BUILDS_FN := build/ref_logits_fn build/ref_logits_mm_fn
+define BACKEND_TESTS_FN
+	$(PY) tests/test_snapshot.py --use qwen3.8-flash-next
+	$(PY) tests/test_server.py --use qwen3.8-flash-next
+	$(PY) tests/compare_fn.py
+	$(PY) tests/test_mirror_budget.py
+	$(PY) tests/test_vision.py --use qwen3.8-flash-next
+endef
+
+LLAMA_INC  := -I$(GGML)/include -I$(GGML)/ggml/include
+LLAMA      := -O2 -std=c++17 $(LLAMA_INC)
+LLAMA_LIBS := -L$(GGML)/build/bin -lllama -lggml -lggml-base -Wl,-rpath,$(GGML)/build/bin:$(CUDA)/lib64
+CXX_HOST   := g++
+
+.PHONY: kernels kernels_fn

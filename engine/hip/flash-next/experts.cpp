@@ -92,7 +92,6 @@ void Engine::experts_init() {
     CK(hipMemsetAsync(x.d_counts, 0, keys * 4, st));
     CK(hipHostMalloc(&x.h_counts, keys * 4));
     CK(hipEventCreateWithFlags(&x.counted, hipEventDisableTiming));
-    CK(hipStreamCreateWithFlags(&x.xst, hipStreamNonBlocking));
     for (Experts::Load &ld : x.loads) {
         CK(hipMalloc(&ld.stage, STAGE_BYTES));
         CK(hipHostMalloc(&ld.bounce, STAGE_BYTES));
@@ -219,8 +218,8 @@ void Engine::experts_stop() {
         { std::lock_guard<std::mutex> lk(x.mu); x.quit = true; }
         x.cv.notify_all();
         x.loader.join();
+        CK(hipStreamSynchronize(cst));
     }
-    if (x.xst) CK(hipStreamSynchronize(x.xst));
     for (Experts::Load &ld : x.loads) {
         if (ld.stage) (void)hipFree(ld.stage);
         if (ld.bounce) (void)hipHostFree(ld.bounce);
@@ -234,8 +233,7 @@ void Engine::experts_stop() {
     if (x.d_counts) (void)hipFree(x.d_counts);
     if (x.h_counts) (void)hipHostFree(x.h_counts);
     if (x.counted) (void)hipEventDestroy(x.counted);
-    if (x.xst) (void)hipStreamDestroy(x.xst);
-    x.d_counts = nullptr; x.h_counts = nullptr; x.counted = nullptr; x.xst = nullptr;
+    x.d_counts = nullptr; x.h_counts = nullptr; x.counted = nullptr;
     x.counts_pending = false;
 }
 
@@ -270,19 +268,19 @@ void Engine::experts_loader() {
         const size_t gu = (size_t)FE * c.row_gu[c.grp(h)], dn = (size_t)D * c.row_dn;
         const uint8_t *src[3] = {c.gu_row(false, h, 0), c.gu_row(true, h, 0), c.dn_row(h, 0)};
         const size_t len[3] = {gu, gu, dn};
-        CK(hipStreamWaitEvent(x.xst, ld.done, 0));
+        CK(hipStreamWaitEvent(cst, ld.done, 0));
         if (c.grp(h) == 2) {
             CK(hipEventSynchronize(ld.copied));
             size_t at = 0;
             for (int m = 0; m < 3; m++) { memcpy(ld.bounce + at, src[m], len[m]); at += len[m]; }
-            CK(hipEventRecord(ld.start, x.xst));
-            CK(hipMemcpyAsync(ld.stage, ld.bounce, at, hipMemcpyHostToDevice, x.xst));
+            CK(hipEventRecord(ld.start, cst));
+            CK(hipMemcpyAsync(ld.stage, ld.bounce, at, hipMemcpyHostToDevice, cst));
         } else {
             size_t at = 0;
-            CK(hipEventRecord(ld.start, x.xst));
-            for (int m = 0; m < 3; m++) { CK(hipMemcpyAsync(ld.stage + at, src[m], len[m], hipMemcpyHostToDevice, x.xst)); at += len[m]; }
+            CK(hipEventRecord(ld.start, cst));
+            for (int m = 0; m < 3; m++) { CK(hipMemcpyAsync(ld.stage + at, src[m], len[m], hipMemcpyHostToDevice, cst)); at += len[m]; }
         }
-        CK(hipEventRecord(ld.copied, x.xst));
+        CK(hipEventRecord(ld.copied, cst));
         ld.state.store(Experts::COPYING, std::memory_order_release);
     }
 }

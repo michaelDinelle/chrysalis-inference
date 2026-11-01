@@ -177,6 +177,11 @@ int main() {
                 idx_select_ref(dq16, p0, G, nb, kv, layer, score, rsel, st);
                 CK(hipMemcpy(a2.data(), rsel, a2.size() * 4, hipMemcpyDeviceToHost));
                 for (size_t k = 0; k < a1.size(); k++) bad += a1[k] != a2[k];
+                for (int t = 0; t < G; t++) {
+                    idx_select(dq16 + (size_t)t * IDX_H * IDX_D, p0 + t, 1, nb, kv, layer, score, dhist, dsel, st);
+                    CK(hipMemcpy(a1.data(), dsel, (SEL_BLOCKS + 1) * 4, hipMemcpyDeviceToHost));
+                    for (int k = 0; k <= SEL_BLOCKS; k++) bad += a1[k] != a2[(size_t)t * (SEL_BLOCKS + 1) + k];
+                }
             }
             {
                 half *zq; CK(hipMalloc(&zq, (size_t)G * IDX_H * IDX_D * 2)); CK(hipMemset(zq, 0, (size_t)G * IDX_H * IDX_D * 2));
@@ -188,7 +193,7 @@ int main() {
                 for (size_t k = 0; k < a1.size(); k++) bad += a1[k] != a2[k];
                 bad += a1[0] != 0 || a1[SEL_BLOCKS - 1] != SEL_BLOCKS - 1;
             }
-            printf("new selection vs the reference kernels (5 context lengths x %d queries, plus all ties): %d entries differ %s\n", G, bad, bad ? "FAIL" : "ok");
+            printf("new selection vs the reference kernels (5 context lengths x %d queries, at once and one at a time, plus all ties): %d entries differ %s\n", G, bad, bad ? "FAIL" : "ok");
             fails += bad != 0;
             idx_select(dq16, P0, G, nblk, kv, layer, score, dhist, dsel, st);
         }

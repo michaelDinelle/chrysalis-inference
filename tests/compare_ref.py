@@ -3,6 +3,7 @@ import numpy as np
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from tokenizers import Tokenizer
 from chrysalis.engine import Engine
+from chrysalis.models import BACKEND
 
 MODEL = "data/models/qwen3.8-27b/qwen3.8-27b.gguf"
 MAX_KL, MIN_TOP1 = {"decode": 0.004, "prefill": 0.008, "mixed": 0.004}, 0.95
@@ -32,8 +33,8 @@ n = len(ids)
 os.makedirs("build/cmp", exist_ok=True)
 np.array(ids, dtype=np.int32).tofile("build/cmp/tokens.bin")
 if not os.path.exists("build/cmp/ref.bin") or "--fresh" in sys.argv:
-    subprocess.run(["build/ref_logits", MODEL, "build/cmp/tokens.bin", "build/cmp/ref.bin"], check=True,
-                   stderr=subprocess.DEVNULL)
+    subprocess.run(["build/ref_logits", MODEL, "build/cmp/tokens.bin", "build/cmp/ref.bin"] + (["all", str(n), "0"] if BACKEND == "cuda" else []),
+                   check=True, stderr=subprocess.DEVNULL)
 ref = np.fromfile("build/cmp/ref.bin", dtype=np.float32).reshape(n, -1)
 
 def logsoftmax(x):

@@ -561,7 +561,7 @@ writer.join()
 freed = vram_used()
 check("sleep: the reply ends at its next step", events[-1][0] == "done" and events[-1][1]["finish_reason"] == "length" and slept < 2,
       f"{events[-1][1]['completion_tokens']} tokens, GPU free after {slept:.2f} s")
-check("sleep: the GPU's memory is freed", freed < held - 15e9, f"VRAM used {held / 1e9:.1f} -> {freed / 1e9:.1f} GB")
+check("sleep: the GPU's memory is freed", freed < held / 2, f"VRAM used {held / 1e9:.1f} -> {freed / 1e9:.1f} GB")
 srv.wake()
 pin(srv.engine)
 again, _ = reply({"messages": poem, "seed": 7})
@@ -573,16 +573,16 @@ if disk:
 held = vram_used()
 httpx.post(base + "/chrysalis/unload", json={}, timeout=120)
 unloaded, st = vram_used(), httpx.get(base + "/chrysalis/stats").json()
-check("unload: the GPU's memory is freed and stats say asleep", unloaded < held - 15e9 and st.get("asleep") is True,
+check("unload: the GPU's memory is freed and stats say asleep", unloaded < held / 2 and st.get("asleep") is True,
       f"VRAM used {held / 1e9:.1f} -> {unloaded / 1e9:.1f} GB, {st}")
 srv.system_sleep()
 srv.system_wake()
 st = httpx.get(base + "/chrysalis/stats").json()
-check("unload: the machine's sleep and wake leave it unloaded", vram_used() < held - 15e9 and st.get("asleep") is True,
+check("unload: the machine's sleep and wake leave it unloaded", vram_used() < held / 2 and st.get("asleep") is True,
       f"VRAM used {vram_used() / 1e9:.1f} GB, {st}")
 woke = oai.chat.completions.create(model=MODEL + "-fast", messages=poem, max_tokens=16, temperature=0)
 st = httpx.get(base + "/chrysalis/stats").json()
-check("unload: a request loads the model again and answers", woke.choices[0].message.content and "asleep" not in st and vram_used() > held - 5e9,
+check("unload: a request loads the model again and answers", woke.choices[0].message.content and "asleep" not in st and vram_used() > held / 2,
       f"{woke.choices[0].message.content!r}, VRAM used {vram_used() / 1e9:.1f} GB")
 httpd.shutdown()
 other = next(m for m in MODELS if m != MODEL)

@@ -23,6 +23,7 @@ int main(int argc, char **argv) {
     auto mp = llama_model_default_params();
     mp.n_gpu_layers = 99;
     llama_model *model = llama_model_load_from_file(argv[1], mp);
+    if (!model) { fprintf(stderr, "cannot load %s with every layer on the GPU\n", argv[1]); return 1; }
     auto cp = llama_context_default_params();
     cp.n_ctx = n + 16;
     cp.n_batch = n;

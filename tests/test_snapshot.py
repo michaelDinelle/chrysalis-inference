@@ -181,15 +181,35 @@ if getattr(eng, "batched", False):
         for s_ in ss: eng.free_seq(s_)
         return got
     p3 = [random.randrange(1000, 50000) for _ in range(77)]
+    p4 = [random.randrange(1000, 50000) for _ in range(51)]
     three = Sampling(temperature=1.0, top_p=0.95, min_p=0.0, presence_penalty=0.0, top_k=20, n_draft=spec["draft"])
     one = Sampling(temperature=1.0, top_p=0.95, min_p=0.0, presence_penalty=0.0, top_k=20, n_draft=1)
     pair = one if "flash-next" in spec["path"] else three
     two = together([p1, p2], [21, 22], pair, 15)
-    many = together([p1, p2, p3], [23, 24, 25], one, 15)
+    many = together([p1, p2, p3, p4], [23, 24, 25, 26], one, 15)
     ok = (two == [alone(p1, 21, pair, 15), alone(p2, 22, pair, 15)] and
-          many == [alone(p1, 23, one, 15), alone(p2, 24, one, 15), alone(p3, 25, one, 15)] and min(map(len, two)) > 15)
+          many == [alone(p1, 23, one, 15), alone(p2, 24, one, 15), alone(p3, 25, one, 15), alone(p4, 26, one, 15)] and
+          min(map(len, two)) > 15)
     fails += not ok
-    print(f"sequences stepped together = alone   {'ok' if ok else 'FAIL'}  two: {[len(t) for t in two]} tokens, three: {[len(t) for t in many]}")
+    print(f"sequences stepped together = alone   {'ok' if ok else 'FAIL'}  two: {[len(t) for t in two]} tokens, four: {[len(t) for t in many]}")
+if hasattr(eng.lib, "chrysalis_tune") and "flash-next" not in spec["path"]:
+    import ctypes as C
+    eng.lib.chrysalis_tune.restype, eng.lib.chrysalis_tune.argtypes = C.c_double, [C.c_char_p, C.c_double]
+    lent = eng.lib.chrysalis_tune(b"lend", 1)
+    if lent >= 0:
+        def lent_run():
+            s_ = eng.new_seq(); eng.prefill(s_, p2 + p1); first = eng.last_logits()
+            eng.begin(s_, 41)
+            out = gen(s_, sampled, 40)
+            eng.free_seq(s_)
+            return first, out
+        l_in, o_in = lent_run()
+        eng.lib.chrysalis_tune(b"lend", 0)
+        l_ram, o_ram = lent_run()
+        eng.lib.chrysalis_tune(b"lend", 1)
+        ok = lent > 0 and np.array_equal(l_in, l_ram) and o_in == o_ram
+        fails += not ok
+        print(f"layers in free KV VRAM = read from RAM {'ok' if ok else 'FAIL'}  {lent:.0f} layers lent, max diff {np.abs(l_in - l_ram).max()}")
 if eng.persistent:
     x, y = eng.new_seq(), eng.new_seq()
     long = (p2 + p1) * 23

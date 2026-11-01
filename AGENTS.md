@@ -13,8 +13,13 @@ README.md shows what Chrysalis is. This file is how to change it.
 - engine/api.h declares the C API every engine implements, the chrysalis_* functions chrysalis/engine.py calls;
   engine/gguf.h, sampler.h and lookup.h are the host code every backend shares: the GGUF reader, the sampler that
   matches llama.cpp's, and prompt lookup.
-- engine/<backend>/ (hip for the RX 7900, metal for Apple Silicon) has a build.mk and one engine per model, 27b/ and
-  flash-next/, each a shared library that includes engine/api.h. Every backend reads the same model files.
+- engine/<backend>/ (hip for the RX 7900, cuda for NVIDIA, metal for Apple Silicon) has a build.mk and one engine per
+  model, 27b/ and flash-next/, each a shared library that includes engine/api.h. Every backend reads the same model files.
+- A HIP engine has at most three streams of its own. ROCm gives a process four hardware queues and hipBLASLt's setup
+  keeps one on the default stream for good, and streams take queues as they get work: with a fourth, two of them share
+  a queue in some processes and run one after the other (Flash-Next's 4K prompt took 2.19 s instead of 1.72 s in about
+  one process in six, until its expert loader moved onto the copy stream). `AMD_LOG_LEVEL=3` logs each queue a stream
+  takes ("Selected queue", with its refCount); a fifth queue costs the KV cache VRAM and decode about 2%.
 - chrysalis/models.py picks the backend from the platform (CHRYSALIS_BACKEND overrides it), with each backend's own
   settings in ON; bench/measure.py does the same for the bench.
 - tests/<backend>/ hold kernel checks; tests/*.py check any backend through the C API.
@@ -37,9 +42,9 @@ under them true to what Chrysalis does now.
 A gate measures the working tree against HEAD in the same session, both models on the GPU with Chrysalis's model server
 stopped; bench/hill_ready.py refuses to start while anything else holds the GPU or free memory is short. Measuring time
 is a reward too: a gate takes minutes, deep context is restored from snapshots primed once per machine, and the bench
-only gets faster. Every machine with a record (the RX 7900 here, the M4 Max on studio) judges each change: run
-`.hill/hill gate` there and append its new .hill/ledger.jsonl lines here before committing. The hook (`git config
-core.hooksPath bench/hooks`) holds every commit to that.
+only gets faster. Every machine with a record (the RX 7900 here, the M4 Max on studio, the RTX 5070 rented on
+vast.ai) judges each change: run `.hill/hill gate` there and append its new .hill/ledger.jsonl lines here before
+committing. The hook (`git config core.hooksPath bench/hooks`) holds every commit to that.
 
 ## Comments
 
@@ -56,7 +61,8 @@ None: no comments or docstrings anywhere in the repo, in any language, including
 - Flash-Next's CPU / GPU split and its expert pool move with history and change results by rounding: a check that
   needs bit-identical repeats within one process pins them (`chrysalis_tune` "split", "gfrac", "experts"), as
   tests/test_snapshot.py does. Fresh processes given the same requests repeat each other to the bit: its CPU, DMA, disk
-  and prompt-split calibration is kept in data/cache/flash-next-calibration.txt, and pool moves land at fixed steps.
+  and prompt-split calibration, and on CUDA the RAM its mirror may use, is kept in data/cache/flash-next-calibration.txt,
+  and pool moves land at fixed steps.
 - Tests check, they don't time: a timing is not a check.
 
 ## Running them
@@ -86,6 +92,20 @@ None: no comments or docstrings anywhere in the repo, in any language, including
   `make kernels_fn`, `make test` and `make test_fn_model`. Their references come from data/llama.cpp at the commit Linux
   pins, built with Metal (`cmake -B build && cmake --build build --target llama ggml ggml-base`), and the PDF checks
   need poppler (`brew install poppler`). The Metal engines have no vision tower yet, so their tests leave pictures out.
+- On an NVIDIA GPU, the same targets build and check the CUDA engines (nvcc from /usr/local/cuda, the native architecture
+  unless ARCH is set): `make kernels`, `make kernels_fn`, `make test` and `make test_fn_model`, with data/llama.cpp built
+  for CUDA (`cmake -B build -DGGML_CUDA=ON -DBUILD_SHARED_LIBS=ON && cmake --build build`). On a card too small for a
+  model, the 27B keeps the layers that don't fit in pinned RAM (streamed to VRAM for prompts, read across PCIe for
+  writing) and Flash-Next starts the VRAM experts that don't fit in its RAM mirror; CHRYSALIS_CTX and CHRYSALIS_FN_CTX
+  set the context they keep VRAM for. How far Flash-Next's mirror may grow is kept on the machine's calibration line: the
+  first process to load it there keeps the RAM the engine may hold (what was free when it began loading plus what that
+  process already held, a container's own limit as the bound, less 5 GB) and what the engine holds beyond its experts, so
+  fresh processes repeat each other to the bit whatever is free (tests/test_mirror_budget.py); below 250 MB free it still
+  gives memory back. The vision checks on any machine read the first safetensors shard of Qwen's own release
+  (model-00001 of Qwen/Qwen3.8-27B and of Qwen/Qwen3.8-Flash-Next) as data/models/<model>/<model>-shard1.safetensors.
+  Their llama.cpp references are kept in build/vision by their inputs: on a card too small for the 27B, make them with
+  build/ref_logits_mm on a machine that holds it on its GPU (llama.cpp on the CPU is further from that than the checks
+  allow), as Flash-Next's come from a machine with its Q8_0 source.
 - On the RX 7900, Flash-Next takes ~47 GiB of system RAM, in Chrysalis or in-process, and more as its expert pool moves (until 4 GB is left, given back below 3 GB). Check MemAvailable before loading it, and run it
   in its own scope (`systemd-run --user --scope ...`): systemd-oomd kills whole terminal scopes under memory pressure.
 

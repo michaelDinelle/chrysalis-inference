@@ -1,3 +1,4 @@
+import ctypes
 import glob
 import re
 import shutil
@@ -9,13 +10,48 @@ import time
 LOGIND = ["--system", "--dest", "org.freedesktop.login1", "--object-path", "/org/freedesktop/login1"]
 
 
+class _NvmlMemory(ctypes.Structure):
+    _fields_ = [("version", ctypes.c_uint), ("total", ctypes.c_ulonglong), ("reserved", ctypes.c_ulonglong), ("free", ctypes.c_ulonglong),
+                ("used", ctypes.c_ulonglong)]
+
+
+_nvml = []
+
+
+def _nvml_used():
+    if not _nvml:
+        found = None
+        try:
+            lib = ctypes.CDLL("libnvidia-ml.so.1")
+            if lib.nvmlInit_v2() == 0:
+                n, handles = ctypes.c_uint(0), []
+                lib.nvmlDeviceGetCount_v2(ctypes.byref(n))
+                for i in range(n.value):
+                    h = ctypes.c_void_p()
+                    if lib.nvmlDeviceGetHandleByIndex_v2(i, ctypes.byref(h)) == 0:
+                        handles.append(h)
+                found = (lib, handles) if handles else None
+        except (OSError, AttributeError):
+            pass
+        _nvml.append(found)
+    if not _nvml[0]:
+        return None
+    lib, handles = _nvml[0]
+    best = None
+    for h in handles:
+        info = _NvmlMemory(version=ctypes.sizeof(_NvmlMemory) | 2 << 24)
+        if lib.nvmlDeviceGetMemoryInfo_v2(h, ctypes.byref(info)) == 0 and (best is None or info.total > best.total):
+            best = info
+    return best.used if best else None
+
+
 def vram_used():
     if sys.platform == "darwin":
         out = subprocess.run(["ioreg", "-r", "-d", "1", "-c", "IOAccelerator"], capture_output=True, text=True).stdout
         found = re.search(r'"In use system memory"=(\d+)', out)
         return int(found.group(1)) if found else None
     cards = [(int(open(f).read()), f.replace("_total", "_used")) for f in glob.glob("/sys/class/drm/card*/device/mem_info_vram_total")]
-    return int(open(max(cards)[1]).read()) if cards else None
+    return int(open(max(cards)[1]).read()) if cards else _nvml_used()
 
 
 def wait_vram_freed(held, timeout=3.0):
