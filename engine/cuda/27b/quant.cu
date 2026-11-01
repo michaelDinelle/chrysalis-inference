@@ -332,8 +332,282 @@ void gemv(const QTensor &W, QAct x, int T, float *y, int ldy, int mode, cudaStre
 }
 
 
+constexpr int MMQ_WARPS = 8, MMQ_NT = 8, MMQ_TOK = 8 * MMQ_NT, MMQ_STAGES = 3, MMQ_ROWB = 80, MMQ_KS = 2;
+
+__device__ __forceinline__ uint32_t smem_u32(const void *p) { return (uint32_t)__cvta_generic_to_shared(p); }
+__device__ __forceinline__ void cp_async16(uint32_t dst, const void *src) {
+    asm volatile("cp.async.cg.shared.global [%0], [%1], 16;" :: "r"(dst), "l"(src));
+}
+__device__ __forceinline__ void cp_async4(uint32_t dst, const void *src) {
+    asm volatile("cp.async.ca.shared.global [%0], [%1], 4;" :: "r"(dst), "l"(src));
+}
+__device__ __forceinline__ void cp_commit() { asm volatile("cp.async.commit_group;"); }
+template <int N> __device__ __forceinline__ void cp_wait() { asm volatile("cp.async.wait_group %0;" :: "n"(N)); }
+
+template <int QT> struct MmqRaw;
+template <> struct MmqRaw<IQ4_XS> { uint32_t q; half d; uint8_t sc; uint16_t sh; };
+template <> struct MmqRaw<Q8_0> { int lo, hi; half d; };
+template <> struct MmqRaw<Q6_K> { uint32_t l0, l1, h0, h1; int8_t s0, s1; half d; };
+
+template <int QT> struct MmqRow {
+    const uint8_t *q, *qh; const int8_t *sc8; const uint8_t *sc; const uint16_t *sh; const half *d;
+    __device__ __forceinline__ MmqRow(const QTensor &W, int row, int tig) {
+        const int K = W.cols;
+        if constexpr (QT == IQ4_XS) {
+            q = W.q + (size_t)row * (K / 2) + tig * 4; d = W.d + (size_t)row * (K / 256);
+            sc = W.sc + (size_t)row * (K / 256) * 4; sh = W.sh + (size_t)row * (K / 256); qh = nullptr; sc8 = nullptr;
+        } else if constexpr (QT == Q8_0) {
+            q = W.q + (size_t)row * K + tig * 4; d = W.d + (size_t)row * (K / 32); qh = nullptr; sc8 = nullptr; sc = nullptr; sh = nullptr;
+        } else {
+            q = W.q + (size_t)row * (K / 2) + tig * 4; qh = W.qh + (size_t)row * (K / 4) + tig * 4;
+            sc8 = (const int8_t *)W.sc + (size_t)row * (K / 16); d = W.d + (size_t)row * (K / 256); sc = nullptr; sh = nullptr;
+        }
+    }
+    __device__ __forceinline__ void load(int kb, MmqRaw<QT> &r) const {
+        if constexpr (QT == IQ4_XS) {
+            const int sb = kb >> 3;
+            r.q = __ldg((const uint32_t *)(q + kb * 16));
+            r.d = d[sb]; r.sc = sc[sb * 4 + ((kb & 7) >> 1)]; r.sh = sh[sb];
+        } else if constexpr (QT == Q8_0) {
+            r.lo = __ldg((const int *)(q + kb * 32)); r.hi = __ldg((const int *)(q + kb * 32 + 16)); r.d = d[kb];
+        } else {
+            const int sb = kb >> 3, j = kb & 7, h = j >> 2, grp = j & 3;
+            const uint8_t *ql = q + sb * 128 + h * 64 + (grp & 1) * 32, *qq = qh + sb * 64 + h * 32;
+            r.l0 = __ldg((const uint32_t *)ql); r.l1 = __ldg((const uint32_t *)(ql + 16));
+            r.h0 = __ldg((const uint32_t *)qq); r.h1 = __ldg((const uint32_t *)(qq + 16));
+            const int8_t *s8 = sc8 + sb * 16 + h * 8 + grp * 2;
+            r.s0 = s8[0]; r.s1 = s8[1]; r.d = d[sb];
+        }
+    }
+};
+
 template <int QT>
-__device__ __forceinline__ void mmq_a(const QTensor &W, int row, int kb, int tig, int &lo, int &hi, float &slo, float &shi) {
+__device__ __forceinline__ void mmq_decode(const MmqRaw<QT> &r, int kb, int &lo, int &hi, float &slo, float &shi) {
+    if constexpr (QT == IQ4_XS) {
+        const int ib = kb & 7;
+        const int2 v = iq4_lookup(r.q);
+        lo = v.x; hi = v.y;
+        const int sc = (((r.sc >> 4 * (ib & 1)) & 0xf) | (((r.sh >> 2 * ib) & 3) << 4)) - 32;
+        slo = shi = __half2float(r.d) * sc;
+    } else if constexpr (QT == Q8_0) {
+        lo = r.lo; hi = r.hi;
+        slo = shi = __half2float(r.d);
+    } else {
+        const int j = kb & 7, grp = j & 3;
+        const int ns = (grp >> 1) * 4, hs = grp * 2;
+        lo = q6_unpack(r.l0 >> ns, r.h0 >> hs);
+        hi = q6_unpack(r.l1 >> ns, r.h1 >> hs);
+        const float dd = __half2float(r.d);
+        slo = dd * r.s0; shi = dd * r.s1;
+    }
+}
+
+struct MmqSmem {
+    uint8_t x[MMQ_STAGES][MMQ_KS][MMQ_TOK * MMQ_ROWB];
+    float d[MMQ_STAGES][MMQ_KS][MMQ_TOK];
+};
+
+template <bool TWO>
+struct MmqLoader {
+    static constexpr int P = TWO ? 4 : 2, ITEMS = MMQ_KS * MMQ_TOK * P, PER = (ITEMS + MMQ_WARPS * 32 - 1) / (MMQ_WARPS * 32);
+    const int8_t *src[PER]; uint32_t dst[PER]; int kofs[PER]; bool on[PER];
+    const float *dsrc; uint32_t ddst; int dk; bool don;
+    __device__ __forceinline__ MmqLoader(MmqSmem &S, QAct x, int T, int K, int t0) {
+#pragma unroll
+        for (int m = 0; m < PER; m++) {
+            const int i = threadIdx.x + m * MMQ_WARPS * 32;
+            on[m] = i < ITEMS;
+            const int k = i / (MMQ_TOK * P), rem = i % (MMQ_TOK * P), j = rem / P, part = rem % P, t = min(t0 + j, T - 1);
+            kofs[m] = k;
+            src[m] = (part < 2 ? x.q : x.r) + (size_t)t * K + k * 32 + (part & 1) * 16;
+            dst[m] = smem_u32(&S.x[0][k][j * MMQ_ROWB + part * 16]);
+        }
+        const int i = threadIdx.x;
+        don = i < MMQ_KS * MMQ_TOK;
+        dk = i / MMQ_TOK;
+        const int j = i % MMQ_TOK, t = min(t0 + j, T - 1);
+        dsrc = x.d + (size_t)t * (K / 32) + dk;
+        ddst = smem_u32(&S.d[0][dk][j]);
+    }
+    __device__ __forceinline__ void load(int stage, int kb0, int nkb) const {
+#pragma unroll
+        for (int m = 0; m < PER; m++)
+            if (on[m] && kb0 + kofs[m] < nkb)
+                cp_async16(dst[m] + stage * (uint32_t)sizeof(MmqSmem::x[0]), src[m] + kb0 * 32);
+        if (don && kb0 + dk < nkb)
+            cp_async4(ddst + stage * (uint32_t)sizeof(MmqSmem::d[0]), dsrc + kb0);
+    }
+};
+
+__device__ __forceinline__ void ldsm4(uint32_t addr, int &r0, int &r1, int &r2, int &r3) {
+    asm volatile("ldmatrix.sync.aligned.m8n8.x4.shared.b16 {%0,%1,%2,%3}, [%4];" : "=r"(r0), "=r"(r1), "=r"(r2), "=r"(r3) : "r"(addr));
+}
+
+template <int QT, bool TWO, bool LDSM>
+__device__ __forceinline__ void mmq_step(const int a0[2], const int a1[2], const float s0[2], const float s1[2], uint32_t lsm,
+                                        const uint8_t *row, const float *dp, float acc[4]) {
+    int b0, b1, rr0, rr1;
+    if constexpr (LDSM) ldsm4(lsm, b0, b1, rr0, rr1);
+    else { b0 = *(const int *)row; b1 = *(const int *)(row + 16); rr0 = *(const int *)(row + 32); rr1 = *(const int *)(row + 48); }
+    constexpr float RS = TWO ? 1.0f / 254.0f : 1.0f;
+    const float2 dd = *(const float2 *)dp;
+    const float da = dd.x * RS, db = dd.y * RS;
+    if constexpr (QT == Q6_K) {
+        int clo[4] = {0, 0, 0, 0}, chi[4] = {0, 0, 0, 0};
+        const int alo[2] = {a0[0], a1[0]}, ahi[2] = {a0[1], a1[1]};
+        mma_s8_k16(clo, alo, b0);
+        mma_s8_k16(chi, ahi, b1);
+        if constexpr (TWO) {
+            const int r0 = rr0, r1 = rr1;
+            int rlo[4] = {0, 0, 0, 0}, rhi[4] = {0, 0, 0, 0};
+            mma_s8_k16(rlo, alo, r0);
+            mma_s8_k16(rhi, ahi, r1);
+#pragma unroll
+            for (int i = 0; i < 4; i++) { clo[i] = clo[i] * 254 + rlo[i]; chi[i] = chi[i] * 254 + rhi[i]; }
+        }
+        acc[0] = __fmaf_rn(__fmaf_rn((float)clo[0], s0[0], (float)chi[0] * s0[1]), da, acc[0]);
+        acc[1] = __fmaf_rn(__fmaf_rn((float)clo[1], s0[0], (float)chi[1] * s0[1]), db, acc[1]);
+        acc[2] = __fmaf_rn(__fmaf_rn((float)clo[2], s1[0], (float)chi[2] * s1[1]), da, acc[2]);
+        acc[3] = __fmaf_rn(__fmaf_rn((float)clo[3], s1[0], (float)chi[3] * s1[1]), db, acc[3]);
+    } else {
+        int c[4] = {0, 0, 0, 0};
+        const int a[4] = {a0[0], a1[0], a0[1], a1[1]}, b[2] = {b0, b1};
+        mma_s8(c, a, b);
+        if constexpr (TWO) {
+            const int rb[2] = {rr0, rr1};
+            int cr[4] = {0, 0, 0, 0};
+            mma_s8(cr, a, rb);
+#pragma unroll
+            for (int i = 0; i < 4; i++) c[i] = c[i] * 254 + cr[i];
+        }
+        acc[0] = __fmaf_rn((float)c[0], s0[0] * da, acc[0]);
+        acc[1] = __fmaf_rn((float)c[1], s0[0] * db, acc[1]);
+        acc[2] = __fmaf_rn((float)c[2], s1[0] * da, acc[2]);
+        acc[3] = __fmaf_rn((float)c[3], s1[0] * db, acc[3]);
+    }
+}
+
+template <int QT, bool TWO, bool GLU, bool FULL>
+__device__ __forceinline__ void mmq_main(const QTensor &Wa, const QTensor &Wb, QAct x, int T, int row0, int t0, bool live, int g, int tig,
+                                        MmqSmem &S, float acc[MMQ_NT][4], float acc2[MMQ_NT][4]) {
+    const int K = Wa.cols, nkb = K / 32, nst = (nkb + MMQ_KS - 1) / MMQ_KS;
+    const MmqLoader<TWO> ld(S, x, T, K, t0);
+#pragma unroll
+    for (int s = 0; s < MMQ_STAGES - 1; s++) {
+        if (s < nst) ld.load(s, s * MMQ_KS, nkb);
+        cp_commit();
+    }
+    const MmqRow<QT> pa0(Wa, row0 + g, tig), pa1(Wa, row0 + g + 8, tig), pb0(Wb, row0 + g, tig), pb1(Wb, row0 + g + 8, tig);
+    MmqRaw<QT> ra0, ra1, rb0, rb1;
+    if (live) {
+        pa0.load(0, ra0); pa1.load(0, ra1);
+        if constexpr (GLU) { pb0.load(0, rb0); pb1.load(0, rb1); }
+    }
+    const int nlive = FULL ? MMQ_NT : min(MMQ_NT, (T - t0 + 7) / 8);
+    const int lane = threadIdx.x % 32;
+    const uint32_t xrow = smem_u32(&S.x[0][0][0]) + (lane % 8) * MMQ_ROWB + (lane / 8) * 16;
+    const uint8_t *prow = &S.x[0][0][0] + g * MMQ_ROWB + tig * 4;
+    const float *drow = &S.d[0][0][0] + tig * 2;
+    for (int sk = 0; sk < nst; sk++) {
+        cp_wait<MMQ_STAGES - 2>();
+        __syncthreads();
+        const int nk = sk + MMQ_STAGES - 1;
+        if (nk < nst) ld.load(nk % MMQ_STAGES, nk * MMQ_KS, nkb);
+        cp_commit();
+        if (!live) continue;
+        const int st = sk % MMQ_STAGES;
+#pragma unroll
+        for (int k = 0; k < MMQ_KS; k++) {
+            const int kb = sk * MMQ_KS + k;
+            if (kb >= nkb) break;
+            const uint32_t xs = xrow + (st * MMQ_KS + k) * (MMQ_TOK * MMQ_ROWB);
+            const uint8_t *ps = prow + (st * MMQ_KS + k) * (MMQ_TOK * MMQ_ROWB);
+            const float *ds = drow + (st * MMQ_KS + k) * MMQ_TOK;
+            int a0[2], a1[2], b0[2], b1[2];
+            float s0[2], s1[2], u0[2], u1[2];
+            mmq_decode<QT>(ra0, kb, a0[0], a0[1], s0[0], s0[1]);
+            mmq_decode<QT>(ra1, kb, a1[0], a1[1], s1[0], s1[1]);
+            if constexpr (GLU) { mmq_decode<QT>(rb0, kb, b0[0], b0[1], u0[0], u0[1]); mmq_decode<QT>(rb1, kb, b1[0], b1[1], u1[0], u1[1]); }
+            if (kb + 1 < nkb) {
+                pa0.load(kb + 1, ra0); pa1.load(kb + 1, ra1);
+                if constexpr (GLU) { pb0.load(kb + 1, rb0); pb1.load(kb + 1, rb1); }
+            }
+#pragma unroll
+            for (int n = 0; n < MMQ_NT; n++)
+                if (FULL || n < nlive) mmq_step<QT, TWO, !GLU>(a0, a1, s0, s1, xs + n * 8 * MMQ_ROWB, ps + n * 8 * MMQ_ROWB, ds + n * 8, acc[n]);
+            if constexpr (GLU) {
+#pragma unroll
+                for (int n = 0; n < MMQ_NT; n++)
+                    if (FULL || n < nlive) mmq_step<QT, TWO, !GLU>(b0, b1, u0, u1, xs + n * 8 * MMQ_ROWB, ps + n * 8 * MMQ_ROWB, ds + n * 8, acc2[n]);
+            }
+        }
+    }
+    cp_wait<0>();
+}
+
+template <int QT, bool TWO>
+__global__ __launch_bounds__(MMQ_WARPS * 32) void k_mmq(QTensor W, QAct x, int T, void *y, int ldy, int mode, int y_f16) {
+    __shared__ __align__(16) MmqSmem S;
+    const int warp = threadIdx.x / 32, lane = threadIdx.x % 32, g = lane / 4, tig = lane % 4;
+    const int row0 = (blockIdx.y * MMQ_WARPS + warp) * 16, t0 = blockIdx.x * MMQ_TOK;
+    const bool live = row0 < W.rows;
+    float acc[MMQ_NT][4] = {};
+    if (t0 + MMQ_TOK <= T) mmq_main<QT, TWO, false, true>(W, W, x, T, row0, t0, live, g, tig, S, acc, acc);
+    else mmq_main<QT, TWO, false, false>(W, W, x, T, row0, t0, live, g, tig, S, acc, acc);
+    if (!live) return;
+#pragma unroll
+    for (int n = 0; n < MMQ_NT; n++)
+#pragma unroll
+        for (int i = 0; i < 4; i++) {
+            const int t = t0 + n * 8 + tig * 2 + (i & 1), row = row0 + g + (i >> 1) * 8;
+            if (t >= T) continue;
+            const size_t o = (size_t)t * ldy + row;
+            if (y_f16) ((half *)y)[o] = __float2half(acc[n][i]);
+            else ((float *)y)[o] = mode == GEMV_ADD ? ((float *)y)[o] + acc[n][i] : acc[n][i];
+        }
+}
+
+template <int QT, bool TWO>
+__global__ __launch_bounds__(MMQ_WARPS * 32) void k_mmq_glu(QTensor Wg, QTensor Wu, QAct x, int T, QAct out) {
+    __shared__ __align__(16) MmqSmem S;
+    __shared__ float amax[MMQ_WARPS][MMQ_TOK];
+    const int warp = threadIdx.x / 32, lane = threadIdx.x % 32, g = lane / 4, tig = lane % 4;
+    const int row0 = (blockIdx.y * MMQ_WARPS + warp) * 16, t0 = blockIdx.x * MMQ_TOK, N = Wg.rows;
+    const bool live = row0 < N;
+    float ag[MMQ_NT][4] = {}, au[MMQ_NT][4] = {};
+    if (t0 + MMQ_TOK <= T) mmq_main<QT, TWO, true, true>(Wg, Wu, x, T, row0, t0, live, g, tig, S, ag, au);
+    else mmq_main<QT, TWO, true, false>(Wg, Wu, x, T, row0, t0, live, g, tig, S, ag, au);
+#pragma unroll
+    for (int n = 0; n < MMQ_NT; n++) {
+        float m[2];
+#pragma unroll
+        for (int i = 0; i < 4; i++) ag[n][i] = silu(ag[n][i]) * au[n][i];
+#pragma unroll
+        for (int c = 0; c < 2; c++) {
+            m[c] = fmaxf(fabsf(ag[n][c]), fabsf(ag[n][c + 2]));
+            m[c] = fmaxf(m[c], lane_xor<4>(m[c])); m[c] = fmaxf(m[c], lane_xor<8>(m[c])); m[c] = fmaxf(m[c], lane_xor<16>(m[c]));
+        }
+        if (g == 0) { amax[warp][n * 8 + tig * 2] = m[0]; amax[warp][n * 8 + tig * 2 + 1] = m[1]; }
+    }
+    __syncthreads();
+    if (!live) return;
+#pragma unroll
+    for (int n = 0; n < MMQ_NT; n++)
+#pragma unroll
+        for (int i = 0; i < 4; i++) {
+            const int tc = n * 8 + tig * 2 + (i & 1), t = t0 + tc, row = row0 + g + (i >> 1) * 8;
+            if (t >= T) continue;
+            const float d = fmaxf(amax[warp][tc], amax[warp ^ 1][tc]) / 127.0f, v = ag[n][i];
+            const float q = d > 0 ? rintf(v / d) : 0.0f;
+            const size_t o = (size_t)t * N + row;
+            out.q[o] = (int8_t)q;
+            if (out.r) out.r[o] = (int8_t)(d > 0 ? fminf(127.0f, fmaxf(-127.0f, rintf((v - q * d) * (254.0f / d)))) : 0.0f);
+            if (g == 0 && (i >> 1) == 0 && (warp & 1) == 0) out.d[o / 32] = d;
+        }
+}
+
+template <int QT>
+__device__ __forceinline__ void smq_a(const QTensor &W, int row, int kb, int tig, int &lo, int &hi, float &slo, float &shi) {
     const int K = W.cols;
     if constexpr (QT == IQ4_XS) {
         const int sb = kb >> 3, ib = kb & 7;
@@ -359,15 +633,15 @@ __device__ __forceinline__ void mmq_a(const QTensor &W, int row, int kb, int tig
     }
 }
 
-constexpr int MMQ_WARPS = 4, MMQ_NT = 8;
+constexpr int SMQ_WARPS = 4, SMQ_NT = 8;
 
-struct MmqX {
-    const int8_t *q[MMQ_NT], *r[MMQ_NT];
-    const float *d[MMQ_NT][2];
-    bool live[MMQ_NT];
-    __device__ MmqX(QAct x, int T, int K, int t0, int g, int tig) {
+struct SmqX {
+    const int8_t *q[SMQ_NT], *r[SMQ_NT];
+    const float *d[SMQ_NT][2];
+    bool live[SMQ_NT];
+    __device__ SmqX(QAct x, int T, int K, int t0, int g, int tig) {
 #pragma unroll
-        for (int n = 0; n < MMQ_NT; n++) {
+        for (int n = 0; n < SMQ_NT; n++) {
             const int tb = min(t0 + n * 8 + g, T - 1), ta = t0 + n * 8 + tig * 2;
             live[n] = t0 + n * 8 < T;
             q[n] = x.q + (size_t)tb * K + tig * 4;
@@ -379,7 +653,7 @@ struct MmqX {
 };
 
 template <int QT, bool TWO>
-__device__ __forceinline__ void mmq_step(const int a0[2], const int a1[2], const float s0[2], const float s1[2], const MmqX &X, int n, int kb,
+__device__ __forceinline__ void smq_step(const int a0[2], const int a1[2], const float s0[2], const float s1[2], const SmqX &X, int n, int kb,
                                          float acc[4]) {
     const int b0 = __ldg((const int *)(X.q[n] + kb * 32)), b1 = __ldg((const int *)(X.q[n] + kb * 32 + 16));
     constexpr float RS = TWO ? 1.0f / 254.0f : 1.0f;
@@ -418,29 +692,29 @@ __device__ __forceinline__ void mmq_step(const int a0[2], const int a1[2], const
 }
 
 template <int QT, bool TWO>
-__device__ __forceinline__ void mmq_rows(const QTensor &W, int row0, const MmqX &X, int g, int tig, float acc[MMQ_NT][4]) {
+__device__ __forceinline__ void smq_rows(const QTensor &W, int row0, const SmqX &X, int g, int tig, float acc[SMQ_NT][4]) {
     const int nkb = W.cols / 32;
     for (int kb = 0; kb < nkb; kb++) {
         int a0[2], a1[2];
         float s0[2], s1[2];
-        mmq_a<QT>(W, row0 + g, kb, tig, a0[0], a0[1], s0[0], s0[1]);
-        mmq_a<QT>(W, row0 + g + 8, kb, tig, a1[0], a1[1], s1[0], s1[1]);
+        smq_a<QT>(W, row0 + g, kb, tig, a0[0], a0[1], s0[0], s0[1]);
+        smq_a<QT>(W, row0 + g + 8, kb, tig, a1[0], a1[1], s1[0], s1[1]);
 #pragma unroll
-        for (int n = 0; n < MMQ_NT; n++)
-            if (X.live[n]) mmq_step<QT, TWO>(a0, a1, s0, s1, X, n, kb, acc[n]);
+        for (int n = 0; n < SMQ_NT; n++)
+            if (X.live[n]) smq_step<QT, TWO>(a0, a1, s0, s1, X, n, kb, acc[n]);
     }
 }
 
 template <int QT, bool TWO>
-__global__ __launch_bounds__(MMQ_WARPS * 32) void k_mmq(QTensor W, QAct x, int T, void *y, int ldy, int mode, int y_f16) {
+__global__ __launch_bounds__(SMQ_WARPS * 32) void k_smq(QTensor W, QAct x, int T, void *y, int ldy, int mode, int y_f16) {
     const int warp = threadIdx.x / 32, lane = threadIdx.x % 32, g = lane / 4, tig = lane % 4;
-    const int row0 = (blockIdx.y * MMQ_WARPS + warp) * 16, t0 = blockIdx.x * 8 * MMQ_NT;
+    const int row0 = (blockIdx.y * SMQ_WARPS + warp) * 16, t0 = blockIdx.x * 8 * SMQ_NT;
     if (row0 >= W.rows) return;
-    const MmqX X(x, T, W.cols, t0, g, tig);
-    float acc[MMQ_NT][4] = {};
-    mmq_rows<QT, TWO>(W, row0, X, g, tig, acc);
+    const SmqX X(x, T, W.cols, t0, g, tig);
+    float acc[SMQ_NT][4] = {};
+    smq_rows<QT, TWO>(W, row0, X, g, tig, acc);
 #pragma unroll
-    for (int n = 0; n < MMQ_NT; n++)
+    for (int n = 0; n < SMQ_NT; n++)
 #pragma unroll
         for (int i = 0; i < 4; i++) {
             const int t = t0 + n * 8 + tig * 2 + (i & 1), row = row0 + g + (i >> 1) * 8;
@@ -452,16 +726,16 @@ __global__ __launch_bounds__(MMQ_WARPS * 32) void k_mmq(QTensor W, QAct x, int T
 }
 
 template <int QT, bool TWO>
-__global__ __launch_bounds__(MMQ_WARPS * 32) void k_mmq_glu(QTensor Wg, QTensor Wu, QAct x, int T, QAct out) {
-    __shared__ float amax[MMQ_WARPS][8 * MMQ_NT];
+__global__ __launch_bounds__(SMQ_WARPS * 32) void k_smq_glu(QTensor Wg, QTensor Wu, QAct x, int T, QAct out) {
+    __shared__ float amax[SMQ_WARPS][8 * SMQ_NT];
     const int warp = threadIdx.x / 32, lane = threadIdx.x % 32, g = lane / 4, tig = lane % 4;
-    const int row0 = (blockIdx.y * MMQ_WARPS + warp) * 16, t0 = blockIdx.x * 8 * MMQ_NT, N = Wg.rows;
-    const MmqX X(x, T, Wg.cols, t0, g, tig);
-    float ag[MMQ_NT][4] = {}, au[MMQ_NT][4] = {};
-    mmq_rows<QT, TWO>(Wg, row0, X, g, tig, ag);
-    mmq_rows<QT, TWO>(Wu, row0, X, g, tig, au);
+    const int row0 = (blockIdx.y * SMQ_WARPS + warp) * 16, t0 = blockIdx.x * 8 * SMQ_NT, N = Wg.rows;
+    const SmqX X(x, T, Wg.cols, t0, g, tig);
+    float ag[SMQ_NT][4] = {}, au[SMQ_NT][4] = {};
+    smq_rows<QT, TWO>(Wg, row0, X, g, tig, ag);
+    smq_rows<QT, TWO>(Wu, row0, X, g, tig, au);
 #pragma unroll
-    for (int n = 0; n < MMQ_NT; n++) {
+    for (int n = 0; n < SMQ_NT; n++) {
         float m[2];
 #pragma unroll
         for (int i = 0; i < 4; i++) ag[n][i] = silu(ag[n][i]) * au[n][i];
@@ -474,7 +748,7 @@ __global__ __launch_bounds__(MMQ_WARPS * 32) void k_mmq_glu(QTensor Wg, QTensor 
     }
     __syncthreads();
 #pragma unroll
-    for (int n = 0; n < MMQ_NT; n++)
+    for (int n = 0; n < SMQ_NT; n++)
 #pragma unroll
         for (int i = 0; i < 4; i++) {
             const int tc = n * 8 + tig * 2 + (i & 1), t = t0 + tc, row = row0 + g + (i >> 1) * 8;
@@ -488,37 +762,38 @@ __global__ __launch_bounds__(MMQ_WARPS * 32) void k_mmq_glu(QTensor Wg, QTensor 
         }
 }
 
-template <bool TWO>
-static void mmq_launch(const QTensor &W, QAct x, int T, void *y, int ldy, int mode, bool y_f16, cudaStream_t st) {
-    const dim3 grid((T + 8 * MMQ_NT - 1) / (8 * MMQ_NT), (W.rows + 16 * MMQ_WARPS - 1) / (16 * MMQ_WARPS));
-    if (W.type == IQ4_XS) k_mmq<IQ4_XS, TWO><<<grid, MMQ_WARPS * 32, 0, st>>>(W, x, T, y, ldy, mode, y_f16);
-    else if (W.type == Q6_K) k_mmq<Q6_K, TWO><<<grid, MMQ_WARPS * 32, 0, st>>>(W, x, T, y, ldy, mode, y_f16);
-    else if (W.type == Q8_0) k_mmq<Q8_0, TWO><<<grid, MMQ_WARPS * 32, 0, st>>>(W, x, T, y, ldy, mode, y_f16);
+void gemm_q(const QTensor &W, QAct x, int T, void *y, int ldy, int mode, bool y_f16, cudaStream_t st) {
+    if (W.rows % 16 || W.cols % 256 || !x.r) FAIL("gemm_q: %dx%d (two-term activations %d) not supported", W.rows, W.cols, x.r != nullptr);
+    if (T <= 8 * SMQ_NT) {
+        const dim3 sg(1, (W.rows + 16 * SMQ_WARPS - 1) / (16 * SMQ_WARPS));
+        if (W.type == IQ4_XS) k_smq<IQ4_XS, true><<<sg, SMQ_WARPS * 32, 0, st>>>(W, x, T, y, ldy, mode, y_f16);
+        else if (W.type == Q6_K) k_smq<Q6_K, true><<<sg, SMQ_WARPS * 32, 0, st>>>(W, x, T, y, ldy, mode, y_f16);
+        else if (W.type == Q8_0) k_smq<Q8_0, true><<<sg, SMQ_WARPS * 32, 0, st>>>(W, x, T, y, ldy, mode, y_f16);
+        else FAIL("gemm_q: type %d", W.type);
+        return;
+    }
+    const dim3 grid((T + MMQ_TOK - 1) / MMQ_TOK, (W.rows + 16 * MMQ_WARPS - 1) / (16 * MMQ_WARPS));
+    if (W.type == IQ4_XS) k_mmq<IQ4_XS, true><<<grid, MMQ_WARPS * 32, 0, st>>>(W, x, T, y, ldy, mode, y_f16);
+    else if (W.type == Q6_K) k_mmq<Q6_K, true><<<grid, MMQ_WARPS * 32, 0, st>>>(W, x, T, y, ldy, mode, y_f16);
+    else if (W.type == Q8_0) k_mmq<Q8_0, true><<<grid, MMQ_WARPS * 32, 0, st>>>(W, x, T, y, ldy, mode, y_f16);
     else FAIL("gemm_q: type %d", W.type);
 }
 
-void gemm_q(const QTensor &W, QAct x, int T, void *y, int ldy, int mode, bool y_f16, cudaStream_t st) {
-    if (W.rows % 16 || W.cols % 256) FAIL("gemm_q: %dx%d not supported", W.rows, W.cols);
-    if (x.r) mmq_launch<true>(W, x, T, y, ldy, mode, y_f16, st);
-    else mmq_launch<false>(W, x, T, y, ldy, mode, y_f16, st);
-}
-
-template <bool TWO>
-static void mmq_glu_launch(const QTensor &Wg, const QTensor &Wu, QAct x, int T, QAct out, cudaStream_t st) {
-    const dim3 grid((T + 8 * MMQ_NT - 1) / (8 * MMQ_NT), Wg.rows / (16 * MMQ_WARPS));
-    if (Wg.type == IQ4_XS) k_mmq_glu<IQ4_XS, TWO><<<grid, MMQ_WARPS * 32, 0, st>>>(Wg, Wu, x, T, out);
-    else if (Wg.type == Q6_K) k_mmq_glu<Q6_K, TWO><<<grid, MMQ_WARPS * 32, 0, st>>>(Wg, Wu, x, T, out);
-    else if (Wg.type == Q8_0) k_mmq_glu<Q8_0, TWO><<<grid, MMQ_WARPS * 32, 0, st>>>(Wg, Wu, x, T, out);
+void gemm_q_glu(const QTensor &Wg, const QTensor &Wu, QAct x, int T, QAct out, cudaStream_t st) {
+    if (Wg.rows % 32 || Wg.cols % 256 || Wg.type != Wu.type || Wg.rows != Wu.rows || Wg.cols != Wu.cols || !x.r)
+        FAIL("gemm_q_glu: %dx%d types %d and %d (two-term activations %d) not supported", Wg.rows, Wg.cols, Wg.type, Wu.type, x.r != nullptr);
+    if (T <= 8 * SMQ_NT) {
+        const dim3 sg(1, Wg.rows / (16 * SMQ_WARPS));
+        if (Wg.type == IQ4_XS) k_smq_glu<IQ4_XS, true><<<sg, SMQ_WARPS * 32, 0, st>>>(Wg, Wu, x, T, out);
+        else if (Wg.type == Q8_0) k_smq_glu<Q8_0, true><<<sg, SMQ_WARPS * 32, 0, st>>>(Wg, Wu, x, T, out);
+        else FAIL("gemm_q_glu: type %d", Wg.type);
+        return;
+    }
+    const dim3 grid((T + MMQ_TOK - 1) / MMQ_TOK, (Wg.rows + 16 * MMQ_WARPS - 1) / (16 * MMQ_WARPS));
+    if (Wg.type == IQ4_XS) k_mmq_glu<IQ4_XS, true><<<grid, MMQ_WARPS * 32, 0, st>>>(Wg, Wu, x, T, out);
+    else if (Wg.type == Q8_0) k_mmq_glu<Q8_0, true><<<grid, MMQ_WARPS * 32, 0, st>>>(Wg, Wu, x, T, out);
     else FAIL("gemm_q_glu: type %d", Wg.type);
 }
-
-void gemm_q_glu(const QTensor &Wg, const QTensor &Wu, QAct x, int T, QAct out, cudaStream_t st) {
-    if (Wg.rows % (16 * MMQ_WARPS) || Wg.cols % 256 || Wg.type != Wu.type || Wg.rows != Wu.rows || Wg.cols != Wu.cols)
-        FAIL("gemm_q_glu: %dx%d types %d and %d not supported", Wg.rows, Wg.cols, Wg.type, Wu.type);
-    if (x.r) mmq_glu_launch<true>(Wg, Wu, x, T, out, st);
-    else mmq_glu_launch<false>(Wg, Wu, x, T, out, st);
-}
-
 
 __device__ __forceinline__ void store16(half *o, int4 q, float d) {
     const int8_t *b = (const int8_t *)&q;

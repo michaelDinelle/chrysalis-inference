@@ -210,9 +210,22 @@ void CpuMoe::worker(int id) {
         const int layer = sh->layer, T = sh->T;
         const ColdLayer &c = L[layer];
         int pick[MOE_MAX_T * MOE_MAX_E], np = 0, emu[MOE_MAX_T * MOE_MAX_E], ne = 0;
+        int uslot[MOE_MAX_T * MOE_MAX_E], ufirst[MOE_MAX_T * MOE_MAX_E + 1], umem[MOE_MAX_T * MOE_MAX_E], nu = 0;
         for (int j = 0; j < T * MOE_MAX_E; j++) {
             if (sh->slot[j] >= 0) pick[np++] = j;
             else if (sh->slot[j] <= -2) emu[ne++] = j;
+        }
+        for (int p = 0; p < np; p++) {
+            const int s = sh->slot[pick[p]];
+            int u = 0;
+            while (u < nu && uslot[u] != s) u++;
+            if (u == nu) uslot[nu++] = s;
+        }
+        ufirst[0] = 0;
+        for (int u = 0, m = 0; u < nu; u++) {
+            for (int p = 0; p < np; p++)
+                if (sh->slot[pick[p]] == uslot[u]) umem[m++] = p;
+            ufirst[u + 1] = m;
         }
         const ggml_type_traits_cpu *tr_gu[3] = {ggml_get_type_traits_cpu((ggml_type)c.type_gu[0]),
                                                 ggml_get_type_traits_cpu((ggml_type)(c.gate[1] ? c.type_gu[1] : c.type_gu[0])),
@@ -232,21 +245,23 @@ void CpuMoe::worker(int id) {
                 }
             }
             barrier();
-            const int R1 = (np + ne) * 2 * FE_;
+            const int R1 = (nu + ne) * 2 * FE_;
             for (int r = id * R1 / n; r < (id + 1) * R1 / n; r++) {
-                if (r / (2 * FE_) >= np) {
-                    const int j = emu[r / (2 * FE_) - np], k = r % (2 * FE_), slot = -2 - sh->slot[j];
+                if (r / (2 * FE_) >= nu) {
+                    const int j = emu[r / (2 * FE_) - nu], k = r % (2 * FE_), slot = -2 - sh->slot[j];
                     me->gu[j][k] = emu_gu_row(c.gu_row(k >= FE_, slot, k % FE_), c.type_gu[c.grp(slot)], ea[j / MOE_MAX_E], scr[id].v);
                     continue;
                 }
-                const int p = r / (2 * FE_), k = r % (2 * FE_), j = pick[p], slot = sh->slot[j], g = c.grp(slot), gx = dot_same ? 0 : g;
+                const int u = r / (2 * FE_), k = r % (2 * FE_), slot = uslot[u], g = c.grp(slot), gx = dot_same ? 0 : g;
                 const uint8_t *row = c.gu_row(k >= FE_, slot, k % FE_);
-                const int t = j / MOE_MAX_E;
-                if (vx)
-                    gu[(size_t)p * 2 * FE_ + k] = vnni_dot_gu1(row, c.type_gu[g], dxq.data() + (size_t)t * D_, dxs.data() + t * (D_ / 32),
-                                                               dxsum.data() + t * (D_ / 16), ds16.data() + t * (D_ / 16),
-                                                               df16.data() + t * (D_ / 16), scr[id].v);
-                else tr_gu[g]->vec_dot(D_, &gu[(size_t)p * 2 * FE_ + k], 0, row, 0, xq[gx].data() + xq_row[gx] * t, 0, 1);
+                for (int m = ufirst[u]; m < ufirst[u + 1]; m++) {
+                    const int p = umem[m], t = pick[p] / MOE_MAX_E;
+                    if (vx)
+                        gu[(size_t)p * 2 * FE_ + k] = vnni_dot_gu1(row, c.type_gu[g], dxq.data() + (size_t)t * D_, dxs.data() + t * (D_ / 32),
+                                                                   dxsum.data() + t * (D_ / 16), ds16.data() + t * (D_ / 16),
+                                                                   df16.data() + t * (D_ / 16), scr[id].v);
+                    else tr_gu[g]->vec_dot(D_, &gu[(size_t)p * 2 * FE_ + k], 0, row, 0, xq[gx].data() + xq_row[gx] * t, 0, 1);
+                }
             }
             barrier();
             if (ne && id == 0) store_rel(&me->ready, g);
