@@ -76,12 +76,9 @@ void gdn_step(const GdnStepArgs &a, cudaStream_t st);
 struct MoeShared;
 struct MoeEmu;
 constexpr int EMU_PICK = -(1 << 30);
-void router_dec(const half *W, const float *wsg, const float *x, int T, float *logits, float *sg, cudaStream_t st);
 void router_route_dec(const half *W, const float *wsg, const float *x, int T, float *logits, float *sg, const int *slot_of,
                       int n_ram, int *ids, float *wts, int *hot_slot, MoeShared *sh, float gfrac, int layer, uint32_t gen,
                       unsigned *counter, cudaStream_t st, unsigned *counts = nullptr, unsigned starts = 1, float xfrac = 1.0f, bool hand_x = true);
-void route_dec(const float *logits, int T, const int *slot_of, int n_ram, int *ids, float *wts, int *hot_slot, MoeShared *sh,
-               float gfrac, const float *x, int layer, uint32_t gen, cudaStream_t st);
 void moe_experts_dec(const QTensor &gate, const QTensor &up, const QTensor &down, const uint8_t *fmt, const QTensor &sgate,
                      const QTensor &sup, const QTensor &sdown, const int *hot_slot, int T, QAct x, QAct hq, const float *wts,
                      const float *sg, float *y, cudaStream_t st);

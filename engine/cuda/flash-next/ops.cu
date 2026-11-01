@@ -364,6 +364,17 @@ __global__ __launch_bounds__(256) void k_mix(const float *res, const float *gamm
     int8_t *lq = (int8_t *)lq4;
     for (int u = blockIdx.x; u < D / 64; u += gridDim.x) {
         const int i0 = u * 64;
+        float rg[MIX_T][HC];
+        if (tid < 64)
+#pragma unroll
+            for (int t = 0; t < MIX_T; t++) {
+                if (t >= T) break;
+#pragma unroll
+                for (int s2 = 0; s2 < HC; s2++) {
+                    const int c = s2 * D + i0 + tid;
+                    rg[t][s2] = res[(size_t)t * HCD + c] * inv[t * HC + s2] * gamma[c];
+                }
+            }
         for (int k = wave; k < T * HCR / 32; k += 8) {
             const int t = k / (HCR / 32), blk = k % (HCR / 32);
             const float v = silu(lo[(size_t)t * HCR + blk * 32 + lane] * (1.0f / HC));
@@ -390,13 +401,12 @@ __global__ __launch_bounds__(256) void k_mix(const float *res, const float *gamm
         __syncthreads();
         if (tid < 64) {
             const int i = i0 + tid;
-            for (int t = 0; t < T; t++) {
+#pragma unroll
+            for (int t = 0; t < MIX_T; t++) {
+                if (t >= T) break;
                 float m = 0;
 #pragma unroll
-                for (int s2 = 0; s2 < HC; s2++) {
-                    const int c = s2 * D + i;
-                    m += res[(size_t)t * HCD + c] * inv[t * HC + s2] * gamma[c] * sigmoid(g[t][s2][tid]);
-                }
+                for (int s2 = 0; s2 < HC; s2++) m += rg[t][s2] * sigmoid(g[t][s2][tid]);
                 m *= 1.0f / HC;
                 const size_t o = (size_t)t * D + i;
                 mx[o] = m;
