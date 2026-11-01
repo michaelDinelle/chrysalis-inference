@@ -56,14 +56,21 @@ def unsupported(instrument):
     sys.exit(0)
 
 
+_mach = []
+
+
 def free_gb():
     if not MAC:
         return free_bytes() / 1e9
-    libc = C.CDLL(ctypes.util.find_library("c"))
-    level, total = C.c_int(0), C.c_uint64(0)
-    libc.sysctlbyname(b"kern.memorystatus_level", C.byref(level), C.byref(C.c_size_t(4)), None, 0)
-    libc.sysctlbyname(b"hw.memsize", C.byref(total), C.byref(C.c_size_t(8)), None, 0)
-    return level.value / 100 * total.value / 1e9
+    if not _mach:
+        libc, sizes = C.CDLL(ctypes.util.find_library("c")), [C.c_uint64(0) for _ in range(3)]
+        for name, v in zip((b"hw.memsize_usable", b"hw.memsize", b"hw.pagesize"), sizes):
+            libc.sysctlbyname(name, C.byref(v), C.byref(C.c_size_t(8)), None, 0)
+        _mach.extend([libc, libc.mach_host_self(), *(v.value for v in sizes)])
+    libc, host, usable, total, page = _mach
+    info = (C.c_uint32 * 38)()
+    libc.host_statistics64(host, 4, info, C.byref(C.c_uint32(38)))
+    return sum(info[:3]) * page / usable * total / 1e9
 
 
 def unused_gb():
