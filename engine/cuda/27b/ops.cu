@@ -18,6 +18,7 @@ __global__ __launch_bounds__(256) void k_rmsnorm(const float *x, const float *w,
     for (int i = threadIdx.x; i < n; i += 256) ss += xr[i] * xr[i];
     const float inv = rsqrtf(block_sum(ss, red) / n + EPS);
     const size_t o = (size_t)blockIdx.x * ldo;
+#pragma unroll 1
     for (int i = threadIdx.x; i < n; i += 256) {
         const float v = xr[i] * inv * w[i];
         if (of) of[o + i] = v;

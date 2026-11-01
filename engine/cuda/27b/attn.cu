@@ -95,9 +95,63 @@ constexpr int KLD = HD + 8;
 constexpr int VLD = KST + 8;
 
 template <int AW>
+struct AttnRaw {
+    static constexpr int NK = KST * HD / 8 / (AW * 32), NV = HD * (KST / 8) / (AW * 32);
+    uint2 kw[NK]; half ks[NK];
+    uint32_t vlo[NV], vhb[NV]; uint4 vsr[NV];
+};
+
+template <int AW>
+__device__ __forceinline__ void attn_fetch(AttnRaw<AW> &r, const uint8_t *page, int slot0, int nvalid, int tid) {
+#pragma unroll
+    for (int m = 0; m < AttnRaw<AW>::NK; m++) {
+        const int i = tid + m * AW * 32, key = i / (HD / 8), d8 = i % (HD / 8);
+        r.kw[m] = *(const uint2 *)(page + (size_t)(slot0 + key) * HD + d8 * 8);
+        r.ks[m] = key < nvalid ? ((const half *)(page + KS_OFF))[(slot0 + key) * (HD / 32) + d8 / 4] : __float2half(0.0f);
+    }
+#pragma unroll
+    for (int m = 0; m < AttnRaw<AW>::NV; m++) {
+        const int i = tid + m * AW * 32, dim = i / (KST / 8), k8 = i % (KST / 8), s = slot0 + k8 * 8;
+        r.vlo[m] = *(const uint32_t *)(page + VLO_OFF + dim * (PAGE / 2) + s / 2);
+        r.vhb[m] = page[VHI_OFF + dim * (PAGE / 8) + s / 8];
+        r.vsr[m] = *(const uint4 *)(page + VS_OFF + ((size_t)(dim / 32) * PAGE + s) * 2);
+    }
+}
+
+template <int AW>
+__device__ __forceinline__ void attn_store(const AttnRaw<AW> &r, half (*Ks)[KLD], half (*Vt)[VLD], int nvalid, int tid) {
+#pragma unroll
+    for (int m = 0; m < AttnRaw<AW>::NK; m++) {
+        const int i = tid + m * AW * 32, key = i / (HD / 8), d8 = i % (HD / 8);
+        const half2 s2 = __halves2half2(r.ks[m], r.ks[m]), base = __float2half2_rn(1152.0f);
+        const uint32_t ux = r.kw[m].x ^ 0x80808080u, uy = r.kw[m].y ^ 0x80808080u;
+        const uint32_t raw[4] = {__byte_perm(ux, 0x64646464u, 0x5140), __byte_perm(ux, 0x64646464u, 0x7362),
+                                 __byte_perm(uy, 0x64646464u, 0x5140), __byte_perm(uy, 0x64646464u, 0x7362)};
+        uint32_t o[4];
+#pragma unroll
+        for (int j = 0; j < 4; j++) { const half2 v = __hmul2(__hsub2(*(const half2 *)&raw[j], base), s2); o[j] = *(const uint32_t *)&v; }
+        *(uint4 *)&Ks[key][d8 * 8] = make_uint4(o[0], o[1], o[2], o[3]);
+    }
+#pragma unroll
+    for (int m = 0; m < AttnRaw<AW>::NV; m++) {
+        const int i = tid + m * AW * 32, dim = i / (KST / 8), k8 = i % (KST / 8);
+        const half *sc = (const half *)&r.vsr[m];
+        float v[8];
+#pragma unroll
+        for (int j = 0; j < 8; j++) {
+            const int u = (int)(((r.vlo[m] >> (4 * j)) & 15) | (((r.vhb[m] >> j) & 1) << 4)) - 16;
+            v[j] = k8 * 8 + j < nvalid ? __half2float(sc[j]) * u : 0.0f;
+        }
+        *(uint4 *)&Vt[dim][k8 * 8] = make_uint4(pack_h2(v[0], v[1]), pack_h2(v[2], v[3]), pack_h2(v[4], v[5]), pack_h2(v[6], v[7]));
+    }
+}
+
+template <int AW>
 __global__ __launch_bounds__(AW * 32) void k_attn(AttnArgs a) {
-    __shared__ __align__(16) half Ks[KST][KLD];
-    __shared__ __align__(16) half Vt[HD][VLD];
+    constexpr int NB = AW == 8 ? 2 : 1;
+    extern __shared__ __align__(16) uint8_t attn_smem[];
+    half (*Ks)[KST][KLD] = (half (*)[KST][KLD])attn_smem;
+    half (*Vt)[HD][VLD] = (half (*)[HD][VLD])(attn_smem + sizeof(half) * NB * KST * KLD);
     const int g = blockIdx.y, tid = threadIdx.x, warp = tid / 32, lane = tid % 32, gq = lane / 4, tig = lane % 4;
     const int nrows = a.T * 6, tile = blockIdx.x * AW + warp;
     const int r0 = tile * 16 + gq, r1 = r0 + 8;
@@ -113,35 +167,15 @@ __global__ __launch_bounds__(AW * 32) void k_attn(AttnArgs a) {
 #pragma unroll
     for (int d = 0; d < HD / 8; d++) acc[d][0] = acc[d][1] = acc[d][2] = acc[d][3] = 0.0f;
 
-    for (int k0 = kbeg; k0 < kend; k0 += KST) {
-        __syncthreads();
-        const uint8_t *page = kv_head(a.kv, a.layer, g, k0);
-        const int slot0 = k0 % PAGE, nvalid = kend - k0;
-        for (int i = tid; i < KST * HD / 8; i += AW * 32) {
-            const int key = i / (HD / 8), d8 = i % (HD / 8);
-            const uint2 w = *(const uint2 *)(page + (size_t)(slot0 + key) * HD + d8 * 8);
-            const float s = key < nvalid ? __half2float(((const half *)(page + KS_OFF))[(slot0 + key) * (HD / 32) + d8 / 4]) : 0.0f;
-            const int8_t *b = (const int8_t *)&w;
-            uint32_t o[4];
-#pragma unroll
-            for (int j = 0; j < 4; j++) o[j] = pack_h2(s * b[2 * j], s * b[2 * j + 1]);
-            *(uint4 *)&Ks[key][d8 * 8] = make_uint4(o[0], o[1], o[2], o[3]);
-        }
-        for (int i = tid; i < HD * (KST / 8); i += AW * 32) {
-            const int dim = i / (KST / 8), k8 = i % (KST / 8), s = slot0 + k8 * 8;
-            const uint32_t lo = *(const uint32_t *)(page + VLO_OFF + dim * (PAGE / 2) + s / 2);
-            const uint32_t hb = page[VHI_OFF + dim * (PAGE / 8) + s / 8];
-            const uint4 sr = *(const uint4 *)(page + VS_OFF + ((size_t)(dim / 32) * PAGE + s) * 2);
-            const half *sc = (const half *)&sr;
-            float v[8];
-#pragma unroll
-            for (int j = 0; j < 8; j++) {
-                const int u = (int)(((lo >> (4 * j)) & 15) | (((hb >> j) & 1) << 4)) - 16;
-                v[j] = k8 * 8 + j < nvalid ? __half2float(sc[j]) * u : 0.0f;
-            }
-            *(uint4 *)&Vt[dim][k8 * 8] = make_uint4(pack_h2(v[0], v[1]), pack_h2(v[2], v[3]), pack_h2(v[4], v[5]), pack_h2(v[6], v[7]));
-        }
-        __syncthreads();
+    AttnRaw<AW> raw;
+    if (kbeg < kend) {
+        attn_fetch<AW>(raw, kv_head(a.kv, a.layer, g, kbeg), kbeg % PAGE, kend - kbeg, tid);
+        attn_store<AW>(raw, Ks[0], Vt[0], kend - kbeg, tid);
+    }
+    __syncthreads();
+    for (int k0 = kbeg, cur = 0; k0 < kend; k0 += KST, cur ^= NB - 1) {
+        const int kn = k0 + KST;
+        if (kn < kend) attn_fetch<AW>(raw, kv_head(a.kv, a.layer, g, kn), kn % PAGE, kend - kn, tid);
 
         float s[KST / 8][4];
 #pragma unroll
@@ -153,7 +187,7 @@ __global__ __launch_bounds__(AW * 32) void k_attn(AttnArgs a) {
                                    *(const uint32_t *)(q1 + d + 8)};
 #pragma unroll
             for (int n = 0; n < KST / 8; n++) {
-                const uint32_t B[2] = {*(const uint32_t *)&Ks[n * 8 + gq][d], *(const uint32_t *)&Ks[n * 8 + gq][d + 8]};
+                const uint32_t B[2] = {*(const uint32_t *)&Ks[cur][n * 8 + gq][d], *(const uint32_t *)&Ks[cur][n * 8 + gq][d + 8]};
                 mma_f16(s[n], A, B);
             }
         }
@@ -197,9 +231,12 @@ __global__ __launch_bounds__(AW * 32) void k_attn(AttnArgs a) {
         for (int dt = 0; dt < HD / 8; dt++)
 #pragma unroll
             for (int ks = 0; ks < KST / 16; ks++) {
-                const uint32_t B[2] = {*(const uint32_t *)&Vt[dt * 8 + gq][ks * 16 + tig * 2], *(const uint32_t *)&Vt[dt * 8 + gq][ks * 16 + 8 + tig * 2]};
+                const uint32_t B[2] = {*(const uint32_t *)&Vt[cur][dt * 8 + gq][ks * 16 + tig * 2], *(const uint32_t *)&Vt[cur][dt * 8 + gq][ks * 16 + 8 + tig * 2]};
                 mma_f16(acc[dt], P[ks], B);
             }
+        if constexpr (NB == 1) __syncthreads();
+        if (kn < kend) attn_store<AW>(raw, Ks[cur ^ (NB - 1)], Vt[cur ^ (NB - 1)], kend - kn, tid);
+        __syncthreads();
     }
 
 #pragma unroll
@@ -276,7 +313,10 @@ void attention(AttnArgs a, half *oh, QAct oq, cudaStream_t st) {
     if (a.nsplit > MAX_SPLITS) FAIL("attention: %d keys need %d splits", nkeys, a.nsplit);
     a.partial = 1;
     const dim3 grid(rowblocks, NKV, a.nsplit);
-    if (aw == 8) k_attn<8><<<grid, 256, 0, st>>>(a);
-    else k_attn<4><<<grid, 128, 0, st>>>(a);
+    constexpr int SMEM = sizeof(half) * (KST * KLD + HD * VLD);
+    static const bool attr = [] { CK(cudaFuncSetAttribute(k_attn<8>, cudaFuncAttributeMaxDynamicSharedMemorySize, 2 * SMEM)); return true; }();
+    (void)attr;
+    if (aw == 8) k_attn<8><<<grid, 256, 2 * SMEM, st>>>(a);
+    else k_attn<4><<<grid, 128, SMEM, st>>>(a);
     k_attn_combine<<<a.T * NH, 256, 0, st>>>(a.part_o, a.part_ml, a.nsplit, a.T * NH, a.qg, oh, oq);
 }
