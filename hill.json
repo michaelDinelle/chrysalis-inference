@@ -13,6 +13,7 @@
     "build/bench/ref-27b.bin"
   ],
   "build": "data/venv/bin/python bench/hill_tree.py",
+  "same": "data/venv/bin/python bench/hill_same.py",
   "readme": "README.md",
   "machines": {
     "e20a368548adfcc2": "7900 XTX",

@@ -2102,11 +2102,22 @@ static int cmd_gate(Spec *s) {
     Noise *noise = calibration(s, &l, m.ident, best.harness);
     lock_hill();
     char *tree = best_tree(s, commit);
-    build(s, tree, "best");
-    build(s, root_dir, "candidate");
+    const char *same_cmd = jtext(jget(s->spec, "same"));
+    char *same = NULL;
+    if (same_cmd && same_cmd[0]) {
+        Proc a = shell(same_cmd, tree, 1, 0, -1, NULL), b = shell(same_cmd, root_dir, 1, 0, -1, NULL);
+        if (!a.status && !b.status && bstr(&a.out)[0] && !strcmp(bstr(&a.out), bstr(&b.out))) same = bstr(&a.out);
+    }
+    if (same) {
+        printf("hill: the candidate builds and runs the same code here as the best (%.16s): every reward is equal\n", same);
+        fflush(stdout);
+    } else {
+        build(s, tree, "best");
+        build(s, root_dir, "candidate");
+    }
     Strs names = instrument_names(s);
     Judged j = {jnew(JOBJ), 0, 0};
-    for (size_t ni = 0; ni < names.n && !j.losses; ni++) {
+    for (size_t ni = 0; ni < names.n && !j.losses && !same; ni++) {
         Strs one = {0};
         spush(&one, names.v[ni]);
         Sample *samples = exact_only(s, names.v[ni]) ? once(s, tree, root_dir, names.v[ni], known_best(s, &l, m.ident, best.harness, best.product, names.v[ni]))
@@ -2131,6 +2142,7 @@ static int cmd_gate(Spec *s) {
     jset(entry, "candidate", jstr(cand.product));
     jset(entry, "harness", jstr(best.harness));
     jset(entry, "verdict", jstr(verdict));
+    if (same) jset(entry, "same", jstr(same));
     jset(entry, "rows", j.rows);
     jset(entry, "values", values);
     append(entry);
