@@ -23,9 +23,9 @@ times every request.
 On the RX 7900, Strata's IQ3_S is the closest to Chrysalis in quality, and Chrysalis beats it on every measure:
 first tokens 1.8-2.8x sooner, writing 1.2-1.3x faster, 1.6x closer to the full model and 1.5x faster to load, in less
 memory. Strata's Q2_0 is its speed setting: it writes up to 1.2x faster than Chrysalis and needs 9 GB less memory, at
-5.5 times the error. On the 12 GB RTX 5070, Chrysalis answers a short prompt or a follow-up 1.5-1.6x sooner than
-IQ3_S, loads 1.4x faster and stays 1.7x closer to the full model, but Strata writes faster there, IQ3_S 1.6-2.0x and
-Q2_0 3.0-3.6x, and reads 4K to 100K prompts sooner: most of Flash-Next's experts don't fit in 12 GB, and Chrysalis
+5.5 times the error. On the 12 GB RTX 5070, Chrysalis answers a short prompt or a follow-up 1.4-1.6x sooner than
+IQ3_S, loads 1.6x faster and stays 1.7x closer to the full model, but Strata writes faster there, IQ3_S 1.4-1.8x and
+Q2_0 2.7-3.2x, and reads 4K to 100K prompts sooner: most of Flash-Next's experts don't fit in 12 GB, and Chrysalis
 runs them on a 6-core CPU and across PCIe. On the M4 Max, where Strata doesn't run, Chrysalis writes 8-10 tokens a
 second in 36 GB, reading the experts it doesn't keep from the SSD.
 
@@ -83,21 +83,21 @@ second in 36 GB, reading the experts it doesn't keep from the SSD.
 
 | | Chrysalis RTX 5070 (CUDA) | Strata IQ3_S RTX 5070 (CUDA) | Strata Q2_0 RTX 5070 (CUDA) |
 | --- | ---: | ---: | ---: |
-| First token, short prompt | **0.52 s** | 0.84 s | 0.70 s |
+| First token, short prompt | **0.61 s** | 0.84 s | 0.70 s |
 | First token, 4K prompt | 2.7 s | 2.3 s | **1.6 s** |
-| First token, 16K prompt | 8.3 s | 7.9 s | **5.2 s** |
-| First token, 100K prompt | 52.6 s | 46.5 s | **33.1 s** |
-| First token, follow-up in the 100K chat | **1.9 s** | 2.8 s | 2.2 s |
-| Writing, short prompt | 30.3 tok/s | 54.0 tok/s | **102.0 tok/s** |
-| Writing, 4K prompt | 32.2 tok/s | 52.3 tok/s | **100.8 tok/s** |
-| Writing, 16K prompt | 30.3 tok/s | 54.8 tok/s | **91.1 tok/s** |
-| Writing, 100K prompt | 28.3 tok/s | 56.1 tok/s | **96.2 tok/s** |
-| Writing, follow-up in the 100K chat | 27.2 tok/s | 54.9 tok/s | **97.1 tok/s** |
+| First token, 16K prompt | 8.2 s | 7.9 s | **5.2 s** |
+| First token, 100K prompt | 52.5 s | 46.5 s | **33.1 s** |
+| First token, follow-up in the 100K chat | **1.7 s** | 2.8 s | 2.2 s |
+| Writing, short prompt | 33.7 tok/s | 54.0 tok/s | **102.0 tok/s** |
+| Writing, 4K prompt | 36.3 tok/s | 52.3 tok/s | **100.8 tok/s** |
+| Writing, 16K prompt | 33.5 tok/s | 54.8 tok/s | **91.1 tok/s** |
+| Writing, 100K prompt | 31.3 tok/s | 56.1 tok/s | **96.2 tok/s** |
+| Writing, follow-up in the 100K chat | 30.6 tok/s | 54.9 tok/s | **97.1 tok/s** |
 | Error vs Q8_0, mean KL over 1,082 tokens | **0.0315** | 0.0550 | 0.187 |
-| Load time, to a first answer | **26.4 s** | 38.2 s | 28.1 s |
+| Load time, to a first answer | **24.2 s** | 38.2 s | 28.1 s |
 | Peak memory | 59.4 GB | 56.6 GB | **44.5 GB** |
 | Share of the GPU's limit, reading 100K | 16% | 18% | **25%** |
-| Share of the GPU's limit, writing at 100K | 11% | not reported | not reported |
+| Share of the GPU's limit, writing at 100K | 12% | not reported | not reported |
 
 **M4 Max**
 
@@ -131,10 +131,11 @@ On the RX 7900, Chrysalis reads prompts 1.4-2.6x sooner than llama.cpp with the 
 starts 2.7x sooner and keeps 6 GB less in RAM; at 100K it reaches 62% of the GPU's limit reading the prompt and 55%
 writing, llama.cpp 40% and 27%. On the 12 GB RTX 5070, which holds neither engine's whole file, Chrysalis writes
 2.0-7.2x faster than llama.cpp, 5.3 tokens a second at 100K to its 0.8, and answers a short prompt or a follow-up
-2.2-2.3x sooner, but llama.cpp reads 4K to 100K prompts 1.6-1.8x sooner there. On the M4 Max, Chrysalis writes 1.5x
-faster than MLX up to 16K and 1.1x at 100K, 1.1-1.3x faster than llama.cpp, and answers a short prompt 1.8x sooner
-than MLX and 2.6x sooner than llama.cpp. Up to 16K the three read prompts at about the same speed; at 100K MLX reads
-1.2x faster than the other two, then runs out of GPU memory on the follow-up in that chat.
+2.2-3.0x sooner and a 4K prompt 1.1x sooner; llama.cpp reads a 16K prompt as fast and a 100K prompt 1.1x sooner there.
+On the M4 Max, Chrysalis writes 1.5x faster than MLX up to 16K and 1.1x at 100K, 1.1-1.3x faster than llama.cpp, and
+answers a short prompt 1.8x sooner than MLX and 2.6x sooner than llama.cpp. Up to 16K the three read prompts at about
+the same speed; at 100K MLX reads 1.2x faster than the other two, then runs out of GPU memory on the follow-up in that
+chat.
 
 <details><summary>How it was measured, and every number</summary>
 
@@ -186,10 +187,10 @@ than MLX and 2.6x sooner than llama.cpp. Up to 16K the three read prompts at abo
 | | Chrysalis RTX 5070 (CUDA) | llama.cpp RTX 5070 (CUDA) |
 | --- | ---: | ---: |
 | First token, short prompt | **0.96 s** | 2.1 s |
-| First token, 4K prompt | 11.0 s | **6.7 s** |
-| First token, 16K prompt | 44.0 s | **24.0 s** |
-| First token, 100K prompt | 321 s | **177 s** |
-| First token, follow-up in the 100K chat | **5.6 s** | 12.8 s |
+| First token, 4K prompt | **6.2 s** | 6.7 s |
+| First token, 16K prompt | 24.1 s | **24.0 s** |
+| First token, 100K prompt | 199 s | **177 s** |
+| First token, follow-up in the 100K chat | **4.3 s** | 12.8 s |
 | Writing, short prompt | **8.9 tok/s** | 4.3 tok/s |
 | Writing, 4K prompt | **7.9 tok/s** | 3.6 tok/s |
 | Writing, 16K prompt | **7.4 tok/s** | 2.4 tok/s |
@@ -198,7 +199,7 @@ than MLX and 2.6x sooner than llama.cpp. Up to 16K the three read prompts at abo
 | Error vs Q8_0, mean KL over 1,082 tokens | 0.0116 | **0.0115** |
 | Load time, to a first answer | **7.0 s** | 7.6 s |
 | Peak memory | 17.4 GB | **17.3 GB** |
-| Share of the GPU's limit, reading 100K | 14% | **25%** |
+| Share of the GPU's limit, reading 100K | 22% | **25%** |
 | Share of the GPU's limit, writing at 100K | **6%** | 1% |
 
 **M4 Max**
