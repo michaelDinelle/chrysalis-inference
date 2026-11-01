@@ -47,16 +47,18 @@ void CpuMoe::start(MoeShared *shared, MoeShared *pred, const std::vector<ColdLay
     for (const ColdLayer &c : L) if (c.n && !vnni_formats(c)) vnni = false;
     vnni_ok = vnni;
     dxq.resize((size_t)MOE_MAX_T * D_); dxs.resize(MOE_MAX_T * (D_ / 32)); dxsum.resize(MOE_MAX_T * (D_ / 16));
-    ds16.resize(MOE_MAX_T * (D_ / 16)); df16.resize(MOE_MAX_T * (D_ / 16));
+    ds16.resize(MOE_MAX_T * (D_ / 16)); df16.resize(MOE_MAX_T * (D_ / 16)); dxf.resize(MOE_MAX_T * (D_ / 32));
     dhq.resize((size_t)MOE_MAX_T * MOE_MAX_E * FE_); dhs.resize(MOE_MAX_T * MOE_MAX_E * (FE_ / 32)); dhc.resize(MOE_MAX_T * MOE_MAX_E * (FE_ / 32));
-    std::vector<int> core;
+    std::vector<int> core, sib;
     for (int c = 1; c < CPU_SETSIZE && (int)core.size() < n; c++) {
         FILE *f = fopen(("/sys/devices/system/cpu/cpu" + std::to_string(c) + "/topology/thread_siblings_list").c_str(), "r");
         if (!f) continue;
-        int first = -1;
-        if (fscanf(f, "%d", &first) == 1 && first == c) core.push_back(c);
+        int first = -1, second = -1;
+        char sep = 0;
+        if (fscanf(f, "%d%c%d", &first, &sep, &second) >= 1 && first == c) { core.push_back(c); if (sep == ',' && second > c) sib.push_back(second); }
         fclose(f);
     }
+    if (sib.size() == core.size()) { core.insert(core.end(), sib.begin(), sib.end()); n = (int)core.size(); scr = std::vector<Scratch>(n); }
     for (int i = 0; i < n; i++) {
         th.emplace_back(&CpuMoe::worker, this, i);
         if (i < (int)core.size()) {
@@ -239,6 +241,7 @@ void CpuMoe::worker(int id) {
                     int32_t *xsum = dxsum.data() + t * (D_ / 16);
                     vnni_quant_x(sh->x + (size_t)t * D_, dxq.data() + (size_t)t * D_, dxs.data() + t * (D_ / 32), xsum);
                     vnni_act1(dxs.data() + t * (D_ / 32), xsum, ds16.data() + t * (D_ / 16), df16.data() + t * (D_ / 16));
+                    vnni_act_x(xsum, dxf.data() + t * (D_ / 32));
                 } else {
                     for (int g = 0; g < (dot_same ? 1 : 3); g++)
                         ggml_get_type_traits_cpu((ggml_type)dot_gu[g])->from_float(sh->x + (size_t)t * D_, xq[g].data() + xq_row[g] * t, D_);
@@ -247,6 +250,20 @@ void CpuMoe::worker(int id) {
             barrier();
             const int R1 = (nu + ne) * 2 * FE_;
             for (int r = id * R1 / n; r < (id + 1) * R1 / n; r++) {
+                if (vx && r + 1 < (id + 1) * R1 / n && r / (2 * FE_) < nu && (r + 1) / (2 * FE_) == r / (2 * FE_) &&
+                    c.type_gu[c.grp(uslot[r / (2 * FE_)])] == 23) {
+                    const int u = r / (2 * FE_), k = r % (2 * FE_), slot = uslot[u];
+                    const uint8_t *r0 = c.gu_row(k >= FE_, slot, k % FE_), *r1 = c.gu_row(k + 1 >= FE_, slot, (k + 1) % FE_);
+                    for (int m = ufirst[u]; m < ufirst[u + 1]; m++) {
+                        const int p = umem[m], t = pick[p] / MOE_MAX_E;
+                        float o[2];
+                        vnni_dot_gu2(r0, r1, dxq.data() + (size_t)t * D_, dxs.data() + t * (D_ / 32), dxf.data() + t * (D_ / 32), o);
+                        gu[(size_t)p * 2 * FE_ + k] = o[0];
+                        gu[(size_t)p * 2 * FE_ + k + 1] = o[1];
+                    }
+                    r++;
+                    continue;
+                }
                 if (r / (2 * FE_) >= nu) {
                     const int j = emu[r / (2 * FE_) - nu], k = r % (2 * FE_), slot = -2 - sh->slot[j];
                     me->gu[j][k] = emu_gu_row(c.gu_row(k >= FE_, slot, k % FE_), c.type_gu[c.grp(slot)], ea[j / MOE_MAX_E], scr[id].v);

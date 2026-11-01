@@ -78,6 +78,8 @@ void vnni_quant_x(const float *x, int8_t *q, float *s, int32_t *sum);
 void expert_vnni(const ColdLayer &c, int slot, int n, const int8_t *const *xq, const float *const *xs, const int32_t *const *xsum,
                  const float *w, uint16_t *const *out, VnniScratch &S);
 void vnni_act1(const float *xs, const int32_t *xsum, float *s16, float *f16);
+void vnni_act_x(const int32_t *xsum, float *xf);
+void vnni_dot_gu2(const uint8_t *r0, const uint8_t *r1, const int8_t *xq, const float *xs, const float *xf, float *out);
 float vnni_dot_gu1(const uint8_t *row, int type, const int8_t *xq, const float *xs, const int32_t *xsum, const float *s16,
                    const float *f16, VnniScratch &S);
 void vnni_quant_h(const float *h, int8_t *q, float *s, float *c);
@@ -118,7 +120,7 @@ private:
     std::vector<float> gu;
     std::vector<uint8_t> xq[3];
     std::vector<uint8_t> hq;
-    std::vector<int8_t> dxq, dhq; std::vector<float> dxs, ds16, df16, dhs, dhc; std::vector<int32_t> dxsum;
+    std::vector<int8_t> dxq, dhq; std::vector<float> dxs, ds16, df16, dxf, dhs, dhc; std::vector<int32_t> dxsum;
     size_t xq_row[3] = {}, hq_row = 0;
     int dot_gu[3] = {-1, -1, -1};
     bool dot_same = true;

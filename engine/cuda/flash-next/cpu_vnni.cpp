@@ -333,20 +333,66 @@ VNNI float dot1_q2k(const uint8_t *row, const int8_t *xq, const float *s16, cons
     return _mm512_reduce_add_ps(acc) - _mm512_reduce_add_ps(cor);
 }
 
-VNNI float dot1_iq4xs(const uint8_t *row, const int8_t *xq, const float *xs, const int32_t *xsum, VnniScratch &S) {
-    decode_iq4xs(row, D_, S.w, S.ws);
-    __m512 acc = _mm512_setzero_ps();
-    float cor = 0;
-    for (int b = 0; b < NB_GU; b += 2) {
-        const __m512i sdot = _mm512_dpbusd_epi32(_mm512_setzero_si512(), _mm512_loadu_si512(S.w + 32 * b), _mm512_loadu_si512(xq + 32 * b));
-        const float c0 = S.ws[b] * xs[b], c1 = S.ws[b + 1] * xs[b + 1];
-        acc = _mm512_fmadd_ps(_mm512_cvtepi32_ps(sdot), _mm512_mask_blend_ps(0xff00, _mm512_set1_ps(c0), _mm512_set1_ps(c1)), acc);
-        cor += 128.0f * (c0 * (float)(xsum[2 * b] + xsum[2 * b + 1]) + c1 * (float)(xsum[2 * b + 2] + xsum[2 * b + 3]));
-    }
-    return _mm512_reduce_add_ps(acc) - cor;
-}
 }
 
+namespace {
+VNNI inline __m512i iq4xs_w64(const uint8_t *qp, __m256i tbl, __m256i m4) {
+    const __m256i q = _mm256_loadu_si256((const __m256i *)qp);
+    const __m256i lo = _mm256_shuffle_epi8(tbl, _mm256_and_si256(q, m4));
+    const __m256i hi = _mm256_shuffle_epi8(tbl, _mm256_and_si256(_mm256_srli_epi16(q, 4), m4));
+    return _mm512_inserti64x4(_mm512_castsi256_si512(_mm256_permute2x128_si256(lo, hi, 0x20)), _mm256_permute2x128_si256(lo, hi, 0x31), 1);
+}
+VNNI inline __m256 iq4xs_ws8(const uint8_t *blk) {
+    const uint64_t lo4 = _pdep_u64(*(const uint32_t *)(blk + 4), 0x0F0F0F0F0F0F0F0Full);
+    const uint64_t hi2 = _pdep_u64(*(const uint16_t *)(blk + 2), 0x0303030303030303ull);
+    const __m256i ls = _mm256_cvtepu8_epi32(_mm_cvtsi64_si128((long long)(lo4 | hi2 << 4)));
+    return _mm256_mul_ps(_mm256_set1_ps(_cvtsh_ss(*(const uint16_t *)blk)), _mm256_cvtepi32_ps(_mm256_sub_epi32(ls, _mm256_set1_epi32(32))));
+}
+
+template <int NR>
+VNNI void dotn_iq4xs(const uint8_t *const *row, const int8_t *xq, const float *xs, const float *xf, float *out) {
+    const __m256i tbl = _mm256_broadcastsi128_si256(_mm_load_si128((const __m128i *)KV128)), m4 = _mm256_set1_epi8(0x0f);
+    __m512 acc[NR];
+    float cor[NR];
+    for (int i = 0; i < NR; i++) { acc[i] = _mm512_setzero_ps(); cor[i] = 0; }
+    const __m512i sel[4] = {_mm512_set_epi32(1, 1, 1, 1, 1, 1, 1, 1, 0, 0, 0, 0, 0, 0, 0, 0), _mm512_set_epi32(3, 3, 3, 3, 3, 3, 3, 3, 2, 2, 2, 2, 2, 2, 2, 2),
+                            _mm512_set_epi32(5, 5, 5, 5, 5, 5, 5, 5, 4, 4, 4, 4, 4, 4, 4, 4), _mm512_set_epi32(7, 7, 7, 7, 7, 7, 7, 7, 6, 6, 6, 6, 6, 6, 6, 6)};
+    for (int sb = 0; sb < D_ / 256; sb++) {
+        const __m256 x8 = _mm256_loadu_ps(xs + sb * 8), f8 = _mm256_loadu_ps(xf + sb * 8);
+        __m512 cz[NR];
+        alignas(16) float t[NR][4];
+        const __m256i ev = _mm256_setr_epi32(0, 2, 4, 6, 0, 2, 4, 6), od = _mm256_setr_epi32(1, 3, 5, 7, 1, 3, 5, 7);
+        const __m128 fe = _mm256_castps256_ps128(_mm256_permutevar8x32_ps(f8, ev)), fo = _mm256_castps256_ps128(_mm256_permutevar8x32_ps(f8, od));
+        for (int i = 0; i < NR; i++) {
+            const __m256 c8 = _mm256_mul_ps(iq4xs_ws8(row[i] + sb * 136), x8);
+            cz[i] = _mm512_castps256_ps512(c8);
+            const __m128 ce = _mm256_castps256_ps128(_mm256_permutevar8x32_ps(c8, ev)), co = _mm256_castps256_ps128(_mm256_permutevar8x32_ps(c8, od));
+            _mm_store_ps(t[i], _mm_fmadd_ps(ce, fe, _mm_mul_ps(co, fo)));
+        }
+#pragma unroll
+        for (int k = 0; k < 4; k++) {
+            const __m512i xv = _mm512_loadu_si512(xq + sb * 256 + 64 * k);
+            for (int i = 0; i < NR; i++) {
+                const __m512i sdot = _mm512_dpbusd_epi32(_mm512_setzero_si512(), iq4xs_w64(row[i] + sb * 136 + 8 + 32 * k, tbl, m4), xv);
+                acc[i] = _mm512_fmadd_ps(_mm512_cvtepi32_ps(sdot), _mm512_permutexvar_ps(sel[k], cz[i]), acc[i]);
+            }
+        }
+        for (int i = 0; i < NR; i++) {
+            for (int k = 0; k < 4; k++) cor[i] = _mm_cvtss_f32(_mm_fmadd_ss(_mm_set_ss(128.0f), _mm_set_ss(t[i][k]), _mm_set_ss(cor[i])));
+        }
+    }
+    for (int i = 0; i < NR; i++) out[i] = _mm512_reduce_add_ps(acc[i]) - cor[i];
+}
+
+}
+
+void vnni_act_x(const int32_t *xsum, float *xf) {
+    for (int b = 0; b < NB_GU; b++) xf[b] = (float)(xsum[2 * b] + xsum[2 * b + 1]);
+}
+void vnni_dot_gu2(const uint8_t *r0, const uint8_t *r1, const int8_t *xq, const float *xs, const float *xf, float *out) {
+    const uint8_t *rows[2] = {r0, r1};
+    dotn_iq4xs<2>(rows, xq, xs, xf, out);
+}
 void vnni_act1(const float *xs, const int32_t *xsum, float *s16, float *f16) {
     for (int g = 0; g < D_ / 16; g++) { s16[g] = xs[g / 2]; f16[g] = xs[g / 2] * (float)xsum[g]; }
 }
@@ -354,8 +400,13 @@ float vnni_dot_gu1(const uint8_t *row, int type, const int8_t *xq, const float *
                    const float *f16, VnniScratch &S) {
     if (type == 11) return dot1_q3k(row, xq, s16, f16);
     if (type == 10) return dot1_q2k(row, xq, s16, f16);
-    S.reserve();
-    return dot1_iq4xs(row, xq, xs, xsum, S);
+    (void)S;
+    alignas(64) float xf[NB_GU];
+    vnni_act_x(xsum, xf);
+    const uint8_t *rows[2] = {row, row};
+    float out[2];
+    dotn_iq4xs<2>(rows, xq, xs, xf, out);
+    return out[0];
 }
 VNNI void vnni_quant_h(const float *h, int8_t *q, float *s, float *c) {
     for (int b = 0; b < NB_DN; b++) {

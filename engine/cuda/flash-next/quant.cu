@@ -275,7 +275,7 @@ template <int T>
 static void gemv_launch(const GemvArgs &a, int rows, cudaStream_t st) {
     if (a.seg[0].W.type == Q8_0 && a.seg[0].W.cols >= 4096 && rows >= 1024 && rows <= 8192 && a.nseg == 1)
         k_gemv_sk<Q8_0, T><<<(rows + 1) / 2, 256, 0, st>>>(a);
-    else if (T >= 5) k_gemv<T, 2><<<(rows + 15) / 16, 256, 0, st>>>(a);
+    else if constexpr (T >= 5) k_gemv<T, 2><<<(rows + 15) / 16, 256, 0, st>>>(a);
     else k_gemv<T, 1><<<(rows + 7) / 8, 256, 0, st>>>(a);
 }
 
