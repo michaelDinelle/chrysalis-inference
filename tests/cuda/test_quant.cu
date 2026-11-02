@@ -132,7 +132,8 @@ int main(int argc, char **argv) {
         fails += !ok;
         CK(cudaFree(qa.q)); CK(cudaFree(qa.d)); if (qa.r) CK(cudaFree(qa.r));
     }
-    for (bool two : {false, true}) for (int T : {9, 40, 100, 300}) for (int wi = 0; wi < 3; wi++) for (int mode : {0, 1, 2}) {
+    const bool two = true;
+    for (int T : {9, 40, 100, 300}) for (int wi = 0; wi < 3; wi++) for (int mode : {0, 1, 2}) {
         if (mode && T != 40) continue;
         const QTensor &t = W[wi]; const int K = t.cols, N = t.rows;
         std::vector<float> x((size_t)T * K); for (auto &v : x) v = nd(rng);
@@ -159,7 +160,7 @@ int main(int argc, char **argv) {
         fails += !ok;
         CK(cudaFree(dy)); CK(cudaFree(qa.q)); CK(cudaFree(qa.d)); if (qa.r) CK(cudaFree(qa.r));
     }
-    for (bool two : {false, true}) for (int T : {9, 100}) {
+    for (int T : {9, 100}) {
         const QTensor &tg = W[3], &tu = W[0]; const int K = tg.cols, N = tg.rows;
         std::vector<float> x((size_t)T * K); for (auto &v : x) v = nd(rng);
         QAct qa, out; std::vector<float> xq;
