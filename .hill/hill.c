@@ -1708,6 +1708,28 @@ static Sample *once(Spec *s, const char *tree_a, const char *tree_b, const char 
     return samples;
 }
 
+static Sample *carried(Spec *s, const char *name, J *known, const char *fp) {
+    J *rewards = jget(s->spec, "rewards");
+    Sample *samples = calloc(rewards->len, sizeof *samples);
+    printf("hill: %s: the candidate runs the same code for it as the best (%.16s): its rewards are the best's values in the ledger\n", name, fp);
+    fflush(stdout);
+    for (size_t r = 0; r < rewards->len; r++) {
+        if (strcmp(jget(rewards->v[r], "instrument")->s, name)) continue;
+        samples[r].a = calloc(1, sizeof(Vals));
+        samples[r].b = calloc(1, sizeof(Vals));
+        samples[r].blocks = 1;
+        vpush(&samples[r].a[0], jget(known, rewards->k[r]));
+        vpush(&samples[r].b[0], jget(known, rewards->k[r]));
+    }
+    return samples;
+}
+
+static char *same_here(const char *cmd, const char *tree) {
+    if (!cmd || !cmd[0]) return NULL;
+    Proc a = shell(cmd, tree, 1, 0, -1, NULL), b = shell(cmd, root_dir, 1, 0, -1, NULL);
+    return !a.status && !b.status && bstr(&a.out)[0] && !strcmp(bstr(&a.out), bstr(&b.out)) ? bstr(&a.out) : NULL;
+}
+
 typedef struct {
     J *rows;
     int wins, losses;
@@ -1802,7 +1824,8 @@ static char *report(Spec *s, J *rows, const char *verdict) {
         counts[!strcmp(result, "win") ? 0 : !strcmp(result, "tie") ? 1 : 2]++;
     }
     size_t total = jget(s->spec, "rewards")->len;
-    if (rows->len < total) bprintf(&b, "\n\nThe gate stopped at the first loss: %zu of %zu rewards were not measured.", total - rows->len, total);
+    if (rows->len && rows->len < total) bprintf(&b, "\n\nThe gate stopped at the first loss: %zu of %zu rewards were not measured.", total - rows->len, total);
+    if (!rows->len) bprintf(&b, "\n\nThe candidate builds and runs the same code here as the best, so nothing was measured: every reward is equal.");
     if (!strcmp(verdict, "PROMOTE"))
         bprintf(&b, "\n\n\xf0\x9f\x91\x91 PROMOTE on %d reward%s, with %d equal and none worse:%s\nCommit it with .hill/ledger.jsonl staged; it's the new best.", counts[0],
                 counts[0] == 1 ? "" : "s", counts[1], bstr(&named));
@@ -2102,12 +2125,7 @@ static int cmd_gate(Spec *s) {
     Noise *noise = calibration(s, &l, m.ident, best.harness);
     lock_hill();
     char *tree = best_tree(s, commit);
-    const char *same_cmd = jtext(jget(s->spec, "same"));
-    char *same = NULL;
-    if (same_cmd && same_cmd[0]) {
-        Proc a = shell(same_cmd, tree, 1, 0, -1, NULL), b = shell(same_cmd, root_dir, 1, 0, -1, NULL);
-        if (!a.status && !b.status && bstr(&a.out)[0] && !strcmp(bstr(&a.out), bstr(&b.out))) same = bstr(&a.out);
-    }
+    char *same = same_here(jtext(jget(s->spec, "same")), tree);
     if (same) {
         printf("hill: the candidate builds and runs the same code here as the best (%.16s): every reward is equal\n", same);
         fflush(stdout);
@@ -2117,11 +2135,16 @@ static int cmd_gate(Spec *s) {
     }
     Strs names = instrument_names(s);
     Judged j = {jnew(JOBJ), 0, 0};
+    J *kept = jnew(JOBJ);
     for (size_t ni = 0; ni < names.n && !j.losses && !same; ni++) {
         Strs one = {0};
         spush(&one, names.v[ni]);
-        Sample *samples = exact_only(s, names.v[ni]) ? once(s, tree, root_dir, names.v[ni], known_best(s, &l, m.ident, best.harness, best.product, names.v[ni]))
-                                                   : paired(s, tree, root_dir, "best", "candidate", "blocks", BLOCKS, &one);
+        char *fp = same_here(jtext(jget(jget(jget(s->spec, "instruments"), names.v[ni]), "same")), tree);
+        J *known = known_best(s, &l, m.ident, best.harness, best.product, names.v[ni]);
+        if (fp && known) jset(kept, names.v[ni], jstr(fp));
+        Sample *samples = fp && known ? carried(s, names.v[ni], known, fp)
+                        : exact_only(s, names.v[ni]) ? once(s, tree, root_dir, names.v[ni], known)
+                                                     : paired(s, tree, root_dir, "best", "candidate", "blocks", BLOCKS, &one);
         Judged part = judge(s, samples, noise);
         for (size_t r = 0; r < part.rows->len; r++) jset(j.rows, part.rows->k[r], part.rows->v[r]);
         j.wins += part.wins;
@@ -2143,6 +2166,7 @@ static int cmd_gate(Spec *s) {
     jset(entry, "harness", jstr(best.harness));
     jset(entry, "verdict", jstr(verdict));
     if (same) jset(entry, "same", jstr(same));
+    if (kept->len) jset(entry, "same_for", kept);
     jset(entry, "rows", j.rows);
     jset(entry, "values", values);
     append(entry);
