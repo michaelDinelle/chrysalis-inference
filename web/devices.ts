@@ -42,12 +42,19 @@ export class Devices {
   ask(nonce: string, name: string): { secret: string; code: string } | undefined {
     this.prune();
     if (!this.nonces.delete(nonce)) return undefined;
+    return this.coded(name.slice(0, 40) || "A device", "browser");
+  }
+  computerAsk(name: string): { secret: string; code: string } {
+    this.prune();
+    return this.coded(name.replace(/[^\w .-]/g, "").slice(0, 40) || "A computer", "computer");
+  }
+  private coded(name: string, kind: Kind): { secret: string; code: string } {
     while (this.asks.size >= MAX_ASKS) this.asks.delete(this.asks.keys().next().value!);
     const taken = new Set([...this.asks.values()].map((a) => a.code));
     let code: string;
     do code = String(randomInt(1_000_000)).padStart(6, "0"); while (taken.has(code));
     const secret = randomBytes(24).toString("base64url");
-    this.asks.set(secret, { code, name: name.slice(0, 40) || "A device", at: Date.now(), allowed: false, kind: "browser" });
+    this.asks.set(secret, { code, name, at: Date.now(), allowed: false, kind });
     return { secret, code };
   }
   linkAsk(name: string, commit: string): { secret: string; nonce: string } | undefined {

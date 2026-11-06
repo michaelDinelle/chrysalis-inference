@@ -2906,6 +2906,7 @@ for (const [t, label] of [["system", "System"], ["light", "Light"], ["dark", "Da
   b.onclick = () => { choose(t); markTheme(); };
   themePick.append(b);
 }
+const PHONE = /iPhone|iPad|Android/.test(navigator.userAgent) || (navigator.maxTouchPoints > 1 && /Mac/.test(navigator.platform));
 const connectView = $<HTMLDialogElement>("connect-view");
 let known: Set<string> | undefined, joined = "", connectTimer = 0;
 interface Paired { id: string; name: string; added: number; seen: number; kind: "browser" | "computer" }
@@ -2922,11 +2923,18 @@ async function answer(how: "allow" | "deny", code: string) {
   void renderConnect();
 }
 async function renderConnect() {
-  const p = await fetch("/api/pair").then((r) => r.ok ? r.json() : null).catch(() => null);
+  const [p, oc] = await Promise.all(["/api/pair", "/api/opencode"].map((u) => fetch(u).then((r) => r.ok ? r.json() : null).catch(() => null)));
   if (!connectView.open) return;
   clearTimeout(connectTimer);
   connectTimer = window.setTimeout(renderConnect, 2000);
   const box = $("connect-body");
+  if (!status.here && oc?.line) {
+    if (box.dataset.key !== oc.line) {
+      box.dataset.key = oc.line;
+      box.replaceChildren(openCodeRow(oc.line, `Paste this into ${/Win/.test(navigator.platform) ? "WSL, with OpenCode installed there," : "a terminal on this computer,"} then allow the code it shows on the computer Chrysalis runs on. OpenCode then has Chrysalis's models.`));
+    }
+    return;
+  }
   if (!p) {
     box.dataset.key = "";
     return void box.replaceChildren(h("p", "set-note", "Cannot reach Chrysalis's web server. Trying again…"));
@@ -2940,7 +2948,7 @@ async function renderConnect() {
   const list: Paired[] = p.devices, asking: Joining[] = p.waiting, fresh = known && list.find((d) => !known!.has(d.id));
   if (fresh) joined = fresh.name;
   known = new Set(list.map((d) => d.id));
-  const key = JSON.stringify([joined, asking, list.map((d) => [d.id, since(d.seen)]), p.connect, !!p.qr]);
+  const key = JSON.stringify([joined, asking, list.map((d) => [d.id, since(d.seen)]), p.connect, !!p.qr, oc?.line]);
   if (box.dataset.key === key) return;
   box.dataset.key = key;
   const row = h("div", "dev-row"), text = h("div", "dev-text"), other = h("p");
@@ -2983,7 +2991,15 @@ async function renderConnect() {
   const done = h("p", "dev-joined");
   done.innerHTML = icon("check");
   done.append(`${joined} is connected.`);
-  box.replaceChildren(...(joined ? [done] : []), row, ...(asking.length ? [asks] : []), devs, fp);
+  box.replaceChildren(...(joined ? [done] : []), row, ...(asking.length ? [asks] : []),
+    ...(oc?.line ? [openCodeRow(oc.line, "On another computer: connect its browser, and Connect a device there has this line to copy. Pasted into a terminal there, it asks with a code that appears here.")] : []), devs, fp);
+}
+function openCodeRow(line: string, how: string) {
+  const row = h("div", "dev-list"), button = h("button", "btn small copy", "Copy");
+  button.type = "button";
+  button.onclick = () => copy(line, button);
+  row.append(h("div", "set-title", "OpenCode"), h("p", "set-note", how), h("code", "dev-url", line), button);
+  return row;
 }
 function openConnect() {
   joined = "";
@@ -3221,7 +3237,7 @@ async function refreshStatus(again = true) {
     status = await r.json();
   } catch { status = { state: "offline", backend: status.backend }; }
   if (status.check) void checkTrust();
-  $("connect").hidden = !status.here;
+  $("connect").hidden = !status.here && PHONE;
   $("connect").classList.toggle("asking", !!status.waiting);
   if ((status.waiting ?? 0) > asked && !connectView.open) toast("A device is asking to join: Connect a device, the phone at the top");
   asked = status.waiting ?? 0;
@@ -4536,7 +4552,7 @@ function copy(text: string, button: HTMLElement) {
   area.value = text;
   area.readOnly = true;
   area.style.cssText = "position: fixed; top: 0; opacity: 0; font-size: 16px";
-  document.body.append(area);
+  (button.closest("dialog") ?? document.body).append(area);
   area.select();
   area.setSelectionRange(0, text.length);
   document.execCommand("copy");

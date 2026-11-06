@@ -62,7 +62,12 @@ export function webTls(dir = tlsDir()) {
   }
   for (const k of ["ca.key", "server.key", "check.key", "link-ca.key", "link.key"]) chmodSync(`${dir}/${k}`, 0o600);
   const ca = readFileSync(`${dir}/ca.pem`, "utf8"), x = new X509Certificate(ca), linkCa = readFileSync(`${dir}/link-ca.pem`, "utf8");
-  return { dir, cert: readFileSync(`${dir}/server.pem`, "utf8"), key: readFileSync(`${dir}/server.key`, "utf8"), ca, caDer: Uint8Array.from(x.raw),
+  if (!existsSync(`${dir}/dns-ca.pem`)) {
+    run("req", "-x509", "-new", "-key", `${dir}/ca.key`, "-out", `${dir}/dns-ca.pem`, "-days", "3650", "-subj", `/${x.subject}`,
+      "-addext", "basicConstraints=critical,CA:TRUE,pathlen:0", "-addext", "keyUsage=critical,keyCertSign,cRLSign",
+      "-addext", `nameConstraints=critical,permitted;DNS:local,permitted;DNS:localhost,permitted;DNS:${host}`);
+  }
+  return { dir, cert: readFileSync(`${dir}/server.pem`, "utf8"), key: readFileSync(`${dir}/server.key`, "utf8"), ca, dnsCa: readFileSync(`${dir}/dns-ca.pem`, "utf8"), caDer: Uint8Array.from(x.raw),
     caName: x.subject.replace(/^CN=/, ""), fingerprint: x.fingerprint256,
     check: { cert: readFileSync(`${dir}/check.pem`, "utf8"), key: readFileSync(`${dir}/check.key`, "utf8") },
     link: { cert: readFileSync(`${dir}/link.pem`, "utf8"), key: readFileSync(`${dir}/link.key`, "utf8"), ca: linkCa, fingerprint: fingerprint(linkCa) } };

@@ -1,6 +1,6 @@
 import { afterAll, beforeAll, expect, test } from "bun:test";
-import { existsSync, mkdtempSync, rmSync, readFileSync, writeFileSync } from "node:fs";
-import { tmpdir } from "node:os";
+import { chmodSync, existsSync, mkdtempSync, rmSync, readFileSync, writeFileSync } from "node:fs";
+import { hostname, tmpdir } from "node:os";
 import { WebStandardStreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/webStandardStreamableHttp.js";
 import { createHash } from "node:crypto";
 import { fakeMcp } from "./fake-mcp";
@@ -875,6 +875,127 @@ test("a computer without the engine finds this one on the network, and is not fo
     lap.proc.kill();
   }
 }, 60_000);
+
+test("a computer with only OpenCode gets in from one pinned line and an approval: the line refuses any other server, leaves OpenCode trusting only local names, and its key opens the API and nothing else", async () => {
+  const dir = TLS(), home = mkdtempSync(`${RUN}/home-`), bin = mkdtempSync(`${RUN}/bin-`), log = `${home}/calls`, browserKey = "a-browser-key";
+  writeFileSync(`${dir}/devices.json`, JSON.stringify([{ id: "b", name: "Phone", hash: createHash("sha256").update(browserKey).digest("hex"), added: 1, seen: 1, kind: "browser" }]));
+  writeFileSync(`${home}/corporate.pem`, "corporate roots\n");
+  const carries = `${home}/service-carries-ca`, window = `${home}/window`;
+  writeFileSync(`${bin}/opencode`, `#!/bin/sh\necho "$*" >> "${log}"\n[ "$1 $2" != "service get" ] || echo '{ "NODE_EXTRA_CA_CERTS": "${home}/corporate.pem" }'\n[ "$1 $2" != "service restart" ] || touch "${carries}"\n`);
+  writeFileSync(`${bin}/ps`, `#!/bin/sh\nif [ "$1" = -axo ]; then echo "/opt/x/opencode.exe serve --service"; [ ! -f "${window}" ] || echo "/opt/x/opencode.exe --auto"; else\n[ ! -f "${carries}" ] || echo "1 ?? S 0:00 opencode.exe serve --service NODE_EXTRA_CA_CERTS=${home}/.config/chrysalis/opencode-ca.pem"; fi\n`);
+  const realCurl = Bun.which("curl")!, noName = `${home}/no-local-name`;
+  writeFileSync(noName, "");
+  writeFileSync(`${bin}/curl`, `#!/bin/sh\ncase "$*" in *.local:*) [ ! -f "${noName}" ] || exit 6; exit 0 ;; esac\nexec "${realCurl}" "$@"\n`);
+  chmodSync(`${bin}/opencode`, 0o755);
+  chmodSync(`${bin}/ps`, 0o755);
+  chmodSync(`${bin}/curl`, 0o755);
+  const desk = await onNetwork(dir), [here, net] = desk.urls, json = { "Content-Type": "application/json" };
+  const paste = (line: string, path = `${bin}:${process.env.PATH}`) => Bun.spawnSync(["sh", "-c", line], { env: { ...process.env, HOME: home, XDG_CONFIG_HOME: "", PATH: path }, stdout: "pipe", stderr: "pipe" });
+  const calls = () => existsSync(log) ? readFileSync(log, "utf8").trim().split("\n") : [];
+  try {
+    const { line } = await (await fetch(`${here}/api/opencode`)).json();
+    expect(line.endsWith(`${net}/opencode | sh`)).toBe(true);
+
+    paste(line.replace(/sha256\/\/\S+/, `sha256//${"A".repeat(43)}=`));
+    expect(calls()).toEqual([]);
+    const missing = paste(line, "/usr/bin:/bin");
+    expect([missing.exitCode, String(missing.stderr)]).toEqual([1, expect.stringContaining("OpenCode is not on this computer")]);
+
+    writeFileSync(window, "");
+    const held = Bun.spawn(["sh", "-c", line], { env: { ...process.env, HOME: home, XDG_CONFIG_HOME: "", PATH: `${bin}:${process.env.PATH}` }, stdout: "ignore", stderr: "pipe" });
+    expect(new TextDecoder().decode((await held.stderr.getReader().read()).value)).toContain("Close OpenCode to go on");
+    await Bun.sleep(1200);
+    expect(calls().filter((c) => c !== "service get env")).toEqual([]);
+    rmSync(window);
+    expect(await held.exited).toBe(0);
+    const trust = `${home}/.config/chrysalis/opencode-ca.pem`, restarts = () => calls().filter((c) => c === "service restart").length;
+    expect(calls().filter((c) => c === `service set env NODE_EXTRA_CA_CERTS ${trust}`).length).toBe(1);
+    expect(calls().at(-1)).toBe(`auth login ${net} --method login`);
+    expect(restarts()).toBe(1);
+    expect(paste(line).exitCode).toBe(0);
+    expect(restarts()).toBe(1);
+    rmSync(carries);
+    expect(paste(line).exitCode).toBe(0);
+    expect(restarts()).toBe(2);
+    expect(calls().filter((c) => c.startsWith("auth login")).length).toBe(3);
+    rmSync(noName);
+    expect(paste(line).exitCode).toBe(0);
+    expect(calls().at(-1)).toBe(`auth login https://${hostname().toLowerCase().replace(/\.local$/, "")}.local:${new URL(net).port} --method login`);
+    const bundle = readFileSync(trust, "utf8");
+    expect([bundle.startsWith("corporate roots\n"), bundle.split("BEGIN CERTIFICATE").length - 1]).toEqual([true, 1]);
+
+    const asBun = (roots: Record<string, string>) => String(Bun.spawnSync([process.execPath, "-e", `const r = await fetch(${JSON.stringify(`${net}/.well-known/opencode`)}); console.log(r.status)`],
+      { env: { ...process.env, NODE_TLS_REJECT_UNAUTHORIZED: "1", ...roots }, stdout: "pipe", stderr: "pipe" }).stdout).trim();
+    expect([asBun({ NODE_EXTRA_CA_CERTS: trust }), asBun({})]).toEqual(["200", ""]);
+    const leaf = `${home}/public`;
+    for (const args of [["req", "-new", "-newkey", "ec", "-pkeyopt", "ec_paramgen_curve:prime256v1", "-nodes", "-keyout", `${leaf}.key`, "-out", `${leaf}.csr`, "-subj", "/CN=api.example.com", "-addext", "subjectAltName=DNS:api.example.com"],
+      ["x509", "-req", "-in", `${leaf}.csr`, "-CA", `${dir}/dns-ca.pem`, "-CAkey", `${dir}/ca.key`, "-CAcreateserial", "-days", "2", "-copy_extensions", "copy", "-out", `${leaf}.pem`]])
+      expect(Bun.spawnSync(["openssl", ...args], { stdout: "ignore", stderr: "ignore" }).exitCode).toBe(0);
+    expect(String(Bun.spawnSync(["openssl", "verify", "-CAfile", `${dir}/dns-ca.pem`, `${leaf}.pem`], { stdout: "pipe", stderr: "pipe" }).stderr)).toContain("permitted subtree violation");
+
+    const before = readFileSync(`${dir}/server.pem`, "utf8"), trusted = readFileSync(`${dir}/dns-ca.pem`, "utf8");
+    writeFileSync(`${dir}/names`, "an address this computer had before");
+    webTls(dir);
+    expect(readFileSync(`${dir}/server.pem`, "utf8")).not.toBe(before);
+    expect(readFileSync(`${dir}/dns-ca.pem`, "utf8")).toBe(trusted);
+    expect(Bun.spawnSync(["openssl", "verify", "-CAfile", `${dir}/dns-ca.pem`, `${dir}/server.pem`], { stdout: "ignore", stderr: "ignore" }).exitCode).toBe(0);
+
+    const ca = readFileSync(`${dir}/ca.pem`, "utf8"), manifest = await (await fetch(`${net}/.well-known/opencode`, { tls: { ca } })).json();
+    const provider: any = Object.values(manifest.config.providers)[0];
+    expect([provider.settings.baseURL, provider.settings.apiKey]).toEqual([`${net}/v1`, `{env:${manifest.auth.env}}`]);
+    const login = async () => {
+      const proc = Bun.spawn(manifest.auth.command, { stdout: "pipe", stderr: "pipe" });
+      const code = /Allow (\d{6}) on /.exec(new TextDecoder().decode((await proc.stderr.getReader().read()).value))?.[1];
+      expect(code).toBeTruthy();
+      return { proc, code };
+    };
+    const yes = await login();
+    expect((await fetch(`${here}/api/pair/allow`, { method: "POST", headers: json, body: JSON.stringify({ code: yes.code }) })).status).toBe(200);
+    expect(await yes.proc.exited).toBe(0);
+    const key = (await new Response(yes.proc.stdout).text()).trim();
+    const chat = (token?: string) => fetch(`${net}/v1/chat/completions`, { method: "POST", tls: { ca }, headers: { ...json, ...(token ? { Authorization: `Bearer ${token}` } : {}) },
+      body: JSON.stringify({ messages: [{ role: "user", content: "hi" }] }) });
+    expect([(await chat(key)).status, (await chat(browserKey)).status, (await chat()).status, (await chat("wrong")).status]).toEqual([200, 401, 401, 401]);
+    expect((await fetch(`${net}/api/status`, { tls: { ca }, headers: { Authorization: `Bearer ${key}` } })).status).toBe(401);
+
+    const no = await login();
+    expect((await fetch(`${here}/api/pair/deny`, { method: "POST", headers: json, body: JSON.stringify({ code: no.code }) })).status).toBe(204);
+    expect(await no.proc.exited).toBe(1);
+    expect(await new Response(no.proc.stdout).text()).toBe("");
+  } finally {
+    desk.proc.kill();
+  }
+});
+
+test("a question answered elsewhere leaves the terminal, so the next one is asked rather than queued behind it", async () => {
+  const dir = TLS(), free = Bun.serve({ hostname: "127.0.0.1", port: 0, fetch: () => new Response() }), port = free.port!, here = `http://127.0.0.1:${port}`;
+  free.stop(true);
+  const proc = Bun.spawn(["python3", "-c", "import pty, sys; pty.spawn(sys.argv[1:])", process.execPath, "server.ts"], {
+    cwd: import.meta.dir, stdin: "pipe", stdout: "pipe", stderr: "inherit",
+    env: { ...process.env, PORT: String(port), CHRYSALIS_URL: `http://127.0.0.1:${fake.port}`, CHRYSALIS_HOST: "0.0.0.0", NODE_ENV: "production", CHRYSALIS_MCP_CONFIG: CONFIG,
+      CHRYSALIS_SELF_AS_NETWORK: "1", CHRYSALIS_TLS_DIR: dir, CHRYSALIS_CHECK_PORT: "0", CHRYSALIS_LINK_PORT: "0" },
+  });
+  const reader = proc.stdout.getReader(), dec = new TextDecoder(), json = { "Content-Type": "application/json" };
+  let out = "";
+  void (async () => { for (let r = await reader.read(); !r.done; r = await reader.read()) out += dec.decode(r.value); })();
+  const shown = async (text: string) => {
+    for (const end = Date.now() + 8000; !out.includes(text); await Bun.sleep(100))
+      if (Date.now() > end) throw new Error(`the terminal never said ${text}: ${out}`);
+  };
+  try {
+    await shown("OpenCode on another computer");
+    const net = /https:\/\/[\d.]+:\d+/.exec(out)![0];
+    const ask = async (name: string) => (await (await fetch(`${net}/opencode/ask`, { method: "POST", headers: json, body: JSON.stringify({ name }), tls: { rejectUnauthorized: false } })).text()).split(" ");
+    const [, first] = await ask("first"), [, second] = await ask("second");
+    await shown("first asks");
+    expect(out).not.toContain("second asks");
+    expect((await fetch(`${here}/api/pair/deny`, { method: "POST", headers: json, body: JSON.stringify({ code: first }) })).status).toBe(204);
+    await shown("answered elsewhere");
+    await shown(`second asks to use this computer's Chrysalis · ${second.slice(0, 3)} ${second.slice(3)}`);
+  } finally {
+    proc.kill();
+  }
+}, 30_000);
 
 test("the page hears Chrysalis is off where its address takes a connection and never answers, as a port no one listens on does in WSL's mirrored networking", async () => {
   const mute = Bun.listen({ hostname: "127.0.0.1", port: 0, socket: { data() {} } }), run = mkdtempSync(`${RUN}/run-`);

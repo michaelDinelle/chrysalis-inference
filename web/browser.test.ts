@@ -2015,7 +2015,28 @@ test("past the chat's warning on the network, a device gets the connect page and
       await page.waitForFunction((c) => location.href === c, { timeout: 15_000 }, chat);
       await page.waitForSelector("#input");
       await Bun.sleep(1000);
-      expect([page.url(), await page.$eval("#connect", (e) => e.checkVisibility())]).toEqual([chat, false]);
+      expect([page.url(), await page.$eval("#connect", (e) => e.checkVisibility())]).toEqual([chat, true]);
+      await page.click("#connect");
+      await page.waitForSelector("#connect-view .dev-url");
+      const line = await page.$eval("#connect-view .dev-url", (e) => e.textContent!);
+      expect(line).toMatch(/^curl -fsSk --pinnedpubkey sha256\/\/\S+ https:\/\/\S+\/opencode \| sh$/);
+      expect(await page.evaluate(() => {
+        let copied = "";
+        const real = document.execCommand.bind(document);
+        document.execCommand = (name: string) => { copied = getSelection()!.toString() || (document.activeElement as HTMLTextAreaElement).value; return real(name); };
+        document.querySelector<HTMLButtonElement>("#connect-view .dev-list .btn")!.click();
+        document.execCommand = real;
+        return copied;
+      })).toBe(line);
+      expect(await page.$eval("#connect-view .dev-list .btn", (e) => e.textContent)).toBe("Copied");
+      await page.click("#connect-close");
+      const phone = await b.newPage();
+      await phone.setUserAgent("Mozilla/5.0 (iPhone; CPU iPhone OS 18_0 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/18.0 Mobile/15E148 Safari/604.1");
+      await phone.goto(chat, { waitUntil: "load" });
+      await phone.waitForSelector("#input");
+      await Bun.sleep(500);
+      expect(await phone.$eval("#connect", (e) => e.checkVisibility())).toBe(false);
+      await phone.close();
       await local.waitForFunction((n) => (document.querySelector("#connect-view .dev-joined")?.textContent ?? "").includes(`${n} is connected`), { timeout: 5000 }, name);
       if (!firefox) chrome = page;
     }

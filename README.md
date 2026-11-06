@@ -253,7 +253,7 @@ network, and only devices you allow get past the connect page.</sub>
 
 - **Voice mode** that hears you talk over the reply
 - **Tools**, MCP servers and sub-agents
-- **Claude Code** and **OpenCode**, through OpenAI and Anthropic APIs
+- **Claude Code** and **OpenCode**, through OpenAI and Anthropic APIs; OpenCode on another computer needs only one line and your approval
 - The same chat on **llama.cpp, Ollama, LM Studio, KoboldCpp or vLLM**
 - **Qwen3.8-27B** with its full 262K context: 104 tok/s on short prompts, 73 at 100K
 - **Apple Silicon**: both models on a Mac with 32 GB or more, on Metal kernels written for its GPU; on an M4 Max the 27B
@@ -278,6 +278,11 @@ Your laptop and phone use it too: `chrysalis.sh --host 0.0.0.0` puts it on your 
 Chrysalis, finds yours by itself, and asks in both terminals with the same code: answer y on each, once, and its apps
 use your GPU at `http://127.0.0.1:8080`, as if it were there. A phone scans the QR code, trusts Chrysalis once, and gets the chat. No RX 7900 at all? You get the chat
 alone, for Ollama, LM Studio or llama.cpp.
+
+Coding on another computer needs no Chrysalis there, only OpenCode. Connect its browser as you would a phone, and Connect a
+device has a line to copy. Pasted into a terminal (on Windows, WSL's), it shows a code to allow, and Chrysalis's models are
+in OpenCode. The line carries this computer's key, so it refuses any impostor. OpenCode then reaches Chrysalis over HTTPS by
+its name on your network, trusting it for names on your network alone.
 
 A Mac with Apple Silicon and 32 GB or more runs the models itself from a clone of this repository: the first
 `./chrysalis.sh` gets Python and Bun into the folder and builds the Metal engines with Xcode's Metal compiler. The

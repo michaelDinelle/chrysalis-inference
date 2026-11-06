@@ -6,10 +6,11 @@ import app from "./index.html";
 import { Backends, standard } from "./backend";
 import { Devices, keyCookie } from "./devices";
 import { advertise, Link } from "./link";
+import { opencodeLine, opencodeManifest, opencodeScript } from "./opencode";
 import { appleProfile, connectPage, deviceScript, TRUSTED_GIF } from "./setup";
 import { SUBAGENT_SYSTEM } from "./tool-agent";
 import * as registry from "./tools";
-import { lanAddresses, routeAddress, tlsDir, webTls } from "./tls";
+import { fingerprint, lanAddresses, routeAddress, tlsDir, webTls } from "./tls";
 import { assistantTurn, DESCRIPTIONS, toolTurn, unnoted, type ToolChoice, type WireCall } from "./wire";
 
 const CHRYSALIS = process.env.CHRYSALIS_URL ?? "http://127.0.0.1:8080";
@@ -462,6 +463,23 @@ const serve = (hostname: string, port: number) => Bun.serve<VoiceSocket>({
     "/chrysalis.mobileconfig": { GET: open(() => authority((a) => appleProfile(a), "application/x-apple-aspen-config", "chrysalis.mobileconfig")) },
     "/chrysalis-ca.crt": { GET: open(() => authority((a) => a.ca, "application/octet-stream", "chrysalis-ca.crt")) },
     "/chrysalis-ca-firefox.crt": { GET: open(() => authority((a) => a.caDer, "application/x-x509-ca-cert")) },
+    "/opencode": { GET: open((req) => new Response(opencodeScript(new URL(req.url).origin, MACHINE, tls().dnsCa, fingerprint(tls().dnsCa), tls().cert),
+      { headers: { "Content-Type": "text/x-shellscript", "Cache-Control": "no-store" } })) },
+    "/.well-known/opencode": { GET: open((req) => Response.json(opencodeManifest(new URL(req.url).origin, MACHINE, tls().cert, process.platform !== "darwin"))) },
+    "/opencode/ask": {
+      POST: open(json(async (req) => {
+        const { secret, code } = devices.computerAsk(String((await req.json().catch(() => ({})))?.name ?? ""));
+        return new Response(`${secret} ${code}`);
+      })),
+    },
+    "/opencode/ask/:secret": {
+      GET: open((req) => {
+        const got = devices.collect((req as Request & { params: { secret: string } }).params.secret);
+        return !got ? new Response("gone", { status: 404 }) : got.state === "allowed" ? new Response(got.key) : new Response(null, { status: 202 });
+      }),
+    },
+    "/v1/*": open((req, srv) => devices.find(req)?.device.kind === "computer" ? proxy(req, srv)
+      : Response.json({ error: { message: "this computer is not let in to Chrysalis here" } }, { status: 401 })),
     "/pair/ask": {
       POST: open(json(async (req) => {
         const found = devices.find(req);
@@ -496,6 +514,10 @@ img.src = ${JSON.stringify(checkUrl(req))} + "?t=" + Date.now();
         return Response.json({ lan: true, connect, qr: qrSvg(connect[0]), api: connect.map((u) => `${u}v1`), waiting: devices.waiting(),
           devices: devices.all(), name: tls().caName, fingerprint: tls().fingerprint });
       }),
+    },
+    "/api/opencode": {
+      GET: guarded(async (req, srv) => LAN
+        ? Response.json({ line: opencodeLine(fromNetwork(req, srv) ? new URL(req.url).origin : (await connectUrls())[0].replace(/\/$/, ""), tls().cert) }) : Response.json({})),
     },
     "/api/pair/allow": {
       POST: here(json(async (req) => {
@@ -764,7 +786,7 @@ function forwardHere() {
 }
 forwardHere();
 const spaced = (code: string) => `${code.slice(0, 3)} ${code.slice(3)}`;
-const questions: { text: string; answer: (yes: boolean) => void }[] = [], asked = new Set<string>();
+const questions: { key: string; text: string; answer: (yes: boolean) => void }[] = [], asked = new Set<string>();
 const tty = process.stdin.isTTY ? createInterface({ input: process.stdin }) : undefined;
 const nextQuestion = () => { if (questions[0]) process.stdout.write(`${questions[0].text} [y/N] `); };
 tty?.on("line", (line) => {
@@ -774,10 +796,16 @@ tty?.on("line", (line) => {
 function question(key: string, text: string, answer: (yes: boolean) => void) {
   if (!tty || asked.has(key)) return;
   asked.add(key);
-  questions.push({ text, answer });
+  questions.push({ key, text, answer });
   if (questions.length === 1) nextQuestion();
 }
 if (tty) setInterval(() => {
+  const open = new Set((LAN ? devices.waiting() : []).filter((a) => !a.allowed).map((a) => `ask ${a.code}`)), first = questions[0];
+  questions.splice(0, questions.length, ...questions.filter((q) => !q.key.startsWith("ask ") || open.has(q.key)));
+  if (first && first !== questions[0]) {
+    process.stdout.write("answered elsewhere\n");
+    nextQuestion();
+  }
   for (const a of LAN ? devices.waiting() : []) if (!a.allowed)
     question(`ask ${a.code}`, `${a.name} asks to use ${a.kind === "computer" ? "this computer's Chrysalis" : "the chat"} · ${spaced(a.code)} · allow?`,
       (yes) => void (yes ? devices.allow(a.code) : devices.deny(a.code)));
@@ -793,6 +821,7 @@ if (Bun.spawnSync([`${import.meta.dir}/../chrysalis.sh`, "gpu"]).exitCode !== 0)
     forwardHere();
   });
 }, 2000);
+if (LAN) console.log(`  OpenCode on another computer: ${opencodeLine((await connectUrls())[0].replace(/\/$/, ""), tls().cert)}`);
 if (!process.stdout.isTTY) {
   console.log(`chrysalis web: ${server.url}`);
   for (const s of secure) console.log(`chrysalis web: ${s.url}`);
