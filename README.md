@@ -17,9 +17,7 @@
 
 ## Qwen3.8-Flash-Next: Chrysalis vs Strata
 
-On the RX 7900, Chrysalis beats Strata's IQ3_S on every measure and answers sooner than both Strata files at every prompt
-length. On the RX 7900 and the RTX 5070, Chrysalis is more accurate and loads faster than both. Chrysalis runs on a Mac. Strata
-doesn't.
+Chrysalis beats Strata's IQ3_S on every measure on the RX 7900. On the RTX 5070 it has the lowest error and the fastest load.
 
 <p align="center"><img src="media/flash-next.png" width="860" alt="Qwen3.8-Flash-Next in Chrysalis and Strata on an RX 7900 XTX, an RTX 5070 and an M4 Max: time to first token and writing speed at five prompt lengths, error against Q8_0, load time, memory, and each one's share of its GPU's limit"></p>
 
@@ -76,8 +74,7 @@ ask for a change. The paint bucket edits the artifact by hand.</sub>
 <p align="center"><img src="media/characters.webp" width="900" alt="Seraphina's SillyTavern card dropped in: her greeting, a reply in her voice, her card"></p>
 
 <sub>Drag in a SillyTavern card to import it. Speech and narration look the way they do in SillyTavern, and each speaker in a
-group chat has a portrait. Seraphina is SillyTavern's sample character (AGPL-3.0), and this one recording is under their
-license.</sub>
+group chat has a portrait. Seraphina is SillyTavern's sample character (AGPL-3.0). This recording is under their license.</sub>
 
 ## Phones and other devices
 
@@ -85,7 +82,7 @@ license.</sub>
 <p align="center"><img src="media/connect-desktop.png" width="520" alt="Connect a device on the computer: the QR code and the phone's code with Allow"></p>
 
 <sub>Scan the QR code, trust this computer's certificate authority once, and allow the code the phone shows. The page shows
-how to trust it on each kind of device. The chat runs over HTTPS, and the authority is valid only on your network.</sub>
+how to trust it on each kind of device. The chat runs over HTTPS. The authority works only on your network.</sub>
 
 ## Coding on another computer
 
@@ -107,11 +104,11 @@ it first.</sub>
 <sub>Press `ctrl+x m` and pick a model. The line adds both to your favorites. OpenCode retries while Chrysalis is off. To take
 a computer's access away, use Remove under Connect a device.</sub>
 
-The line pins this computer's key, and only computers you allow get in. OpenCode connects over HTTPS and trusts Chrysalis's
-authority for local names only.
+The line pins this computer's key. Only computers you allow can connect. OpenCode connects over HTTPS and trusts Chrysalis's
+authority for local names.
 
-On a Mac, the line also adds a launchd job that forwards a local port to Chrysalis through Apple's `nc`, with HTTPS end to
-end. macOS cuts a background program off the network when the app that started it quits, and this keeps OpenCode connected.
+On a Mac, the line also adds a launchd job that forwards a local port to Chrysalis through Apple's `nc`. HTTPS still runs end
+to end. The job keeps OpenCode connected after the terminal that started it quits.
 
 ## Also
 
