@@ -2995,7 +2995,7 @@ async function renderConnect() {
     ...(oc?.line ? [openCodeRow(oc.line, "On another computer: connect its browser, and Connect a device there has this line to copy. Pasted into a terminal there, it asks with a code that appears here.")] : []), devs, fp);
 }
 function openCodeRow(line: string, how: string) {
-  const row = h("div", "dev-list"), button = h("button", "btn small copy", "Copy");
+  const row = h("div", "dev-list"), button = h("button", "btn small dev-copy", "Copy");
   button.type = "button";
   button.onclick = () => copy(line, button);
   row.append(h("div", "set-title", "OpenCode"), h("p", "set-note", how), h("code", "dev-url", line), button);
@@ -4559,8 +4559,9 @@ function copy(text: string, button: HTMLElement) {
   area.remove();
   const label = button.textContent;
   button.classList.add("done");
-  if (button.classList.contains("copy")) button.textContent = "Copied";
-  setTimeout(() => { button.classList.remove("done"); if (button.classList.contains("copy")) button.textContent = label; }, 1200);
+  const named = button.matches(".copy, .dev-copy");
+  if (named) button.textContent = "Copied";
+  setTimeout(() => { button.classList.remove("done"); if (named) button.textContent = label; }, 1200);
 }
 
 $("svg-zoom").addEventListener("click", (e) => (e.currentTarget as HTMLDialogElement).close());

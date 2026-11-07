@@ -25,6 +25,16 @@ export function advertise(name: string, port: number, fp: string, serving: () =>
   return () => m.destroy();
 }
 
+export function answerName(host: string, addresses: () => string[]): () => void {
+  const m = mdns();
+  m.on("query", (q) => {
+    if (q.questions.some((x) => x.name.toLowerCase() === host && ["A", "AAAA", "ANY"].includes(x.type as string)))
+      m.respond({ answers: [...addresses().map((data) => ({ name: host, type: "A" as const, ttl: TTL, data })),
+        { name: host, type: "NSEC" as const, ttl: TTL, data: { nextDomain: host, rrtypes: ["A"] } }] });
+  });
+  return () => m.destroy();
+}
+
 export function discover(off?: () => void): Promise<Found[]> {
   return new Promise((done) => {
     const m = mdns(), found = new Map<string, Found>();

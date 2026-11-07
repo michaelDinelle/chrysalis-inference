@@ -27,6 +27,8 @@ export function tlsDir(dir = process.env.CHRYSALIS_TLS_DIR ?? `${homedir()}/.con
   return dir;
 }
 
+export const netName = () => `chrysalis-${hostname().toLowerCase().replace(/\.local$/, "").replace(/[^a-z0-9-]/g, "-")}.local`;
+
 export function webTls(dir = tlsDir()) {
   const host = hostname().toLowerCase(), ec = ["-newkey", "ec", "-pkeyopt", "ec_paramgen_curve:prime256v1", "-nodes"];
   const run = (...args: string[]) => {
@@ -39,7 +41,7 @@ export function webTls(dir = tlsDir()) {
       "-addext", "basicConstraints=critical,CA:TRUE,pathlen:0", "-addext", "keyUsage=critical,keyCertSign,cRLSign",
       "-addext", `nameConstraints=critical,${allow.join(",")}`);
   }
-  const names = [`DNS:${host}`, `DNS:${host}.local`, "DNS:localhost", "IP:127.0.0.1", ...lanAddresses().map((a) => `IP:${a}`)].join(",");
+  const names = [`DNS:${host}`, `DNS:${host}.local`, `DNS:${netName()}`, "DNS:localhost", "IP:127.0.0.1", ...lanAddresses().map((a) => `IP:${a}`)].join(",");
   const stale = !existsSync(`${dir}/server.pem`) || !existsSync(`${dir}/names`) || readFileSync(`${dir}/names`, "utf8") !== names
     || !openssl("x509", "-checkend", String(30 * 86400), "-noout", "-in", `${dir}/server.pem`).ok;
   if (stale) {

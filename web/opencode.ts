@@ -10,8 +10,8 @@ const pinned = (cert: string) => {
 
 export const opencodeLine = (origin: string, cert: string) => `${pinned(cert)} ${origin}/opencode | sh`;
 
-export function opencodeScript(origin: string, name: string, ca: string, fingerprint: string, cert: string): string {
-  const named = `https://${name.toLowerCase()}.local:${new URL(origin).port}`;
+export function opencodeScript(origin: string, name: string, ca: string, fingerprint: string, cert: string, host: string): string {
+  const named = `https://${host}:${new URL(origin).port}`;
   return `#!/bin/sh
 set -e
 command -v opencode >/dev/null || { echo "OpenCode is not on this computer: get it from https://opencode.ai, then run this again" >&2; exit 1; }
@@ -45,7 +45,7 @@ opencode auth login "$origin" --method login </dev/null
 
 export function opencodeManifest(origin: string, name: string, cert: string, vision: boolean) {
   const curl = pinned(cert), who = label(name);
-  const ask = `a=$(${curl} -H 'Content-Type: application/json' -d "{\\"name\\":\\"$(hostname | tr -cd 'A-Za-z0-9.-')\\"}" ${origin}/opencode/ask)
+  const ask = `a=$(${curl} -H 'Content-Type: application/json' -d "{\\"name\\":\\"$(hostname -s | tr -cd 'A-Za-z0-9.-')\\"}" ${origin}/opencode/ask)
 echo "Allow \${a#* } on ${who}" >&2
 while :; do
     k=$(${curl} ${origin}/opencode/ask/\${a%% *}) || { echo "${who} did not allow this computer" >&2; exit 1; }

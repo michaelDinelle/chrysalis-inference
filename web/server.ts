@@ -5,12 +5,12 @@ import type { BunPlugin, Server, Subprocess } from "bun";
 import app from "./index.html";
 import { Backends, standard } from "./backend";
 import { Devices, keyCookie } from "./devices";
-import { advertise, Link } from "./link";
+import { advertise, answerName, Link } from "./link";
 import { opencodeLine, opencodeManifest, opencodeScript } from "./opencode";
 import { appleProfile, connectPage, deviceScript, TRUSTED_GIF } from "./setup";
 import { SUBAGENT_SYSTEM } from "./tool-agent";
 import * as registry from "./tools";
-import { fingerprint, lanAddresses, routeAddress, tlsDir, webTls } from "./tls";
+import { fingerprint, lanAddresses, netName, routeAddress, tlsDir, webTls } from "./tls";
 import { assistantTurn, DESCRIPTIONS, toolTurn, unnoted, type ToolChoice, type WireCall } from "./wire";
 
 const CHRYSALIS = process.env.CHRYSALIS_URL ?? "http://127.0.0.1:8080";
@@ -20,7 +20,7 @@ const BUILD = Bun.hash((await Promise.all(["index.html", "app.ts", "sampler.ts",
 await registry.reload();
 for (const sig of ["SIGINT", "SIGTERM"] as const) process.on(sig, () => void registry.closeAll().finally(() => process.exit(0)));
 
-const NAMES = new Set(["", "localhost", hostname().toLowerCase(), `${hostname().toLowerCase()}.local`]);
+const NAMES = new Set(["", "localhost", hostname().toLowerCase(), `${hostname().toLowerCase()}.local`, netName()]);
 const hostOk = (req: Request) => {
   const host = (req.headers.get("host") ?? "").toLowerCase();
   return host.startsWith("[") || /^\d{1,3}(\.\d{1,3}){3}(:\d+)?$/.test(host) || NAMES.has(host.replace(/:\d+$/, ""));
@@ -463,7 +463,7 @@ const serve = (hostname: string, port: number) => Bun.serve<VoiceSocket>({
     "/chrysalis.mobileconfig": { GET: open(() => authority((a) => appleProfile(a), "application/x-apple-aspen-config", "chrysalis.mobileconfig")) },
     "/chrysalis-ca.crt": { GET: open(() => authority((a) => a.ca, "application/octet-stream", "chrysalis-ca.crt")) },
     "/chrysalis-ca-firefox.crt": { GET: open(() => authority((a) => a.caDer, "application/x-x509-ca-cert")) },
-    "/opencode": { GET: open((req) => new Response(opencodeScript(new URL(req.url).origin, MACHINE, tls().dnsCa, fingerprint(tls().dnsCa), tls().cert),
+    "/opencode": { GET: open((req) => new Response(opencodeScript(new URL(req.url).origin, MACHINE, tls().dnsCa, fingerprint(tls().dnsCa), tls().cert, netName()),
       { headers: { "Content-Type": "text/x-shellscript", "Cache-Control": "no-store" } })) },
     "/.well-known/opencode": { GET: open((req) => Response.json(opencodeManifest(new URL(req.url).origin, MACHINE, tls().cert, process.platform !== "darwin"))) },
     "/opencode/ask": {
@@ -772,6 +772,7 @@ if (links.length) {
   seeEngine();
   setInterval(seeEngine, 10_000);
   advertise(MACHINE, linkPort, tls().link.fingerprint, () => !link.name && Date.now() - engineSeen < 60_000);
+  answerName(netName(), lanAddresses);
 }
 let forwarder: Server<undefined> | undefined;
 function forwardHere() {

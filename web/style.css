@@ -716,6 +716,7 @@ label.set-switch { cursor: pointer; }
 .dev-text { min-width: 0; font-size: 13px; line-height: 1.5; }
 .dev-text > p { margin: 0 0 8px; }
 .dev-text > .dev-lead { font-size: 14px; color: var(--text); }
+.dev-copy { display: block; margin: 8px 0 0 auto; }
 .dev-url, .dev-code { padding: 1px 6px; border-radius: 6px; background: var(--code); font: 12.5px var(--mono); overflow-wrap: anywhere; user-select: all; }
 .dev-code { font-weight: 600; letter-spacing: 0.06em; white-space: nowrap; }
 .dev-joined { display: flex; align-items: center; gap: 8px; margin: 0; padding: 8px 12px; border: 1px solid color-mix(in srgb, var(--ok) 45%, var(--line));

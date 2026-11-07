@@ -1,12 +1,12 @@
 import { afterAll, beforeAll, expect, test } from "bun:test";
 import { chmodSync, existsSync, mkdtempSync, rmSync, readFileSync, writeFileSync } from "node:fs";
-import { hostname, tmpdir } from "node:os";
+import { tmpdir } from "node:os";
 import { WebStandardStreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/webStandardStreamableHttp.js";
 import { createHash } from "node:crypto";
 import { fakeMcp } from "./fake-mcp";
 import mdns from "multicast-dns";
 import { advertise, discover } from "./link";
-import { fingerprint, lanAddresses, webTls } from "./tls";
+import { fingerprint, lanAddresses, netName, webTls } from "./tls";
 
 const RUN = mkdtempSync(`${tmpdir()}/chrysalis-test-`);
 
@@ -920,7 +920,20 @@ test("a computer with only OpenCode gets in from one pinned line and an approval
     expect(calls().filter((c) => c.startsWith("auth login")).length).toBe(3);
     rmSync(noName);
     expect(paste(line).exitCode).toBe(0);
-    expect(calls().at(-1)).toBe(`auth login https://${hostname().toLowerCase().replace(/\.local$/, "")}.local:${new URL(net).port} --method login`);
+    expect(calls().at(-1)).toBe(`auth login https://${netName()}:${new URL(net).port} --method login`);
+
+    const heard = await new Promise<{ type: string; data: unknown }[]>((done) => {
+      const m = mdns(), got: { type: string; data: unknown }[] = [];
+      m.on("response", (r) => got.push(...r.answers.filter((a) => a.name === netName()).map((a) => ({ type: a.type, data: (a as { data: unknown }).data }))));
+      m.query({ questions: [{ name: netName(), type: "A" }, { name: netName(), type: "AAAA" }] });
+      setTimeout(() => { m.destroy(); done(got); }, 1000);
+    });
+    const addresses = heard.filter((a) => a.type === "A");
+    expect(addresses.length).toBeGreaterThan(0);
+    expect(addresses.every((a) => lanAddresses().includes(String(a.data)))).toBe(true);
+    expect(heard.filter((a) => a.type === "AAAA")).toEqual([]);
+    expect(heard.some((a) => a.type === "NSEC" && (a.data as { rrtypes: string[] }).rrtypes.join() === "A")).toBe(true);
+    expect(Bun.spawnSync(["openssl", "x509", "-in", `${dir}/server.pem`, "-noout", "-ext", "subjectAltName"], { stdout: "pipe" }).stdout.toString()).toContain(netName());
     const bundle = readFileSync(trust, "utf8");
     expect([bundle.startsWith("corporate roots\n"), bundle.split("BEGIN CERTIFICATE").length - 1]).toEqual([true, 1]);
 
