@@ -39,6 +39,25 @@ if [ -n "$fresh" ] || ! ps axeww | grep -F 'serve --service' | grep -qF "NODE_EX
 fi
 origin=${origin}
 if ${pinned(cert)} -m 3 ${named}/.well-known/opencode >/dev/null 2>&1; then origin=${named}; fi
+if [ "$(uname)" = Darwin ]; then
+    port=$(($(printf %s ${host} | cksum | cut -d' ' -f1) % 20000 + 20000))
+    job=chrysalis-opencode-${host}
+    plist="$HOME/Library/LaunchAgents/$job.plist"
+    target=\${origin#https://}
+    mkdir -p "$HOME/Library/LaunchAgents"
+    cat > "$plist" <<CHRYSALIS_JOB
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0"><dict>
+<key>Label</key><string>$job</string>
+<key>ProgramArguments</key><array><string>/usr/bin/nc</string><string>\${target%:*}</string><string>\${target##*:}</string></array>
+<key>inetdCompatibility</key><dict><key>Wait</key><false/></dict>
+<key>Sockets</key><dict><key>Listeners</key><dict><key>SockNodeName</key><string>127.0.0.1</string><key>SockServiceName</key><string>$port</string><key>SockFamily</key><string>IPv4</string></dict></dict>
+</dict></plist>
+CHRYSALIS_JOB
+    launchctl bootout "gui/$(id -u)/$job" 2>/dev/null || true
+    if launchctl bootstrap "gui/$(id -u)" "$plist"; then origin=https://127.0.0.1:$port; fi
+fi
 opencode auth login "$origin" --method login </dev/null
 `;
 }

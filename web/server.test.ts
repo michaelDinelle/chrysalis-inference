@@ -892,6 +892,7 @@ test("a computer with only OpenCode gets in from one pinned line and an approval
   const desk = await onNetwork(dir), [here, net] = desk.urls, json = { "Content-Type": "application/json" };
   const paste = (line: string, path = `${bin}:${process.env.PATH}`) => Bun.spawnSync(["sh", "-c", line], { env: { ...process.env, HOME: home, XDG_CONFIG_HOME: "", PATH: path }, stdout: "pipe", stderr: "pipe" });
   const calls = () => existsSync(log) ? readFileSync(log, "utf8").trim().split("\n") : [];
+  let forward: Bun.Subprocess<"ignore", "pipe", "inherit"> | undefined;
   try {
     const { line } = await (await fetch(`${here}/api/opencode`)).json();
     expect(line.endsWith(`${net}/opencode | sh`)).toBe(true);
@@ -922,6 +923,25 @@ test("a computer with only OpenCode gets in from one pinned line and an approval
     expect(paste(line).exitCode).toBe(0);
     expect(calls().at(-1)).toBe(`auth login https://${netName()}:${new URL(net).port} --method login`);
 
+    const mac = mkdtempSync(`${RUN}/mac-`), jobs = `${home}/jobs`, refused = `${home}/launchd-refuses`, onMac = `${mac}:${bin}:${process.env.PATH}`;
+    expect(existsSync(jobs)).toBe(false);
+    writeFileSync(`${mac}/uname`, "#!/bin/sh\necho Darwin\n");
+    writeFileSync(`${mac}/launchctl`, `#!/bin/sh\necho "$*" >> "${jobs}"\n[ "$1" != bootstrap ] || [ ! -f "${refused}" ]\n`);
+    chmodSync(`${mac}/uname`, 0o755);
+    chmodSync(`${mac}/launchctl`, 0o755);
+    writeFileSync(refused, "");
+    expect(paste(line, onMac).exitCode).toBe(0);
+    expect(calls().at(-1)).toBe(`auth login https://${netName()}:${new URL(net).port} --method login`);
+    rmSync(refused);
+    expect(paste(line, onMac).exitCode).toBe(0);
+    const job = JSON.parse(String(Bun.spawnSync(["python3", "-c", "import json, plistlib, sys; print(json.dumps(plistlib.load(open(sys.argv[1], 'rb'))))",
+      readFileSync(jobs, "utf8").trim().split("\n").at(-1)!.split(" ").at(-1)!], { stdout: "pipe" }).stdout));
+    const listener = job.Sockets.Listeners, local = `https://127.0.0.1:${listener.SockServiceName}`;
+    expect([job.ProgramArguments, job.inetdCompatibility, listener.SockNodeName]).toEqual([["/usr/bin/nc", netName(), new URL(net).port], { Wait: false }, "127.0.0.1"]);
+    expect(calls().at(-1)).toBe(`auth login ${local} --method login`);
+    forward = Bun.spawn([process.execPath, "-e", `require("net").createServer((c) => { const far = require("net").connect(${new URL(net).port}, ${JSON.stringify(new URL(net).hostname)}); c.on("error", () => {}); far.on("error", () => {}); c.pipe(far).pipe(c); }).listen(${listener.SockServiceName}, "127.0.0.1", () => console.log("up"))`], { stdout: "pipe" });
+    await forward.stdout.getReader().read();
+
     const heard = await new Promise<{ type: string; data: unknown }[]>((done) => {
       const m = mdns(), got: { type: string; data: unknown }[] = [];
       m.on("response", (r) => got.push(...r.answers.filter((a) => a.name === netName()).map((a) => ({ type: a.type, data: (a as { data: unknown }).data }))));
@@ -937,9 +957,10 @@ test("a computer with only OpenCode gets in from one pinned line and an approval
     const bundle = readFileSync(trust, "utf8");
     expect([bundle.startsWith("corporate roots\n"), bundle.split("BEGIN CERTIFICATE").length - 1]).toEqual([true, 1]);
 
-    const asBun = (roots: Record<string, string>) => String(Bun.spawnSync([process.execPath, "-e", `const r = await fetch(${JSON.stringify(`${net}/.well-known/opencode`)}); console.log(r.status)`],
+    const asBun = (roots: Record<string, string>, at = net) => String(Bun.spawnSync([process.execPath, "-e", `const r = await fetch(${JSON.stringify(`${at}/.well-known/opencode`)}); console.log(r.status)`],
       { env: { ...process.env, NODE_TLS_REJECT_UNAUTHORIZED: "1", ...roots }, stdout: "pipe", stderr: "pipe" }).stdout).trim();
     expect([asBun({ NODE_EXTRA_CA_CERTS: trust }), asBun({})]).toEqual(["200", ""]);
+    expect([asBun({ NODE_EXTRA_CA_CERTS: trust }, local), asBun({}, local)]).toEqual(["200", ""]);
     const leaf = `${home}/public`;
     for (const args of [["req", "-new", "-newkey", "ec", "-pkeyopt", "ec_paramgen_curve:prime256v1", "-nodes", "-keyout", `${leaf}.key`, "-out", `${leaf}.csr`, "-subj", "/CN=api.example.com", "-addext", "subjectAltName=DNS:api.example.com"],
       ["x509", "-req", "-in", `${leaf}.csr`, "-CA", `${dir}/dns-ca.pem`, "-CAkey", `${dir}/ca.key`, "-CAcreateserial", "-days", "2", "-copy_extensions", "copy", "-out", `${leaf}.pem`]])
@@ -956,6 +977,8 @@ test("a computer with only OpenCode gets in from one pinned line and an approval
     const ca = readFileSync(`${dir}/ca.pem`, "utf8"), manifest = await (await fetch(`${net}/.well-known/opencode`, { tls: { ca } })).json();
     const provider: any = Object.values(manifest.config.providers)[0];
     expect([provider.settings.baseURL, provider.settings.apiKey]).toEqual([`${net}/v1`, `{env:${manifest.auth.env}}`]);
+    const forwarded = await (await fetch(`${local}/.well-known/opencode`, { tls: { ca } })).json();
+    expect((Object.values(forwarded.config.providers)[0] as any).settings.baseURL).toBe(`${local}/v1`);
     const login = async () => {
       const proc = Bun.spawn(manifest.auth.command, { stdout: "pipe", stderr: "pipe" });
       const code = /Allow (\d{6}) on /.exec(new TextDecoder().decode((await proc.stderr.getReader().read()).value))?.[1];
@@ -966,16 +989,19 @@ test("a computer with only OpenCode gets in from one pinned line and an approval
     expect((await fetch(`${here}/api/pair/allow`, { method: "POST", headers: json, body: JSON.stringify({ code: yes.code }) })).status).toBe(200);
     expect(await yes.proc.exited).toBe(0);
     const key = (await new Response(yes.proc.stdout).text()).trim();
-    const chat = (token?: string) => fetch(`${net}/v1/chat/completions`, { method: "POST", tls: { ca }, headers: { ...json, ...(token ? { Authorization: `Bearer ${token}` } : {}) },
+    const chat = (token?: string, at = net) => fetch(`${at}/v1/chat/completions`, { method: "POST", tls: { ca }, headers: { ...json, ...(token ? { Authorization: `Bearer ${token}` } : {}) },
       body: JSON.stringify({ messages: [{ role: "user", content: "hi" }] }) });
     expect([(await chat(key)).status, (await chat(browserKey)).status, (await chat()).status, (await chat("wrong")).status]).toEqual([200, 401, 401, 401]);
+    expect([(await chat(key, local)).status, (await chat(undefined, local)).status]).toEqual([200, 401]);
     expect((await fetch(`${net}/api/status`, { tls: { ca }, headers: { Authorization: `Bearer ${key}` } })).status).toBe(401);
+    expect((await fetch(`${local}/api/status`, { tls: { ca }, headers: { Authorization: `Bearer ${key}` } })).status).toBe(401);
 
     const no = await login();
     expect((await fetch(`${here}/api/pair/deny`, { method: "POST", headers: json, body: JSON.stringify({ code: no.code }) })).status).toBe(204);
     expect(await no.proc.exited).toBe(1);
     expect(await new Response(no.proc.stdout).text()).toBe("");
   } finally {
+    forward?.kill();
     desk.proc.kill();
   }
 });
