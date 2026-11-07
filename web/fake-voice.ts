@@ -49,7 +49,7 @@ function tone(seconds: number) {
 function chunk(ws: Bun.ServerWebSocket<Session>, id: string, r: Reply, to: number, spoken = ws.data.voice) {
   const text = r.text.slice(r.told, to).join(""), words = text.trim().split(/\s+/).filter(Boolean).length;
   const header = new TextEncoder().encode(JSON.stringify({ id, seq: r.seq++, text, from: r.told, to, rate: RATE }));
-  const pcm = tone(Math.max(0.25, 0.12 * words)), buf = new Uint8Array(4 + header.length + pcm.byteLength);
+  const pcm = tone(Math.max(0.1, 0.05 * words)), buf = new Uint8Array(4 + header.length + pcm.byteLength);
   new DataView(buf.buffer).setUint32(0, header.length, true);
   buf.set(header, 4);
   buf.set(new Uint8Array(pcm.buffer), 4 + header.length);
@@ -90,7 +90,7 @@ function hear(ws: Bun.ServerWebSocket<Session>) {
   if (++d.frames % 10 === 0) log({ s: d.n, ev: "frames", n: d.frames });
   const line = d.script[d.at];
   if (!d.listening || !line || (line.after === "config" && !d.configs)) return;
-  const k = ++d.heard, step = 10, first = line.text.split(" "), more = line.more?.split(" ") ?? [];
+  const k = ++d.heard, step = 4, first = line.text.split(" "), more = line.more?.split(" ") ?? [];
   const send = (o: object) => (ws.send(JSON.stringify(o)), log({ s: d.n, ev: "sent", t: Date.now(), ...o }));
   const say = (at: number, before: string[], words: string[]) => {
     const w = (k - at) / step - 1;

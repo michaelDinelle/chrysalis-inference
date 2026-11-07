@@ -133,7 +133,7 @@ const serveFake = () => Bun.serve({
     if (path === "/chrysalis/stats") return Response.json({ model: fakes.loaded, context: 262144, kv_tokens: 276000, cache: { free_kv_tokens: 270000 } });
     if (path === "/chrysalis/load") {
       const { model } = await req.json();
-      await (loading = Bun.sleep(3000).then(() => { fakes.loaded = model; }));
+      await (loading = Bun.sleep(1000).then(() => { fakes.loaded = model; }));
       return Response.json({ model });
     }
     if (path !== "/v1/chat/completions") return new Response("not found", { status: 404 });

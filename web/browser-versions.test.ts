@@ -14,7 +14,7 @@ test("a model picked while a reply is written is the one the next question asks 
     await page.click("#model-btn");
     await page.waitForSelector("#model-pop .model-item");
     await page.evaluate(() => [...document.querySelectorAll<HTMLElement>("#model-pop .model-item")].find((b) => /Flash/.test(b.textContent ?? ""))!.click());
-    await Bun.sleep(1000);
+    while (!loading) await Bun.sleep(10);
     const n = streams.length;
     await page.type("#input", "which model");
     await page.keyboard.press("Enter");

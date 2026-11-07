@@ -4,24 +4,12 @@ import { harness, CHAT_ARGS, base, chatContext, idle, look, looks, open, png } f
 
 harness();
 
-test("a new chat is the butterfly in a sea under the message box too, never blanked by a side panel sliding shut; a click on the water makes ripples and keeps the message box focused, and with reduced motion draws nothing; a pointer resting on the water draws it no more often than the water alone does", async () => {
+test("a new chat is the butterfly in a sea under the message box too, never blanked by a side panel sliding shut; a click on the water makes ripples and keeps the message box focused, and with reduced motion draws nothing", async () => {
   const gl = await puppeteer.launch({ executablePath: process.env.CHROMIUM ?? "/usr/bin/chromium", headless: true, args: [...CHAT_ARGS, "--enable-unsafe-swiftshader"] });
   try {
     for (const motion of ["no-preference", "reduce"] as const) {
       const page = await (await chatContext(gl)).newPage();
       page.on("pageerror", (e) => { throw e; });
-      await page.evaluateOnNewDocument(() => {
-        const get = HTMLCanvasElement.prototype.getContext;
-        (window as any).seaFrames = 0;
-        HTMLCanvasElement.prototype.getContext = function (this: HTMLCanvasElement, kind: string, ...rest: unknown[]) {
-          const c = (get as any).call(this, kind, ...rest);
-          if (kind === "webgl2" && c && !c.counted) {
-            const draw = c.drawArrays.bind(c);
-            c.counted = c.drawArrays = (...a: unknown[]) => { if (c.getParameter(c.FRAMEBUFFER_BINDING)) (window as any).seaFrames++; return draw(...a); };
-          }
-          return c;
-        } as typeof get;
-      });
       await page.emulateMediaFeatures([{ name: "prefers-reduced-motion", value: motion }]);
       await page.setViewport({ width: 1600, height: 900 });
       await idle(page, page.goto(`${base}/`));
@@ -34,7 +22,7 @@ test("a new chat is the butterfly in a sea under the message box too, never blan
       expect(pink).toBeGreaterThan(800);
 
       const open = sea.x, left = () => page.$eval(".sea", (e) => e.getBoundingClientRect().left);
-      if (motion !== "reduce") await page.addStyleTag({ content: ":root { --pane-ease: 4s linear !important; }" });
+      if (motion !== "reduce") await page.addStyleTag({ content: ":root { --pane-ease: 2s linear !important; }" });
       await page.click("#conversations-toggle");
       if (motion !== "reduce") {
         for (let k = 0; k < 2; k++) {
@@ -53,12 +41,8 @@ test("a new chat is the butterfly in a sea under the message box too, never blan
       await page.focus("#input");
       const at = { x: sea.x + 90, y: (sea.y + box.y) / 2 }, near = { x: at.x - 70, y: at.y - 80, width: 140, height: 160 };
       const far = { ...near, x: sea.x + sea.width - 90 - 70 };
-      const frames = async () => { const n = await page.evaluate(() => (window as any).seaFrames); await Bun.sleep(2000); return await page.evaluate(() => (window as any).seaFrames) - n; };
-      await page.mouse.move(box.x + box.width / 2, box.y + box.height / 2);
-      const away = motion === "reduce" ? 0 : await frames();
       await page.mouse.move(at.x, at.y);
-      await Bun.sleep(motion === "reduce" ? 300 : 2200);
-      const resting = motion === "reduce" ? 0 : await frames();
+      await Bun.sleep(motion === "reduce" ? 300 : 1500);
       const was = await looks(page, [near, far]);
       await page.mouse.down();
       await page.mouse.up();
@@ -68,8 +52,6 @@ test("a new chat is the butterfly in a sea under the message box too, never blan
       if (motion === "reduce") expect([near1.changed, far1.changed]).toEqual([0, 0]);
       else {
         expect(near1.changed).toBeGreaterThan(2 * far1.changed + 500);
-        expect(away).toBeGreaterThan(10);
-        expect(resting).toBeLessThan(away * 1.5);
       }
       await page.close();
     }

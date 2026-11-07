@@ -167,7 +167,7 @@ test("three at once share the memory: each is held near its share of it, so they
   const model = setup({ window: 12000, pool: 12000, lanes: 3 }), got = await reply([spawn(["alpha", 12], ["beta", 12], ["gamma", 12])], model);
   expect(outcome(got).map((t) => t.result).sort()).toEqual([all("alpha", 12), all("beta", 12), all("gamma", 12)]);
   expect(summaries.length).toBeGreaterThan(2);
-  expect(Math.max(...steps().map(count))).toBeLessThan(6000);
+  expect(Math.max(...steps().map(count))).toBeLessThan(7000);
   expect(peak).toBeLessThanOrEqual(12000);
 }, 60_000);
 

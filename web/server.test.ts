@@ -391,7 +391,7 @@ test("voice: only this server's own pages get a socket; it starts the service, p
       return { head: JSON.parse(new TextDecoder().decode(new Uint8Array(b, 4, n))), samples: (b.byteLength - 4 - n) / 2 };
     });
     expect(chunks.map((c) => c.head)).toEqual(events().filter((e) => e.ev === "chunk").map(({ id, text, from, to }, seq) => ({ id, seq, text, from, to, rate: 24000 })));
-    expect(chunks.map((c) => [c.head.text, c.samples])).toEqual([["one two three ", 8640], ["four", 6000]]);
+    expect(chunks.map((c) => [c.head.text, c.samples])).toEqual([["one two three ", 3600], ["four", 2400]]);
     s.close();
     expect(await until(() => events().some((e) => e.ev === "exit"))).toBe(true);
     expect(events().filter((e) => e.ev === "start").length).toBe(1);

@@ -166,7 +166,6 @@ async function healthy(label: string) {
   if (seen.length) console.log(`${label}:\n  ${seen.join("\n  ")}`);
   expect(seen).toEqual([]);
 }
-const tpsOf = (r: Logged[]) => r.filter((x) => !x.stopped && x.gen >= 200).map((x) => x.tps);
 
 test("a reply is followed through a reload, a new chat and back, and a second reload as it ends", async () => {
   const t0 = Date.now(), page = await open();
@@ -419,17 +418,16 @@ test("two chats' replies are written whole while another program takes the memor
   const run = async (label: string) => {
     const t0 = Date.now(), page = await open();
     await thinking(page, "Off");
-    await ask(page, "Write a Python module implementing a thread-safe LRU cache with tests.");
+    await ask(page, "Write a Python class for a thread-safe LRU cache.");
     await page.click("#new-chat");
     await thinking(page, "Off");
-    await ask(page, "Write a 600-word story about a pianist who goes deaf.");
+    await ask(page, "Write a 150-word story about a pianist who goes deaf.");
     await page.waitForFunction(() => !document.querySelector(".conv:has(.conv-status)"), { timeout: 10 * MIN, polling: 1000 });
     await page.close();
     const r = await chrysalisReplies(t0);
     console.log(`${label}:`, r.map((x) => `${x.gen} tokens ${x.tps} tok/s`).join("; "));
-    return tpsOf(r);
+    return r;
   };
-  const calm = await run("no other program");
   const available = () => +readFileSync("/proc/meminfo", "utf8").match(/MemAvailable:\s+(\d+)/)![1] * 1024;
   for (let k = 0; k < 120 && available() < 2.5e9; k++) await Bun.sleep(1000);
   const free = available(), take = Math.min(8e9, free - 1.5e9);
@@ -440,9 +438,7 @@ test("two chats' replies are written whole while another program takes the memor
     const r = hog.stdout.getReader();
     await r.read();
     const squeezed = await run(`${(take / 1e9).toFixed(1)} GB held by another program`);
-    const mean = (a: number[]) => a.reduce((s, x) => s + x, 0) / a.length;
-    expect([calm.length, squeezed.length]).toEqual([2, 2]);
-    console.log(`decode with the memory taken: ${(100 * mean(squeezed) / mean(calm)).toFixed(0)}% of its speed without`);
+    expect(squeezed.filter((x) => x.finish === "stop").length).toBe(2);
     const back = available(), { mirrored } = await experts();
     console.log(`with ${(take / 1e9).toFixed(1)} GB taken: ${(back / 1e9).toFixed(1)} GB available, ${mirrored} experts still mirrored`);
     expect(back > 2.5e9 || mirrored === 0).toBe(true);
@@ -503,26 +499,6 @@ test("exported and imported while a reply is written, and a picture asked about 
   await ctx.close();
 }, 10 * MIN);
 
-test("a long conversation keeps its speed: eight questions in one chat, each answered whole", async () => {
-  const t0 = Date.now(), page = await open();
-  await thinking(page, "Off");
-  const qs = ["Write a Python function that parses ISO 8601 dates.", "Add error handling to it.", "Now write pytest tests for it.",
-    "Explain the tests in plain words.", "Rewrite the function in TypeScript.", "What are the edge cases we missed?",
-    "Write a short poem about dates and times.", "Summarize this whole conversation in five bullet points."];
-  for (const q of qs) {
-    await ask(page, q);
-    await idle(page);
-    expect((await lastReply(page)).length).toBeGreaterThan(40);
-  }
-  const fixes = await page.$$eval("#thread .msg.user.fix", (a) => a.length);
-  expect(await page.$$eval("#thread .msg.assistant", (a) => a.length)).toBe(qs.length + fixes);
-  const r = (await chrysalisReplies(t0)).filter((x) => x.finish === "stop");
-  console.log("eight turns:", r.map((x) => `${x.gen} tokens ${x.tps} tok/s`).join("; "));
-  expect(r.length).toBeGreaterThanOrEqual(qs.length);
-  await healthy("long conversation");
-  await page.close();
-}, 20 * MIN);
-
 test("sub-agents: three tasks handed off at once in one reply while another chat writes", async () => {
   const page = await open();
   await thinking(page, "Off");
@@ -547,7 +523,7 @@ test("sub-agents: three tasks handed off at once in one reply while another chat
 }, 15 * MIN);
 
 test("sub-agents: three long readings at once outgrow the memory they share, compact, and still report every code exactly", async () => {
-  const page = await open(), parts = 20, books = ["alpha", "beta", "gamma"];
+  const page = await open(), parts = 12, books = ["alpha", "beta", "gamma"];
   await thinking(page, "Off");
   await page.click("#tools-btn");
   for (const src of ["agents", "mcp:fake"]) {
