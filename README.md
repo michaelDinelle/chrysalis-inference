@@ -6,10 +6,11 @@
 
 <p align="center">
   <a href="LICENSE"><img alt="MIT license" src="https://img.shields.io/badge/license-MIT-e24d85"></a>
-  <a href="https://huggingface.co/michaelDinelle/chrysalis"><img alt="Models on Hugging Face" src="https://img.shields.io/badge/Hugging%20Face-models-ffd21e?logo=huggingface&logoColor=black"></a>
   <a href="https://x.com/michaeldinelle"><img alt="Follow on X" src="https://img.shields.io/badge/follow-%40michaeldinelle-000?logo=x"></a>
   <a href="https://ko-fi.com/michaeldinelle"><img alt="Support on Ko-fi" src="https://img.shields.io/badge/Ko--fi-support-ff5e5b?logo=ko-fi&logoColor=white"></a>
 </p>
+
+<p align="center"><a href="https://huggingface.co/michaelDinelle/chrysalis"><img alt="Download the models on Hugging Face" height="44" src="https://img.shields.io/badge/Hugging%20Face-Download%20the%20models-ffd21e?style=for-the-badge&logo=huggingface&logoColor=ffd21e"></a></p>
 
 <p align="center"><img src="media/pagoda.webp" width="900" alt="A voxel pagoda garden that Qwen3.8-Flash-Next wrote in Chrysalis, running in the browser"><br>
 <sub>A voxel pagoda garden that Qwen3.8-Flash-Next wrote from one prompt in about two minutes, in Chrysalis on an RX 7900 XTX.</sub></p>
@@ -298,7 +299,8 @@ chrysalis/chrysalis.sh
 ```
 
 Nothing is installed outside that folder. With 64 GB of RAM, each start asks which model to run; otherwise it runs the
-27B. The first start downloads the model (16 GB for the 27B, 117 GB for Flash-Next) and prints the chat's address.
+27B. The first start downloads the model from [Hugging Face](https://huggingface.co/michaelDinelle/chrysalis) (16 GB for the
+27B, 117 GB for Flash-Next) and prints the chat's address.
 Chrysalis runs in that terminal, and Ctrl+C stops it.
 
 Your laptop and phone use it too: `chrysalis.sh --host 0.0.0.0` puts it on your network. A laptop runs the same
@@ -343,7 +345,7 @@ hold from RAM, on the CPU and over PCIe.
 
 ## Links
 
-[X @michaeldinelle](https://x.com/michaeldinelle) · [Ko-fi](https://ko-fi.com/michaeldinelle) ·
-[GitHub](https://github.com/michaelDinelle)
+[Hugging Face](https://huggingface.co/michaelDinelle/chrysalis) · [X @michaeldinelle](https://x.com/michaeldinelle) ·
+[Ko-fi](https://ko-fi.com/michaeldinelle) · [GitHub](https://github.com/michaelDinelle)
 
 MIT licensed.
