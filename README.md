@@ -19,6 +19,10 @@
 
 <p align="center"><img src="media/flash-next.png" width="860" alt="Qwen3.8-Flash-Next in Chrysalis and Strata on an RX 7900 XTX, an RTX 5070 and an M4 Max: time to first token and writing speed at five prompt lengths, error against Q8_0, load time, memory, and each one's share of its GPU's limit"></p>
 
+On the RX 7900, Chrysalis beats Strata's IQ3_S, its closest file in quality, on every measure. Strata's Q2_0 writes faster and
+uses less memory, with over five times the error. On the RTX 5070, Chrysalis is closer to the full model and loads faster, and
+Strata writes faster.
+
 <details><summary>How it was measured</summary>
 
 - **Machines**: an RX 7900 XTX (24 GB) with a Ryzen 7 7800X3D and 64 GB of DDR5, an RTX 5070 (12 GB) with a Core
