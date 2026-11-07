@@ -123,6 +123,12 @@ docker run -d --device /dev/kfd --device /dev/dri -p 127.0.0.1:8080:8080 -v chry
   portrait.
 - Phones: the connect page shows how to trust the certificate authority on each kind of device. The chat runs over HTTPS.
   The authority works only on the local network.
+- Long replies: a chat or sub-agent near the end of its context summarizes what came before and carries on. The chat
+  stays whole on screen, and a divider holds the summary. Sub-agents side by side share the GPU's memory, so each keeps to
+  its share. A reply takes as many tool rounds as it needs, and Stop ends it. When a reply that used tools stops, the
+  model reviews it against the request and goes on if the work is not finished. A chat waiting on you says Needs you in
+  the list. Chats stay in the tab, so a finished sub-agent keeps its answer and its last steps through a reload, without
+  their results.
 
 **OpenCode on another computer**
 

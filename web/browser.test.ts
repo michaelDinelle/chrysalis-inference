@@ -109,9 +109,14 @@ const png = (() => {
 const TOOL_ASKS: Record<string, { name: string; args: string }> = {
   "tool echo": { name: "fake__echo", args: '{"text":  "hello"}' },
   "tool note": { name: "fake__write_note", args: '{"text": "n1"}' },
+  "tool squeeze": { name: "fake__echo", args: '{"text": "squeezed"}' },
+  "tool slowly": { name: "fake__echo", args: '{"text": "once"}' },
+  "tool note slowly": { name: "fake__write_note", args: '{"text": "n2"}' },
 };
+const SUMMARY = "## Objective\n- keep chatting\n\n## Findings\n- the word is lighthouse\n\n## Next Move\n1. answer the next message";
+const CONTEXT_FULL = () => Response.json({ error: { message: "the request (300000 tokens) exceeds the available context size (262144 tokens), try increasing it", type: "invalid_request_error", code: "context_length_exceeded" } }, { status: 400 });
 const AGENT_TASKS = [{ description: "Echo a word", prompt: "tool echo" }, { description: "Write a note", prompt: "tool note" }];
-let lastStream: any = null, probes = 0, callIds = 0, chrysalisStopped = 0;
+let lastStream: any = null, probes = 0, callIds = 0, chrysalisStopped = 0, memoryRefusals = 0, naps = 0;
 const streams: any[] = [], streamAt: number[] = [];
 const checks: any[] = [];
 let loaded = "qwen3.8-27b";
@@ -138,21 +143,34 @@ const fake = Bun.serve({
       return Response.json({ choices: [{ message: { content: heard.includes("pie game") ? "pie game => Pygame\ntool: no" : "-" }, finish_reason: "stop" }] });
     }
     if (!body.stream) return Response.json({ choices: [{ message: { content: "A title" } }] });
+    if (/You are now the reviewer/.test(JSON.stringify(body.messages.at(-1)?.content ?? "")) && /^You are a sub-agent/.test(body.messages[0].content)) await Bun.sleep(700);
+    if (/You are now the reviewer/.test(JSON.stringify(body.messages.at(-1)?.content ?? ""))) return new Response(`data: ${JSON.stringify({ choices: [{ delta: { content: '{"verdict":"done","reason":"ok"}' }, finish_reason: "stop" }] })}\n\ndata: [DONE]\n\n`, { headers: { "Content-Type": "text/event-stream" } });
     lastStream = body;
     streams.push(body);
     streamAt.push(Date.now());
     req.signal.addEventListener("abort", () => chrysalisStopped++);
     const at = body.messages.findLastIndex((m: any) => m.role === "user"), last = body.messages[at];
-    const said = !last ? "" : (typeof last.content === "string" ? last.content : last.content.map((p: any) => p.text ?? "").join("")).replace(/^\[[^\]]*\]\n\n/, "");
+    const said = !last ? "" : (typeof last.content === "string" ? last.content : last.content.map((p: any) => p.text ?? "").join("")).replace(/^\[[^\]]*\]\n\n/, "").split("\n\n<conversation-checkpoint>")[0]
+      .replace(/^<conversation-checkpoint>[\s\S]*<\/conversation-checkpoint>\n\n/, "");
+    const summary = /structured summary|Update the existing checkpoint/.test(said), covered = JSON.stringify(body.messages).includes("<conversation-checkpoint>");
     const round = body.messages.slice(at).filter((m: any) => m.role === "assistant" && m !== prefix).length, ask = TOOL_ASKS[said];
+    if (!summary && !covered && (said.startsWith("overflow now") || (said === "tool squeeze" && round === 1))) return CONTEXT_FULL();
+    if (said === "overflow again" && !JSON.stringify(body.messages).includes("still lighthouse")) return CONTEXT_FULL();
+    if (said === "needs memory" && memoryRefusals-- > 0) return Response.json({ error: { message: "the request exceeds the available context size (KV cache full), try increasing it", code: "context_length_exceeded" } }, { status: 400 });
+    if (said === "chrysalis naps" && naps-- > 0) return Response.json({ error: { message: "the machine is going to sleep; Chrysalis loads the model again when it wakes", code: "unavailable" } }, { status: 503 });
     const agents = said === "agents" && round === 0 && body.tools?.some((t: any) => t.function.name === "subagent");
-    const calls = agents ? AGENT_TASKS.map((a) => ({ name: "subagent", args: JSON.stringify(a) })) : ask && body.tools && round === 0 ? [ask] : [];
+    const flood = said === "tool flood" && round < 24, flooded = said === "tool flood";
+    const spawned = said === "flood agent" && round === 0 && body.tools?.some((t: any) => t.function.name === "subagent") ? [{ description: "Read a lot", prompt: "tool flood" }]
+      : said === "squeeze agent" && round === 0 ? [{ description: "Fill the context", prompt: "tool squeeze" }] : undefined;
+    const calls = summary ? [] : spawned ? spawned.map((a) => ({ name: "subagent", args: JSON.stringify(a) })) : agents ? AGENT_TASKS.map((a) => ({ name: "subagent", args: JSON.stringify(a) }))
+      : flood ? Array.from({ length: 8 }, (_, k) => ({ name: "fake__big", args: `{"n": ${40000 + k}}` })) : ask && body.tools && round === 0 ? [ask] : [];
     const next = /\[(.+) next\.\]$/.exec(said)?.[1];
-    const think = agents ? "Two separate tasks: each goes to a sub-agent." : next ? `${next} has the floor.` : "";
-    const text = agents ? "" : next ? `${next}: I go on.` : calls.length ? "Let me check." : ask ? `The tool said: ${body.messages.at(-1).content}` : said === "agents"
+    const think = summary ? "" : agents ? "Two separate tasks: each goes to a sub-agent." : next ? `${next} has the floor.` : "";
+    const slowly = said.includes("slowly") && !summary && (!said.startsWith("tool") || round === 0);
+    const text = summary ? (said.includes("Update the existing checkpoint") ? SUMMARY.replace("is lighthouse", "is still lighthouse") : SUMMARY) : slowly ? Array.from({ length: 100 }, (_, k) => `w${k} `).join("") : flooded ? "Read it all." : spawned ? "" : agents ? "" : next ? `${next}: I go on.` : calls.length ? "Let me check." : ask ? `The tool said: ${body.messages.at(-1).content}` : said === "agents"
       ? `The sub-agents said: ${body.messages.slice(at).filter((m: any) => m.role === "tool").map((m: any) => m.content).join(" | ")}` : said.startsWith("slow")
       ? Array.from({ length: 40 }, (_, k) => `w${k} `).join("") : Object.entries(REPLIES).find(([k]) => said.includes(k))?.[1] ?? `You said: ${said}`;
-    const step = said.startsWith("slow") ? 4 : 9, gap = said.startsWith("slow") ? 60 : said.startsWith("steady") ? 25 : 5;
+    const step = said.startsWith("slow") || slowly ? 4 : 9, gap = said.startsWith("slow") || slowly ? 60 : said.startsWith("steady") ? 25 : 5;
     let i = 0, j = 0, restated = !prefix, read = false;
     return new Response(new ReadableStream({
       async pull(ctl) {
@@ -192,7 +210,7 @@ beforeAll(async () => {
     cwd: import.meta.dir, stdout: "pipe", stderr: "inherit",
     env: { ...process.env, PORT: "0", CHRYSALIS_URL: `http://127.0.0.1:${fake.port}`, CHRYSALIS_HOST: "127.0.0.1", NODE_ENV: "production", CHRYSALIS_MCP_CONFIG: `${dir}/mcp.json`,
       CHRYSALIS_VOICE_CMD: JSON.stringify([process.execPath, `${import.meta.dir}/fake-voice.ts`]), FAKE_VOICE_LOG: VOICE_LOG, CHRYSALIS_VOICE_IDLE_MS: "1500",
-      CHRYSALIS_TLS_DIR: mkdtempSync(`${RUN}/tls-`), CHRYSALIS_CHECK_PORT: "0" },
+      CHRYSALIS_TLS_DIR: mkdtempSync(`${RUN}/tls-`), CHRYSALIS_CHECK_PORT: "0", CHRYSALIS_RETRY_MS: "400" },
   });
   const reader = web.stdout.getReader(), dec = new TextDecoder();
   let out = "";
@@ -1193,6 +1211,179 @@ test("a tool that asks first shows the call with Allow once, Always allow and De
   await page.waitForSelector('.tool-card[data-state="approval"] .tool-ask:not([hidden])', { timeout: 20_000 });
   await page.close();
 }, 90_000);
+
+test("a chat past its context is compacted: a divider holds the summary, the next turn opens with it, a reload keeps it, and going back behind it brings the real history back", async () => {
+  const page = await open();
+  await send(page, "first question");
+  await send(page, "overflow now");
+  const wire = () => lastStream.messages.filter((m: any) => m.role !== "system").map((m: any) => [m.role, typeof m.content === "string" ? m.content : m.content.map((p: any) => p.text).join("")]);
+  const divider = () => page.$$eval(".checkpoint", (d) => d.map((x) => [x.querySelector("summary")!.textContent, x.closest("article")!.dataset.i]));
+  expect(await divider()).toEqual([["Context compacted", "3"]]);
+  await page.click(".checkpoint summary");
+  expect(await page.$eval(".checkpoint .markdown", (m) => (m as HTMLElement).innerText)).toContain("the word is lighthouse");
+  expect(await page.$eval(".msg.assistant:last-child .error", () => true).catch(() => false)).toBe(false);
+
+  await send(page, "next one");
+  let sent = wire();
+  expect(sent.map((m: string[]) => m[0])).toEqual(["user", "assistant", "user"]);
+  expect(sent[0][1]).toStartWith("<conversation-checkpoint>");
+  expect(sent[0][1]).toContain("the word is lighthouse");
+  expect(sent[0][1]).toEndWith("overflow now");
+  expect(sent[2][1]).toBe("next one");
+
+  await send(page, "overflow again");
+  const saved = await page.evaluate(() => (Object.values(JSON.parse(sessionStorage.getItem("chats")!)) as any[])[0].messages.flatMap((m: any) => m.checkpoints ?? []).map((k: any) => !!k.recent));
+  expect(saved).toEqual([false, true]);
+  await page.reload({ waitUntil: "networkidle0" });
+  expect(await divider()).toEqual([["Context compacted", "3"], ["Context compacted", "7"]]);
+  await send(page, "after the reload");
+  sent = wire();
+  expect(sent[0][1]).toStartWith("<conversation-checkpoint>");
+  expect(sent.at(-1)[1]).toBe("after the reload");
+
+  await page.evaluate(() => (document.querySelector('article[data-i="0"] [data-act="edit"]') as HTMLElement).click());
+  await page.waitForSelector("textarea.edit-text, .editor textarea");
+  await page.evaluate(() => { const t = document.querySelector(".editor textarea, textarea.edit-text") as HTMLTextAreaElement; t.value = "the first question, edited"; t.dispatchEvent(new Event("input", { bubbles: true })); });
+  await page.evaluate(() => ([...document.querySelectorAll("button")].find((b) => b.textContent === "Save") as HTMLElement).click());
+  expect(await divider()).toEqual([]);
+  await send(page, "after the edit");
+  sent = wire();
+  expect(sent[0]).toEqual(["user", "the first question, edited"]);
+  expect(sent.some((m: string[]) => m[1].includes("<conversation-checkpoint>"))).toBe(false);
+  await page.close();
+}, 60_000);
+
+test("a sub-agent that fills its context says it is compacting, keeps going, and shows where in its log", async () => {
+  const page = await open();
+  await toolsOn(page);
+  await page.click("#tools-btn");
+  await page.waitForSelector(sw("agents"));
+  await page.click(sw("agents"));
+  await page.keyboard.press("Escape");
+  await page.type("#input", "squeeze agent");
+  await page.keyboard.press("Enter");
+  await page.waitForFunction(() => document.querySelector(".agent-card .agent-now")?.textContent === "Checking its work", { timeout: 15_000 });
+  await page.waitForFunction(() => document.querySelectorAll(".msg .stats").length === 1, { timeout: 20_000 });
+  expect(await page.$eval(".agent-card", (c) => [c.getAttribute("data-state"), c.querySelector(".tool-name")!.textContent])).toEqual(["done", "Fill the context"]);
+  await page.click(".agent-card .agent-head");
+  await page.waitForSelector(".agent-log .checkpoint");
+  expect(await page.$$eval(".agent-log > *", (l) => l.map((x) => x.className))).toEqual(["checkpoint", "round"]);
+  await page.close();
+}, 30_000);
+
+test("a heavy run leaves the chat whole through a reload: the answers stay, and the sub-agent's log is what is let go", async () => {
+  const page = await open();
+  await toolsOn(page);
+  await page.click("#tools-btn");
+  await page.waitForSelector(sw("agents"));
+  await page.click(sw("agents"));
+  await page.keyboard.press("Escape");
+  await page.type("#input", "flood agent");
+  await page.keyboard.press("Enter");
+  await page.waitForFunction(() => document.querySelectorAll(".msg .stats").length > 0, { timeout: 60_000 });
+  const cards = () => page.$$eval(".agent-card", (c) => c.map((x) => [x.getAttribute("data-state"), x.querySelector(".agent-meta")!.textContent, x.querySelector(".agent-now")!.textContent]));
+  const end = await cards();
+  expect(end.length).toBe(1);
+  expect(end[0][1]).toStartWith("192 tools");
+  const saved = await page.evaluate(() => sessionStorage.getItem("chats")!.length);
+  expect(saved).toBeLessThan(200_000);
+  expect(await page.evaluate(() => !!(Object.values(JSON.parse(sessionStorage.getItem("chats")!)) as any[])[0].messages.at(-1).stats)).toBe(true);
+  await page.reload({ waitUntil: "networkidle0" });
+  expect(await cards()).toEqual(end);
+  await page.click(".agent-card .agent-head");
+  expect(await page.$eval(".agent-card .agent-body > .markdown", (m) => (m as HTMLElement).innerText.trim())).toBe("Read it all.");
+  expect(await page.$$eval(".agent-card .agent-log .round .tool-card", (c) => c.length)).toBe(160);
+  expect(await page.$eval(".agent-card .agent-notes", (n) => n.textContent)).toBe("32 earlier tool calls are not kept through a reload");
+  expect(await page.$$eval(".agent-card .agent-log .tool-result", (c) => c.length)).toBe(0);
+  await send(page, "still here");
+  expect(lastStream.messages.filter((m: any) => m.role === "tool").map((m: any) => m.content)).toEqual(["Read it all."]);
+  await page.close();
+}, 90_000);
+
+test("a reload in the middle of a reply that compacted brings it back with one divider, and the words once", async () => {
+  const page = await open();
+  await send(page, "first question");
+  await page.type("#input", "overflow now slowly");
+  await page.keyboard.press("Enter");
+  await page.waitForFunction(() => /w3 /.test([...document.querySelectorAll(".msg.assistant")].at(-1)?.textContent ?? ""), { timeout: 15_000 });
+  await page.waitForFunction(() => sessionStorage.getItem("chats")?.includes('"checkpoints"'), { timeout: 8000 });
+  expect(await page.$$eval(".msg .stats", (s) => s.length)).toBe(1);
+  await page.reload({ waitUntil: "load" });
+  await page.waitForFunction(() => document.querySelectorAll(".msg .stats").length === 2, { timeout: 20_000 });
+  expect(await page.$$eval(".checkpoint", (c) => c.length)).toBe(1);
+  expect((await page.$eval(".msg.assistant:last-child", (m) => m.textContent!)).match(/w99 /g)?.length).toBe(1);
+  await page.close();
+}, 60_000);
+
+test("a page cut off inside a round the server has since folded starts the reply over, and has every word once", async () => {
+  const page = await open();
+  await page.evaluate(() => {
+    const reader = ReadableStreamDefaultReader.prototype as any, read = reader.read;
+    reader.read = function () { return (window as any).cut ? Promise.reject(new Error("cut off")) : read.call(this); };
+  });
+  await toolsOn(page);
+  await page.keyboard.press("Escape");
+  const asked = streams.length;
+  await page.type("#input", "tool slowly");
+  await page.keyboard.press("Enter");
+  await page.waitForFunction(() => /w3 /.test([...document.querySelectorAll(".msg.assistant")].at(-1)?.textContent ?? ""), { timeout: 15_000 });
+  await page.evaluate(() => { (window as any).cut = true; });
+  while (streams.length < asked + 2) await Bun.sleep(50);
+  await page.evaluate(() => { (window as any).cut = false; });
+  await page.waitForFunction(() => document.querySelectorAll(".msg .stats").length === 1, { timeout: 20_000 });
+  const text = await page.$eval(".msg.assistant:last-child", (m) => m.textContent!);
+  expect(Array.from({ length: 100 }, (_, k) => text.match(new RegExp(`w${k} `, "g"))?.length)).toEqual(Array(100).fill(1));
+  expect(text).toContain("The tool said: echo: once");
+  await page.close();
+}, 60_000);
+
+test("a reply waiting for you says so in the list instead of Working, and tells you when you are in another chat", async () => {
+  const page = await open(), status = () => page.$$eval(".conv-status", (s) => s.map((x) => x.textContent));
+  await toolsOn(page);
+  await page.keyboard.press("Escape");
+  await page.type("#input", "tool note slowly");
+  await page.keyboard.press("Enter");
+  await page.waitForFunction(() => /w3 /.test([...document.querySelectorAll(".msg.assistant")].at(-1)?.textContent ?? ""), { timeout: 15_000 });
+  expect((await status())[0]).toStartWith("Working");
+  await page.click("#new-chat");
+  await page.waitForFunction(() => /a tool is waiting for you to allow it/.test(document.querySelector("#toast")?.textContent ?? ""), { timeout: 15_000 });
+  expect(await status()).toEqual(["Needs you"]);
+  await page.click(".conv:has(.conv-status)");
+  await page.waitForSelector('.tool-card[data-state="approval"] [data-decision="once"]');
+  await page.click('.tool-card[data-state="approval"] [data-decision="once"]');
+  await page.waitForFunction(() => document.querySelectorAll(".msg .stats").length === 1, { timeout: 20_000 });
+  expect(await status()).toEqual([]);
+  await page.close();
+}, 60_000);
+
+test("a reply held up says why while it waits, then goes on by itself", async () => {
+  const page = await open(), shown = (text: string) => page.waitForFunction((t) => (document.querySelector(".msg.assistant:last-child .waiting")?.textContent ?? "").includes(t), { timeout: 8000 }, text);
+  memoryRefusals = 2;
+  await page.type("#input", "needs memory");
+  await page.keyboard.press("Enter");
+  await shown("Waiting for memory: other replies are using it");
+  await page.waitForFunction(() => document.querySelectorAll(".msg .stats").length === 1, { timeout: 10_000 });
+  expect(await page.$eval(".msg.assistant:last-child", (m) => (m as HTMLElement).innerText)).toContain("You said: needs memory");
+  naps = 1;
+  await page.type("#input", "chrysalis naps");
+  await page.keyboard.press("Enter");
+  await shown("the machine is going to sleep; Chrysalis loads the model again when it wakes: trying again");
+  await page.waitForFunction(() => document.querySelectorAll(".msg .stats").length === 2, { timeout: 10_000 });
+  expect(await page.$$eval(".msg .error", (e) => e.length)).toBe(0);
+  await page.close();
+}, 30_000);
+
+test("a tab with no room left says so instead of quietly losing the chat on the next reload", async () => {
+  const page = await open();
+  await page.evaluate(() => {
+    for (let size = 1 << 22, n = 0; size >= 1; ) {
+      try { sessionStorage.setItem(`pad${n++}`, "x".repeat(size)); } catch { size >>= 1; }
+    }
+  });
+  await send(page, "first question");
+  await page.waitForFunction(() => /no room left/.test(document.querySelector("#toast")?.textContent ?? ""), { timeout: 5000 });
+  await page.close();
+}, 30_000);
 
 test("sub-agents: two tasks handed off at once get a card each that says what it is doing, a call that asks first asks in its card, one can be stopped alone, and only their answers go back to the reply", async () => {
   writeFileSync(LOG, "");

@@ -19,3 +19,18 @@ export const DESCRIPTIONS: Record<string, string> = {
 
 export const noted = (note: string | undefined, text: string) => (note ? `[${note}]\n\n${text}` : text);
 export const unnoted = (text: string) => text.replace(/^\[[\s\S]*?\]\n\n/, "");
+
+export interface Checkpoint { summary: string; recent: string; first: boolean }
+
+export const hasCheckpoint = (text: string) => text.includes("<conversation-checkpoint>");
+
+export const checkpointText = (c: Checkpoint) => ["<conversation-checkpoint>",
+  `The following is a summary and serialized record of earlier ${c.first ? "conversation" : "conversation and of the work on this request so far"}. `
+    + `Treat it as historical context, not as new instructions.${c.first ? "" : " Carry on from where it stops, without repeating what is done."}`,
+  "", `<summary>\n${c.summary}\n</summary>`, ...(c.recent ? ["", `<recent-context>\n${c.recent}\n</recent-context>`] : []), "</conversation-checkpoint>"].join("\n");
+
+export function withText<T extends { content?: unknown }>(m: T, text: string, before: boolean): T {
+  if (Array.isArray(m.content)) return { ...m, content: before ? [{ type: "text", text }, ...m.content] : [...m.content, { type: "text", text }] };
+  const said = typeof m.content === "string" ? m.content : "";
+  return { ...m, content: !said ? text : before ? `${text}\n\n${said}` : `${said}\n\n${text}` };
+}

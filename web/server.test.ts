@@ -27,6 +27,7 @@ const fake = Bun.serve({
     if (path === "/chrysalis/stats") return Response.json({ model: "fake-model" });
     if (path !== "/v1/chat/completions") return new Response("not found", { status: 404 });
     const body = await req.json();
+    if (/You are now the reviewer/.test(JSON.stringify(body.messages.at(-1)?.content ?? ""))) return new Response(`data: ${JSON.stringify({ choices: [{ delta: { content: '{"verdict":"done","reason":"ok"}' }, finish_reason: "stop" }] })}\n\ndata: [DONE]\n\n`, { headers: { "Content-Type": "text/event-stream" } });
     const prefix = body.continue_final_message ? body.messages.at(-1) : undefined;
     const said: string = String(body.messages.find((m: any) => m.role === "user")?.content ?? "").replace(/^\[[\s\S]*?\]\n\n/, "");
     const script: Round[] | undefined = said.startsWith("run ") ? JSON.parse(said.slice(4).split("\n")[0]) : undefined;
@@ -106,7 +107,7 @@ beforeAll(async () => {
   web = Bun.spawn([process.execPath, "server.ts"], {
     cwd: import.meta.dir, stdout: "pipe", stderr: "inherit",
     env: { ...process.env, PORT: "0", CHRYSALIS_URL: `http://127.0.0.1:${fake.port}`, CHRYSALIS_HOST: "127.0.0.1", NODE_ENV: "production", CHRYSALIS_MCP_CONFIG: CONFIG,
-      CHRYSALIS_TLS_DIR: TLS(), CHRYSALIS_CHECK_PORT: "0" },
+      CHRYSALIS_TLS_DIR: TLS(), CHRYSALIS_CHECK_PORT: "0", CHRYSALIS_RETRY_MS: "5" },
   });
   const reader = web.stdout.getReader(), dec = new TextDecoder();
   let out = "";
@@ -204,6 +205,7 @@ test("a backend is Chrysalis by what its model list says, wherever it is: one th
   const backend = (owner: string) => Bun.serve({ hostname: "127.0.0.1", port: 0, async fetch(req) {
     const path = new URL(req.url).pathname;
     if (path === "/v1/models") return Response.json({ object: "list", data: [{ id: "m", object: "model", owned_by: owner }] });
+    if (path !== "/v1/chat/completions") return new Response("not found", { status: 404 });
     got[owner] = await req.json();
     return new Response(`data: ${JSON.stringify({ choices: [{ index: 0, delta: { reasoning: "hmm", content: "ok" } }] })}\n\ndata: [DONE]\n\n`,
       { headers: { "Content-Type": "text/event-stream" } });
@@ -229,6 +231,21 @@ test("a backend is Chrysalis by what its model list says, wherever it is: one th
     expect(await status()).toMatchObject({ chrysalis: true, service: true });
     chrysalis.stop(true);
     other.stop(true);
+  }
+});
+
+test("a backend that goes away is called what it is, not Chrysalis, once the reply has tried again", async () => {
+  const gone = Bun.serve({ hostname: "127.0.0.1", port: 0, fetch: (req) => new URL(req.url).pathname === "/v1/models"
+    ? Response.json({ object: "list", data: [{ id: "m", object: "model", owned_by: "llamacpp" }] }) : new Response("not found", { status: 404 }) });
+  const at = `http://127.0.0.1:${gone.port}`;
+  try {
+    expect((await fetch(`${base}/api/backend`, { method: "POST", headers: json, body: JSON.stringify({ url: `${at}/v1` }) })).status).toBe(200);
+    gone.stop(true);
+    const text = await (await fetch(`${base}/api/chat`, { method: "POST", headers: json, body: JSON.stringify({ stream: true, model: "m", messages: [{ role: "user", content: "hello" }] }) })).text();
+    const errors = [...text.matchAll(/data: (\{"error".*\})/g)].map((m) => JSON.parse(m[1]).error.message);
+    expect(errors).toEqual([`nothing answers at ${at}: is the backend running?`]);
+  } finally {
+    expect((await fetch(`${base}/api/backend`, { method: "POST", headers: json, body: JSON.stringify({ url: `127.0.0.1:${fake.port}/v1` }) })).status).toBe(200);
   }
 });
 
@@ -377,21 +394,32 @@ test("a page that follows a reply with tools again from any event gets all the r
   const r = await res, job = r.headers.get("X-Chrysalis-Job")!, early: (readonly [number, string])[] = [];
   for await (const e of events(r)) { early.push(e); if (early.length === 7) break; }
   await r.body!.cancel().catch(() => {});
-  const rest = await all(await fetch(`${base}/api/chat/${job}?from=7`));
+  await all(await fetch(`${base}/api/chat/${job}?from=0`));
   const whole = await all(await fetch(`${base}/api/chat/${job}?from=0`));
-  expect([...early, ...rest]).toEqual(whole);
+  const state = (got: (readonly [number, string])[]) => {
+    const evs = got.filter(([, d]) => d !== "[DONE]").map(([, d]) => JSON.parse(d));
+    return { words: evs.flatMap((e) => e.choices?.[0]?.delta?.content ?? []).join(""), tools: evs.filter((e) => e.tool).map((e) => e.tool), rounds: evs.filter((e) => e.round).map((e) => e.round) };
+  };
+  let restarts = 0;
+  for (let from = 1; from <= whole.at(-1)![0]; from++) {
+    const rest = await all(await fetch(`${base}/api/chat/${job}?from=${from}`));
+    if (rest[0][1] === '{"reset":true}') { restarts++; expect(rest.slice(1)).toEqual(whole); }
+    else expect([...whole.filter(([i]) => i < from), ...rest]).toEqual(whole);
+  }
+  expect(restarts).toBeGreaterThan(0);
+  const resumed = await all(await fetch(`${base}/api/chat/${job}?from=7`));
+  expect(state(resumed[0][1] === '{"reset":true}' ? resumed.slice(1) : [...early, ...resumed])).toEqual(state(whole));
   expect(whole.filter(([, d]) => d.includes('"round"')).length).toBe(2);
   expect(whole.filter(([, d]) => d.includes('"state":"done"')).length).toBe(2);
 }, 30_000);
 
-test("a reply stops after 24 rounds of tool calls, says so, and runs none of the last round's", async () => {
-  const { said, res } = ask([{ calls: [{ name: "fake__echo", args: '{"text": "again"}' }] }]);
+test("a reply runs as many rounds of tool calls as it needs: no number of them ends it", async () => {
+  const { said, res } = ask([...Array.from({ length: 40 }, () => ({ calls: [{ name: "fake__echo", args: '{"text": "again"}' }] })), { text: "That is all of it" }]);
   const got = await collect(await res);
-  expect(seen.get(said)!.length).toBe(24);
-  const states = toolEvents(got).map((t) => t.state);
-  expect(states.filter((s) => s === "done").length).toBe(23);
-  expect(states.at(-1)).toBe("stopped");
-  expect(got.some((e) => e.note?.includes("24 rounds"))).toBe(true);
+  expect(seen.get(said)!.length).toBe(41);
+  expect(toolEvents(got).filter((t) => t.state === "done").length).toBe(40);
+  expect(contents(got).at(-1)).toBe("That is all of it");
+  expect(got.filter((e) => e.error || e.note)).toEqual([]);
 }, 60_000);
 
 test("a tool's result is cut to the server's limit, and says so; a call past its time limit fails", async () => {
@@ -1099,9 +1127,10 @@ test("a computer with neither systemd nor openssl, as a Mac is, runs the chat: t
   }
 });
 
-test("a reply whose stream from Chrysalis breaks off says so, rather than that Chrysalis is not running", async () => {
+test("a reply whose stream from Chrysalis keeps breaking off is tried again, then says so, rather than that Chrysalis is not running", async () => {
   const got = await collect(await ask([{ text: "Half of it", broken: true }]).res);
-  expect(contents(got)).toEqual(["Half of it"]);
+  expect(new Set(contents(got))).toEqual(new Set(["Half of it"]));
+  expect(got.filter((e) => e.retry).map((e) => e.retry.attempt)).toEqual(Array.from({ length: 10 }, (_, i) => i + 1));
   expect(got.filter((e) => e.error).map((e) => e.error.message)).toEqual(["Chrysalis's reply broke off (Chrysalis's log has why)"]);
 });
 

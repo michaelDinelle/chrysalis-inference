@@ -1,4 +1,4 @@
-import type { Source, Tool } from "./tools";
+import { DEFAULT_MAX_CHARS, type Source, type Tool } from "./tools";
 
 export const SUBAGENT_SYSTEM = "You are a sub-agent, running locally in Chrysalis Inference. Another assistant, in a chat with a "
   + "user, handed you the task below and is waiting for your answer: it sees only your final message. Work on the task with "
@@ -22,7 +22,7 @@ export function agentSource(): Source {
   };
   return {
     id: "agents", label: "Sub-agents", kind: "agent", prefix: "", detail: "built in", spec: "agents", state: "connected", tools: [tool],
-    timeoutMs: Infinity, maxChars: Infinity,
+    timeoutMs: Infinity, maxChars: DEFAULT_MAX_CHARS,
     async connect() {},
     async close() {},
   };

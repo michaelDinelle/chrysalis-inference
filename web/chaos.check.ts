@@ -3,6 +3,7 @@ import { mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from "n
 import { tmpdir } from "node:os";
 import { deflateSync } from "node:zlib";
 import puppeteer, { type Browser, type BrowserContext, type Page } from "puppeteer-core";
+import { partCode } from "./fake-mcp";
 
 const RUN = mkdtempSync(`${tmpdir()}/chrysalis-chaos-`);
 process.env.NODE_TLS_REJECT_UNAUTHORIZED = "0";
@@ -29,7 +30,7 @@ const serverLog: string[] = [];
 
 beforeAll(async () => {
   const tls = mkdtempSync(`${RUN}/tls-`), dir = mkdtempSync(`${RUN}/mcp-`);
-  writeFileSync(`${dir}/mcp.json`, JSON.stringify({ mcpServers: { fake: { command: process.execPath, args: ["fake-mcp.ts"], cwd: import.meta.dir } } }));
+  writeFileSync(`${dir}/mcp.json`, JSON.stringify({ mcpServers: { fake: { command: process.execPath, args: ["fake-mcp.ts"], cwd: import.meta.dir, env: { FAKE_MCP_PART_CHARS: "38000" } } } }));
   web = Bun.spawn([process.execPath, "server.ts"], {
     cwd: import.meta.dir, stdout: "pipe", stderr: "pipe",
     env: { ...process.env, PORT: "0", CHRYSALIS_URL: CHRYSALIS, CHRYSALIS_HOST: "127.0.0.1", NODE_ENV: "production",
@@ -51,10 +52,15 @@ beforeAll(async () => {
     out += dec.decode(value);
   }
   base = out.match(/chrysalis web: (\S+)/)![1].replace(/\/$/, "");
-  browser = await puppeteer.launch({ executablePath: process.env.CHROMIUM ?? "/usr/bin/chromium", headless: true, args: CHAT_ARGS,
+  browser = await puppeteer.launch({ executablePath: process.env.CHROMIUM ?? "/usr/bin/chromium", headless: true, args: CHAT_ARGS, protocolTimeout: 30 * MIN,
     userDataDir: mkdtempSync(`${RUN}/chromium-`) });
 }, MIN);
 afterAll(async () => { await browser?.close(); web?.kill(); rmSync(RUN, { recursive: true, force: true }); });
+
+const inArtifact = (stack: string) => {
+  const frames = stack.split("\n").filter((l) => /^\s+at /.test(l));
+  return frames.length > 0 && frames.every((l) => !/https?:/.test(l) || /\/sandbox:\d+:\d+\)?$/.test(l));
+};
 
 async function context(): Promise<BrowserContext> {
   return browser.createBrowserContext();
@@ -62,7 +68,7 @@ async function context(): Promise<BrowserContext> {
 async function open(ctx?: BrowserContext): Promise<Page> {
   const page = await (ctx ?? await context()).newPage();
   await page.setViewport({ width: 1280, height: 900 });
-  page.on("pageerror", (e) => problems.push(`page: ${(e as Error).message}`));
+  page.on("pageerror", (e) => { if (!inArtifact((e as Error).stack ?? "")) problems.push(`page: ${(e as Error).message}`); });
   page.on("console", (m) => {
     const from = m.location()?.url ?? "";
     if (m.type() === "error" && !/\/sandbox$|^blob:/.test(from) && !/^Permissions policy violation: xr-spatial-tracking/.test(m.text())) problems.push(`console: ${m.text()}`);
@@ -129,6 +135,17 @@ const longer = (page: Page, chars: number, timeout = 3 * MIN) => until(page, `a 
 const writing = (page: Page, chars = 80) => longer(page, chars);
 const idle = (page: Page, timeout = 5 * MIN) => until(page, "the reply's end",
   () => page.waitForFunction(() => document.querySelector("#send")?.getAttribute("aria-label") === "Send", { timeout }));
+const answered = async (page: Page, timeout = 5 * MIN) => {
+  await until(page, "the reply's start", () => page.waitForFunction(() => document.querySelector("#send")?.getAttribute("aria-label") !== "Send", { timeout: MIN }));
+  await idle(page, timeout);
+};
+const attended = async (page: Page, wait: () => Promise<void>) => {
+  const watch = setInterval(() => void page.evaluate(() => [...document.querySelectorAll<HTMLElement>('.tool-card[data-state="approval"]')].map((c) => {
+    c.querySelector<HTMLElement>('[data-decision="once"]')?.click();
+    return c.querySelector(".tool-name")?.textContent;
+  })).then((asked) => { if (asked.length) console.log(`allowed: ${asked.join(", ")}`); }).catch(() => {}), 2000);
+  await wait().finally(() => clearInterval(watch));
+};
 const openChat = (page: Page, k: number) => page.evaluate((i) => (document.querySelectorAll(".conv")[i] as HTMLElement).click(), k);
 
 interface Logged { gen: number; tps: number; finish: string; stopped: boolean }
@@ -168,7 +185,7 @@ test("a reply is followed through a reload, a new chat and back, and a second re
   await writing(page, 200);
   await page.click("#new-chat");
   await page.type("#input", "a draft in another chat");
-  await page.click(".conv:has(.conv-status)");
+  await page.$eval(".conv:has(.conv-status)", (c) => (c as HTMLElement).click());
   await writing(page, 400);
   await reload(page);
   await idle(page);
@@ -414,6 +431,7 @@ test("two chats' replies are written whole while another program takes the memor
   };
   const calm = await run("no other program");
   const available = () => +readFileSync("/proc/meminfo", "utf8").match(/MemAvailable:\s+(\d+)/)![1] * 1024;
+  for (let k = 0; k < 120 && available() < 2.5e9; k++) await Bun.sleep(1000);
   const free = available(), take = Math.min(8e9, free - 1.5e9);
   expect(free).toBeGreaterThan(2.5e9);
   const hog = Bun.spawn(["systemd-run", "--user", "--scope", "-q", "python3", "-c",
@@ -496,7 +514,8 @@ test("a long conversation keeps its speed: eight questions in one chat, each ans
     await idle(page);
     expect((await lastReply(page)).length).toBeGreaterThan(40);
   }
-  expect(await page.$$eval("#thread .msg.assistant", (a) => a.length)).toBe(qs.length);
+  const fixes = await page.$$eval("#thread .msg.user.fix", (a) => a.length);
+  expect(await page.$$eval("#thread .msg.assistant", (a) => a.length)).toBe(qs.length + fixes);
   const r = (await chrysalisReplies(t0)).filter((x) => x.finish === "stop");
   console.log("eight turns:", r.map((x) => `${x.gen} tokens ${x.tps} tok/s`).join("; "));
   expect(r.length).toBeGreaterThanOrEqual(qs.length);
@@ -517,7 +536,7 @@ test("sub-agents: three tasks handed off at once in one reply while another chat
   await thinking(page, "Off");
   await ask(page, "Write a 300-word story about a lighthouse.");
   await page.waitForFunction(() => !document.querySelector(".conv:has(.conv-status)"), { timeout: 10 * MIN, polling: 1000 });
-  await page.click(".conv:not(.active)");
+  await page.$eval(".conv:not(.active)", (c) => (c as HTMLElement).click());
   await page.waitForSelector(".agent-head", { timeout: 10_000 });
   const cards = await page.$$eval(".agent-head", (c) => c.length);
   console.log(`sub-agent cards: ${cards}`);
@@ -526,6 +545,60 @@ test("sub-agents: three tasks handed off at once in one reply while another chat
   await healthy("sub-agents");
   await page.close();
 }, 15 * MIN);
+
+test("sub-agents: three long readings at once outgrow the memory they share, compact, and still report every code exactly", async () => {
+  const page = await open(), parts = 20, books = ["alpha", "beta", "gamma"];
+  await thinking(page, "Off");
+  await page.click("#tools-btn");
+  for (const src of ["agents", "mcp:fake"]) {
+    const on = `#tools-pop [data-do="src"][data-src="${src}"]`;
+    await page.waitForSelector(on);
+    if ((await page.$eval(on, (b) => b.getAttribute("aria-checked"))) !== "true") await page.click(on);
+  }
+  await page.keyboard.press("Escape");
+  await ask(page, `Use three sub-agents at once, in one message. Give the first the book "alpha", the second the book "beta" and the third the book "gamma". Tell each one: read parts 1 to ${parts} of its book with the read_part tool, `
+    + "four parts per message, and report every part's code in a list. It must read every part: the codes cannot be guessed. Then show me the three lists.");
+  await attended(page, () => answered(page, 25 * MIN));
+  const cards = await page.$$eval(".agent-card", (c) => c.map((x) => x.getAttribute("data-state")));
+  console.log(`sub-agents: ${cards.join(", ")}`);
+  expect(cards.length).toBeGreaterThanOrEqual(3);
+  expect(cards.every((s) => s === "done")).toBe(true);
+  const reply = await lastReply(page);
+  expect(books.flatMap((b) => Array.from({ length: parts }, (_, i) => partCode(b, i + 1))).filter((c) => !reply.includes(c))).toEqual([]);
+  for (const head of await page.$$(".agent-head")) await head.click();
+  const compacted = await page.$$eval(".agent-log .checkpoint", (c) => c.length);
+  console.log(`compactions: ${compacted}`);
+  expect(compacted).toBeGreaterThan(0);
+  await healthy("sub-agents past their memory");
+  await page.close();
+}, 30 * MIN);
+
+test("one reply reads past the whole context, compacts, and the chat goes on from what it kept, through a reload", async () => {
+  const page = await open(), parts = 40, book = "delta";
+  await thinking(page, "Off");
+  await page.click("#tools-btn");
+  const on = '#tools-pop [data-do="src"][data-src="mcp:fake"]';
+  await page.waitForSelector(on);
+  if ((await page.$eval(on, (b) => b.getAttribute("aria-checked"))) !== "true") await page.click(on);
+  await page.keyboard.press("Escape");
+  await ask(page, `Read parts 1 to ${parts} of the book "${book}" with the read_part tool, four parts per message, and report every part's code in a list. Read every part: the codes cannot be guessed. Do not use sub-agents.`);
+  await attended(page, () => answered(page, 20 * MIN));
+  const compacted = await page.$$eval(".checkpoint", (c) => c.length);
+  console.log(`compactions: ${compacted}`);
+  expect(compacted).toBeGreaterThan(0);
+  const list = await lastReply(page);
+  expect(Array.from({ length: parts }, (_, i) => partCode(book, i + 1)).filter((c) => !list.includes(c))).toEqual([]);
+  await ask(page, "What was the code of part 3? Answer with the code alone.");
+  await answered(page, 3 * MIN);
+  expect(await lastReply(page)).toContain(partCode(book, 3));
+  await page.reload({ waitUntil: "load" });
+  await page.waitForSelector(".checkpoint", { timeout: 20_000 });
+  await ask(page, "And the code of part 38? Answer with the code alone.");
+  await answered(page, 3 * MIN);
+  expect(await lastReply(page)).toContain(partCode(book, 38));
+  await healthy("a reply past the whole context");
+  await page.close();
+}, 30 * MIN);
 
 test("a tab closed while its reply is written: the reply runs out at Chrysalis, and a new tab starts clean", async () => {
   const t0 = Date.now(), ctx = await context(), page = await open(ctx);
@@ -565,7 +638,7 @@ test("the model switched to the 27B while a Flash-Next reply is written, then ba
   expect((await lastReply(page)).length).toBeGreaterThan(20);
   const model = async () => (await (await fetch(`${CHRYSALIS}/chrysalis/stats`)).json()).model;
   expect(await model()).toBe("qwen3.8-27b");
-  await page.click(".conv:not(.active)");
+  await page.$eval(".conv:not(.active)", (c) => (c as HTMLElement).click());
   await page.waitForFunction(() => document.querySelectorAll("#thread > article.msg.assistant").length === 1, { timeout: 10_000 });
   expect((await lastReply(page)).length).toBeGreaterThan(100);
   await pick(/Flash/);

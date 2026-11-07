@@ -4,7 +4,7 @@ import { isIP } from "node:net";
 import { isPublic } from "./tool-fetch";
 
 export interface Backend { url: string; chrysalis?: boolean }
-export interface Model { id: string; owned_by?: string }
+export interface Model { id: string; owned_by?: string; context?: number }
 type Listed = { ok: true; models: Model[]; owner?: string } | { ok: false; error: string };
 
 const PROBE_MS = 5000, LIST_MS = 3000;
@@ -56,11 +56,23 @@ async function list(url: string, ms: number): Promise<Listed & { status?: number
   const body = await r.json().catch(() => null);
   if (!r.ok || !Array.isArray(body?.data))
     return { ok: false, status: r.status, error: `${url}/models answered ${r.status}${r.ok ? " without a model list" : ""}: not an OpenAI-style API there` };
-  const models: Model[] = body.data.filter((m: any) => typeof m?.id === "string").map((m: any) => ({ id: m.id, owned_by: m.owned_by }));
+  const models: Model[] = body.data.filter((m: any) => typeof m?.id === "string")
+    .map((m: any) => ({ id: m.id, owned_by: m.owned_by, context: m.loaded_context_length ?? m.max_model_len ?? m.context_length ?? m.max_context_length }));
   return { ok: true, models, owner: models.find((m) => m.owned_by)?.owned_by };
 }
 
 const saysChrysalis = (models: Model[]) => models.some((m) => m.owned_by === "chrysalis");
+
+const asked = (url: string) => fetch(url, { signal: AbortSignal.timeout(LIST_MS) }).then((r) => (r.ok ? r.json() : null)).catch(() => null);
+const WINDOWS: Record<string, (origin: string, model: string) => Promise<number | undefined>> = {
+  llamacpp: async (o) => (await asked(`${o}/props`))?.default_generation_settings?.n_ctx,
+  koboldcpp: async (o) => (await asked(`${o}/api/extra/true_max_context_length`))?.value,
+  organization_owner: async (o, model) => {
+    const m = (await asked(`${o}/api/v0/models`))?.data?.find((x: { id?: string }) => x.id === model);
+    return m?.loaded_context_length ?? m?.max_context_length;
+  },
+  library: async (o, model) => (await asked(`${o}/api/ps`))?.models?.find((x: { name?: string; model?: string }) => x.name === model || x.model === model)?.context_length,
+};
 
 export class Backends {
   private now: Backend;
@@ -85,6 +97,11 @@ export class Backends {
       });
     }
     return this.cache.listed.then((l) => (l.ok ? { ...l, models: l.models.filter((m) => !/embed/i.test(m.id)) } : l));
+  }
+  async windowOf(model: string): Promise<number | undefined> {
+    const l = await this.models();
+    if (!l.ok) return undefined;
+    return l.models.find((m) => m.id === model)?.context ?? WINDOWS[l.owner ?? ""]?.(new URL(this.now.url).origin, model);
   }
   async about() {
     const l = this.atService ? undefined : await this.models();

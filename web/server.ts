@@ -11,7 +11,8 @@ import { appleProfile, connectPage, deviceScript, TRUSTED_GIF } from "./setup";
 import { SUBAGENT_SYSTEM } from "./tool-agent";
 import * as registry from "./tools";
 import { fingerprint, lanAddresses, netName, routeAddress, tlsDir, webTls } from "./tls";
-import { assistantTurn, DESCRIPTIONS, toolTurn, unnoted, type ToolChoice, type WireCall } from "./wire";
+import { assistantTurn, checkpointText, DESCRIPTIONS, withText, toolTurn, unnoted, type ToolChoice, type WireCall } from "./wire";
+import { ceiling, CONTINUE_AFTER_BREAK, CONTINUE_AFTER_CUT, continueAfterReview, covers, filled, NUDGE, recentText, reviewPrompt, saysTooLong, summaryPrompt, summaryRoom, tokens, tokensIn, verdictOf, type Turn } from "./compaction";
 
 const CHRYSALIS = process.env.CHRYSALIS_URL ?? "http://127.0.0.1:8080";
 const engineStats = () => fetch(`${CHRYSALIS}/chrysalis/stats`, { signal: AbortSignal.timeout(1000) });
@@ -59,7 +60,9 @@ const engineCall = (path: string, body: object = {}) =>
 
 interface Job {
   id: string;
-  events: string[];
+  events: (string | null)[];
+  folds: { from: number; to: number }[];
+  rounds: Map<string, number>;
   done: boolean;
   ctrl: AbortController;
   waiters: Set<() => void>;
@@ -72,19 +75,27 @@ interface Job {
 type Decision = "once" | "always" | "deny";
 const jobs = new Map<string, Job>();
 const KEEP_MS = 15 * 60_000;
-const MAX_ROUNDS = 24;
 const HELD_MS = 60_000;
+const RETRIES = 10, RETRY_MS = Number(process.env.CHRYSALIS_RETRY_MS) || 2000, RETRY_MOST_MS = RETRY_MS * 5;
+const SUMMARY_THINKING = 2048, WORTH_IT = 4;
+const CUTS = 2, MAX_REPLY = 131072;
+const STALLS = 3, REVIEW_THINKING = 256, REVIEW_TOKENS = 512;
+const STALLED = "It says the work is not finished, but made no progress in three tries, so it stops here.";
+const ROOM_MS = 2000;
 const FIRST_ONLY = ["continue_final_message", "chrysalis_original", "chrysalis_append_token"];
 
 function startJob(body: string): Job {
-  const job: Job = { id: crypto.randomUUID(), events: [], done: false, ctrl: new AbortController(), waiters: new Set(), asks: new Map(),
+  const job: Job = { id: crypto.randomUUID(), events: [], folds: [], rounds: new Map(), done: false, ctrl: new AbortController(), waiters: new Set(), asks: new Map(),
     agents: new Map(), t0: Date.now(), gen: 0 };
   jobs.set(job.id, job);
   const push = (data: string | object) => {
+    const ended = typeof data === "string" ? undefined : (data as any).round ? "" : (data as any).agent?.ev?.round ? (data as any).agent.id as string : undefined;
+    if (ended !== undefined) fold(job, ended);
     job.events.push(typeof data === "string" ? data : JSON.stringify(data));
     for (const wake of [...job.waiters]) wake();
   };
   push({ started: job.t0 });
+  let main: Thread | undefined;
   (async () => {
     try {
       const { req, web, said, tool, ahead, tools, notes } = await asSent(JSON.parse(body));
@@ -95,45 +106,47 @@ function startJob(body: string): Job {
           job.ctrl.signal.addEventListener("abort", () => (clearTimeout(timer), go()));
         });
       }
-      if (!web && !said) return void await round(job, req, push);
+      main = thread(job, req, req.messages ?? [], push, job.ctrl.signal, true, true);
+      if (!web && !said) return void await step(main, false);
       for (const note of notes) push({ note });
       const allow = new Set(web?.allow ?? []);
-      let messages: object[] = req.messages ?? [];
       const route = said && tools.length && web?.route && backends.isChrysalis ? ROUTE : undefined;
-      let called = false, force = false, preamble: string | undefined;
+      const onward = web?.loop !== false && !req.max_tokens;
+      let called = false, force = false, stalls = 0, preamble: string | undefined;
       for (let k = 0; ; k++) {
         if (k) push({ round: k });
-        const first = k === 0 && route && (tool || route.asks.test(unnoted(textOf((messages.findLast((m: any) => m.role === "user") as any)?.content))));
-        if (first) preamble = route.preambles[messages.length % route.preambles.length];
-        const out = first || force ? await forced(job, req, messages, push, preamble) : await round(job, { ...req, messages }, push);
-        if (out && !job.ctrl.signal.aborted && route && !out.calls.length && !called && !force && !first && route.announces.test(out.content)) {
+        const first = k === 0 && route && (tool || route.asks.test(unnoted(textOf((main.messages.findLast((m) => m.role === "user") as any)?.content))));
+        if (first) preamble = route.preambles[main.messages.length % route.preambles.length];
+        const out = first || force ? await forced(main, preamble) : await step(main, onward);
+        if (!job.ctrl.signal.aborted && route && !out.calls.length && !called && !force && !first && route.announces.test(out.content)) {
           force = true;
           preamble = undefined;
-          for (const f of FIRST_ONLY) delete req[f];
-          messages = [...messages, assistantTurn(out.content, out.reasoning)];
+          add(main, assistantTurn(out.content, out.reasoning));
           continue;
         }
         force = false;
-        called ||= !!out?.calls.length;
-        if (!out || !out.calls.length || web?.loop === false || job.ctrl.signal.aborted) break;
+        called ||= !!out.calls.length;
+        if (web?.loop === false || job.ctrl.signal.aborted) break;
+        if (!out.calls.length) {
+          const more = onward && called && !said ? await unfinished(main, out) : undefined;
+          if (!more) break;
+          if (++stalls >= STALLS) { push({ note: STALLED }); break; }
+          add(main, assistantTurn(out.content, out.reasoning), { role: "user", content: more });
+          continue;
+        }
+        stalls = 0;
         await job.held;
         if (job.ctrl.signal.aborted) throw new DOMException("stopped", "AbortError");
-        const results = k + 1 < MAX_ROUNDS ? await Promise.all(out.calls.map((c) => call(job, c, tools, allow, web ?? { tools: {} }, push, req)))
-          : out.calls.map((c) => {
-            const result = `Not run: this reply reached its limit of ${MAX_ROUNDS} rounds of tool calls.`;
-            push({ tool: { id: c.id, state: "stopped", result } });
-            return result;
-          });
+        const room = await roomFor(main, out.calls.length);
+        const results = await Promise.all(out.calls.map((c) => call(job, c, tools, allow, web ?? { tools: {} }, push, req, room)));
         if (job.ctrl.signal.aborted) throw new DOMException("stopped", "AbortError");
-        if (k + 1 >= MAX_ROUNDS) { push({ note: `Stopped after ${MAX_ROUNDS} rounds of tool calls: Continue carries on.` }); break; }
-        if (k === 0 && req.continue_final_message) messages = messages.slice(0, -1);
-        for (const f of FIRST_ONLY) delete req[f];
-        messages = [...messages, assistantTurn(out.content, out.reasoning, out.calls), ...out.calls.map((c, i) => toolTurn(c.id, results[i]))];
+        add(main, assistantTurn(out.content, out.reasoning, out.calls), ...out.calls.map((c, i) => toolTurn(c.id, results[i])));
       }
     } catch (e) {
-      if (!job.ctrl.signal.aborted && !(e instanceof ChrysalisDown)) console.error(`chrysalis web: reply ${job.id} failed:`, e);
-      push(job.ctrl.signal.aborted ? { stopped: true } : { error: { message: e instanceof ChrysalisDown ? "Chrysalis is not running" : e instanceof Error ? e.message : String(e) } });
+      if (!job.ctrl.signal.aborted && !(e instanceof ChrysalisDown || e instanceof Refused || e instanceof ChrysalisBroke || e instanceof CannotGoOn)) console.error(`chrysalis web: reply ${job.id} failed:`, e);
+      push(job.ctrl.signal.aborted ? { stopped: true } : { error: { message: e instanceof Error ? e.message : String(e) } });
     } finally {
+      if (main) threads.delete(main);
       push({ timing: { start: job.t0, first: job.tFirst, answer: job.tAnswer, last: job.tLast, gen: job.gen } });
       push("[DONE]");
       job.done = true;
@@ -141,6 +154,32 @@ function startJob(body: string): Job {
     }
   })();
   return job;
+}
+
+const wordsOnly = (ev: any) => {
+  const c = ev?.choices?.[0];
+  if (!c || c.finish_reason || ev.usage || ev.chrysalis_prompt) return false;
+  const { role, content, reasoning_content, ...rest } = c.delta ?? {};
+  return !Object.keys(rest).length;
+};
+function fold(job: Job, id: string) {
+  const end = job.events.length, words: number[] = [];
+  let reasoning = "", content = "";
+  for (let i = job.rounds.get(id) ?? 0; i < end; i++) {
+    const raw = job.events[i];
+    if (!raw?.includes('"delta"')) continue;
+    const ev = JSON.parse(raw), own = id ? (ev.agent?.id === id ? ev.agent.ev : undefined) : ev.agent ? undefined : ev;
+    if (!wordsOnly(own)) continue;
+    reasoning += own.choices[0].delta.reasoning_content ?? "";
+    content += own.choices[0].delta.content ?? "";
+    words.push(i);
+  }
+  job.rounds.set(id, end + 1);
+  if (words.length < 2) return;
+  const last = words.pop()!, delta = { choices: [{ index: 0, delta: { ...(reasoning ? { reasoning_content: reasoning } : {}), ...(content ? { content } : {}) } }] };
+  for (const i of words) job.events[i] = null;
+  job.events[last] = JSON.stringify(id ? { agent: { id, ev: delta } } : delta);
+  job.folds.push({ from: words[0], to: last });
 }
 
 async function asSent(raw: any) {
@@ -157,33 +196,42 @@ async function asSent(raw: any) {
 class ChrysalisDown extends Error {
   message = backends.atService ? "Chrysalis is not running" : `nothing answers at ${new URL(backends.url).origin}: is the backend running?`;
 }
-class ChrysalisBroke extends Error { message = backends.isChrysalis ? "Chrysalis's reply broke off (Chrysalis's log has why)" : "the backend's reply broke off"; }
-const errorOf = async (r: Response) => {
+interface Out { content: string; reasoning: string; calls: WireCall[]; finish?: string; usage?: { prompt_tokens: number; completion_tokens: number } }
+class ChrysalisBroke extends Error {
+  message = backends.isChrysalis ? "Chrysalis's reply broke off (Chrysalis's log has why)" : "the backend's reply broke off";
+  constructor(readonly partial: Out) { super(); }
+}
+class Refused extends Error {
+  constructor(message: string, readonly status: number, readonly code?: string) { super(message); }
+}
+class CannotGoOn extends Error {}
+const refusal = async (r: Response) => {
   const e = (await r.json().catch(() => null))?.error;
-  return (typeof e === "string" ? e : e?.message) ?? `${backends.isChrysalis ? "Chrysalis" : new URL(backends.url).host} answered ${r.status}`;
+  return new Refused((typeof e === "string" ? e : e?.message) ?? `${backends.isChrysalis ? "Chrysalis" : new URL(backends.url).host} answered ${r.status}`, r.status, e?.code);
 };
-async function round(job: Job, body: object, push: (d: string | object) => void, signal = job.ctrl.signal, timed = true) {
+const memoryFull = (e: unknown) => e instanceof Refused && /KV cache full/.test(e.message);
+const tooLong = (e: unknown) => e instanceof Refused && (e.code === "context_length_exceeded" || saysTooLong(e.message));
+const passing = (e: unknown) => e instanceof ChrysalisDown || e instanceof ChrysalisBroke || (e instanceof Refused && (e.status >= 500 || e.status === 429 || e.status === 408));
+async function round(job: Job, body: object, push: (d: string | object) => void, signal = job.ctrl.signal, timed = true): Promise<Out> {
   const r = await fetch(`${backends.url}/chat/completions`, {
     method: "POST", body: JSON.stringify(body), headers: backends.headers(), signal,
   }).catch((e) => { throw signal.aborted ? e : new ChrysalisDown(); });
-  if (!r.ok || !r.body) {
-    push({ error: { message: await errorOf(r) } });
-    return null;
-  }
-  const out = { content: "", reasoning: "", calls: [] as WireCall[] };
+  if (!r.ok || !r.body) throw await refusal(r);
+  const out: Out = { content: "", reasoning: "", calls: [] };
   let first: number | undefined, last: number | undefined;
   const reader = r.body.getReader(), decoder = new TextDecoder();
   let buf = "";
   try {
     for (;;) {
-      const { value, done } = await reader.read().catch((e) => { throw signal.aborted ? e : new ChrysalisBroke(); });
+      const { value, done } = await reader.read().catch((e) => { throw signal.aborted ? e : new ChrysalisBroke(out); });
       if (done) break;
       buf += decoder.decode(value, { stream: true }).replace(/\r\n?/g, "\n");
       for (let end = buf.indexOf("\n\n"); end >= 0; end = buf.indexOf("\n\n")) {
         let data = buf.slice(0, end).split("\n").filter((l) => l.startsWith("data:")).map((l) => l.slice(l.startsWith("data: ") ? 6 : 5)).join("\n");
         buf = buf.slice(end + 2);
         if (!data || data === "[DONE]") continue;
-        const now = Date.now(), ev = data.includes('"delta"') ? JSON.parse(data) : undefined, delta = ev?.choices?.[0]?.delta;
+        const now = Date.now(), ev = JSON.parse(data), choice = ev.choices?.[0], delta = choice?.delta;
+        if (ev.error) throw new Refused(ev.error.message ?? String(ev.error), ev.error.status ?? 500, ev.error.code);
         if (typeof delta?.reasoning === "string" && !backends.isChrysalis) {
           delta.reasoning_content ??= delta.reasoning;
           delete delta.reasoning;
@@ -207,6 +255,8 @@ async function round(job: Job, body: object, push: (d: string | object) => void,
           if (c.function?.name) at.name += c.function.name;
           if (c.function?.arguments) at.args += c.function.arguments;
         }
+        out.finish = choice?.finish_reason ?? out.finish;
+        out.usage = ev.usage ?? out.usage;
         push(data);
       }
     }
@@ -216,7 +266,183 @@ async function round(job: Job, body: object, push: (d: string | object) => void,
   return out;
 }
 
-type Out = NonNullable<Awaited<ReturnType<typeof round>>>;
+interface Thread { job: Job; req: any; messages: Turn[]; task?: Turn; head: number; push: (d: string | object) => void; signal: AbortSignal; timed: boolean; main: boolean;
+  counted: number; read: number; settled: boolean; asking: number }
+const threads = new Set<Thread>();
+function thread(job: Job, req: any, messages: Turn[], push: (d: string | object) => void, signal: AbortSignal, timed: boolean, main: boolean) {
+  const t: Thread = { job, req, messages, task: messages.findLast((m) => m.role === "user"), head: messages[0]?.role === "system" ? 1 : 0, push, signal, timed, main,
+    counted: 0, read: 0, settled: false, asking: 0 };
+  threads.add(t);
+  return t;
+}
+const add = (t: Thread, ...turns: Turn[]) => { t.messages = [...t.messages, ...turns]; };
+const sizeOf = (t: Thread) => t.counted + t.messages.slice(t.read).reduce((n, m) => n + tokensIn(m), t.read ? 0 : tokens(JSON.stringify(t.req.tools ?? "")));
+const pause = (ms: number, signal: AbortSignal) => new Promise<void>((done, stop) => {
+  const gone = () => (clearTimeout(timer), stop(new DOMException("stopped", "AbortError"))), timer = setTimeout(() => (signal.removeEventListener("abort", gone), done()), ms);
+  if (signal.aborted) gone();
+  else signal.addEventListener("abort", gone, { once: true });
+});
+const gap = (n: number) => Math.ceil(Math.min(RETRY_MS * 2 ** n, RETRY_MOST_MS) * (1 + Math.random() * 0.2));
+
+interface Room { window?: number; pool?: number; lanes?: number }
+const rooms = new Map<string, { at: number; room: Promise<Room> }>();
+async function readRoom(model: string): Promise<Room> {
+  if (!backends.isChrysalis) return { window: await backends.windowOf(model) };
+  const s = await fetch(`${new URL(backends.url).origin}/chrysalis/stats`, { signal: AbortSignal.timeout(ROOM_MS) }).then((r) => r.json());
+  return { window: s.context, pool: s.kv_tokens, lanes: s.cache?.slots?.length };
+}
+function roomOf(t: Thread): Promise<Room> {
+  const model = String(t.req.model ?? ""), seen = rooms.get(model);
+  if (seen && Date.now() - seen.at < ROOM_MS) return seen.room;
+  const room = readRoom(model).catch(() => seen?.room ?? {});
+  rooms.set(model, { at: Date.now(), room });
+  return room;
+}
+async function limitOf(t: Thread) {
+  const { window, pool, lanes } = await roomOf(t);
+  if (!window) return Infinity;
+  if (!pool || !lanes) return ceiling(window);
+  const sharing = [...threads].filter((x) => !(x.main && x.job.agents.size));
+  const others = sharing.filter((x) => x !== t).map(sizeOf).sort((a, b) => b - a).slice(0, lanes - 1).reduce((a, b) => a + b, 0);
+  return ceiling(Math.min(window, Math.max(pool - others, Math.floor(pool / Math.max(1, Math.min(lanes, sharing.length))))));
+}
+async function roomFor(t: Thread, calls: number) {
+  const limit = await limitOf(t);
+  return limit === Infinity ? Infinity : Math.floor((limit * 1.5) / calls);
+}
+
+async function patient(t: Thread, send: () => Promise<Out>, keep: boolean): Promise<Out> {
+  const asked = async () => {
+    t.asking++;
+    try { return await send(); } finally { t.asking--; }
+  };
+  for (let failed = 0, waited = 0; ;) {
+    try {
+      return await asked();
+    } catch (e) {
+      if (t.signal.aborted) throw e;
+      if (memoryFull(e) && (waited < RETRIES || [...threads].some((x) => x !== t && x.asking))) {
+        t.push({ waiting: "Waiting for memory: other replies are using it" });
+        await pause(gap(waited++), t.signal);
+        continue;
+      }
+      if (!passing(e) || failed >= RETRIES) throw e;
+      if (keep && e instanceof ChrysalisBroke) carry(t, e.partial, CONTINUE_AFTER_BREAK);
+      const ms = gap(failed++);
+      t.push({ retry: { attempt: failed, ms, message: (e as Error).message } });
+      await pause(ms, t.signal);
+    }
+  }
+}
+function begun(t: Thread) {
+  if (t.req.continue_final_message) t.messages = t.messages.slice(0, -1);
+  for (const f of FIRST_ONLY) delete t.req[f];
+}
+function carry(t: Thread, out: Out, note: string) {
+  if (out.content.trim()) {
+    begun(t);
+    add(t, assistantTurn(out.content, out.reasoning), { role: "user", content: note });
+  }
+  t.push({ round: true });
+}
+
+async function step(t: Thread, onward: boolean, extra: object = {}): Promise<Out> {
+  let rejected = false, cuts = 0;
+  for (;;) {
+    if (!t.settled && sizeOf(t) >= await limitOf(t)) await compact(t, false);
+    let out: Out;
+    try {
+      out = await patient(t, () => round(t.job, { ...t.req, messages: t.messages, ...extra }, t.push, t.signal, t.timed), true);
+    } catch (e) {
+      if (!tooLong(e)) throw e;
+      if (rejected) throw new CannotGoOn("what this reply has to keep whole is larger than the context of the model");
+      rejected = true;
+      t.settled = false;
+      await compact(t, true);
+      continue;
+    }
+    t.settled = false;
+    if (out.usage) { t.counted = out.usage.prompt_tokens + out.usage.completion_tokens; t.read = t.messages.length + (t.req.continue_final_message ? 0 : 1); }
+    if (out.finish === "length" && !out.calls.length && onward) {
+      const { window } = await roomOf(t), used = out.usage ? out.usage.prompt_tokens + out.usage.completion_tokens : 0;
+      const limited = !backends.isChrysalis || !window || used >= window - 64 || (out.usage?.completion_tokens ?? 0) >= (t.req.max_tokens ?? MAX_REPLY);
+      if (limited && ++cuts > CUTS) throw new CannotGoOn(`the reply was still cut off after ${CUTS} tries to carry on: ${t.req.max_tokens ? "its Max tokens setting is too low for it" : "it does not fit in the context"}`);
+      carry(t, out, CONTINUE_AFTER_CUT);
+      if (!limited) await pause(gap(0), t.signal);
+      continue;
+    }
+    begun(t);
+    return out;
+  }
+}
+
+async function unfinished(t: Thread, out: Out) {
+  t.push({ reviewing: true });
+  const { max_tokens, tool_choice, stop, seed, logprobs, top_logprobs, ...req } = t.req;
+  const messages = [...t.messages, assistantTurn(out.content, out.reasoning), { role: "user", content: reviewPrompt(textOf(t.task?.content)) }];
+  const said = await patient(t, () => round(t.job, { ...req, ...(backends.isChrysalis ? { thinking_budget: REVIEW_THINKING } : {}), max_tokens: REVIEW_TOKENS, messages }, () => {}, t.signal, false), false).catch((e) => {
+    if (t.signal.aborted) throw e;
+  });
+  const verdict = said && verdictOf(said.content);
+  return verdict?.verdict === "continue" ? continueAfterReview(verdict.reason, verdict.next_step) : undefined;
+}
+
+function fitted(rest: Turn[], fit: number) {
+  let used = 0, end = 0;
+  for (let i = 0; i < rest.length; i++) {
+    used += tokensIn(rest[i]);
+    if (rest[i + 1]?.role === "tool") continue;
+    if (used > fit && end) break;
+    end = i + 1;
+  }
+  return rest.slice(0, end);
+}
+async function summarize(t: Thread, messages: Turn[], update: boolean) {
+  const { max_tokens, tool_choice, stop, seed, logprobs, top_logprobs, ...req } = t.req;
+  for (const f of FIRST_ONLY) delete req[f];
+  const last = messages.at(-1)!, ask = (text: string) => last.role === "user" ? [...messages.slice(0, -1), withText(last, text, false)] : [...messages, { role: "user", content: text }];
+  const send = (text: string) => patient(t, () => round(t.job, { ...req, ...(backends.isChrysalis ? { thinking_budget: SUMMARY_THINKING } : {}), messages: ask(text) }, () => {}, t.signal, false), false);
+  const prompt = summaryPrompt(update);
+  let out = await send(prompt);
+  if (!filled(out.content) && out.finish !== "length") out = await send(`${prompt}\n\n${NUDGE}`);
+  if (out.finish === "length") throw new Refused("the summary ran out of room", 400, "context_length_exceeded");
+  if (!filled(out.content)) throw new CannotGoOn("the model did not write a summary of this chat when its context filled up, so it cannot go on");
+  return out.content.trim();
+}
+async function compact(t: Thread, needed: boolean) {
+  const m = t.messages, head = m.slice(0, t.head);
+  let tail = m.length - 1;
+  while (tail > t.head && m[tail].role === "tool") tail--;
+  if (m[tail] !== t.task && m[tail]?.role === "user" && m[tail - 1]?.role === "assistant") tail--;
+  const first = m[tail] === t.task, old = m.slice(t.head, tail);
+  if (!needed && old.reduce((n, x) => n + tokensIn(x), 0) - (first || !t.task ? 0 : tokensIn(t.task)) < await limitOf(t) / WORTH_IT) return;
+  if (!old.length) throw new CannotGoOn("this message is larger than the whole context of the model, so there is nothing to summarize");
+  t.push({ compacting: true });
+  const { window } = await roomOf(t);
+  const fixed = head.reduce((n, x) => n + tokensIn(x), tokens(JSON.stringify(t.req.tools ?? "")));
+  let fit = window ? summaryRoom(window) : Infinity, rest = old, summary = "";
+  while (rest.length) {
+    const part = fitted(rest, fit - fixed - tokens(summary));
+    const carried = !summary ? part : part[0].role === "user" ? [withText(part[0], checkpointText({ summary, recent: "", first: true }), true), ...part.slice(1)]
+      : [{ role: "user", content: checkpointText({ summary, recent: "", first: true }) }, ...part];
+    try {
+      summary = await summarize(t, [...head, ...carried], !!summary || part.some(covers));
+    } catch (e) {
+      if (!tooLong(e)) throw e;
+      fit = Math.floor(part.reduce((n, x) => n + tokensIn(x), fixed + tokens(summary)) * 0.7);
+      if (fitted(rest, fit - fixed - tokens(summary)).length >= part.length) throw new CannotGoOn("one message of this chat is larger than the whole context of the model, so it cannot be summarized");
+      continue;
+    }
+    rest = rest.slice(part.length);
+  }
+  const limit = await limitOf(t), recent = recentText(old, limit === Infinity ? sizeOf(t) : limit), checkpoint = { summary, recent, first };
+  const kept = first || t.req.continue_final_message ? 0 : 1;
+  t.messages = [...head, withText(t.task ?? { role: "user" }, checkpointText(checkpoint), first), ...(first ? [] : m.slice(tail))];
+  t.counted = t.read = 0;
+  t.settled = true;
+  t.push({ compacted: { ...checkpoint, kept } });
+}
+
 function phrasePattern(phrases: string[], before = ""): RegExp {
   return new RegExp(`\\b${before}(${phrases.map((p) => p.replace(/[.*+?^${}()|[\]\\]/g, "\\$&").replace(/\s+/g, "\\s+")).join("|")})\\b`, "i");
 }
@@ -234,18 +460,18 @@ const ROUTE: Routing = {
 const FORCE = { tool_choice: "required", logprobs: false, top_logprobs: undefined };
 const textOf = (c: unknown) => (typeof c === "string" ? c : Array.isArray(c) ? c.map((p: any) => p?.text ?? "").join(" ") : "");
 
-async function forced(job: Job, req: any, messages: object[], push: (d: string | object) => void, preamble?: string): Promise<Out | null> {
+async function forced(t: Thread, preamble?: string): Promise<Out> {
   if (preamble) {
-    push({ choices: [{ index: 0, delta: { content: preamble } }] });
-    job.tFirst ??= Date.now();
-    job.tAnswer ??= Date.now();
+    t.push({ choices: [{ index: 0, delta: { content: preamble } }] });
+    t.job.tFirst ??= Date.now();
+    t.job.tAnswer ??= Date.now();
   }
-  const out = await round(job, { ...req, messages, ...FORCE }, push);
-  if (out && preamble) out.content = preamble + out.content;
+  const out = await step(t, false, FORCE);
+  if (preamble) out.content = preamble + out.content;
   return out;
 }
 
-async function call(job: Job, c: WireCall, tools: registry.Named[], allow: Set<string>, web: ToolChoice, push: (d: object) => void, req: any,
+async function call(job: Job, c: WireCall, tools: registry.Named[], allow: Set<string>, web: ToolChoice, push: (d: object) => void, req: any, room: number,
   signal = job.ctrl.signal): Promise<string> {
   const n = tools.find((t) => t.fn === c.name);
   const about = { id: c.id, title: n?.tool.title ?? c.name, source: n?.source.label, readOnly: n?.tool.readOnly };
@@ -274,10 +500,10 @@ async function call(job: Job, c: WireCall, tools: registry.Named[], allow: Set<s
   const t = Date.now();
   if (n.source.kind === "agent") {
     const [state, result] = await subagent(job, c, args, tools.filter((x) => x.source.kind !== "agent"), allow, web, push, req, signal);
-    return end(state, result, Date.now() - t);
+    return end(state, registry.cut(result, Math.min(room, n.source.maxChars)), Date.now() - t);
   }
   try {
-    const result = await registry.run(n, args, signal, n.source.kind === "fetch" ? web.fetchChars : undefined);
+    const result = await registry.run(n, args, signal, n.source.kind === "fetch" ? web.fetchChars : undefined, room);
     return end("done", result, Date.now() - t);
   } catch (e) {
     if (signal.aborted) return end("stopped", "Stopped: the user stopped the reply while this call ran.", Date.now() - t);
@@ -291,52 +517,65 @@ async function subagent(job: Job, c: WireCall, args: Record<string, unknown>, to
   if (!task) return ["failed", "Error: the call needs a prompt: the task, with everything the sub-agent needs to know."];
   const ctrl = new AbortController(), signal = AbortSignal.any([outer, ctrl.signal]);
   job.agents.set(c.id, ctrl);
-  let failure: string | undefined;
-  const inner = (d: string | object) => {
-    const ev = typeof d === "string" ? JSON.parse(d) : d;
-    if (ev?.error?.message) failure = ev.error.message;
-    push({ agent: { id: c.id, ev } });
-  };
+  const inner = (d: string | object) => push({ agent: { id: c.id, ev: typeof d === "string" ? JSON.parse(d) : d } });
   const base = { ...req };
   for (const f of ["messages", "tools", "tool_choice", "seed", "logprobs", "top_logprobs", ...FIRST_ONLY]) delete base[f];
   if (tools.length) base.tools = tools.map((n) => registry.openai(n, DESCRIPTIONS[n.tool.name]));
-  let messages: object[] = [{ role: "system", content: SUBAGENT_SYSTEM }, { role: "user", content: task }], said = "";
+  const t = thread(job, base, [{ role: "system", content: SUBAGENT_SYSTEM }, { role: "user", content: task }], inner, signal, false, false);
+  let said = "", worked = false, stalls = 0;
   try {
     for (let k = 0; ; k++) {
       if (k) inner({ round: k });
-      const out = await round(job, { ...base, messages }, inner, signal, false);
-      if (!out) return ["failed", `Error: the sub-agent could not go on: ${failure ?? "Chrysalis refused its request"}`];
+      const out = await step(t, true);
       said = out.content.trim();
-      if (!out.calls.length) return ["done", said || "The sub-agent finished without writing an answer."];
-      if (k + 1 >= MAX_ROUNDS) {
-        inner({ note: `Stopped after ${MAX_ROUNDS} rounds of tool calls.` });
-        return ["done", `${said}\n\n[The sub-agent stopped here: it reached its limit of ${MAX_ROUNDS} rounds of tool calls.]`.trim()];
+      if (!out.calls.length) {
+        const more = worked ? await unfinished(t, out) : undefined;
+        if (!more) return ["done", said || "The sub-agent finished without writing an answer."];
+        if (++stalls >= STALLS) {
+          inner({ note: STALLED });
+          return ["done", `${said}\n\n[${STALLED}]`.trim()];
+        }
+        add(t, assistantTurn(out.content, out.reasoning), { role: "user", content: more });
+        continue;
       }
-      const results = await Promise.all(out.calls.map((x) => call(job, x, tools, allow, web, inner, req, signal)));
+      worked = true;
+      stalls = 0;
+      const room = await roomFor(t, out.calls.length);
+      const results = await Promise.all(out.calls.map((x) => call(job, x, tools, allow, web, inner, req, room, signal)));
       if (signal.aborted) throw new DOMException("stopped", "AbortError");
-      messages = [...messages, assistantTurn(out.content, out.reasoning, out.calls), ...out.calls.map((x, i) => toolTurn(x.id, results[i]))];
+      add(t, assistantTurn(out.content, out.reasoning, out.calls), ...out.calls.map((x, i) => toolTurn(x.id, results[i])));
     }
   } catch (e) {
     if (signal.aborted) {
       const by = outer.aborted ? "the user stopped the reply" : "the user stopped it";
       return ["stopped", `Stopped before it finished: ${by}.${said ? ` What it had written last:\n\n${said}` : ""}`];
     }
-    return ["failed", `Error: the sub-agent could not go on: ${e instanceof ChrysalisDown ? "Chrysalis is not running" : e instanceof Error ? e.message : String(e)}`];
+    const why = e instanceof Error ? e.message : String(e);
+    inner({ error: { message: why } });
+    return ["failed", `Error: the sub-agent could not go on: ${why}`];
   } finally {
+    threads.delete(t);
     job.agents.delete(c.id);
   }
 }
 
 function follow(job: Job, from: number): Response {
-  let i = Math.max(0, from), waiter: (() => void) | undefined;
+  let i = Math.max(0, from), checked = 0, waiter: (() => void) | undefined;
   const encoder = new TextEncoder();
   const stream = new ReadableStream<Uint8Array>({
     async pull(ctl) {
       while (i >= job.events.length && !job.done)
         await new Promise<void>((resolve) => { waiter = () => { job.waiters.delete(waiter!); resolve(); }; job.waiters.add(waiter); });
+      const inside = job.folds.slice(checked).some((f) => f.from < i && i <= f.to);
+      checked = job.folds.length;
+      if (inside) {
+        ctl.enqueue(encoder.encode(`id: 0\ndata: {"reset":true}\n\n`));
+        i = 0;
+      }
       if (i < job.events.length) {
-        ctl.enqueue(encoder.encode(job.events.slice(i).map((d, k) => `id: ${i + k}\ndata: ${d}\n\n`).join("")));
-        i = job.events.length;
+        const end = job.events.length;
+        ctl.enqueue(encoder.encode(job.events.slice(i, end).flatMap((d, k) => (d === null ? [] : [`id: ${i + k}\ndata: ${d}\n\n`])).join("")));
+        i = end;
       } else ctl.close();
     },
     cancel() { if (waiter) job.waiters.delete(waiter); },

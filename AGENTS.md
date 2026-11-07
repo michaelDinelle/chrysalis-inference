@@ -80,7 +80,8 @@ None: no comments or docstrings anywhere in the repo, in any language, including
   certificate; certutil makes their trust).
 - With Chrysalis running Flash-Next: `make test_chaos` (the chat for real, used oddly: replies through reloads, closed
   tabs and chat switches, several at once, Stop / regenerate / edit mid-reply, tools, settings, a 3D page, memory taken
-  by another program; it restarts Chrysalis and switches models, so ask first, as for stopping it).
+  by another program, sub-agents past the memory they share and a reply past the whole context; it restarts Chrysalis
+  and switches models, so ask first, as for stopping it).
 - GPU, with Chrysalis's model server stopped (the chat's Stop, which frees the GPU; the user runs Chrysalis: check the GPU
   is idle, ask once per task, then just say when it stops and for how long): `make test` (test_web, the 27B kernels,
   then the model in-process: chat format, cache, snapshots and generation (held answers' masked steps too), the server

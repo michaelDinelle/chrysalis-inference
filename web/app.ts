@@ -8,7 +8,7 @@ import { type Cand, type Odds, type SamplerKey, type Stage, DEFAULT_STAGES, samp
 import { type Part, type VoiceAsk, type VoiceInfo, type VoiceReady, Speaker, VoiceClient } from "./voice";
 import { type Fix, applyFixes, fixedParts, readHeard } from "./heard";
 import { pointOf, shownWords, unitOf } from "./spoken";
-import { DESCRIPTIONS, type ToolChoice, type WireCall, assistantTurn, noted, toolTurn } from "./wire";
+import { type Checkpoint, DESCRIPTIONS, type ToolChoice, type WireCall, assistantTurn, checkpointText, noted, toolTurn, withText } from "./wire";
 import { type Block, type Span, type Version, ARTIFACTS_PROMPT, PAGE_DOC, elementById, elementSpans, idOf, artifactOf, infoOf, type Info, markSource, replay, setOpen, withAttr, withBackground,
   withContent, withCopy, withOrder, withPaint, withoutElement, lineDiff } from "./artifacts";
 import { LATEX_CSS, latexToHtml } from "./latex";
@@ -21,7 +21,8 @@ type Effort = "xhigh" | "medium" | "low" | "off";
 interface Stats { ttft: number; tps: number; tokens: number; prompt: number; cached?: number; thought?: number; seed?: number; model?: string; ctx?: number }
 type CallState = "approval" | "running" | "done" | "failed" | "declined" | "stopped";
 interface Call extends WireCall { title?: string; source?: string; readOnly?: boolean; state?: CallState; result?: string; ms?: number; agent?: AgentRun }
-interface AgentRun { content: string; reasoning: string; calls?: Call[]; rounds?: Round[]; notes?: string[]; read?: boolean; tokens?: number; error?: string }
+interface AgentRun { content: string; reasoning: string; calls?: Call[]; rounds?: Round[]; notes?: string[]; read?: boolean; tokens?: number; error?: string; tools?: number; now?: string; checkpoints?: Kept[] }
+interface Kept extends Checkpoint { at: number; job?: string }
 interface Round { content: string; reasoning?: string; calls: Call[] }
 interface Versions { shown: number; others: Message[][] }
 interface Message {
@@ -33,6 +34,7 @@ interface Message {
   files?: Attachment[];
   rounds?: Round[];
   calls?: Call[];
+  checkpoints?: Kept[];
   base?: number;
   starting?: boolean;
   notes?: string[];
@@ -70,7 +72,7 @@ interface Backend { url: string; chrysalis: boolean; service: boolean; remote: b
 interface View {
   el: HTMLElement; think: HTMLDetailsElement; summary: HTMLElement; thought: HTMLElement; body: HTMLElement; foot: HTMLElement; shown?: string; blocks?: Blocks;
   tok?: { reasoning: number; content: number };
-  rounds: HTMLElement; calls: HTMLElement; notes: HTMLElement; roundsShown?: number;
+  rounds: HTMLElement; calls: HTMLElement; notes: HTMLElement; roundsShown?: string;
 }
 interface Alt { t: string; p: number; id: number }
 interface Tok { t: string; p: number; alts: Alt[] }
@@ -84,6 +86,7 @@ interface Run {
   seed?: number; timing?: { start: number; first?: number; answer?: number; last?: number; gen?: number };
   pick?: Tok;
   frame: number; saved: number;
+  asking?: boolean;
 }
 
 const MODELS: [string, string, string][] = [
@@ -462,7 +465,7 @@ async function forget(id: string) {
     if (g) { groups.set(id, g); await saveGroup(g); }
     for (const { x, members } of was) { x.members = members; await saveGroup(x); }
     for (const c of gone) chats[c.id] = c;
-    store("chats", chats);
+    keepChats();
     renderCast();
     render();
   } };
@@ -473,7 +476,7 @@ function dropChats(ids: string[]) {
     if (r) { r.gone = true; stopRun(r); }
     delete chats[id];
   }
-  store("chats", chats);
+  keepChats();
   if (ids.includes(conv.id) || (conv.who && !folderOf(conv))) newChat();
   else render();
 }
@@ -2436,10 +2439,16 @@ function load<T>(key: string, fallback: T): T {
   try { return JSON.parse(sessionStorage.getItem(key) ?? "null") ?? fallback; } catch { return fallback; }
 }
 function store(key: string, value: unknown) {
-  try { sessionStorage.setItem(key, JSON.stringify(value)); } catch {  }
+  try { sessionStorage.setItem(key, JSON.stringify(value)); return true; } catch { return false; }
 }
 
 const chats: Record<string, Conversation> = load("chats", {});
+let tabFull = false;
+function keepChats() {
+  const kept = store("chats", Object.fromEntries(Object.entries(chats).map(([id, c]) => [id, { ...c, messages: lean(c.messages) }])));
+  if (!kept && !tabFull) toast("This tab has no room left to keep its chats through a reload: export or delete some");
+  tabFull = !kept;
+}
 let settings = loadSettings();
 let conv = blank();
 const runs = new Map<string, Run>();
@@ -2577,6 +2586,7 @@ function editorView(m: Message, i: number): HTMLElement {
       m.content = text.value;
       if (think) m.reasoning = think.value;
       m.edited = true;
+      stale(conv, i);
       if (m.id) { tokens.delete(m.id); tokenView.delete(m.id); }
     }
     render();
@@ -2633,8 +2643,10 @@ function pager(m: Message) {
     `<span class="pager-n" aria-hidden="true">${k + 1} / ${n}</span>${b("next", k < n - 1, "Next version")}</span>`;
 }
 
+const stale = (c: Conversation, i: number) => { for (const m of c.messages.slice(i + 1)) delete m.checkpoints; };
 function deleteMessage(i: number) {
   const c = conv;
+  stale(c, i);
   if (c.messages[i].versions) {
     const all = versionsAt(c, i), k = c.messages[i].versions!.shown, [gone] = all.splice(k, 1), role = gone[0].role;
     showVersion(c, i, all, Math.min(k, all.length - 1));
@@ -2670,6 +2682,14 @@ function assistantView(i: number): View {
   return { el, think, summary, thought, body, foot, rounds, calls, notes };
 }
 
+function checkpointView(k: Kept): HTMLElement {
+  const el = h("details", "checkpoint"), body = h("div", "markdown");
+  el.append(h("summary", "", "Context compacted"), body);
+  renderBlocks({ body }, k.summary, false);
+  return el;
+}
+const roundViews = (rounds: Round[], marks: Kept[] | undefined, m: Message) => [...rounds.flatMap((r, i) => [...(marks ?? []).filter((k) => k.at === i).map(checkpointView), roundView(r, m)]),
+  ...(marks ?? []).filter((k) => k.at >= rounds.length).map(checkpointView)];
 function roundView(r: Round, m: Message): HTMLElement {
   const el = h("div", "round"), body = h("div", "markdown"), calls = h("div", "tool-cards");
   if (r.reasoning) {
@@ -2778,12 +2798,13 @@ const prettyArgs = (args: string) => { try { return JSON.stringify(JSON.parse(ar
 
 const AGENT_FN = "subagent";
 interface AgentView { task: HTMLElement; log: HTMLElement; think: HTMLDetailsElement; thought: HTMLElement; calls: HTMLElement;
-  answerLabel: HTMLElement; answer: { body: HTMLElement; blocks?: Blocks }; notes: HTMLElement; stop: HTMLButtonElement; logShown: number }
+  answerLabel: HTMLElement; answer: { body: HTMLElement; blocks?: Blocks }; notes: HTMLElement; stop: HTMLButtonElement; logShown: string }
 const agentViews = new WeakMap<HTMLElement, AgentView>();
 function agentArgs(c: Call): { description?: unknown; prompt?: unknown } {
   try { const a = JSON.parse(c.args); return a && typeof a === "object" ? a : {}; } catch { return {}; }
 }
 const agentCalls = (a?: AgentRun) => [...(a?.rounds ?? []).flatMap((r) => r.calls), ...(a?.calls ?? [])];
+const agentTools = (a?: AgentRun) => a?.tools ?? agentCalls(a).length;
 function gist(text: string) {
   const lines = text.split("\n").map((l) => l.trim()).filter(Boolean);
   const line = lines.find((l) => !/^#{1,6}\s/.test(l) && !/^\*\*[^*]+\*\*:?$/.test(l)) ?? lines[0] ?? "";
@@ -2795,6 +2816,7 @@ function agentNow(c: Call, live: boolean) {
   if (c.state === "failed") return a?.error || gist(c.result ?? "") || "Failed";
   if (c.state === "stopped") return "Stopped before it finished";
   if (c.state !== "running") return live ? "Waiting to start" : "Not run";
+  if (a?.now) return a.now;
   const x = a?.calls?.find((y) => y.state === "approval") ?? a?.calls?.find((y) => y.state === "running");
   if (x) return x.state === "approval" ? `Asks to run ${x.title ?? x.name}` : `${x.title ?? x.name}: ${argLine(x)}`;
   if (a?.content) return "Writing its answer";
@@ -2812,7 +2834,7 @@ function agentCard(c: Call): HTMLElement {
   return el;
 }
 function paintAgent(el: HTMLElement, c: Call, m: Message, live: boolean) {
-  const a = c.agent, open = openCards.has(c.id), n = agentCalls(a).length, label = agentArgs(c).description;
+  const a = c.agent, open = openCards.has(c.id), n = agentTools(a), label = agentArgs(c).description;
   const set = (x: Element, v: string) => { if (x.textContent !== v) x.textContent = v; };
   el.dataset.state = c.state ?? (live ? "asked" : "none");
   set(el.querySelector(".tool-name")!, typeof label === "string" && label.trim() ? label.trim() : "Sub-agent");
@@ -2828,7 +2850,7 @@ function paintAgent(el: HTMLElement, c: Call, m: Message, live: boolean) {
     const task = agentArgs(c).prompt;
     v = { task: h("div", "agent-task", typeof task === "string" ? task : c.args), log: h("div", "agent-log"), think: h("details", "thinking"),
       thought: h("div", "thought"), calls: h("div", "tool-cards"), answerLabel: h("div", "tool-label", "Answer"), answer: { body: h("div", "markdown") },
-      notes: h("div", "agent-notes"), stop: h("button", "btn small agent-stop", "Stop sub-agent"), logShown: -1 };
+      notes: h("div", "agent-notes"), stop: h("button", "btn small agent-stop", "Stop sub-agent"), logShown: "" };
     v.think.append(h("summary", "", "Thoughts"), v.thought);
     v.stop.type = "button";
     v.stop.dataset.act = "agent-stop";
@@ -2836,18 +2858,21 @@ function paintAgent(el: HTMLElement, c: Call, m: Message, live: boolean) {
     agentViews.set(el, v);
   }
   const working = c.state === "running" && live, rounds = a?.rounds ?? [];
-  if (v.logShown !== rounds.length) {
-    v.log.replaceChildren(...rounds.map((r) => roundView(r, m)));
-    v.logShown = rounds.length;
+  const log = `${rounds.length}/${a?.checkpoints?.length ?? 0}`;
+  if (v.logShown !== log) {
+    v.log.replaceChildren(...roundViews(rounds, a?.checkpoints, m));
+    v.logShown = log;
   }
   v.think.hidden = !a?.reasoning;
   v.think.classList.toggle("live", working && !!a?.reasoning && !a.content && !a.calls?.length);
   set(v.think.firstElementChild!, v.think.classList.contains("live") ? "Thinking" : "Thoughts");
   set(v.thought, a?.reasoning ?? "");
   syncCards(v.calls, a?.calls ?? [], m, live);
-  v.answerLabel.hidden = !a?.content;
-  renderBlocks(v.answer, a?.content ?? "", working);
-  const said = [...(a?.notes ?? []), ...(c.state === "failed" || c.state === "stopped" ? [c.result ?? ""] : [])].filter(Boolean);
+  const answer = a?.content || (c.state === "done" ? c.result ?? "" : "");
+  v.answerLabel.hidden = !answer;
+  renderBlocks(v.answer, answer, working);
+  const gone = (a?.tools ?? 0) - agentCalls(a).length;
+  const said = [...(gone > 0 ? [`${gone} earlier tool call${gone === 1 ? " is" : "s are"} not kept through a reload`] : []), ...(a?.notes ?? []), ...(c.state === "failed" || c.state === "stopped" ? [c.result ?? ""] : [])].filter(Boolean);
   if (v.notes.childElementCount !== said.length) v.notes.replaceChildren(...said.map((x) => h("div", "note", x)));
   v.stop.hidden = !(working && m.job);
 }
@@ -2858,9 +2883,10 @@ const slots = (list: [Act, boolean, string?][]) => list.map(([a, on, html]) => !
 
 function paint(v: View, m: Message, live?: Live) {
   const elapsed = live ? (performance.now() - live.since) / 1000 : 0;
-  if (v.roundsShown !== (m.rounds?.length ?? 0)) {
-    v.rounds.replaceChildren(...(m.rounds ?? []).map((r) => roundView(r, m)));
-    v.roundsShown = m.rounds?.length ?? 0;
+  const shown = `${m.rounds?.length ?? 0}/${m.checkpoints?.length ?? 0}`;
+  if (v.roundsShown !== shown) {
+    v.rounds.replaceChildren(...roundViews(m.rounds ?? [], m.checkpoints, m));
+    v.roundsShown = shown;
   }
   syncCards(v.calls, m.calls ?? [], m, !!live);
   if (v.notes.childElementCount !== (m.notes?.length ?? 0)) v.notes.replaceChildren(...(m.notes ?? []).map((n) => h("div", "note", n)));
@@ -3185,13 +3211,14 @@ function convRow(s: Conversation) {
     setTimeout(() => { del.classList.remove("armed"); del.textContent = "×"; }, 2500);
   };
   const r = runs.get(s.id);
-  a.append(h("span", "conv-title", s.title), r ? workingLabel(r.begun) : h("span", "conv-ago", ago(s.updated)), del);
+  a.append(h("span", "conv-title", s.title), r?.asking ? askingLabel() : r ? workingLabel(r.begun) : h("span", "conv-ago", ago(s.updated)), del);
   return a;
 }
 const workingFor = (ms: number) => {
   const sec = Math.max(0, Math.floor(ms / 1000)), min = Math.floor(sec / 60);
   return sec < 60 ? `${sec}s` : min < 60 ? `${min}m` : `${Math.floor(min / 60)}h ${min % 60}m`;
 };
+const askingLabel = () => h("span", "conv-status asking", "Needs you");
 function workingLabel(begun: number) {
   const el = h("span", "conv-status"), dur = h("span", "conv-dur", workingFor(Date.now() - begun));
   dur.dataset.since = String(begun);
@@ -3281,14 +3308,30 @@ async function refreshStatus(again = true) {
 function persist(c: Conversation) {
   if (c.messages.length) return save(c);
   delete chats[c.id];
-  store("chats", chats);
+  keepChats();
   renderList();
 }
 
+const STEPS_KEPT = 20, STEP_CHARS = 200;
+const clipped = (s: string) => (s.length > STEP_CHARS ? `${s.slice(0, STEP_CHARS)}…` : s);
+const leanStep = (r: Round): Round => ({ content: clipped(r.content), calls: r.calls.map(({ result, ...c }) => ({ ...c, args: clipped(c.args) })) });
+const leanAgent = (a: AgentRun): AgentRun => ({ content: "", reasoning: "", tools: agentTools(a), ...(a.rounds?.length ? { rounds: a.rounds.slice(-STEPS_KEPT).map(leanStep) } : {}),
+  ...(a.tokens ? { tokens: a.tokens } : {}), ...(a.notes ? { notes: a.notes } : {}), ...(a.error ? { error: a.error } : {}), read: a.read });
+function leanCall({ agent, result, ...c }: Call, behind: boolean): Call {
+  return { ...c, ...(result !== undefined && !behind ? { result } : {}), ...(agent ? { agent: leanAgent(agent) } : {}) };
+}
+const leanRound = (r: Round, behind: boolean): Round => ({ content: r.content, ...(r.reasoning && !behind ? { reasoning: r.reasoning } : {}), calls: r.calls.map((c) => leanCall(c, behind)) });
+function lean(list: Message[]): Message[] {
+  const at = list.findLastIndex((m) => m.checkpoints?.length), from = at < 0 ? 0 : list[at].checkpoints!.at(-1)!.at;
+  return list.map((m, i) => ({ ...m, ...(i < at && m.reasoning ? { reasoning: "" } : {}), ...(m.calls ? { calls: m.calls.map((c) => leanCall(c, i < at)) } : {}),
+    ...(m.checkpoints ? { checkpoints: m.checkpoints.map((k, j, all) => (i === at && j === all.length - 1 ? k : { ...k, recent: "" })) } : {}),
+    ...(m.rounds ? { rounds: m.rounds.map((r, k) => leanRound(r, i < at || (i === at && k < from))) } : {}),
+    ...(m.versions ? { versions: { ...m.versions, others: m.versions.others.map(lean) } } : {}) }));
+}
 function save(c: Conversation) {
   if (!c.messages.length) return;
   chats[c.id] = structuredClone(c);
-  store("chats", chats);
+  keepChats();
   const at = location.hash.slice(1);
   if (c === conv && at !== c.id && !chats[at]) history.replaceState(null, "", `#${c.id}`);
   renderList();
@@ -3296,7 +3339,7 @@ function save(c: Conversation) {
 
 function request(c: Conversation, upto: Message[], o: { effort?: Effort; sampling?: Mode; final?: object; extra?: Record<string, unknown>; loop?: boolean; route?: boolean; as?: string } = {}) {
   const effort = o.effort ?? c.effort, mode: Mode = effort === "off" ? "fast" : "think";
-  const messages: object[] = upto.flatMap(wire), system = systemFor(c), { members, group } = castOf(c);
+  const messages: object[] = sentHistory(upto), system = systemFor(c), { members, group } = castOf(c);
   const writer = writerOf(c), char = writer?.card.data.name ?? members[0]?.card.data.name ?? "";
   const after = [writer, persona()].map((p) => p?.card.data.post_history_instructions?.trim()).filter(Boolean).map((t) => `[${fillCard(t!, char, userName())}]`);
   const asked = [...messages].reverse().find((x) => (x as { role: string }).role === "user") as { content: string | { type: string; text?: string }[] } | undefined;
@@ -3325,10 +3368,16 @@ function request(c: Conversation, upto: Message[], o: { effort?: Effort; samplin
 const OTHER_EFFORT: Record<Effort, string | undefined> = { xhigh: undefined, medium: "medium", low: "low", off: "none" };
 const ran = (c: Call) => c.result !== undefined;
 const TALKED_OVER = " — [cut off: the user talked over this reply]";
-function wire(m: Message): object[] {
+function sentHistory(upto: Message[]): object[] {
+  const at = upto.findLastIndex((m) => m.checkpoints?.length);
+  if (at < 0) return upto.flatMap((m) => wire(m));
+  const m = upto[at], k = m.checkpoints!.at(-1)!, asked = upto.slice(0, at).findLast((x) => x.role === "user");
+  return [withText(asked ? wire(asked)[0] : { role: "user" }, checkpointText(k), k.first), ...wire(m, k.at), ...upto.slice(at + 1).flatMap((x) => wire(x))];
+}
+function wire(m: Message, from = 0): object[] {
   if (m.role === "user") return [{ role: "user", content: userContent(m) }];
   const ended = !!m.calls?.some(ran);
-  const rounds = [...(m.rounds ?? []), ...(ended ? [{ content: m.content, reasoning: m.reasoning, calls: m.calls! }] : [])];
+  const rounds = [...(m.rounds ?? []), ...(ended ? [{ content: m.content, reasoning: m.reasoning, calls: m.calls! }] : [])].slice(from).filter((r) => r.content || r.calls.some(ran));
   const out = rounds.flatMap((r) => {
     const done = r.calls.filter(ran);
     return [assistantTurn(r.content, r.reasoning, done), ...done.map((x) => toolTurn(x.id, x.result!))];
@@ -3343,7 +3392,7 @@ const systemFor = (c: Conversation) => castOf(c).members.length ? castSystem(c)
     settings.artifacts === false ? "" : ARTIFACTS_PROMPT].filter(Boolean).join("\n\n");
 
 const DONE = Symbol("done");
-async function* events(body: ReadableStream<Uint8Array>): AsyncGenerator<any> {
+async function* events(body: ReadableStream<Uint8Array>, seen?: (id: number) => void): AsyncGenerator<any> {
   const reader = body.getReader(), decoder = new TextDecoder();
   let buf = "";
   for (;;) {
@@ -3351,8 +3400,9 @@ async function* events(body: ReadableStream<Uint8Array>): AsyncGenerator<any> {
     if (done) return;
     buf += decoder.decode(value, { stream: true });
     for (let end = buf.indexOf("\n\n"); end >= 0; end = buf.indexOf("\n\n")) {
-      const data = buf.slice(0, end).split("\n").filter((l) => l.startsWith("data: ")).map((l) => l.slice(6)).join("\n");
+      const block = buf.slice(0, end), data = block.split("\n").filter((l) => l.startsWith("data: ")).map((l) => l.slice(6)).join("\n"), id = /^id: (\d+)$/m.exec(block)?.[1];
       buf = buf.slice(end + 2);
+      if (id) seen?.(Number(id));
       if (data === "[DONE]") return void (yield DONE);
       if (data) yield JSON.parse(data);
     }
@@ -3447,6 +3497,14 @@ async function startRun(c: Conversation, m: Message, body: () => object, pick?: 
   finish(run);
 }
 
+function begin(m: Message) {
+  m.content = m.reasoning = "";
+  m.rounds = m.rounds?.slice(0, m.base ?? 0);
+  if (!m.rounds?.length) delete m.rounds;
+  m.calls = m.notes = undefined;
+  m.checkpoints = m.checkpoints?.filter((k) => k.job !== m.job);
+  if (m.id) tokens.delete(m.id);
+}
 async function resume(c: Conversation, m: Message) {
   const run: Run = { conv: c, m, live: { phase: "waiting", since: performance.now(), note: "Reading the prompt" }, at: 0, begun: Date.now(), stopping: false, frame: 0, saved: 0 };
   runs.set(c.id, run);
@@ -3454,11 +3512,7 @@ async function resume(c: Conversation, m: Message) {
     const res = await fetch(`/api/chat/${m.job}?from=0`);
     if (res.status === 404) throw new Error(CUT_OFF);
     if (!res.ok || !res.body) throw new Error(`HTTP ${res.status}`);
-    m.content = m.reasoning = "";
-    m.rounds = m.rounds?.slice(0, m.base ?? 0);
-    if (!m.rounds?.length) delete m.rounds;
-    m.calls = m.notes = undefined;
-    if (m.id) tokens.delete(m.id);
+    begin(m);
     await stream(run, res.body);
   } catch (e) {
     if (run.stopping) m.stopped = true;
@@ -3471,8 +3525,7 @@ async function stream(run: Run, body: ReadableStream<Uint8Array> | null) {
   for (let attempt = 0; ; ) {
     if (body) {
       try {
-        for await (const ev of events(body)) {
-          run.at++;
+        for await (const ev of events(body, (id) => { run.at = id + 1; })) {
           attempt = 0;
           if (ev === DONE) return;
           take(run, ev);
@@ -3491,6 +3544,12 @@ async function stream(run: Run, body: ReadableStream<Uint8Array> | null) {
 
 function take(run: Run, ev: any) {
   const { m, live } = run, choice = ev.choices?.[0], d = choice?.delta ?? {}, now = performance.now(), v = views.get(m);
+  if (ev.reset) {
+    begin(m);
+    run.usage = run.read = run.written = undefined;
+    if (v) v.tok = undefined;
+    return;
+  }
   if (ev.error) m.error = ev.error.message;
   if (choice?.finish_reason) m.finish = choice.finish_reason;
   if (d.chrysalis_prefix) {
@@ -3526,12 +3585,15 @@ function take(run: Run, ev: any) {
     addCall(m, c);
   }
   if (ev.tool) toolEvent(m.calls, ev.tool, now);
+  const waiting = waitNote(ev, "the context");
+  if (waiting) Object.assign(live, { phase: "waiting", since: now, note: waiting });
+  if (ev.compacted) m.checkpoints = [...(m.checkpoints ?? []), keptFrom(ev.compacted, m.rounds, m.job)];
   if (ev.agent) {
     const c = m.calls?.find((x) => x.id === ev.agent.id);
     if (c) feedAgent(c, ev.agent.ev, now);
   }
   if (ev.round) {
-    m.rounds = [...(m.rounds ?? []), { content: m.content, ...(m.reasoning ? { reasoning: m.reasoning } : {}), calls: m.calls ?? [] }];
+    if (m.content || m.reasoning || m.calls) m.rounds = [...(m.rounds ?? []), { content: m.content, ...(m.reasoning ? { reasoning: m.reasoning } : {}), calls: m.calls ?? [] }];
     m.content = m.reasoning = "";
     m.calls = undefined;
     if (m.id) tokens.delete(m.id);
@@ -3553,6 +3615,12 @@ function take(run: Run, ev: any) {
     live.phase = "writing";
     m.content += d.content;
   }
+  const asking = needsYou(m);
+  if (asking !== !!run.asking) {
+    run.asking = asking;
+    renderList();
+    if (asking && run.conv !== conv) toast(`${run.conv.title}: a tool is waiting for you to allow it`);
+  }
   if (now - run.saved > 2000) {
     run.saved = now;
     save(run.conv);
@@ -3561,6 +3629,9 @@ function take(run: Run, ev: any) {
   schedule(run);
 }
 
+const needsYou = (m: Message) => !!m.calls?.some((c) => c.state === "approval" || c.agent?.calls?.some((x) => x.state === "approval"));
+const waitNote = (ev: any, what: string) => ev.compacting ? `Compacting ${what}` : ev.compacted ? "Reading the prompt" : ev.waiting ?? (ev.retry ? `${ev.retry.message}: trying again` : undefined);
+const keptFrom = ({ kept, ...k }: Checkpoint & { kept: number }, rounds: Round[] | undefined, job?: string): Kept => ({ ...k, at: (rounds?.length ?? 0) - kept, ...(job ? { job } : {}) });
 function addCall(holder: { calls?: Call[] }, t: any) {
   const calls = (holder.calls ??= []), at = (calls[t.index ?? calls.length] ??= { id: "", name: "", args: "" });
   if (t.id) at.id = t.id;
@@ -3580,13 +3651,15 @@ function feedAgent(c: Call, ev: any, now: number) {
   const a = (c.agent ??= { content: "", reasoning: "" }), d = ev.choices?.[0]?.delta ?? {};
   if (ev.error) a.error = ev.error.message;
   if (ev.chrysalis_prompt) a.read = true;
+  a.now = ev.reviewing ? "Checking its work" : waitNote(ev, "its context") ?? (ev.chrysalis_prompt || d.reasoning_content || d.content || d.tool_calls ? undefined : a.now);
+  if (ev.compacted) a.checkpoints = [...(a.checkpoints ?? []), keptFrom(ev.compacted, a.rounds)];
   if (ev.usage) a.tokens = (a.tokens ?? 0) + (ev.usage.completion_tokens ?? 0);
   if (d.reasoning_content) a.reasoning += d.reasoning_content;
   if (d.content) a.content += d.content;
   for (const t of d.tool_calls ?? []) addCall(a, t);
   if (ev.tool && toolEvent(a.calls, ev.tool, now)?.state === "approval") openCards.add(c.id);
   if (ev.round) {
-    a.rounds = [...(a.rounds ?? []), { content: a.content, ...(a.reasoning ? { reasoning: a.reasoning } : {}), calls: a.calls ?? [] }];
+    if (a.content || a.reasoning || a.calls) a.rounds = [...(a.rounds ?? []), { content: a.content, ...(a.reasoning ? { reasoning: a.reasoning } : {}), calls: a.calls ?? [] }];
     a.content = a.reasoning = "";
     a.calls = undefined;
   }
@@ -4568,7 +4641,7 @@ function remove(id: string) {
     stopRun(r);
   }
   delete chats[id];
-  store("chats", chats);
+  keepChats();
   if (id === conv.id) newChat(folderOf(conv));
   else renderList();
 }

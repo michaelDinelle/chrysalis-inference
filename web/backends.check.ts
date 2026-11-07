@@ -18,9 +18,9 @@ const spawn = (cmd: string[], env: Record<string, string> = {}) =>
 const BACKENDS: Spec[] = [
   { name: "llama.cpp", port: 18180, model: `${GGUF}/Qwen3.5-2B-Q8_0.gguf`, ready: "/health", thinkingOff: "none",
     start: () => spawn([`${DATA}/llama.cpp/build/bin/llama-server`, "-m", `${GGUF}/Qwen3.5-2B-Q8_0.gguf`, "--mmproj", `${GGUF}/mmproj-Qwen3.5-2B-BF16.gguf`,
-      "--no-mmproj-offload", "-ngl", "0", "-c", "16384", "--host", "127.0.0.1", "--port", "18180"]) },
+      "--no-mmproj-offload", "-ngl", "0", "--device", "none", "-c", "16384", "--host", "127.0.0.1", "--port", "18180"]) },
   { name: "Ollama", port: 18181, model: "qwen3.5:2b", ready: "/", thinkingOff: "none",
-    start: () => spawn([`${B}/ollama/bin/ollama`, "serve"], { OLLAMA_HOST: "127.0.0.1:18181", OLLAMA_MODELS: `${B}/ollama-models` }) },
+    start: () => spawn([`${B}/ollama/bin/ollama`, "serve"], { OLLAMA_HOST: "127.0.0.1:18181", OLLAMA_MODELS: `${B}/ollama-models`, OLLAMA_CONTEXT_LENGTH: "16384" }) },
   { name: "LM Studio", port: 18182, model: "qwen3.5-2b", ready: "/v1/models", thinkingOff: "none",
     start: () => {
       for (const args of [["server", "stop"], ["unload", "--all"], ["load", "qwen3.5-2b", "--gpu", "off", "-c", "16384", "-y"], ["server", "start", "--port", "18182"]])
@@ -54,7 +54,7 @@ const RED = (() => {
 const dir = mkdtempSync(`${RUN}/backends-`), tls = mkdtempSync(`${RUN}/tls-`);
 writeFileSync(`${dir}/mcp.json`, JSON.stringify({ mcpServers: { fake: { command: process.execPath, args: ["fake-mcp.ts"], cwd: import.meta.dir } } }));
 const json = { "Content-Type": "application/json" };
-let web: Bun.Subprocess<"ignore", "pipe", "inherit">, base = "", check = "";
+let web: Bun.Subprocess<"ignore", "pipe", "inherit">, base = "";
 beforeAll(async () => {
   web = Bun.spawn([process.execPath, "server.ts"], {
     cwd: import.meta.dir, stdout: "pipe", stderr: "inherit",
@@ -63,13 +63,12 @@ beforeAll(async () => {
   });
   const reader = web.stdout.getReader(), dec = new TextDecoder();
   let out = "";
-  while (!/chrysalis check: \S+/.test(out)) {
+  while (!/chrysalis web: \S+/.test(out)) {
     const { value, done } = await reader.read();
     if (done) throw new Error(`server.ts exited: ${out}`);
     out += dec.decode(value);
   }
   base = out.match(/chrysalis web: (\S+)/)![1].replace(/\/$/, "");
-  check = out.match(/chrysalis check: (\S+)/)![1].replace(/\/$/, "");
 });
 afterAll(() => { web?.kill(); rmSync(RUN, { recursive: true, force: true }); });
 
@@ -77,7 +76,7 @@ const connect = (url: string) => fetch(`${base}/api/backend`, { method: "POST", 
 async function reply(body: object) {
   const r = await fetch(`${base}/api/chat`, { method: "POST", headers: json, body: JSON.stringify({ stream: true, stream_options: { include_usage: true }, ...body }) });
   expect(r.status).toBe(200);
-  const got = { reasoning: "", content: "", tools: [] as any[], rounds: 0, usage: undefined as any, timing: false, error: undefined as string | undefined, done: false };
+  const got = { reasoning: "", content: "", tools: [] as any[], rounds: 0, compactions: 0, usage: undefined as any, timing: false, error: undefined as string | undefined, done: false };
   const reader = r.body!.getReader(), dec = new TextDecoder();
   let buf = "";
   for (;;) {
@@ -94,6 +93,7 @@ async function reply(body: object) {
       if (d.reasoning !== undefined) throw new Error("a reply's thinking reached the page as reasoning, not reasoning_content");
       if (ev.tool?.state === "done" || ev.tool?.state === "failed") got.tools.push(ev.tool);
       if (ev.round) got.rounds++;
+      if (ev.compacted) got.compactions++;
       if (ev.usage) got.usage = ev.usage;
       if (ev.timing) got.timing = true;
       if (ev.error) got.error = ev.error.message;
@@ -146,6 +146,15 @@ for (const b of BACKENDS) {
         .toEqual([undefined, [["done", "echo: butterfly-7"]], 1, true]);
     }, MINUTES(10));
 
+    test(`${b.name}: a chat longer than the context it was started with is compacted, and the reply still knows how it began`, async () => {
+      const log = "The log goes on about the weather and the rigging and the long watches at sea. ".repeat(50);
+      const history = Array.from({ length: 24 }, (_, i) => i === 0 ? "The ship is called Marigold." : i === 12 ? "The cook is named Tobin." : `This is entry ${i + 1} of the log.`)
+        .flatMap((note) => [{ role: "user", content: `Note this: ${note} ${log}` }, { role: "assistant", content: `Noted: ${note}` }]);
+      const got = await reply({ model: b.model, temperature: 0, reasoning_effort: "none", messages: [...history, { role: "user", content: "What is the ship called, and who is the cook? Answer in one short sentence." }] });
+      console.log(`${b.name}: ${got.compactions} compactions, said: ${got.content.slice(0, 120)}`);
+      expect([got.error, got.compactions > 0, /Marigold/i.test(got.content), /Tobin/i.test(got.content)]).toEqual([undefined, true, true, true]);
+    }, MINUTES(20));
+
     test(`${b.name}: a picture reaches the model`, async () => {
       const got = await reply({ model: b.model, temperature: 0, reasoning_effort: "none", messages: [{ role: "user", content: [
         { type: "image_url", image_url: { url: RED } }, { type: "text", text: "What single color fills this picture? Answer with one word." }] }] });
@@ -154,16 +163,11 @@ for (const b of BACKENDS) {
 
     if (b.name === "llama.cpp") {
       test("the page, in a browser: the top bar shows the address it is connected to; llama.cpp's pasted there (and its key) connects it, and a reply shows its thinking and its answer", async () => {
-        const nonce = crypto.randomUUID().replaceAll("-", "");
-        await fetch(`${check}/check.gif?n=${nonce}`);
-        const asked = await fetch(`${base}/pair/ask`, { method: "POST", headers: json, body: JSON.stringify({ nonce, name: "Linux · Chrome" }) });
-        const cookie = asked.headers.get("set-cookie")!.split(";")[0].split("=");
         expect((await connect("127.0.0.1:9")).status).toBe(200);
         const browser = await puppeteer.launch({ executablePath: process.env.CHROMIUM ?? "/usr/bin/chromium", headless: true,
           args: ["--no-sandbox", "--ignore-certificate-errors"] });
         try {
           const ctx = await browser.createBrowserContext();
-          await ctx.setCookie({ name: cookie[0], value: cookie[1], domain: "127.0.0.1", path: "/", secure: true, httpOnly: true, sameSite: "Strict" });
           const page = await ctx.newPage();
           page.on("pageerror", (e) => { throw e; });
           await page.goto(`${base}/`, { waitUntil: "load" });

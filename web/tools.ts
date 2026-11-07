@@ -103,8 +103,11 @@ export async function select(choice: Record<string, { off?: string[] }>): Promis
 export const openai = (n: Named, description?: string) =>
   ({ type: "function", function: { name: n.fn, description: description ?? n.tool.description, parameters: n.tool.parameters } });
 
-export async function run(n: Named, args: Record<string, unknown>, signal: AbortSignal, maxChars?: number): Promise<string> {
-  const limit = Math.min(maxChars ?? n.source.chars ?? n.source.maxChars, n.source.maxChars);
+export const cut = (out: string, limit: number) => out.length <= limit ? out
+  : `${out.slice(0, limit)}\n\n[The result was cut here: ${limit.toLocaleString("en-US")} of ${out.length.toLocaleString("en-US")} characters.]`;
+
+export async function run(n: Named, args: Record<string, unknown>, signal: AbortSignal, maxChars?: number, room = Infinity): Promise<string> {
+  const limit = Math.min(maxChars ?? n.source.chars ?? n.source.maxChars, n.source.maxChars, room);
   const timeout = AbortSignal.timeout(n.source.timeoutMs);
   const both = AbortSignal.any([signal, timeout]);
   const out = await new Promise<string>((resolve, reject) => {
@@ -114,6 +117,5 @@ export async function run(n: Named, args: Record<string, unknown>, signal: Abort
     both.addEventListener("abort", gone, { once: true });
     n.tool.run(args, { signal: both, maxChars: limit }).then(resolve, reject);
   });
-  return out.length <= limit ? out
-    : `${out.slice(0, limit)}\n\n[The result was cut here: ${limit.toLocaleString("en-US")} of ${out.length.toLocaleString("en-US")} characters.]`;
+  return cut(out, limit);
 }
