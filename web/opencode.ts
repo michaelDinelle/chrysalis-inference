@@ -3,6 +3,13 @@ import { createHash, X509Certificate } from "node:crypto";
 const MODELS = { "qwen3.8-27b": "Qwen3.8 27B", "qwen3.8-flash-next": "Qwen3.8 Flash-Next" };
 const KEY = "CHRYSALIS_KEY";
 const label = (name: string) => name.replace(/[^\w.-]/g, "-").slice(0, 60) || "chrysalis";
+const providerId = (name: string) => `chrysalis-${label(name)}`;
+const favorites = (name: string) => `const fs = require("fs"), f = process.env.FAVORITES, m = { recent: [], favorite: [], variant: {}, ...(fs.existsSync(f) ? JSON.parse(fs.readFileSync(f, "utf8")) : {}) };
+for (const modelID of ${JSON.stringify(Object.keys(MODELS))})
+    if (!m.favorite.some((x) => x.providerID === "${providerId(name)}" && x.modelID === modelID)) m.favorite.push({ providerID: "${providerId(name)}", modelID });
+fs.mkdirSync(require("path").dirname(f), { recursive: true });
+fs.writeFileSync(f + ".chrysalis", JSON.stringify(m));
+fs.renameSync(f + ".chrysalis", f);`;
 const pinned = (cert: string) => {
   const spki = new X509Certificate(cert).publicKey.export({ type: "spki", format: "der" });
   return `curl -fsSk --pinnedpubkey sha256//${createHash("sha256").update(spki).digest("base64")}`;
@@ -18,7 +25,7 @@ command -v opencode >/dev/null || { echo "OpenCode is not on this computer: get 
 dir="\${XDG_CONFIG_HOME:-$HOME/.config}/chrysalis"
 ca="$dir/opencode-ca.pem"
 mkdir -p "$dir"
-windows() { ps -axo command= | awk '{ n = $1; sub(/.*\\//, "", n) } (n == "opencode" || n == "opencode.exe") && $2 != "serve"' | grep -q .; }
+windows() { ps -axo command= | awk '{ n = $1; sub(/.*\\//, "", n) } (n == "opencode" || n == "opencode2" || n == "opencode.exe") && $2 != "serve"' | grep -q .; }
 fresh=
 if ! grep -qF ${fingerprint} "$ca" 2>/dev/null; then
     was=$(opencode service get env 2>/dev/null | sed -n 's/.*"NODE_EXTRA_CA_CERTS": *"\\([^"]*\\)".*/\\1/p')
@@ -59,6 +66,7 @@ CHRYSALIS_JOB
     if launchctl bootstrap "gui/$(id -u)" "$plist"; then origin=https://127.0.0.1:$port; fi
 fi
 opencode auth login "$origin" --method login </dev/null
+FAVORITES="\${XDG_STATE_HOME:-$HOME/.local/state}/opencode/model.json" BUN_BE_BUN=1 opencode -e '${favorites(name)}' || true
 `;
 }
 
@@ -79,6 +87,6 @@ done`;
     variants: ["low", "medium", "high"].map((effort) => ({ id: effort, settings: { reasoningEffort: effort } })),
   }]));
   return { auth: { command: ["sh", "-c", ask], env: KEY },
-    config: { providers: { [`chrysalis-${who}`]: { name: `Chrysalis on ${who}`, package: "@opencode-ai/ai/providers/openai-compatible",
+    config: { providers: { [providerId(name)]: { name: "Chrysalis", package: "@opencode-ai/ai/providers/openai-compatible",
       settings: { baseURL: `${origin}/v1`, apiKey: `{env:${KEY}}` }, models } } } };
 }

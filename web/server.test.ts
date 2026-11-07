@@ -881,8 +881,8 @@ test("a computer with only OpenCode gets in from one pinned line and an approval
   writeFileSync(`${dir}/devices.json`, JSON.stringify([{ id: "b", name: "Phone", hash: createHash("sha256").update(browserKey).digest("hex"), added: 1, seen: 1, kind: "browser" }]));
   writeFileSync(`${home}/corporate.pem`, "corporate roots\n");
   const carries = `${home}/service-carries-ca`, window = `${home}/window`;
-  writeFileSync(`${bin}/opencode`, `#!/bin/sh\necho "$*" >> "${log}"\n[ "$1 $2" != "service get" ] || echo '{ "NODE_EXTRA_CA_CERTS": "${home}/corporate.pem" }'\n[ "$1 $2" != "service restart" ] || touch "${carries}"\n`);
-  writeFileSync(`${bin}/ps`, `#!/bin/sh\nif [ "$1" = -axo ]; then echo "/opt/x/opencode.exe serve --service"; [ ! -f "${window}" ] || echo "/opt/x/opencode.exe --auto"; else\n[ ! -f "${carries}" ] || echo "1 ?? S 0:00 opencode.exe serve --service NODE_EXTRA_CA_CERTS=${home}/.config/chrysalis/opencode-ca.pem"; fi\n`);
+  writeFileSync(`${bin}/opencode`, `#!/bin/sh\n[ -z "$BUN_BE_BUN" ] || exec "${process.execPath}" "$@"\necho "$*" >> "${log}"\n[ "$1 $2" != "service get" ] || echo '{ "NODE_EXTRA_CA_CERTS": "${home}/corporate.pem" }'\n[ "$1 $2" != "service restart" ] || touch "${carries}"\n`);
+  writeFileSync(`${bin}/ps`, `#!/bin/sh\nif [ "$1" = -axo ]; then echo "/opt/x/opencode.exe serve --service"; [ ! -f "${window}" ] || echo "opencode2"; else\n[ ! -f "${carries}" ] || echo "1 ?? S 0:00 opencode.exe serve --service NODE_EXTRA_CA_CERTS=${home}/.config/chrysalis/opencode-ca.pem"; fi\n`);
   const realCurl = Bun.which("curl")!, noName = `${home}/no-local-name`;
   writeFileSync(noName, "");
   writeFileSync(`${bin}/curl`, `#!/bin/sh\ncase "$*" in *.local:*) [ ! -f "${noName}" ] || exit 6; exit 0 ;; esac\nexec "${realCurl}" "$@"\n`);
@@ -890,7 +890,7 @@ test("a computer with only OpenCode gets in from one pinned line and an approval
   chmodSync(`${bin}/ps`, 0o755);
   chmodSync(`${bin}/curl`, 0o755);
   const desk = await onNetwork(dir), [here, net] = desk.urls, json = { "Content-Type": "application/json" };
-  const paste = (line: string, path = `${bin}:${process.env.PATH}`) => Bun.spawnSync(["sh", "-c", line], { env: { ...process.env, HOME: home, XDG_CONFIG_HOME: "", PATH: path }, stdout: "pipe", stderr: "pipe" });
+  const paste = (line: string, path = `${bin}:${process.env.PATH}`) => Bun.spawnSync(["sh", "-c", line], { env: { ...process.env, HOME: home, XDG_CONFIG_HOME: "", XDG_STATE_HOME: "", PATH: path }, stdout: "pipe", stderr: "pipe" });
   const calls = () => existsSync(log) ? readFileSync(log, "utf8").trim().split("\n") : [];
   let forward: Bun.Subprocess<"ignore", "pipe", "inherit"> | undefined;
   try {
@@ -903,7 +903,7 @@ test("a computer with only OpenCode gets in from one pinned line and an approval
     expect([missing.exitCode, String(missing.stderr)]).toEqual([1, expect.stringContaining("OpenCode is not on this computer")]);
 
     writeFileSync(window, "");
-    const held = Bun.spawn(["sh", "-c", line], { env: { ...process.env, HOME: home, XDG_CONFIG_HOME: "", PATH: `${bin}:${process.env.PATH}` }, stdout: "ignore", stderr: "pipe" });
+    const held = Bun.spawn(["sh", "-c", line], { env: { ...process.env, HOME: home, XDG_CONFIG_HOME: "", XDG_STATE_HOME: "", PATH: `${bin}:${process.env.PATH}` }, stdout: "ignore", stderr: "pipe" });
     expect(new TextDecoder().decode((await held.stderr.getReader().read()).value)).toContain("Close OpenCode to go on");
     await Bun.sleep(1200);
     expect(calls().filter((c) => c !== "service get env")).toEqual([]);
@@ -922,6 +922,20 @@ test("a computer with only OpenCode gets in from one pinned line and an approval
     rmSync(noName);
     expect(paste(line).exitCode).toBe(0);
     expect(calls().at(-1)).toBe(`auth login https://${netName()}:${new URL(net).port} --method login`);
+
+    const state = `${home}/.local/state/opencode/model.json`, chosen = () => JSON.parse(readFileSync(state, "utf8"));
+    const manifestNow = await (await fetch(`${net}/.well-known/opencode`, { tls: { rejectUnauthorized: false } })).json();
+    const [providerID, provided]: [string, any] = Object.entries(manifestNow.config.providers)[0] as [string, any];
+    const both = Object.keys(provided.models).map((modelID) => ({ providerID, modelID }));
+    expect(provided.name).toBe("Chrysalis");
+    expect(both.length).toBe(2);
+    expect(chosen().favorite).toEqual(both);
+    const mine = { providerID: "other", modelID: "theirs" };
+    writeFileSync(state, JSON.stringify({ recent: [mine], favorite: [mine, both[1]], variant: { "other/theirs": "high" } }));
+    expect(paste(line).exitCode).toBe(0);
+    expect(chosen()).toEqual({ recent: [mine], favorite: [mine, both[1], both[0]], variant: { "other/theirs": "high" } });
+    expect(paste(line).exitCode).toBe(0);
+    expect(chosen().favorite.length).toBe(3);
 
     const mac = mkdtempSync(`${RUN}/mac-`), jobs = `${home}/jobs`, refused = `${home}/launchd-refuses`, onMac = `${mac}:${bin}:${process.env.PATH}`;
     expect(existsSync(jobs)).toBe(false);
