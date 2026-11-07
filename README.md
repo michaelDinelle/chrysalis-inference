@@ -29,49 +29,36 @@ Chrysalis beats Strata's IQ3_S on every measure on the RX 7900. On the RTX 5070 
 
 <p align="center"><img src="media/paint.webp" width="900" alt="An SVG cabin drawn live; pointing at the roof and asking to make it red changes only the roof; the paint bucket fills the door by hand"></p>
 
-<sub>Artifacts render as they are written. Hover over a part to highlight it, click to attach it to your next message, and
-ask for a change. The paint bucket edits the artifact by hand.</sub>
+<sub>Click a part, then ask for a change.</sub>
 
 ## SillyTavern character cards
 
 <p align="center"><img src="media/characters.webp" width="900" alt="Seraphina's SillyTavern card dropped in: her greeting, a reply in her voice, her card"></p>
 
-<sub>Drag in a SillyTavern card to import it. Speech and narration look the way they do in SillyTavern, and each speaker in a
-group chat has a portrait. Seraphina is SillyTavern's sample character (AGPL-3.0). This recording is under their license.</sub>
+<sub>Drag in a card. Seraphina is SillyTavern's sample character (AGPL-3.0). This recording is under their license.</sub>
 
 ## Phones and other devices
 
 <p align="center"><img src="media/phone-pairing.png" width="760" alt="A phone connecting: the connect page, the code it shows, then the chat"></p>
 <p align="center"><img src="media/connect-desktop.png" width="520" alt="Connect a device on the computer: the QR code and the phone's code with Allow"></p>
 
-<sub>Scan the QR code, trust this computer's certificate authority once, and allow the code the phone shows. The page shows
-how to trust it on each kind of device. The chat runs over HTTPS. The authority works only on your network.</sub>
+<sub>Scan the QR code, trust the certificate once, and allow the code.</sub>
 
 ## Coding on another computer
 
-Run Chrysalis on one computer and code on another with [OpenCode](https://opencode.ai). Start Chrysalis with
-`chrysalis.sh --host 0.0.0.0`.
+Start Chrysalis with `chrysalis.sh --host 0.0.0.0`. The other computer needs [OpenCode](https://opencode.ai).
 
 <p align="center"><img src="media/opencode-copy.png" width="560" alt="Connect a device in that computer's browser: the OpenCode line and its Copy button"></p>
 
-<sub>Open Chrysalis in that computer's browser, allow its code, and copy the line under Connect a device. Over SSH, copy the
-same line from Chrysalis's terminal.</sub>
+<sub>Copy the line under Connect a device.</sub>
 
 <p align="center"><img src="media/opencode-login.png" width="760" alt="The line pasted into a terminal: it shows a code to allow, then Connected"></p>
 
-<sub>Paste the line into a terminal, in WSL on Windows, and allow the code it shows. If OpenCode is open, it asks you to close
-it first.</sub>
+<sub>Paste it into a terminal and allow the code.</sub>
 
 <p align="center"><img src="media/opencode-models.png" width="440" alt="OpenCode's model picker: Qwen3.8 27B and Qwen3.8 Flash-Next, both Chrysalis, under Favorites at the top"> <img src="media/opencode-coding.png" width="440" alt="OpenCode writing and running fib.py on Qwen3.8 Flash-Next, in Chrysalis"></p>
 
-<sub>Press `ctrl+x m` and pick a model. The line adds both to your favorites. OpenCode retries while Chrysalis is off. To take
-a computer's access away, use Remove under Connect a device.</sub>
-
-The line pins this computer's key. Only computers you allow can connect. OpenCode connects over HTTPS and trusts Chrysalis's
-authority for local names.
-
-On a Mac, the line also adds a launchd job that forwards a local port to Chrysalis through Apple's `nc`. HTTPS still runs end
-to end. The job keeps OpenCode connected after the terminal that started it quits.
+<sub>Press `ctrl+x m` and pick a model.</sub>
 
 ## Also
 
@@ -80,57 +67,81 @@ to end. The job keeps OpenCode connected after the terminal that started it quit
 - **Claude Code** and **OpenCode**, through OpenAI and Anthropic APIs
 - The same chat on **llama.cpp, Ollama, LM Studio, KoboldCpp or vLLM**
 - **Qwen3.8-27B** with its full 262K context
-- **Apple Silicon** with 32 GB or more runs both models
-- **NVIDIA** RTX 30 series and newer run both models
 
 ## Run it
 
-On an RX 7900 XTX, XT or GRE with Linux:
+**Linux with an RX 7900 XTX, XT or GRE**
 
 ```sh
 curl -fsSL https://github.com/michaelDinelle/chrysalis-inference/releases/latest/download/chrysalis-linux-x86_64.tar.gz | tar -xz
 chrysalis/chrysalis.sh
 ```
 
-Everything stays in that folder. With 64 GB of RAM, each start asks which model to run. With less, it runs the 27B. The first
-start downloads the model from [Hugging Face](https://huggingface.co/michaelDinelle/chrysalis) (16 GB for the 27B, 117 GB for
-Flash-Next) and prints the chat's address. Press Ctrl+C in that terminal to stop it.
+<p align="center"><img src="media/run.png" width="760" alt="Chrysalis starting in a terminal: it asks which model, says it is ready, and prints the chat's and API's addresses"></p>
 
-**On your network**: run `chrysalis.sh --host 0.0.0.0`. Run the same Chrysalis on a laptop and it finds yours. Answer y in both
-terminals, once, and the laptop's apps use your GPU at `http://127.0.0.1:8080`. On a computer with no supported GPU, you get
-the chat alone, for Ollama, LM Studio or llama.cpp.
+<sub>The first start downloads 16 GB for the 27B or 117 GB for Flash-Next from [Hugging Face](https://huggingface.co/michaelDinelle/chrysalis).</sub>
 
-**Mac**: Apple Silicon with 32 GB or more runs the models from a clone of this repository. The first `./chrysalis.sh` gets
-Python and Bun and builds the Metal engines with Xcode's Metal compiler. For a laptop's chat alone, use the same two lines with
-`chrysalis-macos-arm64.tar.gz`, then open `chrysalis/Chrysalis.app`.
+**Mac with Apple Silicon and 32 GB or more, or Linux with an RTX 30 series or newer**
 
-**NVIDIA**: an RTX 30 series or newer on Linux, with NVIDIA's driver and CUDA toolkit, runs the models from a clone. The first
-`./chrysalis.sh` builds the CUDA engines.
+```sh
+git clone https://github.com/michaelDinelle/chrysalis-inference
+cd chrysalis-inference
+./chrysalis.sh
+```
 
-**Windows**: run `wsl --install` as an administrator, once, then double-click
-[chrysalis.wsl](https://github.com/michaelDinelle/chrysalis-inference/releases/latest/download/chrysalis.wsl). Chrysalis is
-then in the Start menu, and closing its window stops it. To put it on your network, run
-`wsl -d Chrysalis --cd ~ -- chrysalis/chrysalis.sh --host 0.0.0.0` in PowerShell.
+**Windows**
 
-**Docker**, for the API alone at `http://localhost:8080/v1`:
+Run `wsl --install` as an administrator, then double-click [chrysalis.wsl](https://github.com/michaelDinelle/chrysalis-inference/releases/latest/download/chrysalis.wsl).
+
+**Docker**
 
 ```sh
 docker run -d --device /dev/kfd --device /dev/dri -p 127.0.0.1:8080:8080 -v chrysalis:/models ghcr.io/michaeldinelle/chrysalis
 ```
 
-## How it works
-
-Chrysalis has its own engines for AMD, NVIDIA and Apple GPUs, with hand-written kernels for each quantized format, MTP
-speculative decoding and a prompt cache for agent turns.
-
-Flash-Next keeps its most used experts in VRAM. The CPU runs the rest from RAM. On a Mac it keeps them in memory and reads the
-others from the SSD.
-
-A small card holds what it can of the 27B and reads the other layers from pinned RAM as it writes.
-
-Runs repeat to the bit, and each engine change is checked against the last on every machine.
-
 <details><summary>For agents</summary>
+
+**Running Chrysalis**
+
+- Everything stays in the release's folder. With 64 GB of RAM, each start asks which model to run. With less, it runs the
+  27B. Ctrl+C in its terminal stops it.
+- `chrysalis.sh --host 0.0.0.0` puts Chrysalis on the network. The same Chrysalis on a laptop finds it. After y in both
+  terminals, once, the laptop's apps use its GPU at `http://127.0.0.1:8080`.
+- With no supported GPU, Chrysalis is the chat alone, for Ollama, LM Studio or llama.cpp.
+- Mac: the first `./chrysalis.sh` in a clone gets Python and Bun and builds the Metal engines with Xcode's Metal compiler.
+  The release, `chrysalis-macos-arm64.tar.gz`, is a laptop's chat alone, and `chrysalis/Chrysalis.app` opens it in Terminal.
+- NVIDIA: needs Linux with NVIDIA's driver and CUDA toolkit. The first `./chrysalis.sh` in a clone builds the CUDA engines.
+- Windows: Chrysalis is in the Start menu after the install, and closing its window stops it.
+  `wsl -d Chrysalis --cd ~ -- chrysalis/chrysalis.sh --host 0.0.0.0` in PowerShell puts it on the network.
+- Docker is the API alone, at `http://localhost:8080/v1`.
+
+**Features**
+
+- Artifacts render as they are written. Hovering highlights a part. Clicking attaches it to the next message. The paint
+  bucket edits the artifact by hand.
+- SillyTavern cards: speech and narration look the way they do in SillyTavern, and each speaker in a group chat has a
+  portrait.
+- Phones: the connect page shows how to trust the certificate authority on each kind of device. The chat runs over HTTPS.
+  The authority works only on the local network.
+
+**OpenCode on another computer**
+
+- With no browser there, as over SSH, Chrysalis's terminal prints the same line. On Windows the line runs in WSL.
+- If OpenCode is open, the line asks to close it first. The line adds both models to OpenCode's favorites.
+- OpenCode retries while Chrysalis is off. Remove under Connect a device takes a computer's access away.
+- The line pins this computer's key. Only allowed computers can connect. OpenCode connects over HTTPS and trusts Chrysalis's
+  authority for local names.
+- On a Mac, the line also adds a launchd job that forwards a local port to Chrysalis through Apple's `nc`. HTTPS still runs
+  end to end. The job keeps OpenCode connected after the terminal that started it quits.
+
+**How it works**
+
+- Chrysalis has its own engines for AMD, NVIDIA and Apple GPUs, with hand-written kernels for each quantized format, MTP
+  speculative decoding and a prompt cache for agent turns.
+- Flash-Next keeps its most used experts in VRAM. The CPU runs the rest from RAM. On a Mac it keeps them in memory and reads
+  the others from the SSD.
+- A small card holds what it can of the 27B and reads the other layers from pinned RAM as it writes.
+- Runs repeat to the bit, and each engine change is checked against the last on every machine.
 
 **How Qwen3.8-Flash-Next was measured**
 
