@@ -251,21 +251,26 @@ network, and only devices you allow get past the connect page.</sub>
 
 ## Coding on another computer
 
-Chrysalis takes the memory, so code on another machine: it needs [OpenCode](https://opencode.ai) and nothing of Chrysalis.
+Chrysalis takes the memory, so code on another machine. That machine needs [OpenCode](https://opencode.ai) and nothing of
+Chrysalis. Start Chrysalis with `chrysalis.sh --host 0.0.0.0`, then:
 
-1. Run Chrysalis on your network: `chrysalis.sh --host 0.0.0.0`.
-2. On the computer you code on, open the address it prints, and allow the code, as for a phone.
-3. In the chat there, press Connect a device, the phone at the top, and Copy the line.
-4. Paste it into a terminal (on Windows, WSL's, with OpenCode installed there). If OpenCode is open, it asks you to close it.
-5. Allow the code it shows, in Chrysalis's terminal or under Connect a device.
-6. In OpenCode, `/models` has Chrysalis's models, under Chrysalis on your computer's name.
+<p align="center"><img src="media/opencode-copy.png" width="560" alt="Connect a device in that computer's browser: the OpenCode line and its Copy button"></p>
 
-With no browser there, as on a server over SSH, Chrysalis's terminal prints the same line. Remove under Connect a device
-takes the computer's access away. While Chrysalis is off OpenCode says it can't connect and keeps trying, and the reply
-comes once Chrysalis is back.
+<sub>Open Chrysalis in that computer's browser and allow its code, as for a phone. Connect a device, the phone at the top,
+has a line to copy. With no browser there, as on a server over SSH, Chrysalis's terminal prints the same line.</sub>
+
+<p align="center"><img src="media/opencode-login.png" width="760" alt="The line pasted into a terminal: it shows a code to allow, then Connected"></p>
+
+<sub>Paste it into a terminal (on Windows, WSL's), and allow the code it shows, in Chrysalis's terminal or under Connect a
+device. If OpenCode is open, it asks you to close it first.</sub>
+
+<p align="center"><img src="media/opencode-models.png" width="440" alt="OpenCode's model picker: Qwen3.8 Flash-Next and Qwen3.8 27B under Chrysalis on omarchy"> <img src="media/opencode-coding.png" width="440" alt="OpenCode writing and running fib.py on Qwen3.8 Flash-Next, Chrysalis on omarchy"></p>
+
+<sub>Pick a Chrysalis model with `ctrl+x m`, and code. While Chrysalis is off OpenCode says it can't connect and keeps trying,
+and the reply comes once it is back. Remove under Connect a device takes the computer's access away.</sub>
 
 The line carries this computer's key, so it refuses any impostor, and only computers you allow get in. OpenCode reaches
-Chrysalis over HTTPS by its name on your network, and trusts its authority for names on your network alone.
+Chrysalis over HTTPS by a name Chrysalis answers on your network, and trusts its authority for names on your network alone.
 
 ## Also
 
