@@ -21,46 +21,9 @@ Chrysalis beats Strata's IQ3_S on every measure on the RX 7900. On the RTX 5070 
 
 <p align="center"><img src="media/flash-next.png" width="860" alt="Qwen3.8-Flash-Next in Chrysalis and Strata on an RX 7900 XTX, an RTX 5070 and an M4 Max: time to first token and writing speed at five prompt lengths, error against Q8_0, load time, memory, and each one's share of its GPU's limit"></p>
 
-<details><summary>How it was measured</summary>
-
-- **Machines**: an RX 7900 XTX (24 GB) with a Ryzen 7 7800X3D and 64 GB of DDR5, an RTX 5070 (12 GB) with a Core
-  i5-11600KF and 64 GB of RAM, rented on vast.ai, both on Linux, and an M4 Max Mac Studio with 36 GB on macOS 27.2. One
-  engine ran at a time, and one client timed every request.
-- **Chrysalis**: its own file, 3.8 bits per expert weight, 63 GB plus a 54 GB lookup table read from disk.
-- **Strata**: IQ3_S (3.3 bits) and Q2_0 (2.3 bits). 0.2.6 on the RX 7900 with its RX 7900 switches on, and 0.2.9 on the
-  RTX 5070 with the setup its installer writes. Strata doesn't run on a Mac.
-- **Prompts**: short, 4K and 16K are Strata's standard benchmark, run through its own client code with 512-token answers.
-  100K is the same kind of records at 98,878 tokens. The follow-up adds about 1,100 tokens to that chat.
-- **Rounds**: medians over two rounds on each PC and one on the Mac, run from October 30 to November 1, 2026.
-- **Error**: KL against Q8_0 over 1,082 tokens of prose, a technical explanation and Python. Strata's files ran in
-  llama.cpp.
-- **Memory**: the peak private RAM of each server, pinned buffers included, and the peak footprint on the Mac.
-- **Share of each GPU's limit**: computed by [bench/limits.py](bench/limits.py), counting the whole model as if it were in
-  VRAM. Strata doesn't report the tokens each of its passes writes.
-
-</details>
-
 ## Qwen3.8-27B: Chrysalis vs llama.cpp and MLX
 
 <p align="center"><img src="media/27b.png" width="860" alt="Qwen3.8-27B in Chrysalis, llama.cpp and MLX on an RX 7900 XTX, an RTX 5070 and an M4 Max: time to first token and writing speed at five prompt lengths, error against Q8_0, load time, memory, and each one's share of its GPU's limit"></p>
-
-<details><summary>How it was measured</summary>
-
-- **Machines and prompts**: the same as above. The benchmark's thinking budget of 0 is left out, because Strata and
-  llama.cpp read it differently.
-- **The file**: Chrysalis and llama.cpp ran the same 16 GB file, 4.65 bits per weight on average.
-- **llama.cpp**: commit 9c2e0e4 for HIP and CUDA, and Homebrew's build 11669 on the Mac. Flash attention, MTP with 3
-  drafts, one slot and a 131K context. The RX 7900 ran every layer on the GPU with an 8-bit KV cache and prompt batches of
-  2,048. The RTX 5070 ran the 21 of 66 layers its own fit chose.
-- **MLX**: 0.32.4 with mlx-lm 0.32.2 and mlx-community's 4-bit model, through `mlx_lm.server`, which has no MTP for this
-  model. The 100K prompt ran with prefill steps of 512, because the default ran out of memory. The follow-up ran out of
-  memory at 512 too.
-- **Rounds**: medians over two rounds for Chrysalis and one for llama.cpp and MLX, run from October 26 to November 1, 2026.
-- **Error and memory**: as above. Chrysalis's footprint on the Mac includes its conversation snapshots.
-- **Share of each GPU's limit**: as above, with each engine's tokens per pass from its log. The Mac uses Apple's published
-  bandwidth and its GPU's FP16 rate.
-
-</details>
 
 ## Editing artifacts by pointing at them
 
@@ -166,6 +129,163 @@ others from the SSD.
 A small card holds what it can of the 27B and reads the other layers from pinned RAM as it writes.
 
 Runs repeat to the bit, and each engine change is checked against the last on every machine.
+
+<details><summary>For agents</summary>
+
+**How Qwen3.8-Flash-Next was measured**
+
+- **Machines**: an RX 7900 XTX (24 GB) with a Ryzen 7 7800X3D and 64 GB of DDR5, an RTX 5070 (12 GB) with a Core
+  i5-11600KF and 64 GB of RAM, rented on vast.ai, both on Linux, and an M4 Max Mac Studio with 36 GB on macOS 27.2. One
+  engine ran at a time, and one client timed every request.
+- **Chrysalis**: its own file, 3.8 bits per expert weight, 63 GB plus a 54 GB lookup table read from disk.
+- **Strata**: IQ3_S (3.3 bits) and Q2_0 (2.3 bits). 0.2.6 on the RX 7900 with its RX 7900 switches on, and 0.2.9 on the
+  RTX 5070 with the setup its installer writes. Strata doesn't run on a Mac.
+- **Prompts**: short, 4K and 16K are Strata's standard benchmark, run through its own client code with 512-token answers.
+  100K is the same kind of records at 98,878 tokens. The follow-up adds about 1,100 tokens to that chat.
+- **Rounds**: medians over two rounds on each PC and one on the Mac, run from October 30 to November 1, 2026.
+- **Error**: KL against Q8_0 over 1,082 tokens of prose, a technical explanation and Python. Strata's files ran in
+  llama.cpp.
+- **Memory**: the peak private RAM of each server, pinned buffers included, and the peak footprint on the Mac.
+- **Share of each GPU's limit**: computed by [bench/limits.py](bench/limits.py), counting the whole model as if it were in
+  VRAM. Strata doesn't report the tokens each of its passes writes.
+
+**Qwen3.8-Flash-Next, RX 7900 XTX**
+
+| | Chrysalis 7900 XTX (ROCm) | Strata IQ3_S 7900 XTX (ROCm) | Strata Q2_0 7900 XTX (ROCm) |
+| --- | ---: | ---: | ---: |
+| First token, short prompt | 0.24 s | 0.67 s | 0.37 s |
+| First token, 4K prompt | 1.8 s | 3.4 s | 3.0 s |
+| First token, 16K prompt | 5.9 s | 10.7 s | 9.8 s |
+| First token, 100K prompt | 37.7 s | 66.1 s | 60.9 s |
+| First token, follow-up in the 100K chat | 1.1 s | 2.1 s | 1.9 s |
+| Writing, short prompt | 91.8 tok/s | 72.4 tok/s | 110.0 tok/s |
+| Writing, 4K prompt | 91.2 tok/s | 67.6 tok/s | 94.8 tok/s |
+| Writing, 16K prompt | 86.2 tok/s | 72.5 tok/s | 96.3 tok/s |
+| Writing, 100K prompt | 82.3 tok/s | 66.5 tok/s | 82.2 tok/s |
+| Writing, follow-up in the 100K chat | 89.6 tok/s | 71.7 tok/s | 96.6 tok/s |
+| Error vs Q8_0, mean KL over 1,082 tokens | 0.0339 | 0.0550 | 0.187 |
+| Load time, to a first answer | 14.8 s | 21.6 s | 16.2 s |
+| Peak memory | 54.2 GB | 55.3 GB | 45.1 GB |
+| Share of the GPU's limit, reading 100K | 29% | 17% | 18% |
+| Share of the GPU's limit, writing at 100K | 24% | not reported | not reported |
+
+**Qwen3.8-Flash-Next, RTX 5070**
+
+| | Chrysalis RTX 5070 (CUDA) | Strata IQ3_S RTX 5070 (CUDA) | Strata Q2_0 RTX 5070 (CUDA) |
+| --- | ---: | ---: | ---: |
+| First token, short prompt | 0.61 s | 0.84 s | 0.70 s |
+| First token, 4K prompt | 2.7 s | 2.3 s | 1.6 s |
+| First token, 16K prompt | 8.2 s | 7.9 s | 5.2 s |
+| First token, 100K prompt | 52.5 s | 46.5 s | 33.1 s |
+| First token, follow-up in the 100K chat | 1.7 s | 2.8 s | 2.2 s |
+| Writing, short prompt | 33.7 tok/s | 54.0 tok/s | 102.0 tok/s |
+| Writing, 4K prompt | 36.3 tok/s | 52.3 tok/s | 100.8 tok/s |
+| Writing, 16K prompt | 33.5 tok/s | 54.8 tok/s | 91.1 tok/s |
+| Writing, 100K prompt | 31.3 tok/s | 56.1 tok/s | 96.2 tok/s |
+| Writing, follow-up in the 100K chat | 30.6 tok/s | 54.9 tok/s | 97.1 tok/s |
+| Error vs Q8_0, mean KL over 1,082 tokens | 0.0315 | 0.0550 | 0.187 |
+| Load time, to a first answer | 24.2 s | 38.2 s | 28.1 s |
+| Peak memory | 59.4 GB | 56.6 GB | 44.5 GB |
+| Share of the GPU's limit, reading 100K | 16% | 18% | 25% |
+| Share of the GPU's limit, writing at 100K | 12% | not reported | not reported |
+
+**Qwen3.8-Flash-Next, M4 Max**
+
+| | Chrysalis M4 Max (Metal) |
+| --- | ---: |
+| First token, short prompt | 3.0 s |
+| First token, 4K prompt | 14.3 s |
+| First token, 16K prompt | 39.6 s |
+| First token, 100K prompt | 254 s |
+| First token, follow-up in the 100K chat | 11.7 s |
+| Writing, short prompt | 9.3 tok/s |
+| Writing, 4K prompt | 9.6 tok/s |
+| Writing, 16K prompt | 8.9 tok/s |
+| Writing, 100K prompt | 8.2 tok/s |
+| Writing, follow-up in the 100K chat | 9.7 tok/s |
+| Error vs Q8_0, mean KL over 1,082 tokens | 0.0351 |
+| Load time, to a first answer | 6.9 s |
+| Peak memory | 32.1 GB |
+| Share of the GPU's limit, reading 100K | 20% |
+| Share of the GPU's limit, writing at 100K | 6% |
+
+**How Qwen3.8-27B was measured**
+
+- **Machines and prompts**: the same as above. The benchmark's thinking budget of 0 is left out, because Strata and
+  llama.cpp read it differently.
+- **The file**: Chrysalis and llama.cpp ran the same 16 GB file, 4.65 bits per weight on average.
+- **llama.cpp**: commit 9c2e0e4 for HIP and CUDA, and Homebrew's build 11669 on the Mac. Flash attention, MTP with 3
+  drafts, one slot and a 131K context. The RX 7900 ran every layer on the GPU with an 8-bit KV cache and prompt batches of
+  2,048. The RTX 5070 ran the 21 of 66 layers its own fit chose.
+- **MLX**: 0.32.4 with mlx-lm 0.32.2 and mlx-community's 4-bit model, through `mlx_lm.server`, which has no MTP for this
+  model. The 100K prompt ran with prefill steps of 512, because the default ran out of memory. The follow-up ran out of
+  memory at 512 too.
+- **Rounds**: medians over two rounds for Chrysalis and one for llama.cpp and MLX, run from October 26 to November 1, 2026.
+- **Error and memory**: as above. Chrysalis's footprint on the Mac includes its conversation snapshots.
+- **Share of each GPU's limit**: as above, with each engine's tokens per pass from its log. The Mac uses Apple's published
+  bandwidth and its GPU's FP16 rate.
+
+**Qwen3.8-27B, RX 7900 XTX**
+
+| | Chrysalis 7900 XTX (ROCm) | llama.cpp 7900 XTX (ROCm) |
+| --- | ---: | ---: |
+| First token, short prompt | 0.12 s | 0.31 s |
+| First token, 4K prompt | 2.8 s | 4.0 s |
+| First token, 16K prompt | 11.6 s | 16.9 s |
+| First token, 100K prompt | 94.1 s | 146 s |
+| First token, follow-up in the 100K chat | 1.8 s | 2.9 s |
+| Writing, short prompt | 104.0 tok/s | 68.4 tok/s |
+| Writing, 4K prompt | 90.5 tok/s | 57.2 tok/s |
+| Writing, 16K prompt | 80.8 tok/s | 51.5 tok/s |
+| Writing, 100K prompt | 73.0 tok/s | 34.7 tok/s |
+| Writing, follow-up in the 100K chat | 74.2 tok/s | 38.5 tok/s |
+| Error vs Q8_0, mean KL over 1,082 tokens | 0.0117 | 0.0141 |
+| Load time, to a first answer | 1.4 s | 3.7 s |
+| Peak memory | 7.7 GB | 13.4 GB |
+| Share of the GPU's limit, reading 100K | 62% | 40% |
+| Share of the GPU's limit, writing at 100K | 55% | 27% |
+
+**Qwen3.8-27B, RTX 5070**
+
+| | Chrysalis RTX 5070 (CUDA) | llama.cpp RTX 5070 (CUDA) |
+| --- | ---: | ---: |
+| First token, short prompt | 0.96 s | 2.1 s |
+| First token, 4K prompt | 6.2 s | 6.7 s |
+| First token, 16K prompt | 24.1 s | 24.0 s |
+| First token, 100K prompt | 199 s | 177 s |
+| First token, follow-up in the 100K chat | 4.3 s | 12.8 s |
+| Writing, short prompt | 8.9 tok/s | 4.3 tok/s |
+| Writing, 4K prompt | 7.9 tok/s | 3.6 tok/s |
+| Writing, 16K prompt | 7.4 tok/s | 2.4 tok/s |
+| Writing, 100K prompt | 5.3 tok/s | 0.8 tok/s |
+| Writing, follow-up in the 100K chat | 6.0 tok/s | 0.8 tok/s |
+| Error vs Q8_0, mean KL over 1,082 tokens | 0.0116 | 0.0115 |
+| Load time, to a first answer | 7.0 s | 7.6 s |
+| Peak memory | 17.4 GB | 17.3 GB |
+| Share of the GPU's limit, reading 100K | 22% | 25% |
+| Share of the GPU's limit, writing at 100K | 6% | 1% |
+
+**Qwen3.8-27B, M4 Max**
+
+| | Chrysalis M4 Max (Metal) | MLX M4 Max (Metal) | llama.cpp M4 Max (Metal) |
+| --- | ---: | ---: | ---: |
+| First token, short prompt | 0.31 s | 0.56 s | 0.78 s |
+| First token, 4K prompt | 19.9 s | 19.5 s | 20.7 s |
+| First token, 16K prompt | 82.2 s | 82.4 s | 88.8 s |
+| First token, 100K prompt | 788 s | 666 s | 819 s |
+| First token, follow-up in the 100K chat | 14.0 s | out of memory | 14.9 s |
+| Writing, short prompt | 32.4 tok/s | 21.3 tok/s | 29.4 tok/s |
+| Writing, 4K prompt | 30.4 tok/s | 20.4 tok/s | 27.0 tok/s |
+| Writing, 16K prompt | 28.6 tok/s | 19.5 tok/s | 25.2 tok/s |
+| Writing, 100K prompt | 17.0 tok/s | 15.2 tok/s | 14.8 tok/s |
+| Writing, follow-up in the 100K chat | 21.7 tok/s | out of memory | 17.2 tok/s |
+| Error vs Q8_0, mean KL over 1,082 tokens | 0.0113 | 0.0351 | 0.0112 |
+| Load time, to a first answer | 8.3 s | 6.0 s | 8.7 s |
+| Peak memory | 25.2 GB | 30.6 GB | 20.9 GB |
+| Share of the GPU's limit, reading 100K | 33% | 39% | 32% |
+| Share of the GPU's limit, writing at 100K | 35% | 68% | 30% |
+
+</details>
 
 ## Links
 
