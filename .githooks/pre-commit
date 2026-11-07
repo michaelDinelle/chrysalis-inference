@@ -1,0 +1,3 @@
+#!/bin/sh
+sh .hill/hill check || exit 1
+python3 media/charts.py --check || exit 1

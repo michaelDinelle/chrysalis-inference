@@ -36,14 +36,17 @@ a record and at least one is better: no trade-offs, no net gains, no "within noi
 machine. `.hill/hill gate` is the only judge; if it is wrong, fix it and gate again. The ledger is append-only. Rewards
 are never dropped, re-keyed or loosened. Only the user can make an exception, and agents never propose one. Harness
 changes (bench/, hill.json, .hill/) land on their own, never with a product change. The README has no Rewards table and
-`hill table` isn't run: report each verdict's table to the user instead, and keep the README's charts and its For agents numbers true to what Chrysalis does now.
+`hill table` isn't run: report each verdict's table to the user instead, and keep the README's charts and its For agents
+numbers true to what Chrysalis does now. media/charts.json holds those numbers, and `data/venv/bin/python media/charts.py`
+is the only thing that writes the charts and the tables, both from that file: never edit them by hand. `python3
+media/charts.py --check` fails if either differs from it, and the hook and `make test_web` run it.
 
 A gate measures the working tree against HEAD in the same session, both models on the GPU with Chrysalis's model server
 stopped; bench/hill_ready.py refuses to start while anything else holds the GPU or free memory is short. Measuring time
 is a reward too: a gate takes minutes, deep context is restored from snapshots primed once per machine, and the bench
 only gets faster. Every machine with a record (the RX 7900 here, the M4 Max on studio, the RTX 5070 rented on
 vast.ai) judges each change: run `.hill/hill gate` there and append its new .hill/ledger.jsonl lines here before
-committing. The hook (`git config core.hooksPath bench/hooks`) holds every commit to that.
+committing. The hook (`git config core.hooksPath .githooks`) holds every commit to that.
 
 ## Comments
 
