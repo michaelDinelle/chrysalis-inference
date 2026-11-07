@@ -3,6 +3,8 @@
   <head>
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <meta name="color-scheme" content="dark" />
+    <meta name="theme-color" content="#121010" />
     <meta http-equiv="Content-Security-Policy" content="default-src 'self'; img-src 'self' data: blob:; style-src 'self' 'unsafe-inline'; font-src 'self' data:; connect-src 'self'; object-src 'none'; base-uri 'none'; form-action 'self'" />
     <title>Chrysalis Inference</title>
     <link rel="icon" href="./logo.svg" />
@@ -125,24 +127,28 @@
             <div id="model-pop" class="model-pop" role="listbox" aria-label="Model" hidden></div>
             <div id="tools-pop" class="tools-pop" role="dialog" aria-label="Tools in this chat" hidden></div>
             <div class="composer-row">
-              <button id="attach" class="act attach" type="button" title="Attach text files or pictures (or drop or paste them)" aria-label="Attach files"></button>
-              <input id="attach-file" type="file" multiple hidden />
-              <div class="think-ctl">
-                <div id="energy" class="energy" role="slider" tabindex="0" aria-label="Thinking" aria-valuemin="0" aria-valuemax="3"></div>
-                <div id="energy-stops" class="energy-stops"></div>
+              <div class="composer-options">
+                <button id="attach" class="act attach" type="button" title="Attach text files or pictures (or drop or paste them)" aria-label="Attach files"></button>
+                <input id="attach-file" type="file" multiple hidden />
+                <div class="think-ctl">
+                  <div id="energy" class="energy" role="slider" tabindex="0" aria-label="Thinking" aria-valuemin="0" aria-valuemax="3"></div>
+                  <div id="energy-stops" class="energy-stops"></div>
+                </div>
+                <button id="tools-btn" class="tools-btn" type="button" aria-haspopup="dialog" aria-expanded="false" aria-controls="tools-pop"></button>
               </div>
-              <button id="tools-btn" class="tools-btn" type="button" aria-haspopup="dialog" aria-expanded="false" aria-controls="tools-pop"></button>
-              <span id="meter" class="meter"></span>
-              <button id="model-btn" class="model-btn" type="button" aria-haspopup="listbox" aria-expanded="false" aria-controls="model-pop"></button>
-              <button id="power" class="act power" type="button"></button>
-              <button id="draft" class="draft" type="button" hidden></button>
-              <button id="voice" class="voice" type="button" title="Voice mode" aria-label="Voice mode"></button>
-              <div id="voice-pill" class="voice-pill" hidden>
-                <button id="voice-dots" class="voice-dots" type="button"><i></i><i></i><i></i><i></i><i></i></button>
-                <button id="voice-mute" class="voice-mic" type="button"></button>
+              <div class="composer-actions">
+                <span id="meter" class="meter"></span>
+                <button id="model-btn" class="model-btn" type="button" aria-haspopup="listbox" aria-expanded="false" aria-controls="model-pop"></button>
+                <button id="power" class="act power" type="button"></button>
+                <button id="draft" class="draft" type="button" hidden></button>
+                <button id="voice" class="voice" type="button" title="Voice mode" aria-label="Voice mode"></button>
+                <div id="voice-pill" class="voice-pill" hidden>
+                  <button id="voice-dots" class="voice-dots" type="button"><i></i><i></i><i></i><i></i><i></i></button>
+                  <button id="voice-mute" class="voice-mic" type="button"></button>
+                </div>
+                <button id="voice-pick" class="voice-name" type="button" hidden></button>
+                <button id="send" class="send" type="submit" aria-label="Send"></button>
               </div>
-              <button id="voice-pick" class="voice-name" type="button"></button>
-              <button id="send" class="send" type="submit" aria-label="Send"></button>
             </div>
           </div>
           <p class="hint"><span class="hint-text">Enter to send · Shift+Enter for a new line · Esc stops the reply</span><span class="voice-hint-line"><span id="voice-status" role="status" aria-live="polite"></span><span class="voice-keys"> · Esc talks over the reply · ■ ends voice mode</span></span></p>
@@ -173,7 +179,6 @@
           <button type="button" data-sec="sampling">Sampling</button>
         </nav>
         <div class="set-look">
-          <div id="theme-pick" class="segmented" role="radiogroup" aria-label="Theme"></div>
           <label class="set-sea" title="The ASCII background behind chats"><span>ASCII background</span><button id="sea-switch" class="switch" type="button" role="switch" aria-checked="false"></button></label>
         </div>
       </div>

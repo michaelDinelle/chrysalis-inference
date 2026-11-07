@@ -1,4 +1,3 @@
-import { type Theme, choose, chosen } from "./theme";
 import DOMPurify from "dompurify";
 import hljs from "highlight.js/lib/common";
 import katex from "katex";
@@ -888,6 +887,33 @@ marked.use({
   },
 });
 const markdown = (src: string) => DOMPurify.sanitize(marked.parse(src, { async: false }));
+const cellsOf = (row: string) => row.trim().replace(/^\|/, "").replace(/(?<!\\)\|$/, "").split(/(?<!\\)\|/).map((c) => c.trim());
+function bareRows(src: string) {
+  const row = /[^\n]*\|[^\n]*(?:\n|$)/y, rows: string[][] = [];
+  let raw = "";
+  for (let m = row.exec(src); m && !/^(?: {4}| {0,3}(?:[-*+] |\d+[.)] |#{1,6} |>|```|~~~))/.test(m[0]); m = row.exec(src)) {
+    const cells = cellsOf(m[0]);
+    if (cells.length < 2 || (rows.length && cells.length !== rows[0].length)) break;
+    if (rows.length === 1 && cells.every((c) => /^:?-+:?$/.test(c))) return;
+    rows.push(cells);
+    raw += m[0];
+  }
+  return rows.length > 2 ? { raw, rows } : undefined;
+}
+marked.use({
+  extensions: [{
+    name: "bareTable",
+    level: "block",
+    start(src) { for (const m of src.matchAll(/\n(?=[^\n]*\|)/g)) if (bareRows(src.slice(m.index + 1))) return m.index + 1; },
+    tokenizer(src) {
+      const found = bareRows(src);
+      if (!found) return;
+      const cell = (text: string, header: boolean) => ({ text, tokens: this.lexer.inline(text), header, align: null });
+      return { type: "table", raw: found.raw, align: found.rows[0].map(() => null), header: found.rows[0].map((c) => cell(c, true)),
+        rows: found.rows.slice(1).map((r) => r.map((c) => cell(c, false))) };
+    },
+  }],
+});
 
 const QUOTES: Record<string, string> = { '"': '"', "“": "”", "«": "»", "「": "」", "『": "』", "＂": "＂" };
 const chatTokens = (src: string) => marked.lexer(src, { ...marked.defaults, breaks: true });
@@ -928,9 +954,22 @@ marked.use({
     renderer: (t) => `<span class="math${t.display ? " display" : ""}" data-tex="${escapeHtml(t.text)}"></span>`,
   }],
 });
+function fitTable(box: Element) {
+  box.classList.remove("dense", "stacked");
+  if (box.scrollWidth > box.clientWidth) box.classList.add("dense");
+  if (box.scrollWidth > box.clientWidth) box.classList.replace("dense", "stacked");
+}
+const tableFit = new ResizeObserver((seen) => { for (const s of seen) fitTable(s.target.parentElement!); });
 function typeset(root: ParentNode) {
   for (const el of root.querySelectorAll<HTMLElement>(".math[data-tex]"))
     katex.render(el.dataset.tex!, el, { displayMode: el.classList.contains("display"), throwOnError: false, strict: "ignore", output: "htmlAndMathml" });
+  for (const table of root.querySelectorAll("table")) {
+    const box = h("div", "table"), ruler = h("i", "table-ruler"), heads = [...table.querySelectorAll("thead th")].map((c) => c.textContent!);
+    for (const row of table.querySelectorAll("tbody tr")) [...row.children].forEach((c, k) => { if (heads[k]) (c as HTMLElement).dataset.label = heads[k]; });
+    table.replaceWith(box);
+    box.append(ruler, table);
+    tableFit.observe(ruler);
+  }
 }
 
 interface Blocks { raws: string[]; nodes: Node[][] }
@@ -943,7 +982,7 @@ function settle(src: string): string {
   const prose = src.replace(/^ {0,3}(`{3,}|~{3,})[^]*?^ {0,3}\1.*$/gm, "").replace(/`[^`\n]*`/g, "");
   if ((prose.match(/\$\$/g)?.length ?? 0) % 2) return src.slice(0, src.lastIndexOf("$$"));
   if (prose.lastIndexOf("\\[") > prose.lastIndexOf("\\]")) return src.slice(0, src.lastIndexOf("\\["));
-  if (/^\s*\|/.test(line)) return head;
+  if (/^\s*\|/.test(line) || /\|.*\n$/.test(head)) return head;
   if (/^\s*(?:[#>*+-]|\d+[.)])*\s*$/.test(line)) return head;
   if (!/\s$/.test(line)) line = line.replace(/[A-Za-z0-9À-ɏ'’_-]{1,24}$/, "");
   const text = head + line, p = text.lastIndexOf("\n\n") + 1;
@@ -2897,15 +2936,6 @@ seaSwitch.onclick = () => {
   showSea(on);
 };
 showSea(pref("sea", "on") === "on");
-const themePick = $("theme-pick");
-for (const [t, label] of [["system", "System"], ["light", "Light"], ["dark", "Dark"]] as [Theme, string][]) {
-  const b = h("button", "", label);
-  b.type = "button";
-  b.setAttribute("role", "radio");
-  b.dataset.theme = t;
-  b.onclick = () => { choose(t); markTheme(); };
-  themePick.append(b);
-}
 const PHONE = /iPhone|iPad|Android/.test(navigator.userAgent) || (navigator.maxTouchPoints > 1 && /Mac/.test(navigator.platform));
 const connectView = $<HTMLDialogElement>("connect-view");
 let known: Set<string> | undefined, joined = "", connectTimer = 0;
@@ -3020,10 +3050,6 @@ function checkTrust(): Promise<boolean> {
     document.body.append(frame);
   });
 }
-function markTheme() {
-  for (const b of themePick.querySelectorAll<HTMLElement>("button")) b.setAttribute("aria-checked", String(b.dataset.theme === chosen()));
-}
-markTheme();
 
 function paintTokens(v: View, m: Message) {
   const td = tokens.get(m.id!)!;
@@ -5035,8 +5061,11 @@ function setModelsOpen(open: boolean, refocus = false) {
   $("model-pop").hidden = !open;
   delete $("model-pop").dataset.key;
   renderControls();
-  if (open) $("model-pop").querySelector<HTMLElement>(".current")?.focus();
-  else if (refocus) $("model-btn").focus();
+  if (open) {
+    const pop = $("model-pop"), room = pop.offsetParent?.clientWidth ?? innerWidth;
+    pop.style.left = `${Math.max(8, Math.min($("model-btn").offsetLeft, room - pop.offsetWidth - 8))}px`;
+    pop.querySelector<HTMLElement>(".current")?.focus();
+  } else if (refocus) $("model-btn").focus();
 }
 
 let catalog: Catalog | null = null, toolsOpen = false;
@@ -5284,7 +5313,7 @@ function renderControls() {
   const state = status.loading || status.state === "loading" ? "loading" : status.state;
   const pct = status.progress == null ? "" : `${Math.round(status.progress * 100)}%`, name = modelName(current());
   const btn = $("model-btn");
-  btn.innerHTML = `<span class="dot ${state}"></span>${shortName(current())}${state === "loading" && pct ? `<span class="model-pct">${pct}</span>` : ""}${icon("chevron")}`;
+  btn.innerHTML = `<span class="dot ${state}"></span><span class="model-name">${shortName(current())}</span>${state === "loading" && pct ? `<span class="model-pct">${pct}</span>` : ""}${icon("chevron")}`;
   const b = status.backend, down = b?.listed && !b.listed.ok ? b.listed.error : "";
   btn.title = !onService() ? (down ? `${b!.name}: ${down}` : `${name || "No model"} on ${b!.name}`)
     : state === "online" ? `${name}: ready` : state === "loading" ? `Loading ${name}` : `${name}: stopped`;
@@ -5797,6 +5826,7 @@ function voiceTrigger(spot: VoiceSpot, name: HTMLButtonElement = h("button", "vo
   const el = h("span", "voice-pick"), play = playButton(spot, spot.now(), "this voice"), mine = () => voiceMenu.matches(":popover-open") && menuSpot === spot;
   let wasOpen = false;
   name.type = "button";
+  name.hidden = false;
   name.setAttribute("aria-haspopup", "dialog");
   name.setAttribute("aria-expanded", "false");
   name.addEventListener("pointerdown", () => { wasOpen = mine(); });

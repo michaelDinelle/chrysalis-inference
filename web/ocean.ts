@@ -1,5 +1,4 @@
 import logo from "./logo.svg";
-import { isDark, onTheme } from "./theme";
 
 const SEA = " ·~≈+*#";
 const TUBE = "·:+*≈#%@";
@@ -376,7 +375,6 @@ export class Ocean {
     this.hintAt = hint;
     this.roomAt = room;
     this.dress(this.canvas);
-    onTheme(() => { this.readColors(); this.wake(); });
     this.still.addEventListener("change", () => this.wake());
     addEventListener("scroll", () => this.layout(), { passive: true });
   }
@@ -454,7 +452,7 @@ export class Ocean {
   private readColors() {
     const probe = document.body.appendChild(document.createElement("i"));
     const read = (v: string) => { probe.style.color = `var(${v})`; return rgb(getComputedStyle(probe).color); };
-    this.colors = { sea: read("--muted"), pink: read("--accent"), hi: isDark() ? [1.0, 0.86, 0.92] : read("--accent-hi") };
+    this.colors = { sea: read("--muted"), pink: read("--accent"), hi: [1.0, 0.86, 0.92] };
     probe.remove();
   }
 

@@ -59,7 +59,7 @@ const page = (body: string, script: string, sea: string) => `<!doctype html>
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
-<meta name="color-scheme" content="light dark">
+<meta name="color-scheme" content="dark">
 <title>Connect to Chrysalis</title>
 <style>
 ${TOKENS}

@@ -72,6 +72,13 @@ const REPLIES: Record<string, string> = {
   "did not apply": '```edit panda\n<<<<<<< SEARCH\n<rect x="35" y="50" width="30" height="10" fill="#8b4513"/>\n=======\n<rect x="35" y="50" width="30" height="10" fill="#0000ff"/>\n>>>>>>> REPLACE\n```',
   "make this orange": '```edit panda\n<g id="burger">\n  <rect x="35" y="50" width="30" height="10" fill="#ff8c00"/>\n</g>\n```',
   "capital of France": "Paris.",
+  "a small table": "The fruit:\n\n| Fruit | Weight | Color |\n| --- | ---: | :-: |\n| Apple | 180 g | Red |\n| Banana | 120 g | Yellow |\n\nThat is all.",
+  "only a table": "| Fruit | Color |\n| --- | --- |\n| Apple | Red |\n",
+  "a wide table": `| ${Array.from({ length: 12 }, (_, i) => `Column number ${i}`).join(" | ")} |\n|${" --- |".repeat(12)}\n| ${Array.from({ length: 12 }, (_, i) => `a fairly long value ${i}`).join(" | ")} |\n`,
+  "a long reply": Array(40).fill("Every word of this reply takes its place on a long line.").join(" "),
+  "a long link": `| Name | Where |\n| --- | --- |\n| Docs | https://example.com/${"long-path-".repeat(30)} |\n`,
+  "a bare table": "Here they are:\nFruit       | Color      | Typical Season\nApple       | Red/Green  | Fall\nBanana      | Yellow     | **Summer**\nGrape       | Purple     | Summer\n\nThat is all.",
+  "pipes but no table": "One | two\nThree | four\n\n- a | b\n- c | d\n- e | f\n\nx | y | z\nno pipes here\nd | e | f\n\n```\nq | r\ns | t\nu | v\n```",
   math: "Solve $ax^2 + bx + c = 0$:\n\n$$\nx = \\frac{-b \\pm \\sqrt{b^2 - 4ac}}{2a}\n$$\n\nAlso \\(e^{i\\pi} + 1 = 0\\) and\n\n\\[\n\\int_0^1 x\\,dx\n\\]\n\n" +
     "It costs $5 and $10. Escaped: \\$x\\$. Code: `$HOME` stays.\n",
   diagram: "```mermaid\nflowchart LR\n  A[Ask] --> B{Cached?}\n  B -->|yes| C[Append]\n  B -->|no| D[Prefill]\n```\n\n" +
@@ -932,7 +939,6 @@ test("TeX is typeset; prices, escaped dollars and code stay text", async () => {
 
 test("a chat reads as SillyTavern sets it: speech in quotes in its orange, the marks kept (one left open to its line's end), italics muted but a quote's inside one, a line break where one was written, code as written; the user's own text the same, its code and HTML as typed; a document's text as written", async () => {
   const page = await open();
-  await page.emulateMediaFeatures([{ name: "prefers-color-scheme", value: "dark" }]);
   await send(page, '*knocks* "Is **the kettle** on?" and `ls "x"` <b>as typed</b>');
   const look = (sel: string) => page.$eval(sel, (b) => {
     const color = (e: Element | null) => e && getComputedStyle(e).color;
@@ -1689,33 +1695,20 @@ test("What the model is sent shows the next request as Chrysalis gets it: the to
   await page.close();
 }, 60_000);
 
-test("the theme is the system's until Settings chooses one, which overrides it and is kept across a reload; System follows the system's scheme as it changes", async () => {
+test("Chrysalis is dark whatever the system prefers or an old choice of Light left behind, and Settings has no theme to pick", async () => {
   const page = await open();
-  const bg = async (want: "dark" | "light") => {
-    const lum = () => page.evaluate(() => {
-      const [r, g, b] = getComputedStyle(document.body).backgroundColor.match(/[\d.]+/g)!.map(Number);
-      return 0.2126 * r + 0.7152 * g + 0.0722 * b;
-    });
-    let v = await lum();
-    for (const end = Date.now() + 2000; (want === "dark" ? v >= 60 : v <= 200) && Date.now() < end; await Bun.sleep(25)) v = await lum();
-    return v;
-  };
-  const scheme = (value: "dark" | "light") => page.emulateMediaFeatures([{ name: "prefers-color-scheme", value }]);
-  await scheme("dark");
-  expect(await bg("dark")).toBeLessThan(60);
-  await scheme("light");
-  expect(await bg("light")).toBeGreaterThan(200);
-  await openSettings(page);
-  await page.click('#theme-pick [data-theme="dark"]');
-  expect(await bg("dark")).toBeLessThan(60);
+  const look = () => page.evaluate(() => {
+    const [r, g, b] = getComputedStyle(document.body).backgroundColor.match(/[\d.]+/g)!.map(Number);
+    return [0.2126 * r + 0.7152 * g + 0.0722 * b < 60, getComputedStyle(document.documentElement).colorScheme, document.querySelector("#theme-pick")];
+  });
+  const dark = [true, "dark", null];
+  for (const value of ["dark", "light"]) {
+    await page.emulateMediaFeatures([{ name: "prefers-color-scheme", value }]);
+    expect(await look()).toEqual(dark);
+  }
+  await page.evaluate(() => localStorage.setItem("theme", "light"));
   await page.reload({ waitUntil: "networkidle0" });
-  expect(await bg("dark")).toBeLessThan(60);
-  expect(await page.$eval('#theme-pick [aria-checked="true"]', (b) => (b as HTMLElement).dataset.theme)).toBe("dark");
-  await openSettings(page);
-  await page.click('#theme-pick [data-theme="system"]');
-  expect(await bg("light")).toBeGreaterThan(200);
-  await scheme("dark");
-  expect(await bg("dark")).toBeLessThan(60);
+  expect(await look()).toEqual(dark);
   await page.close();
 }, 30_000);
 
@@ -1730,6 +1723,158 @@ async function closeSettings(page: Page) {
 }
 const stored = (page: Page) => page.evaluate(() => JSON.parse(sessionStorage.getItem("settings2") ?? "{}").voice);
 const settled = async (ok: () => boolean, ms = 5000) => { for (const t = Date.now(); !ok() && Date.now() - t < ms; ) await Bun.sleep(25); return ok(); };
+
+const SIZES = [[1920, 1080], [1440, 900], [1210, 834], [834, 1210], [390, 844], [320, 640]] as const;
+const composerFaults = (page: Page) => page.evaluate(() => {
+  const box = document.querySelector(".composer-box")!.getBoundingClientRect(), name = (e: Element) => e.id || e.className;
+  const shown = [...document.querySelectorAll(".composer-row button, .composer-row .think-ctl, .composer-row .voice-pill")].filter((e) => e.getBoundingClientRect().width > 0);
+  const out = shown.filter((e) => { const r = e.getBoundingClientRect(); return r.left < box.left || r.right > box.right || r.top < box.top || r.bottom > box.bottom; });
+  const blank = shown.filter((e) => e.matches("button") && !e.textContent!.trim() && !e.querySelector("svg, i"));
+  return { out: out.map(name), blank: blank.map(name), sideways: document.documentElement.scrollWidth > innerWidth };
+});
+const shown = (page: Page, sel: string) => page.$eval(sel, (e) => e.getBoundingClientRect().width > 0);
+const CLEAN = { out: [], blank: [], sideways: false };
+async function resize(page: Page, width: number, height: number) {
+  await page.setViewport({ width, height });
+  await page.evaluate(() => new Promise((done) => requestAnimationFrame(() => requestAnimationFrame(done))));
+}
+
+test("the message box holds every control inside it at each size from a big screen to a small phone, in a chat and in voice mode, and shows no blank button; voice mode keeps its pill, its voice and its stop", async () => {
+  const page = await open();
+  await page.emulateMediaFeatures([{ name: "prefers-reduced-motion", value: "reduce" }]);
+  expect(await composerFaults(page)).toEqual(CLEAN);
+  expect(await shown(page, "#voice-pick")).toBe(false);
+  await send(page, "capital of France");
+  for (const [width, height] of SIZES) {
+    await resize(page, width, height);
+    expect({ width, ...await composerFaults(page) }).toEqual({ width, ...CLEAN });
+    expect(await shown(page, "#draft")).toBe(true);
+  }
+  await page.close();
+  const { page: talking } = await voicePage("silent");
+  await talking.emulateMediaFeatures([{ name: "prefers-reduced-motion", value: "reduce" }]);
+  for (const [width, height] of SIZES) {
+    await resize(talking, width, height);
+    expect({ width, ...await composerFaults(talking) }).toEqual({ width, ...CLEAN });
+    expect([await shown(talking, "#voice-pill"), await shown(talking, "#voice-pick"), await shown(talking, "#send")]).toEqual([true, true, true]);
+  }
+  await resize(talking, 1600, 900);
+  await talking.click("#send");
+  await talking.waitForFunction(() => !document.querySelector("#composer.voicing"));
+  expect(await composerFaults(talking)).toEqual(CLEAN);
+  expect(await shown(talking, "#voice-pick")).toBe(false);
+}, 60_000);
+
+test("the model list opens over its button and stays on the page at each size", async () => {
+  const page = await open();
+  await page.emulateMediaFeatures([{ name: "prefers-reduced-motion", value: "reduce" }]);
+  for (const [width, height] of SIZES) {
+    await resize(page, width, height);
+    await page.click("#model-btn");
+    await page.waitForSelector("#model-pop:not([hidden])");
+    const at = await page.evaluate(() => {
+      const pop = document.querySelector("#model-pop")!.getBoundingClientRect(), btn = document.querySelector("#model-btn")!.getBoundingClientRect();
+      return { fits: pop.left >= 0 && pop.right <= innerWidth, over: pop.bottom <= btn.top && pop.left < btn.right && pop.right > btn.left };
+    });
+    expect([width, at]).toEqual([width, { fits: true, over: true }]);
+    await page.keyboard.press("Escape");
+    await page.waitForSelector("#model-pop[hidden]", { hidden: true });
+  }
+  await page.close();
+}, 30_000);
+
+test("a table fills its reply edge to edge with the columns' alignment kept, and a table with nothing around it shows no second box", async () => {
+  const page = await open();
+  await send(page, "a small table");
+  const small = await page.$eval(".msg.assistant .table", (box) => {
+    const bubble = box.closest(".markdown")!.getBoundingClientRect(), table = box.querySelector("table")!.getBoundingClientRect(), style = (s: string) => getComputedStyle(box.querySelector(s)!);
+    return { edges: [Math.round(table.left - bubble.left), Math.round(bubble.right - table.right)], aligned: [style("th").textAlign, style("td:nth-child(2)").textAlign, style("td:nth-child(3)").textAlign].map((a) => a.replace("-webkit-", "")),
+      column: Math.round(bubble.right - document.querySelector(".composer-box")!.getBoundingClientRect().right) };
+  });
+  expect(small).toEqual({ edges: [1, 1], aligned: ["left", "right", "center"], column: 0 });
+  await send(page, "only a table");
+  expect(await page.$$eval(".msg.assistant .table", (b) => {
+    const box = b.at(-1)!, bubble = box.closest(".markdown")!, inner = box.getBoundingClientRect(), outer = bubble.getBoundingClientRect();
+    return [Math.round(inner.top - outer.top), Math.round(outer.bottom - inner.bottom), getComputedStyle(box).borderTopWidth, getComputedStyle(box).borderBottomWidth];
+  })).toEqual([1, 1, "0px", "0px"]);
+  await page.close();
+}, 30_000);
+
+test("no table runs past its bubble at any size: it wraps at its words and tightens, and with no room left each row becomes a list of labelled values, a long link breaking to fit, and it is a table again when the room comes back", async () => {
+  const page = await open();
+  await page.emulateMediaFeatures([{ name: "prefers-reduced-motion", value: "reduce" }]);
+  await send(page, "a wide table");
+  await send(page, "a long link");
+  const fit = () => page.$$eval(".msg.assistant .table", (boxes) => boxes.map((box) => {
+    const words = (el: Element) => [...(el.firstChild as Text).data.matchAll(/\S+/g)].map((m) => {
+      const r = document.createRange();
+      r.setStart(el.firstChild!, m.index);
+      r.setEnd(el.firstChild!, m.index + m[0].length);
+      return r.getClientRects().length;
+    });
+    const cells = [...box.querySelectorAll("th, td")].filter((c) => c.getBoundingClientRect().width > 0), link = box.querySelector("td:nth-child(2)")!.textContent!.startsWith("https");
+    return { stacked: box.classList.contains("stacked"), cut: box.scrollWidth > box.clientWidth, split: link ? 0 : cells.flatMap(words).filter((n) => n !== 1).length,
+      label: box.classList.contains("stacked") ? getComputedStyle(box.querySelector("td:nth-child(2)")!, "::before").content : "",
+      sides: (() => {
+        const outer = box.getBoundingClientRect(), fields = [...box.querySelectorAll("tbody tr:first-child td")].map((c) => c.getBoundingClientRect());
+        return [Math.round(Math.min(...fields.map((f) => f.left)) - outer.left), Math.round(outer.right - Math.max(...fields.map((f) => f.right)))];
+      })(),
+      inColumn: box.closest(".markdown")!.getBoundingClientRect().right <= document.querySelector(".composer-box")!.getBoundingClientRect().right + 0.5 };
+  }));
+  for (const [width, height] of SIZES) {
+    await resize(page, width, height);
+    const [wide, link] = await fit();
+    expect({ width, cut: [wide.cut, link.cut], split: wide.split, inColumn: [wide.inColumn, link.inColumn] }).toEqual({ width, cut: [false, false], split: 0, inColumn: [true, true] });
+    if (wide.stacked) expect([wide.label, wide.sides[0] - wide.sides[1]]).toEqual(['"Column number 1"', 0]);
+    expect(await page.evaluate(() => document.documentElement.scrollWidth > innerWidth)).toBe(false);
+  }
+  expect((await fit())[0].stacked).toBe(true);
+  await resize(page, 1920, 1080);
+  expect((await fit())[0].stacked).toBe(false);
+  await page.close();
+}, 40_000);
+
+test("rows of pipes with the dashes left out, as the model sometimes writes them, are a table, after a line of text and while still being written; pipes in two lines, a list, uneven lines or code stay as they are", async () => {
+  const page = await open();
+  await page.evaluate(() => {
+    (window as any).stray = 0;
+    new MutationObserver(() => {
+      const reply = [...document.querySelectorAll(".msg.assistant .markdown")].at(-1);
+      if (reply?.querySelector("table") && [...reply.querySelectorAll(":scope > p")].some((p) => p.textContent!.includes("|"))) (window as any).stray++;
+    }).observe(document.getElementById("thread")!, { childList: true, subtree: true, characterData: true });
+  });
+  await send(page, "steady a bare table");
+  expect(await page.$eval(".msg.assistant .markdown", (m) => ({
+    blocks: [...m.children].map((c) => c.tagName), head: [...m.querySelectorAll("th")].map((c) => c.textContent),
+    rows: [...m.querySelectorAll("tbody tr")].map((r) => [...r.children].map((c) => c.textContent)), bold: m.querySelector("td strong")?.textContent,
+  }))).toEqual({ blocks: ["P", "DIV", "P"], head: ["Fruit", "Color", "Typical Season"], bold: "Summer",
+    rows: [["Apple", "Red/Green", "Fall"], ["Banana", "Yellow", "Summer"], ["Grape", "Purple", "Summer"]] });
+  expect(await page.evaluate(() => (window as any).stray)).toBe(0);
+  await send(page, "pipes but no table");
+  expect(await page.$$eval(".msg.assistant .markdown", (m) => [m.at(-1)!.querySelectorAll("table").length, m.at(-1)!.querySelectorAll("li").length, m.at(-1)!.querySelector("pre")?.textContent]))
+    .toEqual([0, 3, "q | r\ns | t\nu | v"]);
+  await page.close();
+}, 30_000);
+
+test("the chat uses the room it has: on a big screen long messages run far past the old column and every message lines up with the message box; on a phone faces sit over the bubbles, which take the whole width, and the stats have a line of their own", async () => {
+  const page = await open();
+  await page.emulateMediaFeatures([{ name: "prefers-reduced-motion", value: "reduce" }]);
+  await resize(page, 1920, 1080);
+  await send(page, "a long reply please, ".repeat(30));
+  const rect = (s: string) => page.$eval(s, (e) => { const r = e.getBoundingClientRect(); return { left: Math.round(r.left), right: Math.round(r.right), width: Math.round(r.width) }; });
+  const big = { box: await rect(".composer-box"), mine: await rect(".msg.user .bubble"), myFace: await rect(".msg.user .speaker .face"), hers: await rect(".msg.assistant > .markdown"), herFace: await rect(".msg.assistant .speaker .face") };
+  expect([big.box.width >= 1100, big.mine.width > 900, big.hers.width > 1000]).toEqual([true, true, true]);
+  expect([big.herFace.left - big.box.left, big.hers.right - big.box.right, big.myFace.right - big.box.right]).toEqual([0, 0, 0]);
+  await resize(page, 390, 844);
+  const box = await rect(".composer-box"), hers = await rect(".msg.assistant > .markdown"), mine = await rect(".msg.user .bubble");
+  expect([hers.left - box.left, hers.right - box.right, mine.right - box.right]).toEqual([0, 0, 0]);
+  expect(await page.$eval(".msg.assistant", (m) => {
+    const name = m.querySelector(".speaker > span:last-child")!.getBoundingClientRect(), face = m.querySelector(".speaker .face")!.getBoundingClientRect(), bubble = m.querySelector(":scope > .markdown")!.getBoundingClientRect();
+    const stats = m.querySelector(".stats")!.getBoundingClientRect(), foot = m.querySelector(".msg-foot")!.getBoundingClientRect();
+    return { faceAbove: face.bottom <= bubble.top, nameBeside: name.left >= face.right, statsWidth: Math.round(stats.width) === Math.round(foot.width) };
+  })).toEqual({ faceAbove: true, nameBeside: true, statsWidth: true });
+  await page.close();
+}, 30_000);
 
 test("voice picker: a voice model not downloaded yet is downloaded from the picker, and then offers its voices", async () => {
   const { page } = await voicePage("pick");
@@ -2214,7 +2359,7 @@ test("the sea drawn by the CPU, in a browser without WebGL, is the sea WebGL2 dr
       for (const [size, width, height] of [["window", 1280, 800], ["phone", 390, 844]] as const) {
         const page = await (await chatContext(b)).newPage();
         page.on("pageerror", (e) => { throw e; });
-        await page.emulateMediaFeatures([{ name: "prefers-reduced-motion", value: "reduce" }, { name: "prefers-color-scheme", value: "dark" }]);
+        await page.emulateMediaFeatures([{ name: "prefers-reduced-motion", value: "reduce" }]);
         await page.setViewport({ width, height });
         await page.goto(`${base}/`, { waitUntil: "load" });
         expect(await page.evaluate(() => !!document.createElement("canvas").getContext("webgl2"))).toBe(name === "gpu");
@@ -2254,8 +2399,8 @@ test("a new chat is the butterfly in a sea under the message box too, never blan
           return c;
         } as typeof get;
       });
-      await page.emulateMediaFeatures([{ name: "prefers-color-scheme", value: "dark" }, { name: "prefers-reduced-motion", value: motion }]);
-      await page.setViewport({ width: 1200, height: 900 });
+      await page.emulateMediaFeatures([{ name: "prefers-reduced-motion", value: motion }]);
+      await page.setViewport({ width: 1600, height: 900 });
       await page.goto(`${base}/`, { waitUntil: "networkidle0" });
       await page.waitForSelector(".sea > canvas.ocean");
       const rect = async (sel: string) => (await (await page.$(sel))!.boundingBox())!;
@@ -2312,13 +2457,12 @@ test("a new chat is the butterfly in a sea under the message box too, never blan
   }
 }, 90_000);
 
-test("the sea stays behind a chat, the butterfly sunk into it and every click the chat's, and a new chat raises it again; Settings takes the sea away from chats (remembered) and leaves it in a new chat; it follows the theme", async () => {
+test("the sea stays behind a chat, the butterfly sunk into it and every click the chat's, and a new chat raises it again; Settings takes the sea away from chats (remembered) and leaves it in a new chat", async () => {
   const gl = await puppeteer.launch({ executablePath: process.env.CHROMIUM ?? "/usr/bin/chromium", headless: true, args: [...CHAT_ARGS, "--enable-unsafe-swiftshader"] });
   try {
     const page = await (await chatContext(gl)).newPage();
     page.on("pageerror", (e) => { throw e; });
-    await page.emulateMediaFeatures([{ name: "prefers-color-scheme", value: "dark" }]);
-    await page.setViewport({ width: 1600, height: 900 });
+    await page.setViewport({ width: 1920, height: 900 });
     await page.goto(`${base}/`, { waitUntil: "networkidle0" });
     await page.waitForSelector(".sea > canvas.ocean");
     const rect = async (sel: string) => (await (await page.$(sel))!.boundingBox())!;
@@ -2357,14 +2501,6 @@ test("the sea stays behind a chat, the butterfly sunk into it and every click th
     expect(await risen()).toBeGreaterThan(800);
     await page.reload({ waitUntil: "networkidle0" });
     expect(await page.$eval("#sea-switch", (b) => b.getAttribute("aria-checked"))).toBe("false");
-
-    const cores = async () => (await look(page, middle, "", "var(--accent-hi)")).close;
-    await openSettings(page);
-    await page.click('#theme-pick [data-theme="light"]');
-    await closeSettings(page);
-    await Bun.sleep(600);
-    expect(await page.evaluate(() => document.documentElement.dataset.theme)).toBe("light");
-    expect(await cores()).toBeGreaterThan(100);
     await page.close();
   } finally {
     await gl.close();

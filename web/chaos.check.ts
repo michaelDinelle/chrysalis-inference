@@ -92,16 +92,26 @@ function replyText(): string {
   const walk = (n: Node) => {
     if (n.nodeType === Node.TEXT_NODE) { out += n.textContent; return; }
     if (n instanceof Element) {
-      if (n.matches("figcaption, style, script, .code-head, .svg-code")) return;
+      if (n.matches("figcaption, style, script, .code-head, .svg-code, .art-card, .svg-bar, .art-tools")) return;
       if (n.shadowRoot) walk(n.shadowRoot);
       if (/^(P|DIV|LI|H\d|PRE|TR|BR)$/.test(n.tagName)) out += " ";
     }
     for (const c of n.childNodes) walk(c);
   };
   if (body) walk(body);
+  if (body?.querySelector(".art-card.on")) for (const canvas of document.querySelectorAll("#shelf-stage > .art-canvas")) walk(canvas);
   return out.replace(/\s+/g, " ").trim();
 }
-const lastReply = (page: Page) => page.evaluate(replyText);
+function openLastCard() {
+  const arts = document.querySelectorAll("#thread > article.msg.assistant"), cards = arts[arts.length - 1]?.querySelectorAll<HTMLElement>(":scope > .markdown .art-card");
+  const card = cards?.[cards.length - 1];
+  if (card && !card.classList.contains("on")) card.click();
+  return !!card;
+}
+async function lastReply(page: Page) {
+  if (await page.evaluate(openLastCard)) await page.waitForFunction(`(${replyText.toString()})().length > 0`, { timeout: 10_000 });
+  return page.evaluate(replyText);
+}
 const reload = (page: Page) => page.reload({ waitUntil: "load" });
 async function until(page: Page, what: string, wait: () => Promise<unknown>) {
   try { await wait(); } catch (e) {
@@ -158,7 +168,7 @@ test("a reply is followed through a reload, a new chat and back, and a second re
   await writing(page, 200);
   await page.click("#new-chat");
   await page.type("#input", "a draft in another chat");
-  await page.click(".conv.running");
+  await page.click(".conv:has(.conv-status)");
   await writing(page, 400);
   await reload(page);
   await idle(page);
@@ -183,7 +193,7 @@ test("three chats write at once, a fourth waits its turn, and another tab writes
   const other = await open(ctx);
   await thinking(other, "Off");
   await ask(other, "Explain in about 250 words how a refrigerator works.");
-  await page.waitForFunction(() => !document.querySelector(".conv.running"), { timeout: 10 * MIN, polling: 1000 });
+  await page.waitForFunction(() => !document.querySelector(".conv:has(.conv-status)"), { timeout: 10 * MIN, polling: 1000 });
   await idle(other, 10 * MIN);
   const n = await page.$$eval(".conv", (c) => c.length);
   expect(n).toBe(4);
@@ -240,7 +250,7 @@ test("a chat deleted while it is written stops its reply at Chrysalis, and the c
   await page.click("#new-chat");
   await thinking(page, "Off");
   await ask(page, "Write a 300-word story about a lost umbrella.");
-  await page.waitForFunction(() => document.querySelectorAll(".conv.running").length === 2, { timeout: 30_000 });
+  await page.waitForFunction(() => document.querySelectorAll(".conv:has(.conv-status)").length === 2, { timeout: 30_000 });
   await page.evaluate((href) => {
     const del = document.querySelector<HTMLElement>(`.conv[href="${href}"] .conv-del`)!;
     del.click(); del.click();
@@ -261,21 +271,17 @@ test("settings, panels, the window's size and the models list changed while a re
   await thinking(page, "Off");
   await ask(page, "Write a 500-word story about a library that only opens at night.");
   await writing(page, 100);
-  await page.click("#settings-toggle");
+  await page.click("#settings-open");
   await page.waitForFunction(() => {
-    const r = document.querySelector("#theme-pick button")?.getBoundingClientRect();
+    const r = document.querySelector("#sea-switch")?.getBoundingClientRect();
     return !!r && r.width > 0 && r.right <= innerWidth && !document.getAnimations().some((a) => a.playState === "running" && (a.effect as KeyframeEffect)?.target instanceof Element && (a.effect as KeyframeEffect).target!.closest("#settings"));
   }, { timeout: 10_000 });
-  for (const t of ["light", "dark", "system", "dark"]) {
-    await page.$eval(`#theme-pick button[data-theme="${t}"]`, (b) => b.scrollIntoView({ block: "center" }));
-    await page.click(`#theme-pick button[data-theme="${t}"]`);
-  }
   await page.$eval("#sea-switch", (b) => b.scrollIntoView({ block: "center" }));
   await page.click("#sea-switch");
   await page.$eval("#artifacts-switch", (b) => b.scrollIntoView({ block: "center" }));
   await page.click("#artifacts-switch");
   await page.click("#artifacts-switch");
-  await page.click("#settings-toggle");
+  await page.click("#settings-close");
   await page.click("#tools-btn");
   await page.keyboard.press("Escape");
   await page.click("#model-btn");
@@ -289,7 +295,7 @@ test("settings, panels, the window's size and the models list changed while a re
   await page.keyboard.press("ArrowRight");
   await idle(page);
   expect((await lastReply(page)).length).toBeGreaterThan(1500);
-  const settings = () => page.evaluate(() => [document.documentElement.dataset.theme ?? "", document.querySelector("#sea-switch")?.getAttribute("aria-checked") ?? ""]);
+  const settings = () => page.evaluate(() => document.querySelector("#sea-switch")?.getAttribute("aria-checked") ?? "");
   const was = await settings();
   await reload(page);
   expect(await settings()).toEqual(was);
@@ -343,7 +349,7 @@ test("a 3D page asked for and handled while it is written: Edit, clicks and keys
   await page.mouse.click(box.x + box.width / 2, box.y + box.height / 2);
   await page.keyboard.press("Delete");
   await page.keyboard.down("Control"); await page.keyboard.press("z"); await page.keyboard.up("Control");
-  await page.click("#artifacts");
+  if (named) await page.click("#artifacts-toggle");
   await page.click("#shelf-close").catch(() => {});
   await reload(page);
   await idle(page, 6 * MIN);
@@ -400,7 +406,7 @@ test("two chats' replies are written whole while another program takes the memor
     await page.click("#new-chat");
     await thinking(page, "Off");
     await ask(page, "Write a 600-word story about a pianist who goes deaf.");
-    await page.waitForFunction(() => !document.querySelector(".conv.running"), { timeout: 10 * MIN, polling: 1000 });
+    await page.waitForFunction(() => !document.querySelector(".conv:has(.conv-status)"), { timeout: 10 * MIN, polling: 1000 });
     await page.close();
     const r = await chrysalisReplies(t0);
     console.log(`${label}:`, r.map((x) => `${x.gen} tokens ${x.tps} tok/s`).join("; "));
@@ -459,9 +465,9 @@ test("exported and imported while a reply is written, and a picture asked about 
   await writing(page, 100);
   const cdp = await page.createCDPSession();
   await cdp.send("Browser.setDownloadBehavior", { behavior: "allow", downloadPath: into, browserContextId: ctx.id });
-  await page.click("#export");
+  await page.click("#export-all");
   let file = "";
-  for (let k = 0; k < 50 && !file; k++) { file = readdirSync(into).find((x) => x.endsWith(".chrysalis.json")) ?? ""; await Bun.sleep(100); }
+  for (let k = 0; k < 50 && !file; k++) { file = readdirSync(into).find((x) => x.startsWith("chrysalis-chats-")) ?? ""; await Bun.sleep(100); }
   expect(file).not.toBe("");
   await idle(page);
   const other = await open(ctx);
@@ -510,7 +516,7 @@ test("sub-agents: three tasks handed off at once in one reply while another chat
   await page.click("#new-chat");
   await thinking(page, "Off");
   await ask(page, "Write a 300-word story about a lighthouse.");
-  await page.waitForFunction(() => !document.querySelector(".conv.running"), { timeout: 10 * MIN, polling: 1000 });
+  await page.waitForFunction(() => !document.querySelector(".conv:has(.conv-status)"), { timeout: 10 * MIN, polling: 1000 });
   await page.click(".conv:not(.active)");
   await page.waitForSelector(".agent-head", { timeout: 10_000 });
   const cards = await page.$$eval(".agent-head", (c) => c.length);
