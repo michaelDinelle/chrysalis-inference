@@ -6,6 +6,7 @@
 
 <p align="center">
   <a href="LICENSE"><img alt="MIT license" src="https://img.shields.io/badge/license-MIT-e24d85"></a>
+  <a href="https://huggingface.co/michaelDinelle/chrysalis"><img alt="Models on Hugging Face" src="https://img.shields.io/badge/Hugging%20Face-models-ffd21e?logo=huggingface&logoColor=black"></a>
   <a href="https://x.com/michaeldinelle"><img alt="Follow on X" src="https://img.shields.io/badge/follow-%40michaeldinelle-000?logo=x"></a>
   <a href="https://ko-fi.com/michaeldinelle"><img alt="Support on Ko-fi" src="https://img.shields.io/badge/Ko--fi-support-ff5e5b?logo=ko-fi&logoColor=white"></a>
 </p>
