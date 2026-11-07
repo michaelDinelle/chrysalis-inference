@@ -11,7 +11,7 @@ import { appleProfile, connectPage, deviceScript, TRUSTED_GIF } from "./setup";
 import { SUBAGENT_SYSTEM } from "./tool-agent";
 import * as registry from "./tools";
 import { fingerprint, lanAddresses, netName, routeAddress, tlsDir, webTls } from "./tls";
-import { assistantTurn, checkpointText, DESCRIPTIONS, withText, toolTurn, unnoted, type ToolChoice, type WireCall } from "./wire";
+import { assistantTurn, checkpointText, DESCRIPTIONS, withText, toolTurn, type ToolChoice, type WireCall } from "./wire";
 import { ceiling, CONTINUE_AFTER_BREAK, CONTINUE_AFTER_CUT, continueAfterReview, covers, filled, NUDGE, recentText, reviewPrompt, saysTooLong, summaryPrompt, summaryRoom, tokens, tokensIn, verdictOf, type Turn } from "./compaction";
 
 const CHRYSALIS = process.env.CHRYSALIS_URL ?? "http://127.0.0.1:8080";
@@ -98,7 +98,7 @@ function startJob(body: string): Job {
   let main: Thread | undefined;
   (async () => {
     try {
-      const { req, web, said, tool, ahead, tools, notes } = await asSent(JSON.parse(body));
+      const { req, web, ahead, tools, notes } = await asSent(JSON.parse(body));
       if (ahead) {
         job.held = new Promise((go) => {
           const timer = setTimeout(() => job.ctrl.abort(), HELD_MS);
@@ -107,28 +107,16 @@ function startJob(body: string): Job {
         });
       }
       main = thread(job, req, req.messages ?? [], push, job.ctrl.signal, true, true);
-      if (!web && !said) return void await step(main, false);
       for (const note of notes) push({ note });
       const allow = new Set(web?.allow ?? []);
-      const route = said && tools.length && web?.route && backends.isChrysalis ? ROUTE : undefined;
-      const onward = web?.loop !== false && !req.max_tokens;
-      let called = false, force = false, stalls = 0, preamble: string | undefined;
+      const onward = !!web && web.loop !== false && !req.max_tokens;
+      let stalls = 0;
       for (let k = 0; ; k++) {
         if (k) push({ round: k });
-        const first = k === 0 && route && (tool || route.asks.test(unnoted(textOf((main.messages.findLast((m) => m.role === "user") as any)?.content))));
-        if (first) preamble = route.preambles[main.messages.length % route.preambles.length];
-        const out = first || force ? await forced(main, preamble) : await step(main, onward);
-        if (!job.ctrl.signal.aborted && route && !out.calls.length && !called && !force && !first && route.announces.test(out.content)) {
-          force = true;
-          preamble = undefined;
-          add(main, assistantTurn(out.content, out.reasoning));
-          continue;
-        }
-        force = false;
-        called ||= !!out.calls.length;
-        if (web?.loop === false || job.ctrl.signal.aborted) break;
+        const out = await step(main, onward);
+        if (!web || web.loop === false || job.ctrl.signal.aborted) break;
         if (!out.calls.length) {
-          const more = onward && called && !said ? await unfinished(main, out) : undefined;
+          const more = onward && tools.length ? await unfinished(main, out) : undefined;
           if (!more) break;
           if (++stalls >= STALLS) { push({ note: STALLED }); break; }
           add(main, assistantTurn(out.content, out.reasoning), { role: "user", content: more });
@@ -138,7 +126,7 @@ function startJob(body: string): Job {
         await job.held;
         if (job.ctrl.signal.aborted) throw new DOMException("stopped", "AbortError");
         const room = await roomFor(main, out.calls.length);
-        const results = await Promise.all(out.calls.map((c) => call(job, c, tools, allow, web ?? { tools: {} }, push, req, room)));
+        const results = await Promise.all(out.calls.map((c) => call(job, c, tools, allow, web, push, req, room)));
         if (job.ctrl.signal.aborted) throw new DOMException("stopped", "AbortError");
         add(main, assistantTurn(out.content, out.reasoning, out.calls), ...out.calls.map((c, i) => toolTurn(c.id, results[i])));
       }
@@ -183,14 +171,13 @@ function fold(job: Job, id: string) {
 }
 
 async function asSent(raw: any) {
-  const req = { ...raw }, web: ToolChoice | undefined = req.chrysalis_web, said = !!req.chrysalis_voice, tool = req.chrysalis_voice?.tool === true;
-  const ahead = req.chrysalis_voice?.ahead === true;
+  const req = { ...raw }, web: ToolChoice | undefined = req.chrysalis_web, ahead = req.chrysalis_ahead === true;
   delete req.chrysalis_web;
-  delete req.chrysalis_voice;
+  delete req.chrysalis_ahead;
   const picked = web ? await registry.select(web.tools ?? {}) : { tools: [] as registry.Named[], notes: [] as string[] };
-  const tools = said ? picked.tools.filter((n) => n.source.kind !== "agent") : picked.tools, notes = picked.notes;
+  const tools = picked.tools, notes = picked.notes;
   if (tools.length) req.tools = tools.map((n) => registry.openai(n, DESCRIPTIONS[n.tool.name]));
-  return { req: backends.isChrysalis ? req : standard(req), web, said, tool, ahead, tools, notes };
+  return { req: backends.isChrysalis ? req : standard(req), web, ahead, tools, notes };
 }
 
 class ChrysalisDown extends Error {
@@ -346,13 +333,13 @@ function carry(t: Thread, out: Out, note: string) {
   t.push({ round: true });
 }
 
-async function step(t: Thread, onward: boolean, extra: object = {}): Promise<Out> {
+async function step(t: Thread, onward: boolean): Promise<Out> {
   let rejected = false, cuts = 0;
   for (;;) {
     if (!t.settled && sizeOf(t) >= await limitOf(t)) await compact(t, false);
     let out: Out;
     try {
-      out = await patient(t, () => round(t.job, { ...t.req, messages: t.messages, ...extra }, t.push, t.signal, t.timed), true);
+      out = await patient(t, () => round(t.job, { ...t.req, messages: t.messages }, t.push, t.signal, t.timed), true);
     } catch (e) {
       if (!tooLong(e)) throw e;
       if (rejected) throw new CannotGoOn("what this reply has to keep whole is larger than the context of the model");
@@ -443,33 +430,7 @@ async function compact(t: Thread, needed: boolean) {
   t.push({ compacted: { ...checkpoint, kept } });
 }
 
-function phrasePattern(phrases: string[], before = ""): RegExp {
-  return new RegExp(`\\b${before}(${phrases.map((p) => p.replace(/[.*+?^${}()|[\]\\]/g, "\\$&").replace(/\s+/g, "\\s+")).join("|")})\\b`, "i");
-}
-interface Routing { preambles: string[]; asks: RegExp; announces: RegExp }
-const ROUTE: Routing = {
-  preambles: ["Let me look that up.", "Let me check.", "One moment, I'll look."],
-  asks: phrasePattern(["search", "google", "look it up", "look that up", "look this up", "look them up", "look up", "browse", "fetch", "online",
-    "on the web", "on the internet", "open the link", "open this link", "open that link", "open the page", "open this page"]),
-  announces: phrasePattern(["search", "searching", "look that up", "look it up", "look this up", "look them up", "look those up", "look up",
-    "looking up", "looking that up", "looking it up", "look for", "looking for", "look into", "looking into", "check on", "check for",
-    "check online", "check the", "check that", "check it", "check this", "checking", "find out", "find that", "find the", "find it",
-    "find a", "find some", "finding", "pull up", "pulling up", "browse", "browsing", "fetch", "fetching", "open the link",
-    "open that link", "open the page", "opening"], "(I['’]?ll|I will|I['’]?m going to|I am going to|let me|I['’]?m|I am)\\s+(now\\s+|just\\s+|quickly\\s+)?"),
-};
-const FORCE = { tool_choice: "required", logprobs: false, top_logprobs: undefined };
 const textOf = (c: unknown) => (typeof c === "string" ? c : Array.isArray(c) ? c.map((p: any) => p?.text ?? "").join(" ") : "");
-
-async function forced(t: Thread, preamble?: string): Promise<Out> {
-  if (preamble) {
-    t.push({ choices: [{ index: 0, delta: { content: preamble } }] });
-    t.job.tFirst ??= Date.now();
-    t.job.tAnswer ??= Date.now();
-  }
-  const out = await step(t, false, FORCE);
-  if (preamble) out.content = preamble + out.content;
-  return out;
-}
 
 async function call(job: Job, c: WireCall, tools: registry.Named[], allow: Set<string>, web: ToolChoice, push: (d: object) => void, req: any, room: number,
   signal = job.ctrl.signal): Promise<string> {
@@ -522,14 +483,14 @@ async function subagent(job: Job, c: WireCall, args: Record<string, unknown>, to
   for (const f of ["messages", "tools", "tool_choice", "seed", "logprobs", "top_logprobs", ...FIRST_ONLY]) delete base[f];
   if (tools.length) base.tools = tools.map((n) => registry.openai(n, DESCRIPTIONS[n.tool.name]));
   const t = thread(job, base, [{ role: "system", content: SUBAGENT_SYSTEM }, { role: "user", content: task }], inner, signal, false, false);
-  let said = "", worked = false, stalls = 0;
+  let said = "", stalls = 0;
   try {
     for (let k = 0; ; k++) {
       if (k) inner({ round: k });
       const out = await step(t, true);
       said = out.content.trim();
       if (!out.calls.length) {
-        const more = worked ? await unfinished(t, out) : undefined;
+        const more = tools.length ? await unfinished(t, out) : undefined;
         if (!more) return ["done", said || "The sub-agent finished without writing an answer."];
         if (++stalls >= STALLS) {
           inner({ note: STALLED });
@@ -538,7 +499,6 @@ async function subagent(job: Job, c: WireCall, args: Record<string, unknown>, to
         add(t, assistantTurn(out.content, out.reasoning), { role: "user", content: more });
         continue;
       }
-      worked = true;
       stalls = 0;
       const room = await roomFor(t, out.calls.length);
       const results = await Promise.all(out.calls.map((x) => call(job, x, tools, allow, web, inner, req, room, signal)));
@@ -805,8 +765,8 @@ img.src = ${JSON.stringify(checkUrl(req))} + "?t=" + Date.now();
     },
     "/api/preview": {
       POST: guarded(json(async (req) => {
-        const { req: body, said } = await asSent(await req.json().catch(() => ({})));
-        return Response.json({ body, voice: said });
+        const { req: body } = await asSent(await req.json().catch(() => ({})));
+        return Response.json({ body });
       })),
     },
     "/api/chat/:id": {

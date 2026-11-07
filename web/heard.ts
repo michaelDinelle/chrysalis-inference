@@ -38,12 +38,12 @@ export const soundsLike = (heard: string, said: string) => {
 };
 
 export interface Fix { heard: string; said: string }
-export function readHeard(text: string): { fixes: Fix[]; tool: boolean } {
+export function readHeard(text: string): { fixes: Fix[] } {
   const fixes = text.split("\n").flatMap((line) => {
     const m = line.match(/^\s*(.+?)\s*=>\s*(.+?)\s*$/);
     return m ? [{ heard: m[1].replace(/^["']|["']$/g, ""), said: m[2].replace(/\s*\([^)]*\)\s*$/, "").replace(/^["']|["']$/g, "") }] : [];
   });
-  return { fixes, tool: /^\s*tool:\s*yes\b/im.test(text) };
+  return { fixes };
 }
 
 export function heardParts(transcript: string, fixes: Fix[]): (string | Fix)[] {

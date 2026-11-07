@@ -3,7 +3,7 @@ import { existsSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import mdns from "multicast-dns";
 import { fingerprint } from "./tls";
 
-const SERVICE = "_chrysalis._tcp.local", TTL = 120, FIND_MS = 1500, ASK_MS = 10 * 60_000;
+const SERVICE = "_chrysalis._tcp.local", TTL = 120, ASK_MS = 10 * 60_000, REFIND_MS = Number(process.env.CHRYSALIS_REFIND_MS ?? 5000);
 const sha = (s: string) => createHash("sha256").update(s).digest("hex");
 const OFF_NETWORK = "macOS keeps Chrysalis off your network: allow it in System Settings › Privacy & Security › Local Network";
 const refused = (e: unknown) => process.platform === "darwin" && (e as { code?: string } | null)?.code === "EHOSTUNREACH";
@@ -49,7 +49,7 @@ export function discover(off?: () => void): Promise<Found[]> {
     });
     m.on("error", () => {});
     m.query({ questions: [{ name: SERVICE, type: "PTR" }] }, (e) => { if (refused(e)) off?.(); });
-    setTimeout(() => { m.destroy(); done([...found.values()]); }, FIND_MS);
+    setTimeout(() => { m.destroy(); done([...found.values()]); }, Number(process.env.CHRYSALIS_FIND_MS) || 1500);
   });
 }
 
@@ -88,7 +88,7 @@ export class Link {
   }
 
   state() {
-    if (!this.linked && !this.finding && Date.now() - this.lastFind > 5000) {
+    if (!this.linked && !this.finding && Date.now() - this.lastFind > REFIND_MS) {
       let off = false;
       this.finding = discover(() => (off = true)).then((f) => {
         this.found = f.filter((x) => x.fp !== this.ownFp);

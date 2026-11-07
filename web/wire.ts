@@ -7,7 +7,7 @@ export const assistantTurn = (content: string, reasoning?: string, calls: WireCa
 
 export const toolTurn = (id: string, result: string) => ({ role: "tool", tool_call_id: id, content: result });
 
-export interface ToolChoice { tools: Record<string, { off?: string[] }>; allow?: string[]; loop?: boolean; fetchChars?: number; route?: boolean }
+export interface ToolChoice { tools: Record<string, { off?: string[] }>; allow?: string[]; loop?: boolean; fetchChars?: number }
 
 export const DESCRIPTIONS: Record<string, string> = {
   web_search_exa: "Searches the web; returns titles, URLs, dates and excerpts. Use it for anything that may have changed since your " +
@@ -18,7 +18,6 @@ export const DESCRIPTIONS: Record<string, string> = {
 };
 
 export const noted = (note: string | undefined, text: string) => (note ? `[${note}]\n\n${text}` : text);
-export const unnoted = (text: string) => text.replace(/^\[[\s\S]*?\]\n\n/, "");
 
 export interface Checkpoint { summary: string; recent: string; first: boolean }
 

@@ -106,13 +106,14 @@ beforeAll(async () => {
 afterAll(() => { web.kill(); fake.stop(true); rmSync(RUN, { recursive: true, force: true }); });
 
 type Ev = any;
+const arrived = async (text: string) => { while (!requests.some((b) => said(b.messages.at(-1)) === text)) await Bun.sleep(5); };
 let models = 0;
 function setup(e: Engine) {
   engine = e;
   requests = []; summaries = []; reviews = []; rejected = []; busy = new Map(); peak = 0; aborted = 0;
   return `model-${++models}`;
 }
-async function reply(messages: object[], model: string, extra: object = {}, tools: object | undefined = { agents: {}, "mcp:fake": {} }): Promise<Ev[]> {
+async function reply(messages: object[], model: string, extra: object = {}, tools: object | null = { agents: {}, "mcp:fake": {} }): Promise<Ev[]> {
   const res = await fetch(`${base}/api/chat`, { method: "POST", headers: { "Content-Type": "application/json" },
     body: JSON.stringify({ model, stream: true, messages, ...(tools ? { chrysalis_web: { tools } } : {}), ...extra }) });
   return blocks(await res.text());
@@ -213,7 +214,7 @@ test("a backend that cuts a long chat without a word is asked for its context, i
     try {
       expect((await fetch(`${base}/api/backend`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ url: `127.0.0.1:${other.port}/v1` }) })).status).toBe(200);
       const old = Array.from({ length: 24 }, (_, i) => [user(`Question ${i} ${"words ".repeat(120)}`), { role: "assistant", content: `Answer ${i} ${"words ".repeat(120)}` }]).flat();
-      const got = await reply([...old, user("hello")], `listed-${owner}`, {}, undefined);
+      const got = await reply([...old, user("hello")], `listed-${owner}`, {}, null);
       expect([owner, got.filter((e) => e.error), got.filter((e) => e.compacted).length]).toEqual([owner, [], 1]);
     } finally {
       await fetch(`${base}/api/backend`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ url: `127.0.0.1:${fake.port}/v1` }) });
@@ -330,20 +331,19 @@ test("a review that says blocked, or nothing usable, leaves the reply as it is",
   }
 }, 30_000);
 
-test("a reply that used no tools, a voice reply and a reply under the user's own limit are not reviewed", async () => {
+test("a reply with no tools and a reply under the user's own limit are not reviewed; one that promises a tool it never called is sent back", async () => {
   const none = setup({});
-  await reply([user("hello")], none, {}, { "mcp:fake": {} });
+  await reply([user("hello")], none, {}, null);
   expect(reviews).toEqual([]);
-  let once = true;
-  const script = (b: any) => { if (once) { once = false; return { text: "", calls: [{ name: "fake__echo", args: '{"text": "hi"}' }] }; } return { text: "Done", calls: [] }; };
-  const limited = setup({ out: script });
+  const limited = setup({});
   await reply([user("hello")], limited, { max_tokens: 500 }, { "mcp:fake": {} });
   expect(reviews).toEqual([]);
-  once = true;
-  const voiced = setup({ out: script });
-  await reply([user("hello")], voiced, { chrysalis_voice: { tool: false } }, { "mcp:fake": {} });
-  expect(requests.length).toBe(2);
-  expect(reviews).toEqual([]);
+  let promised = false;
+  const promising = setup({ verdict: (b) => b.messages.some((m: any) => m.role === "tool") ? '{"verdict":"done","reason":"it ran"}' : '{"verdict":"continue","reason":"it only said it would look"}',
+    out: (b) => { if (isReview(b)) return; if (!promised) { promised = true; return { text: "Let me look that up.", calls: [] }; } if (!b.messages.some((m: any) => m.role === "tool")) return { text: "", calls: [{ name: "fake__echo", args: '{"text": "hi"}' }] }; return { text: "Found it.", calls: [] }; } });
+  const got = await reply([user("look it up")], promising, {}, { "mcp:fake": {} });
+  expect(got.filter((e) => e.tool?.state === "done").length).toBe(1);
+  expect(got.flatMap((e) => e.choices?.[0]?.delta?.content ?? []).join("")).toBe("Let me look that up.Found it.");
 }, 30_000);
 
 test("Stop reaches a run that is being reviewed", async () => {
@@ -371,13 +371,13 @@ test("a broken stream is tried again: what was written stays, the model is told 
 test("a backend that is going to sleep or overloaded is tried again; one that refuses for good is not", async () => {
   let asleep = 2;
   const model = setup({ refuse: () => asleep-- > 0 ? Response.json({ error: { message: "the machine is going to sleep; Chrysalis loads the model again when it wakes", code: "unavailable" } }, { status: 503 }) : undefined });
-  const got = await reply([user("hello")], model, {}, undefined);
+  const got = await reply([user("hello")], model, {}, null);
   expect(got.filter((e) => e.retry).length).toBe(2);
   expect(got.filter((e) => e.error)).toEqual([]);
   expect(got.flatMap((e) => e.choices?.[0]?.delta?.content ?? []).join("")).toBe("You said: hello");
 
   const refused = setup({ refuse: () => Response.json({ error: { message: "bad key" } }, { status: 401 }) });
-  const end = await reply([user("hello")], refused, {}, undefined);
+  const end = await reply([user("hello")], refused, {}, null);
   expect(end.filter((e) => e.retry)).toEqual([]);
   expect(end.filter((e) => e.error).map((e) => e.error.message)).toEqual(["bad key"]);
   expect(requests.length).toBe(1);
@@ -385,7 +385,7 @@ test("a backend that is going to sleep or overloaded is tried again; one that re
 
 test("a backend that stays down fails in the end, saying so", async () => {
   const model = setup({ refuse: () => Response.json({ error: { message: "overloaded" } }, { status: 500 }) });
-  const got = await reply([user("hello")], model, {}, undefined);
+  const got = await reply([user("hello")], model, {}, null);
   expect(got.filter((e) => e.retry).length).toBe(10);
   expect(got.filter((e) => e.error).map((e) => e.error.message)).toEqual(["overloaded"]);
 }, 30_000);
@@ -404,7 +404,7 @@ test("a chat with no tools that reaches the ceiling compacts before it replies, 
   const model = setup({ window: 8000 });
   const old = Array.from({ length: 22 }, (_, i) => [user(`Question ${i} ${"words ".repeat(120)}`), { role: "assistant", content: `Answer ${i} ${"words ".repeat(120)}` }]).flat();
   const picture = { type: "image_url", image_url: { url: `data:image/png;base64,${"A".repeat(40000)}` } }, asked = { role: "user", content: [picture, { type: "text", text: "what is this?" }] };
-  const got = await reply([{ role: "system", content: "Be brief." }, ...old, asked], model, {}, undefined);
+  const got = await reply([{ role: "system", content: "Be brief." }, ...old, asked], model, {}, null);
   expect(got.filter((e) => e.error)).toEqual([]);
   expect(got.filter((e) => e.compacted).length).toBe(1);
   expect(got.find((e) => e.compacted).compacted).toMatchObject({ first: true, kept: 0 });
@@ -421,7 +421,7 @@ test("a Continue that is cut off or breaks goes on from what it wrote, and is no
     const model = setup({ window: 100000, pool: 100000, lanes: 3, out: (b) => { if (b.continue_final_message && once) { once = false; return out; } } });
     const got = await reply([user("hello"), { role: "assistant", content: "So far" }], model, { continue_final_message: true });
     expect(got.filter((e) => e.error)).toEqual([]);
-    expect(requests.length).toBe(2);
+    expect(steps().length).toBe(2);
     expect(requests[1].continue_final_message).toBeUndefined();
     expect(requests[1].messages.map((m: any) => [m.role, m.content.slice(0, 12)])).toEqual([["user", "hello"], ["assistant", "More of it."], ["user", said(requests[1].messages.at(-1)).slice(0, 12)]]);
   }
@@ -437,23 +437,23 @@ test("a message too big to shrink is not summarized over and over: there is too 
 }, 30_000);
 
 test("memory that never comes while nothing else runs does not hold a reply for ever: the reply says it cannot fit", async () => {
-  const model = setup({ refuse: () => KV_FULL() }), got = await reply([user("hello")], model, {}, undefined);
+  const model = setup({ refuse: () => KV_FULL() }), got = await reply([user("hello")], model, {}, null);
   expect(got.filter((e) => e.waiting).length).toBe(10);
   expect(got.filter((e) => e.error).map((e) => e.error.message)).toEqual(["this message is larger than the whole context of the model, so there is nothing to summarize"]);
 }, 30_000);
 
 test("replies waiting for memory do not count as holding it: two that can never fit both end", async () => {
   const model = setup({ refuse: () => KV_FULL() });
-  const both = await Promise.all([reply([user("one")], model, {}, undefined), reply([user("two")], model, {}, undefined)]);
+  const both = await Promise.all([reply([user("one")], model, {}, null), reply([user("two")], model, {}, null)]);
   expect(both.map((got) => got.filter((e) => e.error).length)).toEqual([1, 1]);
 }, 10_000);
 
 test("a reply waits for memory for as long as another reply is really holding it", async () => {
   const model = setup({ gap: 700, refuse: (b) => said(b.messages.at(-1)) === "after you" ? (slow ? KV_FULL() : undefined) : undefined });
   let slow = true;
-  const other = reply([user("first")], model, {}, undefined).then((r) => { slow = false; return r; });
-  await Bun.sleep(100);
-  const got = await reply([user("after you")], model, {}, undefined);
+  const other = reply([user("first")], model, {}, null).then((r) => { slow = false; return r; });
+  await arrived("first");
+  const got = await reply([user("after you")], model, {}, null);
   await other;
   expect(got.filter((e) => e.error)).toEqual([]);
   expect(got.filter((e) => e.waiting).length).toBeGreaterThan(10);
@@ -463,7 +463,7 @@ test("a reply waits for memory for as long as another reply is really holding it
 test("a chat larger than the whole window is summarized in parts, oldest first, and no part is skipped", async () => {
   const model = setup({ window: 6000 });
   const old = Array.from({ length: 30 }, (_, i) => [user(`Note ${code("old", i + 1)} ${"words ".repeat(100)}`), { role: "assistant", content: `Noted ${"words ".repeat(100)}` }]).flat();
-  const got = await reply([...old, user("hello")], model, {}, undefined);
+  const got = await reply([...old, user("hello")], model, {}, null);
   expect(got.filter((e) => e.error)).toEqual([]);
   expect(summaries.length).toBeGreaterThan(1);
   expect(codes(got.find((e) => e.compacted).compacted.summary).length).toBe(30);
@@ -473,14 +473,14 @@ test("a chat larger than the whole window is summarized in parts, oldest first, 
 test("a part accepted with no room left for its summary is made smaller, however the backend's window was learned", async () => {
   const model = setup({ refuse: (b, n) => n >= 3000 ? CONTEXT_FULL(n, 3000) : undefined, out: (b, n) => isSummary(b) && n >= 2200 ? { text: "## Objective\n- half of a", calls: [], finish: "length" } : undefined });
   const old = Array.from({ length: 12 }, (_, i) => [user(`Note ${code("old", i + 1)} ${"words ".repeat(60)}`), { role: "assistant", content: `Noted ${"words ".repeat(60)}` }]).flat();
-  const got = await reply([...old, user("hello")], model, {}, undefined);
+  const got = await reply([...old, user("hello")], model, {}, null);
   expect(got.filter((e) => e.error)).toEqual([]);
   expect(codes(got.find((e) => e.compacted).compacted.summary).length).toBe(12);
 }, 30_000);
 
 test("a message larger than the whole window cannot be summarized, and the reply says that", async () => {
   const model = setup({ window: 6000 });
-  const got = await reply([user("hi"), { role: "assistant", content: "hello" }, user("words ".repeat(20000))], model, {}, undefined);
+  const got = await reply([user("hi"), { role: "assistant", content: "hello" }, user("words ".repeat(20000))], model, {}, null);
   expect(got.filter((e) => e.error).length).toBe(1);
   expect(got.find((e) => e.error).error.message).toBe("what this reply has to keep whole is larger than the context of the model");
 }, 30_000);
@@ -529,25 +529,28 @@ test("a finished round is kept as its words, not its tokens: a replay says the s
 }, 30_000);
 
 test("Stop reaches a reply that is waiting for memory, and one that is compacting", async () => {
-  const waiting = setup({ gap: 2000, refuse: (b) => said(b.messages.at(-1)) === "hello" ? KV_FULL() : undefined });
+  const waiting = setup({ gap: 700, refuse: (b) => said(b.messages.at(-1)) === "hello" ? KV_FULL() : undefined });
   const holder = fetch(`${base}/api/chat`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ model: waiting, stream: true, messages: [user("holding it")] }) }).then((r) => r.text());
-  await Bun.sleep(50);
+  await arrived("holding it");
   const res = await fetch(`${base}/api/chat`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ model: waiting, stream: true, messages: [user("hello")] }) });
-  const job = res.headers.get("X-Chrysalis-Job")!;
-  await Bun.sleep(600);
+  const job = res.headers.get("X-Chrysalis-Job")!, reader = res.body!.getReader(), dec = new TextDecoder();
+  let seen = "";
+  while (!seen.includes('"waiting"')) seen += dec.decode((await reader.read()).value);
   await fetch(`${base}/api/chat/${job}/stop`, { method: "POST" });
-  expect((await res.text())).toContain('"stopped":true');
+  for (let r = await reader.read(); !r.done; r = await reader.read()) seen += dec.decode(r.value);
+  expect(seen).toContain('"stopped":true');
   await holder;
 
   const compacting = setup({ window: 8000, gap: 300 });
   const body = { model: compacting, stream: true, messages: [...Array.from({ length: 30 }, (_, i) => [user(`Question ${i} ${"words ".repeat(120)}`), { role: "assistant", content: `Answer ${"words ".repeat(120)}` }]).flat(), user("go on")] };
-  const again = await fetch(`${base}/api/chat`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body) });
+  const summarized = summaries.length, again = await fetch(`${base}/api/chat`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body) });
   const id = again.headers.get("X-Chrysalis-Job")!;
-  await Bun.sleep(100);
+  while (summaries.length === summarized) await Bun.sleep(5);
   await fetch(`${base}/api/chat/${id}/stop`, { method: "POST" });
   const text = await again.text();
   expect(text).toContain('"compacting":true');
   expect(text).toContain('"stopped":true');
   expect(text).not.toContain('"compacted"');
+  for (const t = Date.now(); !aborted && Date.now() - t < 5000; ) await Bun.sleep(10);
   expect(aborted).toBeGreaterThan(0);
 }, 30_000);

@@ -12,15 +12,13 @@ test("a meaning offered in place of the words is not", () => {
     expect([heard, said, soundsLike(heard, said)]).toEqual([heard, said, false]);
 });
 
-test("the check's fixes and tool decision are read as written, and only the transcript's own words are swapped", () => {
-  const { fixes, tool } = readHeard("pie game => Pygame\ntail => list\nnot in it => anything\ntool: no");
-  expect(tool).toBe(false);
+test("the check's fixes are read as written, and only the transcript's own words are swapped", () => {
+  const { fixes } = readHeard("pie game => Pygame\ntail => list\nnot in it => anything");
   expect(fixes).toEqual([{ heard: "pie game", said: "Pygame" }, { heard: "tail", said: "list" }, { heard: "not in it", said: "anything" }]);
   const said = "Let's do a snake game and pie game, and report it in a tail.", made = applyFixes(said, fixes);
   expect(made).toEqual({ text: "Let's do a snake game and Pygame, and report it in a tail.", made: [fixes[0]] });
   expect(fixedParts(made.text, made.made)).toEqual(["Let's do a snake game and ", fixes[0], ", and report it in a tail."]);
-  expect(readHeard("tool: yes")).toEqual({ fixes: [], tool: true });
-  expect(readHeard("")).toEqual({ fixes: [], tool: false });
+  expect(readHeard("")).toEqual({ fixes: [] });
 });
 
 test("a remark in brackets after a fix is not part of what was said", () => {

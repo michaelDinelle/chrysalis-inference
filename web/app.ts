@@ -158,15 +158,13 @@ const DEFAULT_VOICE_PROMPT = "The user is talking to you by voice; a word may st
   "counting or logic, work it out loud in a few short steps, then answer.";
 const VOICE_TOOLS = "Only say you searched or did something once the tool call for it has returned, and never describe results you " +
   "have not received from a tool. When results come back, give the key points briefly, and say the links are on screen rather than reading them.";
-const CHECK = "You fix speech recognition errors in what a user says to {{MODEL}}, a voice assistant running locally in Chrysalis Inference{{TOOLS}}. " +
+const CHECK = "You fix speech recognition errors in what a user says to {{MODEL}}, a voice assistant running locally in Chrysalis Inference. " +
   "For each transcript, write one line per misheard word or phrase: the transcript's exact words => the words that sound like them " +
   "which the user meant (names spelled right, numbers in digits). Read the transcript against the conversation: words that do not fit " +
   "what the user is asking were misheard, names of libraries, products and models as everyday words (\"pie torch\" for \"PyTorch\") " +
   "and everyday words as others that sound alike (\"read it\" for \"write it\", \"by\" for \"buy\"). Fix only what was misheard: " +
   "never rephrase, censor, explain or expand, and keep words that fit and names you have no reason to doubt. Write \"-\" when nothing " +
   "was misheard.";
-const CHECK_TOOLS = " Then a last line, \"tool: yes\" if answering needs a web search or a page (they ask to search, look up or check " +
-  "something, or the answer depends on current facts such as news, weather, prices or schedules), else \"tool: no\".";
 const VOICE_OFF = "The user is typing again and reads your replies.";
 const TITLE_PROMPT = "You are a title generator. Reply with a title of at most six words for the conversation that starts with the user's message below. Reply with the title only.";
 const DRAFT_PROMPT = "Write the next message I would send in this conversation, as me: same voice, same goals, natural and brief. Reply with only that message.";
@@ -3337,7 +3335,7 @@ function save(c: Conversation) {
   renderList();
 }
 
-function request(c: Conversation, upto: Message[], o: { effort?: Effort; sampling?: Mode; final?: object; extra?: Record<string, unknown>; loop?: boolean; route?: boolean; as?: string } = {}) {
+function request(c: Conversation, upto: Message[], o: { effort?: Effort; sampling?: Mode; final?: object; extra?: Record<string, unknown>; loop?: boolean; as?: string } = {}) {
   const effort = o.effort ?? c.effort, mode: Mode = effort === "off" ? "fast" : "think";
   const messages: object[] = sentHistory(upto), system = systemFor(c), { members, group } = castOf(c);
   const writer = writerOf(c), char = writer?.card.data.name ?? members[0]?.card.data.name ?? "";
@@ -3355,8 +3353,7 @@ function request(c: Conversation, upto: Message[], o: { effort?: Effort; samplin
   if (system) messages.unshift({ role: "system", content: system });
   if (o.final) messages.push(o.final);
   const web: ToolChoice | undefined = toolsOn(c)
-    ? { tools: c.tools!, allow: settings.allow, fetchChars: settings.fetchChars, ...(o.loop === false ? { loop: false } : {}),
-      ...(o.route ? { route: true } : {}) } : undefined;
+    ? { tools: c.tools!, allow: settings.allow, fetchChars: settings.fetchChars, ...(o.loop === false ? { loop: false } : {}) } : undefined;
   const chrysalis = onChrysalis();
   return {
     model: chrysalis && effort === "off" ? `${current()}-fast` : current(), reasoning_effort: chrysalis ? (effort === "off" ? undefined : effort) : OTHER_EFFORT[effort],
@@ -3926,13 +3923,13 @@ function closeVoice() {
   input.focus();
 }
 
-interface Heard { text: string; fixes: Fix[]; tool: boolean; asked?: { role: string; content: string }[] }
+interface Heard { text: string; fixes: Fix[]; asked?: { role: string; content: string }[] }
 interface Asking { checks: Map<string, Promise<Heard>>; done: Map<string, Heard>; busy?: string; settled?: string }
 const asking = (): Asking => ({ checks: new Map(), done: new Map() });
 interface Ahead {
   text: string;
   q: Message;
-  sent: string; tool: boolean;
+  sent: string;
   said?: Message;
   check?: Heard;
   run: Run; reply: VoiceReply; ended: boolean; live: boolean;
@@ -3943,7 +3940,7 @@ const heardAs = new WeakMap<Message, string>();
 function checkOf(v: VoiceMode, text: string): Promise<Heard> {
   const mine = v.asking, asked = mine.checks.get(text);
   if (asked) return asked;
-  const c = v.c, system = fill(CHECK.replace("{{TOOLS}}", toolsOn(c) ? ", with web search and page reading" : "")) + (toolsOn(c) ? CHECK_TOOLS : "");
+  const c = v.c, system = fill(CHECK);
   if (v.check[0]?.content !== system || v.check.length > 121) v.check = [{ role: "system", content: system }];
   const at = c.messages.findLastIndex((m) => m.role === "assistant"), last = c.messages[at]?.content.slice(0, 300) ?? "";
   const before = at > 0 ? c.messages.slice(0, at).findLast((m) => m.role === "user")?.content.slice(0, 200) ?? "" : "";
@@ -3953,10 +3950,10 @@ function checkOf(v: VoiceMode, text: string): Promise<Heard> {
       const res = await fetch("/api/chat", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({
         ...quick(), messages: [...v.check, turn], temperature: 0, presence_penalty: 0, max_tokens: 48 }) });
       const answer: string = (await res.json())?.choices?.[0]?.message?.content ?? "";
-      if (!res.ok || !answer) return { text, fixes: [], tool: false };
+      if (!res.ok || !answer) return { text, fixes: [] };
       return { text, ...readHeard(answer), asked: [turn, { role: "assistant", content: answer }] };
     } catch {
-      return { text, fixes: [], tool: false };
+      return { text, fixes: [] };
     }
   })();
   mine.checks.set(text, p);
@@ -3987,21 +3984,21 @@ function questionFor(v: VoiceMode, text: string): { text: string; on?: Message }
 }
 
 function startAhead(v: VoiceMode, text: string, on?: Message): Ahead {
-  const c = v.c, known = knownFor(v, text), fixed = applyFixes(text, known?.fixes ?? []), tool = known?.tool ?? false;
+  const c = v.c, known = knownFor(v, text), fixed = applyFixes(text, known?.fixes ?? []);
   const effort = v.c.effort, mode: Mode = effort === "off" ? "fast" : "think";
   const note = on ? undefined : noteFor(c, true);
   const q: Message = on ?? { role: "user", content: fixed.text, voice: true, ...(note ? { note } : {}), ...pointFields(true), ...takeEdits() };
   const sent = { ...q, content: fixed.text }, upto = on ? c.messages.map((x) => (x === on ? sent : x)) : [...c.messages, sent];
   const m: Message = { id: randomId(), role: "assistant", content: "", reasoning: "", effort, params: changed(mode) || undefined };
   const run: Run = { conv: c, m, live: { phase: "waiting", since: performance.now(), note: "Reading the prompt" }, at: 0, begun: Date.now(), stopping: false, frame: 0, saved: 0 };
-  const a: Ahead = { text, q, sent: fixed.text, tool, run, reply: { m, sent: 0, spoken: 0, audible: false }, ended: false, live: false };
+  const a: Ahead = { text, q, sent: fixed.text, run, reply: { m, sent: 0, spoken: 0, audible: false }, ended: false, live: false };
   if (!on) heardAs.set(q, text);
   v.client.hold(m.id!);
   void (async () => {
     try {
       await filesReady(upto);
       const res = await fetch("/api/chat", { method: "POST", headers: { "Content-Type": "application/json" },
-        body: JSON.stringify(request(c, upto, { effort, route: true, extra: { chrysalis_voice: { tool, ahead: true } } })) });
+        body: JSON.stringify(request(c, upto, { effort, extra: { chrysalis_ahead: true } })) });
       if (!res.ok || !res.body) throw new Error((await res.json().catch(() => null))?.error?.message ?? `HTTP ${res.status}`);
       m.job = res.headers.get("X-Chrysalis-Job") ?? undefined;
       if (run.stopping) stopRun(run, true);
@@ -4041,7 +4038,7 @@ function pauseAhead(v: VoiceMode, text: string) {
 function standAhead(v: VoiceMode, a: Ahead) {
   if (voice !== v || v.ahead !== a || !a.said || !a.check) return;
   const c = v.c, said = a.said, fixed = applyFixes(a.text, a.check.fixes), m = a.run.m;
-  if (fixed.text !== a.sent || a.check.tool !== a.tool) {
+  if (fixed.text !== a.sent) {
     dropAhead(v);
     said.content = fixed.text;
     const again = (v.ahead = startAhead(v, a.text, said));
@@ -4134,7 +4131,7 @@ async function answerLater(v: VoiceMode, text: string, on?: Message) {
   const upto = [...c.messages];
   branch(c, c.messages.length, m);
   v.reply = { m, sent: 0, spoken: 0, audible: false };
-  await startRun(c, m, () => request(c, upto, { effort, route: true, extra: { chrysalis_voice: { tool: heard.tool } } }));
+  await startRun(c, m, () => request(c, upto, { effort }));
 }
 
 async function warmVoice(v: VoiceMode) {
@@ -5838,7 +5835,7 @@ function buildSettings() {
 async function showSent() {
   const c = conv, said = voice?.c === c, effort = c.effort;
   await filesReady(c.messages);
-  const body = request(c, [...c.messages], { effort, ...(said ? { route: true, ...(effort === "off" ? { extra: { chrysalis_voice: true } } : {}) } : {}) });
+  const body = request(c, [...c.messages], { effort });
   const res = await fetch("/api/preview", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body) }).catch(() => null);
   const sent = res?.ok ? (await res.json()).body : null;
   if (!sent) return toast("The web server did not answer");
@@ -5857,7 +5854,7 @@ async function showSent() {
   if (note) lines.push("", "── your next question said aloud, after this note:", `[${note}]`);
   $("sent-about").textContent = (!sent.tools?.length ? "" : onChrysalis() ? "Chrysalis's chat template writes the tools first in the system turn (\"# Tools … <tools> … </tools>\"), " +
     "with how to call them, and the system prompt after them. " : "The backend's chat template writes the tools into the prompt. ") + "Your next message goes after these." +
-    (said ? " Each spoken question is first checked, in a conversation of its own beside this one, for what speech recognition misheard (and with tools whether one is needed): the question is sent fixed." : "");
+    (said ? " Each spoken question is first checked, in a conversation of its own beside this one, for what speech recognition misheard." : "");
   $("sent-text").textContent = lines.join("\n");
   $<HTMLDialogElement>("sent-view").showModal();
 }
@@ -6141,6 +6138,7 @@ for (const c of Object.values(chats)) {
 }
 if (location.hash.length > 1) openConversation(location.hash.slice(1), false);
 else render();
+$("app").removeAttribute("aria-busy");
 (async () => {
   for (;;) {
     await sleep(status.state === "loading" || status.loading ? 250 : 4000);

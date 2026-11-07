@@ -77,7 +77,8 @@ None: no comments or docstrings anywhere in the repo, in any language, including
   pictured), `make build/test_cpujob_fn && build/test_cpujob_fn`, `make test_voice` (the voice service: its features against
   transformers', turns, echo and barge-in over its WebSocket), `make test_web` (the web UI's sampler against
   the engine's, its server against a fake Chrysalis, the page in headless Chromium, and Firefox past and trusting the network's
-  certificate; certutil makes their trust).
+  certificate; certutil makes their trust). `cd web && bun tests.ts` runs the same files side by side, as many as the free
+  memory holds, sharing one Chromium, in well under a minute; `bun tests.ts ./<file>.test.ts` runs some of them.
 - With Chrysalis running Flash-Next: `make test_chaos` (the chat for real, used oddly: replies through reloads, closed
   tabs and chat switches, several at once, Stop / regenerate / edit mid-reply, tools, settings, a 3D page, memory taken
   by another program, sub-agents past the memory they share and a reply past the whole context; it restarts Chrysalis
