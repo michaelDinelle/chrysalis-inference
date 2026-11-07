@@ -31,7 +31,7 @@ Chrysalis beats Strata's IQ3_S on every measure on the RX 7900. On the RTX 5070 
 
 <sub>Click a part, then ask for a change.</sub>
 
-## SillyTavern character cards
+## [SillyTavern](https://github.com/SillyTavern/SillyTavern) character cards
 
 <p align="center"><img src="media/characters.webp" width="900" alt="Seraphina's SillyTavern card dropped in: her greeting, a reply in her voice, her card"></p>
 
