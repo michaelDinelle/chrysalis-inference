@@ -117,7 +117,8 @@ struct Engine {
     uint32_t *mask_rows();
 
     void forward(Seq &s, int T, bool verify, int rope0, bool rpos = false, bool img = false);
-    void mtp_forward(Seq &s, int T, int pos0, const float *h_prev, const int *tokens, int rope0, bool rpos = false, bool img = false);
+    float *mtp_in(int T, const float *h_prev, const int *tokens, bool img);
+    void mtp_draft(Seq &s, int i, int *draft, bool pick = true);
     void mtp_catch_up(Seq &s, int T, int pos0, int rope0, bool rpos = false, bool img = false, int off = 0);
     void lm_head(const QAct &in, int T, int rows);
     void ensure_pages(Seq &s, int n_tokens, int from);

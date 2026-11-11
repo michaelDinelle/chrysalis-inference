@@ -71,7 +71,7 @@ __device__ __forceinline__ float block_sum256(float v, float *red) {
 __global__ __launch_bounds__(256) void k_attn_prep(const float *qg, const float *kin, const float *vin, const float *qnw,
                                                    const float *knw, int pos0, int rope0, const int *rpos, KVRef kv, int layer, half *Q16) {
     __shared__ float red[8], buf[HD];
-    const int job = blockIdx.x, t = blockIdx.y, i = threadIdx.x, pos = pos0 + t;
+    const int job = qg ? blockIdx.x : blockIdx.x + NH, t = blockIdx.y, i = threadIdx.x, pos = pos0 + t;
     float x;
     if (job < NH) x = qg[((size_t)t * NH + job) * 2 * HD + i];
     else if (job < NH + NKV) x = kin[((size_t)t * NKV + job - NH) * HD + i];
@@ -119,7 +119,7 @@ __global__ __launch_bounds__(256) void k_attn_prep(const float *qg, const float 
 
 void attn_prep(const float *qg, const float *k, const float *v, const float *qnw, const float *knw, int T, int pos0,
                int rope0, const int *rpos, KVRef kv, int layer, half *Q16, hipStream_t st) {
-    k_attn_prep<<<dim3(NH + 2 * NKV, T), 256, 0, st>>>(qg, k, v, qnw, knw, pos0, rope0, rpos, kv, layer, Q16);
+    k_attn_prep<<<dim3(qg ? NH + 2 * NKV : 2 * NKV, T), 256, 0, st>>>(qg, k, v, qnw, knw, pos0, rope0, rpos, kv, layer, Q16);
 }
 
 constexpr int QLD = HD + 8;

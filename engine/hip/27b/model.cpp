@@ -402,7 +402,7 @@ void Engine::forward_parts(const Part *p, int np, int T) {
     }
 }
 
-void Engine::mtp_forward(Seq &s, int T, int pos0, const float *h_prev, const int *tokens, int rope0, bool rpos, bool img) {
+float *Engine::mtp_in(int T, const float *h_prev, const int *tokens, bool img) {
     const bool small = T <= 8;
     float *xm = small ? b.mtp_x : b.mtp_h;
     embed(embd, tokens, img ? b.img : nullptr, T, b.x, st);
@@ -415,8 +415,16 @@ void Engine::mtp_forward(Seq &s, int T, int pos0, const float *h_prev, const int
         linear(eh_proj, T, NO_Q, b.hh, 2 * D, xm, D, GEMV_STORE);
         rmsnorm(xm, M.attn_norm, T, D, D, D, nullptr, b.hh, NO_Q, st);
     }
-    attn_block(M, NATT, s, T, pos0, rope0, rpos ? b.rpos : nullptr, xm);
-    ffn_block(M, T, xm, small ? head_norm : nullptr, small ? b.mtp_x : nullptr);
+    return xm;
+}
+
+void Engine::mtp_draft(Seq &s, int i, int *draft, bool pick) {
+    float *xm = mtp_in(1, i == 0 ? s.h_last : b.mtp_x, draft + i, false);
+    attn_block(M, NATT, s, 1, s.n + i, s.pos + i, nullptr, xm);
+    ffn_block(M, 1, xm, head_norm, xm);
+    if (!pick) return;
+    lm_head(b.hq, 1, DRAFT_VOCAB);
+    argmax(b.logits, 1, DRAFT_VOCAB, VOCAB, draft + i + 1, st);
 }
 
 void Engine::lm_head(const QAct &in, int T, int rows) {
@@ -488,7 +496,10 @@ int Engine::image_encode(int slot, const float *patches, int gh, int gw, int fra
 void Engine::mtp_catch_up(Seq &s, int T, int pos0, int rope0, bool rpos, bool img, int off) {
     CK(hipMemcpyAsync(b.mtp_h, s.h_last, D * 4, hipMemcpyDeviceToDevice, st));
     if (T > 1) CK(hipMemcpyAsync(b.mtp_h + D, b.hfin + (size_t)off * D, (size_t)(T - 1) * D * 4, hipMemcpyDeviceToDevice, st));
-    mtp_forward(s, T, pos0, b.mtp_h, b.tokens + off, rope0, rpos, img);
+    mtp_in(T, b.mtp_h, b.tokens + off, img);
+    linear(M.k, T, b.hq, b.hh, D, b.k, NKV * HD, GEMV_STORE);
+    linear(M.v, T, b.hq, b.hh, D, b.v, NKV * HD, GEMV_STORE);
+    attn_prep(nullptr, b.k, b.v, M.q_norm, M.k_norm, T, pos0, rope0, rpos ? b.rpos : nullptr, kv(s), NATT, nullptr, st);
 }
 
 static void keep_row(const float *v, const int *i, float *rows_v, int *rows_i, int at) {
@@ -540,11 +551,7 @@ void Engine::generate_batch(int n, const int *ids, const Sampling *sps, int *out
         q[i] = s.n;
         ensure_pages(s, q[i] + k[i] + 1, q[i]);
         CK(hipMemcpyAsync(b.draft + T, &s.pending, 4, hipMemcpyHostToDevice, st));
-        for (int d = 0; d < k[i]; d++) {
-            mtp_forward(s, 1, q[i] + d, d == 0 ? s.h_last : b.mtp_x, b.draft + T + d, s.pos + d);
-            lm_head(b.hq, 1, DRAFT_VOCAB);
-            argmax(b.logits, 1, DRAFT_VOCAB, VOCAB, b.draft + T + d + 1, st);
-        }
+        for (int d = 0; d < k[i]; d++) mtp_draft(s, d, b.draft + T);
         parts.push_back({&s, k[i] + 1, T, q[i], s.pos, nullptr, k[i] > 0});
         T += k[i] + 1;
     }
@@ -613,11 +620,7 @@ int Engine::generate(int id, const Sampling &sp, int *out, int max_out, float *r
     ensure_pages(s, q + k + 1, q);
 
     CK(hipMemcpyAsync(b.draft, copied, (nl + 1) * 4, hipMemcpyHostToDevice, st));
-    for (int i = 0; i < k && nl == 0; i++) {
-        mtp_forward(s, 1, q + i, i == 0 ? s.h_last : b.mtp_x, b.draft + i, s.pos + i);
-        lm_head(b.hq, 1, DRAFT_VOCAB);
-        argmax(b.logits, 1, DRAFT_VOCAB, VOCAB, b.draft + i + 1, st);
-    }
+    for (int i = 0; i < k && nl == 0; i++) mtp_draft(s, i, b.draft);
     return verify(s, sp, k, false, out, nout, rows_v, rows_i);
 }
 
@@ -684,12 +687,7 @@ int Engine::draft(int id, const Sampling &sp, const int *fixed, int nfixed, int 
         const int q = s.n;
         ensure_pages(s, q + k + 1, q);
         CK(hipMemcpyAsync(b.draft, copied, (nf + 1) * 4, hipMemcpyHostToDevice, st));
-        for (int i = 0; i < k; i++) {
-            mtp_forward(s, 1, q + i, i == 0 ? s.h_last : b.mtp_x, b.draft + i, s.pos + i);
-            if (i < nf) continue;
-            lm_head(b.hq, 1, DRAFT_VOCAB);
-            argmax(b.logits, 1, DRAFT_VOCAB, VOCAB, b.draft + i + 1, st);
-        }
+        for (int i = 0; i < k; i++) mtp_draft(s, i, b.draft, i >= nf);
         CK(hipMemcpyAsync(copied + 1 + nf, b.draft + 1 + nf, (k - nf) * 4, hipMemcpyDeviceToHost, st));
         CK(hipStreamSynchronize(st));
     }
