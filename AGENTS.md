@@ -44,9 +44,9 @@ media/charts.py --check` fails if either differs from it, and the hook and `make
 A gate measures the working tree against HEAD in the same session, both models on the GPU with Chrysalis's model server
 stopped; bench/hill_ready.py refuses to start while anything else holds the GPU or free memory is short. Measuring time
 is a reward too: a gate takes minutes, deep context is restored from snapshots primed once per machine, and the bench
-only gets faster. Every machine with a record (the RX 7900 here, the M4 Max on studio, the RTX 5070 rented on
-vast.ai) judges each change: run `.hill/hill gate` there and append its new .hill/ledger.jsonl lines here before
-committing. The hook (`git config core.hooksPath .githooks`) holds every commit to that.
+only gets faster. Every machine with a record (the RX 7900 here and the M4 Max on studio) judges each change: run
+`.hill/hill gate` there and append its new .hill/ledger.jsonl lines here before committing. The RTX 5070 rented on
+vast.ai was destroyed on 2026-11-11: its verdicts stay in the ledger, and it judges nothing more. The hook (`git config core.hooksPath .githooks`) holds every commit to that.
 
 ## Comments
 

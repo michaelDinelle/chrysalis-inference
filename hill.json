@@ -17,8 +17,7 @@
   "readme": "README.md",
   "machines": {
     "e20a368548adfcc2": "7900 XTX",
-    "37faa95555ab4a0d": "M4 Max",
-    "fc0844197a083008": "RTX 5070"
+    "37faa95555ab4a0d": "M4 Max"
   },
   "groups": [
     "Speed",
