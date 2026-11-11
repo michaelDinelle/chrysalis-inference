@@ -19,11 +19,11 @@
 
 Chrysalis beats Strata's IQ3_S on every measure on the RX 7900. On the RTX 5070 it has the lowest error and the fastest load.
 
-<p align="center"><img src="media/flash-next.png" width="860" alt="Qwen3.8-Flash-Next in Chrysalis and Strata on an RX 7900 XTX, an RTX 5070 and an M4 Max: time to first token and writing speed at five prompt lengths, error against Q8_0, load time, memory, and each one's share of its GPU's limit"></p>
+<p align="center"><img src="media/flash-next.png" width="860" alt="Qwen3.8-Flash-Next in Chrysalis and Strata on an RX 7900 XTX, an RTX 5070 and an M4 Max: time to first token and writing speed at five prompt lengths, error against Q8_0, load time and memory"></p>
 
 ## Qwen3.8-27B: Chrysalis vs llama.cpp and MLX
 
-<p align="center"><img src="media/27b.png" width="860" alt="Qwen3.8-27B in Chrysalis, llama.cpp and MLX on an RX 7900 XTX, an RTX 5070 and an M4 Max: time to first token and writing speed at five prompt lengths, error against Q8_0, load time, memory, and each one's share of its GPU's limit"></p>
+<p align="center"><img src="media/27b.png" width="860" alt="Qwen3.8-27B in Chrysalis, llama.cpp and MLX on an RX 7900 XTX, an RTX 5070 and an M4 Max: time to first token and writing speed at five prompt lengths, error against Q8_0, load time and memory"></p>
 
 ## Editing artifacts by pointing at them
 
@@ -163,8 +163,6 @@ docker run -d --device /dev/kfd --device /dev/dri -p 127.0.0.1:8080:8080 -v chry
 - **Error**: KL against Q8_0 over 1,082 tokens of prose, a technical explanation and Python. Strata's files ran in
   llama.cpp.
 - **Memory**: the peak private RAM of each server, pinned buffers included, and the peak footprint on the Mac.
-- **Share of each GPU's limit**: computed by [bench/limits.py](bench/limits.py), counting the whole model as if it were in
-  VRAM. Strata doesn't report the tokens each of its passes writes.
 
 **Qwen3.8-Flash-Next, RX 7900 XTX**
 
@@ -183,8 +181,6 @@ docker run -d --device /dev/kfd --device /dev/dri -p 127.0.0.1:8080:8080 -v chry
 | Error vs Q8_0, mean KL over 1,082 tokens | 0.0339 | 0.0550 | 0.187 |
 | Load time, to a first answer | 14.8 s | 21.6 s | 16.2 s |
 | Peak memory | 54.2 GB | 55.3 GB | 45.1 GB |
-| Share of the GPU's limit, reading 100K | 29% | 17% | 18% |
-| Share of the GPU's limit, writing at 100K | 24% | not reported | not reported |
 
 **Qwen3.8-Flash-Next, RTX 5070**
 
@@ -203,8 +199,6 @@ docker run -d --device /dev/kfd --device /dev/dri -p 127.0.0.1:8080:8080 -v chry
 | Error vs Q8_0, mean KL over 1,082 tokens | 0.0315 | 0.0550 | 0.187 |
 | Load time, to a first answer | 24.2 s | 38.2 s | 28.1 s |
 | Peak memory | 59.4 GB | 56.6 GB | 44.5 GB |
-| Share of the GPU's limit, reading 100K | 16% | 18% | 25% |
-| Share of the GPU's limit, writing at 100K | 12% | not reported | not reported |
 
 **Qwen3.8-Flash-Next, M4 Max**
 
@@ -223,8 +217,6 @@ docker run -d --device /dev/kfd --device /dev/dri -p 127.0.0.1:8080:8080 -v chry
 | Error vs Q8_0, mean KL over 1,082 tokens | 0.0351 |
 | Load time, to a first answer | 6.9 s |
 | Peak memory | 32.1 GB |
-| Share of the GPU's limit, reading 100K | 20% |
-| Share of the GPU's limit, writing at 100K | 6% |
 
 **How Qwen3.8-27B was measured**
 
@@ -239,8 +231,6 @@ docker run -d --device /dev/kfd --device /dev/dri -p 127.0.0.1:8080:8080 -v chry
   memory at 512 too.
 - **Rounds**: medians over two rounds for Chrysalis and one for llama.cpp and MLX, run from October 26 to November 11, 2026.
 - **Error and memory**: as above. Chrysalis's footprint on the Mac includes its conversation snapshots.
-- **Share of each GPU's limit**: as above, with each engine's tokens per pass from its log. The Mac uses Apple's published
-  bandwidth and its GPU's FP16 rate.
 
 **Qwen3.8-27B, RX 7900 XTX**
 
@@ -259,8 +249,6 @@ docker run -d --device /dev/kfd --device /dev/dri -p 127.0.0.1:8080:8080 -v chry
 | Error vs Q8_0, mean KL over 1,082 tokens | 0.0117 | 0.0141 |
 | Load time, to a first answer | 1.6 s | 3.7 s |
 | Peak memory | 7.7 GB | 13.4 GB |
-| Share of the GPU's limit, reading 100K | 63% | 40% |
-| Share of the GPU's limit, writing at 100K | 57% | 27% |
 
 **Qwen3.8-27B, RTX 5070**
 
@@ -279,8 +267,6 @@ docker run -d --device /dev/kfd --device /dev/dri -p 127.0.0.1:8080:8080 -v chry
 | Error vs Q8_0, mean KL over 1,082 tokens | 0.0116 | 0.0115 |
 | Load time, to a first answer | 7.0 s | 7.6 s |
 | Peak memory | 17.4 GB | 17.3 GB |
-| Share of the GPU's limit, reading 100K | 22% | 25% |
-| Share of the GPU's limit, writing at 100K | 6% | 1% |
 
 **Qwen3.8-27B, M4 Max**
 
@@ -299,8 +285,6 @@ docker run -d --device /dev/kfd --device /dev/dri -p 127.0.0.1:8080:8080 -v chry
 | Error vs Q8_0, mean KL over 1,082 tokens | 0.0113 | 0.0351 | 0.0112 |
 | Load time, to a first answer | 8.3 s | 6.0 s | 8.7 s |
 | Peak memory | 25.2 GB | 30.6 GB | 20.9 GB |
-| Share of the GPU's limit, reading 100K | 33% | 39% | 32% |
-| Share of the GPU's limit, writing at 100K | 35% | 68% | 30% |
 
 </details>
 

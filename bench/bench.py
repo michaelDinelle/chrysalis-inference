@@ -316,14 +316,6 @@ def table(data, name, key, env_id):
     for row, label in (("ttft", "Time to first token"), ("prompt_tps", "Prompt tok/s"), ("decode_tps", "Decode tok/s"), ("per_pass", "Tokens per pass"),
                        ("pass_rate", "Passes per second"), ("itl_p99", "Token gap p99")):
         print(f"| {label} | " + " | ".join(fmt(f"{row}.{c}", mean(f"{row}.{c}")) for c in CASES) + " |")
-    try:
-        import limits
-        share = limits.shares(name, e["passes"])
-    except (OSError, StopIteration, KeyError, ImportError):
-        share = {}
-    if share:
-        for i, label in ((0, "Prompt, share of the theoretical max"), (1, "Writing, share of the theoretical max per pass")):
-            print(f"| {label} | " + " | ".join(f"{100 * share[c][i]:.0f}%" if c in share else "–" for c in CASES) + " |")
     print("\n| Metric | Value | Resolution |\n|---|---:|---:|")
     for m in ("reused.followup", "sanity", "kl_mean", "kl_p999", "kl_max", "top1", "kv_tokens", "ram_gb", "vram_gb", "load_s", "mem_limited"):
         r = res(m)

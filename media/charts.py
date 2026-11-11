@@ -16,9 +16,8 @@ FILL = {"Chrysalis": "#e24d85", "Strata IQ3_S": "#4d4d4d", "Strata Q2_0": "#bdbd
 CASES = ["Short", "4K", "16K", "100K", "Follow-up"]
 PROMPTS = ["short prompt", "4K prompt", "16K prompt", "100K prompt", "follow-up in the 100K chat"]
 MACHINES = {"7900 XTX": "RX 7900 XTX", "RTX 5070": "RTX 5070", "M4 Max": "M4 Max"}
-MODELS = {"fn": ("flash-next", "Qwen3.8-Flash-Next", [("Chrysalis", "3.8-bit"), ("Strata IQ3_S", "3.3-bit"), ("Strata Q2_0", "2.3-bit")],
-                 " · the whole model as if it were in VRAM"),
-          "27b": ("27b", "Qwen3.8-27B", [("Chrysalis", "4.65-bit file"), ("llama.cpp", "the same file"), ("MLX", "4-bit")], "")}
+MODELS = {"fn": ("flash-next", "Qwen3.8-Flash-Next", [("Chrysalis", "3.8-bit"), ("Strata IQ3_S", "3.3-bit"), ("Strata Q2_0", "2.3-bit")]),
+          "27b": ("27b", "Qwen3.8-27B", [("Chrysalis", "4.65-bit file"), ("llama.cpp", "the same file"), ("MLX", "4-bit")])}
 
 
 def fmt_s(v):
@@ -31,10 +30,6 @@ def fmt_kl(v):
 
 def fmt_gb(v):
     return f"{v:.1f} GB"
-
-
-def fmt_share(v):
-    return f"{100 * v:.0f}%"
 
 
 def esc(s):
@@ -83,7 +78,7 @@ def block(out, y, title, sub, heads, data, cols, scale=None):
     return y + 14
 
 
-def svg(title, legend, data, note):
+def svg(title, legend, data):
     out = [f'<text x="0" y="16" font-size="19" font-weight="700" fill="{INK[0]}">{esc(title)}</text>']
     lx = 0
     for name, bits in legend:
@@ -98,10 +93,6 @@ def svg(title, legend, data, note):
     out.append(f'<line x1="0" x2="{W}" y1="{y}" y2="{y}" stroke="{INK[2]}"/>')
     y = block(out, y + 30, "Quality, load and memory", "lower is better", ["Error vs Q8_0 (KL)", "Load to a first answer", "Peak memory"], data,
               [("kl", None, fmt_kl, True), ("load", None, fmt_s, True), ("ram", None, fmt_gb, True)])
-    out.append(f'<line x1="0" x2="{W}" y1="{y}" y2="{y}" stroke="{INK[2]}"/>')
-    y = block(out, y + 30, "Share of each GPU's limit at 100K",
-              "higher is better · the time its peak math or memory speed needs, over the time taken" + note,
-              ["Reading the prompt", "Writing, per pass"], data, [("share", 0, fmt_share, False), ("share", 1, fmt_share, False)], scale=1.0)
     h = y - 4
     pad = 30
     return (f'<svg xmlns="http://www.w3.org/2000/svg" width="{W + 2 * pad:.0f}" height="{h + 2 * pad:.0f}" '
@@ -140,8 +131,7 @@ def table(data):
     rows = [(f"First token, {c}", "ttft", i, fmt_s) for i, c in enumerate(PROMPTS)]
     rows += [(f"Writing, {c}", "tps", i, lambda v: f"{v:.1f} tok/s") for i, c in enumerate(PROMPTS)]
     rows += [("Error vs Q8_0, mean KL over 1,082 tokens", "kl", None, fmt_kl), ("Load time, to a first answer", "load", None, fmt_s),
-             ("Peak memory", "ram", None, fmt_gb), ("Share of the GPU's limit, reading 100K", "share", 0, fmt_share),
-             ("Share of the GPU's limit, writing at 100K", "share", 1, fmt_share)]
+             ("Peak memory", "ram", None, fmt_gb)]
     lines = ["| | " + " | ".join(f'{d["engine"]} {d["machine"]} ({d["backend"]})' for d in data) + " |", "| --- |" + " ---: |" * len(data)]
     for label, key, i, fmtv in rows:
         vals = [d[key][i] if i is not None else d[key] for d in data]
@@ -151,7 +141,7 @@ def table(data):
 
 def tables(numbers, text):
     written = 0
-    for key, (_, title, _, _) in MODELS.items():
+    for key, (_, title, _) in MODELS.items():
         for machine in dict.fromkeys(d["machine"] for d in numbers[key]):
             heading = f"**{title}, {MACHINES[machine]}**\n\n"
             body = table([d for d in numbers[key] if d["machine"] == machine])
@@ -189,8 +179,8 @@ def check():
 
 def main():
     numbers, digest = read()
-    for key, (name, title, legend, note) in MODELS.items():
-        png(name, svg(title, legend, numbers[key], note), digest)
+    for key, (name, title, legend) in MODELS.items():
+        png(name, svg(title, legend, numbers[key]), digest)
     with open(README) as f:
         text = f.read()
     with open(README, "w") as f:

@@ -26,8 +26,7 @@ README.md shows what Chrysalis is. This file is how to change it.
 - A new backend: engine/<name>/build.mk building build/libchrysalis and build/libchrysalis_fn, with `kernels` and
   `kernels_fn`, its model checks in BACKEND_TESTS and BACKEND_TESTS_FN (the builds they need in TEST_BUILDS and
   TEST_BUILDS_FN), and LLAMA_INC, LLAMA, LLAMA_LIBS and CXX_HOST for the llama.cpp references; its name in
-  chrysalis/models.py and bench/measure.py; its kernel checks in tests/<name>/; and in bench/limits.py, how to read its
-  GPU's memory bandwidth and FP16 rate, which the bench's share of the GPU's limit divides by.
+  chrysalis/models.py and bench/measure.py; and its kernel checks in tests/<name>/.
 
 ## Rewards
 
