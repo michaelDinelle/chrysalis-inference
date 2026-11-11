@@ -4,6 +4,7 @@ import { tmpdir } from "node:os";
 import puppeteer, { type Browser, type BrowserContext, type Page } from "puppeteer-core";
 import { ARTIFACTS_PROMPT } from "./artifacts";
 import { cardPng } from "./cast";
+import { fakeOpenCode } from "./fake-opencode";
 
 import { deflateSync } from "node:zlib";
 
@@ -109,18 +110,9 @@ export const png = (() => {
   return Buffer.concat([Buffer.from([137, 80, 78, 71, 13, 10, 26, 10]), chunk("IHDR", ihdr), chunk("IDAT", deflateSync(rows)), chunk("IEND", new Uint8Array())]);
 })();
 
-export const TOOL_ASKS: Record<string, { name: string; args: string }> = {
-  "tool echo": { name: "fake__echo", args: '{"text":  "hello"}' },
-  "tool note": { name: "fake__write_note", args: '{"text": "n1"}' },
-  "tool squeeze": { name: "fake__echo", args: '{"text": "squeezed"}' },
-  "tool slowly": { name: "fake__echo", args: '{"text": "once"}' },
-  "tool note slowly": { name: "fake__write_note", args: '{"text": "n2"}' },
-};
 export const SUMMARY = "## Objective\n- keep chatting\n\n## Findings\n- the word is lighthouse\n\n## Next Move\n1. answer the next message";
 export const CONTEXT_FULL = () => Response.json({ error: { message: "the request (300000 tokens) exceeds the available context size (262144 tokens), try increasing it", type: "invalid_request_error", code: "context_length_exceeded" } }, { status: 400 });
-export const AGENT_TASKS = [{ description: "Echo a word", prompt: "tool echo" }, { description: "Write a note", prompt: "tool note" }];
 export let lastStream: any = null, probes = 0, chrysalisStopped = 0, loading: Promise<void> | null = null;
-let callIds = 0;
 export const streams: any[] = [], streamAt: number[] = [], checks: any[] = [];
 export const fakes = { memoryRefusals: 0, naps: 0, loaded: "qwen3.8-27b", hurry: false };
 export let fake: ReturnType<typeof Bun.serve>;
@@ -146,8 +138,6 @@ const serveFake = () => Bun.serve({
       return Response.json({ choices: [{ message: { content: heard.includes("pie game") ? "pie game => Pygame" : "-" }, finish_reason: "stop" }] });
     }
     if (!body.stream) return Response.json({ choices: [{ message: { content: "A title" } }] });
-    if (/You are now the reviewer/.test(JSON.stringify(body.messages.at(-1)?.content ?? "")) && /^You are a sub-agent/.test(body.messages[0].content)) await Bun.sleep(700);
-    if (/You are now the reviewer/.test(JSON.stringify(body.messages.at(-1)?.content ?? ""))) return new Response(`data: ${JSON.stringify({ choices: [{ delta: { content: '{"verdict":"done","reason":"ok"}' }, finish_reason: "stop" }] })}\n\ndata: [DONE]\n\n`, { headers: { "Content-Type": "text/event-stream" } });
     lastStream = body;
     streams.push(body);
     streamAt.push(Date.now());
@@ -156,22 +146,15 @@ const serveFake = () => Bun.serve({
     const said = !last ? "" : (typeof last.content === "string" ? last.content : last.content.map((p: any) => p.text ?? "").join("")).replace(/^\[[^\]]*\]\n\n/, "").split("\n\n<conversation-checkpoint>")[0]
       .replace(/^<conversation-checkpoint>[\s\S]*<\/conversation-checkpoint>\n\n/, "");
     const summary = /structured summary|Update the existing checkpoint/.test(said), covered = JSON.stringify(body.messages).includes("<conversation-checkpoint>");
-    const round = body.messages.slice(at).filter((m: any) => m.role === "assistant" && m !== prefix).length, ask = TOOL_ASKS[said];
-    if (!summary && !covered && (said.startsWith("overflow now") || (said === "tool squeeze" && round === 1))) return CONTEXT_FULL();
+    const round = body.messages.slice(at).filter((m: any) => m.role === "assistant" && m !== prefix).length;
+    if (!summary && !covered && said.startsWith("overflow now")) return CONTEXT_FULL();
     if (said === "overflow again" && !JSON.stringify(body.messages).includes("still lighthouse")) return CONTEXT_FULL();
     if (said === "needs memory" && fakes.memoryRefusals-- > 0) return Response.json({ error: { message: "the request exceeds the available context size (KV cache full), try increasing it", code: "context_length_exceeded" } }, { status: 400 });
     if (said === "chrysalis naps" && fakes.naps-- > 0) return Response.json({ error: { message: "the machine is going to sleep; Chrysalis loads the model again when it wakes", code: "unavailable" } }, { status: 503 });
-    const agents = said === "agents" && round === 0 && body.tools?.some((t: any) => t.function.name === "subagent");
-    const flood = said === "tool flood" && round < 24, flooded = said === "tool flood";
-    const spawned = said === "flood agent" && round === 0 && body.tools?.some((t: any) => t.function.name === "subagent") ? [{ description: "Read a lot", prompt: "tool flood" }]
-      : said === "squeeze agent" && round === 0 ? [{ description: "Fill the context", prompt: "tool squeeze" }] : undefined;
-    const calls = summary ? [] : spawned ? spawned.map((a) => ({ name: "subagent", args: JSON.stringify(a) })) : agents ? AGENT_TASKS.map((a) => ({ name: "subagent", args: JSON.stringify(a) }))
-      : flood ? Array.from({ length: 8 }, (_, k) => ({ name: "fake__big", args: `{"n": ${40000 + k}}` })) : ask && body.tools && round === 0 ? [ask] : [];
     const next = /\[(.+) next\.\]$/.exec(said)?.[1];
-    const think = summary ? "" : agents ? "Two separate tasks: each goes to a sub-agent." : next ? `${next} has the floor.` : "";
+    const think = summary ? "" : next ? `${next} has the floor.` : "";
     const slowly = said.includes("slowly") && !summary && (!said.startsWith("tool") || round === 0);
-    const text = summary ? (said.includes("Update the existing checkpoint") ? SUMMARY.replace("is lighthouse", "is still lighthouse") : SUMMARY) : slowly ? Array.from({ length: 100 }, (_, k) => `w${k} `).join("") : flooded ? "Read it all." : spawned ? "" : agents ? "" : next ? `${next}: I go on.` : calls.length ? "Let me check." : ask ? `The tool said: ${body.messages.at(-1).content}` : said === "agents"
-      ? `The sub-agents said: ${body.messages.slice(at).filter((m: any) => m.role === "tool").map((m: any) => m.content).join(" | ")}` : said.startsWith("slow")
+    const text = summary ? (said.includes("Update the existing checkpoint") ? SUMMARY.replace("is lighthouse", "is still lighthouse") : SUMMARY) : slowly ? Array.from({ length: 100 }, (_, k) => `w${k} `).join("") : next ? `${next}: I go on.` : said.startsWith("slow")
       ? Array.from({ length: 40 }, (_, k) => `w${k} `).join("") : Object.entries(REPLIES).find(([k]) => said.includes(k))?.[1] ?? `You said: ${said}`;
     const step = said.startsWith("slow") || slowly ? 4 : 9, gap = said.startsWith("slow") || slowly ? 60 : said.startsWith("steady") ? 25 : 5;
     let i = 0, j = 0, restated = !prefix, read = false;
@@ -185,14 +168,6 @@ const serveFake = () => Bun.serve({
         if (!read) { read = true; return ctl.enqueue(enc.encode(`data: ${JSON.stringify({ choices: [{ delta: {} }], chrysalis_prompt: { prompt_tokens: 10, cached_tokens: 0 } })}\n\n`)); }
         if (j < think.length) { ctl.enqueue(enc.encode(`data: ${JSON.stringify({ choices: [{ delta: { reasoning_content: think.slice(j, j + step) } }] })}\n\n`)); j += step; return; }
         if (i < text.length) { ctl.enqueue(enc.encode(`data: ${JSON.stringify({ choices: [{ delta: { content: text.slice(i, i + step) } }] })}\n\n`)); i += step; return; }
-        if (calls.length) {
-          ctl.enqueue(enc.encode(`data: ${JSON.stringify({ choices: [{ delta: { tool_calls: calls.map((c, k) => ({ index: k, id: `call_${++callIds}`, type: "function",
-            function: { name: c.name, arguments: c.args } })) } }] })}\n\n`));
-          ctl.enqueue(enc.encode(`data: ${JSON.stringify({ choices: [{ delta: {}, finish_reason: "tool_calls" }] })}\n\n`));
-          ctl.enqueue(enc.encode(`data: ${JSON.stringify({ choices: [], usage: { prompt_tokens: 10, completion_tokens: 20, total_tokens: 30 } })}\n\n`));
-          ctl.enqueue(enc.encode("data: [DONE]\n\n"));
-          return ctl.close();
-        }
         ctl.enqueue(enc.encode(`data: ${JSON.stringify({ seed: 1, choices: [{ delta: {}, finish_reason: "stop" }] })}\n\n`));
         ctl.enqueue(enc.encode(`data: ${JSON.stringify({ choices: [], usage: { prompt_tokens: 10, completion_tokens: 20, total_tokens: 30 } })}\n\n`));
         ctl.enqueue(enc.encode("data: [DONE]\n\n"));
@@ -205,15 +180,13 @@ const serveFake = () => Bun.serve({
 export let web: Bun.Subprocess<"ignore", "pipe", "inherit">, base = "", browser: Browser;
 export const dir = mkdtempSync(`${RUN}/web-`), LOG = `${dir}/mcp.log`, VOICE_LOG = `${dir}/voice.log`;
 const PAGE = REPLIES.page;
-writeFileSync(`${dir}/mcp.json`, JSON.stringify({ mcpServers: {
-  fake: { command: process.execPath, args: ["fake-mcp.ts"], cwd: import.meta.dir, env: { FAKE_MCP_LOG: LOG } },
-  broken: { command: "/nonexistent/chrysalis-test-mcp" },
-} }));
+export const opencode = fakeOpenCode("test-secret");
 async function start() {
   fake = serveFake();
   web = Bun.spawn([process.execPath, "server.ts"], {
     cwd: import.meta.dir, stdout: "pipe", stderr: "inherit",
-    env: { ...process.env, PORT: "0", CHRYSALIS_URL: `http://127.0.0.1:${fake.port}`, CHRYSALIS_HOST: "127.0.0.1", NODE_ENV: "production", CHRYSALIS_MCP_CONFIG: `${dir}/mcp.json`,
+    env: { ...process.env, PORT: "0", CHRYSALIS_URL: `http://127.0.0.1:${fake.port}`, CHRYSALIS_HOST: "127.0.0.1", NODE_ENV: "production",
+      CHRYSALIS_OPENCODE_URL: `http://127.0.0.1:${opencode.server.port}`, CHRYSALIS_OPENCODE_PASSWORD: "test-secret",
       CHRYSALIS_VOICE_CMD: JSON.stringify([process.execPath, `${import.meta.dir}/fake-voice.ts`]), FAKE_VOICE_LOG: VOICE_LOG, CHRYSALIS_VOICE_IDLE_MS: "1500",
       CHRYSALIS_TLS_DIR: mkdtempSync(`${RUN}/tls-`), CHRYSALIS_CHECK_PORT: "0", CHRYSALIS_RETRY_MS: "400" },
   });
@@ -325,24 +298,7 @@ export const inDoc = (page: Page, text: string) => page.$eval(".art-canvas .doc-
   return { x: r.x + Math.min(r.width / 2, 40), y: r.y + r.height / 2 };
 }, text);
 
-export const pop = "#tools-pop";
-
-export const sw = (src: string, tool = "") => `${pop} [data-do="${tool ? "tool" : "src"}"][data-src="${src}"]${tool ? `[data-tool="${tool}"]` : ""}`;
-
 export const checked = (page: Page, sel: string) => page.$eval(sel, (b) => b.getAttribute("aria-checked"));
-
-export const badge = (page: Page) => page.$eval("#tools-btn", (b) => [b.querySelector(".tools-n")?.textContent ?? "", b.getAttribute("aria-label")]);
-
-export const subOf = (page: Page, src: string) => page.$eval(`${pop} [data-src="${src}"]`, (b) => b.closest(".tp-src")!.querySelector(".tp-sub")!.textContent);
-
-export async function toolsOn(page: Page, src = "mcp:fake") {
-  await page.click("#tools-btn");
-  await page.waitForSelector(sw(src));
-  if ((await checked(page, sw(src))) !== "true") await page.click(sw(src));
-  await page.waitForFunction((s) => document.querySelector(`#tools-pop [data-src="${s}"]`)?.closest(".tp-src")?.querySelector(".tp-sub")?.textContent?.includes("tools on"),
-    { timeout: 20_000 }, src);
-  await page.keyboard.press("Escape");
-}
 
 export async function download(page: Page, into: string) {
   const cdp = await page.createCDPSession();
@@ -512,7 +468,7 @@ export async function onNetwork() {
       cwd: import.meta.dir, stdout: "pipe", stderr: "inherit",
       env: { ...process.env, ...ports, CHRYSALIS_URL: `http://127.0.0.1:${fake.port}`, CHRYSALIS_HOST: "0.0.0.0", NODE_ENV: "production", CHRYSALIS_LINK_PORT: "0",
         CHRYSALIS_SELF_AS_NETWORK: "1",
-        CHRYSALIS_MCP_CONFIG: `${dir}/mcp.json`, CHRYSALIS_TLS_DIR: tlsDir },
+        CHRYSALIS_TLS_DIR: tlsDir },
     });
     let out = "";
     for (const reader = proc.stdout.getReader(), dec = new TextDecoder(); !/chrysalis check: \S+/.test(out); ) {

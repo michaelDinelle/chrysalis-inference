@@ -4,7 +4,7 @@ import { createHash } from "node:crypto";
 import mdns from "multicast-dns";
 import { advertise, discover } from "./link";
 import { fingerprint, lanAddresses, netName, webTls } from "./tls";
-import { harness, CONFIG, RUN, TLS, announcement, ask, base, chrysalisAborted, config, dir, fake, json, onNetwork, port, post, seen, shown, until, web, withoutEngine } from "./server-harness";
+import { harness, RUN, TLS, announcement, ask, base, chrysalisAborted, fake, json, onNetwork, port, post, seen, shown, until, web, withoutEngine } from "./server-harness";
 
 harness();
 
@@ -102,7 +102,7 @@ test("on the network only the devices this computer let in get past the pages, a
     const connecting = async (cookie = "", base = net) => (await (await fetch(`${base}/`, { ...insecure, headers: cookie ? { cookie } : {} })).text())
       .includes("<title>Connect to Chrysalis</title>");
     expect(await connecting()).toBe(true);
-    expect([(await asked("/api/status")).status, (await asked("/api/tools")).status, (await asked("/api/pair")).status,
+    expect([(await asked("/api/status")).status, (await asked("/api/threads")).status, (await asked("/api/pair")).status,
       (await asked("/api/chat", { method: "POST", body: JSON.stringify({ stream: true, messages: [] }), headers: json })).status,
       (await asked("/api/chrysalis/stop", { method: "POST" })).status]).toEqual([401, 401, 401, 401, 401]);
     expect(await voice()).toBe("refused");
@@ -127,7 +127,7 @@ test("on the network only the devices this computer let in get past the pages, a
     expect((await answer(secret)).status).toBe(404);
     const status = await asked("/api/status", { headers: { cookie } });
     expect([status.status, status.headers.get("set-cookie")?.split(";")[0]]).toEqual([200, cookie]);
-    expect([(await asked("/api/tools", { headers: { cookie } })).status, await voice(cookie)]).toEqual([200, "open"]);
+    expect([(await asked("/api/threads", { headers: { cookie } })).status, await voice(cookie)]).toEqual([200, "open"]);
     expect(await connecting(cookie)).toBe(false);
     const twice = (path: string, ...args: string[]) => Bun.spawnSync(["curl", "-sk", "-v", ...args, "-o", "/dev/null", `${net}${path}`, ...args, "-o", "/dev/null", `${net}${path}`],
       { stderr: "pipe" }).stderr.toString().match(/Re-?using existing/) !== null;
@@ -204,7 +204,7 @@ test("a computer without the engine finds this one on the network, and is not fo
     for (let t = Date.now(); chrysalisAborted === aborts && Date.now() - t < 3000; ) await Bun.sleep(50);
     expect(chrysalisAborted).toBe(aborts + 1);
     const { key } = JSON.parse(readFileSync(`${lap.dir}/link.json`, "utf8")), bearer = { authorization: `Bearer ${key}` };
-    expect([(await fetch(`${net}/api/status`, { headers: bearer })).status, (await fetch(`${net}/api/tools`, { headers: bearer })).status,
+    expect([(await fetch(`${net}/api/status`, { headers: bearer })).status, (await fetch(`${net}/api/threads`, { headers: bearer })).status,
       (await fetch(`${door}/chrysalis/stats`)).status, (await fetch(`${door}/chrysalis/stats`, { headers: bearer })).status]).toEqual([401, 401, 401, 200]);
     expect(readFileSync(`${desk.dir}/devices.json`, "utf8")).not.toContain(key);
 
@@ -410,7 +410,7 @@ test("a question answered elsewhere leaves the terminal, so the next one is aske
   free.stop(true);
   const proc = Bun.spawn(["python3", "-c", "import pty, sys; pty.spawn(sys.argv[1:])", process.execPath, "server.ts"], {
     cwd: import.meta.dir, stdin: "pipe", stdout: "pipe", stderr: "inherit",
-    env: { ...process.env, PORT: String(port), CHRYSALIS_URL: `http://127.0.0.1:${fake.port}`, CHRYSALIS_HOST: "0.0.0.0", NODE_ENV: "production", CHRYSALIS_MCP_CONFIG: CONFIG,
+    env: { ...process.env, PORT: String(port), CHRYSALIS_URL: `http://127.0.0.1:${fake.port}`, CHRYSALIS_HOST: "0.0.0.0", NODE_ENV: "production",
       CHRYSALIS_SELF_AS_NETWORK: "1", CHRYSALIS_TLS_DIR: dir, CHRYSALIS_CHECK_PORT: "0", CHRYSALIS_LINK_PORT: "0" },
   });
   const reader = proc.stdout.getReader(), dec = new TextDecoder(), json = { "Content-Type": "application/json" };
@@ -439,7 +439,7 @@ test("the page hears Chrysalis is off where its address takes a connection and n
   const mute = Bun.listen({ hostname: "127.0.0.1", port: 0, socket: { data() {} } }), run = mkdtempSync(`${RUN}/run-`);
   const proc = Bun.spawn([process.execPath, "server.ts"], {
     cwd: import.meta.dir, stdout: "pipe", stderr: "inherit",
-    env: { ...process.env, PORT: "0", CHRYSALIS_URL: `http://127.0.0.1:${mute.port}`, NODE_ENV: "production", CHRYSALIS_MCP_CONFIG: CONFIG,
+    env: { ...process.env, PORT: "0", CHRYSALIS_URL: `http://127.0.0.1:${mute.port}`, NODE_ENV: "production",
       CHRYSALIS_TLS_DIR: TLS(), XDG_RUNTIME_DIR: run, DBUS_SESSION_BUS_ADDRESS: `unix:path=${run}/bus` },
   });
   try {
@@ -464,7 +464,7 @@ test("a computer with neither systemd nor openssl, as a Mac is, runs the chat: t
   const proc = Bun.spawn([process.execPath, "server.ts"], {
     cwd: import.meta.dir, stdout: "pipe", stderr: "inherit",
     env: { ...process.env, PATH: mkdtempSync(`${RUN}/bin-`), PORT: "0", CHRYSALIS_URL: chrysalis, CHRYSALIS_HOST: "127.0.0.1", NODE_ENV: "production",
-      CHRYSALIS_MCP_CONFIG: CONFIG, CHRYSALIS_TLS_DIR: TLS() },
+      CHRYSALIS_TLS_DIR: TLS() },
   });
   try {
     const reader = proc.stdout.getReader(), dec = new TextDecoder();

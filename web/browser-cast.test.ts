@@ -351,3 +351,21 @@ test("a group saved by an earlier version becomes its chats' own: each chat file
   expect([/Scenario: A cellar\./, /Ada hums\./, /Bea drums\./].map((r) => r.test(lastStream.messages[0].content))).toEqual([true, true, true]);
   await page.close();
 }, 30_000);
+
+test("in a group, a message that names one of them with @ has that one answer next; a message that names nobody leaves the scene to them all", async () => {
+  const page = await open();
+  await Bun.write(`${dir}/Mirela.png`, await card("Mirela", { description: "{{char}} keeps bees." }));
+  await Bun.write(`${dir}/Tomas.png`, await card("Tomas", { description: "{{char}} sells honey." }));
+  await (await page.$("input#cast-file"))!.uploadFile(`${dir}/Mirela.png`, `${dir}/Tomas.png`);
+  await page.waitForFunction(() => document.querySelectorAll("#conversations .cast-row").length === 3);
+  await page.waitForFunction(() => (document.querySelector("#input") as HTMLTextAreaElement).placeholder === "Message Mirela");
+  await inRow(page, "Mirela", ".cast-bring");
+  await page.evaluate(() => [...document.querySelectorAll<HTMLElement>("#cast-invite .invite-row")].find((r) => r.querySelector(".invite-name")!.textContent === "Tomas")!.click());
+  await page.keyboard.press("Escape");
+  await page.waitForSelector("#cast-next .talk");
+  await send(page, "@tomas how is the market?");
+  expect(lastStream.messages.at(-1).content).toBe("@tomas how is the market?\n\n[Tomas next.]");
+  await send(page, "and the weather, anyone?");
+  expect(lastStream.messages.at(-1).content).toBe("and the weather, anyone?");
+  await page.close();
+}, 30_000);

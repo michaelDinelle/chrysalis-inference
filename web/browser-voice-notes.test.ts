@@ -1,6 +1,6 @@
 import { expect, test } from "bun:test";
 import { ARTIFACTS_PROMPT } from "./artifacts";
-import { harness, articles, card, closeSettings, fake, lastStream, noteShown, open, openSettings, pop, send, sent, shown, streams, sw, voicePage } from "./browser-harness";
+import { harness, articles, card, closeSettings, fake, lastStream, noteShown, open, openSettings, send, sent, shown, streams, voicePage } from "./browser-harness";
 
 harness();
 
@@ -25,16 +25,9 @@ test("voice mode's note goes before the first question said and again when it ch
   await page.close();
 }, 45_000);
 
-test("What the model is sent shows the next request as Chrysalis gets it: the tools as JSON, the one system prompt, every message; an edited prompt goes as written, and Chrysalis's card's scenario after it", async () => {
+test("What the model is sent shows the next request as Chrysalis gets it: the one system prompt, every message; an edited prompt goes as written, and Chrysalis's card's scenario after it", async () => {
   const page = await open();
   await page.setViewport({ width: 1600, height: 900 });
-  await page.click("#tools-btn");
-  await page.waitForSelector(sw("mcp:fake"));
-  await page.click(sw("mcp:fake"));
-  await page.waitForFunction(() => document.querySelector('#tools-pop [data-src="mcp:fake"]')?.closest(".tp-src")?.querySelector(".tp-sub")?.textContent === "5 of 5 tools on",
-    { timeout: 20_000 });
-  await page.click(sw("fetch"));
-  await page.keyboard.press("Escape");
   await send(page, "first");
   await openSettings(page, "chat");
   await page.click("#sent-open");
@@ -44,14 +37,13 @@ test("What the model is sent shows the next request as Chrysalis gets it: the to
   await closeSettings(page);
   await send(page, "second");
   const next = lastStream;
-  expect(shown).toContain(JSON.stringify(next.tools, null, 2));
   let at = 0;
   for (const m of next.messages.slice(0, -1)) {
     const k = shown.indexOf(`── ${m.role}\n${m.content}`, at);
     expect([m.role, k]).not.toEqual([m.role, -1]);
     at = k;
   }
-  expect(next.messages[0].content).toContain("The tools offered here are the only ones");
+  expect(next.messages[0].content).toContain("There are no tools or files in this chat");
   await page.$eval("#system-input", (el) => { (el as HTMLTextAreaElement).value = "Be terse, {{MODEL}}."; el.dispatchEvent(new Event("input")); });
   await send(page, "third");
   expect(lastStream.messages[0]).toEqual({ role: "system", content: `Be terse, Qwen3.8-27B.\n\n${ARTIFACTS_PROMPT}` });

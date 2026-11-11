@@ -8,7 +8,6 @@
     "check": "tsc --noEmit"
   },
   "dependencies": {
-    "@modelcontextprotocol/sdk": "^1.32.1",
     "aframe": "1.8.0",
     "dompurify": "^3.4.16",
     "highlight.js": "^11.12.0",
@@ -22,7 +21,6 @@
     "@types/bun": "^1.4.2",
     "@types/multicast-dns": "^7.2.4",
     "puppeteer-core": "^25.14.0",
-    "typescript": "^7.0.2",
-    "zod": "^4.6.7"
+    "typescript": "^7.0.2"
   }
 }

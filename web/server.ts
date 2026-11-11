@@ -8,18 +8,16 @@ import { Devices, keyCookie } from "./devices";
 import { advertise, answerName, Link } from "./link";
 import { opencodeLine, opencodeManifest, opencodeScript } from "./opencode";
 import { appleProfile, connectPage, deviceScript, TRUSTED_GIF } from "./setup";
-import { SUBAGENT_SYSTEM } from "./tool-agent";
-import * as registry from "./tools";
+import * as harness from "./harness";
 import { fingerprint, lanAddresses, netName, routeAddress, tlsDir, webTls } from "./tls";
-import { assistantTurn, checkpointText, DESCRIPTIONS, withText, toolTurn, type ToolChoice, type WireCall } from "./wire";
-import { ceiling, CONTINUE_AFTER_BREAK, CONTINUE_AFTER_CUT, continueAfterReview, covers, filled, NUDGE, recentText, reviewPrompt, saysTooLong, summaryPrompt, summaryRoom, tokens, tokensIn, verdictOf, type Turn } from "./compaction";
+import { assistantTurn, checkpointText, withText, type WireCall } from "./wire";
+import { ceiling, CONTINUE_AFTER_BREAK, covers, filled, NUDGE, recentText, saysTooLong, summaryPrompt, summaryRoom, tokens, tokensIn, type Turn } from "./compaction";
 
 const CHRYSALIS = process.env.CHRYSALIS_URL ?? "http://127.0.0.1:8080";
 const engineStats = () => fetch(`${CHRYSALIS}/chrysalis/stats`, { signal: AbortSignal.timeout(1000) });
 const BUILD = Bun.hash((await Promise.all(["index.html", "app.ts", "sampler.ts", "files.ts", "wire.ts", "voice.ts", "voice-worklet.js", "sandbox.js", "heard.ts", "spoken.ts", "ocean.ts",
   "logo.svg", "style.css", "tokens.css"].map((f) => Bun.file(`${import.meta.dir}/${f}`).text()))).join("\0")).toString(36);
-await registry.reload();
-for (const sig of ["SIGINT", "SIGTERM"] as const) process.on(sig, () => void registry.closeAll().finally(() => process.exit(0)));
+for (const sig of ["SIGINT", "SIGTERM"] as const) process.on(sig, () => process.exit(0));
 
 const NAMES = new Set(["", "localhost", hostname().toLowerCase(), `${hostname().toLowerCase()}.local`, netName()]);
 const hostOk = (req: Request) => {
@@ -62,35 +60,29 @@ interface Job {
   id: string;
   events: (string | null)[];
   folds: { from: number; to: number }[];
-  rounds: Map<string, number>;
+  folded: number;
   done: boolean;
   ctrl: AbortController;
   waiters: Set<() => void>;
   asks: Map<string, (d: Decision) => void>;
-  agents: Map<string, AbortController>;
+  thread?: string;
   t0: number; tFirst?: number; tAnswer?: number; tLast?: number;
   gen: number;
-  held?: Promise<void>; go?: () => void;
 }
 type Decision = "once" | "always" | "deny";
-const jobs = new Map<string, Job>();
+const jobs = new Map<string, Job>(), turns = new Map<string, Job>();
 const KEEP_MS = 15 * 60_000;
-const HELD_MS = 60_000;
 const RETRIES = 10, RETRY_MS = Number(process.env.CHRYSALIS_RETRY_MS) || 2000, RETRY_MOST_MS = RETRY_MS * 5;
 const SUMMARY_THINKING = 2048, WORTH_IT = 4;
-const CUTS = 2, MAX_REPLY = 131072;
-const STALLS = 3, REVIEW_THINKING = 256, REVIEW_TOKENS = 512;
-const STALLED = "It says the work is not finished, but made no progress in three tries, so it stops here.";
 const ROOM_MS = 2000;
 const FIRST_ONLY = ["continue_final_message", "chrysalis_original", "chrysalis_append_token"];
 
 function startJob(body: string): Job {
-  const job: Job = { id: crypto.randomUUID(), events: [], folds: [], rounds: new Map(), done: false, ctrl: new AbortController(), waiters: new Set(), asks: new Map(),
-    agents: new Map(), t0: Date.now(), gen: 0 };
+  const job: Job = { id: crypto.randomUUID(), events: [], folds: [], folded: 0, done: false, ctrl: new AbortController(), waiters: new Set(), asks: new Map(),
+    t0: Date.now(), gen: 0 };
   jobs.set(job.id, job);
   const push = (data: string | object) => {
-    const ended = typeof data === "string" ? undefined : (data as any).round ? "" : (data as any).agent?.ev?.round ? (data as any).agent.id as string : undefined;
-    if (ended !== undefined) fold(job, ended);
+    if (typeof data !== "string" && (data as any).round) fold(job);
     job.events.push(typeof data === "string" ? data : JSON.stringify(data));
     for (const wake of [...job.waiters]) wake();
   };
@@ -98,43 +90,30 @@ function startJob(body: string): Job {
   let main: Thread | undefined;
   (async () => {
     try {
-      const { req, web, ahead, tools, notes } = await asSent(JSON.parse(body));
-      if (ahead) {
-        job.held = new Promise((go) => {
-          const timer = setTimeout(() => job.ctrl.abort(), HELD_MS);
-          job.go = () => (clearTimeout(timer), go());
-          job.ctrl.signal.addEventListener("abort", () => (clearTimeout(timer), go()));
+      const raw = JSON.parse(body);
+      if (raw.chrysalis_thread) {
+        const ask = (call: string) => new Promise<harness.Decision | "stop">((resolve) => {
+          if (job.ctrl.signal.aborted) return resolve("stop");
+          job.asks.set(call, (d) => (job.asks.delete(call), resolve(d)));
+          job.ctrl.signal.addEventListener("abort", () => (job.asks.delete(call), resolve("stop")), { once: true });
         });
+        await harness.ensure(CHRYSALIS);
+        const first = (d: any) => {
+          if (d?.choices?.[0]?.delta) { const now = Date.now(); job.tFirst ??= now; job.tLast = now; if (d.choices[0].delta.content) job.tAnswer ??= now; job.gen = now - job.tFirst; }
+          push(d);
+        };
+        await harness.turn(raw.chrysalis_thread, first, job.ctrl.signal, ask, (id) => { job.thread = id; turns.set(id, job); push({ thread: id }); });
+        return;
       }
-      main = thread(job, req, req.messages ?? [], push, job.ctrl.signal, true, true);
-      for (const note of notes) push({ note });
-      const allow = new Set(web?.allow ?? []);
-      const onward = !!web && web.loop !== false && !req.max_tokens;
-      let stalls = 0;
-      for (let k = 0; ; k++) {
-        if (k) push({ round: k });
-        const out = await step(main, onward);
-        if (!web || web.loop === false || job.ctrl.signal.aborted) break;
-        if (!out.calls.length) {
-          const more = onward && tools.length ? await unfinished(main, out) : undefined;
-          if (!more) break;
-          if (++stalls >= STALLS) { push({ note: STALLED }); break; }
-          add(main, assistantTurn(out.content, out.reasoning), { role: "user", content: more });
-          continue;
-        }
-        stalls = 0;
-        await job.held;
-        if (job.ctrl.signal.aborted) throw new DOMException("stopped", "AbortError");
-        const room = await roomFor(main, out.calls.length);
-        const results = await Promise.all(out.calls.map((c) => call(job, c, tools, allow, web, push, req, room)));
-        if (job.ctrl.signal.aborted) throw new DOMException("stopped", "AbortError");
-        add(main, assistantTurn(out.content, out.reasoning, out.calls), ...out.calls.map((c, i) => toolTurn(c.id, results[i])));
-      }
+      const req = asSent(raw);
+      main = thread(job, req, req.messages ?? [], push, job.ctrl.signal, true);
+      await step(main);
     } catch (e) {
       if (!job.ctrl.signal.aborted && !(e instanceof ChrysalisDown || e instanceof Refused || e instanceof ChrysalisBroke || e instanceof CannotGoOn)) console.error(`chrysalis web: reply ${job.id} failed:`, e);
       push(job.ctrl.signal.aborted ? { stopped: true } : { error: { message: e instanceof Error ? e.message : String(e) } });
     } finally {
       if (main) threads.delete(main);
+      if (job.thread && turns.get(job.thread) === job) turns.delete(job.thread);
       push({ timing: { start: job.t0, first: job.tFirst, answer: job.tAnswer, last: job.tLast, gen: job.gen } });
       push("[DONE]");
       job.done = true;
@@ -150,35 +129,27 @@ const wordsOnly = (ev: any) => {
   const { role, content, reasoning_content, ...rest } = c.delta ?? {};
   return !Object.keys(rest).length;
 };
-function fold(job: Job, id: string) {
+function fold(job: Job) {
   const end = job.events.length, words: number[] = [];
   let reasoning = "", content = "";
-  for (let i = job.rounds.get(id) ?? 0; i < end; i++) {
+  for (let i = job.folded; i < end; i++) {
     const raw = job.events[i];
     if (!raw?.includes('"delta"')) continue;
-    const ev = JSON.parse(raw), own = id ? (ev.agent?.id === id ? ev.agent.ev : undefined) : ev.agent ? undefined : ev;
-    if (!wordsOnly(own)) continue;
-    reasoning += own.choices[0].delta.reasoning_content ?? "";
-    content += own.choices[0].delta.content ?? "";
+    const ev = JSON.parse(raw);
+    if (!wordsOnly(ev)) continue;
+    reasoning += ev.choices[0].delta.reasoning_content ?? "";
+    content += ev.choices[0].delta.content ?? "";
     words.push(i);
   }
-  job.rounds.set(id, end + 1);
+  job.folded = end + 1;
   if (words.length < 2) return;
-  const last = words.pop()!, delta = { choices: [{ index: 0, delta: { ...(reasoning ? { reasoning_content: reasoning } : {}), ...(content ? { content } : {}) } }] };
+  const last = words.pop()!;
   for (const i of words) job.events[i] = null;
-  job.events[last] = JSON.stringify(id ? { agent: { id, ev: delta } } : delta);
+  job.events[last] = JSON.stringify({ choices: [{ index: 0, delta: { ...(reasoning ? { reasoning_content: reasoning } : {}), ...(content ? { content } : {}) } }] });
   job.folds.push({ from: words[0], to: last });
 }
 
-async function asSent(raw: any) {
-  const req = { ...raw }, web: ToolChoice | undefined = req.chrysalis_web, ahead = req.chrysalis_ahead === true;
-  delete req.chrysalis_web;
-  delete req.chrysalis_ahead;
-  const picked = web ? await registry.select(web.tools ?? {}) : { tools: [] as registry.Named[], notes: [] as string[] };
-  const tools = picked.tools, notes = picked.notes;
-  if (tools.length) req.tools = tools.map((n) => registry.openai(n, DESCRIPTIONS[n.tool.name]));
-  return { req: backends.isChrysalis ? req : standard(req), web, ahead, tools, notes };
-}
+const asSent = (raw: any) => (backends.isChrysalis ? raw : standard(raw));
 
 class ChrysalisDown extends Error {
   message = backends.atService ? "Chrysalis is not running" : `nothing answers at ${new URL(backends.url).origin}: is the backend running?`;
@@ -253,17 +224,17 @@ async function round(job: Job, body: object, push: (d: string | object) => void,
   return out;
 }
 
-interface Thread { job: Job; req: any; messages: Turn[]; task?: Turn; head: number; push: (d: string | object) => void; signal: AbortSignal; timed: boolean; main: boolean;
+interface Thread { job: Job; req: any; messages: Turn[]; task?: Turn; head: number; push: (d: string | object) => void; signal: AbortSignal; timed: boolean;
   counted: number; read: number; settled: boolean; asking: number }
 const threads = new Set<Thread>();
-function thread(job: Job, req: any, messages: Turn[], push: (d: string | object) => void, signal: AbortSignal, timed: boolean, main: boolean) {
-  const t: Thread = { job, req, messages, task: messages.findLast((m) => m.role === "user"), head: messages[0]?.role === "system" ? 1 : 0, push, signal, timed, main,
+function thread(job: Job, req: any, messages: Turn[], push: (d: string | object) => void, signal: AbortSignal, timed: boolean) {
+  const t: Thread = { job, req, messages, task: messages.findLast((m) => m.role === "user"), head: messages[0]?.role === "system" ? 1 : 0, push, signal, timed,
     counted: 0, read: 0, settled: false, asking: 0 };
   threads.add(t);
   return t;
 }
 const add = (t: Thread, ...turns: Turn[]) => { t.messages = [...t.messages, ...turns]; };
-const sizeOf = (t: Thread) => t.counted + t.messages.slice(t.read).reduce((n, m) => n + tokensIn(m), t.read ? 0 : tokens(JSON.stringify(t.req.tools ?? "")));
+const sizeOf = (t: Thread) => t.counted + t.messages.slice(t.read).reduce((n, m) => n + tokensIn(m), 0);
 const pause = (ms: number, signal: AbortSignal) => new Promise<void>((done, stop) => {
   const gone = () => (clearTimeout(timer), stop(new DOMException("stopped", "AbortError"))), timer = setTimeout(() => (signal.removeEventListener("abort", gone), done()), ms);
   if (signal.aborted) gone();
@@ -289,15 +260,10 @@ async function limitOf(t: Thread) {
   const { window, pool, lanes } = await roomOf(t);
   if (!window) return Infinity;
   if (!pool || !lanes) return ceiling(window);
-  const sharing = [...threads].filter((x) => !(x.main && x.job.agents.size));
+  const sharing = [...threads];
   const others = sharing.filter((x) => x !== t).map(sizeOf).sort((a, b) => b - a).slice(0, lanes - 1).reduce((a, b) => a + b, 0);
   return ceiling(Math.min(window, Math.max(pool - others, Math.floor(pool / Math.max(1, Math.min(lanes, sharing.length))))));
 }
-async function roomFor(t: Thread, calls: number) {
-  const limit = await limitOf(t);
-  return limit === Infinity ? Infinity : Math.floor((limit * 1.5) / calls);
-}
-
 async function patient(t: Thread, send: () => Promise<Out>, keep: boolean): Promise<Out> {
   const asked = async () => {
     t.asking++;
@@ -333,8 +299,8 @@ function carry(t: Thread, out: Out, note: string) {
   t.push({ round: true });
 }
 
-async function step(t: Thread, onward: boolean): Promise<Out> {
-  let rejected = false, cuts = 0;
+async function step(t: Thread): Promise<Out> {
+  let rejected = false;
   for (;;) {
     if (!t.settled && sizeOf(t) >= await limitOf(t)) await compact(t, false);
     let out: Out;
@@ -350,28 +316,9 @@ async function step(t: Thread, onward: boolean): Promise<Out> {
     }
     t.settled = false;
     if (out.usage) { t.counted = out.usage.prompt_tokens + out.usage.completion_tokens; t.read = t.messages.length + (t.req.continue_final_message ? 0 : 1); }
-    if (out.finish === "length" && !out.calls.length && onward) {
-      const { window } = await roomOf(t), used = out.usage ? out.usage.prompt_tokens + out.usage.completion_tokens : 0;
-      const limited = !backends.isChrysalis || !window || used >= window - 64 || (out.usage?.completion_tokens ?? 0) >= (t.req.max_tokens ?? MAX_REPLY);
-      if (limited && ++cuts > CUTS) throw new CannotGoOn(`the reply was still cut off after ${CUTS} tries to carry on: ${t.req.max_tokens ? "its Max tokens setting is too low for it" : "it does not fit in the context"}`);
-      carry(t, out, CONTINUE_AFTER_CUT);
-      if (!limited) await pause(gap(0), t.signal);
-      continue;
-    }
     begun(t);
     return out;
   }
-}
-
-async function unfinished(t: Thread, out: Out) {
-  t.push({ reviewing: true });
-  const { max_tokens, tool_choice, stop, seed, logprobs, top_logprobs, ...req } = t.req;
-  const messages = [...t.messages, assistantTurn(out.content, out.reasoning), { role: "user", content: reviewPrompt(textOf(t.task?.content)) }];
-  const said = await patient(t, () => round(t.job, { ...req, ...(backends.isChrysalis ? { thinking_budget: REVIEW_THINKING } : {}), max_tokens: REVIEW_TOKENS, messages }, () => {}, t.signal, false), false).catch((e) => {
-    if (t.signal.aborted) throw e;
-  });
-  const verdict = said && verdictOf(said.content);
-  return verdict?.verdict === "continue" ? continueAfterReview(verdict.reason, verdict.next_step) : undefined;
 }
 
 function fitted(rest: Turn[], fit: number) {
@@ -406,7 +353,7 @@ async function compact(t: Thread, needed: boolean) {
   if (!old.length) throw new CannotGoOn("this message is larger than the whole context of the model, so there is nothing to summarize");
   t.push({ compacting: true });
   const { window } = await roomOf(t);
-  const fixed = head.reduce((n, x) => n + tokensIn(x), tokens(JSON.stringify(t.req.tools ?? "")));
+  const fixed = head.reduce((n, x) => n + tokensIn(x), 0);
   let fit = window ? summaryRoom(window) : Infinity, rest = old, summary = "";
   while (rest.length) {
     const part = fitted(rest, fit - fixed - tokens(summary));
@@ -428,95 +375,6 @@ async function compact(t: Thread, needed: boolean) {
   t.counted = t.read = 0;
   t.settled = true;
   t.push({ compacted: { ...checkpoint, kept } });
-}
-
-const textOf = (c: unknown) => (typeof c === "string" ? c : Array.isArray(c) ? c.map((p: any) => p?.text ?? "").join(" ") : "");
-
-async function call(job: Job, c: WireCall, tools: registry.Named[], allow: Set<string>, web: ToolChoice, push: (d: object) => void, req: any, room: number,
-  signal = job.ctrl.signal): Promise<string> {
-  const n = tools.find((t) => t.fn === c.name);
-  const about = { id: c.id, title: n?.tool.title ?? c.name, source: n?.source.label, readOnly: n?.tool.readOnly };
-  const end = (state: string, result: string, ms?: number) => (push({ tool: { ...about, state, result, ms } }), result);
-  if (!n) return end("failed", `Error: there is no tool named "${c.name}" in this chat (the user has not turned it on). The tools you can call are: ${tools.map((t) => t.fn).join(", ") || "none"}.`);
-  let args: Record<string, unknown>;
-  try {
-    args = c.args.trim() ? JSON.parse(c.args) : {};
-    if (!args || typeof args !== "object" || Array.isArray(args)) throw new Error("not an object");
-  } catch {
-    return end("failed", `Error: the arguments are not a JSON object: ${c.args.slice(0, 200)}`);
-  }
-  if (!n.tool.readOnly && !allow.has(n.fn)) {
-    push({ tool: { ...about, state: "approval" } });
-    const d = await new Promise<Decision | "stop">((resolve) => {
-      if (signal.aborted) return resolve("stop");
-      job.asks.set(c.id, resolve);
-      signal.addEventListener("abort", () => resolve("stop"), { once: true });
-    });
-    job.asks.delete(c.id);
-    if (d === "stop") return end("stopped", "Not run: the user stopped the reply before this call was allowed.");
-    if (d === "deny") return end("declined", "The user declined this call: it did not run. Do not try it again unless they ask for it.");
-    if (d === "always") allow.add(n.fn);
-  }
-  push({ tool: { ...about, state: "running" } });
-  const t = Date.now();
-  if (n.source.kind === "agent") {
-    const [state, result] = await subagent(job, c, args, tools.filter((x) => x.source.kind !== "agent"), allow, web, push, req, signal);
-    return end(state, registry.cut(result, Math.min(room, n.source.maxChars)), Date.now() - t);
-  }
-  try {
-    const result = await registry.run(n, args, signal, n.source.kind === "fetch" ? web.fetchChars : undefined, room);
-    return end("done", result, Date.now() - t);
-  } catch (e) {
-    if (signal.aborted) return end("stopped", "Stopped: the user stopped the reply while this call ran.", Date.now() - t);
-    return end("failed", `Error: ${e instanceof Error ? e.message : String(e)}`, Date.now() - t);
-  }
-}
-
-async function subagent(job: Job, c: WireCall, args: Record<string, unknown>, tools: registry.Named[], allow: Set<string>,
-  web: ToolChoice, push: (d: object) => void, req: any, outer: AbortSignal): Promise<["done" | "stopped" | "failed", string]> {
-  const task = typeof args.prompt === "string" ? args.prompt.trim() : "";
-  if (!task) return ["failed", "Error: the call needs a prompt: the task, with everything the sub-agent needs to know."];
-  const ctrl = new AbortController(), signal = AbortSignal.any([outer, ctrl.signal]);
-  job.agents.set(c.id, ctrl);
-  const inner = (d: string | object) => push({ agent: { id: c.id, ev: typeof d === "string" ? JSON.parse(d) : d } });
-  const base = { ...req };
-  for (const f of ["messages", "tools", "tool_choice", "seed", "logprobs", "top_logprobs", ...FIRST_ONLY]) delete base[f];
-  if (tools.length) base.tools = tools.map((n) => registry.openai(n, DESCRIPTIONS[n.tool.name]));
-  const t = thread(job, base, [{ role: "system", content: SUBAGENT_SYSTEM }, { role: "user", content: task }], inner, signal, false, false);
-  let said = "", stalls = 0;
-  try {
-    for (let k = 0; ; k++) {
-      if (k) inner({ round: k });
-      const out = await step(t, true);
-      said = out.content.trim();
-      if (!out.calls.length) {
-        const more = tools.length ? await unfinished(t, out) : undefined;
-        if (!more) return ["done", said || "The sub-agent finished without writing an answer."];
-        if (++stalls >= STALLS) {
-          inner({ note: STALLED });
-          return ["done", `${said}\n\n[${STALLED}]`.trim()];
-        }
-        add(t, assistantTurn(out.content, out.reasoning), { role: "user", content: more });
-        continue;
-      }
-      stalls = 0;
-      const room = await roomFor(t, out.calls.length);
-      const results = await Promise.all(out.calls.map((x) => call(job, x, tools, allow, web, inner, req, room, signal)));
-      if (signal.aborted) throw new DOMException("stopped", "AbortError");
-      add(t, assistantTurn(out.content, out.reasoning, out.calls), ...out.calls.map((x, i) => toolTurn(x.id, results[i])));
-    }
-  } catch (e) {
-    if (signal.aborted) {
-      const by = outer.aborted ? "the user stopped the reply" : "the user stopped it";
-      return ["stopped", `Stopped before it finished: ${by}.${said ? ` What it had written last:\n\n${said}` : ""}`];
-    }
-    const why = e instanceof Error ? e.message : String(e);
-    inner({ error: { message: why } });
-    return ["failed", `Error: the sub-agent could not go on: ${why}`];
-  } finally {
-    threads.delete(t);
-    job.agents.delete(c.id);
-  }
 }
 
 function follow(job: Job, from: number): Response {
@@ -765,8 +623,7 @@ img.src = ${JSON.stringify(checkUrl(req))} + "?t=" + Date.now();
     },
     "/api/preview": {
       POST: guarded(json(async (req) => {
-        const { req: body } = await asSent(await req.json().catch(() => ({})));
-        return Response.json({ body });
+        return Response.json({ body: asSent(await req.json().catch(() => ({}))) });
       })),
     },
     "/api/chat/:id": {
@@ -782,19 +639,6 @@ img.src = ${JSON.stringify(checkUrl(req))} + "?t=" + Date.now();
         return new Response(null, { status: 204 });
       }),
     },
-    "/api/chat/:id/agent/:call/stop": {
-      POST: guarded((req) => {
-        const { id, call } = (req as Request & { params: { id: string; call: string } }).params;
-        jobs.get(id)?.agents.get(call)?.abort();
-        return new Response(null, { status: 204 });
-      }),
-    },
-    "/api/chat/:id/go": {
-      POST: guarded((req) => {
-        jobs.get((req as Request & { params: { id: string } }).params.id)?.go?.();
-        return new Response(null, { status: 204 });
-      }),
-    },
     "/api/chat/:id/tool/:call": {
       POST: guarded(json(async (req) => {
         const { id, call } = (req as Request & { params: { id: string; call: string } }).params;
@@ -806,15 +650,41 @@ img.src = ${JSON.stringify(checkUrl(req))} + "?t=" + Date.now();
       })),
     },
 
-    "/api/tools": { GET: guarded(() => Response.json(registry.catalog())) },
-    "/api/tools/reload": { POST: guarded(json(async () => (await registry.reload(), Response.json(registry.catalog())))) },
-    "/api/tools/connect": {
-      POST: guarded(json(async (req) => {
-        const s = registry.source(String((await req.json().catch(() => ({})))?.source));
-        if (!s) return Response.json({ error: { message: "no such tool source" } }, { status: 404 });
-        void s.connect();
-        return Response.json(registry.catalog());
+    "/api/threads": {
+      GET: guarded(async () => {
+        const at = harness.state();
+        if (at.state !== "on") return Response.json({ ...at, install: harness.INSTALL });
+        const [threads, models] = await Promise.all([harness.threads(), harness.models()]);
+        return Response.json({ ...at, models, threads: threads.map((t) => ({ ...t, job: turns.get(t.id)?.id })) });
+      }),
+      POST: guarded(async () => {
+        try { await harness.ensure(CHRYSALIS); } catch (e) { return Response.json({ error: { message: (e as Error).message } }, { status: 502 }); }
+        return Response.json(harness.state());
+      }),
+    },
+    "/api/threads/folders": {
+      GET: guarded((req) => {
+        try { return Response.json(harness.folders(new URL(req.url).searchParams.get("path") ?? "")); }
+        catch { return Response.json({ error: { message: "that folder cannot be read" } }, { status: 404 }); }
+      }),
+    },
+    "/api/threads/:id": {
+      GET: guarded(async (req) => {
+        const id = (req as Request & { params: { id: string } }).params.id;
+        try { return Response.json({ ...(await harness.transcript(id)), job: turns.get(id)?.id }); }
+        catch (e) { return Response.json({ error: { message: (e as Error).message } }, { status: 502 }); }
+      }),
+      PATCH: guarded(json(async (req) => {
+        const title = String((await req.json().catch(() => ({})))?.title ?? "").trim();
+        if (title) await harness.rename((req as Request & { params: { id: string } }).params.id, title);
+        return new Response(null, { status: 204 });
       })),
+      DELETE: guarded(async (req) => {
+        const id = (req as Request & { params: { id: string } }).params.id;
+        turns.get(id)?.ctrl.abort();
+        try { await harness.remove(id); } catch (e) { return Response.json({ error: { message: (e as Error).message } }, { status: 502 }); }
+        return new Response(null, { status: 204 });
+      }),
     },
 
     "/api/voice": guarded((req, srv) => {

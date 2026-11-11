@@ -63,7 +63,7 @@ Start Chrysalis with `chrysalis.sh --host 0.0.0.0`. The other computer needs [Op
 ## Also
 
 - **Voice mode** you can interrupt by talking
-- **Tools**, MCP servers and sub-agents
+- **OpenCode threads** in the chat: work in a folder, with OpenCode's tools and models
 - **Claude Code** and **OpenCode**, through OpenAI and Anthropic APIs
 - The same chat on **llama.cpp, Ollama, LM Studio, KoboldCpp or vLLM**
 - **Qwen3.8-27B** with its full 262K context
@@ -120,15 +120,18 @@ docker run -d --device /dev/kfd --device /dev/dri -p 127.0.0.1:8080:8080 -v chry
 - Artifacts render as they are written. Hovering highlights a part. Clicking attaches it to the next message. The paint
   bucket edits the artifact by hand.
 - SillyTavern cards: speech and narration look the way they do in SillyTavern, and each speaker in a group chat has a
-  portrait.
+  portrait. A character's row in the sidebar brings others into its chat, and a chat keeps its own people. In a group,
+  `@name` has that one answer next.
+- OpenCode threads: the OpenCode button starts [OpenCode](https://opencode.ai) on the computer Chrysalis runs on.
+  A folder opened there is a row in the sidebar and its threads are chats, read from OpenCode, so they come back
+  after a reload and on other devices. The tools, models, permissions and compaction are OpenCode's. A thread uses
+  one of Chrysalis's own models unless another is picked. A character can do the work, in character. Chrysalis's
+  own chats have no tools.
+- Settling puts a chat or a thread away on a shelf at the bottom of the sidebar.
 - Phones: the connect page shows how to trust the certificate authority on each kind of device. The chat runs over HTTPS.
   The authority works only on the local network.
-- Long replies: a chat or sub-agent near the end of its context summarizes what came before and carries on. The chat
-  stays whole on screen, and a divider holds the summary. Sub-agents side by side share the GPU's memory, so each keeps to
-  its share. A reply takes as many tool rounds as it needs, and Stop ends it. When a reply that used tools stops, the
-  model reviews it against the request and goes on if the work is not finished. A chat waiting on you says Needs you in
-  the list. Chats stay in the tab, so a finished sub-agent keeps its answer and its last steps through a reload, without
-  their results.
+- Long replies: a chat near the end of its context summarizes what came before and carries on. The chat stays whole
+  on screen, and a divider holds the summary. A thread waiting on you says Needs you in the list.
 
 **OpenCode on another computer**
 

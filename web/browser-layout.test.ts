@@ -1,5 +1,5 @@
 import { expect, test } from "bun:test";
-import { harness, fakes, CLEAN, SIZES, composerFaults, idle, look, open, pop, resize, send, shown, still, voicePage } from "./browser-harness";
+import { harness, fakes, CLEAN, SIZES, composerFaults, idle, look, open, resize, send, shown, still, voicePage } from "./browser-harness";
 
 harness();
 

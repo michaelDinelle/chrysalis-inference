@@ -101,6 +101,7 @@
         <button type="button" data-add="group" role="menuitem">A chat with several…</button>
       </div>
       <div id="cast-invite" class="cast-invite" role="dialog" aria-label="Who is in this chat" hidden></div>
+      <div id="oc-pop" class="cast-invite oc-pop" role="dialog" aria-label="OpenCode" hidden></div>
       <input id="cast-file" type="file" accept=".png,.json,image/png,application/json" multiple hidden />
       <main>
         <header class="topbar">
@@ -114,6 +115,7 @@
             <p id="link-note" class="backend-note" role="status" hidden></p>
           </form>
           <button id="artifacts-toggle" class="act art-btn" type="button" title="Artifacts" aria-label="Artifacts" aria-controls="shelf" hidden></button>
+          <button id="opencode" class="act oc-btn" type="button" aria-haspopup="dialog" aria-controls="oc-pop"></button>
           <button id="connect" class="act" type="button" title="Connect a phone or another device" aria-label="Connect a device" aria-haspopup="dialog" hidden></button>
         </header>
         <div id="sea" class="sea"></div>
@@ -126,7 +128,6 @@
             <div id="cast-next" class="cast-next" hidden></div>
             <textarea id="input" rows="1" placeholder="Message Chrysalis" autofocus></textarea>
             <div id="model-pop" class="model-pop" role="listbox" aria-label="Model" hidden></div>
-            <div id="tools-pop" class="tools-pop" role="dialog" aria-label="Tools in this chat" hidden></div>
             <div class="composer-row">
               <div class="composer-options">
                 <button id="attach" class="act attach" type="button" title="Attach text files or pictures (or drop or paste them)" aria-label="Attach files"></button>
@@ -135,7 +136,7 @@
                   <div id="energy" class="energy" role="slider" tabindex="0" aria-label="Thinking" aria-valuemin="0" aria-valuemax="3"></div>
                   <div id="energy-stops" class="energy-stops"></div>
                 </div>
-                <button id="tools-btn" class="tools-btn" type="button" aria-haspopup="dialog" aria-expanded="false" aria-controls="tools-pop"></button>
+                
               </div>
               <div class="composer-actions">
                 <span id="meter" class="meter"></span>
@@ -190,7 +191,7 @@
             <textarea id="system-input" rows="1" placeholder="No system prompt" title="Sent as written, {{MODEL}} as the chat's model; empty sends none. The default keeps the model from acting as a coding agent when it doesn't think, and is sent as its tools version in a chat with tools on. A change makes each chat read its history again once."></textarea>
             <div class="set-block-foot">
               <label class="set-switch" title="After the system prompt, how to make artifacts (with an id for each part) and change them in place with edits that hold only what changes"><button id="artifacts-switch" class="switch" type="button" role="switch" aria-checked="true"></button><span>Artifacts the model changes in place</span></label>
-              <button id="sent-open" class="btn small" type="button" title="The open chat's next request, exactly as the backend gets it: the tools, the system prompt and every message">What the model is sent</button>
+              <button id="sent-open" class="btn small" type="button" title="The open chat's next request, exactly as the backend gets it: the system prompt and every message">What the model is sent</button>
             </div>
           </div>
           <div class="set-block">

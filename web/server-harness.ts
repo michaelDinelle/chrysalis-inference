@@ -1,9 +1,7 @@
 import { afterAll, beforeAll, expect } from "bun:test";
 import { chmodSync, existsSync, mkdtempSync, rmSync, readFileSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { WebStandardStreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/webStandardStreamableHttp.js";
 import { createHash } from "node:crypto";
-import { fakeMcp } from "./fake-mcp";
 import mdns from "multicast-dns";
 import { advertise, discover } from "./link";
 import { fingerprint, lanAddresses, netName, webTls } from "./tls";
@@ -22,7 +20,7 @@ export interface Round { calls?: { name: string; args: string }[]; text?: string
 export const seen = new Map<string, any[]>();
 export const enc = new TextEncoder();
 export const sse = (o: unknown) => enc.encode(`data: ${typeof o === "string" ? o : JSON.stringify(o)}\n\n`);
-export let fake: ReturnType<typeof Bun.serve>, site: ReturnType<typeof Bun.serve>, inner: ReturnType<typeof Bun.serve>, mcpHttp: ReturnType<typeof Bun.serve>;
+export let fake: ReturnType<typeof Bun.serve>;
 const serveFake = () => Bun.serve({
   hostname: "127.0.0.1",
   port: 0,
@@ -71,49 +69,12 @@ const serveFake = () => Bun.serve({
   },
 });
 
-export const PAGE = `<!doctype html><html><head><title>Chrysalis &amp; tools</title><script>alert("no")</script><style>p{}</style></head><body>
-<nav><a href="/">Home</a></nav><main><h1>Fetched</h1><p>A <a href="/docs">link</a> and <code>code</code>.</p><ul><li>one</li><li>two</li></ul>
-<pre>let x = 1;</pre></main><footer>Copyright</footer></body></html>`;
-const serveSite = () => Bun.serve({
-  hostname: "127.0.0.1", port: 0,
-  fetch(req) {
-    const u = new URL(req.url);
-    if (u.pathname === "/page") return new Response(PAGE, { headers: { "Content-Type": "text/html; charset=utf-8" } });
-    if (u.pathname === "/hop") return Response.redirect(`http://127.0.0.2:${inner.port}/secret`, 302);
-    if (u.pathname === "/long") return new Response("0123456789".repeat(5000), { headers: { "Content-Type": "text/plain" } });
-    if (u.pathname === "/pic") return new Response(new Uint8Array(64), { headers: { "Content-Type": "image/png" } });
-    return new Response("missing", { status: 404, headers: { "Content-Type": "text/plain" } });
-  },
-});
-const serveInner = () => Bun.serve({ hostname: "127.0.0.2", port: 0, fetch: () => new Response("the secret", { headers: { "Content-Type": "text/plain" } }) });
-const serveMcp = () => Bun.serve({
-  hostname: "127.0.0.1", port: 0,
-  async fetch(req) {
-    const t = new WebStandardStreamableHTTPServerTransport({ sessionIdGenerator: undefined, enableJsonResponse: true });
-    await fakeMcp().connect(t);
-    return t.handleRequest(req);
-  },
-});
-
-export const dir = mkdtempSync(`${RUN}/tools-`), CONFIG = `${dir}/mcp.json`, LOG = `${dir}/mcp.log`;
-export const stdio = (timeout?: number) => ({ command: process.execPath, args: ["fake-mcp.ts"], cwd: import.meta.dir, env: { FAKE_MCP_LOG: LOG }, ...(timeout ? { timeout } : {}) });
-export const config = (fetch: object = {}) => writeFileSync(CONFIG, JSON.stringify({
-  mcpServers: { fake: stdio(3), "a.b": stdio(), a_b: stdio(), web: { url: `http://127.0.0.1:${mcpHttp.port}/mcp` },
-    narrow: { url: `http://localhost:${mcpHttp.port}/mcp`, tools: ["echo", "nonexistent"] }, plain: { url: "http://example.com/mcp" },
-    broken: { command: "/nonexistent/chrysalis-test-mcp" }, off: { command: "true", disabled: true } },
-  fetch,
-}));
 export let web: Bun.Subprocess<"ignore", "pipe", "inherit">, base = "", port = "";
 async function start() {
   fake = serveFake();
-  site = serveSite();
-  inner = serveInner();
-  mcpHttp = serveMcp();
-  writeFileSync(LOG, "");
-  config();
   web = Bun.spawn([process.execPath, "server.ts"], {
     cwd: import.meta.dir, stdout: "pipe", stderr: "inherit",
-    env: { ...process.env, PORT: "0", CHRYSALIS_URL: `http://127.0.0.1:${fake.port}`, CHRYSALIS_HOST: "127.0.0.1", NODE_ENV: "production", CHRYSALIS_MCP_CONFIG: CONFIG,
+    env: { ...process.env, PORT: "0", CHRYSALIS_URL: `http://127.0.0.1:${fake.port}`, CHRYSALIS_HOST: "127.0.0.1", NODE_ENV: "production",
       CHRYSALIS_TLS_DIR: TLS(), CHRYSALIS_CHECK_PORT: "0", CHRYSALIS_RETRY_MS: "5" },
   });
   const reader = web.stdout.getReader(), dec = new TextDecoder();
@@ -128,7 +89,7 @@ async function start() {
 }
 export function harness() {
   beforeAll(start);
-  afterAll(async () => { web.kill(); await web.exited; fake.stop(true); site.stop(true); inner.stop(true); mcpHttp.stop(true); });
+  afterAll(async () => { web.kill(); await web.exited; fake.stop(true); });
 }
 
 export async function* events(res: Response) {
@@ -156,9 +117,9 @@ export type Ev = Record<string, any>;
 let asked = 0;
 export const unique = () => ++asked;
 
-export const ask = (script: Round[], tools: Record<string, { off?: string[] }> = { "mcp:fake": {} }, more: object = {}) => {
+export const ask = (script: Round[], more: object = {}) => {
   const said = `run ${JSON.stringify(script)}\n${++asked}`;
-  const res = fetch(`${base}/api/chat`, { method: "POST", headers: json, body: JSON.stringify({ stream: true, model: "m", messages: [{ role: "user", content: said }], chrysalis_web: { tools, ...more } }) });
+  const res = fetch(`${base}/api/chat`, { method: "POST", headers: json, body: JSON.stringify({ stream: true, model: "m", messages: [{ role: "user", content: said }], ...more }) });
   return { said, res };
 };
 
@@ -166,29 +127,15 @@ export async function* parsed(res: Response) { for await (const [, d] of events(
 
 export const collect = async (res: Response) => { const got: Ev[] = []; for await (const e of parsed(res)) got.push(e); return got; };
 
-export const toolEvents = (got: Ev[]) => got.filter((e) => e.tool).map((e) => e.tool);
-
-export const results = (body: any) => body.messages.filter((m: any) => m.role === "tool").map((m: any) => m.content);
-
-export const catalog = async () => (await fetch(`${base}/api/tools`)).json() as Promise<{ sources: any[]; error?: string }>;
-
-export const sourceOf = async (id: string) => (await catalog()).sources.find((s) => s.id === id);
-
 export const decide = (job: string, call: string, decision: string) =>
   fetch(`${base}/api/chat/${job}/tool/${call}`, { method: "POST", headers: json, body: JSON.stringify({ decision }) });
-
-export const fetched = async (url: string, more: object = {}) => {
-  const { said, res } = ask([{ calls: [{ name: "fetch_url", args: JSON.stringify({ url, ...more }) }] }, { text: "ok" }], { fetch: {} });
-  const got = await collect(await res);
-  return { result: results(seen.get(said)![1])[0] as string, state: toolEvents(got).at(-1)!.state };
-};
 
 export const Socket = WebSocket as unknown as new (url: string, o: { headers?: Record<string, string> }) => WebSocket;
 
 export async function voiceServer(env: Record<string, string>) {
   const proc = Bun.spawn([process.execPath, "server.ts"], {
     cwd: import.meta.dir, stdout: "pipe", stderr: "inherit",
-    env: { ...process.env, PORT: "0", CHRYSALIS_URL: `http://127.0.0.1:${fake.port}`, CHRYSALIS_HOST: "127.0.0.1", NODE_ENV: "production", CHRYSALIS_MCP_CONFIG: CONFIG,
+    env: { ...process.env, PORT: "0", CHRYSALIS_URL: `http://127.0.0.1:${fake.port}`, CHRYSALIS_HOST: "127.0.0.1", NODE_ENV: "production",
       CHRYSALIS_TLS_DIR: TLS(), CHRYSALIS_CHECK_PORT: "0", ...env },
   });
   const reader = proc.stdout.getReader(), dec = new TextDecoder();
@@ -211,7 +158,7 @@ export async function onNetwork(dir = TLS(), self = false) {
   expect(ips.length).toBeGreaterThan(0);
   const proc = Bun.spawn([process.execPath, "server.ts"], {
     cwd: import.meta.dir, stdout: "pipe", stderr: "inherit",
-    env: { ...process.env, PORT: "0", CHRYSALIS_URL: `http://127.0.0.1:${fake.port}`, CHRYSALIS_HOST: "0.0.0.0", NODE_ENV: "production", CHRYSALIS_MCP_CONFIG: CONFIG,
+    env: { ...process.env, PORT: "0", CHRYSALIS_URL: `http://127.0.0.1:${fake.port}`, CHRYSALIS_HOST: "0.0.0.0", NODE_ENV: "production",
       CHRYSALIS_SELF_AS_NETWORK: self ? "" : "1",
       CHRYSALIS_TLS_DIR: dir, CHRYSALIS_CHECK_PORT: "0", CHRYSALIS_LINK_PORT: "0", CHRYSALIS_VOICE_CMD: JSON.stringify([process.execPath, `${import.meta.dir}/fake-voice.ts`]),
       FAKE_VOICE_LOG: `${dir}/voice.log` },
@@ -251,7 +198,7 @@ export async function withoutEngine() {
   free.stop(true);
   const proc = Bun.spawn([process.execPath, "server.ts"], {
     cwd: import.meta.dir, stdout: "pipe", stderr: "inherit",
-    env: { ...process.env, PORT: "0", CHRYSALIS_URL: chrysalis, CHRYSALIS_HOST: "0.0.0.0", NODE_ENV: "production", CHRYSALIS_MCP_CONFIG: CONFIG,
+    env: { ...process.env, PORT: "0", CHRYSALIS_URL: chrysalis, CHRYSALIS_HOST: "0.0.0.0", NODE_ENV: "production",
       CHRYSALIS_TLS_DIR: dir, CHRYSALIS_CHECK_PORT: "0", CHRYSALIS_LINK_PORT: "0" },
   });
   const reader = proc.stdout.getReader(), dec = new TextDecoder();

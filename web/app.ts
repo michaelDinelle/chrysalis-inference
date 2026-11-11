@@ -8,7 +8,7 @@ import { type Cand, type Odds, type SamplerKey, type Stage, DEFAULT_STAGES, samp
 import { type Part, type VoiceAsk, type VoiceInfo, type VoiceReady, Speaker, VoiceClient } from "./voice";
 import { type Fix, applyFixes, fixedParts, readHeard } from "./heard";
 import { pointOf, shownWords, unitOf } from "./spoken";
-import { type Checkpoint, DESCRIPTIONS, type ToolChoice, type WireCall, assistantTurn, checkpointText, noted, toolTurn, withText } from "./wire";
+import { type Checkpoint, type WireCall, assistantTurn, checkpointText, noted, toolTurn, withText } from "./wire";
 import { type Block, type Span, type Version, ARTIFACTS_PROMPT, PAGE_DOC, elementById, elementSpans, idOf, artifactOf, infoOf, type Info, markSource, replay, setOpen, withAttr, withBackground,
   withContent, withCopy, withOrder, withPaint, withoutElement, lineDiff } from "./artifacts";
 import { LATEX_CSS, latexToHtml } from "./latex";
@@ -20,8 +20,7 @@ import { Ocean } from "./ocean";
 type Effort = "xhigh" | "medium" | "low" | "off";
 interface Stats { ttft: number; tps: number; tokens: number; prompt: number; cached?: number; thought?: number; seed?: number; model?: string; ctx?: number }
 type CallState = "approval" | "running" | "done" | "failed" | "declined" | "stopped";
-interface Call extends WireCall { title?: string; source?: string; readOnly?: boolean; state?: CallState; result?: string; ms?: number; agent?: AgentRun }
-interface AgentRun { content: string; reasoning: string; calls?: Call[]; rounds?: Round[]; notes?: string[]; read?: boolean; tokens?: number; error?: string; tools?: number; now?: string; checkpoints?: Kept[] }
+interface Call extends WireCall { title?: string; source?: string; readOnly?: boolean; state?: CallState; result?: string; ms?: number }
 interface Kept extends Checkpoint { at: number; job?: string }
 interface Round { content: string; reasoning?: string; calls: Call[] }
 interface Versions { shown: number; others: Message[][] }
@@ -48,20 +47,18 @@ interface Message {
   fix?: boolean;
   edits?: { id: string; kind: string; src: string }[];
 }
-interface Conversation { id: string; title: string; named?: boolean; updated: number; effort: Effort; messages: Message[]; tools?: ToolChoice["tools"];
+interface Conversation { id: string; title: string; named?: boolean; updated: number; effort: Effort; messages: Message[];
   pending?: Record<string, { kind: string; srcs: string[] }>;
-  who?: string; cast?: string[]; missing?: string[]; scenario?: string; castName?: string }
+  who?: string; cast?: string[]; missing?: string[]; scenario?: string; castName?: string;
+  thread?: { dir: string; id?: string; model?: string } }
 type Sampler = Partial<Record<SamplerKey, number>> & { order?: Stage[] };
 type Mode = "think" | "fast";
 interface Settings {
   v?: 5;
-  system: string; think: Sampler; fast: Sampler; max_tokens?: number; seed?: number; allow?: string[]; fetchChars?: number; voice?: VoiceSettings;
+  system: string; think: Sampler; fast: Sampler; max_tokens?: number; seed?: number; voice?: VoiceSettings;
   artifacts?: false;
 }
 interface VoiceSettings { tts?: string; name?: string; speed?: number; prompt?: string }
-interface ToolInfo { fn: string; name: string; title: string; description: string; readOnly: boolean }
-interface SourceInfo { id: string; label: string; kind: "fetch" | "agent" | "mcp"; detail: string; state: "idle" | "connecting" | "connected" | "failed" | "disabled"; error?: string; tools: ToolInfo[] }
-interface Catalog { config: string; error?: string; sources: SourceInfo[] }
 interface Status { state: "online" | "loading" | "offline"; build?: string; model?: string; loading?: string; progress?: number; context?: number; kv_tokens?: number; cache?: { free_kv_tokens: number };
   check?: boolean; here?: boolean; waiting?: number;
   backend?: Backend; link?: Linking }
@@ -149,15 +146,12 @@ const ODDS: [string, number][] = [["Luna", 703], ["Mochi", 470], ["Whiskers", 31
   ["Momo", 6], ["Jasper", 5], ["Nimbus", 5], ["Nebula", 4], ["Simba", 4], ["Noodle", 3], ["Misty", 3], ["Mocha", 3], ["Mimi", 2],
   ["Munchkin", 2], ["Zephyr", 2], ["Moss", 2]];
 const DEFAULT_SYSTEM = "You are {{MODEL}}, running locally in Chrysalis Inference. There are no tools or files in this chat. Answer directly.";
-const DEFAULT_SYSTEM_TOOLS = "You are {{MODEL}}, running locally in Chrysalis Inference. The tools offered here are the only ones in this chat, and there are no files or projects to explore. Use a tool when it helps; otherwise answer directly.";
 const PLAIN_SYSTEM = "There are no tools or files in this chat. Answer directly.";
 const DEFAULT_VOICE_PROMPT = "The user is talking to you by voice; a word may still be misheard, so take what they most likely meant, by " +
   "how it sounds and by the conversation, without remarking on it. Your reply is read aloud, except code blocks and tables, which are " +
   "shown and not read: speak briefly in plain sentences (but what they ask you to write, such as an essay or a story, in full), put code " +
   "and tables in markdown blocks and say what you put there, and do what is asked rather than asking whether to. When a question needs " +
   "counting or logic, work it out loud in a few short steps, then answer.";
-const VOICE_TOOLS = "Only say you searched or did something once the tool call for it has returned, and never describe results you " +
-  "have not received from a tool. When results come back, give the key points briefly, and say the links are on screen rather than reading them.";
 const CHECK = "You fix speech recognition errors in what a user says to {{MODEL}}, a voice assistant running locally in Chrysalis Inference. " +
   "For each transcript, write one line per misheard word or phrase: the transcript's exact words => the words that sound like them " +
   "which the user meant (names spelled right, numbers in digits). Read the transcript against the conversation: words that do not fit " +
@@ -213,6 +207,8 @@ const ICONS = {
   code: '<path d="m8 8-4 4 4 4M16 8l4 4-4 4M13.5 5l-3 14"/>',
   speak: '<path d="M4 9.5h3.5L12 5.5v13l-4.5-4H4z"/><path d="M15.5 9a4 4 0 0 1 0 6M18 6.5a7.5 7.5 0 0 1 0 11"/>',
   person: '<circle cx="12" cy="8" r="4"/><path d="M4 21c1.5-4 4.5-6 8-6s6.5 2 8 6"/>',
+  folder: '<path d="M3 7.5A2.5 2.5 0 0 1 5.5 5H9l2 2.5h7.5A2.5 2.5 0 0 1 21 10v6.5a2.5 2.5 0 0 1-2.5 2.5h-13A2.5 2.5 0 0 1 3 16.5z"/>',
+  opencode: '<rect x="5.5" y="3.5" width="13" height="17" rx="1"/><rect x="9.5" y="8" width="5" height="8" fill="currentColor" stroke="none"/>',
   personAdd: '<circle cx="10" cy="8" r="4"/><path d="M2.5 21c1.4-4 4.2-6 7.5-6 1.6 0 3 .5 4.3 1.3M19 14v6M16 17h6"/>',
   upload: '<path d="M12 15V4M7.5 8.5 12 4l4.5 4.5M5 20h14"/>',
   micOff: '<path d="M15 9.4V6a3 3 0 0 0-5.7-1.3M9 9v2a3 3 0 0 0 4.9 2.3M18.5 11a6.5 6.5 0 0 1-1 3.4M5.5 11a6.5 6.5 0 0 0 10.4 5.2M12 17.5V21M4 4l16 16"/>',
@@ -257,7 +253,8 @@ const userCard = () => ({ ...persona().card.data, name: userName() });
 const CAST = "cast:";
 const castKey = (cast: string[], missing: string[] = []) => CAST + [...cast].sort().join("+") + (missing.length ? `|${[...missing].sort().join("|")}` : "");
 const folderOf = (c: Conversation) => (c.who && c.who !== CHRYSALIS && (c.cast || people.has(c.who)) ? c.who : "");
-const whoOf = (c: Conversation) => (c.who && c.who !== CHRYSALIS ? c.who : CHRYSALIS);
+const DIR = "dir:", STUB = "oc-";
+const whoOf = (c: Conversation) => (c.thread ? DIR + c.thread.dir : c.who && c.who !== CHRYSALIS ? c.who : CHRYSALIS);
 function castOf(c: Conversation): { members: Person[]; group?: Conversation } {
   const id = folderOf(c);
   if (!id) return { members: [] };
@@ -267,12 +264,17 @@ const sceneOf = (key: string) => (conv.who === key ? conv : chatsOf(key)[0]);
 function eachScene(fn: (c: Conversation) => void) {
   for (const c of new Set([...Object.values(chats), ...[...runs.values()].map((r) => r.conv), conv])) if (c.cast) fn(c);
 }
-const chatsOf = (id: string) => Object.values(chats).filter((s) => whoOf(s) === id).sort((a, b) => b.updated - a.updated);
+const chatsOf = (id: string) => [...Object.values(chats).filter((s) => whoOf(s) === id), ...(id.startsWith(DIR) ? stubsOf(id.slice(DIR.length)) : [])].sort((a, b) => b.updated - a.updated);
 const hue = (s: string) => [...s].reduce((a, ch) => (a * 31 + ch.charCodeAt(0)) % 360, 7);
 function face(id: string): HTMLElement {
   if (id.startsWith(CAST)) {
     const g = sceneOf(id), ms = (g ? inScene(g) : []).slice(0, 4), s = h("span", `face mosaic m${Math.max(ms.length, 1)}`);
     s.append(...(ms.length ? ms : [initials("?")]));
+    return s;
+  }
+  if (id.startsWith(DIR)) {
+    const s = h("span", "face dir");
+    s.innerHTML = icon("folder");
     return s;
   }
   const url = faces.get(id), p = people.get(id), name = p?.card.data.name.trim() || "?";
@@ -314,6 +316,7 @@ const andList = (n: string[]) => (n.length < 2 ? n.join("") : `${n.slice(0, -1).
 const names = (ids: string[]) => andList(ids.map(nameOf));
 const castNames = (c: Conversation) => andList([...castOf(c).members.map((m) => nameOf(m.id)), ...(c.missing ?? [])]);
 function nameOf(id: string): string {
+  if (id.startsWith(DIR)) return dirName(id.slice(DIR.length));
   if (!id.startsWith(CAST)) return people.get(id)?.card.data.name.trim() || (id === CHRYSALIS ? "Chrysalis" : id === ME ? "User" : "");
   const g = sceneOf(id);
   return g ? g.castName ?? castNames(g) : "";
@@ -332,13 +335,14 @@ function unfold(id: string, open = true) {
   setPref("unfolded", JSON.stringify([...unfolded]));
 }
 function castRow(id: string, list: Conversation[], open: boolean): HTMLElement {
-  const g = id.startsWith(CAST), name = nameOf(id);
+  const g = id.startsWith(CAST), d = id.startsWith(DIR), name = nameOf(id);
   const row = h("div", "cast-row");
   const pic = h("button", "cast-pic"), main = h("button", "cast-main"), add = h("button", "act cast-new");
   pic.type = main.type = add.type = "button";
-  pic.title = pic.ariaLabel = g ? `${name}: who is in it` : `${name}'s card`;
+  pic.title = pic.ariaLabel = d ? id.slice(DIR.length) : g ? `${name}: who is in it` : `${name}'s card`;
   pic.append(face(id));
-  pic.dataset.card = id;
+  if (d) pic.onclick = () => main.click();
+  else pic.dataset.card = id;
   main.append(h("span", "cast-name", name || "Unnamed"));
   if (list.length) {
     main.insertAdjacentHTML("beforeend", icon("chevron"));
@@ -354,14 +358,14 @@ function castRow(id: string, list: Conversation[], open: boolean): HTMLElement {
     unfold(id, !open);
     renderList();
   };
-  add.title = add.ariaLabel = `New chat with ${name}`;
+  add.title = add.ariaLabel = d ? `New thread in ${name}` : `New chat with ${name}`;
   add.innerHTML = icon("plus");
   add.onclick = () => newChat(id);
   row.append(pic, main, add);
-  if (g || people.get(id)?.kind === "character") {
-    const bring = h("button", "act cast-bring"), here = folderOf(conv) === id;
+  if (g || d || people.get(id)?.kind === "character") {
+    const bring = h("button", "act cast-bring"), here = d ? whoOf(conv) === id : !conv.thread && folderOf(conv) === id;
     bring.type = "button";
-    bring.title = bring.ariaLabel = here ? "Bring someone into this chat" : `A new chat with ${name} and others`;
+    bring.title = bring.ariaLabel = d ? (here ? "Who works in this thread" : `A new thread in ${name} with a character`) : here ? "Bring someone into this chat" : `A new chat with ${name} and others`;
     bring.innerHTML = icon("personAdd");
     bring.onclick = () => ($("cast-invite").hidden ? openInvite(bring, here ? null : id) : closeInvite());
     row.classList.toggle("here", here);
@@ -497,6 +501,7 @@ function leave(id: string) {
 }
 async function forget(id: string) {
   const p = people.get(id), name = nameOf(id), seats: { c: Conversation; was: Seat }[] = [], empty = new Set<string>();
+  for (const c of new Set([...Object.values(chats), conv])) if (c.thread && c.who === id) delete c.who;
   eachScene((c) => { if (c.cast!.includes(id)) seats.push({ c, was: seatOf(c) }); });
   if (p) { people.delete(id); await dropPerson(id); }
   for (const { c } of seats) {
@@ -525,7 +530,133 @@ function dropChats(ids: string[]) {
   if (ids.includes(conv.id) || (conv.who && !folderOf(conv))) newChat();
   else render();
 }
-const castless = (c: Conversation) => (c.cast ? !c.cast.some((m) => people.has(m)) && !c.missing?.length : !!c.who && c.who !== CHRYSALIS && !people.has(c.who));
+const castless = (c: Conversation) => !c.thread && (c.cast ? !c.cast.some((m) => people.has(m)) && !c.missing?.length : !!c.who && c.who !== CHRYSALIS && !people.has(c.who));
+
+interface Harness { state: "absent" | "off" | "on"; version?: string; install?: string; models?: { id: string; name: string; provider: string }[];
+  threads?: { id: string; title: string; dir: string; updated: number; busy: boolean; job?: string; model?: string }[] }
+let harness: Harness = { state: "off" };
+const dirName = (dir: string) => dir.replace(/\/+$/, "").split("/").pop() || dir;
+const kept = (key: string): string[] => { try { const v = JSON.parse(pref(key, "[]")); return Array.isArray(v) ? v : []; } catch { return []; } };
+const dirs = () => [...new Set([...kept("folders"), ...[...Object.values(chats), conv].flatMap((c) => (c.thread ? [c.thread.dir] : []))])];
+const stubsOf = (dir: string): Conversation[] => (harness.threads ?? []).filter((t) => t.dir === dir && !Object.values(chats).some((c) => c.thread?.id === t.id))
+  .map((t) => ({ id: STUB + t.id, title: t.title || "Thread", named: true, updated: t.updated, effort: "xhigh" as Effort, messages: [], thread: { dir, id: t.id } }));
+const keyOf = (c: Conversation) => (c.thread?.id ? STUB + c.thread.id : c.id);
+const threadModel = (c: Conversation) => [c.thread?.model, pref("thread-model", "")].find((id) => id && harness.models?.some((m) => m.id === id))
+  ?? harness.models?.find((m) => m.id === `chrysalis/${current()}`)?.id ?? harness.models?.find((m) => m.id.startsWith("chrysalis/"))?.id;
+const threadPersona = (c: Conversation) => { const { members } = castOf(c); return members.length
+  ? castPrompt("You are {{char}}, working for {{user}}. Do the work asked of you, and stay in character in everything you say.", members.map((p) => p.card.data), userCard()) : ""; };
+async function loadThreads() {
+  const r = await fetch("/api/threads").catch(() => null);
+  if (!r?.ok) return;
+  harness = await r.json();
+  for (const c of new Set([...Object.values(chats), conv])) {
+    const t = c.thread?.id ? harness.threads?.find((x) => x.id === c.thread!.id) : undefined;
+    if (t?.title && c.title !== t.title && !runs.get(c.id)) { c.title = t.title; c.named = true; }
+  }
+  keepChats();
+  paintHarness();
+  renderList();
+  if (conv.thread) { $("title").textContent = conv.title; renderControls(); }
+}
+async function openThread(sid: string): Promise<string | undefined> {
+  const mine = Object.values(chats).find((c) => c.thread?.id === sid);
+  if (mine && runs.get(mine.id)) return mine.id;
+  const r = await fetch(`/api/threads/${sid}`).catch(() => null), got = r?.ok ? await r.json() : null;
+  if (!got) { if (!mine) toast("OpenCode could not give that thread"); return mine?.id; }
+  const c: Conversation = mine ?? { id: STUB + sid, title: "", named: true, updated: 0, effort: pref("effort", "xhigh") as Effort, messages: [], thread: { dir: got.thread.dir, id: sid } };
+  if (runs.get(c.id)) return c.id;
+  const said: Message[] = got.messages.map((m: Message) => ({ id: randomId(), ...m }));
+  if (got.job) {
+    if (said.at(-1)?.role === "assistant") said.pop();
+    said.push({ id: randomId(), role: "assistant", content: "", reasoning: "", job: got.job, ...(c.who ? { as: c.who } : {}) });
+  }
+  Object.assign(c, { title: got.thread.title || c.title || "Thread", updated: got.thread.updated || c.updated, messages: said });
+  chats[c.id] = c;
+  keepChats();
+  return c.id;
+}
+function showThread(sid: string) {
+  const was = conv;
+  void openThread(sid).then((at) => {
+    if (!at || conv !== was || runs.get(at)) return renderList();
+    conv = structuredClone(chats[at]);
+    if (at !== location.hash.slice(1)) history.replaceState(null, "", `#${at}`);
+    render();
+    scroller.scrollTop = scroller.scrollHeight;
+    const m = conv.messages.find((x) => x.role === "assistant" && x.job);
+    if (m) void resume(conv, m);
+  });
+}
+function newThread(dir: string, who = "") {
+  setPref("folders", JSON.stringify([...new Set([...kept("folders"), dir])]));
+  newChat(DIR + dir);
+  if (who) conv.who = who;
+  renderCast();
+  render();
+}
+
+let ocAt = "";
+function paintHarness() {
+  const b = $("opencode"), on = harness.state === "on";
+  b.innerHTML = `${icon("opencode")}<span class="dot ${on ? "online" : harness.state === "off" ? "" : "failed"}"></span>`;
+  b.title = b.ariaLabel = on ? `OpenCode ${harness.version}: connected. Folders and threads` : harness.state === "off" ? "Connect OpenCode on this computer" : "OpenCode is not installed on the computer Chrysalis runs on";
+  if (!$("oc-pop").hidden) paintOcPop();
+}
+async function paintOcPop() {
+  const pop = $("oc-pop"), row = (cls: string, html: string, onclick: () => void, title = "") => {
+    const x = h("button", cls);
+    x.type = "button";
+    x.innerHTML = html;
+    x.title = title;
+    x.onclick = onclick;
+    return x;
+  };
+  if (harness.state === "absent") {
+    const line = h("code", "oc-line", harness.install ?? "");
+    return void pop.replaceChildren(h("div", "invite-head", "OpenCode"), h("p", "oc-note", "OpenCode is not installed on the computer Chrysalis runs on. Install it there, then press the button again:"), line,
+      row("invite-card", `${icon("copy")}Copy the line`, () => void navigator.clipboard.writeText(harness.install ?? "").then(() => toast("Copied"))));
+  }
+  if (harness.state !== "on") return void pop.replaceChildren(h("div", "invite-head", "OpenCode"), h("p", "oc-note", "Starting OpenCode…"));
+  if (ocAt) {
+    const r = await fetch(`/api/threads/folders?path=${encodeURIComponent(ocAt === "~" ? "" : ocAt)}`).catch(() => null), got = r?.ok ? await r.json() : null;
+    if (!got) { ocAt = ""; toast("That folder cannot be read"); return paintOcPop(); }
+    ocAt = got.path;
+    const list = h("div", "invite-list");
+    list.append(...(got.up ? [row("invite-row", `${icon("chevron")}<span class="invite-name">..</span>`, () => { ocAt = got.up; void paintOcPop(); }, got.up)] : []),
+      ...got.dirs.map((d: { name: string; path: string }) => row("invite-row", `${icon("folder")}<span class="invite-name"></span>`, () => { ocAt = d.path; void paintOcPop(); }, d.path)));
+    got.dirs.forEach((d: { name: string }, k: number) => { list.querySelectorAll(".invite-name")[k + (got.up ? 1 : 0)].textContent = d.name; });
+    return void pop.replaceChildren(h("div", "invite-head", "Open a folder"), h("div", "oc-path", got.path), list,
+      row("invite-card oc-use", `${icon("check")}Work in ${escapeHtml(dirName(got.path))}`, () => { ocAt = ""; pop.hidden = true; newThread(got.path); }, got.path));
+  }
+  const list = h("div", "invite-list");
+  list.append(...dirs().map((d) => {
+    const item = row("invite-row", `${icon("folder")}<span class="invite-name"></span><span class="oc-where"></span>`, () => { pop.hidden = true; newThread(d); }, `A new thread in ${d}`);
+    item.querySelector(".invite-name")!.textContent = dirName(d);
+    item.querySelector(".oc-where")!.textContent = d.replace(/\/[^/]*$/, "");
+    return item;
+  }));
+  if (!list.childElementCount) list.append(h("p", "invite-none", "No folders yet: open one to start a thread in it"));
+  pop.replaceChildren(h("div", "invite-head", `OpenCode ${harness.version ?? ""}`), list, row("invite-card", `${icon("folder")}Open a folder…`, () => { ocAt = "~"; void paintOcPop(); }));
+}
+async function ensureHarness() {
+  if (harness.state === "on" && harness.models?.length) return;
+  if (harness.state !== "on") {
+    const started = await fetch("/api/threads", { method: "POST" }).catch(() => null);
+    if (!started?.ok) throw new Error((await started?.json().catch(() => null))?.error?.message ?? "OpenCode did not start");
+  }
+  await loadThreads();
+}
+async function openHarness() {
+  const pop = $("oc-pop"), r = $("opencode").getBoundingClientRect();
+  if (!pop.hidden) return void (pop.hidden = true);
+  ocAt = "";
+  pop.hidden = false;
+  pop.style.right = `${Math.max(12, innerWidth - r.right)}px`;
+  pop.style.top = `${r.bottom + 6}px`;
+  void paintOcPop();
+  if (harness.state === "off") await ensureHarness().catch((e) => toast(e instanceof Error ? e.message : String(e)));
+  else await loadThreads();
+}
 
 function openAdd(at: HTMLElement) {
   const menu = $("cast-add"), r = at.getBoundingClientRect();
@@ -564,22 +695,31 @@ function paintInvite() {
   const box = $("cast-invite"), list = box.querySelector<HTMLElement>(".invite-list"), find = box.querySelector<HTMLInputElement>(".invite-find");
   if (box.hidden || !list || !find) return;
   const all = [...people.values()].filter((p) => p.kind === "character").sort((a, b) => a.card.data.name.localeCompare(b.card.data.name));
-  const from = inviteFrom, base = from === null ? conv : from ? people.has(from) ? undefined : sceneOf(from) : undefined;
-  const q = find.value.trim().toLowerCase(), members = base ? castOf(base).members : from ? [people.get(from)!] : [], group = from === null && !!conv.cast;
-  box.querySelector(".invite-head")!.textContent = from === null ? "Bring into this chat" : from ? `A new chat with ${nameOf(from)} and` : "Who is in the chat";
+  const from = inviteFrom, solo = from === null ? !!conv.thread : from.startsWith(DIR);
+  const base = from === null ? conv : from && !solo && !people.has(from) ? sceneOf(from) : undefined;
+  const q = find.value.trim().toLowerCase(), members = base ? castOf(base).members : from && !solo ? [people.get(from)!] : [], group = from === null && !!conv.cast;
+  box.querySelector(".invite-head")!.textContent = solo ? (from ? `A new thread in ${nameOf(from)} with` : "Who works in this thread")
+    : from === null ? "Bring into this chat" : from ? `A new chat with ${nameOf(from)} and` : "Who is in the chat";
   const shown = all.filter((p) => p.card.data.name.toLowerCase().includes(q));
   find.hidden = all.length < 7;
   list.replaceChildren(...shown.map((p) => {
     const inside = members.some((m) => m.id === p.id), b = h("button", "invite-row"), name = p.card.data.name;
     b.type = "button";
     b.setAttribute("aria-pressed", String(inside));
-    b.disabled = inside && !group;
-    b.title = inside ? (group ? `${name}: in this chat (click to take out)` : `${name}: this chat is theirs`) : `Bring ${name} in`;
+    b.disabled = inside && !group && !solo;
+    b.title = solo ? (inside ? `${name} works in this thread (click for plain Chrysalis)` : `${name} works in it, in character`)
+      : inside ? (group ? `${name}: in this chat (click to take out)` : `${name}: this chat is theirs`) : `Bring ${name} in`;
     b.append(face(p.id), h("span", "invite-name", name));
     if (inside) b.insertAdjacentHTML("beforeend", icon("check"));
     b.onclick = () => {
       inviteFrom = null;
-      if (from === "") newChat(p.id);
+      if (solo) {
+        if (from) newChat(from);
+        if (inside) delete conv.who; else conv.who = p.id;
+        if (conv.messages.length) save(conv);
+        renderCast();
+        render();
+      } else if (from === "") newChat(p.id);
       else if (inside) leave(p.id);
       else {
         if (from) newChat(from);
@@ -672,8 +812,7 @@ function openSheet(id: string) {
 
   const art = h("div", "card-art"), title = h("div", "card-title"), body = h("div", "card-body"), scroll = h("div", "card-scroll");
   if (g) {
-    const strips = h("div", "strips");
-    const all = inScene(g).slice(0, 5);
+    const all = inScene(g).slice(0, 4), strips = h("div", `strips s${Math.max(all.length, 1)}`);
     strips.append(...(all.length ? all : [face(id)]));
     art.append(strips);
   } else if (person!.kind === "assistant" && !person!.image && seaPortrait()) {
@@ -726,6 +865,15 @@ function openSheet(id: string) {
     body.append(voicePick(person, keep), field("Description", "description", person.kind === "assistant" ? "Who they are, after the system prompt" : "Who they are: looks, past, manner"),
       field("Personality", "personality", "A few words"), field("Scenario", "scenario", "Where and when the chat begins"),
       field("Greeting", "first_mes", "Their first message"), more);
+    if (person.kind === "character" && harness.state === "on" && dirs().length) {
+      const work = h("div", "card-section"), list = h("div", "card-work");
+      list.append(...dirs().map((dir) => {
+        const b = btn("pill", `A new thread in ${dir}, with ${person.card.data.name} doing the work`, `${icon("folder")}${escapeHtml(dirName(dir))}`, () => { closeSheet(); newThread(dir, person.id); });
+        return b;
+      }));
+      work.append(h("span", "card-label", "Works in"), list);
+      body.append(work);
+    }
     if (person.kind === "character") {
       const acts = h("div", "card-acts");
       acts.append(del());
@@ -838,12 +986,14 @@ document.addEventListener("pointerdown", (e) => {
   const t = e.target as HTMLElement;
   if (!$("cast-add").hidden && !t.closest("#cast-add, #add-cast")) $("cast-add").hidden = true;
   if (!$("cast-invite").hidden && !t.closest("#cast-invite, .cast-bring, #cast-add, #toast")) closeInvite();
+  if (!$("oc-pop").hidden && !t.closest("#oc-pop, #opencode, #toast")) $("oc-pop").hidden = true;
   if (!$("cast-sheet").hidden && !t.closest("#cast-sheet, [data-card], #voice-menu")) closeSheet();
 });
 document.addEventListener("keydown", (e) => {
   if (e.key !== "Escape" || voiceMenu.matches(":popover-open")) return;
   if (!$("cast-add").hidden) { $("cast-add").hidden = true; e.preventDefault(); }
   else if (!$("cast-invite").hidden) { closeInvite(); e.preventDefault(); }
+  else if (!$("oc-pop").hidden) { $("oc-pop").hidden = true; e.preventDefault(); }
   else if (!$("cast-sheet").hidden) { closeSheet(); e.preventDefault(); }
 }, true);
 document.addEventListener("click", (e) => {
@@ -2577,9 +2727,7 @@ function randomId() {
 }
 
 function blank(): Conversation {
-  let tools: ToolChoice["tools"] | undefined;
-  try { tools = JSON.parse(pref("tools", "null")) ?? undefined; } catch {  }
-  return { id: randomId(), title: "New chat", updated: Date.now(), effort: pref("effort", "xhigh") as Effort, messages: [], ...(tools && Object.keys(tools).length ? { tools } : {}) };
+  return { id: randomId(), title: "New chat", updated: Date.now(), effort: pref("effort", "xhigh") as Effort, messages: [] };
 }
 
 function render() {
@@ -2858,11 +3006,6 @@ function syncCards(box: HTMLElement, calls: Call[], m: Message, live: boolean) {
   const kept = new Map([...box.children].map((el) => [(el as HTMLElement).dataset.call!, el as HTMLElement]));
   calls.forEach((c, k) => {
     let el = kept.get(c.id);
-    if (c.name === AGENT_FN) {
-      el ??= agentCard(c);
-      if (box.children[k] !== el) box.insertBefore(el, box.children[k] ?? null);
-      return paintAgent(el, c, m, live);
-    }
     if (!el) {
       el = h("div", "tool-card");
       el.dataset.call = c.id;
@@ -2906,87 +3049,6 @@ function syncCards(box: HTMLElement, calls: Call[], m: Message, live: boolean) {
   for (const el of [...box.children].slice(calls.length)) el.remove();
 }
 const prettyArgs = (args: string) => { try { return JSON.stringify(JSON.parse(args), null, 2); } catch { return args; } };
-
-const AGENT_FN = "subagent";
-interface AgentView { task: HTMLElement; log: HTMLElement; think: HTMLDetailsElement; thought: HTMLElement; calls: HTMLElement;
-  answerLabel: HTMLElement; answer: { body: HTMLElement; blocks?: Blocks }; notes: HTMLElement; stop: HTMLButtonElement; logShown: string }
-const agentViews = new WeakMap<HTMLElement, AgentView>();
-function agentArgs(c: Call): { description?: unknown; prompt?: unknown } {
-  try { const a = JSON.parse(c.args); return a && typeof a === "object" ? a : {}; } catch { return {}; }
-}
-const agentCalls = (a?: AgentRun) => [...(a?.rounds ?? []).flatMap((r) => r.calls), ...(a?.calls ?? [])];
-const agentTools = (a?: AgentRun) => a?.tools ?? agentCalls(a).length;
-function gist(text: string) {
-  const lines = text.split("\n").map((l) => l.trim()).filter(Boolean);
-  const line = lines.find((l) => !/^#{1,6}\s/.test(l) && !/^\*\*[^*]+\*\*:?$/.test(l)) ?? lines[0] ?? "";
-  return line.replace(/^(([#>*+|-]|\d+\.)\s*)+/, "").replace(/\*\*|__|`/g, "").trim();
-}
-function agentNow(c: Call, live: boolean) {
-  const a = c.agent;
-  if (c.state === "done") return gist(a?.content || c.result || "") || "Done";
-  if (c.state === "failed") return a?.error || gist(c.result ?? "") || "Failed";
-  if (c.state === "stopped") return "Stopped before it finished";
-  if (c.state !== "running") return live ? "Waiting to start" : "Not run";
-  if (a?.now) return a.now;
-  const x = a?.calls?.find((y) => y.state === "approval") ?? a?.calls?.find((y) => y.state === "running");
-  if (x) return x.state === "approval" ? `Asks to run ${x.title ?? x.name}` : `${x.title ?? x.name}: ${argLine(x)}`;
-  if (a?.content) return "Writing its answer";
-  if (a?.reasoning) return "Thinking";
-  if (a?.rounds?.length) return "Reading the results";
-  return a?.read ? "Working" : "Starting";
-}
-function agentCard(c: Call): HTMLElement {
-  const el = h("div", "tool-card agent-card"), id = `tc-${c.id.replace(/[^\w-]/g, "")}`;
-  el.dataset.call = c.id;
-  el.innerHTML = `<button type="button" class="tool-head agent-head" data-act="card" aria-controls="${id}"><span class="tool-ico">${icon("agent")}</span>` +
-    `<span class="agent-text"><span class="agent-title"><span class="tool-name"></span><span class="tool-src">Sub-agent</span></span>` +
-    `<span class="agent-now"></span></span><span class="agent-meta"></span><span class="tool-state"></span>${icon("chevron")}</button>` +
-    `<div class="tool-body agent-body" id="${id}" hidden></div>`;
-  return el;
-}
-function paintAgent(el: HTMLElement, c: Call, m: Message, live: boolean) {
-  const a = c.agent, open = openCards.has(c.id), n = agentTools(a), label = agentArgs(c).description;
-  const set = (x: Element, v: string) => { if (x.textContent !== v) x.textContent = v; };
-  el.dataset.state = c.state ?? (live ? "asked" : "none");
-  set(el.querySelector(".tool-name")!, typeof label === "string" && label.trim() ? label.trim() : "Sub-agent");
-  set(el.querySelector(".agent-now")!, agentNow(c, live));
-  set(el.querySelector(".agent-meta")!, [n ? `${n} tool${n === 1 ? "" : "s"}` : "", a?.tokens ? `${fmtK(a.tokens)} tokens` : ""].filter(Boolean).join(" · "));
-  set(el.querySelector(".tool-state")!, stateText(c, live));
-  el.querySelector(".tool-head")!.setAttribute("aria-expanded", String(open));
-  const body = el.querySelector<HTMLElement>(".agent-body")!;
-  body.hidden = !open;
-  if (!open) return;
-  let v = agentViews.get(el);
-  if (!v) {
-    const task = agentArgs(c).prompt;
-    v = { task: h("div", "agent-task", typeof task === "string" ? task : c.args), log: h("div", "agent-log"), think: h("details", "thinking"),
-      thought: h("div", "thought"), calls: h("div", "tool-cards"), answerLabel: h("div", "tool-label", "Answer"), answer: { body: h("div", "markdown") },
-      notes: h("div", "agent-notes"), stop: h("button", "btn small agent-stop", "Stop sub-agent"), logShown: "" };
-    v.think.append(h("summary", "", "Thoughts"), v.thought);
-    v.stop.type = "button";
-    v.stop.dataset.act = "agent-stop";
-    body.append(h("div", "tool-label", "Task"), v.task, v.log, v.think, v.calls, v.answerLabel, v.answer.body, v.notes, v.stop);
-    agentViews.set(el, v);
-  }
-  const working = c.state === "running" && live, rounds = a?.rounds ?? [];
-  const log = `${rounds.length}/${a?.checkpoints?.length ?? 0}`;
-  if (v.logShown !== log) {
-    v.log.replaceChildren(...roundViews(rounds, a?.checkpoints, m));
-    v.logShown = log;
-  }
-  v.think.hidden = !a?.reasoning;
-  v.think.classList.toggle("live", working && !!a?.reasoning && !a.content && !a.calls?.length);
-  set(v.think.firstElementChild!, v.think.classList.contains("live") ? "Thinking" : "Thoughts");
-  set(v.thought, a?.reasoning ?? "");
-  syncCards(v.calls, a?.calls ?? [], m, live);
-  const answer = a?.content || (c.state === "done" ? c.result ?? "" : "");
-  v.answerLabel.hidden = !answer;
-  renderBlocks(v.answer, answer, working);
-  const gone = (a?.tools ?? 0) - agentCalls(a).length;
-  const said = [...(gone > 0 ? [`${gone} earlier tool call${gone === 1 ? " is" : "s are"} not kept through a reload`] : []), ...(a?.notes ?? []), ...(c.state === "failed" || c.state === "stopped" ? [c.result ?? ""] : [])].filter(Boolean);
-  if (v.notes.childElementCount !== said.length) v.notes.replaceChildren(...said.map((x) => h("div", "note", x)));
-  v.stop.hidden = !(working && m.job);
-}
 
 type Act = keyof typeof TITLES | "cont";
 const slots = (list: [Act, boolean, string?][]) => list.map(([a, on, html]) => !on ? `<span class="act ghost" aria-hidden="true"></span>`
@@ -3287,30 +3349,59 @@ function renderComposer() {
 
 const customized = () => settings.system !== DEFAULT_SYSTEM
   || Object.keys(settings.think).length + Object.keys(settings.fast).length > 0
-  || !!settings.max_tokens || settings.seed !== undefined || !!settings.allow?.length || settings.fetchChars !== undefined
+  || !!settings.max_tokens || settings.seed !== undefined
   || Object.keys(settings.voice ?? {}).length > 0;
 
+function putAway(c: Conversation, on: boolean, quiet = false) {
+  const now = new Set(kept("settled"));
+  if (on) now.add(keyOf(c)); else now.delete(keyOf(c));
+  setPref("settled", JSON.stringify([...now]));
+  renderList();
+  if (!quiet) toast(on ? `${c.title} is settled` : `${c.title} is active again`, () => putAway(c, !on, true));
+}
 function renderList() {
-  const folders = [...[...people.values()].filter((p) => p.kind !== "persona").map((x) => ({ id: x.id, at: x.added })), ...[...castKeys()].map((id) => ({ id, at: conv.updated }))]
-    .map((x) => ({ ...x, list: chatsOf(x.id).filter((c) => c.messages.length) }));
-  $("conversations").replaceChildren(...folders.sort((a, b) => (b.list[0]?.updated ?? b.at) - (a.list[0]?.updated ?? a.at)).map(({ id, list }) => {
+  const settled = new Set(kept("settled")), shelf: Conversation[] = [];
+  const shown = (id: string) => chatsOf(id).filter((c) => (c.messages.length || c.thread?.id) && (!settled.has(keyOf(c)) || (shelf.push(c), false)));
+  const folders = [...[...people.values()].filter((p) => p.kind !== "persona").map((x) => ({ id: x.id, at: x.added })), ...[...castKeys()].map((id) => ({ id, at: conv.updated })),
+    ...dirs().map((d) => ({ id: DIR + d, at: 0 }))].map((x) => ({ ...x, list: shown(x.id) }));
+  const rows = folders.sort((a, b) => (b.list[0]?.updated ?? b.at) - (a.list[0]?.updated ?? a.at)).map(({ id, list }) => {
     const open = unfolded.has(id) && list.length > 0, box = h("div", `folder${open ? " open" : ""}`);
     box.append(castRow(id, list, open));
     if (open) {
       const kids = h("div", "folder-chats");
-      kids.append(...list.map(convRow));
+      kids.append(...list.map((c) => convRow(c)));
       box.append(kids);
     }
     return box;
-  }));
+  });
+  if (shelf.length) {
+    const open = pref("settled-open", "") === "1", box = h("div", `folder settled${open ? " open" : ""}`), head = h("button", "settled-head");
+    head.type = "button";
+    head.setAttribute("aria-expanded", String(open));
+    head.innerHTML = `<span>Settled</span><span class="cast-count">${shelf.length}</span>${icon("chevron")}`;
+    head.onclick = () => { setPref("settled-open", open ? "" : "1"); renderList(); };
+    box.append(head);
+    if (open) {
+      const kids = h("div", "folder-chats");
+      kids.append(...shelf.sort((a, b) => b.updated - a.updated).map((c) => convRow(c, true)));
+      box.append(kids);
+    }
+    rows.push(box);
+  }
+  $("conversations").replaceChildren(...rows);
 }
 function ago(t: number) {
   const s = (Date.now() - t) / 1000;
   return s < 60 ? "now" : s < 3600 ? `${Math.floor(s / 60)}m` : s < 86400 ? `${Math.floor(s / 3600)}h` : s < 7 * 86400 ? `${Math.floor(s / 86400)}d`
     : s < 30 * 86400 ? `${Math.floor(s / 604800)}w` : new Date(t).toLocaleDateString(undefined, { month: "short", day: "numeric" });
 }
-function convRow(s: Conversation) {
-  const a = h("a", `conv${s.id === conv.id ? " active" : ""}`), del = h("button", "conv-del", "×");
+function convRow(s: Conversation, settled = false) {
+  const a = h("a", `conv${s.id === conv.id ? " active" : ""}`), del = h("button", "conv-del", "×"), put = h("button", "conv-settle");
+  put.type = "button";
+  put.title = put.ariaLabel = settled ? "Make it active again" : "Settle: put it away";
+  put.innerHTML = icon(settled ? "retry" : "check");
+  put.onclick = (e) => { e.preventDefault(); putAway(s, !settled); };
+  del.hidden = !!s.thread;
   a.href = `#${s.id}`;
   a.onclick = (e) => { if (!e.defaultPrevented) closeOver(panes.conversations); };
   del.type = "button";
@@ -3323,7 +3414,7 @@ function convRow(s: Conversation) {
     setTimeout(() => { del.classList.remove("armed"); del.textContent = "×"; }, 2500);
   };
   const r = runs.get(s.id);
-  a.append(h("span", "conv-title", s.title), r?.asking ? askingLabel() : r ? workingLabel(r.begun) : h("span", "conv-ago", ago(s.updated)), del);
+  a.append(h("span", "conv-title", s.title), r?.asking ? askingLabel() : r ? workingLabel(r.begun) : h("span", "conv-ago", ago(s.updated)), put, del);
   return a;
 }
 const workingFor = (ms: number) => {
@@ -3427,10 +3518,8 @@ function persist(c: Conversation) {
 const STEPS_KEPT = 20, STEP_CHARS = 200;
 const clipped = (s: string) => (s.length > STEP_CHARS ? `${s.slice(0, STEP_CHARS)}…` : s);
 const leanStep = (r: Round): Round => ({ content: clipped(r.content), calls: r.calls.map(({ result, ...c }) => ({ ...c, args: clipped(c.args) })) });
-const leanAgent = (a: AgentRun): AgentRun => ({ content: "", reasoning: "", tools: agentTools(a), ...(a.rounds?.length ? { rounds: a.rounds.slice(-STEPS_KEPT).map(leanStep) } : {}),
-  ...(a.tokens ? { tokens: a.tokens } : {}), ...(a.notes ? { notes: a.notes } : {}), ...(a.error ? { error: a.error } : {}), read: a.read });
-function leanCall({ agent, result, ...c }: Call, behind: boolean): Call {
-  return { ...c, ...(result !== undefined && !behind ? { result } : {}), ...(agent ? { agent: leanAgent(agent) } : {}) };
+function leanCall({ result, ...c }: Call, behind: boolean): Call {
+  return { ...c, ...(result !== undefined && !behind ? { result } : {}) };
 }
 const leanRound = (r: Round, behind: boolean): Round => ({ content: r.content, ...(r.reasoning && !behind ? { reasoning: r.reasoning } : {}), calls: r.calls.map((c) => leanCall(c, behind)) });
 function lean(list: Message[]): Message[] {
@@ -3449,7 +3538,11 @@ function save(c: Conversation) {
   renderList();
 }
 
-function request(c: Conversation, upto: Message[], o: { effort?: Effort; sampling?: Mode; final?: object; extra?: Record<string, unknown>; loop?: boolean; as?: string } = {}) {
+function request(c: Conversation, upto: Message[], o: { effort?: Effort; sampling?: Mode; final?: object; extra?: Record<string, unknown>; as?: string } = {}) {
+  if (c.thread) {
+    const asked = upto.findLast((m) => m.role === "user");
+    return { stream: true, chrysalis_thread: { session: c.thread.id, dir: c.thread.dir, text: noted(asked?.note, asked?.content ?? ""), model: threadModel(c), persona: threadPersona(c) } };
+  }
   const effort = o.effort ?? c.effort, mode: Mode = effort === "off" ? "fast" : "think";
   const messages: object[] = sentHistory(upto), system = systemFor(c), { members, group } = castOf(c);
   const writer = writerOf(c), char = writer?.card.data.name ?? members[0]?.card.data.name ?? "";
@@ -3466,13 +3559,11 @@ function request(c: Conversation, upto: Message[], o: { effort?: Effort; samplin
   else if (next) messages.push({ role: "user", content: `[${next} next.]` });
   if (system) messages.unshift({ role: "system", content: system });
   if (o.final) messages.push(o.final);
-  const web: ToolChoice | undefined = toolsOn(c)
-    ? { tools: c.tools!, allow: settings.allow, fetchChars: settings.fetchChars, ...(o.loop === false ? { loop: false } : {}) } : undefined;
   const chrysalis = onChrysalis();
   return {
     model: chrysalis && effort === "off" ? `${current()}-fast` : current(), reasoning_effort: chrysalis ? (effort === "off" ? undefined : effort) : OTHER_EFFORT[effort],
     ...samplerFields(o.sampling ?? mode), max_tokens: settings.max_tokens, seed: settings.seed, ...(chrysalis ? { logprobs: true, top_logprobs: 5 } : {}),
-    messages, stream: true, stream_options: { include_usage: true }, ...(web ? { chrysalis_web: web } : {}),
+    messages, stream: true, stream_options: { include_usage: true },
     ...(group ? { stop: [`\n${userName()}:`, `\n**${userName()}`] } : {}), ...o.extra,
   };
 }
@@ -3496,9 +3587,8 @@ function wire(m: Message, from = 0): object[] {
   if (!ended && (m.content || m.reasoning)) out.push(assistantTurn(m.interrupted ? m.content + TALKED_OVER : m.content, m.reasoning));
   return out;
 }
-const toolsOn = (c: Conversation) => !!c.tools && Object.keys(c.tools).length > 0;
 const systemFor = (c: Conversation) => castOf(c).members.length ? castSystem(c)
-  : [castPrompt(fill((settings.system.trim() === DEFAULT_SYSTEM && toolsOn(c) ? DEFAULT_SYSTEM_TOOLS : settings.system).trim()),
+  : [castPrompt(fill(settings.system.trim()),
     [people.get(CHRYSALIS)!.card.data], userCard()),
     settings.artifacts === false ? "" : ARTIFACTS_PROMPT].filter(Boolean).join("\n\n");
 
@@ -3584,7 +3674,11 @@ async function startRun(c: Conversation, m: Message, body: () => object, pick?: 
   m.starting = true;
   save(c);
   try {
-    if (status.state !== "online" || status.loading) {
+    if (c.thread) {
+      await ensureHarness();
+      if (!threadModel(c)) throw new Error("Choose a model for this thread: OpenCode lists none of Chrysalis's own");
+    }
+    if ((!c.thread || threadModel(c)?.startsWith("chrysalis/")) && (status.state !== "online" || status.loading)) {
       run.live.loading = true;
       await ensureOnline(run);
       run.live.note = "Reading the prompt";
@@ -3677,6 +3771,7 @@ function take(run: Run, ev: any) {
     for (const e of choice.logprobs.content ?? []) td.content.push(tok(e));
   }
   if (ev.stopped) m.stopped = true;
+  if (ev.thread && run.conv.thread) run.conv.thread.id = ev.thread;
   if (ev.timing) run.timing = ev.timing;
   if (typeof ev.started === "number" && ev.started !== run.begun) { run.begun = ev.started; renderList(); }
   if (ev.chrysalis_prompt) { run.read = ev.chrysalis_prompt.prompt_tokens; run.written = 0; }
@@ -3699,10 +3794,6 @@ function take(run: Run, ev: any) {
   const waiting = waitNote(ev, "the context");
   if (waiting) Object.assign(live, { phase: "waiting", since: now, note: waiting });
   if (ev.compacted) m.checkpoints = [...(m.checkpoints ?? []), keptFrom(ev.compacted, m.rounds, m.job)];
-  if (ev.agent) {
-    const c = m.calls?.find((x) => x.id === ev.agent.id);
-    if (c) feedAgent(c, ev.agent.ev, now);
-  }
   if (ev.round) {
     if (m.content || m.reasoning || m.calls) m.rounds = [...(m.rounds ?? []), { content: m.content, ...(m.reasoning ? { reasoning: m.reasoning } : {}), calls: m.calls ?? [] }];
     m.content = m.reasoning = "";
@@ -3740,7 +3831,7 @@ function take(run: Run, ev: any) {
   schedule(run);
 }
 
-const needsYou = (m: Message) => !!m.calls?.some((c) => c.state === "approval" || c.agent?.calls?.some((x) => x.state === "approval"));
+const needsYou = (m: Message) => !!m.calls?.some((c) => c.state === "approval");
 const waitNote = (ev: any, what: string) => ev.compacting ? `Compacting ${what}` : ev.compacted ? "Reading the prompt" : ev.waiting ?? (ev.retry ? `${ev.retry.message}: trying again` : undefined);
 const keptFrom = ({ kept, ...k }: Checkpoint & { kept: number }, rounds: Round[] | undefined, job?: string): Kept => ({ ...k, at: (rounds?.length ?? 0) - kept, ...(job ? { job } : {}) });
 function addCall(holder: { calls?: Call[] }, t: any) {
@@ -3758,25 +3849,6 @@ function toolEvent(calls: Call[] | undefined, tool: any, now: number): Call | un
   deciding.delete(c.id);
   return c;
 }
-function feedAgent(c: Call, ev: any, now: number) {
-  const a = (c.agent ??= { content: "", reasoning: "" }), d = ev.choices?.[0]?.delta ?? {};
-  if (ev.error) a.error = ev.error.message;
-  if (ev.chrysalis_prompt) a.read = true;
-  a.now = ev.reviewing ? "Checking its work" : waitNote(ev, "its context") ?? (ev.chrysalis_prompt || d.reasoning_content || d.content || d.tool_calls ? undefined : a.now);
-  if (ev.compacted) a.checkpoints = [...(a.checkpoints ?? []), keptFrom(ev.compacted, a.rounds)];
-  if (ev.usage) a.tokens = (a.tokens ?? 0) + (ev.usage.completion_tokens ?? 0);
-  if (d.reasoning_content) a.reasoning += d.reasoning_content;
-  if (d.content) a.content += d.content;
-  for (const t of d.tool_calls ?? []) addCall(a, t);
-  if (ev.tool && toolEvent(a.calls, ev.tool, now)?.state === "approval") openCards.add(c.id);
-  if (ev.round) {
-    if (a.content || a.reasoning || a.calls) a.rounds = [...(a.rounds ?? []), { content: a.content, ...(a.reasoning ? { reasoning: a.reasoning } : {}), calls: a.calls ?? [] }];
-    a.content = a.reasoning = "";
-    a.calls = undefined;
-  }
-  if (ev.note) a.notes = [...(a.notes ?? []), ev.note];
-}
-
 function keepTokens(m: Message, pick?: Tok) {
   const td = m.id && tokens.get(m.id);
   if (!td) return;
@@ -3826,7 +3898,7 @@ function finish(run: Run) {
     m.stats = {
       ttft: (t.first - t.start) / 1000, tps: usage.completion_tokens / Math.max((t.gen || t.last - t.first) / 1000, 1e-3),
       tokens: usage.completion_tokens, prompt: usage.prompt_tokens, cached: usage.cached,
-      thought: m.reasoning && t.answer && !m.rounds?.length ? (t.answer - t.first) / 1000 : undefined, seed: run.seed, model: current(),
+      thought: m.reasoning && t.answer && !m.rounds?.length ? (t.answer - t.first) / 1000 : undefined, seed: run.seed, model: c.thread ? threadModel(c) : current(),
       ctx: run.last ? run.last.prompt_tokens + run.last.completion_tokens : undefined,
     };
   }
@@ -3837,8 +3909,8 @@ function finish(run: Run) {
   } else if (voice?.reply?.m === m) endSaying(voice.reply);
   if (voice?.c === c) tellVoice(voice);
   const unrun = (m.calls ?? []).filter((x) => !x.state);
-  if (unrun.length && !m.error && !m.stopped && !toolsOn(c))
-    m.error = `The model asked to run ${[...new Set(unrun.map((x) => x.name))].join(", ")}, but this chat has no tools on, so the reply ends here.`;
+  if (unrun.length && !m.error && !m.stopped)
+    m.error = `The model asked to run ${[...new Set(unrun.map((x) => x.name))].join(", ")}, but a chat has no tools, so the reply ends here.`;
   delete m.job;
   delete m.base;
   delete m.starting;
@@ -3849,7 +3921,8 @@ function finish(run: Run) {
   if (c === conv) render();
   else renderList();
   save(c);
-  if (!c.named && !m.error) void name(c);
+  if (c.thread) void loadThreads();
+  else if (!c.named && !m.error) void name(c);
   redoEdits(c, m);
   if (talking && c === conv && !m.error && !m.stopped) setTimeout(talkOn, 400);
   else if (talking) { talking = 0; renderCastNext(); }
@@ -3902,6 +3975,11 @@ async function name(c: Conversation) {
   if (c === conv) $("title").textContent = document.title = c.title;
 }
 
+function addressed(c: Conversation, text: string) {
+  if (!c.cast) return undefined;
+  const tags = [...text.matchAll(/@([\p{L}\p{N}_-]+)/gu)].map((m) => m[1].toLowerCase());
+  return castOf(c).members.find((p) => { const n = p.card.data.name.trim().toLowerCase(); return tags.includes(n.replace(/\s+/g, "-")) || tags.includes(n.split(/\s+/)[0]); })?.id;
+}
 function submit(text: string, reply = true) {
   text = text.trim();
   if ((!text && !pending.length) || running() || drafting) return;
@@ -3913,7 +3991,7 @@ function submit(text: string, reply = true) {
   if (!conv.messages.some((m) => m.role === "user")) conv.title = (text || files.map((f) => f.name).join(", ")).split("\n")[0].slice(0, 60);
   const note = noteFor(conv, false);
   conv.messages.push({ role: "user", content: text, ...(files.length ? { files } : {}), ...(note ? { note } : {}), ...pointFields(false), ...takeEdits() });
-  if (reply) void generate();
+  if (reply) void generate(conv, conv.messages.length, addressed(conv, text));
   else save(conv);
 }
 
@@ -3939,11 +4017,11 @@ let voice: VoiceMode | null = null;
 let voiceCatalog: VoiceReady["catalog"] = (() => { try { return JSON.parse(pref("voice-catalog", "{}")) ?? {}; } catch { return {}; } })();
 const cuts = new Map<Message, number | null>();
 const voicePrompt = () => settings.voice?.prompt ?? DEFAULT_VOICE_PROMPT;
-const voiceNote = (c: Conversation) => fill([voicePrompt().trim(), toolsOn(c) ? VOICE_TOOLS : ""].filter(Boolean).join(" "));
+const voiceNote = () => fill(voicePrompt().trim());
 function noteFor(c: Conversation, said: boolean): string | undefined {
   const users = c.messages.filter((m) => m.role === "user"), prev = users.at(-1);
   if (!said) return prev?.voice ? VOICE_OFF : undefined;
-  const last = users.findLast((m) => m.note && m.voice)?.note, note = voiceNote(c);
+  const last = users.findLast((m) => m.note && m.voice)?.note, note = voiceNote();
   return note && (!prev?.voice || last !== note) ? note : undefined;
 }
 function tellVoice(v: VoiceMode) {
@@ -4112,11 +4190,10 @@ function startAhead(v: VoiceMode, text: string, on?: Message): Ahead {
     try {
       await filesReady(upto);
       const res = await fetch("/api/chat", { method: "POST", headers: { "Content-Type": "application/json" },
-        body: JSON.stringify(request(c, upto, { effort, extra: { chrysalis_ahead: true } })) });
+        body: JSON.stringify(request(c, upto, { effort })) });
       if (!res.ok || !res.body) throw new Error((await res.json().catch(() => null))?.error?.message ?? `HTTP ${res.status}`);
       m.job = res.headers.get("X-Chrysalis-Job") ?? undefined;
       if (run.stopping) stopRun(run, true);
-      else if (a.live) void fetch(`/api/chat/${m.job}/go`, { method: "POST" }).catch(() => {});
       await stream(run, res.body);
     } catch (e) {
       if (run.stopping) m.stopped = true;
@@ -4142,7 +4219,7 @@ function dropAhead(v: VoiceMode) {
 }
 
 function pauseAhead(v: VoiceMode, text: string) {
-  if (v.ahead?.said || running(v.c) || status.state !== "online" || status.loading) return;
+  if (v.ahead?.said || running(v.c) || status.state !== "online" || status.loading || v.c.thread) return;
   const q = questionFor(v, text.trim());
   if (v.ahead?.text === q.text) return;
   dropAhead(v);
@@ -4170,7 +4247,6 @@ function standAhead(v: VoiceMode, a: Ahead) {
   branch(c, c.messages.length, m);
   runs.set(c.id, a.run);
   v.reply = a.reply;
-  if (m.job) void fetch(`/api/chat/${m.job}/go`, { method: "POST" }).catch(() => {});
   v.client.go(m.id!);
   if (c === conv) {
     follow = true;
@@ -4643,10 +4719,8 @@ function importedChat(x: any): Conversation | null {
   if (!x || typeof x !== "object") return null;
   const messages = importedMessages(x.messages);
   if (!messages) return null;
-  const tools = x.tools && typeof x.tools === "object" ? Object.fromEntries(Object.entries(x.tools).filter(([, v]: [string, any]) =>
-    v && typeof v === "object" && (v.off === undefined || (Array.isArray(v.off) && v.off.every((n: unknown) => typeof n === "string"))))) as ToolChoice["tools"] : undefined;
   return { id: randomId(), title: typeof x.title === "string" && x.title ? x.title.slice(0, 80) : "Imported chat", named: true,
-    updated: Date.now(), effort: EFFORTS.includes(x.effort) ? x.effort : "xhigh", messages, ...(tools && Object.keys(tools).length ? { tools } : {}) };
+    updated: Date.now(), effort: EFFORTS.includes(x.effort) ? x.effort : "xhigh", messages };
 }
 
 async function importFiles(files: FileList) {
@@ -4679,13 +4753,13 @@ async function draft() {
     return;
   }
   const c = conv, begin = input.value;
-  if (running(c) || !c.messages.length || status.state !== "online") return;
+  if (running(c) || !c.messages.length || status.state !== "online" || c.thread) return;
   const d: { job?: string; stop: boolean } = (drafting = { stop: false });
   try { await filesReady(c.messages); } catch (e) { drafting = null; return toast(`The draft failed: ${e instanceof Error ? e.message : e}`); }
   const body = request(c, c.messages, {
-    sampling: "fast", final: begin.trim() ? { role: "assistant", content: begin } : undefined, loop: false,
+    sampling: "fast", final: begin.trim() ? { role: "assistant", content: begin } : undefined,
     extra: { chrysalis_aside: true, max_tokens: 400, logprobs: false, seed: undefined, ...(begin.trim() ? { continue_final_message: true } : {}) },
-  });
+  }) as { messages: object[] };
   (body.messages as object[]).splice(begin.trim() ? -1 : body.messages.length, 0, { role: "user", content: DRAFT_PROMPT });
   input.readOnly = true;
   renderComposer();
@@ -4719,6 +4793,8 @@ function openConversation(id: string, reveal = true) {
   closeVoice();
   stopReading();
   conv = runs.get(id)?.conv ?? (chats[id] ? structuredClone(chats[id]) : blank());
+  const sid = conv.thread?.id ?? (id.startsWith(STUB) ? id.slice(STUB.length) : undefined);
+  if (sid) showThread(sid);
   if (reveal) unfold(whoOf(conv));
   closeOver(panes.conversations);
   render();
@@ -4735,8 +4811,9 @@ function newChat(who = "") {
   unfold(who || CHRYSALIS);
   if (like) Object.assign(conv, structuredClone({ who, cast: like.cast, ...(like.missing ? { missing: like.missing } : {}), ...(like.scenario ? { scenario: like.scenario } : {}),
     ...(like.castName ? { castName: like.castName } : {}) }));
-  else if (who && who !== CHRYSALIS && !who.startsWith(CAST)) conv.who = who;
-  greet(conv);
+  else if (who.startsWith(DIR)) conv.thread = { dir: who.slice(DIR.length) };
+  else if (who && who !== CHRYSALIS) conv.who = who;
+  if (!conv.thread) greet(conv);
   const mine = persona().card.data.first_mes?.trim();
   if (mine && !input.value.trim()) {
     input.value = fillCard(mine, writerOf(conv)?.card.data.name ?? castOf(conv).members[0]?.card.data.name ?? "", userName());
@@ -4756,7 +4833,7 @@ function remove(id: string) {
   }
   delete chats[id];
   keepChats();
-  if (id === conv.id) newChat(folderOf(conv));
+  if (id === conv.id) newChat(conv.thread ? whoOf(conv) : folderOf(conv));
   else renderList();
 }
 
@@ -4839,7 +4916,6 @@ thread.addEventListener("click", (e) => {
   }
   if (act.dataset.act === "card" || act.dataset.act === "more") return toggleCard(act);
   if (act.dataset.act === "decide") return void decide(act);
-  if (act.dataset.act === "agent-stop") return stopAgent(act, m);
   if (act.dataset.act === "speak") return readAloud(m);
   if (running()) return;
   if (act.dataset.act === "retry") void generate(conv, i);
@@ -4861,28 +4937,10 @@ function toggleCard(btn: HTMLElement) {
   const m = conv.messages[Number(card.closest<HTMLElement>("article")?.dataset.i)];
   syncCards(card.parentElement!, cardLists.get(card.parentElement!) ?? [], m, running()?.m === m);
 }
-function findCall(calls: Call[] | undefined, id: string): Call | undefined {
-  for (const c of calls ?? []) {
-    const found = c.id === id ? c : c.agent && (findCall(c.agent.calls, id) ?? c.agent.rounds?.map((r) => findCall(r.calls, id)).find(Boolean));
-    if (found) return found;
-  }
-  return undefined;
-}
-function stopAgent(btn: HTMLElement, m: Message) {
-  const card = btn.closest<HTMLElement>(".agent-card")!;
-  if (!m.job) return;
-  (btn as HTMLButtonElement).disabled = true;
-  void fetch(`/api/chat/${m.job}/agent/${encodeURIComponent(card.dataset.call!)}/stop`, { method: "POST" }).catch(() => {});
-}
-
 async function decide(btn: HTMLElement) {
   const card = btn.closest<HTMLElement>(".tool-card")!, id = card.dataset.call!, decision = btn.dataset.decision!;
-  const m = conv.messages[Number(card.closest<HTMLElement>("article")?.dataset.i)], c = findCall(m?.calls, id);
+  const m = conv.messages[Number(card.closest<HTMLElement>("article")?.dataset.i)], c = m?.calls?.find((x) => x.id === id);
   if (!m?.job || !c) return;
-  if (decision === "always" && !settings.allow?.includes(c.name)) {
-    settings.allow = [...(settings.allow ?? []), c.name].sort();
-    saveSettings();
-  }
   deciding.add(id);
   const r = running();
   if (r) schedule(r);
@@ -4919,7 +4977,6 @@ document.addEventListener("keydown", (e) => {
   }
   if (e.key !== "Escape" || e.defaultPrevented) return;
   if (!$("tokpop").hidden) return closeTokPop();
-  if (toolsOpen) return setToolsOpen(false, true);
   if (modelsOpen) return setModelsOpen(false, true);
   if (voiceMenu.matches(":popover-open")) return;
   if (document.querySelector("dialog[open]")) return;
@@ -5243,7 +5300,6 @@ async function setBackend(confirmRemote = false) {
 }
 
 function setModelsOpen(open: boolean, refocus = false) {
-  if (open && toolsOpen) setToolsOpen(false);
   modelsOpen = open;
   $("model-pop").hidden = !open;
   delete $("model-pop").dataset.key;
@@ -5255,222 +5311,11 @@ function setModelsOpen(open: boolean, refocus = false) {
   } else if (refocus) $("model-btn").focus();
 }
 
-let catalog: Catalog | null = null, toolsOpen = false;
-const shownTools = new Set<string>();
-let fetchKnob: HTMLElement | undefined;
 const JSON_POST = { method: "POST", headers: { "Content-Type": "application/json" } };
-const FETCH_CHARS = 20_000;
-const EXAMPLE = '{"mcpServers": {"notes": {"command": "npx", "args": ["-y", "@modelcontextprotocol/server-filesystem", "/home/me/notes"]}}}';
-
-async function loadCatalog(how: { reload?: boolean; connect?: string } = {}) {
-  try {
-    const r = how.reload ? await fetch("/api/tools/reload", JSON_POST)
-      : how.connect ? await fetch("/api/tools/connect", { ...JSON_POST, body: JSON.stringify({ source: how.connect }) }) : await fetch("/api/tools");
-    if (r.ok) catalog = await r.json();
-  } catch {  }
-  renderTools();
-  void watchTools();
-}
-let watching = false;
-async function watchTools() {
-  if (watching) return;
-  watching = true;
-  try {
-    for (let k = 0; k < 120 && catalog?.sources.some((s) => s.state === "connecting"); k++) {
-      await sleep(500);
-      const r = await fetch("/api/tools").catch(() => null);
-      if (r?.ok) catalog = await r.json();
-      renderTools();
-    }
-  } finally { watching = false; }
-}
-
-const isOn = (id: string, c = conv) => !!c.tools?.[id];
-const toolOn = (id: string, name: string, c = conv) => isOn(id, c) && !c.tools![id].off?.includes(name);
-const onCount = (c = conv) => (catalog?.sources ?? []).reduce((n, s) => n + s.tools.filter((t) => toolOn(s.id, t.name, c)).length, 0);
-function setTools(next: NonNullable<Conversation["tools"]>) {
-  conv.tools = Object.keys(next).length ? next : undefined;
-  setPref("tools", JSON.stringify(conv.tools ?? {}));
-  save(conv);
-  renderTools();
-  if (panel.open) syncSettings();
-}
-function setSource(id: string, on: boolean, only?: string) {
-  const next = { ...conv.tools }, s = catalog?.sources.find((x) => x.id === id);
-  if (!on) delete next[id];
-  else {
-    next[id] = only && s ? { off: s.tools.map((t) => t.name).filter((n) => n !== only).sort() } : {};
-    if (s && (s.state === "idle" || s.state === "failed")) void loadCatalog({ connect: id });
-  }
-  setTools(next);
-}
-function setTool(id: string, name: string, on: boolean) {
-  if (!isOn(id)) return void (on && setSource(id, true, name));
-  const off = new Set(conv.tools![id].off ?? []), s = catalog?.sources.find((x) => x.id === id);
-  if (on) off.delete(name); else off.add(name);
-  if (s && s.tools.every((t) => off.has(t.name))) return setSource(id, false);
-  setTools({ ...conv.tools, [id]: off.size ? { off: [...off].sort() } : {} });
-}
-
-const dotOf = (s: SourceInfo) => (s.state === "connected" ? "online" : s.state === "connecting" ? "loading" : s.state === "failed" ? "failed" : "");
-function stateLine(s: SourceInfo) {
-  const n = s.tools.length, k = s.tools.filter((t) => toolOn(s.id, t.name)).length;
-  if (s.kind === "fetch") return "Reads web pages at public addresses";
-  if (s.kind === "agent") return "Hands tasks to agents that work side by side";
-  return s.state === "connected" ? `${k} of ${n} tool${n === 1 ? "" : "s"} on` : s.state === "connecting" ? "Starting…"
-    : s.state === "failed" ? "Could not start" : s.state === "disabled" ? "Disabled in the config file" : isOn(s.id) ? "Starts with the next reply" : "Not started";
-}
-const toolTag = (t: ToolInfo) => (t.readOnly ? ["read-only", "Changes nothing: runs without asking"]
-  : settings.allow?.includes(t.fn) ? ["runs without asking", "You allowed it for good (Settings, Tools)"] : ["asks first", "Asks you before each run"]);
-function keyed<T extends HTMLElement>(el: T, what: string, src = "", tool = ""): T {
-  Object.assign(el.dataset, { do: what, src, tool, k: `${what}|${src}|${tool}` });
-  return el;
-}
-function toolSwitch(what: string, src: string, tool: string, on: boolean, label: string, disabled = false) {
-  const b = keyed(h("button", "switch"), what, src, tool);
-  b.type = "button";
-  b.setAttribute("role", "switch");
-  b.setAttribute("aria-checked", String(on));
-  b.setAttribute("aria-label", label);
-  b.disabled = disabled;
-  return b;
-}
-function sourceView(s: SourceInfo): HTMLElement {
-  const box = h("div", `tp-src${isOn(s.id) ? " on" : ""}`), row = h("div", "tp-row"), text = h("span", "tp-text");
-  const lead = s.kind === "mcp" ? h("span", `dot ${dotOf(s)}`) : h("span", "tp-ico");
-  if (s.kind !== "mcp") lead.innerHTML = icon(s.kind === "fetch" ? "globe" : "agent");
-  else lead.title = s.state;
-  text.append(h("span", "tp-name", s.label), h("span", "tp-sub", stateLine(s)));
-  row.append(lead, text);
-  const open = shownTools.has(s.id) && s.kind === "mcp" && s.tools.length > 0;
-  if (s.kind === "mcp" && s.tools.length) {
-    const more = h("button", `act tp-more${open ? " open" : ""}`);
-    more.type = "button";
-    keyed(more, "more", s.id);
-    more.setAttribute("aria-expanded", String(open));
-    more.setAttribute("aria-label", `${open ? "Hide" : "Show"} the tools of ${s.label}`);
-    more.title = open ? "Hide its tools" : "Show its tools";
-    more.innerHTML = icon("chevron");
-    row.append(more);
-  }
-  row.append(toolSwitch("src", s.id, "", isOn(s.id), `${s.label} in this chat`, s.state === "disabled"));
-  box.append(row);
-  if (s.kind === "fetch" && isOn(s.id) && fetchKnob) box.append(fetchKnob);
-  if (s.state === "failed" && s.error) {
-    const err = h("div", "tp-err"), retry = h("button", "btn small", "Retry");
-    retry.type = "button";
-    keyed(retry, "retry", s.id);
-    err.append(h("span", "", s.error), retry);
-    box.append(err);
-  }
-  if (open) {
-    const list = h("div", "tp-tools");
-    for (const t of s.tools) {
-      const r = h("div", "tp-tool"), [tag, why] = toolTag(t), label = h("span", "tp-tname", t.title), badge = h("span", `tp-tag${t.readOnly ? "" : " asks"}`, tag);
-      label.title = DESCRIPTIONS[t.name] ?? (t.description || t.name);
-      badge.title = why;
-      r.append(label, badge, toolSwitch("tool", s.id, t.name, toolOn(s.id, t.name), `${t.title} (${s.label})`));
-      list.append(r);
-    }
-    box.append(list);
-  }
-  return box;
-}
-function renderTools() {
-  const btn = $("tools-btn"), n = onCount(), on = toolsOn(conv);
-  const starting = !!catalog?.sources.some((s) => isOn(s.id) && s.state === "connecting");
-  const label = on ? `Tools: ${n} on in this chat` : "Tools: off in this chat";
-  const html = `${icon("wrench")}${on ? `<span class="tools-n">${n || "…"}</span>` : ""}`;
-  if (btn.innerHTML !== html) btn.innerHTML = html;
-  btn.title = label;
-  btn.setAttribute("aria-label", label);
-  btn.setAttribute("aria-expanded", String(toolsOpen));
-  btn.classList.toggle("on", on);
-  btn.classList.toggle("open", toolsOpen);
-  btn.classList.toggle("pending", starting);
-  if (!toolsOpen) return;
-  const pop = $("tools-pop"), key = JSON.stringify([catalog, conv.tools, [...shownTools], settings.allow]);
-  if (pop.dataset.key === key) return;
-  pop.dataset.key = key;
-  const focus = (document.activeElement as HTMLElement | null)?.dataset?.k;
-  const head = h("div", "tp-head");
-  head.append(h("span", "tp-title", "Tools in this chat"), h("span", "tp-count", on ? `${n} on` : "off"));
-  const parts: HTMLElement[] = [head];
-  if (!catalog) parts.push(h("div", "tp-empty", "Asking the web server…"));
-  else {
-    if (catalog.error) parts.push(h("div", "tp-err", catalog.error));
-    const builtIn = catalog.sources.filter((s) => s.kind !== "mcp"), mcp = catalog.sources.filter((s) => s.kind === "mcp");
-    parts.push(...builtIn.map(sourceView), h("div", "tp-group", "MCP servers"));
-    if (mcp.length) parts.push(...mcp.map(sourceView));
-    else {
-      const help = h("div", "tp-empty");
-      help.append("None yet. Add servers to ", h("code", "", catalog.config), " (the shape Claude Desktop and Claude Code use), for example:",
-        h("pre", "tp-code", EXAMPLE), "then Reload.");
-      parts.push(help);
-    }
-    if (settings.allow?.length) {
-      const allow = h("div", "tp-allow");
-      allow.append(h("span", "tp-allow-label", "Run without asking"), ...settings.allow.map((fn) => {
-        const b = keyed(h("button", "chip", fn), "unallow", "", fn);
-        b.type = "button";
-        b.title = b.ariaLabel = `${fn}: ask first again`;
-        b.insertAdjacentHTML("beforeend", icon("x"));
-        return b;
-      }));
-      parts.push(allow);
-    }
-    const foot = h("div", "tp-foot"), reload = h("button", "btn small", "Reload config");
-    reload.type = "button";
-    keyed(reload, "reload");
-    reload.title = `Read ${catalog.config} again (servers that changed restart)`;
-    foot.append(reload);
-    parts.push(foot);
-  }
-  pop.replaceChildren(...parts);
-  if (focus) pop.querySelector<HTMLElement>(`[data-k="${CSS.escape(focus)}"]`)?.focus();
-}
-function setToolsOpen(open: boolean, refocus = false) {
-  toolsOpen = open;
-  const pop = $("tools-pop");
-  pop.hidden = !open;
-  delete pop.dataset.key;
-  if (open) {
-    setModelsOpen(false);
-    const btn = $("tools-btn"), room = pop.offsetParent?.clientWidth ?? innerWidth;
-    pop.style.left = `${Math.max(8, Math.min(btn.offsetLeft - 8, room - pop.offsetWidth - 8))}px`;
-    void loadCatalog();
-  }
-  renderTools();
-  if (open) pop.querySelector<HTMLElement>("[data-do]")?.focus();
-  else if (refocus) $("tools-btn").focus();
-}
-function buildTools() {
-  $("tools-btn").addEventListener("click", () => setToolsOpen(!toolsOpen));
-  $("tools-pop").addEventListener("click", (e) => {
-    const el = (e.target as Element).closest<HTMLElement>("[data-do]");
-    if (!el || (el as HTMLButtonElement).disabled) return;
-    const { do: what, src = "", tool = "" } = el.dataset;
-    if (what === "src") setSource(src, !isOn(src));
-    else if (what === "tool") setTool(src, tool, !toolOn(src, tool));
-    else if (what === "more") { if (!shownTools.delete(src)) shownTools.add(src); renderTools(); }
-    else if (what === "retry") void loadCatalog({ connect: src });
-    else if (what === "reload") void loadCatalog({ reload: true });
-    else if (what === "unallow") {
-      const before = settings.allow;
-      settings.allow = settings.allow?.filter((x) => x !== tool);
-      if (!settings.allow?.length) delete settings.allow;
-      saveSettings();
-      renderTools();
-      toast(`${tool} asks first again`, () => { settings.allow = before; saveSettings(); renderTools(); });
-    }
-  });
-  document.addEventListener("pointerdown", (e) => {
-    if (toolsOpen && !(e.target as Element).closest("#tools-pop, #tools-btn")) setToolsOpen(false);
-  });
-}
 
 const shortName = (id: string) => modelName(id).replace(/^Qwen3\.8-/, "");
 function renderMeter() {
+  if (conv.thread) return void $("meter").replaceChildren();
   const online = status.state === "online" && !status.loading, ctx = status.context ?? 262144;
   const used = status.kv_tokens && status.cache ? 1 - status.cache.free_kv_tokens / status.kv_tokens : 0;
   const r = running(), s = conv.messages.findLast((m) => m.stats)?.stats;
@@ -5485,9 +5330,41 @@ function renderMeter() {
   meter.title = [n !== undefined ? `This chat: ${n.toLocaleString("en-US")} of ${ctx.toLocaleString("en-US")} tokens of context` : "",
     online ? `Cache: ${fmtK(status.cache?.free_kv_tokens ?? 0)} of ${fmtK(status.kv_tokens ?? 0)} KV tokens free (cached conversations are dropped as needed)` : ""].filter(Boolean).join("\n");
 }
+function threadControls() {
+  const id = threadModel(conv), btn = $("model-btn"), on = harness.state === "on";
+  const label = id ? shortName(id.startsWith("chrysalis/") ? id.slice(10) : harness.models?.find((m) => m.id === id)?.name ?? id) : "OpenCode";
+  btn.innerHTML = `<span class="dot ${on ? "online" : "offline"}"></span><span class="model-name">${escapeHtml(label)}</span>${icon("chevron")}`;
+  btn.title = id ? `${id}, through OpenCode` : "OpenCode lists no model";
+  btn.setAttribute("aria-expanded", String(modelsOpen));
+  btn.classList.toggle("open", modelsOpen);
+  $("meter").replaceChildren();
+  if (!modelsOpen) return;
+  const pop = $("model-pop"), key = JSON.stringify(["thread", id, harness.models]);
+  if (pop.dataset.key === key) return;
+  pop.dataset.key = key;
+  const groups = Object.entries(Object.groupBy(harness.models ?? [], (m) => m.provider));
+  if (!groups.length) return void pop.replaceChildren(h("div", "model-empty", "OpenCode lists no model: sign in to a provider with opencode on that computer"));
+  pop.replaceChildren(...groups.flatMap(([provider, list]) => [h("div", "model-group", provider), ...list!.map((m) => {
+    const cur = m.id === id, item = h("button", cur ? "model-item current" : "model-item"), mark = h("span", "model-check");
+    item.type = "button";
+    item.title = m.id;
+    item.setAttribute("role", "option");
+    item.setAttribute("aria-selected", String(cur));
+    if (cur) mark.innerHTML = icon("check");
+    item.append(h("span", "model-label", m.name), mark);
+    item.onclick = () => {
+      conv.thread!.model = m.id;
+      setPref("thread-model", m.id);
+      if (conv.messages.length) save(conv);
+      setModelsOpen(false, true);
+    };
+    return item;
+  })]));
+}
 function renderControls() {
-  renderTools();
   renderBackend();
+  document.querySelector("main")!.toggleAttribute("data-thread", !!conv.thread);
+  if (conv.thread) return threadControls();
   const effort = barEffort(), at = EFFORTS.indexOf(effort), energy = $("energy");
   energy.dataset.heat = HEAT[at];
   energy.style.setProperty("--v", String(at));
@@ -5891,14 +5768,6 @@ function buildSettings() {
   });
   $("reply-knobs").replaceChildren(maxLen, seed);
 
-  const FLO = 2000, FHI = 100_000;
-  fetchKnob = knob({
-    id: "fetchChars", label: "Page length", min: FLO, max: FHI, step: 1000,
-    help: "Fetch URL: how much of a page the model gets at a time, in characters (it can ask for the rest).",
-    fmt: (v) => v.toLocaleString("en-US"), get: () => settings.fetchChars ?? FETCH_CHARS, rec: () => FETCH_CHARS,
-    custom: () => settings.fetchChars !== undefined, set: (v) => { settings.fetchChars = v; },
-    pos: (v) => Math.min(1, Math.max(0, Math.log(v / FLO) / Math.log(FHI / FLO))), val: (p) => Math.round(FLO * (FHI / FLO) ** p / 1000) * 1000,
-  });
   const voicePromptInput = $<HTMLTextAreaElement>("voice-prompt");
   voicePromptInput.addEventListener("input", () => {
     setVoice({ prompt: voicePromptInput.value === DEFAULT_VOICE_PROMPT ? undefined : voicePromptInput.value });
@@ -5951,8 +5820,13 @@ function buildSettings() {
 
 async function showSent() {
   const c = conv, said = voice?.c === c, effort = c.effort;
+  if (c.thread) {
+    $("sent-about").textContent = "OpenCode keeps this thread's messages and writes the request itself, with its own prompt and tools. Chrysalis gives it your message, the model, and who is working.";
+    $("sent-text").textContent = [`model: ${threadModel(c) ?? "none chosen"}`, `folder: ${c.thread.dir}`, "", "── instruction", threadPersona(c) || "(none: plain OpenCode)"].join("\n");
+    return $<HTMLDialogElement>("sent-view").showModal();
+  }
   await filesReady(c.messages);
-  const body = request(c, [...c.messages], { effort });
+  const body = request(c, [...c.messages], { effort }) as { messages: object[] };
   const res = await fetch("/api/preview", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body) }).catch(() => null);
   const sent = res?.ok ? (await res.json()).body : null;
   if (!sent) return toast("The web server did not answer");
@@ -5960,7 +5834,6 @@ async function showSent() {
   const part = (p: any): string => p.type === "text" ? p.text : p.type === "image_url" ? `[picture, ${kb(p.image_url.url)}]`
     : p.type === "file" ? `[PDF ${p.file.filename}, ${kb(p.file.file_data)}]` : p.type === "video_url" ? `[video, ${kb(p.video_url.url)}]` : JSON.stringify(p);
   const lines = [`model: ${sent.model}${sent.reasoning_effort ? `, thinking ${sent.reasoning_effort}` : ""}`];
-  if (sent.tools?.length) lines.push("", `tools (${sent.tools.length}):`, JSON.stringify(sent.tools, null, 2));
   for (const m of sent.messages) {
     lines.push("", `── ${m.role}${m.tool_call_id ? ` (${m.tool_call_id})` : ""}`);
     if (m.reasoning_content) lines.push(`[reasoning] ${m.reasoning_content}`);
@@ -5969,8 +5842,7 @@ async function showSent() {
   }
   const note = said ? noteFor(c, true) : undefined;
   if (note) lines.push("", "── your next question said aloud, after this note:", `[${note}]`);
-  $("sent-about").textContent = (!sent.tools?.length ? "" : onChrysalis() ? "Chrysalis's chat template writes the tools first in the system turn (\"# Tools … <tools> … </tools>\"), " +
-    "with how to call them, and the system prompt after them. " : "The backend's chat template writes the tools into the prompt. ") + "Your next message goes after these." +
+  $("sent-about").textContent = "Your next message goes after these." +
     (said ? " Each spoken question is first checked, in a conversation of its own beside this one, for what speech recognition misheard." : "");
   $("sent-text").textContent = lines.join("\n");
   $<HTMLDialogElement>("sent-view").showModal();
@@ -6147,7 +6019,6 @@ function openSettings(sec?: string) {
   settingsMode = modeOf(conv);
   if (!panel.open) panel.showModal();
   showSettingsSec(sec ?? pref("settings-sec", "chat"));
-  void loadCatalog();
 }
 function showSettingsSec(sec: string) {
   if (!panel.querySelector(`.set-sec[data-sec="${sec}"]`)) sec = "chat";
@@ -6180,6 +6051,10 @@ $("import").innerHTML = icon("upload");
 $("export-all").innerHTML = icon("download");
 $("connect").innerHTML = icon("phone");
 $("connect").onclick = openConnect;
+$("opencode").onclick = () => void openHarness();
+paintHarness();
+void loadThreads();
+addEventListener("focus", () => { if (harness.state === "on") void loadThreads(); });
 $("connect-close").innerHTML = icon("x");
 $("connect-close").onclick = () => connectView.close();
 connectView.addEventListener("click", (e) => { if (e.target === connectView) connectView.close(); });
@@ -6210,9 +6085,7 @@ $("shelf").addEventListener("keydown", (e) => {
 });
 addEventListener("resize", () => glow());
 buildControls();
-buildTools();
 if (location.protocol === "https:") await checkTrust();
-void loadCatalog();
 $("to-latest").innerHTML = icon("down");
 $("settings-reset").insertAdjacentHTML("afterbegin", icon("retry"));
 for (const id of ["system-reset", "voice-prompt-reset"]) $(id).innerHTML = icon("retry");

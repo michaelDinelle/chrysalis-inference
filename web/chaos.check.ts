@@ -1,11 +1,10 @@
 import { afterAll, beforeAll, expect, test } from "bun:test";
-import { mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { deflateSync } from "node:zlib";
 import puppeteer, { type Browser, type BrowserContext, type Page } from "puppeteer-core";
-import { partCode } from "./fake-mcp";
 
-const RUN = mkdtempSync(`${tmpdir()}/chrysalis-chaos-`);
+const RUN = mkdtempSync(`${tmpdir()}/chrysalis-chaos-`), WORK = `${RUN}/work`;
 process.env.NODE_TLS_REJECT_UNAUTHORIZED = "0";
 const CHRYSALIS = "http://127.0.0.1:8080", MIN = 60_000;
 const CHAT_ARGS = ["--no-sandbox", "--ignore-certificate-errors"];
@@ -29,12 +28,14 @@ const problems: string[] = [];
 const serverLog: string[] = [];
 
 beforeAll(async () => {
-  const tls = mkdtempSync(`${RUN}/tls-`), dir = mkdtempSync(`${RUN}/mcp-`);
-  writeFileSync(`${dir}/mcp.json`, JSON.stringify({ mcpServers: { fake: { command: process.execPath, args: ["fake-mcp.ts"], cwd: import.meta.dir, env: { FAKE_MCP_PART_CHARS: "38000" } } } }));
+  const tls = mkdtempSync(`${RUN}/tls-`), home = mkdtempSync(`${RUN}/home-`);
+  mkdirSync(WORK);
+  writeFileSync(`${WORK}/note.txt`, "hello\n");
   web = Bun.spawn([process.execPath, "server.ts"], {
     cwd: import.meta.dir, stdout: "pipe", stderr: "pipe",
     env: { ...process.env, PORT: "0", CHRYSALIS_URL: CHRYSALIS, CHRYSALIS_HOST: "127.0.0.1", NODE_ENV: "production",
-      CHRYSALIS_MCP_CONFIG: `${dir}/mcp.json`, CHRYSALIS_TLS_DIR: tls },
+      CHRYSALIS_TLS_DIR: tls, CHRYSALIS_OPENCODE: Bun.which("opencode") ?? `${process.env.HOME}/.opencode/bin/opencode`,
+      HOME: home, XDG_CONFIG_HOME: `${home}/.config`, XDG_DATA_HOME: `${home}/.local/share`, XDG_STATE_HOME: `${home}/.local/state`, XDG_CACHE_HOME: `${home}/.cache` },
   });
   void (async () => {
     const r = web.stderr.getReader(), dec = new TextDecoder();
@@ -298,8 +299,6 @@ test("settings, panels, the window's size and the models list changed while a re
   await page.click("#artifacts-switch");
   await page.click("#artifacts-switch");
   await page.click("#settings-close");
-  await page.click("#tools-btn");
-  await page.keyboard.press("Escape");
   await page.click("#model-btn");
   await page.keyboard.press("Escape");
   await page.click("#conversations-toggle");
@@ -318,39 +317,6 @@ test("settings, panels, the window's size and the models list changed while a re
   await healthy("settings mid-reply");
   await page.close();
 }, 10 * MIN);
-
-test("tools: a call followed through a reload, one that asks first answered after a reload, and a slow one stopped", async () => {
-  const page = await open();
-  await thinking(page, "Off");
-  await page.click("#tools-btn");
-  const fake = '#tools-pop [data-do="src"][data-src="mcp:fake"]';
-  await page.waitForSelector(fake);
-  if ((await page.$eval(fake, (b) => b.getAttribute("aria-checked"))) !== "true") await page.click(fake);
-  await page.waitForFunction(() => document.querySelector('#tools-pop [data-src="mcp:fake"]')?.closest(".tp-src")?.querySelector(".tp-sub")?.textContent?.includes("tools on"), { timeout: 30_000 });
-  await page.keyboard.press("Escape");
-  await ask(page, "Call the echo tool with the text 'chaos monkey', then tell me exactly what it returned.");
-  await page.waitForSelector(".tool-card", { timeout: 2 * MIN });
-  await reload(page);
-  await idle(page);
-  expect(await page.$$eval(".tool-card", (c) => c.length)).toBeGreaterThan(0);
-  expect((await lastReply(page)).toLowerCase()).toContain("chaos monkey");
-
-  await ask(page, "Save a note with the write_note tool saying 'buy milk'.");
-  await page.waitForSelector('[data-act="decide"][data-decision="once"]', { timeout: 2 * MIN });
-  await reload(page);
-  await page.waitForSelector('[data-act="decide"][data-decision="once"]', { timeout: 30_000 });
-  await page.click('[data-act="decide"][data-decision="once"]');
-  await idle(page);
-  expect(await page.$$eval(".tool-card", (c) => c.map((x) => x.textContent ?? "").join(" "))).toMatch(/done/i);
-
-  await ask(page, "Call the slow tool with ms set to 20000.");
-  await page.waitForFunction(() => [...document.querySelectorAll(".tool-card")].some((c) => /running/.test(c.textContent ?? "")), { timeout: 2 * MIN });
-  await page.keyboard.press("Escape");
-  await idle(page, 30_000);
-  expect(await page.$$eval(".tool-card", (c) => c.map((x) => x.textContent ?? "").join(" "))).toMatch(/stopped/i);
-  await healthy("tools");
-  await page.close();
-}, 15 * MIN);
 
 test("a 3D page asked for and handled while it is written: Edit, clicks and keys in it, the shelf, a reload; it runs whole at the column's size", async () => {
   const page = await open();
@@ -499,82 +465,28 @@ test("exported and imported while a reply is written, and a picture asked about 
   await ctx.close();
 }, 10 * MIN);
 
-test("sub-agents: three tasks handed off at once in one reply while another chat writes", async () => {
+test("a thread through OpenCode for real: the model edits a file in the folder as asked, its steps are cards, and a reload brings the thread back from OpenCode as it was", async () => {
   const page = await open();
-  await thinking(page, "Off");
-  await page.click("#tools-btn");
-  const agents = '#tools-pop [data-do="src"][data-src="agents"]';
-  await page.waitForSelector(agents);
-  if ((await page.$eval(agents, (b) => b.getAttribute("aria-checked"))) !== "true") await page.click(agents);
-  await page.keyboard.press("Escape");
-  await ask(page, "Use three sub-agents at once: one writes a haiku about rain, one a haiku about fire, one a haiku about wind. Then show all three.");
-  await page.click("#new-chat");
-  await thinking(page, "Off");
-  await ask(page, "Write a 300-word story about a lighthouse.");
-  await page.waitForFunction(() => !document.querySelector(".conv:has(.conv-status)"), { timeout: 10 * MIN, polling: 1000 });
-  await page.$eval(".conv:not(.active)", (c) => (c as HTMLElement).click());
-  await page.waitForSelector(".agent-head", { timeout: 10_000 });
-  const cards = await page.$$eval(".agent-head", (c) => c.length);
-  console.log(`sub-agent cards: ${cards}`);
-  expect(cards).toBeGreaterThan(0);
-  expect((await lastReply(page)).length).toBeGreaterThan(40);
-  await healthy("sub-agents");
+  await page.evaluate((work: string) => localStorage.setItem("folders", JSON.stringify([work])), WORK);
+  await reload(page);
+  await page.click("#opencode");
+  await until(page, "OpenCode to start", () => page.waitForFunction(() => /OpenCode \d/.test(document.querySelector("#oc-pop .invite-head")?.textContent ?? ""), { timeout: MIN }));
+  await page.click("#oc-pop .invite-row");
+  await page.waitForFunction(() => document.querySelector("main")!.hasAttribute("data-thread"));
+  await ask(page, "Add a second line to note.txt that says exactly: honey. Then tell me what the file contains.");
+  await attended(page, () => answered(page, 10 * MIN));
+  expect(readFileSync(`${WORK}/note.txt`, "utf8").split("\n").filter(Boolean)).toEqual(["hello", "honey"]);
+  const seen = () => page.evaluate(() => ({ cards: [...document.querySelectorAll<HTMLElement>("#thread .tool-card")].map((c: HTMLElement) => c.dataset.state),
+    said: [...document.querySelectorAll<HTMLElement>("#thread > article.assistant")].at(-1)?.innerText ?? "", error: document.querySelector("#thread .error")?.textContent ?? "" }));
+  const before = await seen();
+  expect([before.error, before.cards.length > 0, before.cards.every((c: string | undefined) => c === "done"), /honey/i.test(before.said)]).toEqual(["", true, true, true]);
+  await reload(page);
+  await page.waitForFunction(() => document.querySelectorAll("#thread .tool-card").length > 0, { timeout: MIN });
+  const after = await seen();
+  expect([after.cards, /honey/i.test(after.said)]).toEqual([before.cards, true]);
   await page.close();
+  await healthy("a thread through OpenCode");
 }, 15 * MIN);
-
-test("sub-agents: three long readings at once outgrow the memory they share, compact, and still report every code exactly", async () => {
-  const page = await open(), parts = 12, books = ["alpha", "beta", "gamma"];
-  await thinking(page, "Off");
-  await page.click("#tools-btn");
-  for (const src of ["agents", "mcp:fake"]) {
-    const on = `#tools-pop [data-do="src"][data-src="${src}"]`;
-    await page.waitForSelector(on);
-    if ((await page.$eval(on, (b) => b.getAttribute("aria-checked"))) !== "true") await page.click(on);
-  }
-  await page.keyboard.press("Escape");
-  await ask(page, `Use three sub-agents at once, in one message. Give the first the book "alpha", the second the book "beta" and the third the book "gamma". Tell each one: read parts 1 to ${parts} of its book with the read_part tool, `
-    + "four parts per message, and report every part's code in a list. It must read every part: the codes cannot be guessed. Then show me the three lists.");
-  await attended(page, () => answered(page, 25 * MIN));
-  const cards = await page.$$eval(".agent-card", (c) => c.map((x) => x.getAttribute("data-state")));
-  console.log(`sub-agents: ${cards.join(", ")}`);
-  expect(cards.length).toBeGreaterThanOrEqual(3);
-  expect(cards.every((s) => s === "done")).toBe(true);
-  const reply = await lastReply(page);
-  expect(books.flatMap((b) => Array.from({ length: parts }, (_, i) => partCode(b, i + 1))).filter((c) => !reply.includes(c))).toEqual([]);
-  for (const head of await page.$$(".agent-head")) await head.click();
-  const compacted = await page.$$eval(".agent-log .checkpoint", (c) => c.length);
-  console.log(`compactions: ${compacted}`);
-  expect(compacted).toBeGreaterThan(0);
-  await healthy("sub-agents past their memory");
-  await page.close();
-}, 30 * MIN);
-
-test("one reply reads past the whole context, compacts, and the chat goes on from what it kept, through a reload", async () => {
-  const page = await open(), parts = 40, book = "delta";
-  await thinking(page, "Off");
-  await page.click("#tools-btn");
-  const on = '#tools-pop [data-do="src"][data-src="mcp:fake"]';
-  await page.waitForSelector(on);
-  if ((await page.$eval(on, (b) => b.getAttribute("aria-checked"))) !== "true") await page.click(on);
-  await page.keyboard.press("Escape");
-  await ask(page, `Read parts 1 to ${parts} of the book "${book}" with the read_part tool, four parts per message, and report every part's code in a list. Read every part: the codes cannot be guessed. Do not use sub-agents.`);
-  await attended(page, () => answered(page, 20 * MIN));
-  const compacted = await page.$$eval(".checkpoint", (c) => c.length);
-  console.log(`compactions: ${compacted}`);
-  expect(compacted).toBeGreaterThan(0);
-  const list = await lastReply(page);
-  expect(Array.from({ length: parts }, (_, i) => partCode(book, i + 1)).filter((c) => !list.includes(c))).toEqual([]);
-  await ask(page, "What was the code of part 3? Answer with the code alone.");
-  await answered(page, 3 * MIN);
-  expect(await lastReply(page)).toContain(partCode(book, 3));
-  await page.reload({ waitUntil: "load" });
-  await page.waitForSelector(".checkpoint", { timeout: 20_000 });
-  await ask(page, "And the code of part 38? Answer with the code alone.");
-  await answered(page, 3 * MIN);
-  expect(await lastReply(page)).toContain(partCode(book, 38));
-  await healthy("a reply past the whole context");
-  await page.close();
-}, 30 * MIN);
 
 test("a tab closed while its reply is written: the reply runs out at Chrysalis, and a new tab starts clean", async () => {
   const t0 = Date.now(), ctx = await context(), page = await open(ctx);

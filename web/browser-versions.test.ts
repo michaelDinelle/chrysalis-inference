@@ -1,7 +1,7 @@
 import { expect, test } from "bun:test";
 import { mkdtempSync, readFileSync, writeFileSync } from "node:fs";
 import { ARTIFACTS_PROMPT } from "./artifacts";
-import { harness, articles, card, dir, download, fakes, idle, lastStream, loading, open, pagerOf, pop, send, sent, still, streams, toolsOn, untilIdle } from "./browser-harness";
+import { harness, articles, card, dir, download, fakes, idle, lastStream, loading, open, pagerOf, send, sent, still, streams, untilIdle } from "./browser-harness";
 
 harness();
 
@@ -118,28 +118,25 @@ test("a reply being written in a version that is not on screen goes on, and show
   await page.close();
 }, 60_000);
 
-test("export and import keep versions and tool rounds, and the imported chat resends the same history; an older file still imports", async () => {
+test("export and import keep versions, and the imported chat resends the same history; an older file still imports", async () => {
   const into = mkdtempSync(`${dir}/export-`);
   const page = await open();
-  await toolsOn(page);
   await send(page, "one");
   await page.hover('#thread > article[data-i="1"]');
   await page.click('#thread > article[data-i="1"] [data-act="retry"]');
   await untilIdle(page);
-  await send(page, "tool echo");
+  await send(page, "two");
   const file = await download(page, into);
   const saved = JSON.parse(readFileSync(file, "utf8")).conversations[0];
   expect(saved.messages[1].versions.others.length).toBe(1);
-  expect(saved.messages[3].rounds[0].calls[0]).toMatchObject({ name: "fake__echo", args: '{"text":  "hello"}', result: "echo: hello", state: "done" });
   expect(JSON.stringify(saved)).not.toContain('"job"');
   await send(page, "after");
   const here = lastStream.messages;
 
   const other = await open();
   await (await other.$("input#import-file"))!.uploadFile(file);
-  await other.waitForSelector(".tool-card");
+  await other.waitForFunction(() => document.querySelectorAll("#thread > article").length === 4);
   expect(await pagerOf(other, 1)).toBe("2 / 2");
-  expect(await other.$eval("#tools-btn", (b) => b.classList.contains("on"))).toBe(true);
   await send(other, "after");
   expect(JSON.stringify(lastStream.messages)).toBe(JSON.stringify(here));
   await other.click('#thread > article[data-i="1"] [data-act="prev"]');
