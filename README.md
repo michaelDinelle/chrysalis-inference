@@ -237,7 +237,7 @@ docker run -d --device /dev/kfd --device /dev/dri -p 127.0.0.1:8080:8080 -v chry
 - **MLX**: 0.32.4 with mlx-lm 0.32.2 and mlx-community's 4-bit model, through `mlx_lm.server`, which has no MTP for this
   model. The 100K prompt ran with prefill steps of 512, because the default ran out of memory. The follow-up ran out of
   memory at 512 too.
-- **Rounds**: medians over two rounds for Chrysalis and one for llama.cpp and MLX, run from October 26 to November 1, 2026.
+- **Rounds**: medians over two rounds for Chrysalis and one for llama.cpp and MLX, run from October 26 to November 11, 2026.
 - **Error and memory**: as above. Chrysalis's footprint on the Mac includes its conversation snapshots.
 - **Share of each GPU's limit**: as above, with each engine's tokens per pass from its log. The Mac uses Apple's published
   bandwidth and its GPU's FP16 rate.
@@ -248,19 +248,19 @@ docker run -d --device /dev/kfd --device /dev/dri -p 127.0.0.1:8080:8080 -v chry
 | --- | ---: | ---: |
 | First token, short prompt | 0.12 s | 0.31 s |
 | First token, 4K prompt | 2.8 s | 4.0 s |
-| First token, 16K prompt | 11.6 s | 16.9 s |
-| First token, 100K prompt | 94.1 s | 146 s |
-| First token, follow-up in the 100K chat | 1.8 s | 2.9 s |
-| Writing, short prompt | 104.0 tok/s | 68.4 tok/s |
-| Writing, 4K prompt | 90.5 tok/s | 57.2 tok/s |
-| Writing, 16K prompt | 80.8 tok/s | 51.5 tok/s |
-| Writing, 100K prompt | 73.0 tok/s | 34.7 tok/s |
-| Writing, follow-up in the 100K chat | 74.2 tok/s | 38.5 tok/s |
+| First token, 16K prompt | 11.4 s | 16.9 s |
+| First token, 100K prompt | 91.9 s | 146 s |
+| First token, follow-up in the 100K chat | 1.7 s | 2.9 s |
+| Writing, short prompt | 105.8 tok/s | 68.4 tok/s |
+| Writing, 4K prompt | 92.2 tok/s | 57.2 tok/s |
+| Writing, 16K prompt | 82.4 tok/s | 51.5 tok/s |
+| Writing, 100K prompt | 74.8 tok/s | 34.7 tok/s |
+| Writing, follow-up in the 100K chat | 76.0 tok/s | 38.5 tok/s |
 | Error vs Q8_0, mean KL over 1,082 tokens | 0.0117 | 0.0141 |
-| Load time, to a first answer | 1.4 s | 3.7 s |
+| Load time, to a first answer | 1.6 s | 3.7 s |
 | Peak memory | 7.7 GB | 13.4 GB |
-| Share of the GPU's limit, reading 100K | 62% | 40% |
-| Share of the GPU's limit, writing at 100K | 55% | 27% |
+| Share of the GPU's limit, reading 100K | 63% | 40% |
+| Share of the GPU's limit, writing at 100K | 57% | 27% |
 
 **Qwen3.8-27B, RTX 5070**
 
