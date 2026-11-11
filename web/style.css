@@ -912,7 +912,7 @@ label.set-switch { cursor: pointer; }
 .point-chip::before { content: "→ "; color: var(--accent); }
 .msg.user.fix .bubble { border-style: dashed; background: none; color: var(--muted); font-size: 13px; }
 
-.cast-add[hidden], .cast-sheet[hidden], .cast-next[hidden] { display: none; }
+.cast-add[hidden], .cast-sheet[hidden], .cast-next[hidden], .cast-invite[hidden], .invite-find[hidden] { display: none; }
 .side-top { display: flex; flex: none; gap: 6px; }
 .side-top #new-chat { flex: 1; }
 .side-top #add-cast { flex: none; width: 36px; padding: 0; justify-content: center; color: var(--muted); }
@@ -929,8 +929,8 @@ label.set-switch { cursor: pointer; }
 .cast-main > .i { flex: none; width: 14px; height: 14px; color: var(--faint); transition: transform 140ms ease; }
 .cast-main[aria-expanded="false"] > .i { transform: rotate(-90deg); }
 .cast-count { margin-left: auto; padding: 0 4px; color: var(--faint); font-size: 12px; }
-.cast-new { flex: none; visibility: hidden; }
-.cast-row:hover .cast-new { visibility: visible; }
+.cast-new, .cast-bring { flex: none; visibility: hidden; }
+.cast-row:hover .cast-new, .cast-row:hover .cast-bring, .cast-row.here .cast-bring { visibility: visible; }
 .folder-chats { margin: 0 0 6px 23px; padding-left: 9px; border-left: 1.5px solid var(--line); }
 .folder-chats .conv { font-size: 13.5px; }
 .conv-ago { flex: none; color: var(--faint); font-size: 11.5px; }
@@ -960,6 +960,24 @@ label.set-switch { cursor: pointer; }
   font: inherit; font-size: 13.5px; text-align: left; cursor: pointer; }
 .cast-add button:hover { background: var(--hover); }
 .cast-add .i { width: 16px; height: 16px; color: var(--muted); }
+.cast-invite { position: fixed; z-index: 40; display: flex; flex-direction: column; gap: 4px; width: min(280px, calc(100vw - 24px)); max-height: min(60dvh, 440px); padding: 6px;
+  border: 1px solid var(--line); border-radius: 14px; background: var(--raised); box-shadow: var(--shadow); }
+.invite-head { padding: 6px 8px 2px; color: var(--faint); font-size: 11.5px; font-weight: 600; letter-spacing: 0.06em; text-transform: uppercase; }
+.invite-find { margin: 2px 2px 4px; padding: 7px 10px; border: 1px solid var(--line); border-radius: 9px; background: var(--bg); color: var(--text); font: inherit; font-size: 13.5px; outline: none; }
+.invite-find:focus { border-color: var(--accent); }
+.invite-list { display: grid; gap: 1px; min-height: 0; overflow-y: auto; }
+.invite-row, .invite-card { display: flex; align-items: center; gap: 10px; padding: 6px 8px; border: 0; border-radius: 9px; background: none; color: var(--text); font: inherit; font-size: 13.5px;
+  text-align: left; cursor: pointer; }
+.invite-row:hover:not(:disabled), .invite-card:hover { background: var(--hover); }
+.invite-row:disabled { cursor: default; }
+.invite-row .face { width: 30px; height: 30px; font-size: 12px; }
+.invite-row[aria-pressed="false"] .face { opacity: 0.6; }
+.invite-row[aria-pressed="true"] .face { box-shadow: 0 0 0 2px var(--raised), 0 0 0 3.5px var(--accent); }
+.invite-name { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.invite-row > .i { width: 16px; height: 16px; color: var(--accent); }
+.invite-none { margin: 0; padding: 10px 8px; color: var(--muted); font-size: 13px; }
+.invite-card { margin-top: 2px; padding: 9px 8px; border-top: 1px solid var(--line); border-radius: 0 0 9px 9px; color: var(--muted); }
+.invite-card .i { width: 16px; height: 16px; }
 .cast-sheet { position: fixed; z-index: 40; display: flex; flex-direction: column; width: min(320px, calc(100vw - 24px)); max-height: calc(100dvh - 72px);
   overflow: hidden; border: 1px solid var(--line); border-radius: 20px; background: var(--raised); box-shadow: 0 24px 60px -18px rgb(0 0 0 / 0.55), var(--shadow); }
 .card-scroll { min-height: 0; overflow-y: auto; overscroll-behavior: contain; scrollbar-width: thin; }
@@ -1044,6 +1062,7 @@ p.line > .who .face { position: absolute; left: -72px; top: 1px; width: 44px; he
 .cast-next .talk:hover { color: var(--text); }
 .cast-next .talk.on { border-color: var(--accent); background: var(--accent-soft); color: var(--text); }
 .cast-next .talk .i { width: 12px; height: 12px; }
+.card-member:disabled { cursor: default; }
 @container chat (min-width: 860px) {
   .bubble, .msg.assistant > .markdown, .msg.assistant .round > .markdown { font-size: 16px; }
 }

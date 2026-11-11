@@ -13,7 +13,7 @@ import { type Block, type Span, type Version, ARTIFACTS_PROMPT, PAGE_DOC, elemen
   withContent, withCopy, withOrder, withPaint, withoutElement, lineDiff } from "./artifacts";
 import { LATEX_CSS, latexToHtml } from "./latex";
 import logo from "./logo.svg";
-import { type CardData, type Group, type Person, type Voice, cardPng, castPrompt, dropGroup, dropPerson, fill as fillCard, loadCast, readCast, saveGroup, savePerson, speakerOf,
+import { type CardData, type Person, type Voice, cardPng, castPrompt, dropPerson, fill as fillCard, loadCast, readCast, savePerson, speakerOf,
   voiceOf } from "./cast";
 import { Ocean } from "./ocean";
 
@@ -50,7 +50,7 @@ interface Message {
 }
 interface Conversation { id: string; title: string; named?: boolean; updated: number; effort: Effort; messages: Message[]; tools?: ToolChoice["tools"];
   pending?: Record<string, { kind: string; srcs: string[] }>;
-  who?: string }
+  who?: string; cast?: string[]; missing?: string[]; scenario?: string; castName?: string }
 type Sampler = Partial<Record<SamplerKey, number>> & { order?: Stage[] };
 type Mode = "think" | "fast";
 interface Settings {
@@ -245,7 +245,7 @@ function h<K extends keyof HTMLElementTagNameMap>(tag: K, cls = "", text = ""): 
   return e;
 }
 
-const people = new Map<string, Person>(), groups = new Map<string, Group>(), faces = new Map<string, string>();
+const people = new Map<string, Person>(), faces = new Map<string, string>();
 const ME = "me", CHRYSALIS = "chrysalis";
 people.set(CHRYSALIS, { id: CHRYSALIS, kind: "assistant", card: { spec: "chara_card_v2", spec_version: "2.0", data: { name: "Chrysalis" } }, added: 0 });
 people.set(ME, { id: ME, kind: "persona", card: { spec: "chara_card_v2", spec_version: "2.0", data: { name: "User", description: "" } }, added: 0 });
@@ -254,19 +254,24 @@ let talking = 0;
 const persona = () => people.get(ME)!;
 const userName = () => nameOf(ME);
 const userCard = () => ({ ...persona().card.data, name: userName() });
-const folderOf = (c: Conversation) => (c.who && c.who !== CHRYSALIS && (people.has(c.who) || groups.has(c.who)) ? c.who : "");
+const CAST = "cast:";
+const castKey = (cast: string[], missing: string[] = []) => CAST + [...cast].sort().join("+") + (missing.length ? `|${[...missing].sort().join("|")}` : "");
+const folderOf = (c: Conversation) => (c.who && c.who !== CHRYSALIS && (c.cast || people.has(c.who)) ? c.who : "");
 const whoOf = (c: Conversation) => (c.who && c.who !== CHRYSALIS ? c.who : CHRYSALIS);
-function castOf(c: Conversation): { members: Person[]; group?: Group } {
-  const id = folderOf(c), g = id ? groups.get(id) : undefined;
+function castOf(c: Conversation): { members: Person[]; group?: Conversation } {
+  const id = folderOf(c);
   if (!id) return { members: [] };
-  return g ? { members: g.members.map((m) => people.get(m)).filter((p): p is Person => !!p), group: g } : { members: [people.get(id)!] };
+  return c.cast ? { members: c.cast.map((m) => people.get(m)).filter((p): p is Person => !!p), group: c } : { members: [people.get(id)!] };
+}
+const sceneOf = (key: string) => (conv.who === key ? conv : chatsOf(key)[0]);
+function eachScene(fn: (c: Conversation) => void) {
+  for (const c of new Set([...Object.values(chats), ...[...runs.values()].map((r) => r.conv), conv])) if (c.cast) fn(c);
 }
 const chatsOf = (id: string) => Object.values(chats).filter((s) => whoOf(s) === id).sort((a, b) => b.updated - a.updated);
 const hue = (s: string) => [...s].reduce((a, ch) => (a * 31 + ch.charCodeAt(0)) % 360, 7);
 function face(id: string): HTMLElement {
-  const g = groups.get(id);
-  if (g) {
-    const ms = inGroup(g).slice(0, 4), s = h("span", `face mosaic m${Math.max(ms.length, 1)}`);
+  if (id.startsWith(CAST)) {
+    const g = sceneOf(id), ms = (g ? inScene(g) : []).slice(0, 4), s = h("span", `face mosaic m${Math.max(ms.length, 1)}`);
     s.append(...(ms.length ? ms : [initials("?")]));
     return s;
   }
@@ -298,15 +303,21 @@ function initials(name: string) {
   s.style.setProperty("--hue", String(hue(name)));
   return s;
 }
-const inGroup = (g: Group) => [...g.members.map((m) => face(m)), ...(g.missing ?? []).map((n) => { const f = initials(n); f.title = `${n}: no card yet`; return f; })];
+const inScene = (c: Conversation) => [...castOf(c).members.map((m) => face(m.id)), ...(c.missing ?? []).map((n) => { const f = initials(n); f.title = `${n}: no card yet`; return f; })];
 function setFace(p: Person) {
   const was = faces.get(p.id);
   if (was) URL.revokeObjectURL(was);
   if (p.image) faces.set(p.id, URL.createObjectURL(p.image));
   else faces.delete(p.id);
 }
-const nameOf = (id: string) => groups.get(id)?.name ?? (people.get(id)?.card.data.name.trim() || (id === CHRYSALIS ? "Chrysalis" : id === ME ? "User" : ""));
-const names = (ids: string[]) => { const n = ids.map(nameOf); return n.length < 2 ? n.join("") : `${n.slice(0, -1).join(", ")} and ${n.at(-1)}`; };
+const andList = (n: string[]) => (n.length < 2 ? n.join("") : `${n.slice(0, -1).join(", ")} and ${n.at(-1)}`);
+const names = (ids: string[]) => andList(ids.map(nameOf));
+const castNames = (c: Conversation) => andList([...castOf(c).members.map((m) => nameOf(m.id)), ...(c.missing ?? [])]);
+function nameOf(id: string): string {
+  if (!id.startsWith(CAST)) return people.get(id)?.card.data.name.trim() || (id === CHRYSALIS ? "Chrysalis" : id === ME ? "User" : "");
+  const g = sceneOf(id);
+  return g ? g.castName ?? castNames(g) : "";
+}
 
 function renderCast() {
   $("you").replaceChildren(face(ME), h("span", "you-name", nameOf(ME)));
@@ -321,7 +332,7 @@ function unfold(id: string, open = true) {
   setPref("unfolded", JSON.stringify([...unfolded]));
 }
 function castRow(id: string, list: Conversation[], open: boolean): HTMLElement {
-  const g = groups.get(id), name = nameOf(id);
+  const g = id.startsWith(CAST), name = nameOf(id);
   const row = h("div", "cast-row");
   const pic = h("button", "cast-pic"), main = h("button", "cast-main"), add = h("button", "act cast-new");
   pic.type = main.type = add.type = "button";
@@ -337,6 +348,8 @@ function castRow(id: string, list: Conversation[], open: boolean): HTMLElement {
     else if (!open) main.append(h("span", "cast-count", String(list.length)));
   }
   main.onclick = () => {
+    const idle = g ? chatsOf(id).find((x) => !x.messages.length) : undefined;
+    if (!list.length && idle) return void (location.hash = idle.id);
     if (!list.length) return newChat(id);
     unfold(id, !open);
     renderList();
@@ -345,6 +358,15 @@ function castRow(id: string, list: Conversation[], open: boolean): HTMLElement {
   add.innerHTML = icon("plus");
   add.onclick = () => newChat(id);
   row.append(pic, main, add);
+  if (g || people.get(id)?.kind === "character") {
+    const bring = h("button", "act cast-bring"), here = folderOf(conv) === id;
+    bring.type = "button";
+    bring.title = bring.ariaLabel = here ? "Bring someone into this chat" : `A new chat with ${name} and others`;
+    bring.innerHTML = icon("personAdd");
+    bring.onclick = () => ($("cast-invite").hidden ? openInvite(bring, here ? null : id) : closeInvite());
+    row.classList.toggle("here", here);
+    row.append(bring);
+  }
   if (people.get(id)?.kind === "character") {
     row.draggable = true;
     row.ondragstart = (e) => { e.dataTransfer!.setData(CAST_DRAG, id); e.dataTransfer!.effectAllowed = "copy"; };
@@ -379,18 +401,56 @@ function castSystem(c: Conversation) {
   return castPrompt(base, members.map((p) => p.card.data), userCard(), group?.scenario);
 }
 
+function seat(c: Conversation, cast: string[], missing: string[] = c.missing ?? [], single = true) {
+  if (single && cast.length === 1 && !missing.length) {
+    c.who = cast[0];
+    delete c.cast;
+    delete c.missing;
+    delete c.castName;
+    delete c.scenario;
+  } else {
+    const key = castKey(cast, missing), there = key === c.who ? undefined : chatsOf(key).find((x) => x.id !== c.id);
+    if (there?.castName) c.castName = there.castName;
+    else if (there) delete c.castName;
+    c.cast = cast;
+    if (missing.length) c.missing = missing; else delete c.missing;
+    c.who = key;
+  }
+  unfold(c.who);
+  stow(c);
+}
+function stow(c: Conversation) {
+  if (c.messages.length || c.cast) return save(c);
+  delete chats[c.id];
+  keepChats();
+  renderList();
+}
+type Seat = Pick<Conversation, "who" | "cast" | "missing" | "castName" | "scenario">;
+const seatOf = (c: Conversation): Seat => ({ who: c.who, cast: c.cast, missing: c.missing, castName: c.castName, scenario: c.scenario });
+function reseat(c: Conversation, was: Seat) {
+  for (const k of ["who", "cast", "missing", "castName", "scenario"] as const) if (was[k] === undefined) delete c[k]; else (c[k] as Seat[typeof k]) = was[k];
+  stow(c);
+}
+
 async function adopt(f: File): Promise<string | null> {
   const got = await readCast(f).catch(() => null);
   if (!got) return null;
   if ("group" in got) {
     const ids = got.group.members.map((n) => [...people.values()].find((p) => p.kind === "character" && p.card.data.name === n)?.id);
-    const missing = got.group.members.filter((_, i) => !ids[i]);
-    const g: Group = { id: randomId(), name: got.group.name, members: ids.filter((x): x is string => !!x), ...(missing.length ? { missing } : {}),
-      scenario: got.group.scenario, added: Date.now() };
-    groups.set(g.id, g);
-    await saveGroup(g);
-    if (missing.length) toast(`${g.name}: no card yet for ${missing.join(", ")}`);
-    return g.id;
+    const c = blank();
+    c.cast = ids.filter((x): x is string => !!x);
+    c.missing = got.group.members.filter((_, i) => !ids[i]);
+    if (!c.missing.length) delete c.missing;
+    if (got.group.scenario) c.scenario = got.group.scenario;
+    c.who = castKey(c.cast, c.missing);
+    const there = chatsOf(c.who)[0];
+    if (there?.castName) c.castName = there.castName;
+    else if (!there && got.group.name !== castNames(c)) c.castName = got.group.name;
+    c.title = got.group.name;
+    chats[c.id] = c;
+    keepChats();
+    if (c.missing) toast(`${got.group.name}: no card yet for ${c.missing.join(", ")}`);
+    return c.who;
   }
   const d = got.card.data, had = [...people.values()].find((p) => p.kind === "character" && p.card.data.name === d.name
     && (p.card.data.description ?? "") === (d.description ?? ""));
@@ -399,16 +459,12 @@ async function adopt(f: File): Promise<string | null> {
   people.set(p.id, p);
   setFace(p);
   await savePerson(p);
-  for (const g of groups.values()) if (g.missing?.includes(d.name)) {
-    g.members = [...g.members, p.id];
-    g.missing = g.missing.filter((n) => n !== d.name);
-    if (!g.missing.length) delete g.missing;
-    await saveGroup(g);
-  }
+  eachScene((c) => { if (c.missing?.includes(d.name)) seat(c, [...c.cast!, p.id], c.missing.filter((n) => n !== d.name), false); });
   return p.id;
 }
+const castKeys = () => { const keys = new Set<string>(); eachScene((c) => keys.add(c.who!)); return keys; };
 async function welcome(files: Iterable<File>, into: boolean): Promise<File[]> {
-  const had = new Set([...people.keys(), ...groups.keys()]), ids: string[] = [], rest: File[] = [];
+  const had = new Set([...people.keys(), ...castKeys()]), ids: string[] = [], rest: File[] = [];
   for (const f of files) {
     const id = await adopt(f);
     if (id) ids.push(id); else rest.push(f);
@@ -425,44 +481,35 @@ async function welcome(files: Iterable<File>, into: boolean): Promise<File[]> {
 function join(ids: string[]) {
   const c = conv, { members, group } = castOf(c), fresh = [...new Set(ids)].filter((id) => !members.some((m) => m.id === id));
   if (!fresh.length) return toast(`${names(ids)} ${ids.length > 1 ? "are" : "is"} in this chat already`);
-  if (group) {
-    const before = { members: group.members, name: group.name };
-    group.members = [...before.members, ...fresh];
-    if (before.name === names(before.members)) group.name = names(group.members);
-    void saveGroup(group);
-    toast(`${names(fresh)} joined ${before.name}`, () => { Object.assign(group, before); void saveGroup(group); renderCast(); render(); });
-  } else {
-    const one = members[0].id, g: Group = { id: randomId(), name: names([one, ...fresh]), members: [one, ...fresh], added: Date.now() };
-    for (const m of c.messages) if (m.role === "assistant") m.as ??= one;
-    groups.set(g.id, g);
-    void saveGroup(g);
-    c.who = g.id;
-    save(c);
-    toast(`${names(fresh)} joined: a group now`, () => {
-      c.who = one;
-      save(c);
-      groups.delete(g.id);
-      void dropGroup(g.id);
-      renderCast();
-      render();
-    });
-  }
+  const was = seatOf(c), name = nameOf(c.who!);
+  if (!group) for (const m of c.messages) if (m.role === "assistant") m.as ??= was.who;
+  seat(c, [...members.map((m) => m.id), ...fresh]);
+  toast(group ? `${names(fresh)} joined ${name}` : `${names(fresh)} joined: a group now`, () => { reseat(c, was); renderCast(); render(); });
+  renderCast();
+  render();
+}
+function leave(id: string) {
+  const c = conv, was = seatOf(c), name = nameOf(id);
+  seat(c, c.cast!.filter((m) => m !== id));
+  toast(`${name} left`, () => { reseat(c, was); renderCast(); render(); });
   renderCast();
   render();
 }
 async function forget(id: string) {
-  const p = people.get(id), g = groups.get(id), name = nameOf(id), gone = Object.values(chats).filter((c) => c.who === id);
-  const was = [...groups.values()].filter((x) => x.members.includes(id)).map((x) => ({ x, members: x.members }));
-  if (g) { groups.delete(id); await dropGroup(id); }
+  const p = people.get(id), name = nameOf(id), seats: { c: Conversation; was: Seat }[] = [], empty = new Set<string>();
+  eachScene((c) => { if (c.cast!.includes(id)) seats.push({ c, was: seatOf(c) }); });
   if (p) { people.delete(id); await dropPerson(id); }
-  for (const { x } of was) { x.members = x.members.filter((m) => m !== id); await saveGroup(x); }
+  for (const { c } of seats) {
+    if (c.cast!.length === 1 && !c.missing?.length) empty.add(c.id);
+    else seat(c, c.cast!.filter((m) => m !== id));
+  }
+  const gone = Object.values(chats).filter((c) => c.who === id || empty.has(c.id));
   dropChats(gone.map((c) => c.id));
   renderCast();
   return { name, chats: gone.length, undo: async () => {
     if (p) { people.set(id, p); setFace(p); await savePerson(p); }
-    if (g) { groups.set(id, g); await saveGroup(g); }
-    for (const { x, members } of was) { x.members = members; await saveGroup(x); }
     for (const c of gone) chats[c.id] = c;
+    for (const { c, was } of seats) if (!empty.has(c.id)) reseat(c, was);
     keepChats();
     renderCast();
     render();
@@ -478,7 +525,7 @@ function dropChats(ids: string[]) {
   if (ids.includes(conv.id) || (conv.who && !folderOf(conv))) newChat();
   else render();
 }
-const castless = (c: Conversation) => !!c.who && c.who !== CHRYSALIS && !people.has(c.who) && !groups.has(c.who);
+const castless = (c: Conversation) => (c.cast ? !c.cast.some((m) => people.has(m)) && !c.missing?.length : !!c.who && c.who !== CHRYSALIS && !people.has(c.who));
 
 function openAdd(at: HTMLElement) {
   const menu = $("cast-add"), r = at.getBoundingClientRect();
@@ -487,35 +534,93 @@ function openAdd(at: HTMLElement) {
   menu.style.top = `${r.bottom + 6}px`;
 }
 for (const [add, svg] of [["card", icon("personAdd")], ["group", icon("agent")]]) $("cast-add").querySelector(`[data-add="${add}"]`)!.insertAdjacentHTML("afterbegin", svg);
+let fileInto = false, inviteFrom: string | null = null;
+function openInvite(at: HTMLElement, from: string | null) {
+  const box = $("cast-invite"), find = h("input", "invite-find"), list = h("div", "invite-list"), card = h("button", "invite-card");
+  inviteFrom = from;
+  find.type = "search";
+  find.placeholder = "Find a character";
+  find.ariaLabel = "Find a character";
+  find.spellcheck = false;
+  find.oninput = () => paintInvite();
+  find.onkeydown = (e) => { if (e.key === "Enter") list.querySelector<HTMLElement>(".invite-row:not(:disabled)")?.click(); };
+  card.type = "button";
+  card.innerHTML = `${icon("personAdd")}A character from a card…`;
+  card.onclick = () => {
+    if (inviteFrom) { newChat(inviteFrom); inviteFrom = null; }
+    fileInto = inviteFrom === null;
+    $("cast-file").click();
+  };
+  box.replaceChildren(h("div", "invite-head"), find, list, card);
+  box.hidden = false;
+  paintInvite();
+  const r = at.getBoundingClientRect(), up = r.top > innerHeight / 2;
+  box.style.left = `${Math.max(12, Math.min(r.left, innerWidth - box.offsetWidth - 12))}px`;
+  box.style.top = up ? "" : `${r.bottom + 6}px`;
+  box.style.bottom = up ? `${innerHeight - r.top + 6}px` : "";
+  if (matchMedia("(hover: hover)").matches) find.focus();
+}
+function paintInvite() {
+  const box = $("cast-invite"), list = box.querySelector<HTMLElement>(".invite-list"), find = box.querySelector<HTMLInputElement>(".invite-find");
+  if (box.hidden || !list || !find) return;
+  const all = [...people.values()].filter((p) => p.kind === "character").sort((a, b) => a.card.data.name.localeCompare(b.card.data.name));
+  const from = inviteFrom, base = from === null ? conv : from ? people.has(from) ? undefined : sceneOf(from) : undefined;
+  const q = find.value.trim().toLowerCase(), members = base ? castOf(base).members : from ? [people.get(from)!] : [], group = from === null && !!conv.cast;
+  box.querySelector(".invite-head")!.textContent = from === null ? "Bring into this chat" : from ? `A new chat with ${nameOf(from)} and` : "Who is in the chat";
+  const shown = all.filter((p) => p.card.data.name.toLowerCase().includes(q));
+  find.hidden = all.length < 7;
+  list.replaceChildren(...shown.map((p) => {
+    const inside = members.some((m) => m.id === p.id), b = h("button", "invite-row"), name = p.card.data.name;
+    b.type = "button";
+    b.setAttribute("aria-pressed", String(inside));
+    b.disabled = inside && !group;
+    b.title = inside ? (group ? `${name}: in this chat (click to take out)` : `${name}: this chat is theirs`) : `Bring ${name} in`;
+    b.append(face(p.id), h("span", "invite-name", name));
+    if (inside) b.insertAdjacentHTML("beforeend", icon("check"));
+    b.onclick = () => {
+      inviteFrom = null;
+      if (from === "") newChat(p.id);
+      else if (inside) leave(p.id);
+      else {
+        if (from) newChat(from);
+        join([p.id]);
+      }
+      paintInvite();
+    };
+    return b;
+  }));
+  if (!shown.length) list.append(h("p", "invite-none", all.length ? "No one by that name" : "No characters yet: add one from a card"));
+}
+const closeInvite = () => { $("cast-invite").hidden = true; inviteFrom = null; };
 $("cast-add").addEventListener("click", async (e) => {
   const b = (e.target as HTMLElement).closest<HTMLElement>("[data-add]");
   if (!b) return;
   $("cast-add").hidden = true;
+  fileInto = false;
   if (b.dataset.add === "card") return $("cast-file").click();
-  const g: Group = { id: randomId(), name: "New group", members: [], added: Date.now() };
-  groups.set(g.id, g);
-  await saveGroup(g);
-  pickFolder(g.id);
-  renderCast();
-  openSheet(g.id);
+  openInvite($("add-cast"), "");
 });
 $("cast-file").addEventListener("change", async (e) => {
   const input = e.currentTarget as HTMLInputElement;
-  for (const f of await welcome(input.files ?? [], false)) toast(`${f.name} holds no character card`);
+  for (const f of await welcome(input.files ?? [], fileInto)) toast(`${f.name} holds no character card`);
   input.value = "";
 });
 
 let sheetOf = "", sampler: Speaker | undefined, sheetFile: { id: string; url: string } | undefined;
 function openSheet(id: string) {
-  const sheet = $("cast-sheet"), g = groups.get(id);
-  const person = people.get(id);
+  const sheet = $("cast-sheet"), person = people.get(id), last = person ? undefined : chatsOf(id)[0];
+  if (!person && conv.who !== id && last) {
+    history.replaceState(null, "", `#${last.id}`);
+    openConversation(last.id);
+  }
+  const g = !person && conv.cast && conv.who === id ? conv : undefined;
   if (!person && !g) return;
   const again = sheetOf === id, top = sheet.querySelector(".card-scroll")?.scrollTop ?? 0;
   sheetOf = id;
   let saving = 0;
   const keep = () => {
     clearTimeout(saving);
-    saving = window.setTimeout(() => { void (person ? savePerson(person) : saveGroup(g!)); if (person) void cardFile(person); }, 300);
+    saving = window.setTimeout(() => { if (person) { void savePerson(person); void cardFile(person); } else stow(g!); }, 300);
   };
   const btn = (cls: string, title: string, html: string, onclick: () => void) => {
     const b = h("button", cls);
@@ -568,7 +673,7 @@ function openSheet(id: string) {
   const art = h("div", "card-art"), title = h("div", "card-title"), body = h("div", "card-body"), scroll = h("div", "card-scroll");
   if (g) {
     const strips = h("div", "strips");
-    const all = inGroup(g).slice(0, 5);
+    const all = inScene(g).slice(0, 5);
     strips.append(...(all.length ? all : [face(id)]));
     art.append(strips);
   } else if (person!.kind === "assistant" && !person!.image && seaPortrait()) {
@@ -591,12 +696,13 @@ function openSheet(id: string) {
   art.append(h("div", "card-scrim"), title);
   if (person) art.append(btn("card-float card-pic", person.image ? "Another picture" : "A picture", icon("edit"), () => picture(person)));
   const name = h("input", "card-name");
-  name.value = person ? person.card.data.name : g!.name;
-  name.placeholder = id === ME ? "User" : id === CHRYSALIS ? "Chrysalis" : g ? "The group's name" : "Their name";
+  name.value = person ? person.card.data.name : g!.castName ?? castNames(g!);
+  name.placeholder = id === ME ? "User" : id === CHRYSALIS ? "Chrysalis" : g ? castNames(g) : "Their name";
   name.ariaLabel = "Name";
   name.spellcheck = false;
   name.oninput = () => {
-    if (person) person.card.data.name = name.value; else g!.name = name.value;
+    if (person) person.card.data.name = name.value;
+    else eachScene((c) => { if (c.who !== id) return; if (name.value.trim()) c.castName = name.value; else delete c.castName; if (c !== g) stow(c); });
     const file = art.querySelector<HTMLAnchorElement>("a.card-file");
     if (file) file.download = file.title = cardName(id);
     keep();
@@ -628,31 +734,35 @@ function openSheet(id: string) {
   } else {
     const members = h("div", "card-members");
     members.append(...[...people.values()].filter((x) => x.kind === "character").map((x) => {
-      const inside = g!.members.includes(x.id), b = h("button", `card-member ${inside ? "in" : "out"}`);
+      const inside = g!.cast!.includes(x.id), only = inside && g!.cast!.length === 1 && !g!.missing?.length;
+      const b = h("button", `card-member ${inside ? "in" : "out"}`);
       b.type = "button";
-      b.title = `${x.card.data.name}: ${inside ? "in the group (click to take out)" : "click to add"}`;
+      b.disabled = only;
+      b.title = `${x.card.data.name}: ${only ? "the last one in this chat" : inside ? "in this chat (click to take out)" : "click to bring in"}`;
       b.append(face(x.id));
       b.onclick = () => {
-        g!.members = inside ? g!.members.filter((m) => m !== x.id) : [...g!.members, x.id];
-        keep();
+        clearTimeout(saving);
+        seat(g!, inside ? g!.cast!.filter((m) => m !== x.id) : [...g!.cast!, x.id]);
         renderCast();
         render();
-        openSheet(id);
+        if (!g!.cast) return closeSheet();
+        sheetOf = g!.who!;
+        openSheet(sheetOf);
       };
       return b;
     }), ...(g!.missing ?? []).map((n) => {
       const m = h("span", "card-member waiting");
-      m.title = `${n}: no card yet (theirs joins the group once it is added)`;
+      m.title = `${n}: no card yet (theirs joins this chat once it is added)`;
       m.append(initials(n));
       return m;
     }));
     const who = h("div", "card-section"), where = h("label", "card-field"), acts = h("div", "card-acts");
-    who.append(h("span", "card-label", "Who is in it"), members);
+    who.append(h("span", "card-label", "In this chat"), members);
     where.append(h("span", "card-label", "Scenario"), text(g!.scenario ?? "", (v) => { g!.scenario = v || undefined; }, "card-text",
       "Where they are and what is going on (in place of their own)"));
-    acts.append(btn("", "The group as a file (with its members' cards beside it, it imports anywhere this chat runs)", `${icon("download")}Export`,
-      () => download(`${g!.name || "group"}.json`, JSON.stringify({ spec: "chrysalis_group", name: g!.name,
-        members: [...g!.members.map((m) => people.get(m)?.card.data.name).filter(Boolean), ...(g!.missing ?? [])], ...(g!.scenario ? { scenario: g!.scenario } : {}) }, null, 2), "application/json")),
+    acts.append(btn("", "Who is in this chat as a file (with their cards beside it, it imports anywhere this chat runs)", `${icon("download")}Export`,
+      () => download(`${nameOf(id) || "group"}.json`, JSON.stringify({ spec: "chrysalis_group", name: nameOf(id),
+        members: [...castOf(g!).members.map((m) => m.card.data.name), ...(g!.missing ?? [])], ...(g!.scenario ? { scenario: g!.scenario } : {}) }, null, 2), "application/json")),
       del());
     body.append(who, where, acts);
   }
@@ -727,11 +837,13 @@ function voicePick(p: Person, keep: () => void) {
 document.addEventListener("pointerdown", (e) => {
   const t = e.target as HTMLElement;
   if (!$("cast-add").hidden && !t.closest("#cast-add, #add-cast")) $("cast-add").hidden = true;
+  if (!$("cast-invite").hidden && !t.closest("#cast-invite, .cast-bring, #cast-add, #toast")) closeInvite();
   if (!$("cast-sheet").hidden && !t.closest("#cast-sheet, [data-card], #voice-menu")) closeSheet();
 });
 document.addEventListener("keydown", (e) => {
   if (e.key !== "Escape" || voiceMenu.matches(":popover-open")) return;
   if (!$("cast-add").hidden) { $("cast-add").hidden = true; e.preventDefault(); }
+  else if (!$("cast-invite").hidden) { closeInvite(); e.preventDefault(); }
   else if (!$("cast-sheet").hidden) { closeSheet(); e.preventDefault(); }
 }, true);
 document.addEventListener("click", (e) => {
@@ -786,9 +898,10 @@ function head(id: string) {
 
 function renderCastNext() {
   const box = $("cast-next"), { members, group } = castOf(conv);
-  input.placeholder = members.length ? `Message ${group ? group.name : members[0].card.data.name}` : "Message Chrysalis";
+  input.placeholder = members.length ? `Message ${nameOf(conv.who!)}` : "Message Chrysalis";
   box.hidden = !group || !members.length;
-  if (box.hidden) return;
+  paintInvite();
+  if (box.hidden) return box.replaceChildren();
   const talk = h("button", `talk${talking ? " on" : ""}`);
   talk.type = "button";
   talk.title = talking ? "Stop them" : "They go on by themselves for a few turns (typing stops them)";
@@ -3178,7 +3291,8 @@ const customized = () => settings.system !== DEFAULT_SYSTEM
   || Object.keys(settings.voice ?? {}).length > 0;
 
 function renderList() {
-  const folders = [...[...people.values()].filter((p) => p.kind !== "persona"), ...groups.values()].map((x) => ({ id: x.id, list: chatsOf(x.id), at: x.added }));
+  const folders = [...[...people.values()].filter((p) => p.kind !== "persona").map((x) => ({ id: x.id, at: x.added })), ...[...castKeys()].map((id) => ({ id, at: conv.updated }))]
+    .map((x) => ({ ...x, list: chatsOf(x.id).filter((c) => c.messages.length) }));
   $("conversations").replaceChildren(...folders.sort((a, b) => (b.list[0]?.updated ?? b.at) - (a.list[0]?.updated ?? a.at)).map(({ id, list }) => {
     const open = unfolded.has(id) && list.length > 0, box = h("div", `folder${open ? " open" : ""}`);
     box.append(castRow(id, list, open));
@@ -3327,7 +3441,7 @@ function lean(list: Message[]): Message[] {
     ...(m.versions ? { versions: { ...m.versions, others: m.versions.others.map(lean) } } : {}) }));
 }
 function save(c: Conversation) {
-  if (!c.messages.length) return;
+  if (!c.messages.length && !c.cast) return;
   chats[c.id] = structuredClone(c);
   keepChats();
   const at = location.hash.slice(1);
@@ -4616,9 +4730,12 @@ function openConversation(id: string, reveal = true) {
 function newChat(who = "") {
   closeVoice();
   stopReading();
+  const like = who.startsWith(CAST) ? sceneOf(who) : undefined;
   conv = blank();
   unfold(who || CHRYSALIS);
-  if (who && who !== CHRYSALIS) conv.who = who;
+  if (like) Object.assign(conv, structuredClone({ who, cast: like.cast, ...(like.missing ? { missing: like.missing } : {}), ...(like.scenario ? { scenario: like.scenario } : {}),
+    ...(like.castName ? { castName: like.castName } : {}) }));
+  else if (who && who !== CHRYSALIS && !who.startsWith(CAST)) conv.who = who;
   greet(conv);
   const mine = persona().card.data.first_mes?.trim();
   if (mine && !input.value.trim()) {
@@ -6131,7 +6248,18 @@ for (const c of Object.values(chats)) {
     people.set(p.id, p);
     setFace(p);
   }
-  for (const g of got?.groups ?? []) groups.set(g.id, g);
+  for (const g of got?.groups ?? []) for (const c of Object.values(chats)) if (c.who === g.id) {
+    c.cast = g.members;
+    if (g.missing?.length) c.missing = g.missing;
+    if (g.scenario) c.scenario = g.scenario;
+    c.who = castKey(c.cast, c.missing);
+    if (g.name !== castNames(c)) c.castName = g.name;
+  }
+  if (got) for (const c of Object.values(chats)) if (c.cast?.some((m) => !people.has(m))) {
+    c.cast = c.cast.filter((m) => people.has(m));
+    c.who = castKey(c.cast, c.missing);
+  }
+  if (got) keepChats();
   const orphans = got ? Object.values(chats).filter(castless).map((c) => c.id) : [];
   if (orphans.length) dropChats(orphans);
   renderCast();

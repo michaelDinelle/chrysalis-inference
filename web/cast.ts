@@ -151,6 +151,4 @@ export async function loadCast(): Promise<{ people: Person[]; groups: Group[] } 
 }
 export const savePerson = async (x: Person) => { const s = await store("people", "readwrite"); if (s) await ask(s.put(x)); };
 export const dropPerson = async (id: string) => { const s = await store("people", "readwrite"); if (s) await ask(s.delete(id)); };
-export const saveGroup = async (x: Group) => { const s = await store("groups", "readwrite"); if (s) await ask(s.put(x)); };
-export const dropGroup = async (id: string) => { const s = await store("groups", "readwrite"); if (s) await ask(s.delete(id)); };
 export const voiceOf = (c: CardData): Voice | undefined => (c.extensions?.chrysalis as { voice?: Voice } | undefined)?.voice;

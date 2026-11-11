@@ -81,7 +81,7 @@
           <div class="side-body">
             <div class="side-top">
               <button id="new-chat" class="btn" type="button"></button>
-              <button id="add-cast" class="btn" type="button" title="A character from a card, or a group" aria-label="Add a character or a group"></button>
+              <button id="add-cast" class="btn" type="button" title="A character from a card, or a chat with several" aria-label="Add a character or start a chat with several"></button>
             </div>
             <nav id="conversations" aria-label="Conversations"></nav>
             <div class="side-foot">
@@ -98,8 +98,9 @@
       <div id="cast-sheet" class="cast-sheet" role="dialog" aria-label="Character" hidden></div>
       <div id="cast-add" class="cast-add" role="menu" hidden>
         <button type="button" data-add="card" role="menuitem">A character from a card…</button>
-        <button type="button" data-add="group" role="menuitem">A group of characters</button>
+        <button type="button" data-add="group" role="menuitem">A chat with several…</button>
       </div>
+      <div id="cast-invite" class="cast-invite" role="dialog" aria-label="Who is in this chat" hidden></div>
       <input id="cast-file" type="file" accept=".png,.json,image/png,application/json" multiple hidden />
       <main>
         <header class="topbar">
