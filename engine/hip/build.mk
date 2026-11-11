@@ -11,6 +11,9 @@ OBJ := $(SRC:%=build/o27/%.o)
 build/o27/%.o: % $(wildcard engine/*.h $(H)/*.h $(H)/27b/*.h)
 	@mkdir -p $(@D)
 	$(HIPCC) $(FLAGS) -I$(H)/27b -x hip -c -o $@ $<
+build/o27/%.cpp.o: %.cpp $(wildcard engine/*.h $(H)/*.h $(H)/27b/*.h)
+	@mkdir -p $(@D)
+	$(HIPCC) $(FLAGS:-O3=-Os) -I$(H)/27b -x hip -c -o $@ $<
 
 build/libchrysalis.so: $(OBJ)
 	$(HIPCC) $(FLAGS) -shared -s -o $@ $(OBJ) $(LIBS)
