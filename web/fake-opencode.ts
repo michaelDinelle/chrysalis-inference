@@ -1,18 +1,20 @@
-interface Session { id: string; title: string; dir: string; created: number; updated: number; model?: object; messages: any[]; persona?: string }
+interface Session { id: string; title: string; dir: string; created: number; updated: number; idle?: number; archived?: number; fork?: object; metadata?: object; model?: object; messages: any[]; persona?: string; parentID?: string; agent?: string }
 
 export function fakeOpenCode(secret: string) {
-  const sessions = new Map<string, Session>(), listeners = new Set<(line: string) => void>(), asks = new Map<string, (reply: string) => void>();
-  const stops = new Map<string, { now: boolean }>();
-  const log: { prompts: { session: string; text: string; persona?: string; model?: object }[]; replies: string[]; interrupts: number } = { prompts: [], replies: [], interrupts: 0 };
+  const sessions = new Map<string, Session>(), listeners = new Set<(line: string) => void>(), asks = new Map<string, (reply: string, at: string) => void>();
+  const stops = new Map<string, { now: boolean }>(), staged = new Map<string, string>();
+  const log: { prompts: { session: string; text: string; persona?: string; model?: object; agent?: string; command?: string; meta?: any; files?: { uri: string; name?: string }[] }[]; replies: string[]; interrupts: number; answers: (object | string)[]; routines: string[] } =
+    { prompts: [], replies: [], interrupts: 0, answers: [], routines: [] };
+  const forms = new Map<string, (answer: object | undefined) => void>(), routines = new Map<string, { id: string; sessionID: string; name: string; status: string }>();
   let ids = 0;
   const emit = (type: string, data: object) => { for (const fn of listeners) fn(`data: ${JSON.stringify({ id: `evt_${++ids}`, type, data })}\n\n`); };
   const json = (data: unknown, status = 200) => Response.json(data, { status });
-  const info = (s: Session) => ({ id: s.id, title: s.title, time: { created: s.created, updated: s.updated }, location: { directory: s.dir }, ...(s.model ? { model: s.model } : {}) });
+  const info = (s: Session) => ({ id: s.id, title: s.title, time: { created: s.created, updated: s.updated, idle: s.idle, ...(s.archived ? { archived: s.archived } : {}) }, ...(s.fork ? { fork: s.fork } : {}), ...(s.metadata ? { metadata: s.metadata } : {}), location: { directory: s.dir }, ...(s.model ? { model: s.model } : {}), ...(s.parentID ? { parentID: s.parentID } : {}) });
 
-  async function run(s: Session, text: string) {
-    const sessionID = s.id, stopped = { now: false }, lead = s.persona ? `${/You are (\w+)/.exec(s.persona)?.[1] ?? "Someone"} here. ` : "";
+  async function run(s: Session, text: string, more: object = {}) {
+    const sessionID = s.id, stopped = { now: false }, who = /Write (\w+)'s next reply/.exec(s.persona ?? "")?.[1] ?? /\[(\w+) next\.\]$/.exec(text)?.[1], lead = who ? `${who} here. ` : "";
     stops.set(s.id, stopped);
-    s.messages.push({ id: `msg_${++ids}`, type: "user", text, time: { created: Date.now() } });
+    s.messages.push({ id: `msg_${++ids}`, type: "user", text, time: { created: Date.now() }, ...more });
     emit("session.execution.started", { sessionID });
     const one = `msg_${++ids}`, call = `call_${++ids}`, input = { path: "note.txt" }, out = "hello\nhoney\n";
     emit("session.step.started", { sessionID, assistantMessageID: one });
@@ -28,7 +30,58 @@ export function fakeOpenCode(secret: string) {
       log.replies.push(reply);
       allowed = reply !== "reject";
     }
-    if (text.includes("slowly")) for (let k = 0; k < 40 && !stopped.now; k++) await Bun.sleep(50);
+    if (text.includes("a helper")) {
+      const child: Session = { id: `ses_${++ids}`, title: "Count the jars", dir: s.dir, created: Date.now(), updated: Date.now(), messages: [], parentID: s.id }, sub = `call_${++ids}`, read = `call_${++ids}`;
+      const later = text.includes("in the background"), mine = { sessionID: child.id, assistantMessageID: `msg_${++ids}` };
+      sessions.set(child.id, child);
+      emit("session.tool.input.started", { sessionID, assistantMessageID: one, id: sub, name: "subagent" });
+      emit("session.tool.called", { sessionID, assistantMessageID: one, id: sub, input: { agent: "explore", description: "Count the jars" } });
+      emit("session.created", { sessionID: child.id, parentID: s.id });
+      emit("session.tool.progress", { sessionID, assistantMessageID: one, id: sub, metadata: { sessionID: child.id, status: "running" } });
+      emit("session.execution.started", { sessionID: child.id });
+      const work = async () => {
+        emit("session.tool.input.started", { ...mine, id: read, name: "shell" });
+        emit("session.tool.called", { ...mine, id: read, input: { command: "ls jars" } });
+        const request = `per_${++ids}`;
+        emit("permission.asked", { id: request, sessionID: child.id, action: "shell", resources: ["ls jars"], save: ["*"], source: { type: "tool", id: read } });
+        log.replies.push(await new Promise<string>((done) => asks.set(request, (reply, at) => done(`${at === child.id ? "to the helper" : "to the wrong session"}: ${reply}`))));
+        emit("session.tool.success", { ...mine, id: read, content: [{ type: "text", text: "12 jars" }] });
+        emit("session.execution.succeeded", { sessionID: child.id });
+      };
+      if (later) {
+        emit("session.tool.success", { sessionID, assistantMessageID: one, id: sub, content: [{ type: "text", text: "The helper is working in the background." }] });
+        void Bun.sleep(300).then(work).then(() => Bun.sleep(300)).then(async () => {
+          emit("session.inbox.enqueued", { sessionID, inboxID: `msg_${++ids}`, item: { type: "user" } });
+          s.messages.push({ id: `msg_${++ids}`, type: "user", text: "<subagent>12 jars</subagent>", metadata: { source: "subagent", agent: "Explore" }, time: { created: Date.now() } });
+          emit("session.execution.started", { sessionID });
+          emit("session.inbox.delivered", { sessionID });
+          const three = `msg_${++ids}`, said = "The helper counted 12 jars.";
+          emit("session.step.started", { sessionID, assistantMessageID: three });
+          emit("session.text.delta", { sessionID, assistantMessageID: three, delta: said });
+          emit("session.step.ended", { sessionID, assistantMessageID: three, finish: "stop", tokens: { input: 10, output: 5, cache: { read: 0 } } });
+          s.messages.push({ id: three, type: "assistant", time: { created: Date.now() }, content: [{ type: "text", text: said }] }, { id: `msg_${++ids}`, type: "idle", outcome: "succeeded", time: { created: Date.now() } });
+          s.updated = s.idle = Date.now();
+          emit("session.execution.succeeded", { sessionID });
+        });
+      } else {
+        await work();
+        emit("session.tool.success", { sessionID, assistantMessageID: one, id: sub, content: [{ type: "text", text: "<subagent>12 jars</subagent>" }] });
+      }
+    }
+    let chosen = "";
+    if (text.includes("which one")) {
+      const form = `frm_${++ids}`;
+      emit("form.created", { form: { id: form, sessionID, title: "Questions", metadata: { kind: "question", tool: { messageID: one, id: call } },
+        fields: [{ key: "q0", title: "Which jar", description: "Which jar should I read?", type: "string", custom: true, options: [{ value: "Clover", label: "Clover" }, { value: "Heather", label: "Heather" }] }] } });
+      const answer = await new Promise<object | undefined>((done) => forms.set(form, done));
+      log.answers.push(answer ?? "skipped");
+      chosen = answer ? ` You chose ${(answer as { q0?: string }).q0}.` : " You did not choose.";
+    }
+    if (text.includes("every morning")) {
+      const id = `sch_${++ids}`;
+      routines.set(id, { id, sessionID, name: "morning bees", status: "active" });
+    }
+    if (text.includes("slowly")) for (let k = 0; k < (text.includes("very slowly") ? 160 : 40) && !stopped.now; k++) await Bun.sleep(50);
     const state = allowed ? { status: "completed", input, output: out } : { status: "error", input, error: "rejected" };
     if (allowed) emit("session.tool.success", { sessionID, assistantMessageID: one, id: call, content: [{ type: "text", text: out }] });
     else emit("session.tool.failed", { sessionID, assistantMessageID: one, id: call, error: { message: "rejected" } });
@@ -37,11 +90,11 @@ export function fakeOpenCode(secret: string) {
       content: [{ type: "reasoning", text: "Look at the file first." }, { type: "tool", id: call, name: "read", state }] });
     const end = (outcome: string) => {
       s.messages.push({ id: `msg_${++ids}`, type: "idle", outcome, time: { created: Date.now() } });
-      s.updated = Date.now();
+      s.updated = s.idle = Date.now();
       stops.delete(s.id);
     };
     if (stopped.now) { end("interrupted"); return emit("session.execution.interrupted", { sessionID, reason: "user" }); }
-    const two = `msg_${++ids}`, answer = `${lead}${allowed ? "The file says hello and honey." : "I did not read it."} You asked: ${text}`;
+    const two = `msg_${++ids}`, answer = `${lead}${allowed ? "The file says hello and honey." : "I did not read it."}${chosen} You asked: ${text}`;
     emit("session.step.started", { sessionID, assistantMessageID: two });
     for (let k = 0; k < answer.length; k += 12) emit("session.text.delta", { sessionID, assistantMessageID: two, delta: answer.slice(k, k + 12) });
     emit("session.step.ended", { sessionID, assistantMessageID: two, finish: "stop", tokens: { input: 40, output: 20, cache: { read: 100 } } });
@@ -59,8 +112,28 @@ export function fakeOpenCode(secret: string) {
     async fetch(req) {
       const url = new URL(req.url), path = url.pathname, method = req.method;
       if (req.headers.get("authorization") !== `Basic ${Buffer.from(`opencode:${secret}`).toString("base64")}`) return new Response("", { status: 401 });
-      if (path === "/api/info") return json({ version: "2.0.25" });
-      if (path === "/api/model") return json({ data: [{ id: "qwen3.8-27b", providerID: "chrysalis", name: "Qwen3.8 27B" }, { id: "cloud-1", providerID: "elsewhere", name: "Cloud One" }] });
+      if (path === "/api/info") return json({ version: "2.2.7" });
+      const routine = /^\/api\/experimental\/schedule(?:\/([^/]+))?(?:\/(pause|resume))?$/.exec(path);
+      if (routine) {
+        const [, id, act] = routine, r = id ? routines.get(id) : undefined;
+        if (!id && method === "POST") {
+          const made = await req.json(), fresh = { id: `sch_${++ids}`, sessionID: made.sessionID, name: made.name ?? "", status: "active" };
+          routines.set(fresh.id, fresh);
+          log.routines.push(`POST ${fresh.name} ${JSON.stringify(made.when)}`);
+          return json({ data: fresh });
+        }
+        if (!id) return json({ data: [...routines.values()].filter((x) => x.sessionID === url.searchParams.get("sessionID")).map((x) => ({ ...x, when: { type: "cron", cron: "0 9 * * *" },
+          action: { type: "prompt", prompt: "Count the bees." }, nextDueAt: 1794500000000, runCount: 0 })) });
+        if (!r) return json({ message: "not found" }, 404);
+        log.routines.push(`${act ?? method} ${r.name}`);
+        if (act) r.status = act === "pause" ? "paused" : "active";
+        else routines.delete(id);
+        return act ? json({ data: r }) : new Response(null, { status: 204 });
+      }
+      if (path === "/api/model") return json({ data: [{ id: "qwen3.8-27b", providerID: "chrysalis", name: "Qwen3.8 27B", variants: [{ id: "none" }, { id: "low" }, { id: "medium" }] }, { id: "cloud-1", providerID: "elsewhere", name: "Cloud One" }] });
+      if (path === "/api/agent") return json({ data: [{ id: "build", name: "Build", mode: "primary", hidden: false }, { id: "plan", name: "Plan", mode: "primary", hidden: false },
+        { id: "explore", name: "Explore", mode: "subagent", hidden: false }, { id: "title", name: "Title", mode: "primary", hidden: true }] });
+      if (path === "/api/command") return json({ data: [{ name: "review", description: "review changes" }] });
       if (path === "/api/provider") return json({ data: [{ id: "chrysalis", name: "Chrysalis" }, { id: "elsewhere", name: "Elsewhere" }] });
       if (path === "/api/event") {
         let fn: (line: string) => void;
@@ -71,28 +144,73 @@ export function fakeOpenCode(secret: string) {
         }), { headers: { "Content-Type": "text/event-stream" } });
       }
       if (path === "/api/session" && method === "GET") return json({ data: [...sessions.values()].sort((a, b) => b.updated - a.updated).map(info), cursor: {} });
+      if (path === "/api/experimental/session/import") {
+        const { info: was, messages } = await req.json();
+        if (sessions.has(was.id)) return json({ message: "Session already exists" }, 409);
+        const back: Session = { id: was.id, title: was.title, dir: was.location.directory, created: was.time.created, updated: was.time.updated, idle: was.time.idle, archived: was.time.archived, metadata: was.metadata, model: was.model, messages };
+        sessions.set(back.id, back);
+        return json({ data: info(back) });
+      }
       if (path === "/api/session" && method === "POST") {
-        const body = await req.json(), s: Session = { id: `ses_${++ids}`, title: "", dir: body.location.directory, created: Date.now(), updated: Date.now(), messages: [] };
+        const body = await req.json(), s: Session = { id: `ses_${++ids}`, title: body.title ?? "", dir: body.location.directory, created: Date.now(), updated: Date.now(), messages: [], ...(body.metadata ? { metadata: body.metadata } : {}) };
         sessions.set(s.id, s);
         return json({ data: info(s) });
       }
       const [, id, rest = ""] = /^\/api(?:\/experimental)?\/session\/([^/]+)(\/.*)?$/.exec(path) ?? [], s = id ? sessions.get(id) : undefined;
       if (!s) return json({ message: "not found" }, 404);
       if (!rest && method === "GET") return json({ data: info(s) });
+      if (rest === "/export") return json({ data: { info: info(s), messages: s.messages } });
+      if (!rest && method === "DELETE") {
+        sessions.delete(s.id);
+        for (const r of [...routines.values()]) if (r.sessionID === s.id) routines.delete(r.id);
+        return new Response(null, { status: 204 });
+      }
+      if (!rest && method === "PATCH") {
+        const to = await req.json();
+        if (typeof to.title === "string") s.title = to.title;
+        if (typeof to.archived === "boolean") s.archived = to.archived ? Date.now() : undefined;
+        if (to.metadata) s.metadata = to.metadata;
+        return new Response(null, { status: 204 });
+      }
+      if (rest === "/fork") {
+        const { before } = await req.json(), at = s.messages.findIndex((m) => m.id === before);
+        const copy: Session = { id: `ses_${++ids}`, title: `${s.title} (fork)`, dir: s.dir, created: Date.now(), updated: Date.now(), idle: Date.now(), messages: s.messages.slice(0, at < 0 ? undefined : at),
+          fork: { sessionID: s.id } };
+        sessions.set(copy.id, copy);
+        return json({ data: info(copy) });
+      }
+      if (rest === "/revert/stage") { staged.set(s.id, (await req.json()).messageID); return json({ data: { messageID: staged.get(s.id), files: [] } }); }
+      if (rest === "/revert/commit") {
+        const at = s.messages.findIndex((m) => m.id === staged.get(s.id));
+        if (at >= 0) s.messages.length = at;
+        s.updated = s.idle = Date.now();
+        return new Response(null, { status: 204 });
+      }
+      if (rest === "/agent") { s.agent = (await req.json()).agent; return new Response(null, { status: 204 }); }
+      if (rest === "/command") {
+        const { name, text } = await req.json();
+        log.prompts.push({ session: s.id, text, persona: s.persona, model: s.model, agent: s.agent, command: name });
+        void run(s, `/${name} ${text}`);
+        return new Response(null, { status: 204 });
+      }
       if (rest === "/message") return json({ data: s.messages, cursor: {} });
-      if (rest === "/model") { s.model = (await req.json()).model; return json({ data: info(s) }); }
+      if (rest === "/model") { s.model = (await req.json()).model; return new Response(null, { status: 204 }); }
       if (rest === "/instructions/entries/character") { s.persona = method === "PUT" ? (await req.json()).value : undefined; return new Response(null, { status: 204 }); }
       if (rest === "/interrupt") { log.interrupts++; const stop = stops.get(s.id); if (stop) stop.now = true; return new Response(null, { status: 204 }); }
       if (rest === "/prompt") {
-        const { text } = await req.json();
-        log.prompts.push({ session: s.id, text, persona: s.persona, model: s.model });
-        void run(s, text);
+        const { text, files, metadata } = await req.json();
+        log.prompts.push({ session: s.id, text, persona: s.persona, model: s.model, agent: s.agent, ...(metadata ? { meta: metadata.chrysalis } : {}), ...(files ? { files } : {}) });
+        if (stops.has(s.id)) { s.messages.push({ id: `msg_${++ids}`, type: "user", text, time: { created: Date.now() } }); return json({ data: { id: `msg_${ids}`, sessionID: s.id } }); }
+        void run(s, text, { ...(metadata ? { metadata } : {}), ...(files ? { files: files.map((f: { uri: string; name?: string }) => ({ data: f.uri.slice(f.uri.indexOf(",") + 1), mime: f.uri.slice(5, f.uri.indexOf(";")), name: f.name, source: { type: "inline" } })) } : {}) });
         return json({ data: { id: `msg_${++ids}`, sessionID: s.id } });
       }
       const asked = /^\/permission\/([^/]+)\/reply$/.exec(rest)?.[1];
-      if (asked) { asks.get(asked)?.((await req.json()).decision); asks.delete(asked); return new Response(null, { status: 204 }); }
+      if (asked) { asks.get(asked)?.((await req.json()).decision, s.id); asks.delete(asked); return new Response(null, { status: 204 }); }
+      const form = /^\/form\/([^/]+)(\/reply)?$/.exec(rest);
+      if (form && forms.has(form[1])) { forms.get(form[1])!(form[2] ? (await req.json()).answer : undefined); forms.delete(form[1]); return new Response(null, { status: 204 }); }
       return json({ message: "not found" }, 404);
     },
   });
-  return { server, log, sessions };
+  const wake = (session: string, name: string, text: string) => run(sessions.get(session)!, text, { metadata: { schedule: { id: "sch_0", name, run: 1 } } });
+  return { server, log, sessions, wake };
 }

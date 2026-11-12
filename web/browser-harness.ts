@@ -181,14 +181,17 @@ export let web: Bun.Subprocess<"ignore", "pipe", "inherit">, base = "", browser:
 export const dir = mkdtempSync(`${RUN}/web-`), LOG = `${dir}/mcp.log`, VOICE_LOG = `${dir}/voice.log`;
 const PAGE = REPLIES.page;
 export const opencode = fakeOpenCode("test-secret");
+export const home = mkdtempSync(`${RUN}/home-`);
 async function start() {
+  const tls = mkdtempSync(`${RUN}/tls-`);
+  writeFileSync(`${tls}/opencode-off`, "");
   fake = serveFake();
   web = Bun.spawn([process.execPath, "server.ts"], {
     cwd: import.meta.dir, stdout: "pipe", stderr: "inherit",
     env: { ...process.env, PORT: "0", CHRYSALIS_URL: `http://127.0.0.1:${fake.port}`, CHRYSALIS_HOST: "127.0.0.1", NODE_ENV: "production",
       CHRYSALIS_OPENCODE_URL: `http://127.0.0.1:${opencode.server.port}`, CHRYSALIS_OPENCODE_PASSWORD: "test-secret",
       CHRYSALIS_VOICE_CMD: JSON.stringify([process.execPath, `${import.meta.dir}/fake-voice.ts`]), FAKE_VOICE_LOG: VOICE_LOG, CHRYSALIS_VOICE_IDLE_MS: "1500",
-      CHRYSALIS_TLS_DIR: mkdtempSync(`${RUN}/tls-`), CHRYSALIS_CHECK_PORT: "0", CHRYSALIS_RETRY_MS: "400" },
+      CHRYSALIS_TLS_DIR: tls, CHRYSALIS_CHECK_PORT: "0", CHRYSALIS_RETRY_MS: "400", HOME: home },
   });
   const reader = web.stdout.getReader(), dec = new TextDecoder();
   let out = "";

@@ -31,9 +31,10 @@ beforeAll(async () => {
   const tls = mkdtempSync(`${RUN}/tls-`), home = mkdtempSync(`${RUN}/home-`);
   mkdirSync(WORK);
   writeFileSync(`${WORK}/note.txt`, "hello\n");
+  writeFileSync(`${tls}/opencode-off`, "");
   web = Bun.spawn([process.execPath, "server.ts"], {
     cwd: import.meta.dir, stdout: "pipe", stderr: "pipe",
-    env: { ...process.env, PORT: "0", CHRYSALIS_URL: CHRYSALIS, CHRYSALIS_HOST: "127.0.0.1", NODE_ENV: "production",
+    env: { ...process.env, PORT: "0", CHRYSALIS_URL: CHRYSALIS, CHRYSALIS_HOST: "127.0.0.1", NODE_ENV: "production", BUN_BE_BUN: "1",
       CHRYSALIS_TLS_DIR: tls, CHRYSALIS_OPENCODE: Bun.which("opencode") ?? `${process.env.HOME}/.opencode/bin/opencode`,
       HOME: home, XDG_CONFIG_HOME: `${home}/.config`, XDG_DATA_HOME: `${home}/.local/share`, XDG_STATE_HOME: `${home}/.local/state`, XDG_CACHE_HOME: `${home}/.cache` },
   });
@@ -159,6 +160,13 @@ async function chrysalisReplies(since: number): Promise<Logged[]> {
 }
 async function experts() {
   return (await (await fetch(`${CHRYSALIS}/chrysalis/stats`)).json()).experts as { mirrored: number; mirror_cap: number; decode_picks: number; decode_picks_in_pool: number };
+}
+async function connected(page: Page, on: boolean) {
+  await page.click("#opencode");
+  await page.waitForSelector("#oc-pop .invite-head");
+  await page.evaluate((label: string) => [...document.querySelectorAll<HTMLElement>("#oc-pop .invite-card")].find((b) => b.textContent === label)?.click(), on ? "Connect" : "Disconnect");
+  await until(page, on ? "OpenCode to start" : "OpenCode to stop", () => page.waitForFunction((on: boolean) => !!document.querySelector("#opencode .dot.online") === on, { timeout: MIN }, on));
+  await page.keyboard.press("Escape");
 }
 async function healthy(label: string) {
   const x = await experts();
@@ -438,30 +446,17 @@ test("Chrysalis restarted under a reply: the reply says it was cut off, nothing 
   await page.close();
 }, 15 * MIN);
 
-test("exported and imported while a reply is written, and a picture asked about in the imported chat", async () => {
-  const ctx = await context(), page = await open(ctx), into = mkdtempSync(`${RUN}/export-`);
-  await thinking(page, "Off");
-  await ask(page, "Write a 400-word story about a kite.");
-  await writing(page, 100);
-  const cdp = await page.createCDPSession();
-  await cdp.send("Browser.setDownloadBehavior", { behavior: "allow", downloadPath: into, browserContextId: ctx.id });
-  await page.click("#export-all");
-  let file = "";
-  for (let k = 0; k < 50 && !file; k++) { file = readdirSync(into).find((x) => x.startsWith("chrysalis-chats-")) ?? ""; await Bun.sleep(100); }
-  expect(file).not.toBe("");
-  await idle(page);
-  const other = await open(ctx);
-  await (await other.$("input#import-file"))!.uploadFile(`${into}/${file}`);
-  await other.waitForFunction(() => document.querySelectorAll("#thread > article.msg.assistant").length === 1, { timeout: 10_000 });
+test("a picture is asked about in a chat", async () => {
+  const ctx = await context(), page = await open(ctx), into = mkdtempSync(`${RUN}/picture-`);
   const png = `${into}/red.png`;
   await Bun.write(png, RED);
-  await thinking(other, "Off");
-  await (await other.$("input#attach-file"))!.uploadFile(png);
-  await other.waitForSelector("#attachments .att", { timeout: 10_000 });
-  await ask(other, "What color is this picture? One word.");
-  await idle(other);
-  expect((await lastReply(other)).toLowerCase()).toContain("red");
-  await healthy("export, import, picture");
+  await thinking(page, "Off");
+  await (await page.$("input#attach-file"))!.uploadFile(png);
+  await page.waitForSelector("#attachments .att", { timeout: 10_000 });
+  await ask(page, "What color is this picture? One word.");
+  await idle(page);
+  expect((await lastReply(page)).toLowerCase()).toContain("red");
+  await healthy("a picture");
   await ctx.close();
 }, 10 * MIN);
 
@@ -469,10 +464,10 @@ test("a thread through OpenCode for real: the model edits a file in the folder a
   const page = await open();
   await page.evaluate((work: string) => localStorage.setItem("folders", JSON.stringify([work])), WORK);
   await reload(page);
-  await page.click("#opencode");
-  await until(page, "OpenCode to start", () => page.waitForFunction(() => /OpenCode \d/.test(document.querySelector("#oc-pop .invite-head")?.textContent ?? ""), { timeout: MIN }));
-  await page.click("#oc-pop .invite-row");
-  await page.waitForFunction(() => document.querySelector("main")!.hasAttribute("data-thread"));
+  await connected(page, true);
+  await until(page, "OpenCode to list the folder", () => page.waitForSelector("#conversations .cast-row .face.dir", { timeout: MIN }));
+  await page.evaluate(() => document.querySelector("#conversations .cast-row .face.dir")!.closest(".cast-row")!.querySelector<HTMLElement>(".cast-new")!.click());
+  await page.waitForFunction((work: string) => document.querySelector("main")!.hasAttribute("data-thread") && document.querySelector("#conversations .cast-row.here .cast-pic")?.getAttribute("title") === work, {}, WORK);
   await ask(page, "Add a second line to note.txt that says exactly: honey. Then tell me what the file contains.");
   await attended(page, () => answered(page, 10 * MIN));
   expect(readFileSync(`${WORK}/note.txt`, "utf8").split("\n").filter(Boolean)).toEqual(["hello", "honey"]);
@@ -484,9 +479,54 @@ test("a thread through OpenCode for real: the model edits a file in the folder a
   await page.waitForFunction(() => document.querySelectorAll("#thread .tool-card").length > 0, { timeout: MIN });
   const after = await seen();
   expect([after.cards, /honey/i.test(after.said)]).toEqual([before.cards, true]);
+  await connected(page, false);
   await page.close();
   await healthy("a thread through OpenCode");
 }, 15 * MIN);
+
+test("a thread through OpenCode for real takes a picture with thinking off, shows the question the model asks and gives it the answer, runs sub-agents side by side, and a routine made by asking wakes the thread by itself", async () => {
+  const page = await open(), into = mkdtempSync(`${RUN}/thread-`);
+  await page.evaluate((work: string) => localStorage.setItem("folders", JSON.stringify([work])), WORK);
+  await reload(page);
+  await connected(page, true);
+  await until(page, "OpenCode to list the folder", () => page.waitForSelector("#conversations .cast-row .face.dir", { timeout: MIN }));
+  await page.evaluate(() => document.querySelector("#conversations .cast-row .face.dir")!.closest(".cast-row")!.querySelector<HTMLElement>(".cast-new")!.click());
+  await page.waitForFunction((work: string) => document.querySelector("main")!.hasAttribute("data-thread") && document.querySelector("#conversations .cast-row.here .cast-pic")?.getAttribute("title") === work, {}, WORK);
+  await Bun.write(`${into}/red.png`, RED);
+  await thinking(page, "Off");
+  await (await page.$("input#attach-file"))!.uploadFile(`${into}/red.png`);
+  await page.waitForSelector("#attachments .att", { timeout: 10_000 });
+  await ask(page, "What color is the attached picture? One word, and do not use any tool.");
+  await attended(page, () => answered(page, 5 * MIN));
+  expect([(await lastReply(page)).toLowerCase().includes("red"), await page.$$eval("#thread .thinking:not([hidden])", (t) => t.length)]).toEqual([true, 0]);
+
+  await ask(page, "Use your question tool to ask me whether I prefer clover or heather honey, with those two as its options. Then tell me which one I chose.");
+  await until(page, "the question", () => page.waitForSelector(".tool-ask:not([hidden]) .ask-form .ask-option", { timeout: 5 * MIN }));
+  const options = await page.$$eval(".ask-form .ask-option", (o) => o.map((x) => x.textContent!.toLowerCase()));
+  expect([options.some((o: string) => o.includes("clover")), options.some((o: string) => o.includes("heather"))]).toEqual([true, true]);
+  await page.evaluate(() => [...document.querySelectorAll<HTMLElement>(".ask-form .ask-option")].find((o) => /heather/i.test(o.textContent!))!.click());
+  await until(page, "the answer", () => page.click('.ask-form button[type="submit"]'));
+  await attended(page, () => idle(page));
+  expect([/heather/i.test(await lastReply(page)), await page.$$eval("#thread .error", (e) => e.length)]).toEqual([true, 0]);
+
+  await thinking(page, "Max");
+  const told = await page.$$eval("#thread > article.assistant", (a) => a.length);
+  await ask(page, "Use two subagents at the same time: one reads note.txt and reports its first line, the other reports how many files are in this folder. Then tell me both results.");
+  await attended(page, () => until(page, "the sub-agents' results", () => page.waitForFunction((told: number) => document.querySelector("#send")?.getAttribute("aria-label") === "Send"
+    && [...document.querySelectorAll<HTMLElement>("#thread > article.assistant")].slice(told).some((a) => /hello/i.test(a.querySelector<HTMLElement>(":scope > .markdown")?.innerText ?? "")), { timeout: 10 * MIN }, told)));
+  const helped = await page.$$eval("#thread .tool-card", (c) => c.filter((x) => x.querySelector(".tool-name")!.textContent === "Subagent").map((x) => (x as HTMLElement).dataset.state));
+  expect([helped.filter((x: string | undefined) => x === "done").length >= 2, await page.$$eval("#thread .error", (e) => e.length)]).toEqual([true, 0]);
+
+  await ask(page, "Schedule a one-time reminder 30 seconds from now whose prompt is: say the word pineapple. Then confirm in one sentence.");
+  await attended(page, () => answered(page, 5 * MIN));
+  await until(page, "the routine to wake the thread", () => page.waitForFunction(() => !!document.querySelector("#thread > article.user .point-chip"), { timeout: 3 * MIN }));
+  await attended(page, () => until(page, "the routine's reply", () => page.waitForFunction(() => document.querySelector("#send")?.getAttribute("aria-label") === "Send"
+    && /pineapple/i.test([...document.querySelectorAll<HTMLElement>("#thread > article.assistant")].at(-1)?.innerText ?? ""), { timeout: 5 * MIN })));
+  expect(await page.$eval("#thread > article.user:nth-last-child(2) .point-chip", (c) => c.textContent!.startsWith("Routine"))).toBe(true);
+  await connected(page, false);
+  await page.close();
+  await healthy("a thread's picture, question and routine");
+}, 25 * MIN);
 
 test("a tab closed while its reply is written: the reply runs out at Chrysalis, and a new tab starts clean", async () => {
   const t0 = Date.now(), ctx = await context(), page = await open(ctx);

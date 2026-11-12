@@ -43,7 +43,7 @@ test("What the model is sent shows the next request as Chrysalis gets it: the on
     expect([m.role, k]).not.toEqual([m.role, -1]);
     at = k;
   }
-  expect(next.messages[0].content).toContain("There are no tools or files in this chat");
+  expect(next.messages[0]).toEqual({ role: "system", content: ARTIFACTS_PROMPT });
   await page.$eval("#system-input", (el) => { (el as HTMLTextAreaElement).value = "Be terse, {{MODEL}}."; el.dispatchEvent(new Event("input")); });
   await send(page, "third");
   expect(lastStream.messages[0]).toEqual({ role: "system", content: `Be terse, Qwen3.8-27B.\n\n${ARTIFACTS_PROMPT}` });

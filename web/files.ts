@@ -74,13 +74,13 @@ export const dataUrl = (b: Blob) => new Promise<string>((ok, fail) => {
   r.readAsDataURL(b);
 });
 
-export async function attach(f: File, other?: string): Promise<Attachment | string> {
+export async function attach(f: File, other?: string, pdfs = false): Promise<Attachment | string> {
   const binary: [Kind, number, string][] = [["image", MAX_IMAGE, "pictures"], ["pdf", MAX_PDF, "PDFs"], ["video", MAX_VIDEO, "videos"]];
   const kind: Kind | null = IMAGE_TYPES.has(f.type) ? "image" : f.type === "application/pdf" || /\.pdf$/i.test(f.name) ? "pdf"
     : f.type.startsWith("video/") ? "video" : null;
   if (kind) {
     const [, max, what] = binary.find(([k]) => k === kind)!;
-    if (other && kind !== "image") return `${f.name}: ${other} gets text files and pictures; Chrysalis reads ${what}`;
+    if (other && kind !== "image" && !(pdfs && kind === "pdf")) return `${f.name}: ${other} gets text files${pdfs ? ", PDFs" : ""} and pictures; Chrysalis reads ${what}`;
     if (f.size > max) return `${f.name}: ${what} can be up to ${max >> 20} MB`;
     const a: Attachment = { id: randomId(), name: f.name || "pasted image", type: f.type, size: f.size, kind };
     await put(a.id, f);

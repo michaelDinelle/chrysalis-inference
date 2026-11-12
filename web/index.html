@@ -87,9 +87,6 @@
             <div class="side-foot">
               <button id="you" class="you" type="button" title="Your card"></button>
               <button id="settings-open" class="act" type="button" aria-label="Settings" aria-haspopup="dialog" title="Settings (Ctrl+,)"></button>
-              <button id="import" class="btn" type="button" title="Import: chats from files exported here" aria-label="Import chats"></button>
-              <button id="export-all" class="btn" type="button" title="Export: every chat of this tab, in one file" aria-label="Export all chats"></button>
-              <input id="import-file" type="file" accept=".json,application/json" multiple hidden />
             </div>
           </div>
           <div class="pane-rail" role="separator" aria-orientation="vertical"></div>
@@ -99,9 +96,11 @@
       <div id="cast-add" class="cast-add" role="menu" hidden>
         <button type="button" data-add="card" role="menuitem">A character from a card…</button>
         <button type="button" data-add="group" role="menuitem">A chat with several…</button>
+        <button type="button" data-add="folder" role="menuitem">A folder to work in…</button>
       </div>
       <div id="cast-invite" class="cast-invite" role="dialog" aria-label="Who is in this chat" hidden></div>
       <div id="oc-pop" class="cast-invite oc-pop" role="dialog" aria-label="OpenCode" hidden></div>
+      <div id="routines-pop" class="cast-invite oc-pop" role="dialog" aria-label="Routines" hidden></div>
       <input id="cast-file" type="file" accept=".png,.json,image/png,application/json" multiple hidden />
       <main>
         <header class="topbar">
@@ -132,6 +131,7 @@
               <div class="composer-options">
                 <button id="attach" class="act attach" type="button" title="Attach text files or pictures (or drop or paste them)" aria-label="Attach files"></button>
                 <input id="attach-file" type="file" multiple hidden />
+                <button id="routines" class="act attach routines" type="button" title="Routines in this thread" aria-label="Routines in this thread" aria-haspopup="dialog" aria-controls="routines-pop"></button>
                 <div class="think-ctl">
                   <div id="energy" class="energy" role="slider" tabindex="0" aria-label="Thinking" aria-valuemin="0" aria-valuemax="3"></div>
                   <div id="energy-stops" class="energy-stops"></div>
@@ -188,7 +188,7 @@
         <section class="set-sec" data-sec="chat">
           <div class="set-block">
             <div class="set-block-head"><label class="set-block-title" for="system-input">System prompt</label><button id="system-reset" class="act knob-reset" type="button" title="Back to the default system prompt" aria-label="Restore the default system prompt"></button></div>
-            <textarea id="system-input" rows="1" placeholder="No system prompt" title="Sent as written, {{MODEL}} as the chat's model; empty sends none. The default keeps the model from acting as a coding agent when it doesn't think, and is sent as its tools version in a chat with tools on. A change makes each chat read its history again once."></textarea>
+            <textarea id="system-input" rows="1" placeholder="No system prompt" title="Sent as written, {{MODEL}} as the chat's model; empty, the default, sends none. A change makes each chat read its history again once."></textarea>
             <div class="set-block-foot">
               <label class="set-switch" title="After the system prompt, how to make artifacts (with an id for each part) and change them in place with edits that hold only what changes"><button id="artifacts-switch" class="switch" type="button" role="switch" aria-checked="true"></button><span>Artifacts the model changes in place</span></label>
               <button id="sent-open" class="btn small" type="button" title="The open chat's next request, exactly as the backend gets it: the system prompt and every message">What the model is sent</button>

@@ -435,6 +435,7 @@ export class Ocean {
     const box = this.boxAt ? document.querySelector(this.boxAt) : null;
     if (box) this.resize.observe(box);
     this.readColors();
+    if (document.readyState !== "complete") addEventListener("load", () => { this.readColors(); this.wake(); }, { once: true });
     void drawingSdf(720).then((s) => { this.sdf = s; this.uploadSdf(); this.wake(); });
     return true;
   }

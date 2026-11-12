@@ -80,7 +80,8 @@ None: no comments or docstrings anywhere in the repo, in any language, including
   memory holds, sharing one Chromium, in well under a minute; `bun tests.ts ./<file>.test.ts` runs some of them.
 - With Chrysalis running Flash-Next: `make test_chaos` (the chat for real, used oddly: replies through reloads, closed
   tabs and chat switches, several at once, Stop / regenerate / edit mid-reply, settings, a 3D page, memory taken
-  by another program, and a thread through OpenCode itself (it needs `opencode` installed); it restarts Chrysalis
+  by another program, and threads through OpenCode itself, with a picture, a question and a routine (it needs
+  `opencode` 2.2.4 or newer installed); it restarts Chrysalis
   and switches models, so ask first, as for stopping it).
 - GPU, with Chrysalis's model server stopped (the chat's Stop, which frees the GPU; the user runs Chrysalis: check the GPU
   is idle, ask once per task, then just say when it stops and for how long): `make test` (test_web, the 27B kernels,

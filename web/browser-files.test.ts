@@ -1,12 +1,12 @@
 import { expect, test } from "bun:test";
-import { readFileSync, readdirSync, unlinkSync, writeFileSync } from "node:fs";
+import { writeFileSync } from "node:fs";
 import type { Browser, Page } from "puppeteer-core";
 import { ARTIFACTS_PROMPT } from "./artifacts";
 import { harness, base, card, dir, fake, idle, lastStream, look, open, png, send, sent, streams, web } from "./browser-harness";
 
 harness();
 
-test("attached files go to Chrysalis as images, PDFs, videos and fenced text, stay after a reload, and travel in an export", async () => {
+test("attached files go to Chrysalis as images, PDFs, videos and fenced text, and stay after a reload", async () => {
   const pdf = Buffer.from("%PDF-1.4\n%chrysalis\n"), mp4 = Buffer.from([0, 0, 0, 24, 102, 116, 121, 112, 109, 112, 52, 50]);
   writeFileSync(`${dir}/dot.png`, png);
   writeFileSync(`${dir}/fence.md`, "Has ``` inside.\n");
@@ -33,16 +33,6 @@ test("attached files go to Chrysalis as images, PDFs, videos and fenced text, st
   await page.waitForFunction(() => (document.querySelector(".msg-files img") as HTMLImageElement | null)?.naturalWidth === 2);
   await send(page, "again");
   expect(lastStream.messages.find((m: any) => m.role === "user").content).toEqual(content);
-  await page.click("#export-all");
-  const file = await (async () => { for (let k = 0; k < 50; k++) { const f = readdirSync(dir).find((x) => x.startsWith("chrysalis-chats-")); if (f) return f; await Bun.sleep(100); } })();
-  const other = await open();
-  await (await other.$("input#import-file"))!.uploadFile(`${dir}/${file}`);
-  await other.waitForFunction(() => (document.querySelector(".msg-files img") as HTMLImageElement | null)?.naturalWidth === 2);
-  await send(other, "and once more");
-  expect(lastStream.messages.find((m: any) => m.role === "user").content).toEqual(content);
-  expect(JSON.parse(readFileSync(`${dir}/${file}`, "utf8")).conversations[0].messages.length).toBe(4);
-  unlinkSync(`${dir}/${file}`);
   await page.close();
-  await other.close();
 }, 60_000);
 

@@ -122,12 +122,24 @@ docker run -d --device /dev/kfd --device /dev/dri -p 127.0.0.1:8080:8080 -v chry
 - SillyTavern cards: speech and narration look the way they do in SillyTavern, and each speaker in a group chat has a
   portrait. A character's row in the sidebar brings others into its chat, and a chat keeps its own people. In a group,
   `@name` has that one answer next.
-- OpenCode threads: the OpenCode button starts [OpenCode](https://opencode.ai) on the computer Chrysalis runs on.
-  A folder opened there is a row in the sidebar and its threads are chats, read from OpenCode, so they come back
-  after a reload and on other devices. The tools, models, permissions and compaction are OpenCode's. A thread uses
-  one of Chrysalis's own models unless another is picked. A character can do the work, in character. Chrysalis's
-  own chats have no tools.
+- OpenCode: where [OpenCode](https://opencode.ai) is installed on the computer Chrysalis runs on, the page connects to it
+  and is its front end. Every chat then goes through it, in the home folder unless it was started in another: a chat
+  with Chrysalis, with a character (her card and greeting are OpenCode's instruction, so she answers in character and
+  can use its tools) or with several. "How much space is left on this computer" is answered by looking. A new chat's
+  model menu has Chat only, for a plain chat with no tools. Every other folder OpenCode has threads in is a row in the
+  sidebar, and the add button there opens another. Chats are read from OpenCode, with their people, so they are the
+  same after a reload and on other devices. The OpenCode button disconnects it: chats are then plain.
+- In a thread the tools, models, agents (Build, Plan), permissions, compaction, sub-agents, slash commands and routines
+  are OpenCode's. A thread uses one of Chrysalis's own models unless another is picked, takes text files, pictures and
+  PDFs, and the thinking slider picks the model's own level. What OpenCode or a sub-agent asks is answered in a card. A
+  message sent while a turn runs goes to OpenCode. Any message, yours or the reply, can be edited in place or
+  deleted, through OpenCode's own export and import of the chat; an edited message sent again and Regenerate take the
+  chat back and answer anew, and Fork starts a new chat from a message. Deleting a thread deletes it in OpenCode, and settling archives it there. A routine
+  is made by asking for one ("every morning at 9, check the build"): the clock by the message box lists them, and they
+  run while Chrysalis is running. A character can do the work, in character. It needs OpenCode 2.2.4 or newer.
 - Settling puts a chat or a thread away on a shelf at the bottom of the sidebar.
+- Voice mode: talking over a reply stops it and keeps its text, with what was not heard dimmer, and the next message
+  tells the model how far you heard.
 - Phones: the connect page shows how to trust the certificate authority on each kind of device. The chat runs over HTTPS.
   The authority works only on the local network.
 - Long replies: a chat near the end of its context summarizes what came before and carries on. The chat stays whole

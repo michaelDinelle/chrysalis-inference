@@ -1,5 +1,5 @@
-import { writeFileSync } from "node:fs";
-import { hostname } from "node:os";
+import { existsSync, rmSync, writeFileSync } from "node:fs";
+import { homedir, hostname } from "node:os";
 import { createInterface } from "node:readline";
 import type { BunPlugin, Server, Subprocess } from "bun";
 import app from "./index.html";
@@ -46,7 +46,7 @@ const here = (handler: Handler) => guarded((req, srv) => fromNetwork(req, srv)
 const json = (handler: (req: Request, srv: Srv) => Response | Promise<Response>) => (req: Request, srv: Srv) =>
   (req.headers.get("content-type") ?? "").startsWith("application/json") ? handler(req, srv) : new Response("JSON only", { status: 415 });
 
-const MODELS = ["qwen3.8-27b", "qwen3.8-flash-next"], MODEL_FILE = `${tlsDir()}/model`;
+const MODELS = ["qwen3.8-27b", "qwen3.8-flash-next"], MODEL_FILE = `${tlsDir()}/model`, OPENCODE_OFF = `${tlsDir()}/opencode-off`;
 async function pickModel(req: Request): Promise<string | undefined> {
   const model = (await req.json().catch(() => ({})))?.model;
   if (!MODELS.includes(model)) return undefined;
@@ -64,12 +64,11 @@ interface Job {
   done: boolean;
   ctrl: AbortController;
   waiters: Set<() => void>;
-  asks: Map<string, (d: Decision) => void>;
+  asks: Map<string, (d: harness.Answer) => void>;
   thread?: string;
   t0: number; tFirst?: number; tAnswer?: number; tLast?: number;
   gen: number;
 }
-type Decision = "once" | "always" | "deny";
 const jobs = new Map<string, Job>(), turns = new Map<string, Job>();
 const KEEP_MS = 15 * 60_000;
 const RETRIES = 10, RETRY_MS = Number(process.env.CHRYSALIS_RETRY_MS) || 2000, RETRY_MOST_MS = RETRY_MS * 5;
@@ -92,14 +91,16 @@ function startJob(body: string): Job {
     try {
       const raw = JSON.parse(body);
       if (raw.chrysalis_thread) {
-        const ask = (call: string) => new Promise<harness.Decision | "stop">((resolve) => {
+        const ask = (call: string) => new Promise<harness.Answer>((resolve) => {
           if (job.ctrl.signal.aborted) return resolve("stop");
           job.asks.set(call, (d) => (job.asks.delete(call), resolve(d)));
           job.ctrl.signal.addEventListener("abort", () => (job.asks.delete(call), resolve("stop")), { once: true });
         });
         await harness.ensure(CHRYSALIS);
+        let from = 0, to = 0;
         const first = (d: any) => {
-          if (d?.choices?.[0]?.delta) { const now = Date.now(); job.tFirst ??= now; job.tLast = now; if (d.choices[0].delta.content) job.tAnswer ??= now; job.gen = now - job.tFirst; }
+          if (d?.choices?.[0]?.delta) { const now = Date.now(); job.tFirst ??= now; job.tLast = to = now; from ||= now; if (d.choices[0].delta.content) job.tAnswer ??= now; }
+          if (d?.usage) { job.gen += to - from; from = to = 0; }
           push(d);
         };
         await harness.turn(raw.chrysalis_thread, first, job.ctrl.signal, ask, (id) => { job.thread = id; turns.set(id, job); push({ thread: id }); });
@@ -148,6 +149,9 @@ function fold(job: Job) {
   job.events[last] = JSON.stringify({ choices: [{ index: 0, delta: { ...(reasoning ? { reasoning_content: reasoning } : {}), ...(content ? { content } : {}) } }] });
   job.folds.push({ from: words[0], to: last });
 }
+
+const connector: harness.Connector = harness;
+harness.onWake((session) => { if (!turns.has(session)) startJob(JSON.stringify({ chrysalis_thread: { session, dir: "", text: "", follow: true } })); });
 
 const asSent = (raw: any) => (backends.isChrysalis ? raw : standard(raw));
 
@@ -642,10 +646,10 @@ img.src = ${JSON.stringify(checkUrl(req))} + "?t=" + Date.now();
     "/api/chat/:id/tool/:call": {
       POST: guarded(json(async (req) => {
         const { id, call } = (req as Request & { params: { id: string; call: string } }).params;
-        const decision = (await req.json().catch(() => ({})))?.decision, ask = jobs.get(id)?.asks.get(call);
-        if (!["once", "always", "deny"].includes(decision)) return Response.json({ error: { message: "decision: once, always or deny" } }, { status: 400 });
+        const { decision, answer } = (await req.json().catch(() => ({}))) ?? {}, ask = jobs.get(id)?.asks.get(call), filled = !!answer && typeof answer === "object" && !Array.isArray(answer);
+        if (!filled && !["once", "always", "deny"].includes(decision)) return Response.json({ error: { message: "decision: once, always or deny, or an answer" } }, { status: 400 });
         if (!ask) return Response.json({ error: { message: "that call is not waiting for an answer" } }, { status: 409 });
-        ask(decision);
+        ask(filled ? { answer } : decision);
         return new Response(null, { status: 204 });
       })),
     },
@@ -653,11 +657,17 @@ img.src = ${JSON.stringify(checkUrl(req))} + "?t=" + Date.now();
     "/api/threads": {
       GET: guarded(async () => {
         const at = harness.state();
-        if (at.state !== "on") return Response.json({ ...at, install: harness.INSTALL });
-        const [threads, models] = await Promise.all([harness.threads(), harness.models()]);
-        return Response.json({ ...at, models, threads: threads.map((t) => ({ ...t, job: turns.get(t.id)?.id })) });
+        if (at.state !== "on") return Response.json({ ...at, install: harness.INSTALL, wanted: !existsSync(OPENCODE_OFF) });
+        const [threads, models, agents] = await Promise.all([harness.threads(), harness.models(), harness.agents()]);
+        return Response.json({ ...at, name: connector.name, home: homedir(), models, agents, threads: threads.map((t) => ({ ...t, job: turns.get(t.id)?.id })) });
+      }),
+      DELETE: guarded(() => {
+        writeFileSync(OPENCODE_OFF, "");
+        harness.stop();
+        return new Response(null, { status: 204 });
       }),
       POST: guarded(async () => {
+        rmSync(OPENCODE_OFF, { force: true });
         try { await harness.ensure(CHRYSALIS); } catch (e) { return Response.json({ error: { message: (e as Error).message } }, { status: 502 }); }
         return Response.json(harness.state());
       }),
@@ -668,6 +678,56 @@ img.src = ${JSON.stringify(checkUrl(req))} + "?t=" + Date.now();
         catch { return Response.json({ error: { message: "that folder cannot be read" } }, { status: 404 }); }
       }),
     },
+    "/api/threads/:id/say": {
+      POST: guarded(json(async (req) => {
+        const text = String((await req.json().catch(() => ({})))?.text ?? "");
+        if (!text.trim()) return Response.json({ error: { message: "text" } }, { status: 400 });
+        try { await harness.say((req as Request & { params: { id: string } }).params.id, text); } catch (e) { return Response.json({ error: { message: (e as Error).message } }, { status: 502 }); }
+        return new Response(null, { status: 204 });
+      })),
+    },
+    "/api/threads/:id/undo": {
+      POST: guarded(json(async (req) => {
+        try { await harness.undo((req as Request & { params: { id: string } }).params.id, String((await req.json().catch(() => ({})))?.message ?? "")); }
+        catch (e) { return Response.json({ error: { message: (e as Error).message } }, { status: 502 }); }
+        return new Response(null, { status: 204 });
+      })),
+    },
+    "/api/threads/:id/rewrite": {
+      POST: guarded(json(async (req) => {
+        const { drop, edit } = (await req.json().catch(() => ({}))) ?? {}, id = (req as Request & { params: { id: string } }).params.id;
+        const gone = Array.isArray(drop) ? drop.filter((x: unknown) => typeof x === "string") : [], put = typeof edit?.id === "string" && typeof edit?.text === "string" ? { id: edit.id, text: edit.text } : undefined;
+        if (!gone.length && !put) return Response.json({ error: { message: "drop or edit" } }, { status: 400 });
+        if (turns.has(id)) return Response.json({ error: { message: "OpenCode is still working in this chat" } }, { status: 409 });
+        try { await harness.rewrite(id, { drop: gone, ...(put ? { edit: put } : {}) }); } catch (e) { return Response.json({ error: { message: (e as Error).message } }, { status: 502 }); }
+        return new Response(null, { status: 204 });
+      })),
+    },
+    "/api/threads/:id/fork": {
+      POST: guarded(json(async (req) => {
+        const before = (await req.json().catch(() => ({})))?.before;
+        try { return Response.json({ id: await harness.fork((req as Request & { params: { id: string } }).params.id, typeof before === "string" ? before : undefined) }); }
+        catch (e) { return Response.json({ error: { message: (e as Error).message } }, { status: 502 }); }
+      })),
+    },
+    "/api/threads/:id/routines": {
+      GET: guarded(async (req) => {
+        try { return Response.json({ routines: await harness.routines((req as Request & { params: { id: string } }).params.id) }); }
+        catch (e) { return Response.json({ error: { message: (e as Error).message } }, { status: 502 }); }
+      }),
+    },
+    "/api/threads/routines/:routine": {
+      PATCH: guarded(json(async (req) => {
+        try { await harness.pause((req as Request & { params: { routine: string } }).params.routine, !!(await req.json().catch(() => ({})))?.paused); }
+        catch (e) { return Response.json({ error: { message: (e as Error).message } }, { status: 502 }); }
+        return new Response(null, { status: 204 });
+      })),
+      DELETE: guarded(async (req) => {
+        try { await harness.cancel((req as Request & { params: { routine: string } }).params.routine); }
+        catch (e) { return Response.json({ error: { message: (e as Error).message } }, { status: 502 }); }
+        return new Response(null, { status: 204 });
+      }),
+    },
     "/api/threads/:id": {
       GET: guarded(async (req) => {
         const id = (req as Request & { params: { id: string } }).params.id;
@@ -675,8 +735,9 @@ img.src = ${JSON.stringify(checkUrl(req))} + "?t=" + Date.now();
         catch (e) { return Response.json({ error: { message: (e as Error).message } }, { status: 502 }); }
       }),
       PATCH: guarded(json(async (req) => {
-        const title = String((await req.json().catch(() => ({})))?.title ?? "").trim();
-        if (title) await harness.rename((req as Request & { params: { id: string } }).params.id, title);
+        const { title, archived } = (await req.json().catch(() => ({}))) ?? {};
+        try { await harness.change((req as Request & { params: { id: string } }).params.id, { ...(String(title ?? "").trim() ? { title: String(title).trim() } : {}), ...(typeof archived === "boolean" ? { archived } : {}) }); }
+        catch (e) { return Response.json({ error: { message: (e as Error).message } }, { status: 502 }); }
         return new Response(null, { status: 204 });
       })),
       DELETE: guarded(async (req) => {
