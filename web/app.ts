@@ -5887,7 +5887,7 @@ const PAGE_SLASH: Slash[] = [
     openPalette([{ label: "Skills", items: all.map((k): PaletteItem => ({ icon: icon("agent"), title: k.name, note: k.description ? [k.description] : [], run: () => void fetch(`/api/threads/${sid}/skill`, { method: "POST",
       headers: { "Content-Type": "application/json" }, body: JSON.stringify({ id: k.id }) }).then(async (r) => { if (!r.ok) toast("OpenCode did not start that skill"); await loadThreads(); }) })) }]);
   } },
-  { name: "status", aliases: ["usage"], about: "context used, and when it compacts", run: () => toast($("meter").title.split("\n").slice(0, 2).join(". ") || "Nothing measured yet") },
+  { name: "status", aliases: ["usage"], about: "context used, and when it compacts", run: () => { const b = $("meter").querySelector<HTMLElement>(".ctx"); if (b) b.click(); else toast("Nothing measured yet"); } },
   { name: "settings", about: "open Settings", run: () => openSettings() },
   { name: "help", about: "list the commands", run: () => { input.value = "/"; paintSlash(); input.focus(); } },
 ];
@@ -6051,6 +6051,7 @@ $("scope-input").onkeydown = (e) => {
   if (e.key === "Escape") { e.preventDefault(); $("scope-pop").hidden = true; }
   else if (e.key === "Enter") { e.preventDefault(); $("scope-list").querySelector<HTMLElement>(".scope-item")?.click(); }
 };
+document.addEventListener("pointerdown", (e) => { if (!$("ctx-pop").hidden && !(e.target as Element).closest("#ctx-pop, #meter")) $("ctx-pop").hidden = true; });
 document.addEventListener("pointerdown", (e) => { if (!$("scope-pop").hidden && !(e.target as Element).closest("#scope-pop, #side-scope")) $("scope-pop").hidden = true; });
 $("add-project").onclick = addProject;
 $("add-cast").addEventListener("click", (e) => { e.stopPropagation(); openAdd(e.currentTarget as HTMLElement); });
@@ -6351,13 +6352,34 @@ function renderMeter() {
   if (conv.thread) {
     const at = conv.thread.context, meter = $("meter");
     if (!at || harness.state !== "on") { meter.title = ""; return void meter.replaceChildren(); }
-    const used = at.used ?? 0, top = at.auto ? at.ceiling : at.window, share = Math.min(1, used / top), bar = h("span", `ctx-bar${share >= 0.9 ? " near" : share >= 0.7 ? " warm" : ""}`), fill = h("i");
-    fill.style.width = `${Math.round(share * 100)}%`;
-    bar.append(fill);
-    meter.replaceChildren(bar, h("span", "", at.used === undefined ? `${at.compacted ? "compacted" : "–"} / ${fmtK(top)}` : `${fmtK(used)} / ${fmtK(top)}`));
-    meter.title = [at.used === undefined ? (at.compacted ? "The context was just compacted: the next reply measures it" : "The next reply measures this thread's context") : `This thread's context: ${used.toLocaleString("en-US")} tokens`,
-      at.auto ? `OpenCode compacts it at ${at.ceiling.toLocaleString("en-US")}${at.used === undefined ? "" : ` (${Math.max(0, at.ceiling - used).toLocaleString("en-US")} to go)`}` : "OpenCode does not compact it by itself",
-      `The model's window is ${at.window.toLocaleString("en-US")}`, "/compact compacts it now"].join("\n");
+    const used = at.used ?? 0, top = at.auto ? at.ceiling : at.window, share = Math.min(1, used / top), left = Math.max(0, top - used), b = h("button", `ctx${share >= 0.9 ? " near" : share >= 0.7 ? " warm" : ""}`);
+    b.type = "button";
+    b.innerHTML = `<svg class="ctx-ring" viewBox="0 0 20 20" aria-hidden="true"><circle cx="10" cy="10" r="7.5"/><circle class="on" cx="10" cy="10" r="7.5" pathLength="100" stroke-dasharray="${Math.max(share ? 3 : 0, Math.round(share * 100))} 100"/></svg>`;
+    b.append(h("span", "ctx-pct", at.used === undefined ? (at.compacted ? "Compacted" : "Context") : `${Math.round(share * 100)}%`), h("span", "ctx-left", at.used === undefined ? `${fmtK(top)} free` : `${fmtK(left)} left`));
+    b.title = b.ariaLabel = [at.used === undefined ? (at.compacted ? "The context was just compacted: the next reply measures it" : "The next reply measures this thread's context") : `Context: ${used.toLocaleString("en-US")} tokens used`,
+      at.auto ? `OpenCode compacts it at ${at.ceiling.toLocaleString("en-US")}${at.used === undefined ? "" : ` (${left.toLocaleString("en-US")} to go)`}` : "OpenCode does not compact it by itself",
+      `The model's window is ${at.window.toLocaleString("en-US")}`].join("\n");
+    b.onclick = () => {
+      const pop = $("ctx-pop"), r = b.getBoundingClientRect();
+      if (!pop.hidden) return void (pop.hidden = true);
+      const row = (label: string, value: string) => { const x = h("div", "ctx-row"); x.append(h("span", "", label), h("span", "ctx-num", value)); return x; }, bar = h("div", "ctx-track"), fill = h("i"), mark = h("b"), go = h("button", "btn small", "Compact now");
+      fill.style.width = `${(Math.min(used, at.window) / at.window) * 100}%`;
+      mark.style.left = `${(at.ceiling / at.window) * 100}%`;
+      mark.hidden = !at.auto;
+      bar.className = `ctx-track${share >= 0.9 ? " near" : share >= 0.7 ? " warm" : ""}`;
+      bar.append(fill, mark);
+      go.type = "button";
+      go.disabled = !conv.thread?.id || !!running();
+      go.onclick = () => { pop.hidden = true; void PAGE_SLASH.find((c) => c.name === "compact")!.run!(""); };
+      pop.replaceChildren(h("div", "invite-head", "Context"), bar, row("Used", at.used === undefined ? (at.compacted ? "just compacted" : "not measured yet") : `${used.toLocaleString("en-US")} tokens`),
+        row(at.auto ? "Compacts at" : "Compacts", at.auto ? `${at.ceiling.toLocaleString("en-US")}` : "only when asked"), ...(at.auto && at.used !== undefined ? [row("Until then", `${left.toLocaleString("en-US")} tokens`)] : []),
+        row("Model's window", at.window.toLocaleString("en-US")), go);
+      pop.hidden = false;
+      pop.style.left = `${Math.max(8, Math.min(r.left, innerWidth - pop.offsetWidth - 8))}px`;
+      pop.style.bottom = `${innerHeight - r.top + 8}px`;
+    };
+    meter.title = "";
+    meter.replaceChildren(b);
     return;
   }
   const online = status.state === "online" && !status.loading, ctx = status.context ?? 262144;

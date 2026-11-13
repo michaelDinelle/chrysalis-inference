@@ -169,9 +169,10 @@ docker run -d --device /dev/kfd --device /dev/dri -p 127.0.0.1:8080:8080 -v chry
   yours) and the terminal's that have a place on a page: `/new`, `/compact`, `/models`, `/agents`, `/variants`,
   `/undo`, `/fork`, `/rename`, `/sessions`, `/open`, `/cd`, `/copy`, `/export`, `/skills`, `/status`, `/settings`,
   `/help`. Anything else starting with a slash is sent as it is typed.
-- Context: beside the thinking slider a thread shows the tokens its context holds against the point where OpenCode
-  compacts it by itself (the model's window less 15%, or OpenCode's own `compaction.buffer`), and a compaction, its
-  own or one asked for with `/compact`, stays in the thread as a line that opens to its summary.
+- Context: beside the thinking slider a ring fills as a thread's context nears the point where OpenCode compacts it
+  by itself (the model's window less 15%, or OpenCode's own `compaction.buffer`), with the share used and the tokens
+  left; a click gives the exact numbers and Compact now. A compaction, its own or one asked for, stays in the thread
+  as a line that opens to its summary.
 - Pinned sits above the list and Settled below it, each in its own place. A row is dragged as in T3 Code, after six
   pixels and on the vertical alone, and nothing else moves: onto Pinned it is pinned (among pins, where the line
   shows), onto a character or a folder it is theirs, onto Settled it is settled, and a settled row dragged up is active.
