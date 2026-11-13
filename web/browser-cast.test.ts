@@ -14,6 +14,19 @@ const rowMenu = async (page: Page, name: string, item = "") => {
   else await page.keyboard.press("Escape");
   return labels;
 };
+const carry = async (page: Page, rows: string, name: string, to: () => Promise<number[]>) => {
+  const from = await page.evaluate((rows, name) => { const r = [...document.querySelectorAll<HTMLElement>(rows)].find((x) => (x.querySelector(".cast-name")?.textContent ?? x.title) === name)!.getBoundingClientRect(); return [r.x + r.width / 2, r.y + r.height / 2]; }, rows, name);
+  await page.mouse.move(from[0], from[1]);
+  await page.mouse.down();
+  await page.mouse.move(from[0] + 3, from[1] + 9, { steps: 3 });
+  const [x, y] = await to();
+  await page.mouse.move(x, y, { steps: 10 });
+  const verb = await page.$eval(".drag-ghost", (g) => g.querySelector(".conv-verb:not([hidden])")?.textContent ?? "");
+  await page.mouse.up();
+  await page.evaluate(() => new Promise((done) => setTimeout(done)));
+  return verb;
+};
+const rowAt = (page: Page, name: string) => () => page.evaluate((name) => { const r = [...document.querySelectorAll("#conversations .cast-row")].find((x) => x.querySelector(".cast-name")!.textContent === name)!.getBoundingClientRect(); return [r.x + r.width / 2, r.y + r.height / 2]; }, name);
 const answers = (page: Page) => page.$$eval("#cast-next button[title$=' answers']", (b) => b.map((x) => (x as HTMLElement).title.replace(" answers", "")));
 const speakers = (page: Page) => page.$$eval("#thread > article.assistant", (a) => a.map((x) => x.querySelector(".speaker")?.textContent ?? ""));
 const toasted = (page: Page, text: RegExp) => page.waitForFunction((src) => new RegExp(src).test(document.querySelector("#toast:not([hidden]) span")?.textContent ?? ""), {}, text.source);
@@ -113,7 +126,7 @@ test("the user is a character like any other: a portrait opens its card and clos
   await page.close();
 }, 40_000);
 
-test("a card's portrait is the card's file, named for them and as it is now: a click saves it, the PNG any app reads with the picture as given", async () => {
+test("a card is saved from its Download card button, named for them and as it is now, the PNG any app reads with the picture as given; a click on its picture saves nothing", async () => {
   const page = await open();
   const saved = mkdtempSync(`${RUN}/saved-`), cdp = await page.createCDPSession();
   await cdp.send("Browser.setDownloadBehavior", { behavior: "allow", downloadPath: saved, browserContextId: page.browserContext().id });
@@ -125,15 +138,16 @@ test("a card's portrait is the card's file, named for them and as it is now: a c
   await page.keyboard.press("End");
   await page.keyboard.type(" Twelve hives.");
   await Bun.sleep(600);
-  await page.click("#cast-sheet a.card-file");
+  await page.click("#cast-sheet .card-portrait");
+  expect(await page.$eval("#cast-sheet", (s) => (s as HTMLElement).hidden)).toBe(false);
+  await page.click("#cast-sheet .card-acts a.card-file");
   for (const t = Date.now(); !existsSync(`${saved}/Mirela.png`); await Bun.sleep(50)) if (Date.now() - t > 10_000) throw new Error(`not saved: ${readdirSync(saved)}`);
   await Bun.sleep(200);
   const got = pngText(readFileSync(`${saved}/Mirela.png`));
   const v3 = JSON.parse(Buffer.from(got.text.ccv3 ?? "", "base64").toString()), v2 = JSON.parse(Buffer.from(got.text.chara ?? "", "base64").toString());
   expect([readdirSync(saved), v3.data.name, v3.data.description, v2.data.description]).toEqual([["Mirela.png"], "Mirela", "{{char}} keeps bees. Twelve hives.", "{{char}} keeps bees. Twelve hives."]);
   expect(got.idat).toBe(pngText(png).idat);
-  expect(await page.$eval("#cast-sheet a.card-file", (a) => [(a as HTMLAnchorElement).download, a.querySelector("img")!.src === (a as HTMLAnchorElement).href]))
-    .toEqual(["Mirela.png", true]);
+  expect(await page.$eval("#cast-sheet a.card-file", (a) => [(a as HTMLAnchorElement).download, a.textContent])).toEqual(["Mirela.png", "Download card"]);
   await page.close();
 }, 30_000);
 
@@ -212,7 +226,14 @@ test("a group's file brings its members' cards with it: those with no card here 
   await rowMenu(page, "Duo", "Card");
   await page.waitForSelector("#cast-sheet:not([hidden]) .card-member");
   expect(await page.$$eval("#cast-sheet .card-member", (m) => m.map((x) => [x.querySelector(".card-member-open span:last-child")!.textContent, x.querySelector<HTMLButtonElement>(".card-member-out")!.disabled]))).toEqual([["Ada", true], ["Bea", true]]);
+  expect(await page.$$eval("#conversations .folder", (f) => f.map((x) => [...x.querySelectorAll(".members .member")].map((m) => (m as HTMLElement).title)).filter((m) => m.length))).toEqual([["Ada's card", "Bea's card"]]);
   await page.click("#cast-sheet .card-member:nth-child(2) .card-member-open");
+  await page.waitForFunction(() => document.querySelector<HTMLInputElement>("#cast-sheet input.card-name")?.value === "Bea");
+  await rowMenu(page, "Duo", "Card");
+  await page.waitForSelector("#cast-sheet:not([hidden]) .strips");
+  await page.click("#cast-sheet .strips > :first-child");
+  await page.waitForFunction(() => document.querySelector<HTMLInputElement>("#cast-sheet input.card-name")?.value === "Ada");
+  await page.click('#conversations .member[data-card]:nth-child(2)');
   await page.waitForFunction(() => document.querySelector<HTMLInputElement>("#cast-sheet input.card-name")?.value === "Bea");
   await rowMenu(page, "Duo", "Card");
   await page.waitForSelector("#cast-sheet:not([hidden]) .card-acts button");
@@ -272,12 +293,7 @@ test("a group's replies are each one character's own message: whoever the messag
   expect([await castRows(page), (await page.$$("#attachments .att")).length]).toEqual([["Chrysalis", "Hive", "Ida", "Mirela", "Tomas"], 0]);
   await openRow(page, "Mirela");
   await page.waitForFunction(() => document.querySelector("#thread .speaker")?.textContent === "Mirela");
-  await page.evaluate(() => {
-    const row = [...document.querySelectorAll("#conversations .cast-row")].find((r) => r.querySelector(".cast-name")!.textContent === "Tomas")!;
-    const dt = new DataTransfer(), at = document.getElementById("thread")!;
-    row.dispatchEvent(new DragEvent("dragstart", { dataTransfer: dt, bubbles: true }));
-    for (const type of ["dragenter", "dragover", "drop"]) at.dispatchEvent(new DragEvent(type, { dataTransfer: dt, bubbles: true, cancelable: true }));
-  });
+  expect(await carry(page, '#conversations .cast-row[data-person]:has(.cast-name)', "Tomas", () => page.$eval("#thread", (t) => { const r = t.getBoundingClientRect(); return [r.x + r.width / 2, r.y + 200]; }))).toBe("Join this chat");
   await page.waitForSelector("#cast-next .talk");
   expect([await castRows(page), await answers(page), await speakers(page)])
     .toEqual([["Chrysalis", "Hive", "Ida", "Mirela", "Mirela and Tomas", "Tomas"], ["Mirela", "Tomas"], ["Mirela"]]);
@@ -473,5 +489,48 @@ test("every row has the same menu: a character, a group and a folder are pinned,
   await openRow(page, "Hive");
   await page.waitForSelector("#cast-next .talk");
   expect(await answers(page)).toEqual(["Mira"]);
+  await page.close();
+}, 60_000);
+
+test("people are dragged like chats: a character onto another makes a group of the two, onto a group joins it, onto the open chat joins that; a member dragged out of a group's row leaves it, the last pair splits when the group has no chats and stays when it has; a chat dragged onto a group is that group's", async () => {
+  const page = await open();
+  for (const [n, d] of [["Mirela", "keeps bees"], ["Tomas", "sells honey"], ["Ida", "paints hives"]]) await Bun.write(`${dir}/${n}.png`, await card(n, { description: `{{char}} ${d}.` }));
+  await (await page.$("input#cast-file"))!.uploadFile(`${dir}/Mirela.png`, `${dir}/Tomas.png`, `${dir}/Ida.png`);
+  await page.waitForFunction(() => document.querySelectorAll("#conversations .cast-row").length === 4);
+  const people = '#conversations .cast-row[data-person]', member = "#conversations .member";
+  const inside = () => page.$$eval("#conversations .folder", (f) => Object.fromEntries(f.filter((x) => x.querySelector(".members")).map((x) => [x.querySelector(".cast-name")!.textContent, [...x.querySelectorAll(".member")].map((m) => (m as HTMLElement).title.replace("'s card", ""))])));
+  expect(await carry(page, people, "Tomas", rowAt(page, "Mirela"))).toBe("Group with Mirela");
+  await page.waitForFunction(() => !!document.querySelector("#conversations .members"));
+  expect([await castRows(page), await inside()]).toEqual([["Chrysalis", "Ida", "Mirela", "Mirela and Tomas", "Tomas"], { "Mirela and Tomas": ["Mirela", "Tomas"] }]);
+  expect(await carry(page, people, "Ida", rowAt(page, "Mirela and Tomas"))).toBe("Join Mirela and Tomas");
+  await page.waitForFunction(() => document.querySelectorAll("#conversations .member").length === 3);
+  expect([await castRows(page), await inside(), await carry(page, people, "Ida", rowAt(page, "Mirela, Tomas and Ida"))]).toEqual([["Chrysalis", "Ida", "Mirela", "Mirela, Tomas and Ida", "Tomas"], { "Mirela, Tomas and Ida": ["Mirela", "Tomas", "Ida"] }, ""]);
+  expect(await carry(page, member, "Tomas's card", rowAt(page, "Chrysalis"))).toBe("Take out");
+  await page.waitForFunction(() => document.querySelectorAll("#conversations .member").length === 2);
+  expect(await inside()).toEqual({ "Mirela and Ida": ["Mirela", "Ida"] });
+
+  await openRow(page, "Tomas");
+  await page.waitForFunction(() => (document.querySelector("#input") as HTMLTextAreaElement).placeholder === "Message Tomas");
+  await send(page, "good morning mirela");
+  await page.waitForNetworkIdle({ idleTime: 200 });
+  const chat = "#conversations a.conv";
+  const from = await page.$eval(chat, (a) => { const r = a.getBoundingClientRect(); return [r.x + r.width / 2, r.y + r.height / 2]; });
+  await page.mouse.move(from[0], from[1]);
+  await page.mouse.down();
+  await page.mouse.move(from[0] + 3, from[1] + 9, { steps: 3 });
+  const [x, y] = await rowAt(page, "Mirela and Ida")();
+  await page.mouse.move(x, y, { steps: 10 });
+  expect(await page.$eval(".drag-ghost .conv-verb", (v) => [v.textContent, (v as HTMLElement).hidden])).toEqual(["Mirela and Ida", false]);
+  await page.mouse.up();
+  await page.evaluate(() => new Promise((done) => setTimeout(done)));
+  await page.waitForSelector("#cast-next .talk");
+  expect([await answers(page), await page.$eval("#conversations a.conv", (a) => a.closest(".folder")!.querySelector(".cast-name")!.textContent)]).toEqual([["Mirela", "Ida"], "Mirela and Ida"]);
+  expect(await carry(page, member, "Ida's card", rowAt(page, "Chrysalis"))).toBe("");
+  expect(await inside()).toEqual({ "Mirela and Ida": ["Mirela", "Ida"] });
+  await rowMenu(page, "Mirela and Ida", "Fork");
+  await page.waitForFunction(() => document.querySelectorAll("#conversations .members").length === 2);
+  expect(await carry(page, '#conversations .folder:has(.cast-name) .member', "Ida's card", rowAt(page, "Chrysalis"))).toBe("Split up");
+  await page.waitForFunction(() => document.querySelectorAll("#conversations .members").length === 1);
+  expect(await castRows(page)).toEqual(["Chrysalis", "Ida", "Mirela", "Mirela and Ida", "Tomas"]);
   await page.close();
 }, 60_000);

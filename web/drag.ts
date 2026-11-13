@@ -1,4 +1,4 @@
-export type Drop = { kind: "pin"; index: number } | { kind: "unpin" } | { kind: "folder"; who: string } | { kind: "settle" } | { kind: "active" };
+export type Drop = { kind: "pin"; index: number } | { kind: "unpin" } | { kind: "folder"; who: string } | { kind: "settle" } | { kind: "active" } | { kind: "chat" } | { kind: "out" };
 interface Options { verb: (row: HTMLElement, drop: Drop) => string | null; done: (row: HTMLElement, drop: Drop) => void; started: () => void; ended: () => void }
 interface Parts { pins: HTMLElement; list: HTMLElement; shelf: HTMLElement }
 
@@ -6,18 +6,19 @@ const DISTANCE = 6;
 
 export function sidebarDrag(root: HTMLElement, at: Parts, o: Options) {
   root.addEventListener("pointerdown", (down) => {
-    const picked = (down.target as Element).closest<HTMLElement>("a.conv[data-key]");
-    if (!picked || !down.isPrimary || down.button !== 0 || down.pointerType === "touch" || (down.target as Element).closest("button, input, [data-card]")) return;
+    const picked = (down.target as Element).closest<HTMLElement>("a.conv[data-key], [data-person]"), chat = !!picked?.dataset.key;
+    if (!picked || !down.isPrimary || down.button !== 0 || down.pointerType === "touch" || (down.target as Element).closest(chat ? "button, input, [data-card]" : "input, .act")) return;
     let row = picked;
-    const wasPinned = !!row.closest(".pin-chats"), wasSettled = !!row.closest(".shelf-chats");
+    const same = (el: HTMLElement) => el.dataset.key === row.dataset.key && el.dataset.person === row.dataset.person && el.dataset.group === row.dataset.group;
+    const wasPinned = chat ? !!row.closest(".pin-chats") : at.pins.contains(row), wasSettled = chat ? !!row.closest(".shelf-chats") : at.shelf.contains(row);
     let dragging = false, drop: Drop | undefined, done = false, ghost: HTMLElement | undefined, badge: HTMLElement | undefined, bar: HTMLElement | undefined;
-    let scrolled = 0, top = 0, height = 0;
+    let scrolled = 0, top = 0, left = 0, height = 0;
     let pins: { top: number; bottom: number; mid: number }[] = [], folders: { who: string; top: number; bottom: number }[] = [];
     const suppress = (e: Event) => { e.stopPropagation(); e.preventDefault(); document.removeEventListener("click", suppress, true); };
     const clearSelection = () => document.getSelection()?.removeAllRanges();
     const start = () => {
       if (!row.isConnected) {
-        const again = [...root.querySelectorAll<HTMLElement>("a.conv[data-key]")].find((el) => el.dataset.key === row.dataset.key && !!el.closest(".pin-chats") === wasPinned);
+        const again = [...root.querySelectorAll<HTMLElement>("a.conv[data-key], [data-person]")].find((el) => same(el) && (chat ? !!el.closest(".pin-chats") : at.pins.contains(el)) === wasPinned);
         if (!again) return false;
         row = again;
       }
@@ -26,6 +27,7 @@ export function sidebarDrag(root: HTMLElement, at: Parts, o: Options) {
       const now = row.getBoundingClientRect(), box = root.getBoundingClientRect();
       scrolled = at.list.scrollTop;
       top = now.top;
+      left = now.left;
       height = now.height;
       pins = [...at.pins.querySelectorAll<HTMLElement>(".pin-chats > a.conv")].filter((el) => el !== row).map((el) => { const r = el.getBoundingClientRect(); return { top: r.top, bottom: r.bottom, mid: r.top + r.height / 2 }; });
       folders = [...at.list.querySelectorAll<HTMLElement>(".folder[data-who]")].map((el) => { const r = el.getBoundingClientRect(); return { who: el.dataset.who!, top: r.top, bottom: r.bottom }; });
@@ -51,15 +53,17 @@ export function sidebarDrag(root: HTMLElement, at: Parts, o: Options) {
       clearSelection();
       return true;
     };
-    const aim = (y: number): Drop | undefined => {
+    const aim = (y: number, x: number): Drop | undefined => {
       const above = at.pins.getBoundingClientRect(), below = at.shelf.getBoundingClientRect(), tries: Drop[] = [];
-      if (y <= above.bottom) tries.push({ kind: "pin", index: pins.filter((p) => p.mid < y).length });
+      if (x > root.getBoundingClientRect().right) tries.push({ kind: "chat" }, { kind: "out" });
+      else if (y <= above.bottom) tries.push({ kind: "pin", index: pins.filter((p) => p.mid < y).length });
       else if (y >= below.top) tries.push({ kind: "settle" });
       else {
         const inList = y + at.list.scrollTop - scrolled, folder = folders.find((f) => inList >= f.top && inList <= f.bottom);
         if (folder) tries.push({ kind: "folder", who: folder.who });
         if (wasPinned) tries.push({ kind: "unpin" });
         if (wasSettled) tries.push({ kind: "active" });
+        if (folder?.who !== row.dataset.group) tries.push({ kind: "out" });
       }
       return tries.find((t) => o.verb(row, t) !== null);
     };
@@ -90,7 +94,8 @@ export function sidebarDrag(root: HTMLElement, at: Parts, o: Options) {
       const label = at.pins.querySelector(".pin-head")?.getBoundingClientRect().bottom ?? box.top, floor = at.shelf.querySelector(".shelf-head, .settled-head")?.getBoundingClientRect().top ?? box.bottom;
       const y = Math.max(label, Math.min(top + (e.clientY - down.clientY), floor - height));
       ghost!.style.top = `${y}px`;
-      drop = aim(Math.max(box.top + 1, Math.min(e.clientY, box.bottom - 1)));
+      ghost!.style.left = `${left + Math.max(0, e.clientX - box.right)}px`;
+      drop = aim(Math.max(box.top + 1, Math.min(e.clientY, box.bottom - 1)), e.clientX);
       paint();
     };
     const up = (e: PointerEvent) => { if (e.pointerId === down.pointerId) finish(false); };

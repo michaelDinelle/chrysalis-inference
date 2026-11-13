@@ -270,7 +270,6 @@ const people = new Map<string, Person>(), groups = new Map<string, Group>(), fac
 const ME = "me", CHRYSALIS = "chrysalis";
 people.set(CHRYSALIS, { id: CHRYSALIS, kind: "assistant", card: { spec: "chara_card_v2", spec_version: "2.0", data: { name: "Chrysalis" } }, added: 0 });
 people.set(ME, { id: ME, kind: "persona", card: { spec: "chara_card_v2", spec_version: "2.0", data: { name: "User", description: "" } }, added: 0 });
-const CAST_DRAG = "application/x-chrysalis-cast";
 let talking = 0;
 const persona = () => people.get(ME)!;
 const userName = () => nameOf(ME);
@@ -419,10 +418,7 @@ function castRow(id: string, list: Conversation[], open: boolean): HTMLElement {
     row.classList.toggle("here", here);
     row.append(bring);
   }
-  if (people.get(id)?.kind === "character") {
-    row.draggable = true;
-    row.ondragstart = (e) => { e.dataTransfer!.setData(CAST_DRAG, id); e.dataTransfer!.effectAllowed = "copy"; };
-  }
+  if (g || people.get(id)?.kind === "character") row.dataset.person = id;
   return row;
 }
 function pickFolder(id: string) {
@@ -549,6 +545,18 @@ function join(ids: string[]) {
   });
   renderCast();
   render();
+}
+const canLeave = (g: Group) => g.members.length > 2 || !everyChat().some((c) => c.who === g.id);
+function takeOut(g: Group, id: string) {
+  if (g.members.length > 2) setMembers(g, g.members.filter((m) => m !== id), `${nameOf(id)} left ${called(g)}`);
+  else if (canLeave(g)) void drop(g.id);
+}
+function together(a: string, b: string) {
+  const g = groups.get(b);
+  if (g) return setMembers(g, [...g.members, a], `${nameOf(a)} joined ${called(g)}`);
+  const made = makeGroup([b, a]);
+  renderCast();
+  toast(`${nameOf(made.id)} are a group`, () => void forget(made.id).then((f) => f.done()));
 }
 const doomed = new Set<string>();
 async function forget(id: string) {
@@ -1099,13 +1107,14 @@ function paintInvite() {
     const inside = members.some((m) => m.id === p.id), b = h("button", "invite-row"), name = p.card.data.name;
     b.type = "button";
     b.setAttribute("aria-pressed", String(inside));
-    b.disabled = inside && (edited ? edited.members.length < 3 : from !== null);
-    b.title = edited ? (inside ? (b.disabled ? `${name}: one of the last two in it` : `${name}: in it (click to take out)`) : `Bring ${name} in`)
+    b.disabled = inside && (edited ? !canLeave(edited) : from !== null);
+    b.title = edited ? (inside ? (b.disabled ? `${name}: one of the last two in it, which has chats` : `${name}: in it (click to take out)`) : `Bring ${name} in`)
       : inside ? `${name}: this chat is theirs${from === null ? " (click for plain Chrysalis)" : ""}` : folder ? `${name} works in it, in character` : `Bring ${name} in`;
     b.append(face(p.id), h("span", "invite-name", name));
     if (inside) b.insertAdjacentHTML("beforeend", icon("check"));
     b.onclick = () => {
-      if (edited) setMembers(edited, inside ? edited.members.filter((m) => m !== p.id) : [...edited.members, p.id], `${name} ${inside ? "left" : "joined"} ${called(edited)}`);
+      if (edited && inside) takeOut(edited, p.id);
+      else if (edited) setMembers(edited, [...edited.members, p.id], `${name} joined ${called(edited)}`);
       else if (from === null && inside) {
         delete conv.who;
         stow(conv);
@@ -1191,24 +1200,21 @@ function openSheet(id: string) {
   };
   const art = h("div", "card-art"), title = h("div", "card-title"), body = h("div", "card-body"), scroll = h("div", "card-scroll");
   if (g) {
-    const all = membersOf(g).slice(0, 4).map((m) => face(m.id)), strips = h("div", `strips s${Math.max(all.length, 1)}`);
+    const all = membersOf(g).slice(0, 4).map((m) => { const f = face(m.id); f.dataset.card = m.id; f.title = `${m.card.data.name}'s card`; return f; }), strips = h("div", `strips s${Math.max(all.length, 1)}`);
     strips.append(...(all.length ? all : [face(id)]));
     art.append(strips);
   } else if (person!.kind === "assistant" && !person!.image && seaPortrait()) {
     art.append(cardSea!.layer);
     scroll.addEventListener("scroll", () => cardSea!.ocean.place(), { passive: true });
   } else {
-    const file = h("a", "card-file"), pic = person!.image ? h("img") : face(id);
-    file.download = file.title = cardName(id);
-    file.draggable = false;
-    if (sheetFile?.id === id) file.href = sheetFile.url;
+    const pic = person!.image ? h("img") : face(id);
     if (pic instanceof HTMLImageElement) {
-      pic.src = sheetFile?.id === id ? sheetFile.url : faces.get(id)!;
+      pic.src = faces.get(id)!;
       pic.alt = "";
       pic.draggable = false;
     }
-    file.append(pic);
-    art.append(file);
+    pic.classList.add("card-portrait");
+    art.append(pic);
     if (sheetFile?.id !== id) void cardFile(person!);
   }
   art.append(h("div", "card-scrim"), title);
@@ -1221,8 +1227,8 @@ function openSheet(id: string) {
   name.oninput = () => {
     if (person) person.card.data.name = name.value;
     else if (name.value.trim()) g!.name = name.value; else delete g!.name;
-    const file = art.querySelector<HTMLAnchorElement>("a.card-file");
-    if (file) file.download = file.title = cardName(id);
+    const file = body.querySelector<HTMLAnchorElement>("a.card-file");
+    if (file) file.download = cardName(id);
     keep();
     renderCast();
     if (castOf(conv).members.some((m) => m.id === id) || folderOf(conv) === id) render();
@@ -1240,18 +1246,26 @@ function openSheet(id: string) {
     };
     body.append(voicePick(person, keep), field("Description", "description", person.kind === "assistant" ? "The system prompt: who they are and how they answer" : "Who they are: looks, past, manner, how they talk"),
       field("Scenario", "scenario", "Where and when the chat begins"), field("Greeting", "first_mes", "Their first message"));
+    const acts = h("div", "card-acts"), file = h("a", "card-file");
+    file.download = cardName(id);
+    file.title = "Their card as a PNG any app that takes character cards can read";
+    file.draggable = false;
+    file.innerHTML = `${icon("download")}Download card`;
+    if (sheetFile?.id === id) file.href = sheetFile.url;
+    acts.append(file);
+    body.append(acts);
   } else {
     const members = h("div", "card-members");
     members.append(...membersOf(g!).map((x) => {
-      const row = h("div", "card-member"), open = h("button", "card-member-open"), name = x.card.data.name, last = g!.members.length < 3;
+      const row = h("div", "card-member"), open = h("button", "card-member-open"), name = x.card.data.name, last = !canLeave(g!);
       open.type = "button";
       open.title = `${name}'s card`;
+      open.dataset.card = x.id;
       open.append(face(x.id), h("span", "", name));
-      open.onclick = () => openSheet(x.id);
-      const out = btn("act card-member-out", last ? `${name}: one of the last two in it` : `Take ${name} out`, icon("x"), () => {
+      const out = btn("act card-member-out", last ? `${name}: one of the last two in it, which has chats` : `Take ${name} out`, icon("x"), () => {
         clearTimeout(saving);
-        setMembers(g!, g!.members.filter((m) => m !== x.id), `${name} left ${called(g!)}`);
-        openSheet(id);
+        takeOut(g!, x.id);
+        if (groups.has(id)) openSheet(id); else closeSheet();
       });
       out.disabled = last;
       row.append(open, out);
@@ -1262,7 +1276,7 @@ function openSheet(id: string) {
     who.append(h("span", "card-label", "Members"), members, add);
     where.append(h("span", "card-label", "Scenario"), text(g!.scenario ?? "", (v) => { if (v) g!.scenario = v; else delete g!.scenario; }, "card-text",
       "Where they are and what is going on (in place of their own)"));
-    acts.append(btn("", "This group as a file, with its members' cards in it", `${icon("download")}Export`,
+    acts.append(btn("", "This group as a file, with its members' cards in it", `${icon("download")}Download group`,
       () => download(`${nameOf(id) || "group"}.json`, JSON.stringify({ spec: "chrysalis_group", name: nameOf(id),
         members: membersOf(g!).map((m) => m.card.data.name), cards: membersOf(g!).map((m) => m.card), ...(g!.scenario ? { scenario: g!.scenario } : {}) }, null, 2), "application/json")));
     body.append(who, where, acts);
@@ -1294,7 +1308,6 @@ async function cardFile(p: Person) {
   const file = $("cast-sheet").querySelector<HTMLAnchorElement>("a.card-file");
   if (!file) return;
   file.href = url;
-  file.querySelector("img")?.setAttribute("src", url);
 }
 const cardName = (id: string) => `${nameOf(id) || "character"}.png`;
 function closeSheet() {
@@ -3927,6 +3940,20 @@ function renderList() {
     const open = unfolded.has(id) && list.length > 0, box = h("div", `folder${open ? " open" : ""}`);
     box.dataset.who = id;
     box.append(castRow(id, list, open));
+    const g = groups.get(id);
+    if (g) {
+      const strip = h("div", "members");
+      strip.append(...membersOf(g).map((m) => {
+        const b = h("button", "member");
+        b.type = "button";
+        b.title = b.ariaLabel = `${m.card.data.name}'s card`;
+        b.dataset.card = b.dataset.person = m.id;
+        b.dataset.group = id;
+        b.append(face(m.id));
+        return b;
+      }));
+      box.append(strip);
+    }
     if (open) {
       const kids = h("div", "folder-chats");
       kids.append(...list.map((c) => convRow(c)));
@@ -4073,7 +4100,7 @@ const canMove = (c: Conversation, who: string) => {
 };
 async function moveChat(c: Conversation, who: string) {
   if (who.startsWith(DIR)) return moveThread(c, who.slice(DIR.length));
-  const mine = chats[c.id] ?? (c.id === conv.id ? conv : c);
+  const mine = c.id === conv.id ? conv : chats[c.id] ?? c;
   if (who === CHRYSALIS) delete mine.who; else mine.who = who;
   stow(mine);
   unfold(who);
@@ -4088,6 +4115,18 @@ async function moveChat(c: Conversation, who: string) {
 }
 const chatAt = (row: HTMLElement) => everyChat().find((c) => keyOf(c) === row.dataset.key);
 const dropVerb = (row: HTMLElement, drop: Drop): string | null => {
+  const person = row.dataset.person, from = groups.get(row.dataset.group ?? "");
+  if (person && from) return drop.kind === "out" && canLeave(from) ? (from.members.length > 2 ? "Take out" : "Split up") : null;
+  if (person) {
+    const pinned = kept("pinned").includes(person), settled = kept("settled").includes(person);
+    if (drop.kind === "folder") {
+      const g = groups.get(drop.who);
+      if (!people.has(person)) return null;
+      return g ? (g.members.includes(person) ? null : `Join ${nameOf(g.id)}`) : people.get(drop.who)?.kind === "character" && drop.who !== person ? `Group with ${nameOf(drop.who)}` : null;
+    }
+    if (drop.kind === "chat") return people.has(person) && folderOf(conv) && !castOf(conv).members.some((m) => m.id === person) ? "Join this chat" : null;
+    return drop.kind === "pin" ? (pinned ? "" : "Pin") : drop.kind === "unpin" ? "Unpin" : drop.kind === "settle" ? (settled ? "" : "Settle") : drop.kind === "active" ? "Un-settle" : null;
+  }
   const c = chatAt(row), isPinned = !!c && kept("pinned").includes(keyOf(c));
   if (!c) return null;
   const away = !!row.closest(".shelf-chats");
@@ -4099,6 +4138,15 @@ sidebarDrag($("conversations"), { pins: $("side-pins"), list: $("side-list"), sh
   started: () => { sorting = true; },
   ended: () => { sorting = false; listStale = false; renderList(); },
   done: (row, drop) => {
+    const person = row.dataset.person, from = groups.get(row.dataset.group ?? "");
+    if (person && from) return void (drop.kind === "out" && takeOut(from, person));
+    if (person) {
+      if (drop.kind === "folder") together(person, drop.who);
+      else if (drop.kind === "chat") join([person]);
+      else if (drop.kind === "pin" || drop.kind === "unpin") keepRow("pinned", person, drop.kind === "pin");
+      else if (drop.kind === "settle" || drop.kind === "active") keepRow("settled", person, drop.kind === "settle");
+      return;
+    }
     const c = chatAt(row);
     if (!c) return;
     if (row.closest(".shelf-chats")) putAway(c, false, true);
@@ -6053,8 +6101,7 @@ input.addEventListener("paste", (e) => {
   void addFiles(files);
 });
 let dragDepth = 0;
-const dropsHere = (e: DragEvent) => !!e.dataTransfer?.types.includes("Files")
-  || (!!e.dataTransfer?.types.includes(CAST_DRAG) && !!folderOf(conv) && !!(e.target as Element).closest?.("main"));
+const dropsHere = (e: DragEvent) => !!e.dataTransfer?.types.includes("Files");
 document.addEventListener("dragenter", (e) => { if (dropsHere(e) && dragDepth++ === 0) document.querySelector(".composer-box")!.classList.add("dropping"); });
 document.addEventListener("dragleave", (e) => { if (dropsHere(e) && --dragDepth === 0) document.querySelector(".composer-box")!.classList.remove("dropping"); });
 document.addEventListener("dragover", (e) => { if (dropsHere(e)) e.preventDefault(); });
@@ -6063,9 +6110,7 @@ document.addEventListener("drop", (e) => {
   e.preventDefault();
   dragDepth = 0;
   document.querySelector(".composer-box")!.classList.remove("dropping");
-  const who = e.dataTransfer!.getData(CAST_DRAG);
-  if (who) join([who]);
-  else void addFiles(e.dataTransfer!.files);
+  void addFiles(e.dataTransfer!.files);
 });
 document.addEventListener("dragend", () => { dragDepth = 0; document.querySelector(".composer-box")!.classList.remove("dropping"); });
 
