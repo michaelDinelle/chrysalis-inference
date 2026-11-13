@@ -40,18 +40,18 @@ Chrysalis beats Strata's IQ3_S on every measure on the RX 7900. On the RTX 5070 
 ## Phones and other devices
 
 <p align="center"><img src="media/phone-pairing.png" width="760" alt="A phone connecting: the connect page, the code it shows, then the chat"></p>
-<p align="center"><img src="media/opencode-panel.png" width="380" alt="The OpenCode button's panel: OpenCode connected on this computer, Chrysalis only switched on, and Devices"></p>
-<p align="center"><img src="media/connect-desktop.png" width="520" alt="Devices on the computer: the QR code and a device's code with Allow"></p>
+<p align="center"><img src="media/opencode-panel.png" width="380" alt="The OpenCode button's panel: Disconnect, Chrysalis only switched on, Add a phone or browser, Add a computer to Run on"></p>
+<p align="center"><img src="media/connect-desktop.png" width="520" alt="Phones and browsers: the QR code and a device's code with Allow"></p>
 
-<sub>Open Devices from the OpenCode button, scan the QR code, trust the certificate once, and allow the code.</sub>
+<sub>Open Add a phone or browser from the OpenCode button, scan the QR code, trust the certificate once, and allow the code.</sub>
 
 ## Coding on another computer
 
 Start Chrysalis with `chrysalis.sh --host 0.0.0.0`. The other computer needs [OpenCode](https://opencode.ai).
 
-<p align="center"><img src="media/opencode-copy.png" width="560" alt="Devices in that computer's browser: the OpenCode line and its Copy button"></p>
+<p align="center"><img src="media/add-computer.png" width="560" alt="Add a computer: the line to paste, its Copy button, and the computers under Run on"></p>
 
-<sub>Copy the line under Devices, in the OpenCode button's panel.</sub>
+<sub>Copy the line from Add a computer, under the OpenCode button or at the end of the Run on menu.</sub>
 
 <p align="center"><img src="media/opencode-login.png" width="760" alt="The line pasted into a terminal: it shows a code to allow, then Connected"></p>
 
@@ -160,13 +160,13 @@ docker run -d --device /dev/kfd --device /dev/dri -p 127.0.0.1:8080:8080 -v chry
 - Run on: the line also leaves a small helper on that computer (a launchd job on a Mac, a systemd user service on
   Linux) that starts its own OpenCode on Chrysalis's models alone and holds one outgoing HTTPS connection to Chrysalis,
   so nothing listens on that computer. The page drives that OpenCode through it: its folders, its files, its tools.
-  Only threads the page started there are listed. Remove under Devices ends it, and the helper then stops for good.
+  Only threads the page started there are listed. Remove under Add a computer ends it, and the helper then stops for good.
 - A computer pasted a second time is not asked for again: the line keeps its key in `~/.config/chrysalis`.
 - The OpenCode the line opens has Chrysalis's models and no other provider, and starts on the model Chrysalis last
   loaded. The line leaves a command that opens it that way again, `~/.config/chrysalis/opencode-<computer>`, and prints
   it when OpenCode closes. Plain `opencode` keeps its other models beside Chrysalis's: a session on one of those leaves
   your network.
-- OpenCode retries while Chrysalis is off. Remove under Devices takes a computer's access away.
+- OpenCode retries while Chrysalis is off. Remove under Add a computer takes a computer's access away.
 - The line pins this computer's key. Only allowed computers can connect. OpenCode connects over HTTPS and trusts Chrysalis's
   authority for local names.
 - On a Mac, the line also adds a launchd job that forwards a local port to Chrysalis through Apple's `nc`. HTTPS still runs

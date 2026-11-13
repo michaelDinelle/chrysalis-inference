@@ -762,7 +762,7 @@ function chooseMachine(at: HTMLElement) {
     conv.thread = freshThread();
     renderCast();
     renderControls();
-  } })), ...(status.here || !PHONE ? [{ label: "Add another computer", icon: "plus" as const, run: openConnect, quiet: true }] : [])], "Run on");
+  } })), ...(status.here || !PHONE ? [{ label: "Add another computer", icon: "plus" as const, run: () => openConnect("computer") }] : [])], "Run on");
   menu.style.top = "auto";
   menu.style.bottom = `${innerHeight - r.top + 6}px`;
 }
@@ -869,11 +869,15 @@ async function paintOcPop() {
       models.push(back);
     }
     if (!status.here && PHONE) return [h("div", "invite-head oc-part", "Models"), ...models];
-    const devices = row("invite-row oc-devices", "", () => { pop.hidden = true; openConnect(); });
-    devices.id = "oc-devices";
-    devices.innerHTML = `${icon(status.here ? "phone" : "code")}<span class="invite-name"></span>${status.here && status.waiting ? `<span class="oc-asking">${status.waiting}</span>` : ""}${icon("chevron")}`;
-    devices.querySelector(".invite-name")!.textContent = !status.here ? "Add this computer" : status.waiting ? "Asking to be let in" : "Add a phone or computer";
-    return [h("div", "invite-head oc-part", "Models"), ...models, h("div", "invite-head oc-part", "Devices"), devices];
+    const link = (id: string, glyph: keyof typeof ICONS, label: string, mode: "devices" | "computer", count = 0) => {
+      const b = row("invite-row oc-devices", `${icon(glyph)}<span class="invite-name"></span>${count ? `<span class="oc-asking">${count}</span>` : ""}${icon("chevron")}`, () => { pop.hidden = true; openConnect(mode); });
+      b.id = id;
+      b.querySelector(".invite-name")!.textContent = label;
+      return b;
+    };
+    return [h("div", "invite-head oc-part", "Models"), ...models, h("div", "invite-head oc-part", "Devices"),
+      ...(status.here ? [link("oc-devices", "phone", status.waiting ? "Asking to be let in" : "Add a phone or browser", "devices", status.waiting ?? 0)] : []),
+      link("oc-computers", "monitor", "Add a computer to Run on", "computer")];
   };
   const head = (version = "") => h("div", "invite-head", `OpenCode ${version}${host ? ` on ${host}` : ""}`.replace(/  +/g, " "));
   if (harness.state === "absent") {
@@ -3669,30 +3673,63 @@ async function renderConnect() {
   if (!connectView.open) return;
   clearTimeout(connectTimer);
   connectTimer = window.setTimeout(renderConnect, 2000);
-  const box = $("connect-body");
-  if (!status.here && oc?.line) {
-    if (box.dataset.key !== oc.line) {
-      box.dataset.key = oc.line;
-      box.replaceChildren(openCodeRow(oc.line, `Paste this into ${/Win/.test(navigator.platform) ? "WSL, with OpenCode installed there," : "a terminal here,"} then allow its code on ${status.machine ?? "the computer Chrysalis runs on"}. This computer then shows under Run on, and OpenCode opens here on Chrysalis's models.`));
-    }
-    return;
-  }
-  if (!p) {
+  const box = $("connect-body"), computers = connectMode === "computer", host = status.machine ?? "the computer Chrysalis runs on";
+  if (status.here && !p) {
     box.dataset.key = "";
     return void box.replaceChildren(h("p", "set-note", "Cannot reach Chrysalis's web server. Trying again…"));
   }
-  if (!p.lan) {
+  if (status.here ? !p.lan : !oc?.line) {
     const note = h("p", "set-note");
-    note.append("Chrysalis is on this computer only. Run ", h("code", "", "chrysalis.sh --host 0.0.0.0"), " in a terminal to let your phone and other devices on this network in.");
+    note.append("Chrysalis is on this computer only. Run ", h("code", "", "chrysalis.sh --host 0.0.0.0"), " in a terminal to let other devices on this network in.");
     box.dataset.key = "";
     return void box.replaceChildren(note);
   }
-  const list: Paired[] = p.devices, asking: Joining[] = p.waiting, fresh = known && list.find((d) => !known!.has(d.id));
-  if (fresh) joined = fresh.name;
-  known = new Set(list.map((d) => d.id));
-  const key = JSON.stringify([joined, asking, list.map((d) => [d.id, since(d.seen)]), p.connect, !!p.qr, oc?.line]);
+  if (computers) await loadThreads();
+  const list: Paired[] = p?.devices ?? [], asking: Joining[] = p?.waiting ?? [], on = harness.machines ?? [];
+  const ids = computers ? on.map((m) => m.id) : list.map((d) => d.id), fresh = known && ids.find((id) => !known!.has(id));
+  if (fresh) joined = computers ? on.find((m) => m.id === fresh)!.name : list.find((d) => d.id === fresh)!.name;
+  known = new Set(ids);
+  const key = JSON.stringify([connectMode, joined, asking, list.map((d) => [d.id, since(d.seen)]), on, p?.connect, !!p?.qr, oc?.line]);
   if (box.dataset.key === key) return;
   box.dataset.key = key;
+  const asks = h("div", "dev-list");
+  if (asking.length) asks.append(h("div", "set-title", "Asking to join"));
+  for (const a of asking) {
+    const item = h("div", "dev-ask"), allow = h("button", "btn small primary", a.allowed ? "Allowed" : "Allow"), deny = h("button", "btn small", "Deny");
+    allow.type = deny.type = "button";
+    allow.disabled = a.allowed;
+    allow.onclick = () => void answer("allow", a.code);
+    deny.onclick = () => void answer("deny", a.code);
+    item.append(h("span", "dev-name", a.name), h("code", "dev-ask-code", spaced(a.code)), deny, allow);
+    asks.append(item);
+  }
+  if (asking.length) asks.append(h("p", "set-note", "Allow only a code your own device is showing."));
+  const entry = (name: string, note: string, id?: string) => {
+    const item = h("div", "dev-item");
+    item.append(h("span", "dev-name", name), h("span", "dev-when", note));
+    if (id && status.here) {
+      const remove = h("button", "btn small", "Remove");
+      remove.type = "button";
+      remove.onclick = async () => { await fetch(`/api/pair/${id}`, { method: "DELETE" }); box.dataset.key = ""; void renderConnect(); };
+      item.append(remove);
+    }
+    return item;
+  };
+  const done = h("p", "dev-joined");
+  done.innerHTML = icon("check");
+  if (computers) {
+    done.append(`${joined} is under Run on.`);
+    const add = h("div", "dev-list"), copyIt = h("button", "btn small dev-copy", "Copy"), all = h("div", "dev-list");
+    copyIt.type = "button";
+    copyIt.onclick = () => copy(oc.line, copyIt);
+    add.append(h("p", "dev-lead", "On that computer, with OpenCode installed, paste this into a terminal:"), h("code", "dev-url", oc.line), copyIt,
+      ...(asking.length ? [] : [h("p", "set-note", status.here ? "Its code then shows here to allow." : `Then allow its code on ${host}.`)]));
+    all.append(h("div", "set-title", "Run on"));
+    for (const m of on) all.append(entry(m.name, m.id ? "connected" : "Chrysalis runs here", m.id || undefined));
+    for (const d of list) if (d.kind === "computer" && !on.some((m) => m.id === d.id)) all.append(entry(d.name, `not connected · used ${since(d.seen)}`, d.id));
+    return void box.replaceChildren(...(joined ? [done] : []), add, ...(asking.length ? [asks] : []), all);
+  }
+  done.append(`${joined} is connected.`);
   const row = h("div", "dev-row"), text = h("div", "dev-text"), other = h("p");
   if (p.qr) {
     const qr = h("img", "dev-qr");
@@ -3705,47 +3742,22 @@ async function renderConnect() {
     other,
     ...(p.qr ? [] : [h("p", "set-note", "With qrencode installed, a QR code shows here for phones to scan.")]));
   row.append(text);
-  const asks = h("div", "dev-list");
-  if (asking.length) asks.append(h("div", "set-title", "Asking to join"));
-  for (const a of asking) {
-    const item = h("div", "dev-ask"), allow = h("button", "btn small primary", a.allowed ? "Allowed" : "Allow"), deny = h("button", "btn small", "Deny");
-    allow.type = deny.type = "button";
-    allow.disabled = a.allowed;
-    allow.onclick = () => void answer("allow", a.code);
-    deny.onclick = () => void answer("deny", a.code);
-    item.append(h("span", "dev-name", a.name), h("code", "dev-ask-code", spaced(a.code)), deny, allow);
-    asks.append(item);
-  }
-  if (asking.length) asks.append(h("p", "set-note", "Allow only a code your own device is showing. A device let in uses this computer as you do, and a computer let in can be run from this page."));
-  const devs = h("div", "dev-list");
+  const devs = h("div", "dev-list"), browsers = list.filter((d) => d.kind !== "computer");
   devs.append(h("div", "set-title", "Let in"));
-  if (!list.length) devs.append(h("p", "set-note", "None yet."));
-  for (const d of list) {
-    const item = h("div", "dev-item"), remove = h("button", "btn small", "Remove");
-    remove.type = "button";
-    remove.onclick = async () => { await fetch(`/api/pair/${d.id}`, { method: "DELETE" }); box.dataset.key = ""; void renderConnect(); };
-    item.append(h("span", "dev-name", d.name), h("span", "dev-when", `${d.kind === "computer" ? "linked computer · " : ""}added ${day(d.added)} · used ${since(d.seen)}`), remove);
-    devs.append(item);
-  }
+  if (!browsers.length) devs.append(h("p", "set-note", "None yet."));
+  for (const d of browsers) devs.append(entry(d.name, `added ${day(d.added)} · used ${since(d.seen)}`, d.id));
   const fp = h("p", "set-note dev-fp");
   fp.append(`To be sure a device trusts this computer and not an impostor on the network, its certificate details show the same SHA-256 fingerprint for ${p.name}: `,
     h("code", "", p.fingerprint));
-  const done = h("p", "dev-joined");
-  done.innerHTML = icon("check");
-  done.append(`${joined} is connected.`);
-  box.replaceChildren(...(joined ? [done] : []), row, ...(asking.length ? [asks] : []),
-    ...(oc?.line ? [openCodeRow(oc.line, "Another computer with OpenCode: paste this into its terminal and allow its code here. It then shows under Run on.", "A computer")] : []), devs, fp);
+  box.replaceChildren(...(joined ? [done] : []), row, ...(asking.length ? [asks] : []), devs, fp);
 }
-function openCodeRow(line: string, how: string, title = "This computer") {
-  const row = h("div", "dev-list"), button = h("button", "btn small dev-copy", "Copy");
-  button.type = "button";
-  button.onclick = () => copy(line, button);
-  row.append(h("div", "set-title", title), h("p", "set-note", how), h("code", "dev-url", line), button);
-  return row;
-}
-function openConnect() {
+let connectMode: "devices" | "computer" = "devices";
+function openConnect(mode: "devices" | "computer" = "devices") {
+  connectMode = mode;
   joined = "";
   known = undefined;
+  $("connect-body").dataset.key = "";
+  $("connect-title").textContent = mode === "computer" ? "Add a computer" : "Phones and browsers";
   connectView.showModal();
   void renderConnect();
 }
@@ -4155,7 +4167,7 @@ async function refreshStatus(again = true) {
   } catch { status = { state: "offline", backend: status.backend }; }
   if (status.check) void checkTrust();
   paintHarness();
-  if ((status.waiting ?? 0) > asked && !connectView.open) toast("A device is asking to join: Devices, under the OpenCode button");
+  if ((status.waiting ?? 0) > asked && !connectView.open) toast("A device is asking to join: the OpenCode button has its code");
   asked = status.waiting ?? 0;
   build ||= status.build ?? "";
   if (status.state === "online" && status.model && !status.loading && status.model !== picked) {

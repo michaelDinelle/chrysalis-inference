@@ -35,12 +35,14 @@ test("trusting the authority, Chromium and Firefox each show their own code on t
       await page.waitForSelector("#app:not([aria-busy])");
       expect(page.url()).toBe(lan.chat);
       await page.click("#opencode");
-      await page.waitForSelector("#oc-devices");
+      await page.waitForSelector("#oc-computers");
+      expect(await page.$("#oc-devices")).toBeNull();
       expect([await page.$("#oc-only"), /^Chrysalis onlyset on \S/.test(await page.$eval("#oc-locked", (e) => e.textContent ?? "")), await page.$("#oc-back")]).toEqual([null, true, null]);
       expect(await page.evaluate(() => fetch("/api/threads/outside", { method: "POST", headers: { "Content-Type": "application/json" }, body: "{}" }).then((r) => r.status))).toBe(403);
       expect(await page.evaluate(() => fetch("/api/threads").then((r) => r.json()).then((j) => j.outside))).toBe(false);
-      await page.click("#oc-devices");
+      await page.click("#oc-computers");
       await page.waitForSelector("#connect-view .dev-url");
+      expect(await page.$eval("#connect-title", (e) => e.textContent)).toBe("Add a computer");
       const line = await page.$eval("#connect-view .dev-url", (e) => e.textContent!);
       expect(line).toMatch(/^curl -fsSk --pinnedpubkey sha256\/\/\S+ https:\/\/\S+\/opencode \| sh$/);
       expect(await page.evaluate(() => {
@@ -59,7 +61,7 @@ test("trusting the authority, Chromium and Firefox each show their own code on t
       await phone.waitForSelector("#app:not([aria-busy])");
       await phone.click("#opencode");
       await phone.waitForSelector("#oc-locked");
-      expect(await phone.$("#oc-devices")).toBeNull();
+      expect([await phone.$("#oc-devices"), await phone.$("#oc-computers")]).toEqual([null, null]);
       await phone.close();
       await local.waitForFunction((n) => (document.querySelector("#connect-view .dev-joined")?.textContent ?? "").includes(`${n} is connected`), { timeout: 5000 }, name);
       if (!firefox) chrome = page;
