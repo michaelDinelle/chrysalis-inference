@@ -378,6 +378,12 @@ function castRow(id: string, list: Conversation[], open: boolean): HTMLElement {
   pic.type = main.type = add.type = "button";
   pic.title = pic.ariaLabel = d ? id.slice(DIR.length) : `${name || "Unnamed"}'s card`;
   pic.append(face(id));
+  if (g) membersOf(groups.get(id)!).slice(0, 4).forEach((m, k) => {
+    const tile = pic.firstElementChild!.children[k] as HTMLElement;
+    tile.dataset.person = m.id;
+    tile.dataset.group = id;
+    tile.title = m.card.data.name.trim() || nameOf(m.id);
+  });
   if (d) pic.onclick = () => main.click();
   else pic.dataset.card = id;
   if (renaming === id) {
@@ -458,9 +464,16 @@ function stow(c: Conversation) {
 }
 const byName = (name: string) => [...people.values()].find((p) => p.kind !== "persona" && nameOf(p.id) === name.trim());
 const keepGroup = (g: Group) => { groups.set(g.id, g); void saveGroup(g); };
-function makeGroup(members: string[], more: Partial<Group> = {}): Group {
+function placeRow(id: string, beside: string, after = false) {
+  const rows = kept("rows").filter((r) => r !== id), at = rows.indexOf(beside);
+  if (at < 0) return;
+  rows.splice(at + Number(after), 0, id);
+  setPref("rows", JSON.stringify(rows));
+}
+function makeGroup(members: string[], more: Partial<Group> = {}, beside = members[0]): Group {
   const g: Group = { id: CAST + randomId(), members, added: Date.now(), ...more };
   keepGroup(g);
+  placeRow(g.id, beside);
   unfold(g.id);
   return g;
 }
@@ -3918,6 +3931,7 @@ function forkRow(id: string) {
     made = copy.id;
   } else if (g) made = makeGroup([...g.members], { name, ...(g.scenario ? { scenario: g.scenario } : {}) }).id;
   if (!made) return;
+  placeRow(made, id, true);
   renderCast();
   toast(`${name} is a copy of ${nameOf(id)}`, () => void forget(made).then((f) => f.done()));
 }
@@ -3954,20 +3968,6 @@ function renderList() {
     const open = unfolded.has(id) && list.length > 0, box = h("div", `folder${open ? " open" : ""}`);
     box.dataset.who = id;
     box.append(castRow(id, list, open));
-    const g = groups.get(id);
-    if (g) {
-      const strip = h("div", "members");
-      strip.append(...membersOf(g).map((m) => {
-        const b = h("button", "member");
-        b.type = "button";
-        b.title = b.ariaLabel = `${m.card.data.name}'s card`;
-        b.dataset.card = b.dataset.person = m.id;
-        b.dataset.group = id;
-        b.append(face(m.id));
-        return b;
-      }));
-      box.append(strip);
-    }
     if (open) {
       const kids = h("div", "folder-chats");
       kids.append(...list.map((c) => convRow(c)));

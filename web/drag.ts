@@ -31,8 +31,10 @@ export function sidebarDrag(root: HTMLElement, at: Parts, o: Options) {
       height = now.height;
       pins = [...at.pins.querySelectorAll<HTMLElement>(".pin-chats > a.conv")].filter((el) => el !== row).map((el) => { const r = el.getBoundingClientRect(); return { top: r.top, bottom: r.bottom, mid: r.top + r.height / 2 }; });
       folders = [...at.list.querySelectorAll<HTMLElement>(".folder[data-who]")].map((el) => { const r = el.getBoundingClientRect(); return { who: el.dataset.who!, top: r.top, bottom: r.bottom }; });
-      ghost = row.cloneNode(true) as HTMLElement;
-      ghost.removeAttribute("id");
+      const copy = row.cloneNode(true) as HTMLElement;
+      copy.removeAttribute("id");
+      ghost = row.dataset.group ? document.createElement("div") : copy;
+      if (ghost !== copy) { ghost.className = "member"; ghost.append(copy); }
       ghost.classList.add("drag-ghost");
       ghost.style.cssText = `left:${now.left}px;top:${now.top}px;width:${now.width}px;height:${now.height}px`;
       badge = document.createElement("span");

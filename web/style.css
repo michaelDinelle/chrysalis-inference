@@ -907,14 +907,12 @@ label.set-switch { cursor: pointer; }
 .drag-ghost { position: fixed !important; z-index: 60; margin: 0 !important; box-sizing: border-box; background: var(--panel) linear-gradient(color-mix(in srgb, var(--text) 11%, transparent), color-mix(in srgb, var(--text) 11%, transparent)) !important; box-shadow: 0 10px 15px -3px rgb(0 0 0 / 0.4), 0 4px 6px -4px rgb(0 0 0 / 0.4); pointer-events: none; cursor: grabbing; }
 .drag-ghost .conv-slot > :not(.conv-verb) { display: none; }
 .drag-ghost > .conv-verb { margin-left: auto; }
-.conv.lifted, .cast-row.lifted, .member.lifted { opacity: 0; }
+.conv.lifted, .cast-row.lifted, .mosaic > .lifted { opacity: 0; }
 .drag-ghost.member { display: flex; align-items: center; gap: 6px; width: auto !important; height: auto !important; padding: 3px 8px 3px 3px; border-radius: 999px; white-space: nowrap; }
+.drag-ghost.member > .face { flex: none; width: 22px; height: 22px; border-radius: 50%; font-size: 9px; }
 .drag-ghost.cast-row > .act, .drag-ghost.cast-row .cast-count, .drag-ghost.cast-row .i { display: none; }
 .folder[data-who] > .folder-chats { margin-left: 16px; padding-left: 4px; border-left: 1px solid var(--line); }
-.members { display: flex; flex-wrap: wrap; gap: 5px; padding: 0 10px 6px 50px; }
-.member { display: grid; padding: 0; border: 0; border-radius: 50%; background: none; cursor: pointer; }
-.member > .face { width: 22px; height: 22px; font-size: 9px; transition: transform 140ms ease, box-shadow 140ms ease; }
-.member:hover > .face, .card-member-open:hover > .face { transform: scale(1.12); box-shadow: 0 0 0 1.5px var(--panel), 0 0 0 3px var(--accent); }
+.card-member-open:hover > .face { transform: scale(1.12); box-shadow: 0 0 0 1.5px var(--panel), 0 0 0 3px var(--accent); }
 .strips > [data-card] { cursor: pointer; transition: filter 140ms ease; }
 .strips > [data-card]:hover { filter: brightness(1.25); }
 #conversations.sorting { cursor: grabbing; }
