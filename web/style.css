@@ -940,10 +940,10 @@ label.set-switch { cursor: pointer; }
 .cast-main > .i { flex: none; width: 12px; height: 12px; color: var(--muted); transition: transform 140ms ease; }
 .cast-main[aria-expanded="false"] > .i { transform: rotate(-90deg); }
 .cast-count { flex: none; color: var(--muted); font-size: 12px; font-variant-numeric: tabular-nums; }
-.cast-new, .cast-bring { flex: none; display: none; width: 22px; height: 22px; }
+.cast-new, .cast-bring { flex: none; display: inline-grid; width: 22px; height: 22px; }
 .cast-new .i, .cast-bring .i { width: 14px; height: 14px; }
-.cast-row.here .cast-bring { display: inline-grid; }
-@media (hover: none) { .cast-row .cast-new { display: inline-grid; } }
+.cast-bring { display: none; }
+@media (hover: none) { .cast-row.here .cast-bring { display: inline-grid; } }
 .conv-ago { flex: none; margin-left: auto; color: var(--muted); font-size: 12px; font-variant-numeric: tabular-nums; }
 .side-foot .you { display: flex; flex: 1; align-items: center; gap: 9px; min-width: 0; padding: 3px 8px 3px 3px; border: 0; border-radius: 10px; background: none;
   color: var(--muted); font: inherit; font-size: 13.5px; text-align: left; cursor: pointer; }
@@ -1095,8 +1095,6 @@ main[data-thread] .msg-foot [data-act="cont"], main[data-thread] .msg-foot [data
 @media (hover: hover) {
   .conv:hover .conv-status, .conv:hover .conv-ago { display: none; }
   .conv:hover .conv-settle { display: inline-flex; }
-  .cast-row:hover .cast-new, .cast-row:hover .cast-bring { display: inline-grid; }
-  .cast-row:hover .cast-count { display: none; }
 }
 .conv, .cast-row { -webkit-touch-callout: none; -webkit-user-select: none; user-select: none; }
 .conv-face { flex: none; width: 20px; height: 20px; font-size: 9px; }

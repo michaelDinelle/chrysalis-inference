@@ -1,7 +1,7 @@
 import { expect, test } from "bun:test";
 import { existsSync, mkdtempSync, readFileSync, readdirSync, writeFileSync } from "node:fs";
-import type { Browser, Page } from "puppeteer-core";
-import { harness, RUN, articles, card, fresh, castRows, dir, download, inRow, lastStream, look, open, openRow, pagerOf, pickVoice, png, pngText, send, sent, shown, streams, untilIdle, voiceLog } from "./browser-harness";
+import puppeteer, { type Browser, type Page } from "puppeteer-core";
+import { harness, CHAT_ARGS, RUN, articles, card, fresh, castRows, dir, download, inRow, lastStream, look, open, openRow, pagerOf, pickVoice, png, pngText, send, sent, shown, streams, untilIdle, voiceLog } from "./browser-harness";
 
 harness();
 
@@ -429,7 +429,7 @@ test("in a group, a message that names one of them, by @ or by any word of their
   await page.close();
 }, 30_000);
 
-test("every row has the same menu: a character, a group and a folder are pinned, settled, renamed, forked and deleted from it as a chat is; a pinned row goes above the list and a settled one below it, a renamed row keeps its place, a fork is a copy under a new name just below what it copies, a group deleted takes its chats and leaves its people, and the rows keep their order whichever chat was written in last", async () => {
+test("every row has its new-chat button in sight, and the people picker's only where there is no pointer to drag with, on the open chat's row; every row has the same menu: a character, a group and a folder are pinned, settled, renamed, forked and deleted from it as a chat is; a pinned row goes above the list and a settled one below it, a renamed row keeps its place, a fork is a copy under a new name just below what it copies, a group deleted takes its chats and leaves its people, and the rows keep their order whichever chat was written in last", async () => {
   const page = await open();
   await Bun.write(`${dir}/Mirela.png`, await card("Mirela", { description: "{{char}} keeps bees.", first_mes: "Hello, {{user}}." }));
   await Bun.write(`${dir}/Tomas.png`, await card("Tomas", { description: "{{char}} sells honey." }));
@@ -437,6 +437,17 @@ test("every row has the same menu: a character, a group and a folder are pinned,
   await (await page.$("input#cast-file"))!.uploadFile(`${dir}/Mirela.png`, `${dir}/Tomas.png`, `${dir}/Hive.json`);
   await page.waitForFunction(() => document.querySelectorAll("#conversations .cast-row").length === 4);
   const zones = () => page.evaluate(() => ["#side-pins", "#side-list", "#side-shelf"].map((z) => [...document.querySelectorAll(`${z} .cast-row .cast-name`)].map((n) => n.textContent)));
+  const buttons = (p: Page) => p.$$eval("#conversations .cast-row", (r) => r.map((x) => [x.classList.contains("here"), ...[".cast-new", ".cast-bring"].map((b) => !!x.querySelector(b) && getComputedStyle(x.querySelector(b)!).display !== "none")]));
+  expect([await page.evaluate(() => matchMedia("(hover: none)").matches), (await buttons(page)).map((r) => [r[1], r[2] === r[0]]), (await buttons(page)).filter((r) => r[0]).length])
+    .toEqual([true, [[true, true], [true, true], [true, true], [true, true]], 1]);
+  const mouse = await puppeteer.launch({ executablePath: process.env.CHROMIUM ?? "/usr/bin/chromium", headless: true,
+    args: [...CHAT_ARGS, "--blink-settings=primaryHoverType=2,availableHoverTypes=2,primaryPointerType=4,availablePointerTypes=4"] });
+  try {
+    const desk = await mouse.newPage();
+    await desk.goto(`${new URL(page.url()).origin}/`, { waitUntil: "load" });
+    await desk.waitForSelector("#conversations .cast-row.here");
+    expect([await desk.evaluate(() => matchMedia("(hover: hover)").matches), await buttons(desk)]).toEqual([true, [[true, true, false]]]);
+  } finally { await mouse.close(); }
   const order = (await zones())[1];
   expect([await rowMenu(page, "Mirela"), await rowMenu(page, "Hive"), await rowMenu(page, "Chrysalis")]).toEqual([
     ["New chat with Mirela", "Pin", "Settle", "Rename", "Fork", "Card", "Delete"], ["New chat with Hive", "Pin", "Settle", "Rename", "Fork", "Card", "Delete"], ["New chat", "Pin", "Settle", "Rename", "Fork", "Card", "Delete"]]);
