@@ -6,7 +6,7 @@ import { fakeOpenCode } from "./fake-opencode";
 
 harness();
 
-test("another computer let in runs its own OpenCode from this page: it is under Run on once its line's helper connects, a new chat picked onto it works in its folders through its OpenCode on Chrysalis's models alone, the thread stays on that computer, and it is gone when the helper stops", async () => {
+test("another computer let in runs its own OpenCode from this page: it is under Run on once its line's helper connects, a new chat picked onto it works in its folders through its OpenCode on Chrysalis's models alone, the thread stays on that computer beside the threads that computer's own OpenCode made, which are listed as this computer's are, and it is gone when the helper stops", async () => {
   const den = fakeOpenCode("den-secret"), away = mkdtempSync(`${RUN}/away-`), denHome = `${away}/home`, config = `${away}/config.json`, bin = `${away}/opencode`, keyFile = `${away}/key`;
   mkdirSync(`${denHome}/hive`, { recursive: true });
   writeFileSync(bin, `#!/bin/sh\nexec "${process.execPath}" "${import.meta.dir}/fake-away.ts" "$@"\n`);
@@ -49,6 +49,7 @@ test("another computer let in runs its own OpenCode from this page: it is under 
     const own = await fetch(`http://127.0.0.1:${den.server.port}/api/session`, { method: "POST", headers: { ...json, authorization: `Basic ${Buffer.from("opencode:den-secret").toString("base64")}` },
       body: JSON.stringify({ location: { directory: denHome }, title: "made in its own OpenCode" }) });
     expect(own.ok).toBe(true);
+    const made = (await own.json()).data.id as string;
     const here = opencode.log.prompts.length;
     await send(page, "count the hives");
     const sent = den.log.prompts.at(-1)!;
@@ -56,8 +57,9 @@ test("another computer let in runs its own OpenCode from this page: it is under 
     expect(await lastText(page)).toContain("You asked: count the hives");
     expect(await page.$eval("#machine-btn", (b) => b.getAttribute("title"))).toBe(`Runs on ${name}: hand it off to another computer`);
     expect(await page.$$eval("#conversations a.conv .conv-mach", (m) => m.map((e) => e.textContent))).toContain(name);
-    const listed = () => page.evaluate(() => fetch("/api/threads").then((r) => r.json()).then((j) => j.threads.filter((t: { machine?: string }) => t.machine).map((t: { id: string; dir: string }) => [t.id, t.dir])));
-    expect(await listed()).toEqual([[sent.session, `${denHome}/hive`]]);
+    const listed = () => page.evaluate(() => fetch("/api/threads").then((r) => r.json()).then((j) => j.threads.filter((t: { machine?: string }) => t.machine).map((t: { id: string; dir: string }) => [t.id, t.dir]).sort((a: string[], b: string[]) => a[1].localeCompare(b[1]))));
+    expect(await listed()).toEqual([[made, denHome], [sent.session, `${denHome}/hive`]]);
+    await page.waitForFunction(() => [...document.querySelectorAll("#conversations a.conv .conv-title")].some((t) => t.textContent === "made in its own OpenCode"));
 
     await page.reload();
     await page.waitForSelector("#opencode .dot.online");
@@ -72,7 +74,7 @@ test("another computer let in runs its own OpenCode from this page: it is under 
     expect(await page.$$eval("#row-menu > *", (x) => x.map((e) => e.textContent))).toEqual(["Hand off to", name]);
     await page.evaluate(() => document.querySelector<HTMLElement>("#row-menu button")!.click());
     await page.waitForFunction((home) => document.querySelector("#folder-btn")?.getAttribute("title") === `Working in ${home}`, {}, home);
-    expect([den.sessions.has(sent.session), opencode.sessions.get(sent.session)?.dir, opencode.sessions.get(sent.session)?.messages.length, (await listed()).length]).toEqual([false, home, had, 0]);
+    expect([den.sessions.has(sent.session), opencode.sessions.get(sent.session)?.dir, opencode.sessions.get(sent.session)?.messages.length, await listed()]).toEqual([false, home, had, [[made, denHome]]]);
     await send(page, "and back at the house");
     expect([opencode.log.prompts.at(-1)!.text, opencode.log.prompts.at(-1)!.session, den.log.prompts.at(-1)!.text]).toEqual(["and back at the house", sent.session, "and the queens"]);
   } finally {

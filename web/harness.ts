@@ -73,7 +73,7 @@ async function commandsOn(h: Host | undefined, dir: string): Promise<{ name: str
 }
 export const commands = (dir: string, machine?: string) => commandsOn(of(machine), dir);
 export const INSTALL = "curl -fsSL https://opencode.ai/v2/install | bash";
-const SOURCE = name, PERSONA = "character", OURS = "chrysalis", FROM = "chrysalis-page";
+const SOURCE = name, PERSONA = "character", OURS = "chrysalis";
 const sceneOf = (s: any): Scene | undefined => (Array.isArray(s?.metadata?.[OURS]?.cast) ? s.metadata[OURS] : undefined);
 const WITH_US = '"$@" & c=$!; trap "kill $c" TERM INT; while kill -0 "$CHRYSALIS_WEB_PID" 2>/dev/null && kill -0 $c 2>/dev/null; do sleep 1; done; kill $c 2>/dev/null';
 const SKIPPED = "The user chose not to answer.", OLDEST = [2, 2, 4];
@@ -290,7 +290,7 @@ async function threadsOf(h: Host): Promise<Thread[]> {
   const out: Thread[] = [];
   for (let cursor: string | undefined, pages = 0; pages < 10; pages++) {
     const page = await call("GET", `/api/session?limit=100${cursor ? `&cursor=${encodeURIComponent(cursor)}` : ""}`, undefined, h);
-    for (const s of page.data ?? []) if (!s.parentID && s.location?.directory && (!h.id || s.metadata?.[FROM])) {
+    for (const s of page.data ?? []) if (!s.parentID && s.location?.directory) {
       if (h.id) homes.set(s.id, h.id);
       out.push({ id: s.id, title: s.title ?? "", dir: s.location.directory, updated: s.time?.updated ?? s.time?.created ?? 0, idle: s.time?.idle ?? 0, busy: running.has(s.id), archived: !!s.time?.archived, model: idOf(s.model),
         ...(sceneOf(s) ? { scene: { ...sceneOf(s)!, cards: undefined } } : {}), ...(h.id ? { machine: h.id } : {}) });
@@ -322,8 +322,8 @@ export async function handoff(id: string, machine?: string): Promise<{ dir: stri
   if (from === to) throw new Error("This chat is on that computer already");
   if (running.has(id)) throw new Error("OpenCode is still working in this chat");
   const was = (await call("GET", `/api/experimental/session/${id}/export`, undefined, from)).data, dir = to.machine?.home ?? homedir();
-  const { [FROM]: _, ...kept } = was.info.metadata ?? {}, metadata = { ...kept, ...(to.id ? { [FROM]: true } : {}) }, location = { ...was.info.location, directory: dir };
-  await call("POST", "/api/experimental/session/import", { info: { ...was.info, metadata, location }, messages: was.messages, location }, to);
+  const location = { ...was.info.location, directory: dir };
+  await call("POST", "/api/experimental/session/import", { info: { ...was.info, location }, messages: was.messages, location }, to);
   await call("DELETE", `/api/session/${id}`, undefined, from);
   if (to.id) homes.set(id, to.id);
   else homes.delete(id);
@@ -333,11 +333,7 @@ export const move = (id: string, directory: string) => call("POST", `/api/sessio
 export const say = (id: string, text: string) => call("POST", `/api/session/${id}/prompt`, { text }, on(id));
 export const fork = async (id: string, before?: string) => {
   const made = (await call("POST", `/api/session/${id}/fork`, before ? { before } : {}, on(id))).data.id as string;
-  if (homes.has(id)) {
-    homes.set(made, homes.get(id)!);
-    const was = (await call("GET", `/api/session/${made}`, undefined, on(id))).data?.metadata ?? {};
-    await call("PATCH", `/api/session/${made}`, { metadata: { ...was, [FROM]: true } }, on(id));
-  }
+  if (homes.has(id)) homes.set(made, homes.get(id)!);
   return made;
 };
 export async function rewrite(id: string, to: { drop?: string[]; edit?: { id: string; text: string } }) {
@@ -423,7 +419,7 @@ export async function turn(t: Turn, push: (d: object) => void, signal: AbortSign
   if (!t.follow && !to?.id && !existsSync(t.dir)) throw new Error(`There is no folder ${t.dir} on this computer`);
   const stored = t.model || !t.session || (outside && !to?.id) ? undefined : idOf((await go("GET", `/api/session/${t.session}`)).data?.model);
   for (const model of [t.model, stored]) if ((!outside || to?.id) && model && !local(model)) throw new Error(`${model.split("#")[0]} is outside this computer, and OpenCode here is kept to Chrysalis's models: allow models outside this computer from the OpenCode button, on the computer Chrysalis runs on`);
-  const meta = t.scene || t.sampling || to?.id ? { metadata: { ...(to?.id ? { [FROM]: true } : {}), ...(t.scene ? { [OURS]: t.scene } : {}), ...(t.sampling ? { [TUNED]: t.sampling } : {}) } } : {};
+  const meta = t.scene || t.sampling ? { metadata: { ...(t.scene ? { [OURS]: t.scene } : {}), ...(t.sampling ? { [TUNED]: t.sampling } : {}) } } : {};
   const id = t.session ?? (await go("POST", "/api/session", { location: { directory: t.dir }, ...(t.title?.trim() ? { title: t.title.trim().slice(0, 100) } : {}), ...meta })).data.id as string;
   if (to?.id) homes.set(id, to.id);
   if (t.sampling && !t.follow) tunings.set(id, t.sampling);
