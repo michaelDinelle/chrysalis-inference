@@ -5,7 +5,7 @@ import sys
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from measure import BACKENDS, MACHINE_BACKEND, ROOT
 
-others = {os.path.join(ROOT, "engine", b) for b in BACKENDS if b != MACHINE_BACKEND}
+others = {os.path.join(ROOT, "engine", b) for b in BACKENDS if b != MACHINE_BACKEND} | {os.path.join(ROOT, "chrysalis", "voice")}
 h = hashlib.sha256(MACHINE_BACKEND.encode())
 for top in ("engine", "chrysalis", "Makefile"):
     path = os.path.join(ROOT, top)

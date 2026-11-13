@@ -868,7 +868,7 @@ static char *pairs_digest(Pairs *p) {
 
 typedef struct {
     J *spec;
-    Strs measured, harness;
+    Strs measured, harness, apart;
 } Spec;
 
 static Spec load_spec(const char *text, size_t n) {
@@ -894,6 +894,8 @@ static Spec load_spec(const char *text, size_t n) {
     }
     J *m = jget(s.spec, "measured");
     for (size_t i = 0; m && m->t == JARR && i < m->len; i++) spush(&s.measured, m->v[i]->s);
+    J *ap = jget(s.spec, "not_measured");
+    for (size_t i = 0; ap && ap->t == JARR && i < ap->len; i++) spush(&s.apart, ap->v[i]->s);
     Strs h = {0};
     J *hp = jget(s.spec, "harness");
     for (size_t i = 0; hp && hp->t == JARR && i < hp->len; i++) spush(&h, hp->v[i]->s);
@@ -947,7 +949,7 @@ static Digests split_digests(Spec *s, Pairs *everything) {
     for (size_t i = 0; i < everything->n; i++) {
         char *p = everything->v[i].path;
         if (under(p, &s->harness)) ppush(&harness, p, everything->v[i].sha);
-        if (under(p, &s->measured) && !under(p, &s->harness)) ppush(&product, p, everything->v[i].sha);
+        if (under(p, &s->measured) && !under(p, &s->harness) && !under(p, &s->apart)) ppush(&product, p, everything->v[i].sha);
     }
     return (Digests){pairs_digest(&product), pairs_digest(&harness)};
 }
@@ -964,7 +966,7 @@ static Digests digests(Spec *s, const char *tree) {
     } else {
         Pairs m = listing(tree, &s->measured);
         for (size_t i = 0; i < m.n; i++)
-            if (!under(m.v[i].path, &s->harness)) ppush(&product, m.v[i].path, m.v[i].sha);
+            if (!under(m.v[i].path, &s->harness) && !under(m.v[i].path, &s->apart)) ppush(&product, m.v[i].path, m.v[i].sha);
         harness = listing(tree, &s->harness);
     }
     d.product = pairs_digest(&product);
