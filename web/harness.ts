@@ -14,9 +14,64 @@ export interface Turn { session?: string; machine?: string; dir: string; text: s
 export type Answer = Decision | "stop" | { answer: Record<string, unknown> };
 export interface Step { content: string; reasoning?: string; calls: Call[] }
 export interface Call { id: string; name: string; args: string; title: string; source: string; state: string; result?: string }
-export interface Said { role: "user" | "assistant"; content: string; files?: { name: string; type: string; data: string }[]; sent?: string; oc?: string; ocs?: string[]; by?: string; reasoning?: string; rounds?: Step[]; calls?: Call[]; error?: string; stopped?: boolean }
+export interface Context { used?: number; compacted?: boolean; window: number; ceiling: number; auto: boolean }
+export interface Said { role: "user" | "assistant"; content: string; checkpoints?: { summary: string; at: number; recent: string; first: boolean }[]; files?: { name: string; type: string; data: string }[]; sent?: string; oc?: string; ocs?: string[]; by?: string; reasoning?: string; rounds?: Step[]; calls?: Call[]; error?: string; stopped?: boolean }
 type Listener = (type: string, data: any, from?: string) => void;
 
+const RESERVE_MIN = 16_000, RESERVE_SHARE = 0.15, UNKNOWN_WINDOW = 200_000;
+const frames = new WeakMap<Host, Promise<{ windows: Map<string, number>; auto: boolean; buffer?: number | string }>>();
+function frameOf(h: Host) {
+  if (!frames.has(h)) frames.set(h, (async () => {
+    const [models, config] = await Promise.all([call("GET", "/api/model", undefined, h), call("GET", "/api/config", undefined, h).catch(() => [])]);
+    const windows = new Map<string, number>((models.data ?? []).map((m: any) => [idOf(m)!, m.limit?.input && m.limit?.context ? Math.min(m.limit.input, m.limit.context) : m.limit?.input || m.limit?.context || 0]));
+    let auto = true, buffer: number | string | undefined;
+    for (const doc of Array.isArray(config) ? config : config?.data ?? []) {
+      const c = doc?.info?.compaction;
+      if (typeof c?.auto === "boolean") auto = c.auto;
+      if (typeof c?.buffer === "number" || typeof c?.buffer === "string") buffer = c.buffer;
+    }
+    return { windows, auto, buffer };
+  })().catch((e) => { frames.delete(h); throw e; }));
+  return frames.get(h)!;
+}
+async function contextOf(h: Host | undefined, model: string | undefined, used?: number): Promise<Context | undefined> {
+  if (!h || !model) return undefined;
+  const f = await frameOf(h).catch(() => undefined), window = f?.windows.get(model.split("#")[0]) || UNKNOWN_WINDOW;
+  if (!f) return undefined;
+  const kept = typeof f.buffer === "string" ? Math.round((window * Number.parseFloat(f.buffer)) / 100) : f.buffer;
+  const ceiling = kept !== undefined && kept < window ? window - kept : window - Math.max(Math.floor(window * RESERVE_SHARE), window >= 2 * RESERVE_MIN ? RESERVE_MIN : 0);
+  return { ...(used === undefined ? {} : { used }), window, ceiling, auto: f.auto };
+}
+const spent = (t: any) => (t ? (t.input ?? 0) + (t.cache?.read ?? 0) + (t.cache?.write ?? 0) + (t.output ?? 0) : undefined);
+export async function compact(id: string) {
+  const h = on(id);
+  let stop = () => {};
+  const done = new Promise<void>((resolve, reject) => {
+    stop = listen(id, (type, d, from) => {
+      if (from) return;
+      if (type === "session.compaction.ended") resolve();
+      else if (type === "session.compaction.failed") reject(new Error(d.error?.message ?? "OpenCode could not compact this chat"));
+      else if (type === "lost") reject(new Error("The connection to OpenCode was lost"));
+    });
+  });
+  try {
+    await call("POST", `/api/session/${id}/compact`, {}, h);
+    await done;
+  } finally { stop(); }
+}
+export async function skills(dir: string, machine?: string): Promise<{ id: string; name: string; description: string }[]> {
+  const got = await call("GET", `/api/skill?location[directory]=${encodeURIComponent(dir)}`, undefined, of(machine));
+  return (got.data ?? []).map((k: any) => ({ id: String(k.id ?? k.name), name: String(k.name ?? k.id), description: String(k.description ?? "") }));
+}
+export const skill = (id: string, which: string) => call("POST", `/api/experimental/session/${id}/skill`, { id: which, resume: true }, on(id));
+async function commandsOn(h: Host | undefined, dir: string): Promise<{ name: string; description: string }[]> {
+  for (let tries = 0; ; tries++) {
+    const got = (await call("GET", `/api/command?location[directory]=${encodeURIComponent(dir)}`, undefined, h)).data ?? [];
+    if (got.length || tries >= 8) return got.map((c: any) => ({ name: String(c.name), description: String(c.description ?? "") }));
+    await Bun.sleep(250);
+  }
+}
+export const commands = (dir: string, machine?: string) => commandsOn(of(machine), dir);
 export const INSTALL = "curl -fsSL https://opencode.ai/v2/install | bash";
 const SOURCE = name, PERSONA = "character", OURS = "chrysalis", FROM = "chrysalis-page";
 const sceneOf = (s: any): Scene | undefined => (Array.isArray(s?.metadata?.[OURS]?.cast) ? s.metadata[OURS] : undefined);
@@ -80,7 +135,8 @@ async function freePort() {
 
 async function ourModels(chrysalis: string) {
   const listed = await fetch(`${chrysalis}/v1/models`, { signal: AbortSignal.timeout(3000) }).then((r) => r.json()).catch(() => ({ data: [] }));
-  return Object.fromEntries((listed.data ?? []).filter((m: any) => typeof m?.id === "string" && !m.id.endsWith("-fast")).map((m: any) => [m.id, { variants: THINKING, capabilities: { input: ["text", "image", "pdf"] } }]));
+  return Object.fromEntries((listed.data ?? []).filter((m: any) => typeof m?.id === "string" && !m.id.endsWith("-fast")).map((m: any) => [m.id, { variants: THINKING, capabilities: { input: ["text", "image", "pdf"] },
+    ...(m.context_length > 0 ? { limit: { context: m.context_length, output: 32768 } } : {}) }]));
 }
 export const awayConfig = async (chrysalis: string) => ({ enabled_providers: ["chrysalis"],
   providers: { chrysalis: { name: "Chrysalis", package: "@opencode/ai/providers/openai-compatible", settings: {}, models: await ourModels(chrysalis) } } });
@@ -306,7 +362,7 @@ function callOf(p: any): Call {
   return { id: p.id, name: p.name, args: JSON.stringify(s.input ?? {}), title: titled(p.name), source: SOURCE, state: done ? "done" : failed ? "failed" : "stopped",
     ...(done || failed ? { result: typeof s.output === "string" ? s.output : textOf(s.content) || s.error?.message || (typeof s.error === "string" ? s.error : "") } : {}) };
 }
-export async function transcript(id: string): Promise<{ thread: Thread; messages: Said[] }> {
+export async function transcript(id: string): Promise<{ thread: Thread; messages: Said[]; context?: Context }> {
   const go = (method: string, path: string, body?: object) => call(method, path, body, on(id));
   const s = (await go("GET", `/api/session/${id}`)).data, all: any[] = [];
   for (let cursor: string | undefined; ; ) {
@@ -317,9 +373,12 @@ export async function transcript(id: string): Promise<{ thread: Thread; messages
   }
   const scene = sceneOf(s), messages: Said[] = scene?.greeting ? [{ role: "assistant", content: scene.greeting, ...(scene.cast.length === 1 ? { by: scene.cast[0] } : {}) }] : [];
   let steps: Step[] = [], ids: string[] = [], shown: string | undefined, by: string | undefined = scene?.cast.length === 1 ? scene.cast[0] : undefined;
+  let marks: NonNullable<Said["checkpoints"]> = [], used: number | undefined, fresh = false;
   const close = (more: Partial<Said> = {}) => {
     if (!steps.length && !more.error) return;
     const last = steps.pop() ?? { content: "", calls: [] };
+    if (marks.length) more = { ...more, checkpoints: marks };
+    marks = [];
     messages.push({ role: "assistant", content: last.content, ...(shown ? { oc: shown } : {}), ocs: ids, ...(by ? { by } : {}), ...(last.reasoning ? { reasoning: last.reasoning } : {}), ...(last.calls.length ? { calls: last.calls } : {}),
       ...(steps.length ? { rounds: steps } : {}), ...more });
     steps = [];
@@ -334,7 +393,11 @@ export async function transcript(id: string): Promise<{ thread: Thread; messages
       if (typeof ours?.next === "string") by = ours.next;
       messages.push({ role: "user", content: typeof ours?.said === "string" ? ours.said : m.text ?? "", oc: m.id, ocs: [m.id], ...(files.length ? { files } : {}), ...(m.metadata?.source === "subagent" ? { sent: `Sub-agent${m.metadata.agent ? `: ${m.metadata.agent}` : ""}` } : {}) });
     }
+    else if (m.type === "compaction") {
+      if (m.status === "completed") { marks.push({ summary: m.summary ?? "", at: steps.length, recent: "", first: false }); used = undefined; fresh = true; }
+    }
     else if (m.type === "assistant") {
+      if (m.tokens) { used = spent(m.tokens); fresh = false; }
       ids.push(m.id);
       shown = m.id;
       const parts: any[] = m.content ?? [], reasoning = parts.filter((p) => p.type === "reasoning").map((p) => p.text ?? "").join("");
@@ -342,7 +405,9 @@ export async function transcript(id: string): Promise<{ thread: Thread; messages
     } else if (m.type === "idle") { ids.push(m.id); close(m.outcome === "failed" ? { error: m.error?.message ?? "OpenCode could not finish this turn" } : m.outcome === "interrupted" ? { stopped: true } : {}); }
   }
   close();
-  return { thread: { id: s.id, title: s.title ?? "", dir: s.location?.directory ?? "", updated: s.time?.updated ?? 0, idle: s.time?.idle ?? 0, busy: running.has(s.id), archived: !!s.time?.archived, model: idOf(s.model),
+  if (marks.length) messages.push({ role: "assistant", content: "", checkpoints: marks });
+  const context = await contextOf(on(id), idOf(s.model), used).catch(() => undefined);
+  return { ...(context ? { context: { ...context, ...(fresh ? { compacted: true } : {}) } } : {}), thread: { id: s.id, title: s.title ?? "", dir: s.location?.directory ?? "", updated: s.time?.updated ?? 0, idle: s.time?.idle ?? 0, busy: running.has(s.id), archived: !!s.time?.archived, model: idOf(s.model),
     ...(scene ? { scene } : {}), ...(homes.get(s.id) ? { machine: homes.get(s.id) } : {}) }, messages };
 }
 
@@ -369,9 +434,11 @@ export async function turn(t: Turn, push: (d: object) => void, signal: AbortSign
   if (t.agent && !t.follow) await go("POST", `/api/session/${id}/agent`, { agent: t.agent });
   if (t.persona && !t.follow) await go("PUT", entry, { value: t.persona });
   else if (t.session && !t.follow) await go("DELETE", entry).catch(() => {});
+  const model = (t.model ?? stored ?? idOf((await go("GET", `/api/session/${id}`).catch(() => null))?.data?.model))?.split("#")[0];
   const delta = (d: object) => push({ choices: [{ index: 0, delta: d }] });
   const index = new Map<string, number>(), names = new Map<string, string>(), since = new Map<string, number>(), declined = new Set<string>();
   let steps = 0;
+  const measured: Promise<void>[] = [];
   const known = (call: string, name = "tool", args?: string) => {
     if (index.has(call)) return;
     index.set(call, index.size);
@@ -429,21 +496,25 @@ export async function turn(t: Turn, push: (d: object) => void, signal: AbortSign
       else if (type === "session.tool.progress") { if (typeof d.metadata?.sessionID === "string") cards.set(d.metadata.sessionID, d.id); }
       else if (type === "session.tool.success") tool(d.id, "done", { result: textOf(d.content), ms: ms(d.id) });
       else if (type === "session.tool.failed") { if (!declined.has(d.id)) tool(d.id, "failed", { result: `Error: ${d.error?.message ?? (textOf(d.content) || "the tool failed")}`, ms: ms(d.id) }); }
-      else if (type === "session.step.ended" && d.tokens) push({ usage: { prompt_tokens: (d.tokens.input ?? 0) + (d.tokens.cache?.read ?? 0), completion_tokens: d.tokens.output ?? 0,
-        prompt_tokens_details: { cached_tokens: d.tokens.cache?.read ?? 0 } } });
+      else if (type === "session.step.ended" && d.tokens) {
+        push({ usage: { prompt_tokens: (d.tokens.input ?? 0) + (d.tokens.cache?.read ?? 0), completion_tokens: d.tokens.output ?? 0, prompt_tokens_details: { cached_tokens: d.tokens.cache?.read ?? 0 } } });
+        measured.push(contextOf(to, model, spent(d.tokens)).then((c) => { if (c) push({ context: c }); }, () => {}));
+      }
       else if (type === "session.compaction.started") push({ waiting: "Compacting the context" });
+      else if (type === "session.compaction.ended") { push({ compacted: { summary: d.text ?? "", recent: "", first: false } }); measured.push(contextOf(to, model).then((c) => { if (c) push({ context: { ...c, compacted: true } }); }, () => {})); }
     });
   });
   const interrupt = () => { for (const one of new Set([id, ...family])) void go("POST", `/api/session/${one}/interrupt`).catch(() => {}); };
   signal.addEventListener("abort", interrupt, { once: true });
   try {
     const [, slash, rest] = /^\/(\S+)\s*([^]*)$/.exec(t.said ?? t.text) ?? [], files = t.files?.length ? { files: t.files } : {};
-    const command = slash && ((await go("GET", `/api/command?directory=${encodeURIComponent(t.dir)}`)).data ?? []).some((c: any) => c.name === slash);
+    const command = slash && (await commandsOn(to, t.dir)).some((c) => c.name === slash);
     const ours = t.said !== undefined || t.next ? { metadata: { [OURS]: { ...(t.said !== undefined ? { said: t.said } : {}), ...(t.next ? { next: t.next } : {}) } } } : {};
     if (command) await go("POST", `/api/session/${id}/command`, { name: slash, text: rest, ...files });
     else if (!t.follow) await go("POST", `/api/session/${id}/prompt`, { text: t.text, ...files, ...ours });
     if (signal.aborted) interrupt();
     await done;
+    await Promise.all(measured);
   } finally {
     stop();
     signal.removeEventListener("abort", interrupt);

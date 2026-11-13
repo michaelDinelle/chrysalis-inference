@@ -55,7 +55,7 @@ interface Message {
 interface Conversation { id: string; title: string; named?: boolean; updated: number; effort: Effort; messages: Message[];
   pending?: Record<string, { kind: string; srcs: string[] }>;
   who?: string; cast?: string[]; missing?: string[]; scenario?: string; castName?: string;
-  thread?: { dir: string; id?: string; model?: string; at?: number; agent?: string; machine?: string } }
+  thread?: { dir: string; id?: string; model?: string; at?: number; agent?: string; machine?: string; context?: { used?: number; compacted?: boolean; window: number; ceiling: number; auto: boolean } } }
 type Sampler = Partial<Record<SamplerKey, number>> & { order?: Stage[] };
 type Mode = "think" | "fast";
 interface Settings {
@@ -667,6 +667,7 @@ async function openThread(sid: string): Promise<string | undefined> {
   if (runs.get(c.id)) return c.id;
   c.thread!.at = got.thread.idle;
   c.thread!.dir = got.thread.dir;
+  if (got.context) c.thread!.context = got.context;
   const said: Message[] = await Promise.all(got.messages.map(async ({ files, by, ...m }: Omit<Message, "files"> & { by?: string; files?: { name: string; type: string; data: string }[] }, i: number) => ({ id: randomId(), ...m,
     ...(by && [...people.values()].find((p) => p.kind === "character" && p.card.data.name.trim() === by) ? { as: [...people.values()].find((p) => p.kind === "character" && p.card.data.name.trim() === by)!.id } : {}),
     ...(files ? { files: await Promise.all(files.map((f, k) => sentFile(`${sid}-${i}-${k}`, f))) } : {}) })));
@@ -4639,6 +4640,7 @@ function take(run: Run, ev: any) {
   if (ev.stopped) m.stopped = true;
   if (ev.thread && run.conv.thread && run.conv.thread.id !== ev.thread) { run.conv.thread.id = ev.thread; save(run.conv); }
   if (ev.idle && run.conv.thread) run.conv.thread.at = ev.idle;
+  if (ev.context && run.conv.thread) { run.conv.thread.context = ev.context; if (run.conv === conv) renderMeter(); }
   if (ev.timing) run.timing = ev.timing;
   if (typeof ev.started === "number" && ev.started !== run.begun) { run.begun = ev.started; renderList(); }
   if (ev.chrysalis_prompt) { run.read = ev.chrysalis_prompt.prompt_tokens; run.written = 0; }
@@ -5817,9 +5819,132 @@ $("composer").addEventListener("submit", (e) => {
 });
 input.addEventListener("input", () => { grow(); if (!drafting) $("draft").title = input.value.trim() ? "Finish my message (draft)" : "Draft my next message"; });
 input.addEventListener("input", () => { if (talking) { talking = 0; renderCastNext(); } });
+interface Slash { name: string; aliases?: string[]; hint?: string; about: string; run?: (arg: string) => void | Promise<void> }
+let slashFrom: { key: string; commands: { name: string; description: string }[]; skills: { id: string; name: string; description: string }[] } | undefined, slashAt = 0;
+async function slashSource() {
+  const t = conv.thread, key = t ? `${t.machine ?? ""}:${t.dir}` : "";
+  if (!t || harness.state !== "on" || slashFrom?.key === key) return;
+  slashFrom = { key, commands: [], skills: [] };
+  const r = await fetch(`/api/threads/commands?dir=${encodeURIComponent(t.dir)}${t.machine ? `&machine=${t.machine}` : ""}`).catch(() => null), got = r?.ok ? await r.json() : null;
+  if (got && slashFrom?.key === key) { slashFrom = { key, commands: got.commands ?? [], skills: got.skills ?? [] }; paintSlash(); }
+}
+const sidOf = () => conv.thread?.id;
+const needThread = () => (sidOf() ? true : (toast("This works once the thread has a message"), false));
+async function undoLast() {
+  const sid = sidOf(), asked = conv.messages.findLast((m) => m.role === "user" && m.oc);
+  if (!sid || !asked || running()) return;
+  const r = await fetch(`/api/threads/${sid}/undo`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ message: asked.oc }) }).catch(() => null);
+  if (!r?.ok) return toast((await r?.json().catch(() => null))?.error?.message ?? "OpenCode did not undo that");
+  await showThread(sid);
+  input.value = asked.content;
+  input.dispatchEvent(new Event("input"));
+}
+function exportThread() {
+  const text = [`# ${conv.title}`, ...conv.messages.map((m) => `## ${m.role === "user" ? userName() : nameOf(m.as ?? whoOf(conv))}\n\n${m.content}`)].join("\n\n"), a = h("a");
+  a.href = URL.createObjectURL(new Blob([text], { type: "text/markdown" }));
+  a.download = `${conv.title.replace(/[^\w.-]+/g, "-").slice(0, 60) || "thread"}.md`;
+  a.click();
+  URL.revokeObjectURL(a.href);
+}
+const PAGE_SLASH: Slash[] = [
+  { name: "new", aliases: ["clear"], about: "a new thread here", run: () => newChat(whoOf(conv)) },
+  { name: "compact", about: "summarize the context now", run: async () => {
+    const sid = sidOf();
+    if (!sid || !needThread()) return;
+    toast("Compacting the context…");
+    const r = await fetch(`/api/threads/${sid}/compact`, { method: "POST", headers: { "Content-Type": "application/json" }, body: "{}" }).catch(() => null);
+    if (!r?.ok) return toast((await r?.json().catch(() => null))?.error?.message ?? "OpenCode did not compact it");
+    if (conv.thread?.id === sid) { await showThread(sid); renderControls(); }
+    toast("Context compacted");
+  } },
+  { name: "models", about: "choose the model", run: () => setModelsOpen(true) },
+  { name: "agents", about: "choose the agent", run: () => setModelsOpen(true) },
+  { name: "variants", aliases: ["thinking", "effort"], hint: "off | low | medium | max", about: "set the thinking level", run: (arg) => {
+    const at = ["off", "low", "medium", "max"].indexOf(arg.trim().toLowerCase());
+    if (at < 0) return toast("Say which: off, low, medium or max");
+    setEffort(at);
+  } },
+  { name: "undo", about: "take back your last message and what it changed", run: () => { if (needThread()) void undoLast(); } },
+  { name: "fork", about: "a new thread from this one", run: () => {
+    const sid = sidOf();
+    if (!sid || !needThread()) return;
+    void fetch(`/api/threads/${sid}/fork`, { method: "POST", headers: { "Content-Type": "application/json" }, body: "{}" })
+      .then(async (r) => { if (!r.ok) return toast("OpenCode did not fork that chat"); const { id } = await r.json(); await loadThreads(); location.hash = `#${STUB}${id}`; });
+  } },
+  { name: "rename", hint: "title", about: "name this thread", run: (arg) => { if (arg.trim()) rename(conv, arg); else toast("Say the new title after /rename"); } },
+  { name: "sessions", aliases: ["resume", "continue"], about: "find a thread", run: () => { setPane(panes.conversations, true); $("side-search").focus(); } },
+  { name: "open", aliases: ["projects", "project"], about: "start a thread in a project", run: () => newThreadIn() },
+  { name: "cd", hint: "folder", about: "work in another folder", run: (arg) => (arg.trim() ? void moveThread(conv, arg.trim().replace(/^~(?=\/|$)/, homeOf(conv.thread?.machine) ?? "~")) : chooseFolder($("folder-btn"))) },
+  { name: "copy", about: "copy the last reply", run: () => {
+    const last = conv.messages.findLast((m) => m.role === "assistant" && m.content);
+    if (last) void navigator.clipboard.writeText(last.content).then(() => toast("Copied"));
+  } },
+  { name: "export", about: "save this thread as Markdown", run: exportThread },
+  { name: "skills", about: "use a skill", run: () => {
+    const all = slashFrom?.skills ?? [], sid = sidOf();
+    if (!all.length) return toast("OpenCode lists no skill here");
+    if (!sid || !needThread()) return;
+    openPalette([{ label: "Skills", items: all.map((k): PaletteItem => ({ icon: icon("agent"), title: k.name, note: k.description ? [k.description] : [], run: () => void fetch(`/api/threads/${sid}/skill`, { method: "POST",
+      headers: { "Content-Type": "application/json" }, body: JSON.stringify({ id: k.id }) }).then(async (r) => { if (!r.ok) toast("OpenCode did not start that skill"); await loadThreads(); }) })) }]);
+  } },
+  { name: "status", aliases: ["usage"], about: "context used, and when it compacts", run: () => toast($("meter").title.split("\n").slice(0, 2).join(". ") || "Nothing measured yet") },
+  { name: "settings", about: "open Settings", run: () => openSettings() },
+  { name: "help", about: "list the commands", run: () => { input.value = "/"; paintSlash(); input.focus(); } },
+];
+const slashAll = (): Slash[] => [...(slashFrom?.commands ?? []).filter((c) => !PAGE_SLASH.some((p) => p.name === c.name)).map((c): Slash => ({ name: c.name, about: c.description, hint: "…" })), ...PAGE_SLASH];
+const slashTyped = () => (conv.thread && harness.state === "on" ? /^\/(\S*)$/.exec(input.value)?.[1] : undefined);
+const slashShown = () => {
+  const q = slashTyped();
+  return q === undefined ? [] : slashAll().filter((c) => [c.name, ...(c.aliases ?? [])].some((n) => n.startsWith(q.toLowerCase())));
+};
+function paintSlash() {
+  const pop = $("slash-pop"), list = slashShown();
+  pop.hidden = !list.length;
+  if (pop.hidden) return;
+  void slashSource();
+  slashAt = Math.max(0, Math.min(slashAt, list.length - 1));
+  pop.replaceChildren(...list.map((c, k) => {
+    const b = h("button", k === slashAt ? "slash-item on" : "slash-item");
+    b.type = "button";
+    b.setAttribute("role", "option");
+    b.setAttribute("aria-selected", String(k === slashAt));
+    b.append(h("span", "slash-name", `/${c.name}`), ...(c.hint && c.hint !== "…" ? [h("span", "slash-hint", c.hint)] : []), h("span", "slash-about", c.about));
+    b.onmousedown = (e) => e.preventDefault();
+    b.onclick = () => pickSlash(c);
+    return b;
+  }));
+  pop.querySelector(".on")?.scrollIntoView({ block: "nearest" });
+}
+function pickSlash(c: Slash) {
+  if (c.hint || !c.run) {
+    input.value = `/${c.name} `;
+    input.dispatchEvent(new Event("input"));
+    return input.focus();
+  }
+  input.value = "";
+  input.dispatchEvent(new Event("input"));
+  void c.run("");
+}
+function runSlash(text: string): boolean {
+  const [, name, arg = ""] = /^\/(\S+)\s*([^]*)$/.exec(text.trim()) ?? [];
+  if (!name || !conv.thread || harness.state !== "on" || (slashFrom?.commands ?? []).some((c) => c.name === name)) return false;
+  const c = PAGE_SLASH.find((p) => p.name === name || p.aliases?.includes(name));
+  if (!c?.run) return false;
+  input.value = "";
+  input.dispatchEvent(new Event("input"));
+  void c.run(arg);
+  return true;
+}
+input.addEventListener("input", () => { slashAt = 0; paintSlash(); });
+input.addEventListener("blur", () => { $("slash-pop").hidden = true; });
 input.addEventListener("keydown", (e) => {
+  const list = $("slash-pop").hidden ? [] : slashShown();
+  if (list.length && (e.key === "ArrowDown" || e.key === "ArrowUp")) { e.preventDefault(); slashAt = (slashAt + (e.key === "ArrowDown" ? 1 : list.length - 1)) % list.length; return paintSlash(); }
+  if (list.length && e.key === "Escape") { e.preventDefault(); e.stopPropagation(); return void ($("slash-pop").hidden = true); }
+  if (list.length && (e.key === "Tab" || (e.key === "Enter" && !e.shiftKey && !e.isComposing))) { e.preventDefault(); return pickSlash(list[slashAt]); }
   if (e.key === "Enter" && !e.shiftKey && !e.isComposing) {
     e.preventDefault();
+    if (runSlash(input.value)) return;
     if (running() && conv.thread?.id && input.value.trim()) steer(input.value);
     else submit(input.value);
   }
@@ -6223,7 +6348,18 @@ const JSON_POST = { method: "POST", headers: { "Content-Type": "application/json
 
 const shortName = (id: string) => modelName(id).replace(/^Qwen3\.8-/, "");
 function renderMeter() {
-  if (conv.thread) return void $("meter").replaceChildren();
+  if (conv.thread) {
+    const at = conv.thread.context, meter = $("meter");
+    if (!at || harness.state !== "on") { meter.title = ""; return void meter.replaceChildren(); }
+    const used = at.used ?? 0, top = at.auto ? at.ceiling : at.window, share = Math.min(1, used / top), bar = h("span", `ctx-bar${share >= 0.9 ? " near" : share >= 0.7 ? " warm" : ""}`), fill = h("i");
+    fill.style.width = `${Math.round(share * 100)}%`;
+    bar.append(fill);
+    meter.replaceChildren(bar, h("span", "", at.used === undefined ? `${at.compacted ? "compacted" : "–"} / ${fmtK(top)}` : `${fmtK(used)} / ${fmtK(top)}`));
+    meter.title = [at.used === undefined ? (at.compacted ? "The context was just compacted: the next reply measures it" : "The next reply measures this thread's context") : `This thread's context: ${used.toLocaleString("en-US")} tokens`,
+      at.auto ? `OpenCode compacts it at ${at.ceiling.toLocaleString("en-US")}${at.used === undefined ? "" : ` (${Math.max(0, at.ceiling - used).toLocaleString("en-US")} to go)`}` : "OpenCode does not compact it by itself",
+      `The model's window is ${at.window.toLocaleString("en-US")}`, "/compact compacts it now"].join("\n");
+    return;
+  }
   const online = status.state === "online" && !status.loading, ctx = status.context ?? 262144;
   const used = status.kv_tokens && status.cache ? 1 - status.cache.free_kv_tokens / status.kv_tokens : 0;
   const r = running(), s = conv.messages.findLast((m) => m.stats)?.stats;
@@ -6247,7 +6383,7 @@ function threadControls() {
   btn.title = id ? `${id}, through OpenCode${away ? ": this thread leaves this computer" : ""}` : "OpenCode lists no model";
   btn.setAttribute("aria-expanded", String(modelsOpen));
   btn.classList.toggle("open", modelsOpen);
-  $("meter").replaceChildren();
+  renderMeter();
   if (!modelsOpen) return;
   const pop = $("model-pop"), agent = conv.thread!.agent ?? harness.agents?.[0]?.id, key = JSON.stringify(["thread", id, agent, harness.models, harness.agents, speechKey()]);
   if (pop.dataset.key === key) return;

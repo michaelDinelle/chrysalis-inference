@@ -109,7 +109,7 @@ export function fakeOpenCode(secret: string) {
     emit("session.step.started", { sessionID, assistantMessageID: two });
     for (let k = 0; k < answer.length; k += 12) emit("session.text.delta", { sessionID, assistantMessageID: two, delta: answer.slice(k, k + 12) });
     emit("session.step.ended", { sessionID, assistantMessageID: two, finish: "stop", tokens: { input: 40, output: 20, cache: { read: 100 } } });
-    s.messages.push({ id: two, type: "assistant", time: { created: Date.now() }, content: [{ type: "text", text: answer }] });
+    s.messages.push({ id: two, type: "assistant", time: { created: Date.now() }, tokens: { input: 40, output: 20, cache: { read: 100 } }, content: [{ type: "text", text: answer }] });
     if (s.title === "") {
       s.title = `About ${text.split(" ").slice(0, 3).join(" ")}`;
       emit("session.renamed", { sessionID, title: s.title });
@@ -154,6 +154,13 @@ export function fakeOpenCode(secret: string) {
       if (!s) return json({ message: "not found" }, 404);
       if (!rest && method === "GET") return json({ data: info(s) });
       if (rest === "/export") return json({ data: { info: info(s), messages: s.messages } });
+      if (rest === "/compact" && method === "POST") {
+        const sessionID = s.id, text = `Summary: ${s.messages.filter((m) => m.type === "user").length} requests so far.`;
+        emit("session.compaction.started", { sessionID, reason: "manual" });
+        s.messages.push({ id: `msg_${++ids}`, type: "compaction", status: "completed", reason: "manual", summary: text, time: { created: Date.now() } });
+        setTimeout(() => emit("session.compaction.ended", { sessionID, reason: "manual", text }), 30);
+        return json({ data: { id: `msg_${ids}`, sessionID, type: "compaction" } });
+      }
       if (rest === "/move" && method === "POST") { s.dir = (await req.json()).directory; return new Response(null, { status: 204 }); }
       if (!rest && method === "DELETE") {
         sessions.delete(s.id);

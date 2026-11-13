@@ -751,6 +751,30 @@ img.src = ${JSON.stringify(checkUrl(req))} + "?t=" + Date.now();
         return new Response(null, { status: 204 });
       })),
     },
+    "/api/threads/commands": {
+      GET: guarded(async (req) => {
+        const q = new URL(req.url).searchParams, dir = q.get("dir") ?? "", machine = q.get("machine") || undefined;
+        try {
+          const [commands, skills] = await Promise.all([harness.commands(dir, machine), harness.skills(dir, machine).catch(() => [])]);
+          return Response.json({ commands, skills });
+        } catch (e) { return Response.json({ error: { message: (e as Error).message } }, { status: 502 }); }
+      }),
+    },
+    "/api/threads/:id/compact": {
+      POST: guarded(json(async (req) => {
+        const id = (req as Request & { params: { id: string } }).params.id;
+        if (turns.has(id)) return Response.json({ error: { message: "OpenCode is still working in this chat" } }, { status: 409 });
+        try { await harness.compact(id); } catch (e) { return Response.json({ error: { message: (e as Error).message } }, { status: 502 }); }
+        return new Response(null, { status: 204 });
+      })),
+    },
+    "/api/threads/:id/skill": {
+      POST: guarded(json(async (req) => {
+        const id = (req as Request & { params: { id: string } }).params.id, which = String((await req.json().catch(() => ({})))?.id ?? "");
+        try { await harness.skill(id, which); } catch (e) { return Response.json({ error: { message: (e as Error).message } }, { status: 502 }); }
+        return new Response(null, { status: 204 });
+      })),
+    },
     "/api/threads/:id/handoff": {
       POST: guarded(json(async (req) => {
         const id = (req as Request & { params: { id: string } }).params.id, machine = String((await req.json().catch(() => ({})))?.machine ?? "");
