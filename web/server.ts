@@ -50,7 +50,8 @@ const here = (handler: Handler) => guarded((req, srv) => fromNetwork(req, srv)
 const json = (handler: (req: Request, srv: Srv) => Response | Promise<Response>) => (req: Request, srv: Srv) =>
   (req.headers.get("content-type") ?? "").startsWith("application/json") ? handler(req, srv) : new Response("JSON only", { status: 415 });
 
-const MODELS = ["qwen3.8-27b", "qwen3.8-flash-next"], MODEL_FILE = `${tlsDir()}/model`, OPENCODE_OFF = `${tlsDir()}/opencode-off`;
+const MODELS = ["qwen3.8-27b", "qwen3.8-flash-next"], MODEL_FILE = `${tlsDir()}/model`, OPENCODE_OFF = `${tlsDir()}/opencode-off`, OPENCODE_OUTSIDE = `${tlsDir()}/opencode-outside`;
+harness.allowOutside(existsSync(OPENCODE_OUTSIDE));
 async function pickModel(req: Request): Promise<string | undefined> {
   const model = (await req.json().catch(() => ({})))?.model;
   if (!MODELS.includes(model)) return undefined;
@@ -548,6 +549,7 @@ const serve = (hostname: string, port: number) => Bun.serve<VoiceSocket>({
       const key = (req as Request & { params: { key: string } }).params.key, rest = new URL(req.url).pathname.slice(`/opencode/${MODEL_KEY}`.length);
       if (key !== MODEL_KEY || !self(req, srv)) return new Response("not found", { status: 404 });
       const [, to, path] = /^\/via\/([\w-]+)(\/.*)?$/.exec(rest) ?? [];
+      if (to && !harness.outsideAllowed()) return Response.json({ error: { message: "OpenCode here is kept to Chrysalis's models" } }, { status: 403 });
       if (to) return tunedProxy(req, srv, `${Buffer.from(to, "base64url").toString().replace(/\/+$/, "")}${path ?? ""}`);
       return rest.startsWith("/v1/") ? tunedProxy(req, srv, `${CHRYSALIS}${rest}`) : new Response("not found", { status: 404 });
     },
@@ -669,9 +671,9 @@ img.src = ${JSON.stringify(checkUrl(req))} + "?t=" + Date.now();
     "/api/threads": {
       GET: guarded(async () => {
         const at = harness.state();
-        if (at.state !== "on") return Response.json({ ...at, install: harness.INSTALL, wanted: !existsSync(OPENCODE_OFF) });
+        if (at.state !== "on") return Response.json({ ...at, outside: harness.outsideAllowed(), install: harness.INSTALL, wanted: !existsSync(OPENCODE_OFF) });
         const [threads, models, agents] = await Promise.all([harness.threads(), harness.models(), harness.agents()]);
-        return Response.json({ ...at, name: connector.name, home: homedir(), models, agents, threads: threads.map((t) => ({ ...t, job: turns.get(t.id)?.id })) });
+        return Response.json({ ...at, outside: harness.outsideAllowed(), name: connector.name, home: homedir(), models, agents, threads: threads.map((t) => ({ ...t, job: turns.get(t.id)?.id })) });
       }),
       DELETE: guarded(() => {
         writeFileSync(OPENCODE_OFF, "");
@@ -682,6 +684,16 @@ img.src = ${JSON.stringify(checkUrl(req))} + "?t=" + Date.now();
         rmSync(OPENCODE_OFF, { force: true });
         try { await harness.ensure(CHRYSALIS); } catch (e) { return Response.json({ error: { message: (e as Error).message } }, { status: 502 }); }
         return Response.json(harness.state());
+      }),
+    },
+    "/api/threads/outside": {
+      POST: here(json(async () => {
+        writeFileSync(OPENCODE_OUTSIDE, "");
+        return outsideNow(true);
+      })),
+      DELETE: guarded(async () => {
+        rmSync(OPENCODE_OUTSIDE, { force: true });
+        return outsideNow(false);
       }),
     },
     "/api/threads/folders": {
@@ -1005,6 +1017,15 @@ async function tuned(req: Request, body: string | undefined): Promise<string | u
   if (!want) return body;
   const { max_tokens, ...rest } = want, cap = "max_completion_tokens" in sent ? "max_completion_tokens" : "max_tokens";
   return JSON.stringify({ ...sent, ...rest, ...(max_tokens ? { [cap]: max_tokens } : {}) });
+}
+async function outsideNow(on: boolean): Promise<Response> {
+  if (harness.outsideAllowed() === on) return new Response(null, { status: 204 });
+  harness.allowOutside(on);
+  if (harness.state().state !== "on") return new Response(null, { status: 204 });
+  for (const job of new Set(turns.values())) job.ctrl.abort();
+  harness.stop();
+  try { await harness.ensure(CHRYSALIS); } catch (e) { return Response.json({ error: { message: (e as Error).message } }, { status: 502 }); }
+  return new Response(null, { status: 204 });
 }
 async function tunedProxy(req: Request, srv: Srv, to: string): Promise<Response> {
   srv.timeout(req, 0);

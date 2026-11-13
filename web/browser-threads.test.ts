@@ -1,6 +1,6 @@
 import { expect, test } from "bun:test";
 import { mkdirSync } from "node:fs";
-import { card, cards, castRows, connect, dir, harness, home, inRow, menu, open, openFolder, opencode, send, streams, work } from "./browser-harness";
+import { card, cards, castRows, connect, dir, harness, home, inRow, menu, open, openFolder, opencode, send, streams, work, outside } from "./browser-harness";
 
 harness();
 
@@ -146,6 +146,7 @@ test("a chat's folder is chosen from the folder button by the message box: befor
 
 test("a character works in a thread from the folder's invite: her card goes to OpenCode as that thread's instruction and her face heads the reply, taking her out makes it plain again; a model picked from OpenCode's list is the one sent; Stop interrupts OpenCode's turn", async () => {
   const page = await open();
+  await outside(page, true);
   await Bun.write(`${dir}/Mira.png`, await card("Mira", { description: "{{char}} keeps bees." }));
   await (await page.$("input#cast-file"))!.uploadFile(`${dir}/Mira.png`);
   await page.waitForFunction(() => [...document.querySelectorAll("#conversations .cast-row .cast-name")].some((n) => n.textContent === "Mira"));
@@ -168,7 +169,7 @@ test("a character works in a thread from the folder's invite: her card goes to O
   await page.keyboard.press("Escape");
   await page.click("#model-btn");
   await page.waitForSelector("#model-pop:not([hidden]) .model-group");
-  expect(await page.$$eval("#model-pop .model-group, #model-pop .model-label", (x) => x.map((e) => e.textContent))).toEqual(["OpenCode", "Build", "Plan", "Chrysalis", "Qwen3.8 27B", "Elsewhere", "Cloud One"]);
+  expect(await page.$$eval("#model-pop .model-group, #model-pop .model-label", (x) => x.map((e) => e.textContent))).toEqual(["OpenCode", "Build", "Plan", "Chrysalis", "Qwen3.8 27B", "Elsewhere: leaves this computer", "Cloud One"]);
   await page.evaluate(() => [...document.querySelectorAll<HTMLElement>("#model-pop .model-item")].find((i) => i.textContent!.includes("Cloud One"))!.click());
   await send(page, "and once more");
   const second = opencode.log.prompts.at(-1)!;
@@ -188,6 +189,7 @@ test("a character works in a thread from the folder's invite: her card goes to O
   await page.evaluate(() => document.querySelector("#thread > article.assistant:last-child")!.querySelector<HTMLElement>('[data-act="trash"]')!.click());
   await page.waitForFunction((n) => document.querySelectorAll("#thread > article").length === n - 1, {}, was.length);
   expect([before.at(-1), said(), await shown(), opencode.sessions.get(sid)!.dir]).toEqual(["assistant", before.slice(0, -1), was.slice(0, -1), work]);
+  await outside(page, false);
   await page.close();
 }, 90_000);
 
@@ -319,11 +321,57 @@ test("a thread's turns carry the settings' samplers, max tokens and seed to Open
   await send(page, "tuned with thinking off");
   expect(await sampling()).toEqual({ temperature: 0.12, presence_penalty: 0.4, max_tokens: 500, seed: 9 });
   expect(await page.$eval("#toast", (t) => t.classList.contains("show") && /straight to/.test(t.textContent ?? ""))).toBe(false);
+  await page.close();
+}, 60_000);
+
+test("OpenCode here is kept to Chrysalis's models until the switch under its button is turned off past a warning: before that a model outside is not listed, a turn naming one is refused and a thread left on one answers from Chrysalis; after it the model is listed as leaving this computer and its thread is marked; turned back on, it is gone again", async () => {
+  const page = await open(), last = () => opencode.log.prompts.at(-1)!;
+  await connect(page);
+  await openFolder(page, work);
+  const listed = () => page.evaluate(() => fetch("/api/threads").then((r) => r.json()).then((j) => [j.outside, j.models.map((m: { id: string }) => m.id)]));
+  const groups = async () => {
+    await page.click("#model-btn");
+    const out = await page.$$eval("#model-pop .model-group", (g) => g.map((x) => [x.textContent, x.classList.contains("outside")]));
+    await page.keyboard.press("Escape");
+    return out;
+  };
+  const refused = () => page.evaluate((dir) => fetch("/api/chat", { method: "POST", headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ stream: true, chrysalis_thread: { dir, text: "to the cloud", model: "elsewhere/cloud-1" } }) }).then((r) => r.text()), work);
+  expect(await listed()).toEqual([false, ["chrysalis/qwen3.8-27b"]]);
+  expect((await groups()).some(([, away]) => away)).toBe(false);
+  const before = opencode.log.prompts.length;
+  expect(await refused()).toMatch(/elsewhere\/cloud-1 is outside this computer/);
+  expect(opencode.log.prompts.length).toBe(before);
   await page.evaluate(() => localStorage.setItem("thread-model", "elsewhere/cloud-1"));
+  await send(page, "kept at home");
+  expect(last().model).toMatchObject({ providerID: "chrysalis", id: "qwen3.8-27b" });
+  expect(await page.$eval("#model-btn", (b) => b.classList.contains("outside"))).toBe(false);
+  await page.click("#opencode");
+  await page.click("#oc-only");
+  await page.waitForSelector("#outside-view[open]");
+  await page.click("#outside-keep");
+  expect([await page.$eval("#outside-view", (d) => (d as HTMLDialogElement).open), (await listed())[0]]).toEqual([false, false]);
+  await page.click("#oc-only");
+  await page.click("#outside-allow");
+  await page.waitForFunction(() => document.querySelector("#oc-only")?.getAttribute("aria-checked") === "false" && !!document.querySelector("#opencode .dot.outside"));
+  expect(await listed()).toEqual([true, ["chrysalis/qwen3.8-27b", "elsewhere/cloud-1"]]);
+  await page.keyboard.press("Escape");
   const toasts = () => page.$eval("#toast span", (t) => t.textContent ?? "");
   await page.click("#new-chat");
   await page.waitForFunction(() => !document.querySelector(".msg"));
+  expect(await groups()).toContainEqual(["Elsewhere: leaves this computer", true]);
+  expect(await page.$eval("#model-btn", (b) => b.classList.contains("outside"))).toBe(true);
+  await page.evaluate(() => sessionStorage.setItem("settings2", JSON.stringify({ v: 5, system: "", think: { temperature: 0.31 }, fast: {}, seed: 9 })));
+  await page.reload();
+  await page.waitForSelector("#opencode .dot.outside");
+  await openFolder(page, work);
   await send(page, "tuned somewhere else");
+  expect(last().model).toMatchObject({ providerID: "elsewhere", id: "cloud-1" });
   expect(await toasts()).toBe("This OpenCode sends elsewhere/cloud-1 straight to cloud.example, so your sampler settings, max tokens and seed don't reach it");
+  await page.click("#opencode");
+  await page.click("#oc-only");
+  await page.waitForFunction(() => document.querySelector("#oc-only")?.getAttribute("aria-checked") === "true" && !!document.querySelector("#opencode .dot.online"));
+  expect(await listed()).toEqual([false, ["chrysalis/qwen3.8-27b"]]);
+  expect(await refused()).toMatch(/elsewhere\/cloud-1 is outside this computer/);
   await page.close();
-}, 60_000);
+}, 90_000);

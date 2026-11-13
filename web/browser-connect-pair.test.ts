@@ -5,14 +5,16 @@ import { harness, RUN, chatContext, onNetwork, trusting } from "./browser-harnes
 
 harness();
 
-test("trusting the authority, Chromium and Firefox each show their own code on the connect page, which this computer's Connect a device allows, and the chat opens there with the line for other computers; a phone gets no Connect a device, and the chat stays in through a restart of Chrysalis", async () => {
+test("trusting the authority, Chromium and Firefox each show their own code on the connect page, which this computer's Devices, under the OpenCode button, allows, and the chat opens there with the line for other computers; a device let in cannot allow models outside this computer and a phone gets no Devices, and the chat stays in through a restart of Chrysalis", async () => {
   const lan = await onNetwork();
   try {
     const local = await (await chatContext()).newPage();
     await local.goto(lan.here, { waitUntil: "load" });
     await local.waitForSelector("#input", { timeout: 15_000 });
-    await local.waitForSelector("#connect:not([hidden])");
-    await local.click("#connect");
+    await local.click("#opencode");
+    await local.waitForSelector("#oc-devices");
+    expect(await local.$eval("#oc-only", (b) => [b.getAttribute("aria-checked"), (b as HTMLButtonElement).disabled])).toEqual(["true", false]);
+    await local.click("#oc-devices");
     await local.waitForSelector("#connect-view .dev-qr");
     expect(await local.$eval("#connect-view .dev-qr", (img) => (img as HTMLImageElement).naturalWidth > 0)).toBe(true);
     let chrome: Page | undefined;
@@ -31,8 +33,13 @@ test("trusting the authority, Chromium and Firefox each show their own code on t
         .find((e) => e.querySelector(".dev-ask-code")!.textContent === c)!.querySelector<HTMLButtonElement>(".btn.primary")!.click(), code);
       await page.waitForFunction((c) => location.href === c, { timeout: 15_000 }, lan.chat);
       await page.waitForSelector("#app:not([aria-busy])");
-      expect([page.url(), await page.$eval("#connect", (e) => e.checkVisibility())]).toEqual([lan.chat, true]);
-      await page.click("#connect");
+      expect(page.url()).toBe(lan.chat);
+      await page.click("#opencode");
+      await page.waitForSelector("#oc-devices");
+      expect(await page.$eval("#oc-only", (b) => [b.getAttribute("aria-checked"), (b as HTMLButtonElement).disabled])).toEqual(["true", true]);
+      expect(await page.evaluate(() => fetch("/api/threads/outside", { method: "POST", headers: { "Content-Type": "application/json" }, body: "{}" }).then((r) => r.status))).toBe(403);
+      expect(await page.evaluate(() => fetch("/api/threads").then((r) => r.json()).then((j) => j.outside))).toBe(false);
+      await page.click("#oc-devices");
       await page.waitForSelector("#connect-view .dev-url");
       const line = await page.$eval("#connect-view .dev-url", (e) => e.textContent!);
       expect(line).toMatch(/^curl -fsSk --pinnedpubkey sha256\/\/\S+ https:\/\/\S+\/opencode \| sh$/);
@@ -50,7 +57,9 @@ test("trusting the authority, Chromium and Firefox each show their own code on t
       await phone.setUserAgent("Mozilla/5.0 (iPhone; CPU iPhone OS 18_0 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/18.0 Mobile/15E148 Safari/604.1");
       await phone.goto(lan.chat, { waitUntil: "load" });
       await phone.waitForSelector("#app:not([aria-busy])");
-      expect(await phone.$eval("#connect", (e) => e.checkVisibility())).toBe(false);
+      await phone.click("#opencode");
+      await phone.waitForSelector("#oc-only");
+      expect(await phone.$("#oc-devices")).toBeNull();
       await phone.close();
       await local.waitForFunction((n) => (document.querySelector("#connect-view .dev-joined")?.textContent ?? "").includes(`${n} is connected`), { timeout: 5000 }, name);
       if (!firefox) chrome = page;

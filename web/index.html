@@ -115,7 +115,6 @@
           </form>
           <button id="artifacts-toggle" class="act art-btn" type="button" title="Artifacts" aria-label="Artifacts" aria-controls="shelf" hidden></button>
           <button id="opencode" class="act oc-btn" type="button" aria-haspopup="dialog" aria-controls="oc-pop"></button>
-          <button id="connect" class="act" type="button" title="Connect a phone or another device" aria-label="Connect a device" aria-haspopup="dialog" hidden></button>
         </header>
         <div id="sea" class="sea"></div>
         <div id="scroller"><div id="thread" class="thread"></div></div>
@@ -233,8 +232,14 @@
       <pre id="sent-text" class="sent-text"></pre>
     </dialog>
     <dialog id="connect-view" class="connect-view" aria-labelledby="connect-title">
-      <header class="sent-head"><h2 id="connect-title">Connect a device</h2><button id="connect-close" class="act" type="button" aria-label="Close"></button></header>
+      <header class="sent-head"><h2 id="connect-title">Devices</h2><button id="connect-close" class="act" type="button" aria-label="Close"></button></header>
       <div id="connect-body" class="connect-body"></div>
+    </dialog>
+    <dialog id="outside-view" class="connect-view outside-view" aria-labelledby="outside-title">
+      <h2 id="outside-title">Models outside this computer</h2>
+      <p>A thread on one of these models sends that company your prompts, your files and whatever its tools read on this computer. Chrysalis cannot take any of it back.</p>
+      <p>Threads on Chrysalis's own models stay on this computer as before. A thread that leaves is marked on its model button for as long as it does.</p>
+      <div class="outside-acts"><button id="outside-keep" class="btn primary" type="button" autofocus>Keep Chrysalis only</button><button id="outside-allow" class="btn warn" type="button">Allow them</button></div>
     </dialog>
     <script type="module" src="./app.ts"></script>
   </body>

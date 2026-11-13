@@ -710,7 +710,7 @@ label.set-switch { cursor: pointer; }
 .dev-ask .dev-name { flex: 1; }
 .dev-ask-code { font: 600 18px var(--mono); letter-spacing: 0.06em; }
 #connect { position: relative; }
-#connect.asking::after { content: ""; position: absolute; top: 3px; right: 3px; width: 7px; height: 7px; border-radius: 50%; background: var(--accent); }
+#opencode.asking::after { content: ""; position: absolute; top: -3px; right: -3px; width: 8px; height: 8px; border-radius: 50%; background: var(--accent); animation: pulse 1s ease-in-out infinite; }
 .dev-key { display: flex; align-items: center; gap: 8px; }
 .dev-key code { flex: 1; min-width: 0; padding: 5px 8px; border-radius: 7px; background: var(--code); font: 12px var(--mono); overflow-wrap: anywhere; user-select: all; }
 .dev-fp { margin: 0; }
@@ -946,7 +946,7 @@ label.set-switch { cursor: pointer; }
 .invite-none { margin: 0; padding: 10px 8px; color: var(--muted); font-size: 13px; }
 .invite-card { margin-top: 2px; padding: 9px 8px; border-top: 1px solid var(--line); border-radius: 0 0 9px 9px; color: var(--muted); }
 .invite-card .i { width: 16px; height: 16px; }
-.act.oc-btn { display: inline-flex; gap: 8px; width: auto; padding: 0 9px 0 10px; border: 1px solid var(--line); }
+.act.oc-btn { position: relative; display: inline-flex; gap: 8px; width: auto; padding: 0 9px 0 10px; border: 1px solid var(--line); }
 .oc-btn svg { display: block; flex: none; }
 .oc-btn .w { fill: #4b4b4b; }
 .oc-btn .b { fill: #aeaeae; }
@@ -954,6 +954,24 @@ label.set-switch { cursor: pointer; }
 .oc-btn .oc-word { width: 78px; height: 14px; }
 .oc-btn .oc-mark { display: none; width: 11px; height: 14px; }
 .oc-btn .dot { width: 7px; height: 7px; }
+.dot.outside { background: var(--warn); box-shadow: 0 0 0 3px color-mix(in srgb, var(--warn) 18%, transparent); }
+.oc-part { margin-top: 4px; padding-top: 10px; border-top: 1px solid var(--line); }
+.oc-only { display: flex; align-items: center; justify-content: space-between; gap: 12px; padding: 4px 8px 2px; font-size: 13.5px; cursor: pointer; }
+.oc-note.outside { display: flex; gap: 8px; color: var(--warn); }
+.oc-note.outside .i { width: 15px; height: 15px; margin-top: 2px; }
+.oc-devices > .i:first-child { color: var(--muted); }
+.oc-devices > .i:last-child { width: 13px; height: 13px; color: var(--faint); rotate: -90deg; }
+.oc-asking { flex: none; padding: 1px 7px; border-radius: 999px; background: var(--accent); color: #fff; font-size: 11.5px; font-weight: 600; }
+.model-btn.outside, .model-btn.outside:hover { color: var(--warn); }
+.model-btn.outside > .i:first-child { width: 14px; height: 14px; margin-right: 1px; transform: none; }
+.model-group.outside { color: var(--warn); }
+.outside-view { width: min(440px, 94vw); border-color: color-mix(in srgb, var(--warn) 55%, var(--line)); }
+.outside-view h2 { display: flex; align-items: center; gap: 8px; margin: 0 0 10px; color: var(--warn); font-size: 16px; }
+.outside-view p { margin: 0 0 10px; color: var(--text); font-size: 13.5px; line-height: 1.5; }
+.outside-view p + p { color: var(--muted); }
+.outside-acts { display: flex; justify-content: flex-end; gap: 8px; margin-top: 16px; }
+.btn.warn { border-color: color-mix(in srgb, var(--warn) 55%, var(--line)); color: var(--warn); }
+.btn.warn:hover { border-color: var(--warn); }
 @media (max-width: 560px) { .act.oc-btn { padding: 0 8px; } .oc-btn .oc-word { display: none; } .oc-btn .oc-mark { display: block; } }
 .oc-pop { width: min(360px, calc(100vw - 24px)); }
 .oc-pop.exploring { width: min(400px, calc(100vw - 16px)); padding: 0; gap: 0; overflow: hidden; }

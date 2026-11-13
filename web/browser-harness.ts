@@ -524,6 +524,10 @@ export const stageDrawn = async (page: Page) => {
 export const work = `${dir}/site`;
 mkdirSync(work, { recursive: true });
 
+export async function outside(page: Page, on: boolean) {
+  expect(await page.evaluate((on) => fetch("/api/threads/outside", on ? { method: "POST", headers: { "Content-Type": "application/json" }, body: "{}" } : { method: "DELETE" }).then((r) => r.status), on)).toBe(204);
+  if (on) await page.reload();
+}
 export async function connect(page: Page) {
   await page.click("#opencode");
   await page.waitForSelector("#oc-pop .invite-head");

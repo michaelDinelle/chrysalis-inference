@@ -40,17 +40,17 @@ Chrysalis beats Strata's IQ3_S on every measure on the RX 7900. On the RTX 5070 
 ## Phones and other devices
 
 <p align="center"><img src="media/phone-pairing.png" width="760" alt="A phone connecting: the connect page, the code it shows, then the chat"></p>
-<p align="center"><img src="media/connect-desktop.png" width="520" alt="Connect a device on the computer: the QR code and the phone's code with Allow"></p>
+<p align="center"><img src="media/connect-desktop.png" width="520" alt="Devices on the computer: the QR code and the phone's code with Allow"></p>
 
-<sub>Scan the QR code, trust the certificate once, and allow the code.</sub>
+<sub>Open Devices from the OpenCode button, scan the QR code, trust the certificate once, and allow the code.</sub>
 
 ## Coding on another computer
 
 Start Chrysalis with `chrysalis.sh --host 0.0.0.0`. The other computer needs [OpenCode](https://opencode.ai).
 
-<p align="center"><img src="media/opencode-copy.png" width="560" alt="Connect a device in that computer's browser: the OpenCode line and its Copy button"></p>
+<p align="center"><img src="media/opencode-copy.png" width="560" alt="Devices in that computer's browser: the OpenCode line and its Copy button"></p>
 
-<sub>Copy the line under Connect a device.</sub>
+<sub>Copy the line under Devices, in the OpenCode button's panel.</sub>
 
 <p align="center"><img src="media/opencode-login.png" width="760" alt="The line pasted into a terminal: it shows a code to allow, then Connected"></p>
 
@@ -63,7 +63,7 @@ Start Chrysalis with `chrysalis.sh --host 0.0.0.0`. The other computer needs [Op
 ## Also
 
 - **Voice mode** you can interrupt by talking
-- **OpenCode threads** in the chat: work in a folder, with OpenCode's tools and models
+- **OpenCode threads** in the chat: work in a folder, with OpenCode's tools, on Chrysalis's models unless you allow others
 - **Claude Code** and **OpenCode**, through OpenAI and Anthropic APIs
 - The same chat on **llama.cpp, Ollama, LM Studio, KoboldCpp or vLLM**
 - **Qwen3.8-27B** with its full 262K context
@@ -130,7 +130,10 @@ docker run -d --device /dev/kfd --device /dev/dri -p 127.0.0.1:8080:8080 -v chry
   sidebar, and the add button there opens another. Chats are read from OpenCode, with their people, so they are the
   same after a reload and on other devices. The OpenCode button disconnects it: chats are then plain.
 - In a thread the tools, models, agents (Build, Plan), permissions, compaction, sub-agents, slash commands and routines
-  are OpenCode's. A thread uses one of Chrysalis's own models unless another is picked, takes text files, pictures and
+  are OpenCode's. OpenCode here is kept to Chrysalis's own models: it is started with every other provider denied, no
+  other model is listed, and a turn naming one is refused. The switch under the OpenCode button allows the others,
+  past a warning, only from the computer Chrysalis runs on; a thread on one is then marked as leaving this computer.
+  A thread uses one of Chrysalis's own models unless another is picked, takes text files, pictures and
   PDFs, and the thinking slider picks the model's own level. What OpenCode or a sub-agent asks is answered in a card. A
   message sent while a turn runs goes to OpenCode. Any message, yours or the reply, can be edited in place or
   deleted, through OpenCode's own export and import of the chat; an edited message sent again and Regenerate take the
@@ -149,7 +152,7 @@ docker run -d --device /dev/kfd --device /dev/dri -p 127.0.0.1:8080:8080 -v chry
 
 - With no browser there, as over SSH, Chrysalis's terminal prints the same line. On Windows the line runs in WSL.
 - If OpenCode is open, the line asks to close it first. The line adds both models to OpenCode's favorites.
-- OpenCode retries while Chrysalis is off. Remove under Connect a device takes a computer's access away.
+- OpenCode retries while Chrysalis is off. Remove under Devices takes a computer's access away.
 - The line pins this computer's key. Only allowed computers can connect. OpenCode connects over HTTPS and trusts Chrysalis's
   authority for local names.
 - On a Mac, the line also adds a launchd job that forwards a local port to Chrysalis through Apple's `nc`. HTTPS still runs

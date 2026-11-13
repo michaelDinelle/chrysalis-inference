@@ -1,10 +1,11 @@
 import { expect, test } from "bun:test";
-import { cards, castRows, connect, dir, harness, home, lastText, open, openFolder, opencode, png, send, spokenOf, streams, voicePage, work } from "./browser-harness";
+import { cards, castRows, connect, dir, harness, home, lastText, open, openFolder, opencode, png, send, spokenOf, streams, voicePage, work, outside } from "./browser-harness";
 
 harness();
 
 test("a thread takes what a chat takes: attached text files and pictures go to OpenCode with the message and come back with the thread after a reload, a video does not; the thinking slider picks the model's own level and hides for a model with none; a question OpenCode asks is answered or skipped in its card", async () => {
   const page = await open(), last = () => opencode.log.prompts.at(-1)!;
+  await outside(page, true);
   await Bun.write(`${dir}/jar.txt`, "clover honey, 12 jars");
   await Bun.write(`${dir}/jar.png`, png);
   await Bun.write(`${dir}/jar.mp4`, "not really a film");
@@ -54,6 +55,7 @@ test("a thread takes what a chat takes: attached text files and pictures go to O
   await send(page, "plainly");
   expect(last().model).toEqual({ providerID: "elsewhere", id: "cloud-1" });
   await page.evaluate(() => localStorage.removeItem("thread-model"));
+  await outside(page, false);
   await page.close();
 }, 90_000);
 

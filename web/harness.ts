@@ -46,6 +46,10 @@ export async function tuningOf(session: string): Promise<Record<string, unknown>
   if (!tunings.has(root)) tunings.set(root, await call("GET", `/api/session/${root}`).then((r) => r.data?.metadata?.[TUNED], () => undefined));
   return tunings.get(root);
 }
+let outside = false;
+export const allowOutside = (on: boolean) => { outside = on; };
+export const outsideAllowed = () => outside;
+const local = (model: string) => model.startsWith("chrysalis/");
 let woken: (session: string) => void = () => {};
 export const onWake = (fn: (session: string) => void) => { woken = fn; };
 process.on("exit", () => host?.proc?.kill());
@@ -80,14 +84,14 @@ export function ensure(chrysalis: string): Promise<void> {
     for (;;) {
       const password = `${crypto.randomUUID()}${crypto.randomUUID()}`, port = await freePort(), { OPENCODE_SERVER_PASSWORD: _, BUN_BE_BUN: __, ...env } = process.env;
       const others: Record<string, any> = {};
-      for (const [key, base] of routes) {
+      for (const [key, base] of outside ? routes : []) {
         const [provider, model] = key.split("\0");
         others[provider] ??= {};
         if (model) ((others[provider].models ??= {})[model] = { settings: { baseURL: via(base) } });
         else others[provider].settings = { baseURL: via(base) };
       }
       const proc = Bun.spawn(["sh", "-c", WITH_US, "sh", bin, "serve", "--hostname", "127.0.0.1", "--port", String(port)], { stdin: "ignore", stdout: "ignore", stderr: "ignore",
-        env: { ...env, CHRYSALIS_WEB_PID: String(process.pid), OPENCODE_PASSWORD: password, OPENCODE_CONFIG_CONTENT: JSON.stringify({ experimental: { schedules: true }, providers: { ...others, chrysalis: { name: "Chrysalis",
+        env: { ...env, CHRYSALIS_WEB_PID: String(process.pid), OPENCODE_PASSWORD: password, OPENCODE_CONFIG_CONTENT: JSON.stringify({ experimental: { schedules: true }, ...(outside ? {} : { enabled_providers: ["chrysalis"] }), providers: { ...others, chrysalis: { name: "Chrysalis",
           package: "@opencode/ai/providers/openai-compatible", settings: { baseURL: `${modelUrl}/v1`, apiKey: "chrysalis" }, models } } }) } });
       const at = await reach(`http://127.0.0.1:${port}`, password, proc, Object.keys(models).length > 0);
       const [providers, all] = await Promise.all([call("GET", "/api/provider", undefined, at), call("GET", "/api/model", undefined, at)]);
@@ -201,7 +205,7 @@ export async function threads(): Promise<Thread[]> {
 export async function models(): Promise<Model[]> {
   const [list, providers] = await Promise.all([call("GET", "/api/model"), call("GET", "/api/provider")]);
   const names = new Map<string, string>((providers.data ?? []).map((p: any) => [p.id, p.name ?? p.id]));
-  return (list.data ?? []).flatMap((m: any) => (idOf(m) ? [{ id: idOf(m)!, name: m.name ?? m.id, provider: names.get(m.providerID) ?? m.providerID,
+  return (list.data ?? []).flatMap((m: any) => (idOf(m) && (outside || local(idOf(m)!)) ? [{ id: idOf(m)!, name: m.name ?? m.id, provider: names.get(m.providerID) ?? m.providerID,
     variants: (m.variants ?? []).map((v: any) => v.id), ...(/^https?:/.test(m.settings?.baseURL ?? "") && !reached(m.settings.baseURL) ? { straight: new URL(m.settings.baseURL).host } : {}) }] : []));
 }
 export async function agents(): Promise<{ id: string; name: string }[]> {
@@ -294,6 +298,8 @@ export function folders(path: string) {
 
 export async function turn(t: Turn, push: (d: object) => void, signal: AbortSignal, ask: (id: string) => Promise<Answer>, began: (session: string) => void) {
   if (!t.follow && !existsSync(t.dir)) throw new Error(`There is no folder ${t.dir} on this computer`);
+  const stored = t.model || !t.session || outside ? undefined : idOf((await call("GET", `/api/session/${t.session}`)).data?.model);
+  for (const model of [t.model, stored]) if (!outside && model && !local(model)) throw new Error(`${model.split("#")[0]} is outside this computer, and OpenCode here is kept to Chrysalis's models: allow models outside this computer from the OpenCode button, on the computer Chrysalis runs on`);
   const meta = t.scene || t.sampling ? { metadata: { ...(t.scene ? { [OURS]: t.scene } : {}), ...(t.sampling ? { [TUNED]: t.sampling } : {}) } } : {};
   const id = t.session ?? (await call("POST", "/api/session", { location: { directory: t.dir }, ...(t.title?.trim() ? { title: t.title.trim().slice(0, 100) } : {}), ...meta })).data.id as string;
   if (t.sampling && !t.follow) tunings.set(id, t.sampling);

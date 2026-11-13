@@ -199,7 +199,7 @@ export function connectPage(a: Authority, check: string, sea: string): string {
     <p class="about">This device will trust <b>${name}</b>, an authority this computer made for its own web chat. It can only vouch
       for private addresses and local names, so it changes nothing for any other site. Until this device trusts it, nothing
       proves this page came from your computer (that is what the browser's warning said): to be sure, compare the SHA-256
-      fingerprint this device shows for <b>${name}</b> in its certificate details with the one under <b>Connect a device</b>
+      fingerprint this device shows for <b>${name}</b> in its certificate details with the one under <b>Devices</b> in the OpenCode button's panel
       on the computer.</p>
   </details>`, `const CHECK = ${JSON.stringify(check)}, GUIDES = ${JSON.stringify(guides)};
 const detected = /Firefox\\//.test(ua) && os !== "ios" && os !== "android" ? "firefox" : os;
@@ -297,7 +297,7 @@ async function check() {
     .then((x) => x.json()).catch(() => null);
   if (r?.in) return opening("Trusted. Opening Chrysalis…");
   if (!r?.code) return again("Could not ask to join");
-  $("sub").innerHTML = "Allow this device on your computer: Chrysalis's terminal asks with this code, and <b>Connect a device</b>, the phone at the top of the chat, shows it.";
+  $("sub").innerHTML = "Allow this device on your computer: Chrysalis's terminal asks with this code, and <b>Devices</b>, under the OpenCode button at the top of the chat, shows it.";
   $("code").textContent = r.code.slice(0, 3) + " " + r.code.slice(3);
   $("code").hidden = false;
   say("Waiting for you to allow it…");

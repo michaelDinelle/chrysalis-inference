@@ -224,6 +224,7 @@ const ICONS = {
   speak: '<path d="M4 9.5h3.5L12 5.5v13l-4.5-4H4z"/><path d="M15.5 9a4 4 0 0 1 0 6M18 6.5a7.5 7.5 0 0 1 0 11"/>',
   person: '<circle cx="12" cy="8" r="4"/><path d="M4 21c1.5-4 4.5-6 8-6s6.5 2 8 6"/>',
   folder: '<path d="M3 7.5A2.5 2.5 0 0 1 5.5 5H9l2 2.5h7.5A2.5 2.5 0 0 1 21 10v6.5a2.5 2.5 0 0 1-2.5 2.5h-13A2.5 2.5 0 0 1 3 16.5z"/>',
+  warn: '<path d="M12 4 2.8 19.5h18.4z"/><path d="M12 10v4.5M12 17.3v.2"/>',
   personAdd: '<circle cx="10" cy="8" r="4"/><path d="M2.5 21c1.4-4 4.2-6 7.5-6 1.6 0 3 .5 4.3 1.3M19 14v6M16 17h6"/>',
   micOff: '<path d="M15 9.4V6a3 3 0 0 0-5.7-1.3M9 9v2a3 3 0 0 0 4.9 2.3M18.5 11a6.5 6.5 0 0 1-1 3.4M5.5 11a6.5 6.5 0 0 0 10.4 5.2M12 17.5V21M4 4l16 16"/>',
 };
@@ -273,7 +274,7 @@ const CAST = "cast:";
 const castKey = (cast: string[], missing: string[] = []) => CAST + [...cast].sort().join("+") + (missing.length ? `|${[...missing].sort().join("|")}` : "");
 interface Routine { id: string; name: string; when: string; prompt: string; status: string; next?: number; runs: number }
 interface Scene { cast: string[]; scenario?: string; name?: string; greeting?: string }
-interface Harness { state: "absent" | "off" | "on"; name?: string; version?: string; install?: string; wanted?: boolean; home?: string; models?: { id: string; name: string; provider: string; variants: string[]; straight?: string }[]; agents?: { id: string; name: string }[];
+interface Harness { state: "absent" | "off" | "on"; outside?: boolean; name?: string; version?: string; install?: string; wanted?: boolean; home?: string; models?: { id: string; name: string; provider: string; variants: string[]; straight?: string }[]; agents?: { id: string; name: string }[];
   threads?: { id: string; title: string; dir: string; updated: number; idle: number; busy: boolean; archived: boolean; job?: string; model?: string; scene?: Scene }[] }
 let harness: Harness = { state: "off" };
 const folderOf = (c: Conversation) => (c.who && c.who !== CHRYSALIS && (c.cast || people.has(c.who)) ? c.who : "");
@@ -787,9 +788,11 @@ function openRoutines() {
 let ocAt = "", ocShown = "", ocPick: (path: string) => void = () => {};
 function paintHarness() {
   const b = $("opencode"), on = harness.state === "on";
-  b.innerHTML = `${OC_MARK}${OC_WORD}<span class="dot ${on ? "online" : harness.state === "off" ? "" : "failed"}"></span>`;
-  b.title = b.ariaLabel = on ? `OpenCode ${harness.version}: connected` : harness.state === "off" ? "OpenCode: disconnected" : "OpenCode is not installed on the computer Chrysalis runs on";
-  const shown = JSON.stringify([harness.state, harness.version, dirs()]);
+  const dot = `dot ${on ? (harness.outside ? "outside" : "online") : harness.state === "off" ? "" : "failed"}`;
+  if (b.lastElementChild?.className !== dot) b.innerHTML = `${OC_MARK}${OC_WORD}<span class="${dot}"></span>`;
+  b.title = b.ariaLabel = on ? `OpenCode ${harness.version}: connected, ${harness.outside ? "models outside this computer allowed" : "Chrysalis's models only"}` : harness.state === "off" ? "OpenCode: disconnected" : "OpenCode is not installed on the computer Chrysalis runs on";
+  b.classList.toggle("asking", !!status.waiting);
+  const shown = JSON.stringify([harness.state, harness.version, harness.outside, status.waiting, status.here, dirs()]);
   if (!$("oc-pop").hidden && !ocAt && shown !== ocShown) void paintOcPop();
   ocShown = shown;
 }
@@ -802,14 +805,32 @@ async function paintOcPop() {
     x.onclick = onclick;
     return x;
   };
+  const rest = () => {
+    const only = !harness.outside, models = h("label", "oc-only"), sw = h("button", "switch"), devices = row("invite-row oc-devices", "", () => { pop.hidden = true; openConnect(); });
+    sw.type = "button";
+    sw.id = "oc-only";
+    sw.setAttribute("role", "switch");
+    sw.setAttribute("aria-checked", String(only));
+    sw.disabled = only && !status.here;
+    sw.onclick = () => (only ? $<HTMLDialogElement>("outside-view").showModal() : void setOutside(false));
+    models.append(h("span", "", "Chrysalis only"), sw);
+    const note = h("p", only ? "oc-note" : "oc-note outside");
+    if (!only) note.innerHTML = icon("warn");
+    note.append(only ? `Threads run on this computer's own models, and nothing is sent anywhere else.${status.here ? "" : " Models outside it can be allowed only on the computer Chrysalis runs on."}`
+      : "Models outside this computer are allowed. A thread on one sends that company your prompts, your files and what its tools read.");
+    devices.id = "oc-devices";
+    devices.innerHTML = `${icon("phone")}<span class="invite-name"></span>${status.here && status.waiting ? `<span class="oc-asking">${status.waiting} asking</span>` : ""}${icon("chevron")}`;
+    devices.querySelector(".invite-name")!.textContent = status.here ? "Let a phone or another computer in" : "Use Chrysalis from OpenCode on this computer";
+    return [h("div", "invite-head oc-part", "Models"), models, note, ...(!status.here && PHONE ? [] : [h("div", "invite-head oc-part", "Devices"), devices])];
+  };
   if (harness.state === "absent") {
     const line = h("code", "oc-line", harness.install ?? "");
     return void pop.replaceChildren(h("div", "invite-head", "OpenCode"), h("p", "oc-note", "OpenCode is not installed on the computer Chrysalis runs on. Install it there, then press the button again:"), line,
-      row("invite-card", `${icon("copy")}Copy the line`, () => void navigator.clipboard.writeText(harness.install ?? "").then(() => toast("Copied"))));
+      row("invite-card", `${icon("copy")}Copy the line`, () => void navigator.clipboard.writeText(harness.install ?? "").then(() => toast("Copied"))), ...rest());
   }
   const connect = () => { harness.wanted = true; void paintOcPop(); void ensureHarness().catch((e) => { harness.wanted = false; toast(e instanceof Error ? e.message : String(e)); void paintOcPop(); }); };
   if (harness.state !== "on") return void pop.replaceChildren(h("div", "invite-head", "OpenCode"), ...(harness.wanted ? [h("p", "oc-note", "Starting OpenCode…")]
-    : [h("p", "oc-note", "Disconnected: its folders and threads are hidden, and its routines do not run."), row("invite-card", `${icon("power")}Connect`, connect)]));
+    : [h("p", "oc-note", "Disconnected: its folders and threads are hidden, and its routines do not run."), row("invite-card", `${icon("power")}Connect`, connect)]), ...rest());
   if (ocAt) {
     const r = await fetch(`/api/threads/folders?path=${encodeURIComponent(ocAt === "~" ? "" : ocAt)}`).catch(() => null), got = r?.ok ? await r.json() : null;
     if (!got) { ocAt = ""; toast("That folder cannot be read"); return paintOcPop(); }
@@ -897,7 +918,13 @@ async function paintOcPop() {
       renderList();
       if (conv.thread) newChat();
       void fetch("/api/threads", { method: "DELETE" }).then(() => loadThreads());
-    }, "Stop OpenCode: threads stop, and routines do not run until it is connected again"));
+    }, "Stop OpenCode: threads stop, and routines do not run until it is connected again"), ...rest());
+}
+async function setOutside(on: boolean) {
+  const r = await fetch("/api/threads/outside", on ? { method: "POST", headers: { "Content-Type": "application/json" }, body: "{}" } : { method: "DELETE" }).catch(() => null);
+  if (!r?.ok) toast((await r?.json().catch(() => null))?.error?.message ?? "OpenCode did not take that");
+  await loadThreads();
+  if (!$("oc-pop").hidden && !ocAt) void paintOcPop();
 }
 async function ensureHarness() {
   if (harness.state === "on" && harness.models?.length) return;
@@ -1264,7 +1291,7 @@ document.addEventListener("pointerdown", (e) => {
   const t = e.target as HTMLElement;
   if (!$("cast-add").hidden && !t.closest("#cast-add, #add-cast")) $("cast-add").hidden = true;
   if (!$("cast-invite").hidden && !t.closest("#cast-invite, .cast-bring, #cast-add, #toast")) closeInvite();
-  if (!$("oc-pop").hidden && !t.closest("#oc-pop, #opencode, #cast-add, #toast")) $("oc-pop").hidden = true;
+  if (!$("oc-pop").hidden && !t.closest("#oc-pop, #opencode, #cast-add, #toast, #outside-view")) $("oc-pop").hidden = true;
   if (!$("row-menu").hidden && !t.closest("#row-menu")) $("row-menu").hidden = true;
   if (!$("routines-pop").hidden && !t.closest("#routines-pop, #routines, #toast")) $("routines-pop").hidden = true;
   if (!$("cast-sheet").hidden && !t.closest("#cast-sheet, [data-card], #voice-menu")) closeSheet();
@@ -3593,7 +3620,7 @@ async function renderConnect() {
   if (!status.here && oc?.line) {
     if (box.dataset.key !== oc.line) {
       box.dataset.key = oc.line;
-      box.replaceChildren(openCodeRow(oc.line, `Paste this into ${/Win/.test(navigator.platform) ? "WSL, with OpenCode installed there," : "a terminal on this computer,"} then allow the code it shows on the computer Chrysalis runs on. OpenCode then has Chrysalis's models.`));
+      box.replaceChildren(openCodeRow(oc.line, `Paste this into ${/Win/.test(navigator.platform) ? "WSL, with OpenCode installed there," : "a terminal on this computer,"} then allow the code it shows on the computer Chrysalis runs on. OpenCode here then has Chrysalis's models: its files and tools stay on this computer, and only what it asks a model goes to Chrysalis.`));
     }
     return;
   }
@@ -3654,7 +3681,7 @@ async function renderConnect() {
   done.innerHTML = icon("check");
   done.append(`${joined} is connected.`);
   box.replaceChildren(...(joined ? [done] : []), row, ...(asking.length ? [asks] : []),
-    ...(oc?.line ? [openCodeRow(oc.line, "On another computer: connect its browser, and Connect a device there has this line to copy. Pasted into a terminal there, it asks with a code that appears here.")] : []), devs, fp);
+    ...(oc?.line ? [openCodeRow(oc.line, "On another computer: connect its browser, and the OpenCode button there has this line to copy. Pasted into a terminal there, it asks with a code that appears here. OpenCode there then has Chrysalis's models; its files and tools stay on that computer, and what else it is signed in to is its own.")] : []), devs, fp);
 }
 function openCodeRow(line: string, how: string) {
   const row = h("div", "dev-list"), button = h("button", "btn small dev-copy", "Copy");
@@ -4074,9 +4101,8 @@ async function refreshStatus(again = true) {
     status = await r.json();
   } catch { status = { state: "offline", backend: status.backend }; }
   if (status.check) void checkTrust();
-  $("connect").hidden = !status.here && PHONE;
-  $("connect").classList.toggle("asking", !!status.waiting);
-  if ((status.waiting ?? 0) > asked && !connectView.open) toast("A device is asking to join: Connect a device, the phone at the top");
+  paintHarness();
+  if ((status.waiting ?? 0) > asked && !connectView.open) toast("A device is asking to join: Devices, under the OpenCode button");
   asked = status.waiting ?? 0;
   build ||= status.build ?? "";
   if (status.state === "online" && status.model && !status.loading && status.model !== picked) {
@@ -5916,8 +5942,10 @@ function renderMeter() {
 function threadControls() {
   const id = threadModel(conv), btn = $("model-btn"), on = harness.state === "on";
   const label = id ? shortName(id.startsWith("chrysalis/") ? id.slice(10) : harness.models?.find((m) => m.id === id)?.name ?? id) : "OpenCode";
-  btn.innerHTML = `<span class="dot ${on ? "online" : "offline"}"></span><span class="model-name">${escapeHtml(label)}</span>${icon("chevron")}`;
-  btn.title = id ? `${id}, through OpenCode` : "OpenCode lists no model";
+  const away = !!id && !id.startsWith("chrysalis/");
+  btn.innerHTML = `${away ? icon("warn") : `<span class="dot ${on ? "online" : "offline"}"></span>`}<span class="model-name">${escapeHtml(label)}</span>${icon("chevron")}`;
+  btn.classList.toggle("outside", away);
+  btn.title = id ? `${id}, through OpenCode${away ? ": this thread leaves this computer" : ""}` : "OpenCode lists no model";
   btn.setAttribute("aria-expanded", String(modelsOpen));
   btn.classList.toggle("open", modelsOpen);
   $("meter").replaceChildren();
@@ -5925,7 +5953,7 @@ function threadControls() {
   const pop = $("model-pop"), agent = conv.thread!.agent ?? harness.agents?.[0]?.id, key = JSON.stringify(["thread", id, agent, harness.models, harness.agents, speechKey()]);
   if (pop.dataset.key === key) return;
   pop.dataset.key = key;
-  const groups = Object.entries(Object.groupBy(harness.models ?? [], (m) => m.provider));
+  const groups = Object.entries(Object.groupBy(harness.models ?? [], (m) => m.provider)).sort(([, a], [, b]) => Number(b![0].id.startsWith("chrysalis/")) - Number(a![0].id.startsWith("chrysalis/")));
   if (!groups.length) return void pop.replaceChildren(h("div", "model-empty", "OpenCode lists no model: sign in to a provider with opencode on that computer"), ...speechRows());
   const option = (name: string, title: string, cur: boolean, pick: () => void) => {
     const item = h("button", cur ? "model-item current" : "model-item"), mark = h("span", "model-check");
@@ -5946,7 +5974,7 @@ function threadControls() {
   const plain = fresh ? [option("Chat only", `No tools: a plain chat with the model, without ${harness.name ?? "OpenCode"}`, false, () => { delete conv.thread; setPref("tools", "off"); })] : [];
   pop.replaceChildren(...((harness.agents?.length ?? 0) > 1 || plain.length ? [h("div", "model-group", harness.name ?? "OpenCode"),
     ...(harness.agents ?? []).map((a) => option(a.name, `${harness.name ?? "OpenCode"}'s ${a.name} agent`, a.id === agent, () => { conv.thread!.agent = a.id; })), ...plain] : []),
-    ...groups.flatMap(([provider, list]) => [h("div", "model-group", provider), ...list!.map((m) => option(m.name, m.id, m.id === id, () => { conv.thread!.model = m.id; setPref("thread-model", m.id); }))]),
+    ...groups.flatMap(([provider, list]) => [list![0].id.startsWith("chrysalis/") ? h("div", "model-group", provider) : h("div", "model-group outside", `${provider}: leaves this computer`), ...list!.map((m) => option(m.name, m.id, m.id === id, () => { conv.thread!.model = m.id; setPref("thread-model", m.id); }))]),
     ...speechRows());
 }
 function renderControls() {
@@ -5980,6 +6008,7 @@ function renderControls() {
     : state === "online" ? `${name}: ready` : state === "loading" ? `Loading ${name}` : `${name}: stopped`;
   btn.setAttribute("aria-expanded", String(modelsOpen));
   btn.classList.toggle("open", modelsOpen);
+  btn.classList.remove("outside");
   renderMeter();
   const power = $<HTMLButtonElement>("power");
   power.innerHTML = icon("power");
@@ -6703,8 +6732,9 @@ document.addEventListener("visibilitychange", () => { if (!document.hidden) void
 
 $("new-chat").innerHTML = `${icon("plus")}New chat`;
 $("add-cast").innerHTML = icon("personAdd");
-$("connect").innerHTML = icon("phone");
-$("connect").onclick = openConnect;
+$("outside-title").insertAdjacentHTML("afterbegin", icon("warn"));
+$("outside-keep").onclick = () => $<HTMLDialogElement>("outside-view").close();
+$("outside-allow").onclick = () => { $<HTMLDialogElement>("outside-view").close(); void setOutside(true); };
 $("opencode").onclick = () => void openHarness();
 paintHarness();
 void loadThreads().then(() => { if (harness.state === "off" && harness.wanted) void ensureHarness().catch(() => {}); });
