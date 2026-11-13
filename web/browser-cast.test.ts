@@ -625,11 +625,23 @@ test("the sidebar's add makes a new character here, with no file: their card ope
   await page.keyboard.type("W");
   const first = await tint("#cast-sheet .card-portrait");
   await page.keyboard.type("ren");
-  expect([await page.$eval("#cast-sheet .card-portrait", (f) => f.textContent), /^#[0-9a-f]{6}$/.test(first), await tint("#cast-sheet .card-portrait"), await tint("#conversations .cast-pic .face"),
-    await page.$eval("#cast-sheet input.card-tint", (b) => [(b as HTMLInputElement).type, (b as HTMLInputElement).value])]).toEqual(["W", true, first, first, ["color", first]]);
+  expect([await page.$eval("#cast-sheet .card-portrait", (f) => f.textContent), /^#[0-9a-f]{6}$/.test(first), await tint("#cast-sheet .card-portrait"), await tint("#conversations .cast-pic .face")]).toEqual(["W", true, first, first]);
+  await page.click("#cast-sheet button.card-tint");
+  await page.waitForSelector("#cast-sheet .tint-pop");
+  expect(await page.$eval("#cast-sheet .tint-code", (c) => (c as HTMLInputElement).value)).toBe(first);
   const other = first === "#3366cc" ? "#cc6633" : "#3366cc";
-  await page.$eval("#cast-sheet input.card-tint", (b, v) => { (b as HTMLInputElement).value = v; b.dispatchEvent(new Event("input", { bubbles: true })); b.dispatchEvent(new Event("change", { bubbles: true })); }, other);
+  await page.$eval("#cast-sheet .tint-code", (c) => { (c as HTMLInputElement).focus(); (c as HTMLInputElement).select(); });
+  await page.keyboard.type(other);
   expect([await tint("#cast-sheet .card-portrait"), await tint("#conversations .cast-pic .face")]).toEqual([other, other]);
+  const field = await page.$eval("#cast-sheet .tint-field", (f) => { const r = f.getBoundingClientRect(); return [r.x, r.y, r.width, r.height]; });
+  await page.mouse.move(field[0] + field[2] * 0.5, field[1] + field[3] * 0.5);
+  await page.mouse.down();
+  await page.mouse.move(field[0] + field[2], field[1], { steps: 4 });
+  await page.mouse.up();
+  const vivid = await tint("#cast-sheet .card-portrait");
+  expect([vivid, await page.$eval("#cast-sheet .tint-code", (c) => (c as HTMLInputElement).value), await tint("#conversations .cast-pic .face")]).toEqual(["#0055ff", "#0055ff", "#0055ff"]);
+  await page.keyboard.press("Escape");
+  expect([await page.$("#cast-sheet .tint-pop"), await page.$eval("#cast-sheet", (s) => (s as HTMLElement).hidden)]).toEqual([null, false]);
   for (const [label, text] of [["Description", "{{char}} mends clocks for {{user}}."], ["Greeting", "Tick, {{user}}."]]) {
     await page.evaluate((label) => [...document.querySelectorAll("#cast-sheet .card-field")].find((x) => x.querySelector(".card-label")!.textContent === label)!.querySelector("textarea")!.focus(), label);
     await page.keyboard.type(text);
@@ -642,6 +654,6 @@ test("the sidebar's add makes a new character here, with no file: their card ope
   expect([lastStream.messages[0].content, await speakers(page)]).toEqual(["Write Wren's next reply in a fictional chat between Wren and User.\n\nWren mends clocks for User.", ["WWren", "WWren"]]);
   await page.reload({ waitUntil: "load" });
   await page.waitForFunction(() => document.querySelectorAll("#conversations .cast-row").length === 2);
-  expect([await castRows(page), await tint("#conversations .cast-pic .face.initials")]).toEqual([["Chrysalis", "Wren"], other]);
+  expect([await castRows(page), await tint("#conversations .cast-pic .face.initials")]).toEqual([["Chrysalis", "Wren"], "#0055ff"]);
   await page.close();
 }, 30_000);

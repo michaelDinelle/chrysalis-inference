@@ -174,6 +174,7 @@ const LEVEL: Record<Effort, [string]> = { off: ["Off"], low: ["Low"], medium: ["
 const HEAT = ["off", "low", "medium", "max"];
 const ICONS = {
   plus: '<path d="M12 5v14M5 12h14"/>',
+  palette: '<path d="M12 3a9 9 0 0 0 0 18c.9 0 1.6-.7 1.6-1.6 0-.4-.2-.8-.4-1.1-.3-.3-.4-.7-.4-1.100 0-.9.700-1.6 1.6-1.6H16.300A4.700 4.700 0 0 0 21 10.900C21 6.500 17 3 12 3z"/><circle cx="7.6" cy="11.5" r="1"/><circle cx="10" cy="7.600" r="1"/><circle cx="14.600" cy="7.200" r="1"/>',
   paneLeft: '<rect x="3" y="3" width="18" height="18" rx="3"/><path d="M9 3v18"/><path class="chev" d="M15.5 9 12.5 12l3 3"/>',
   paneRight: '<rect x="3" y="3" width="18" height="18" rx="3"/><path d="M15 3v18"/><path class="chev" d="M8.5 9l3 3-3 3"/>',
   send: '<path d="M12 19V5M5 12l7-7 7 7"/>',
@@ -1181,6 +1182,80 @@ $("cast-file").addEventListener("change", async (e) => {
   input.value = "";
 });
 
+const hexOf = (h: number, s: number, v: number) => {
+  const f = (n: number) => { const k = (n + h / 60) % 6; return Math.round(255 * (v - v * s * Math.max(0, Math.min(k, 4 - k, 1)))).toString(16).padStart(2, "0"); };
+  return `#${f(5)}${f(3)}${f(1)}`;
+};
+function hsvOf(hex: string): [number, number, number] {
+  const [r, g, b] = [1, 3, 5].map((k) => Number.parseInt(hex.slice(k, k + 2), 16) / 255), v = Math.max(r, g, b), d = v - Math.min(r, g, b);
+  const h = !d ? 0 : v === r ? ((g - b) / d + 6) % 6 : v === g ? (b - r) / d + 2 : (r - g) / d + 4;
+  return [h * 60, v ? d / v : 0, v];
+}
+function tintPop(from: string, pick: (hex: string) => void, done: () => void) {
+  const pop = h("div", "tint-pop"), field = h("div", "tint-field"), dot = h("span", "tint-dot"), rail = h("div", "tint-rail"), knob = h("span", "tint-dot"), code = h("input", "tint-code"), chip = h("span", "tint-chip");
+  let [hue, sat, val] = hsvOf(from);
+  const paint = (typed = false) => {
+    const hex = hexOf(hue, sat, val);
+    field.style.setProperty("--hue", String(hue));
+    dot.style.left = `${sat * 100}%`;
+    dot.style.top = `${(1 - val) * 100}%`;
+    knob.style.left = `${(hue / 360) * 100}%`;
+    for (const x of [dot, chip]) x.style.background = hex;
+    knob.style.background = hexOf(hue, 1, 1);
+    if (!typed) code.value = hex;
+    field.setAttribute("aria-valuetext", `Saturation ${Math.round(sat * 100)}%, brightness ${Math.round(val * 100)}%`);
+    rail.setAttribute("aria-valuenow", String(Math.round(hue)));
+  };
+  const set = (typed = false) => { paint(typed); pick(hexOf(hue, sat, val)); };
+  const drag = (el: HTMLElement, move: (x: number, y: number) => void) => {
+    el.onpointerdown = (e) => {
+      el.setPointerCapture(e.pointerId);
+      const at = (ev: PointerEvent) => { const r = el.getBoundingClientRect(); move(Math.max(0, Math.min(1, (ev.clientX - r.left) / r.width)), Math.max(0, Math.min(1, (ev.clientY - r.top) / r.height))); set(); };
+      at(e);
+      el.onpointermove = at;
+      el.onpointerup = el.onpointercancel = () => { el.onpointermove = null; done(); };
+      e.preventDefault();
+      el.focus();
+    };
+  };
+  drag(field, (x, y) => { sat = x; val = 1 - y; });
+  drag(rail, (x) => { hue = Math.min(359.9, x * 360); });
+  const keys = (el: HTMLElement, step: (dx: number, dy: number) => void) => {
+    el.tabIndex = 0;
+    el.setAttribute("role", "slider");
+    el.onkeydown = (e) => {
+      const d = { ArrowLeft: [-1, 0], ArrowRight: [1, 0], ArrowUp: [0, 1], ArrowDown: [0, -1] }[e.key];
+      if (!d) return;
+      e.preventDefault();
+      step(d[0] * (e.shiftKey ? 10 : 1), d[1] * (e.shiftKey ? 10 : 1));
+      set();
+      done();
+    };
+  };
+  keys(field, (dx, dy) => { sat = Math.max(0, Math.min(1, sat + dx / 100)); val = Math.max(0, Math.min(1, val + dy / 100)); });
+  keys(rail, (dx, dy) => { hue = Math.max(0, Math.min(359.9, hue + (dx + dy) * 3.6)); });
+  field.ariaLabel = "Saturation and brightness";
+  rail.ariaLabel = "Hue";
+  rail.setAttribute("aria-valuemin", "0");
+  rail.setAttribute("aria-valuemax", "360");
+  code.spellcheck = false;
+  code.maxLength = 7;
+  code.ariaLabel = "Hex color";
+  code.oninput = () => {
+    const m = /^#?([0-9a-f]{6})$/i.exec(code.value.trim());
+    if (!m) return;
+    [hue, sat, val] = hsvOf(`#${m[1].toLowerCase()}`);
+    set(true);
+  };
+  code.onchange = () => { paint(); done(); };
+  const foot = h("div", "tint-foot");
+  foot.append(chip, code);
+  field.append(dot);
+  rail.append(knob);
+  pop.append(field, rail, foot);
+  paint();
+  return pop;
+}
 let sheetOf = "", sampler: Speaker | undefined, sheetFile: { id: string; url: string } | undefined, sheetKeep = () => {};
 function openSheet(id: string) {
   if (sheetOf && sheetOf !== id) dropBlank(sheetOf);
@@ -1271,12 +1346,10 @@ function openSheet(id: string) {
   art.append(h("div", "card-scrim"), title);
   if (person) art.append(btn("card-float card-pic", person.image ? "Another picture" : "A picture", icon("edit"), () => picture(person)));
   if (person?.kind === "character" && !person.image) {
-    const well = h("input", "card-float card-tint");
-    well.type = "color";
-    well.value = tintOf(person);
-    well.title = well.ariaLabel = "Their color";
-    well.oninput = () => { own(person).color = well.value; keep(); relit(); renderCast(); };
-    well.onchange = () => render();
+    const well = btn("card-float card-tint", "Their color", icon("palette"), () => {
+      if (sheet.querySelector(".tint-pop")) return void sheet.querySelector(".tint-pop")!.remove();
+      sheet.append(tintPop(tintOf(person), (hex) => { own(person).color = hex; keep(); relit(); renderCast(); }, () => render()));
+    });
     art.append(well);
   }
   const relit = () => {
@@ -1423,6 +1496,7 @@ document.addEventListener("pointerdown", (e) => {
   if (!$("cast-invite").hidden && !t.closest("#cast-invite, .cast-bring, .card-member-add, #toast")) closeInvite();
   if (!$("oc-pop").hidden && !t.closest("#oc-pop, #opencode, #toast, #outside-view")) $("oc-pop").hidden = true;
   if (!$("row-menu").hidden && !t.closest("#row-menu")) $("row-menu").hidden = true;
+  if (!t.closest(".tint-pop, .card-tint")) $("cast-sheet").querySelector(".tint-pop")?.remove();
   if (!$("cast-sheet").hidden && !t.closest("#cast-sheet, [data-card], #voice-menu, #add-cast")) closeSheet();
 });
 document.addEventListener("keydown", (e) => {
@@ -1430,6 +1504,7 @@ document.addEventListener("keydown", (e) => {
   if (!$("row-menu").hidden) { $("row-menu").hidden = true; e.preventDefault(); }
   else if (!$("cast-invite").hidden) { closeInvite(); e.preventDefault(); }
   else if (!$("oc-pop").hidden) { $("oc-pop").hidden = true; e.preventDefault(); }
+  else if ($("cast-sheet").querySelector(".tint-pop")) { $("cast-sheet").querySelector(".tint-pop")!.remove(); e.preventDefault(); }
   else if (!$("cast-sheet").hidden) { closeSheet(); e.preventDefault(); }
 }, true);
 document.addEventListener("click", (e) => {
