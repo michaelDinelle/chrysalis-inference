@@ -1299,7 +1299,7 @@ p.line > .who .face { position: absolute; left: -72px; top: 1px; width: 44px; he
 .ctx-pct { color: var(--text); font-weight: 500; font-variant-numeric: tabular-nums; }
 .ctx.warm .ctx-pct { color: var(--warn); }
 .ctx.near .ctx-pct { color: var(--danger); }
-.ctx-left { font-variant-numeric: tabular-nums; }
+.ctx-left { color: var(--text); font-variant-numeric: tabular-nums; }
 .ctx-pop { width: 250px; padding: 8px 10px 10px; gap: 6px; }
 .ctx-pop .invite-head { padding: 2px 0 4px; }
 .ctx-track { position: relative; height: 6px; margin: 2px 0 6px; border-radius: 3px; background: color-mix(in srgb, var(--text) 12%, transparent); }
