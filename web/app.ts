@@ -305,6 +305,9 @@ function castOf(c: Conversation): { members: Person[]; group?: Group } {
 }
 const chatsOf = (id: string) => [...Object.values(chats), ...stubs()].filter((s) => whoOf(s) === id).sort((a, b) => b.updated - a.updated);
 const hue = (s: string) => [...s].reduce((a, ch) => (a * 31 + ch.charCodeAt(0)) % 360, 7);
+const HUES = [0, 28, 48, 90, 140, 170, 200, 225, 262, 300];
+const own = (p: Person) => ((p.card.data.extensions ??= {}).chrysalis ??= {}) as { voice?: Voice; hue?: number };
+const hueOf = (p: Person) => (p.card.data.extensions?.chrysalis as { hue?: number } | undefined)?.hue ?? hue(p.card.data.name.trim() || "?");
 function face(id: string): HTMLElement {
   if (groups.has(id)) {
     const g = groups.get(id), ms = (g ? membersOf(g).map((m) => face(m.id)) : []).slice(0, 4), s = h("span", `face mosaic m${Math.max(ms.length, 1)}`);
@@ -337,11 +340,11 @@ function face(id: string): HTMLElement {
     s.append(img);
     return s;
   }
-  return initials(name);
+  return initials(name, p && hueOf(p));
 }
-function initials(name: string) {
+function initials(name: string, tint = hue(name)) {
   const s = h("span", "face initials", name.slice(0, 1).toUpperCase());
-  s.style.setProperty("--hue", String(hue(name)));
+  s.style.setProperty("--hue", String(tint));
   return s;
 }
 function setFace(p: Person) {
@@ -1089,6 +1092,7 @@ const unwritten = (p?: Person) => !!p && p.kind === "character" && !p.image && !
 function newCharacter() {
   if (unwritten(people.get(sheetOf))) return closeSheet();
   const p: Person = { id: randomId(), kind: "character", card: { spec: "chara_card_v2", spec_version: "2.0", data: { name: "", description: "" } }, added: Date.now() };
+  own(p).hue = HUES[Math.floor(Math.random() * HUES.length)];
   people.set(p.id, p);
   openSheet(p.id);
   $("cast-sheet").querySelector<HTMLInputElement>("input.card-name")?.focus();
@@ -1263,18 +1267,22 @@ function openSheet(id: string) {
   }
   art.append(h("div", "card-scrim"), title);
   if (person) art.append(btn("card-float card-pic", person.image ? "Another picture" : "A picture", icon("edit"), () => picture(person)));
+  const relit = () => {
+    const letter = art.querySelector(":scope > .face.card-portrait");
+    if (letter) { const now = face(id); now.classList.add("card-portrait"); letter.replaceWith(now); }
+  };
   const name = h("input", "card-name");
   name.value = person ? person.card.data.name : g!.name ?? "";
   name.placeholder = id === ME ? "User" : id === CHRYSALIS ? "Chrysalis" : g ? castNames(g) : "Their name";
   name.ariaLabel = "Name";
   name.spellcheck = false;
   name.oninput = () => {
+    if (person?.kind === "character") own(person).hue ??= hueOf(person);
     if (person) person.card.data.name = name.value;
     else if (name.value.trim()) g!.name = name.value; else delete g!.name;
     const file = body.querySelector<HTMLAnchorElement>("a.card-file");
     if (file) file.download = cardName(id);
-    const letter = art.querySelector(":scope > .face.card-portrait");
-    if (letter) { const now = face(id); now.classList.add("card-portrait"); letter.replaceWith(now); }
+    relit();
     keep();
     renderCast();
     if (castOf(conv).members.some((m) => m.id === id) || folderOf(conv) === id) render();
@@ -1292,6 +1300,29 @@ function openSheet(id: string) {
     };
     body.append(voicePick(person, keep), field("Description", "description", person.kind === "assistant" ? "The system prompt: who they are and how they answer" : "Who they are: looks, past, manner, how they talk"),
       field("Scenario", "scenario", "Where and when the chat begins"), field("Greeting", "first_mes", "Their first message"));
+    if (person.kind === "character" && !person.image) {
+      const tints = h("div", "card-tints");
+      tints.setAttribute("role", "radiogroup");
+      tints.ariaLabel = "Color";
+      tints.append(...HUES.map((t) => {
+        const b = h("button", "card-tint");
+        b.type = "button";
+        b.setAttribute("role", "radio");
+        b.setAttribute("aria-checked", String(hueOf(person) === t));
+        b.ariaLabel = `Color ${HUES.indexOf(t) + 1}`;
+        b.style.setProperty("--hue", String(t));
+        b.onclick = () => {
+          own(person).hue = t;
+          for (const x of tints.children) x.setAttribute("aria-checked", String(x === b));
+          keep();
+          relit();
+          renderCast();
+          render();
+        };
+        return b;
+      }));
+      body.prepend(tints);
+    }
     const acts = h("div", "card-acts"), file = h("a", "card-file");
     file.download = cardName(id);
     file.title = "Their card as a PNG any app that takes character cards can read";

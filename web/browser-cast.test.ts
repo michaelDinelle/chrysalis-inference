@@ -602,7 +602,7 @@ test("Chrysalis is one of them: a character dragged onto it makes a group with i
   await page.close();
 }, 60_000);
 
-test("the sidebar's add makes a new character here, with no file: their card opens with the name to type and no row yet, the row is there once something is typed, the button again closes an empty card, what is typed is theirs in their chat and after a reload, and one left wholly empty leaves nothing; there is no menu behind the button", async () => {
+test("the sidebar's add makes a new character here, with no file: their card opens with the name to type and no row yet, the row is there once something is typed, in a colour that typing does not change and a row of colours does, the button again closes an empty card, what is typed is theirs in their chat and after a reload, and one left wholly empty leaves nothing; there is no menu behind the button", async () => {
   const page = await open();
   await page.click("#add-cast");
   await page.waitForSelector("#cast-sheet:not([hidden]) input.card-name");
@@ -621,8 +621,14 @@ test("the sidebar's add makes a new character here, with no file: their card ope
 
   await page.click("#add-cast");
   await page.waitForSelector("#cast-sheet:not([hidden]) input.card-name");
-  await page.keyboard.type("Wren");
-  expect(await page.$eval("#cast-sheet .card-portrait", (f) => f.textContent)).toBe("W");
+  const tint = (at: string) => page.$eval(at, (f) => (f as HTMLElement).style.getPropertyValue("--hue"));
+  await page.keyboard.type("W");
+  const first = await tint("#cast-sheet .card-portrait");
+  await page.keyboard.type("ren");
+  expect([await page.$eval("#cast-sheet .card-portrait", (f) => f.textContent), await tint("#cast-sheet .card-portrait"), await tint("#conversations .cast-pic .face"),
+    await page.$eval('#cast-sheet .card-tint[aria-checked="true"]', (b) => (b as HTMLElement).style.getPropertyValue("--hue"))]).toEqual(["W", first, first, first]);
+  const other = await page.$eval('#cast-sheet .card-tint[aria-checked="false"]', (b) => { (b as HTMLElement).click(); return (b as HTMLElement).style.getPropertyValue("--hue"); });
+  expect([other === first, await tint("#cast-sheet .card-portrait"), await tint("#conversations .cast-pic .face")]).toEqual([false, other, other]);
   for (const [label, text] of [["Description", "{{char}} mends clocks for {{user}}."], ["Greeting", "Tick, {{user}}."]]) {
     await page.evaluate((label) => [...document.querySelectorAll("#cast-sheet .card-field")].find((x) => x.querySelector(".card-label")!.textContent === label)!.querySelector("textarea")!.focus(), label);
     await page.keyboard.type(text);
@@ -634,7 +640,7 @@ test("the sidebar's add makes a new character here, with no file: their card ope
   await send(page, "what time is it");
   expect([lastStream.messages[0].content, await speakers(page)]).toEqual(["Write Wren's next reply in a fictional chat between Wren and User.\n\nWren mends clocks for User.", ["WWren", "WWren"]]);
   await page.reload({ waitUntil: "load" });
-  await page.waitForSelector("#conversations .cast-row");
-  expect(await castRows(page)).toEqual(["Chrysalis", "Wren"]);
+  await page.waitForFunction(() => document.querySelectorAll("#conversations .cast-row").length === 2);
+  expect([await castRows(page), await tint("#conversations .cast-pic .face.initials")]).toEqual([["Chrysalis", "Wren"], other]);
   await page.close();
 }, 30_000);
