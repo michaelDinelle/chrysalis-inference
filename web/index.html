@@ -190,11 +190,9 @@
       <div class="set-body">
         <section class="set-sec" data-sec="chat">
           <div class="set-block">
-            <div class="set-block-head"><label class="set-block-title" for="system-input">System prompt</label><button id="system-reset" class="act knob-reset" type="button" title="Back to the default system prompt" aria-label="Restore the default system prompt"></button></div>
-            <textarea id="system-input" rows="1" placeholder="No system prompt" title="Sent as written, {{MODEL}} as the chat's model; empty, the default, sends none. A change makes each chat read its history again once."></textarea>
             <div class="set-block-foot">
               <label class="set-switch" title="After the system prompt, how to make artifacts (with an id for each part) and change them in place with edits that hold only what changes"><button id="artifacts-switch" class="switch" type="button" role="switch" aria-checked="true"></button><span>Artifacts the model changes in place</span></label>
-              <button id="sent-open" class="btn small" type="button" title="The open chat's next request, exactly as the backend gets it: the system prompt and every message">What the model is sent</button>
+              <button id="sent-open" class="btn small" type="button" title="The open chat's next request, exactly as the backend gets it">What the model is sent</button>
             </div>
           </div>
           <div class="set-block">
@@ -207,8 +205,6 @@
               <span class="set-block-title">Speech to text</span>
               <button id="listen-settings" class="voice-name" type="button"></button>
             </div>
-            <div class="set-block-head set-block-sub"><label class="set-block-title" for="voice-prompt">Voice prompt</label><button id="voice-prompt-reset" class="act knob-reset" type="button" title="Back to the default voice prompt" aria-label="Restore the default voice prompt"></button></div>
-            <textarea id="voice-prompt" class="prompt-input" rows="1" placeholder="No prompt" title="A note to the model before the first question said aloud (and again when it changes); the system prompt stays as it is. What the reply writes is spoken."></textarea>
           </div>
         </section>
         <section class="set-sec" data-sec="sampling" hidden>
@@ -223,7 +219,7 @@
         </section>
       </div>
       <footer class="set-foot"><button id="settings-reset" class="btn" type="button"
-        title="The default system prompt and Qwen's recommended values, with thinking and without (Undo brings yours back)">Reset all settings</button></footer>
+        title="Qwen's recommended values, with thinking and without (Undo brings yours back)">Reset all settings</button></footer>
     </dialog>
     <div id="tokpop" class="tokpop" role="dialog" aria-label="Alternatives" hidden></div>
     <div id="voice-menu" class="voice-menu" popover="auto" role="dialog" aria-label="Voices"></div>

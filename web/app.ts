@@ -13,7 +13,7 @@ import { type Block, type Span, type Version, ARTIFACTS_PROMPT, PAGE_DOC, elemen
   withContent, withCopy, withOrder, withPaint, withoutElement, lineDiff } from "./artifacts";
 import { LATEX_CSS, latexToHtml } from "./latex";
 import logo from "./logo.svg";
-import { type CardData, type Person, type Voice, cardPng, castPrompt, dropPerson, fill as fillCard, loadCast, readCast, savePerson, speakerOf,
+import { type Card, type CardData, type Group, type Person, type Voice, cardPng, castPrompt, dropGroup, dropPerson, fill as fillCard, loadCast, readCast, saveGroup, savePerson,
   voiceOf } from "./cast";
 import { Ocean } from "./ocean";
 import { type Drop, sidebarDrag } from "./drag";
@@ -54,16 +54,16 @@ interface Message {
 }
 interface Conversation { id: string; title: string; named?: boolean; updated: number; effort: Effort; messages: Message[];
   pending?: Record<string, { kind: string; srcs: string[] }>;
-  who?: string; cast?: string[]; missing?: string[]; scenario?: string; castName?: string;
+  who?: string;
   thread?: { dir: string; id?: string; model?: string; at?: number; agent?: string; machine?: string; context?: { used?: number; compacted?: boolean; window: number; ceiling: number; auto: boolean } } }
 type Sampler = Partial<Record<SamplerKey, number>> & { order?: Stage[] };
 type Mode = "think" | "fast";
 interface Settings {
   v?: 5;
-  system: string; think: Sampler; fast: Sampler; max_tokens?: number; seed?: number; voice?: VoiceSettings;
+  think: Sampler; fast: Sampler; max_tokens?: number; seed?: number; voice?: VoiceSettings;
   artifacts?: false;
 }
-interface VoiceSettings { tts?: string; name?: string; stt?: string; speed?: number; prompt?: string }
+interface VoiceSettings { tts?: string; name?: string; stt?: string; speed?: number }
 interface Status { state: "online" | "loading" | "offline"; machine?: string; build?: string; model?: string; loading?: string; progress?: number; context?: number; kv_tokens?: number; cache?: { free_kv_tokens: number };
   check?: boolean; here?: boolean; waiting?: number;
   backend?: Backend; link?: Linking }
@@ -151,9 +151,8 @@ const ODDS: [string, number][] = [["Luna", 703], ["Mochi", 470], ["Whiskers", 31
   ["Miso", 31], ["Whisper", 29], ["Moon", 14], ["Pumpkin", 14], ["Pixel", 13], ["Whisker", 11], ["Willow", 9], ["Muffin", 8], ["Echo", 7],
   ["Momo", 6], ["Jasper", 5], ["Nimbus", 5], ["Nebula", 4], ["Simba", 4], ["Noodle", 3], ["Misty", 3], ["Mocha", 3], ["Mimi", 2],
   ["Munchkin", 2], ["Zephyr", 2], ["Moss", 2]];
-const DEFAULT_SYSTEM = "";
 const OLD_SYSTEMS = ["You are {{MODEL}}, running locally in Chrysalis Inference. There are no tools or files in this chat. Answer directly.", "There are no tools or files in this chat. Answer directly."];
-const DEFAULT_VOICE_PROMPT = "The user is talking to you by voice; a word may still be misheard, so take what they most likely meant, by " +
+const VOICE_PROMPT = "The user is talking to you by voice; a word may still be misheard, so take what they most likely meant, by " +
   "how it sounds and by the conversation, without remarking on it. Your reply is read aloud, except code blocks and tables, which are " +
   "shown and not read. Talk the way a person does: answer in one or two short plain sentences and stop, with no lists, no summary of what " +
   "you did, no offer of more and no question back unless you cannot go on without the answer (but what they ask you to write, such as " +
@@ -243,7 +242,7 @@ const OC_WORD = '<svg class="oc-word" viewBox="0 0 234 42" aria-hidden="true"><p
 
 const $ = <T extends HTMLElement = HTMLElement>(id: string) => document.getElementById(id) as T;
 const thread = $("thread"), scroller = $("scroller"), input = $<HTMLTextAreaElement>("input"), sendBtn = $<HTMLButtonElement>("send");
-const panel = $<HTMLDialogElement>("settings"), systemInput = $<HTMLTextAreaElement>("system-input");
+const panel = $<HTMLDialogElement>("settings");
 interface Pane {
   name: string; el: HTMLElement; toggle: HTMLElement; key: string; beside: MediaQueryList; byDefault: boolean;
   widthVar: string; min: number; def: number; preferred: number; width: number; onOpen?: () => void;
@@ -266,7 +265,8 @@ function h<K extends keyof HTMLElementTagNameMap>(tag: K, cls = "", text = ""): 
   return e;
 }
 
-const people = new Map<string, Person>(), faces = new Map<string, string>();
+const castReady = Promise.withResolvers<void>();
+const people = new Map<string, Person>(), groups = new Map<string, Group>(), faces = new Map<string, string>();
 const ME = "me", CHRYSALIS = "chrysalis";
 people.set(CHRYSALIS, { id: CHRYSALIS, kind: "assistant", card: { spec: "chara_card_v2", spec_version: "2.0", data: { name: "Chrysalis" } }, added: 0 });
 people.set(ME, { id: ME, kind: "persona", card: { spec: "chara_card_v2", spec_version: "2.0", data: { name: "User", description: "" } }, added: 0 });
@@ -276,12 +276,11 @@ const persona = () => people.get(ME)!;
 const userName = () => nameOf(ME);
 const userCard = () => ({ ...persona().card.data, name: userName() });
 const CAST = "cast:";
-const castKey = (cast: string[], missing: string[] = []) => CAST + [...cast].sort().join("+") + (missing.length ? `|${[...missing].sort().join("|")}` : "");
-interface Scene { cast: string[]; scenario?: string; name?: string; greeting?: string }
+interface Scene { cast: string[]; cards?: Card[]; group?: string; scenario?: string; name?: string; greeting?: string; greeter?: string }
 interface Harness { state: "absent" | "off" | "on"; outside?: boolean; machines?: { id: string; name: string; home: string; kind: string }[]; name?: string; version?: string; install?: string; wanted?: boolean; home?: string; models?: { id: string; name: string; provider: string; variants: string[]; straight?: string }[]; agents?: { id: string; name: string }[];
   threads?: { id: string; title: string; dir: string; updated: number; idle: number; busy: boolean; archived: boolean; job?: string; model?: string; scene?: Scene; machine?: string }[] }
 let harness: Harness = { state: "off" };
-const folderOf = (c: Conversation) => (c.who && c.who !== CHRYSALIS && (c.cast || people.has(c.who)) ? c.who : "");
+const folderOf = (c: Conversation) => (c.who && c.who !== CHRYSALIS && (groups.has(c.who) || people.has(c.who)) ? c.who : "");
 const DIR = "dir:", STUB = "oc-";
 const machineOf = (id?: string) => harness.machines?.find((m) => m.id === (id ?? ""));
 const homeOf = (id?: string) => machineOf(id)?.home ?? harness.home;
@@ -298,21 +297,17 @@ const freshThread = () => {
   return { dir: m?.home ?? harness.home!, ...(m?.id ? { machine: m.id } : {}) };
 };
 const inDir = (dir: string) => ({ dir, ...(dirMachine(dir) ? { machine: dirMachine(dir) } : {}) });
-const whoOf = (c: Conversation) => (c.thread && c.thread.dir !== homeOf(c.thread.machine) ? DIR + c.thread.dir : c.who && c.who !== CHRYSALIS ? c.who : CHRYSALIS);
-function castOf(c: Conversation): { members: Person[]; group?: Conversation } {
-  const id = folderOf(c);
-  if (!id) return { members: [] };
-  return c.cast ? { members: c.cast.map((m) => people.get(m)).filter((p): p is Person => !!p), group: c } : { members: [people.get(id)!] };
-}
-const sceneOf = (key: string) => (conv.who === key ? conv : chatsOf(key)[0]);
-function eachScene(fn: (c: Conversation) => void) {
-  for (const c of new Set([...Object.values(chats), ...[...runs.values()].map((r) => r.conv), conv])) if (c.cast) fn(c);
+const whoOf = (c: Conversation) => folderOf(c) || (c.thread && c.thread.dir !== homeOf(c.thread.machine) ? DIR + c.thread.dir : CHRYSALIS);
+const membersOf = (g: Group) => g.members.map((m) => people.get(m)).filter((p): p is Person => !!p);
+function castOf(c: Conversation): { members: Person[]; group?: Group } {
+  const id = folderOf(c), group = groups.get(id);
+  return group ? { members: membersOf(group), group } : id ? { members: [people.get(id)!] } : { members: [] };
 }
 const chatsOf = (id: string) => [...Object.values(chats), ...stubs()].filter((s) => whoOf(s) === id).sort((a, b) => b.updated - a.updated);
 const hue = (s: string) => [...s].reduce((a, ch) => (a * 31 + ch.charCodeAt(0)) % 360, 7);
 function face(id: string): HTMLElement {
-  if (id.startsWith(CAST)) {
-    const g = sceneOf(id), ms = (g ? inScene(g) : []).slice(0, 4), s = h("span", `face mosaic m${Math.max(ms.length, 1)}`);
+  if (groups.has(id)) {
+    const g = groups.get(id), ms = (g ? membersOf(g).map((m) => face(m.id)) : []).slice(0, 4), s = h("span", `face mosaic m${Math.max(ms.length, 1)}`);
     s.append(...(ms.length ? ms : [initials("?")]));
     return s;
   }
@@ -349,7 +344,6 @@ function initials(name: string) {
   s.style.setProperty("--hue", String(hue(name)));
   return s;
 }
-const inScene = (c: Conversation) => [...castOf(c).members.map((m) => face(m.id)), ...(c.missing ?? []).map((n) => { const f = initials(n); f.title = `${n}: no card yet`; return f; })];
 function setFace(p: Person) {
   const was = faces.get(p.id);
   if (was) URL.revokeObjectURL(was);
@@ -358,12 +352,11 @@ function setFace(p: Person) {
 }
 const andList = (n: string[]) => (n.length < 2 ? n.join("") : `${n.slice(0, -1).join(", ")} and ${n.at(-1)}`);
 const names = (ids: string[]) => andList(ids.map(nameOf));
-const castNames = (c: Conversation) => andList([...castOf(c).members.map((m) => nameOf(m.id)), ...(c.missing ?? [])]);
+const castNames = (g: Group) => names(membersOf(g).map((m) => m.id));
 function nameOf(id: string): string {
   if (id.startsWith(DIR)) return dirName(id.slice(DIR.length));
-  if (!id.startsWith(CAST)) return people.get(id)?.card.data.name.trim() || (id === CHRYSALIS ? "Chrysalis" : id === ME ? "User" : "");
-  const g = sceneOf(id);
-  return g ? g.castName ?? castNames(g) : "";
+  const g = groups.get(id);
+  return g ? g.name?.trim() || castNames(g) : people.get(id)?.card.data.name.trim() || (id === CHRYSALIS ? "Chrysalis" : id === ME ? "User" : "");
 }
 
 function renderCast() {
@@ -379,15 +372,26 @@ function unfold(id: string, open = true) {
   setPref("unfolded", JSON.stringify([...unfolded]));
 }
 function castRow(id: string, list: Conversation[], open: boolean): HTMLElement {
-  const g = id.startsWith(CAST), d = id.startsWith(DIR), name = nameOf(id);
+  const g = groups.has(id), d = id.startsWith(DIR), name = nameOf(id);
   const row = h("div", "cast-row");
   const pic = h("button", "cast-pic"), main = h("button", "cast-main"), add = h("button", "act cast-new");
   pic.type = main.type = add.type = "button";
-  pic.title = pic.ariaLabel = d ? id.slice(DIR.length) : g ? `${name}: who is in it` : `${name}'s card`;
+  pic.title = pic.ariaLabel = d ? id.slice(DIR.length) : `${name || "Unnamed"}'s card`;
   pic.append(face(id));
   if (d) pic.onclick = () => main.click();
   else pic.dataset.card = id;
-  main.append(h("span", "cast-name", name || "Unnamed"));
+  if (renaming === id) {
+    const box = h("input", "conv-rename");
+    box.value = g ? groups.get(id)!.name ?? "" : name;
+    box.placeholder = g ? castNames(groups.get(id)!) : "Their name";
+    box.ariaLabel = "Name";
+    box.onclick = (e) => e.stopPropagation();
+    box.onkeydown = (e) => { if (e.key === "Enter") { renaming = ""; renameRow(id, box.value); } else if (e.key === "Escape") { renaming = ""; renderList(); } e.stopPropagation(); };
+    box.onblur = () => { if (renaming === id) { renaming = ""; renameRow(id, box.value); } };
+    queueMicrotask(() => { box.focus(); box.select(); });
+    main.append(box);
+  } else main.append(h("span", "cast-name", name || "Unnamed"));
+  if (kept("pinned").includes(id)) main.insertAdjacentHTML("beforeend", `<span class="conv-pin">${icon("pin")}</span>`);
   if (list.length) {
     main.setAttribute("aria-expanded", String(open));
     const needs = open ? undefined : ["approval", "input", "failed", "working", "done"].find((k) => list.some((x) => statusOf(x)?.kind === k));
@@ -396,8 +400,7 @@ function castRow(id: string, list: Conversation[], open: boolean): HTMLElement {
     main.insertAdjacentHTML("beforeend", icon("chevron"));
   }
   main.onclick = () => {
-    const idle = g ? chatsOf(id).find((x) => !x.messages.length) : undefined;
-    if (!list.length && idle) return void (location.hash = idle.id);
+    if (renaming === id) return;
     if (!list.length) return newChat(id);
     unfold(id, !open);
     renderList();
@@ -406,13 +409,13 @@ function castRow(id: string, list: Conversation[], open: boolean): HTMLElement {
   add.innerHTML = icon("compose");
   add.onclick = () => newChat(id);
   row.append(pic, main, add);
-  menuOn(row, () => castMenu(id, row));
+  menuOn(row, () => menuOf(id));
   if (g || d || people.get(id)?.kind === "character") {
     const bring = h("button", "act cast-bring"), here = whoOf(conv) === id;
     bring.type = "button";
-    bring.title = bring.ariaLabel = d ? (here ? "Who works in this thread" : `A new thread in ${name} with a character`) : here ? "Bring someone into this chat" : `A new chat with ${name} and others`;
+    bring.title = bring.ariaLabel = d ? (here ? "Who works in this thread" : `A new thread in ${name} with a character`) : g ? `Who is in ${name}` : here ? "Bring someone into this chat" : `A new group with ${name} and others`;
     bring.innerHTML = icon("personAdd");
-    bring.onclick = () => ($("cast-invite").hidden ? openInvite(bring, here ? null : id) : closeInvite());
+    bring.onclick = () => ($("cast-invite").hidden ? openInvite(bring, here && !g ? null : id) : closeInvite());
     row.classList.toggle("here", here);
     row.append(bring);
   }
@@ -445,61 +448,57 @@ function greet(c: Conversation) {
 }
 function castSystem(c: Conversation) {
   const { members, group } = castOf(c);
-  const base = members.length > 1 ? "Write the next part of a fictional scene between {{user}} and these characters."
+  const base = members.length > 1 ? "Write the next reply in a fictional scene between {{user}} and these characters."
     : "Write {{char}}'s next reply in a fictional chat between {{char}} and {{user}}.";
   return castPrompt(base, members.map((p) => p.card.data), userCard(), group?.scenario);
 }
 
-function seat(c: Conversation, cast: string[], missing: string[] = c.missing ?? [], single = true) {
-  if (single && cast.length === 1 && !missing.length) {
-    c.who = cast[0];
-    delete c.cast;
-    delete c.missing;
-    delete c.castName;
-    delete c.scenario;
-  } else {
-    const key = castKey(cast, missing), there = key === c.who ? undefined : chatsOf(key).find((x) => x.id !== c.id);
-    if (there?.castName) c.castName = there.castName;
-    else if (there) delete c.castName;
-    c.cast = cast;
-    if (missing.length) c.missing = missing; else delete c.missing;
-    c.who = key;
-  }
-  unfold(c.who);
-  stow(c);
-}
 function stow(c: Conversation) {
-  if (c.messages.length || c.cast) return save(c);
+  if (c.messages.length) return save(c);
   delete chats[c.id];
   keepChats();
   renderList();
 }
-type Seat = Pick<Conversation, "who" | "cast" | "missing" | "castName" | "scenario">;
-const seatOf = (c: Conversation): Seat => ({ who: c.who, cast: c.cast, missing: c.missing, castName: c.castName, scenario: c.scenario });
-function reseat(c: Conversation, was: Seat) {
-  for (const k of ["who", "cast", "missing", "castName", "scenario"] as const) if (was[k] === undefined) delete c[k]; else (c[k] as Seat[typeof k]) = was[k];
-  stow(c);
+const byName = (name: string) => [...people.values()].find((p) => p.kind === "character" && p.card.data.name.trim() === name.trim());
+const keepGroup = (g: Group) => { groups.set(g.id, g); void saveGroup(g); };
+function makeGroup(members: string[], more: Partial<Group> = {}): Group {
+  const g: Group = { id: CAST + randomId(), members, added: Date.now(), ...more };
+  keepGroup(g);
+  unfold(g.id);
+  return g;
+}
+function meetCard(card: Card, image?: Blob): Person {
+  const had = byName(card.data.name);
+  if (had) return had;
+  const p: Person = { id: randomId(), kind: "character", card, ...(image ? { image } : {}), added: Date.now() };
+  people.set(p.id, p);
+  setFace(p);
+  void savePerson(p);
+  return p;
+}
+const called = (g: Group) => g.name?.trim() || "the group";
+function setMembers(g: Group, members: string[], said: string) {
+  const before = g.members;
+  g.members = members;
+  keepGroup(g);
+  toast(said, () => { g.members = before; keepGroup(g); renderCast(); render(); });
+  renderCast();
+  render();
 }
 
 async function adopt(f: File): Promise<string | null> {
   const got = await readCast(f).catch(() => null);
   if (!got) return null;
   if ("group" in got) {
-    const ids = got.group.members.map((n) => [...people.values()].find((p) => p.kind === "character" && p.card.data.name === n)?.id);
-    const c = blank();
-    c.cast = ids.filter((x): x is string => !!x);
-    c.missing = got.group.members.filter((_, i) => !ids[i]);
-    if (!c.missing.length) delete c.missing;
-    if (got.group.scenario) c.scenario = got.group.scenario;
-    c.who = castKey(c.cast, c.missing);
-    const there = chatsOf(c.who)[0];
-    if (there?.castName) c.castName = there.castName;
-    else if (!there && got.group.name !== castNames(c)) c.castName = got.group.name;
-    c.title = got.group.name;
-    chats[c.id] = c;
-    keepChats();
-    if (c.missing) toast(`${got.group.name}: no card yet for ${c.missing.join(", ")}`);
-    return c.who;
+    for (const card of got.group.cards) if (got.group.members.includes(card.data.name)) meetCard(card);
+    const found = got.group.members.map((n) => byName(n)?.id), members = found.filter((x): x is string => !!x), absent = got.group.members.filter((_, i) => !found[i]);
+    cardless.push(...absent);
+    if (!members.length) return "";
+    const same = [...groups.values()].find((g) => nameOf(g.id) === got.group.name && g.members.length === members.length && members.every((m) => g.members.includes(m)));
+    if (same) return same.id;
+    const g = makeGroup(members, got.group.scenario ? { scenario: got.group.scenario } : {});
+    if (got.group.name !== castNames(g)) { g.name = got.group.name; keepGroup(g); }
+    return g.id;
   }
   const d = got.card.data, had = [...people.values()].find((p) => p.kind === "character" && p.card.data.name === d.name
     && (p.card.data.description ?? "") === (d.description ?? ""));
@@ -508,62 +507,80 @@ async function adopt(f: File): Promise<string | null> {
   people.set(p.id, p);
   setFace(p);
   await savePerson(p);
-  eachScene((c) => { if (c.missing?.includes(d.name)) seat(c, [...c.cast!, p.id], c.missing.filter((n) => n !== d.name), false); });
   return p.id;
 }
-const castKeys = () => { const keys = new Set<string>(); eachScene((c) => keys.add(c.who!)); for (const c of stubs()) if (c.cast) keys.add(c.who!); return keys; };
+const cardless: string[] = [];
 async function welcome(files: Iterable<File>, into: boolean): Promise<File[]> {
-  const had = new Set([...people.keys(), ...castKeys()]), ids: string[] = [], rest: File[] = [];
+  const had = new Set([...people.keys(), ...groups.keys()]), ids: string[] = [], rest: File[] = [];
   for (const f of files) {
     const id = await adopt(f);
-    if (id) ids.push(id); else rest.push(f);
+    if (id) ids.push(id); else if (id === null) rest.push(f);
   }
+  const none = cardless.splice(0).filter((n) => !byName(n)), lacking = none.length ? `; no card here for ${andList([...new Set(none)])}` : "";
   const them = ids.filter((id) => people.has(id)), fresh = ids.filter((id) => !had.has(id));
   if (into && them.length && folderOf(conv)) join(them);
   else if (ids.length) {
     pickFolder(ids[0]);
     renderCast();
-    if (fresh.length) toast(`${names(fresh)} ${fresh.length > 1 ? "are" : "is"} here`, () => { for (const id of fresh) void forget(id); });
-  }
+    if (fresh.length) toast(`${names(fresh)} ${fresh.length > 1 ? "are" : "is"} here${lacking}`, () => { for (const id of fresh) void forget(id).then((f) => f.done()); });
+    else if (lacking) toast(`No card here for ${andList([...new Set(none)])}`);
+  } else if (lacking) toast(`No card here for ${andList([...new Set(none)])}`);
   return rest;
 }
 function join(ids: string[]) {
   const c = conv, { members, group } = castOf(c), fresh = [...new Set(ids)].filter((id) => !members.some((m) => m.id === id));
   if (!fresh.length) return toast(`${names(ids)} ${ids.length > 1 ? "are" : "is"} in this chat already`);
-  const was = seatOf(c), name = nameOf(c.who!);
-  if (!group) for (const m of c.messages) if (m.role === "assistant") m.as ??= was.who;
-  seat(c, [...members.map((m) => m.id), ...fresh]);
-  toast(group ? `${names(fresh)} joined ${name}` : `${names(fresh)} joined: a group now`, () => { reseat(c, was); renderCast(); render(); });
-  renderCast();
-  render();
-}
-function leave(id: string) {
-  const c = conv, was = seatOf(c), name = nameOf(id);
-  seat(c, c.cast!.filter((m) => m !== id));
-  toast(`${name} left`, () => { reseat(c, was); renderCast(); render(); });
-  renderCast();
-  render();
-}
-async function forget(id: string) {
-  const p = people.get(id), name = nameOf(id), seats: { c: Conversation; was: Seat }[] = [], empty = new Set<string>();
-  for (const c of new Set([...Object.values(chats), conv])) if (whoOf(c).startsWith(DIR) && c.who === id) delete c.who;
-  eachScene((c) => { if (c.cast!.includes(id)) seats.push({ c, was: seatOf(c) }); });
-  if (p) { people.delete(id); await dropPerson(id); }
-  for (const { c } of seats) {
-    if (c.cast!.length === 1 && !c.missing?.length) empty.add(c.id);
-    else seat(c, c.cast!.filter((m) => m !== id));
+  if (group) return setMembers(group, [...group.members, ...fresh], `${names(fresh)} joined ${called(group)}`);
+  const was = c.who;
+  if (!members.length && fresh.length === 1) c.who = fresh[0];
+  else {
+    for (const m of c.messages) if (m.role === "assistant" && members.length) m.as ??= members[0].id;
+    c.who = makeGroup([...members.map((m) => m.id), ...fresh]).id;
   }
-  const gone = Object.values(chats).filter((c) => c.who === id || empty.has(c.id));
+  const now = c.who;
+  unfold(now);
+  stow(c);
+  toast(groups.has(now) ? `${names(fresh)} joined: a group now` : `This chat is ${names(fresh)}'s now`, () => {
+    if (was) c.who = was; else delete c.who;
+    if (groups.delete(now)) void dropGroup(now);
+    stow(c);
+    renderCast();
+    render();
+  });
+  renderCast();
+  render();
+}
+const doomed = new Set<string>();
+async function forget(id: string) {
+  const p = people.get(id), name = nameOf(id), held = [...groups.values()].filter((g) => g.id === id || g.members.includes(id)).map((g) => ({ g, members: g.members }));
+  const out = new Set([id, ...held.filter(({ g }) => g.id === id || g.members.length === 1).map(({ g }) => g.id)]);
+  const gone = [...new Set([...Object.values(chats), conv])].filter((c) => out.has(c.who ?? "")), threads = [...new Set(everyChat().filter((c) => c.thread?.id && out.has(c.who ?? "")).map((c) => c.thread!.id!))];
+  const n = new Set([...gone.filter((c) => c.messages.length || c.thread?.id).map(keyOf), ...threads.map((t) => STUB + t)]).size;
+  if (p) { people.delete(id); await dropPerson(id); }
+  for (const { g } of held) {
+    if (out.has(g.id)) { groups.delete(g.id); void dropGroup(g.id); }
+    else { g.members = g.members.filter((m) => m !== id); void saveGroup(g); }
+  }
+  for (const t of threads) doomed.add(t);
   dropChats(gone.map((c) => c.id));
   renderCast();
-  return { name, chats: gone.length, undo: async () => {
+  return { name, chats: n, undo: async () => {
     if (p) { people.set(id, p); setFace(p); await savePerson(p); }
-    for (const c of gone) chats[c.id] = c;
-    for (const { c, was } of seats) if (!empty.has(c.id)) reseat(c, was);
+    for (const { g, members } of held) { g.members = members; keepGroup(g); }
+    for (const t of threads) doomed.delete(t);
+    for (const c of gone) if (c.messages.length) chats[c.id] = c;
     keepChats();
     renderCast();
     render();
+  }, done: () => {
+    if (!threads.length) return;
+    harness.threads = harness.threads?.filter((t) => !threads.includes(t.id));
+    void Promise.all(threads.map((t) => fetch(`/api/threads/${t}`, { method: "DELETE", keepalive: true }).catch(() => null))).then(() => loadThreads()).then(() => { for (const t of threads) doomed.delete(t); });
   } };
+}
+async function drop(id: string) {
+  const f = await forget(id);
+  toast(`${f.name || "Unnamed"} deleted${f.chats ? `, with ${f.chats} chat${f.chats > 1 ? "s" : ""}` : ""}`, () => void f.undo(), f.done);
 }
 function dropChats(ids: string[]) {
   for (const id of ids) {
@@ -575,7 +592,7 @@ function dropChats(ids: string[]) {
   if (ids.includes(conv.id) || (conv.who && !folderOf(conv))) newChat();
   else render();
 }
-const castless = (c: Conversation) => !c.thread && (c.cast ? !c.cast.some((m) => people.has(m)) && !c.missing?.length : !!c.who && c.who !== CHRYSALIS && !people.has(c.who));
+const castless = (c: Conversation) => !c.thread && !!c.who && c.who !== CHRYSALIS && !people.has(c.who) && !groups.has(c.who);
 
 const dirName = (dir: string) => dir.replace(/\/+$/, "").split("/").pop() || dir;
 const kept = (key: string): string[] => { try { const v = JSON.parse(pref(key, "[]")); return Array.isArray(v) ? v : []; } catch { return []; } };
@@ -593,12 +610,23 @@ function closeFolder(dir: string, shut = true) {
 }
 function seated(scene?: Scene): Partial<Conversation> {
   if (!scene?.cast.length) return {};
-  const found = scene.cast.map((n) => [...people.values()].find((p) => p.kind === "character" && p.card.data.name.trim() === n)?.id), cast = found.filter((id): id is string => !!id);
-  const missing = scene.cast.filter((_, k) => !found[k]);
-  if (cast.length === 1 && !missing.length) return { who: cast[0] };
-  return { who: castKey(cast, missing), cast, ...(missing.length ? { missing } : {}), ...(scene.scenario ? { scenario: scene.scenario } : {}), ...(scene.name ? { castName: scene.name } : {}) };
+  if (scene.group && groups.has(scene.group)) return { who: scene.group };
+  const found = scene.cast.map((n) => byName(n)?.id);
+  if (found.some((id) => !id)) return {};
+  if (found.length === 1 && !scene.group) return { who: found[0] };
+  const same = [...groups.values()].find((g) => g.members.length === found.length && found.every((id) => g.members.includes(id!)));
+  return same ? { who: same.id } : {};
 }
-const stubs = (): Conversation[] => { const mine = new Set([...Object.values(chats), conv, ...[...runs.values()].map((r) => r.conv)].map((c) => c.thread?.id)); return (harness.threads ?? []).filter((t) => !mine.has(t.id))
+function meet(scene?: Scene) {
+  if (!scene?.cast.length) return;
+  for (const card of scene.cards ?? []) if (scene.cast.includes(card.data.name.trim())) meetCard(card);
+  const members = scene.cast.map((n) => byName(n)?.id).filter((id): id is string => !!id);
+  if ((scene.group || scene.cast.length > 1) && members.length && !seated(scene).who)
+    keepGroup({ id: scene.group ?? CAST + randomId(), members, added: Date.now(), ...(scene.name ? { name: scene.name } : {}), ...(scene.scenario ? { scenario: scene.scenario } : {}) });
+  const who = seated(scene).who;
+  if (who) unfold(who);
+}
+const stubs = (): Conversation[] => { const mine = new Set([...Object.values(chats), conv, ...[...runs.values()].map((r) => r.conv)].map((c) => c.thread?.id)); return (harness.threads ?? []).filter((t) => !mine.has(t.id) && !doomed.has(t.id))
   .map((t) => ({ id: STUB + t.id, title: t.title || "Thread", named: true, updated: t.updated, effort: "xhigh" as Effort, messages: [], thread: { dir: t.dir, id: t.id, ...(t.machine ? { machine: t.machine } : {}) }, ...seated(t.scene) })); };
 const keyOf = (c: Conversation) => (c.thread?.id ? STUB + c.thread.id : c.id);
 const threadModel = (c: Conversation) => [c.thread?.model, pref("thread-model", "")].find((id) => id && harness.models?.some((m) => m.id === id))
@@ -614,15 +642,17 @@ const variantsOf = (c: Conversation) => harness.models?.find((m) => m.id === thr
 const threadVariant = (c: Conversation) => VARIANTS[c.effort].find((v) => variantsOf(c).includes(v));
 const greeted = (c: Conversation) => { const at = c.messages.findIndex((m) => m.role === "user"); return (at < 0 ? c.messages : c.messages.slice(0, at)).find((m) => m.role === "assistant" && !m.job)?.content; };
 function threadPersona(c: Conversation) {
-  const { members } = castOf(c), opened = greeted(c);
-  if (!members.length) return [castPrompt(settings.system === DEFAULT_SYSTEM ? "" : fill(settings.system.trim()), [people.get(CHRYSALIS)!.card.data], userCard()),
+  const { members, group } = castOf(c), opened = greeted(c);
+  if (!members.length) return [fill(castPrompt("", [people.get(CHRYSALIS)!.card.data], userCard())),
     opened ? `The chat opened with this greeting from you:\n${opened}` : ""].filter(Boolean).join("\n\n");
-  return [castSystem(c), `Stay in character in everything you say. ${members.length > 1 ? "The characters" : members[0].card.data.name} can use the tools here to do what ${userName()} asks, for real.`,
+  return [castSystem(c), `Stay in character in everything you say. ${group ? "Whoever is speaking" : members[0].card.data.name} can use the tools here to do what ${userName()} asks, for real.`,
     opened ? `The chat opened with this greeting:\n${opened}` : ""].filter(Boolean).join("\n\n");
 }
 function sceneFor(c: Conversation): Scene | undefined {
-  const { members, group } = castOf(c), cast = [...members.map((p) => p.card.data.name.trim()), ...(c.missing ?? [])], opened = greeted(c);
-  return cast.length || opened ? { cast, ...(group?.scenario ? { scenario: group.scenario } : {}), ...(group?.castName ? { name: group.castName } : {}), ...(opened ? { greeting: opened } : {}) } : undefined;
+  const { members, group } = castOf(c), opened = greeted(c), first = c.messages.find((m) => m.role === "assistant" && !m.job);
+  const greeter = opened ? (people.get(first?.as ?? "") ?? (group ? undefined : members[0]))?.card.data.name.trim() : undefined;
+  return members.length || opened ? { cast: members.map((p) => p.card.data.name.trim()), ...(members.length ? { cards: members.map((p) => p.card) } : {}), ...(group ? { group: group.id } : {}),
+    ...(group?.scenario ? { scenario: group.scenario } : {}), ...(group?.name?.trim() ? { name: group.name.trim() } : {}), ...(opened ? { greeting: opened } : {}), ...(greeter ? { greeter } : {}) } : undefined;
 }
 let harnessAt = 0;
 async function loadThreads() {
@@ -663,6 +693,9 @@ async function openThread(sid: string): Promise<string | undefined> {
   if (mine && runs.get(mine.id)) return mine.id;
   const r = await fetch(`/api/threads/${sid}`).catch(() => null), got = r?.ok ? await r.json() : null;
   if (!got) { if (!mine) toast("OpenCode could not give that thread"); return mine?.id; }
+  await castReady.promise;
+  meet(got.thread.scene);
+  if (mine && !folderOf(mine)) Object.assign(mine, seated(got.thread.scene));
   const c: Conversation = mine ?? { id: STUB + sid, title: "", named: true, updated: 0, effort: pref("effort", "xhigh") as Effort, messages: [], thread: { dir: got.thread.dir, id: sid, ...(got.thread.machine ? { machine: got.thread.machine } : {}) }, ...seated(got.thread.scene) };
   if (runs.get(c.id)) return c.id;
   c.thread!.at = got.thread.idle;
@@ -673,7 +706,7 @@ async function openThread(sid: string): Promise<string | undefined> {
     ...(files ? { files: await Promise.all(files.map((f, k) => sentFile(`${sid}-${i}-${k}`, f))) } : {}) })));
   if (got.job) {
     if (said.at(-1)?.role === "assistant") said.pop();
-    said.push({ id: randomId(), role: "assistant", content: "", reasoning: "", job: got.job, ...(c.who && !c.cast ? { as: c.who } : {}) });
+    said.push({ id: randomId(), role: "assistant", content: "", reasoning: "", job: got.job, ...(people.has(c.who ?? "") ? { as: c.who } : {}) });
   }
   const old = mine?.messages ?? [];
   said.forEach((m, i) => {
@@ -1056,35 +1089,36 @@ function paintInvite() {
   const box = $("cast-invite"), list = box.querySelector<HTMLElement>(".invite-list"), find = box.querySelector<HTMLInputElement>(".invite-find");
   if (box.hidden || !list || !find) return;
   const all = [...people.values()].filter((p) => p.kind === "character").sort((a, b) => a.card.data.name.localeCompare(b.card.data.name));
-  const from = inviteFrom, solo = from === null ? whoOf(conv).startsWith(DIR) : from.startsWith(DIR);
-  const base = from === null ? conv : from && !solo && !people.has(from) ? sceneOf(from) : undefined;
-  const q = find.value.trim().toLowerCase(), members = base ? castOf(base).members : from && !solo ? [people.get(from)!] : [], group = from === null && !!conv.cast;
-  box.querySelector(".invite-head")!.textContent = solo ? (from ? `A new thread in ${nameOf(from)} with` : "Who works in this thread")
-    : from === null ? "Bring into this chat" : from ? `A new chat with ${nameOf(from)} and` : "Who is in the chat";
+  const from = inviteFrom, folder = !!from && from.startsWith(DIR), edited = from === null ? castOf(conv).group : groups.get(from ?? "");
+  const q = find.value.trim().toLowerCase(), members = edited ? membersOf(edited) : from === null ? castOf(conv).members : from && !folder ? [people.get(from)!] : [];
+  box.querySelector(".invite-head")!.textContent = folder ? `A new thread in ${nameOf(from!)} with` : edited ? `Who is in ${nameOf(edited.id)}`
+    : from === null ? (members.length ? "Bring into this chat" : whoOf(conv).startsWith(DIR) ? "Who works in this thread" : "Who this chat is with") : from ? `A new group with ${nameOf(from)} and` : "A new chat with";
   const shown = all.filter((p) => p.card.data.name.toLowerCase().includes(q));
   find.hidden = all.length < 7;
   list.replaceChildren(...shown.map((p) => {
     const inside = members.some((m) => m.id === p.id), b = h("button", "invite-row"), name = p.card.data.name;
     b.type = "button";
     b.setAttribute("aria-pressed", String(inside));
-    b.disabled = inside && !group && !solo;
-    b.title = solo ? (inside ? `${name} works in this thread (click for plain Chrysalis)` : `${name} works in it, in character`)
-      : inside ? (group ? `${name}: in this chat (click to take out)` : `${name}: this chat is theirs`) : `Bring ${name} in`;
+    b.disabled = inside && (edited ? edited.members.length < 3 : from !== null);
+    b.title = edited ? (inside ? (b.disabled ? `${name}: one of the last two in it` : `${name}: in it (click to take out)`) : `Bring ${name} in`)
+      : inside ? `${name}: this chat is theirs${from === null ? " (click for plain Chrysalis)" : ""}` : folder ? `${name} works in it, in character` : `Bring ${name} in`;
     b.append(face(p.id), h("span", "invite-name", name));
     if (inside) b.insertAdjacentHTML("beforeend", icon("check"));
     b.onclick = () => {
-      inviteFrom = null;
-      if (solo) {
-        if (from) newChat(from);
-        if (inside) delete conv.who; else conv.who = p.id;
-        if (conv.messages.length) save(conv);
+      if (edited) setMembers(edited, inside ? edited.members.filter((m) => m !== p.id) : [...edited.members, p.id], `${name} ${inside ? "left" : "joined"} ${called(edited)}`);
+      else if (from === null && inside) {
+        delete conv.who;
+        stow(conv);
+        if (conv.thread?.id) void fetch(`/api/threads/${conv.thread.id}`, { method: "PATCH", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ scene: sceneFor(conv) ?? null }) }).then(() => loadThreads());
         renderCast();
         render();
-      } else if (from === "") newChat(p.id);
-      else if (inside) leave(p.id);
+      }
+      else if (from === null) join([p.id]);
       else {
-        if (from) newChat(from);
-        join([p.id]);
+        inviteFrom = null;
+        if (folder) { newChat(from); conv.who = p.id; renderCast(); render(); }
+        else if (from) newChat(makeGroup([from, p.id]).id);
+        else newChat(p.id);
       }
       paintInvite();
     };
@@ -1109,19 +1143,14 @@ $("cast-file").addEventListener("change", async (e) => {
 
 let sheetOf = "", sampler: Speaker | undefined, sheetFile: { id: string; url: string } | undefined;
 function openSheet(id: string) {
-  const sheet = $("cast-sheet"), person = people.get(id), last = person ? undefined : chatsOf(id)[0];
-  if (!person && conv.who !== id && last) {
-    history.replaceState(null, "", `#${last.id}`);
-    openConversation(last.id);
-  }
-  const g = !person && conv.cast && conv.who === id ? conv : undefined;
+  const sheet = $("cast-sheet"), person = people.get(id), g = groups.get(id);
   if (!person && !g) return;
   const again = sheetOf === id, top = sheet.querySelector(".card-scroll")?.scrollTop ?? 0;
   sheetOf = id;
   let saving = 0;
   const keep = () => {
     clearTimeout(saving);
-    saving = window.setTimeout(() => { if (person) { void savePerson(person); void cardFile(person); } else stow(g!); }, 300);
+    saving = window.setTimeout(() => { if (person) { void savePerson(person); void cardFile(person); } else keepGroup(g!); }, 300);
   };
   const btn = (cls: string, title: string, html: string, onclick: () => void) => {
     const b = h("button", cls);
@@ -1160,20 +1189,9 @@ function openSheet(id: string) {
     requestAnimationFrame(() => grow(area));
     return area;
   };
-  const n = Object.values(chats).filter((c) => c.who === id).length, theirs = n ? `, with ${n} chat${n > 1 ? "s" : ""}` : "";
-  const del = () => {
-    const b = btn("icon", `Delete ${nameOf(id) || "them"}${n ? " and their chats" : ""}`, icon("trash"), async () => {
-      if (!b.classList.contains("armed")) { b.classList.add("armed"); b.innerHTML = `${icon("trash")}Delete${theirs}?`; return; }
-      closeSheet();
-      const f = await forget(id);
-      toast(`${f.name} deleted${theirs}`, () => void f.undo());
-    });
-    return b;
-  };
-
   const art = h("div", "card-art"), title = h("div", "card-title"), body = h("div", "card-body"), scroll = h("div", "card-scroll");
   if (g) {
-    const all = inScene(g).slice(0, 4), strips = h("div", `strips s${Math.max(all.length, 1)}`);
+    const all = membersOf(g).slice(0, 4).map((m) => face(m.id)), strips = h("div", `strips s${Math.max(all.length, 1)}`);
     strips.append(...(all.length ? all : [face(id)]));
     art.append(strips);
   } else if (person!.kind === "assistant" && !person!.image && seaPortrait()) {
@@ -1196,13 +1214,13 @@ function openSheet(id: string) {
   art.append(h("div", "card-scrim"), title);
   if (person) art.append(btn("card-float card-pic", person.image ? "Another picture" : "A picture", icon("edit"), () => picture(person)));
   const name = h("input", "card-name");
-  name.value = person ? person.card.data.name : g!.castName ?? castNames(g!);
+  name.value = person ? person.card.data.name : g!.name ?? "";
   name.placeholder = id === ME ? "User" : id === CHRYSALIS ? "Chrysalis" : g ? castNames(g) : "Their name";
   name.ariaLabel = "Name";
   name.spellcheck = false;
   name.oninput = () => {
     if (person) person.card.data.name = name.value;
-    else eachScene((c) => { if (c.who !== id) return; if (name.value.trim()) c.castName = name.value; else delete c.castName; if (c !== g) stow(c); });
+    else if (name.value.trim()) g!.name = name.value; else delete g!.name;
     const file = art.querySelector<HTMLAnchorElement>("a.card-file");
     if (file) file.download = file.title = cardName(id);
     keep();
@@ -1220,59 +1238,33 @@ function openSheet(id: string) {
       f.append(h("span", "card-label", label), text(String(d![k] ?? ""), (v) => { d![k] = v; }, "card-text", placeholder));
       return f;
     };
-    const more = h("details", "card-more");
-    more.append(h("summary", "", "More"), field("How they talk", "mes_example", "Example lines: {{user}}: … {{char}}: …"),
-      field("After the chat", "post_history_instructions", "A note after the last message"));
-    body.append(voicePick(person, keep), field("Description", "description", person.kind === "assistant" ? "Who they are, after the system prompt" : "Who they are: looks, past, manner"),
-      field("Personality", "personality", "A few words"), field("Scenario", "scenario", "Where and when the chat begins"),
-      field("Greeting", "first_mes", "Their first message"), more);
-    if (person.kind === "character" && harness.state === "on" && dirs().length) {
-      const work = h("div", "card-section"), list = h("div", "card-work");
-      list.append(...dirs().map((dir) => {
-        const b = btn("pill", `A new thread in ${dir}, with ${person.card.data.name} doing the work`, `${icon("folder")}${escapeHtml(dirName(dir))}`, () => { closeSheet(); newThread(dir, person.id); });
-        return b;
-      }));
-      work.append(h("span", "card-label", "Works in"), list);
-      body.append(work);
-    }
-    if (person.kind === "character") {
-      const acts = h("div", "card-acts");
-      acts.append(del());
-      body.append(acts);
-    }
+    body.append(voicePick(person, keep), field("Description", "description", person.kind === "assistant" ? "The system prompt: who they are and how they answer" : "Who they are: looks, past, manner, how they talk"),
+      field("Scenario", "scenario", "Where and when the chat begins"), field("Greeting", "first_mes", "Their first message"));
   } else {
     const members = h("div", "card-members");
-    members.append(...[...people.values()].filter((x) => x.kind === "character").map((x) => {
-      const inside = g!.cast!.includes(x.id), only = inside && g!.cast!.length === 1 && !g!.missing?.length;
-      const b = h("button", `card-member ${inside ? "in" : "out"}`);
-      b.type = "button";
-      b.disabled = only;
-      b.title = `${x.card.data.name}: ${only ? "the last one in this chat" : inside ? "in this chat (click to take out)" : "click to bring in"}`;
-      b.append(face(x.id));
-      b.onclick = () => {
+    members.append(...membersOf(g!).map((x) => {
+      const row = h("div", "card-member"), open = h("button", "card-member-open"), name = x.card.data.name, last = g!.members.length < 3;
+      open.type = "button";
+      open.title = `${name}'s card`;
+      open.append(face(x.id), h("span", "", name));
+      open.onclick = () => openSheet(x.id);
+      const out = btn("act card-member-out", last ? `${name}: one of the last two in it` : `Take ${name} out`, icon("x"), () => {
         clearTimeout(saving);
-        seat(g!, inside ? g!.cast!.filter((m) => m !== x.id) : [...g!.cast!, x.id]);
-        renderCast();
-        render();
-        if (!g!.cast) return closeSheet();
-        sheetOf = g!.who!;
-        openSheet(sheetOf);
-      };
-      return b;
-    }), ...(g!.missing ?? []).map((n) => {
-      const m = h("span", "card-member waiting");
-      m.title = `${n}: no card yet (theirs joins this chat once it is added)`;
-      m.append(initials(n));
-      return m;
+        setMembers(g!, g!.members.filter((m) => m !== x.id), `${name} left ${called(g!)}`);
+        openSheet(id);
+      });
+      out.disabled = last;
+      row.append(open, out);
+      return row;
     }));
+    const add = btn("card-member-add", "Bring someone in", `${icon("personAdd")}Add someone`, () => openInvite(add, id));
     const who = h("div", "card-section"), where = h("label", "card-field"), acts = h("div", "card-acts");
-    who.append(h("span", "card-label", "In this chat"), members);
-    where.append(h("span", "card-label", "Scenario"), text(g!.scenario ?? "", (v) => { g!.scenario = v || undefined; }, "card-text",
+    who.append(h("span", "card-label", "Members"), members, add);
+    where.append(h("span", "card-label", "Scenario"), text(g!.scenario ?? "", (v) => { if (v) g!.scenario = v; else delete g!.scenario; }, "card-text",
       "Where they are and what is going on (in place of their own)"));
-    acts.append(btn("", "Who is in this chat as a file (with their cards beside it, it imports anywhere this chat runs)", `${icon("download")}Export`,
+    acts.append(btn("", "This group as a file, with its members' cards in it", `${icon("download")}Export`,
       () => download(`${nameOf(id) || "group"}.json`, JSON.stringify({ spec: "chrysalis_group", name: nameOf(id),
-        members: [...castOf(g!).members.map((m) => m.card.data.name), ...(g!.missing ?? [])], ...(g!.scenario ? { scenario: g!.scenario } : {}) }, null, 2), "application/json")),
-      del());
+        members: membersOf(g!).map((m) => m.card.data.name), cards: membersOf(g!).map((m) => m.card), ...(g!.scenario ? { scenario: g!.scenario } : {}) }, null, 2), "application/json")));
     body.append(who, where, acts);
   }
   sheet.replaceChildren(btn("card-float card-x", "Close", icon("x"), closeSheet), scroll);
@@ -1346,7 +1338,7 @@ function voicePick(p: Person, keep: () => void) {
 document.addEventListener("pointerdown", (e) => {
   const t = e.target as HTMLElement;
   if (!$("cast-add").hidden && !t.closest("#cast-add, #add-cast")) $("cast-add").hidden = true;
-  if (!$("cast-invite").hidden && !t.closest("#cast-invite, .cast-bring, #cast-add, #toast")) closeInvite();
+  if (!$("cast-invite").hidden && !t.closest("#cast-invite, .cast-bring, .card-member-add, #cast-add, #toast")) closeInvite();
   if (!$("oc-pop").hidden && !t.closest("#oc-pop, #opencode, #cast-add, #toast, #outside-view")) $("oc-pop").hidden = true;
   if (!$("row-menu").hidden && !t.closest("#row-menu")) $("row-menu").hidden = true;
   if (!$("cast-sheet").hidden && !t.closest("#cast-sheet, [data-card], #voice-menu")) closeSheet();
@@ -1365,41 +1357,9 @@ document.addEventListener("click", (e) => {
   if (sheetOf === id) closeSheet(); else openSheet(id);
 });
 
-function sceneText(src: string, c: Conversation) {
-  const { members, group } = castOf(c);
-  if (!group || !members.length) return src;
-  const names = members.map((m) => m.card.data.name.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")).join("|");
-  return src.replace(new RegExp(`(?<!\\n)\\n(?=\\s*(?:\\*\\*)?(?:${names})(?:\\*\\*)?\\s*:)`, "g"), "\n\n");
-}
-function speakLine(n: Node | undefined, c: Conversation, before: Node | undefined, as?: string) {
-  const { members, group } = castOf(c);
-  if (!group || !(n instanceof HTMLParagraphElement)) return;
-  const said = speakerOf(n.textContent ?? "", members.map((m) => m.card.data.name));
-  const m = said ? members.find((x) => x.card.data.name === said.name)
-    : people.get((before ? before instanceof HTMLElement && before.dataset.who : as) || "");
-  if (!m) return;
-  if (said) {
-    let drop = said.rest;
-    const walker = document.createTreeWalker(n, NodeFilter.SHOW_TEXT);
-    for (let t = walker.nextNode(); t && drop > 0; t = walker.nextNode()) {
-      const k = Math.min(drop, t.textContent!.length);
-      t.textContent = t.textContent!.slice(k);
-      drop -= k;
-    }
-    for (const el of [...n.querySelectorAll("strong, b")]) if (!el.textContent) el.remove();
-  }
-  n.dataset.who = m.id;
-  n.classList.add("line");
-  if (before instanceof HTMLElement && before.dataset.who === m.id) return void n.classList.add("same");
-  const tag = h("span", "who"), name = m.card.data.name;
-  tag.dataset.card = m.id;
-  tag.title = `${name}'s card`;
-  tag.append(face(m.id), h("b", "", name));
-  n.prepend(tag);
-}
-function speakerHead(c: Conversation) {
-  const w = writerOf(c);
-  return w ? head(w.id) : null;
+function speakerHead(c: Conversation, m: Message) {
+  const id = m.as && people.has(m.as) ? m.as : writerOf(c)?.id;
+  return id ? head(id) : null;
 }
 function head(id: string) {
   const el = h("div", "speaker"), name = nameOf(id);
@@ -1415,9 +1375,9 @@ function renderCastNext() {
   box.hidden = !group || !members.length;
   paintInvite();
   if (box.hidden) return box.replaceChildren();
-  const talk = h("button", `talk${talking ? " on" : ""}`);
+  const talk = h("button", `talk${talking ? " on" : ""}`), up = nextUp(conv);
   talk.type = "button";
-  talk.title = talking ? "Stop them" : "They go on by themselves for a few turns (typing stops them)";
+  talk.title = talking ? "Stop them" : "They take turns by themselves for a few replies (typing stops them)";
   talk.innerHTML = talking ? `${icon("stop")}Stop them` : `${icon("play")}Let them talk`;
   talk.onclick = () => {
     if (talking) { talking = 0; return renderCastNext(); }
@@ -1426,17 +1386,24 @@ function renderCastNext() {
     talkOn();
   };
   box.replaceChildren(h("span", "", "Next"), ...members.map((m) => {
-    const b = h("button");
+    const b = h("button", m.id === up ? "up" : "");
     b.type = "button";
-    b.title = b.ariaLabel = `${m.card.data.name} next`;
+    b.title = b.ariaLabel = `${m.card.data.name} answers`;
     b.append(face(m.id));
     b.onclick = () => replyAs(m);
     return b;
   }), talk);
 }
+function nextUp(c: Conversation): string | undefined {
+  const { members, group } = castOf(c);
+  if (!group || !members.length) return undefined;
+  const last = c.messages.findLast((m) => m.role === "assistant" && m.as)?.as;
+  return members[(members.findIndex((m) => m.id === last) + 1) % members.length].id;
+}
+let lined: string[] = [];
 function replyAs(p: Person, auto = false) {
   if (running()) return;
-  if (!auto) talking = 0;
+  if (!auto) { talking = 0; lined = []; }
   const text = input.value.trim();
   if (text) submit(text, false);
   void generate(conv, conv.messages.length, p.id);
@@ -1451,18 +1418,7 @@ function readAloud(m: Message) {
     const base: VoiceAsk = { ...(s.tts ? { stack: { tts: s.tts } } : {}), ...(s.name ? { voice: s.name } : {}), speed: s.speed ?? 1 };
     const parts: { text: string; who?: Person }[] = [];
     if (m.role === "user") parts.push({ text: m.content, who: persona() });
-    else if (!group) parts.push({ text: m.content, who: writerOf(c) });
-    else {
-      const names = members.map((x) => x.card.data.name);
-      let who = m.as ? people.get(m.as) : undefined;
-      for (const para of sceneText(m.content, c).split(/\n{2,}/)) {
-        const said = speakerOf(para, names), last = parts.at(-1);
-        if (said) who = members.find((x) => x.card.data.name === said.name);
-        const text = said ? para.slice(said.rest) : para;
-        if (last && last.who === who) last.text += `\n\n${text}`;
-        else parts.push({ text, who });
-      }
-    }
+    else parts.push({ text: m.content, who: (m.as && people.get(m.as)) || writerOf(c) });
     reading = m;
     clearTimeout(readerIdle);
     void (reader ??= new Speaker((e) => toast(e))).read(parts.map((x) => ({ text: x.text, voice: x.who && voiceOf(x.who.card.data) })), base, () => {
@@ -1489,13 +1445,10 @@ function paintReading() {
 }
 
 function talkOn() {
-  const { members, group } = castOf(conv);
-  if (!talking || running() || !group || !members.length) return;
-  talking--;
-  const said = conv.messages.filter((m) => m.role === "assistant").map((m) => sceneText(m.content, conv)).join("\n\n").split(/\n\n/);
-  const lastSpoke = [...said].reverse().map((t) => speakerOf(t, members.map((m) => m.card.data.name))?.name).find(Boolean);
-  const next = members.length > 1 ? members.filter((m) => m.card.data.name !== lastSpoke) : members;
-  replyAs(next[Math.floor(Math.random() * next.length)], true);
+  const next = lined.shift() ?? (talking ? nextUp(conv) : undefined), p = next && castOf(conv).members.find((m) => m.id === next);
+  if (!p || running()) { talking = 0; lined = []; return renderCastNext(); }
+  if (talking) talking--;
+  replyAs(p, true);
 }
 
 const escapeHtml = (s: string) => s.replace(/[&<>"']/g, (c) => `&#${c.charCodeAt(0)};`);
@@ -1643,8 +1596,7 @@ const place = (into: Node, n: Node, at: Node | null) => {
 
 function renderBlocks(v: { body: HTMLElement; blocks?: Blocks }, src: string, live: boolean, art?: { c: Conversation; holder: object }) {
   if (!v.blocks) { v.body.replaceChildren(); v.blocks = { raws: [], nodes: [] }; }
-  const text = art ? sceneText(src, art.c) : src;
-  const b = v.blocks, tokens = chatTokens(live ? settle(text) : text), blocks = tokens.filter((t) => t.type !== "space");
+  const b = v.blocks, tokens = chatTokens(live ? settle(src) : src), blocks = tokens.filter((t) => t.type !== "space");
   let seen = 0, all: Map<string, Version[]> | undefined;
   const nth = art ? blocks.map((t) => (t.type === "code" && artifactOf(t.lang, t.text) ? seen++ : -1)) : [];
   const artNodes = (k: number, old: Node | undefined): Node[] => {
@@ -1661,7 +1613,6 @@ function renderBlocks(v: { body: HTMLElement; blocks?: Blocks }, src: string, li
     const now = t.type !== "code" ? htmlNodes(t, tokens.links) : nth[k] >= 0 ? artNodes(k, old[0])
       : SVG_START.test(t.text) ? [svgFigure(old[0], t.text, tail)]
       : /^mermaid$/i.test(t.lang ?? "") ? [mermaidFigure(old[0], t.text, tail)] : page ? [pageFigure(old[0], t.text)] : htmlNodes(t, tokens.links);
-    if (art && t.type === "paragraph") speakLine(now[0], art.c, k ? b.nodes[k - 1]?.[0] : undefined, (art.holder as Message).as);
     b.raws[k] = t.raw;
     if (now.length === 1 && old.length === 1 && now[0] === old[0]) continue;
     const at = b.nodes.slice(k).flat()[0] ?? null;
@@ -3181,7 +3132,7 @@ function render() {
 function messageView(m: Message, i: number): HTMLElement {
   if (m === editing) return editorView(m, i);
   if (m.role === "assistant") {
-    const v = assistantView(i), by = speakerHead(conv);
+    const v = assistantView(i), by = speakerHead(conv, m);
     if (by) v.el.prepend(by);
     views.set(m, v);
     paint(v, m, [...runs.values()].find((r) => r.m === m)?.live);
@@ -3869,8 +3820,7 @@ function renderComposer() {
   }
 }
 
-const customized = () => settings.system !== DEFAULT_SYSTEM
-  || Object.keys(settings.think).length + Object.keys(settings.fast).length > 0
+const customized = () => Object.keys(settings.think).length + Object.keys(settings.fast).length > 0
   || !!settings.max_tokens || settings.seed !== undefined
   || Object.keys(settings.voice ?? {}).length > 0;
 
@@ -3895,7 +3845,7 @@ const fold = (t: string) => t.normalize("NFKD").replace(/[\u0300-\u036f]/g, "").
 const everyChat = () => [...new Map([...Object.values(chats), ...stubs()].filter((c) => c.messages.length || c.thread?.id).map((c) => [keyOf(c), c])).values()];
 const scopeOf = () => {
   const at = pref("scope", "");
-  return at && (at === CHRYSALIS || people.has(at) || castKeys().has(at) || dirs().includes(at.slice(DIR.length))) ? at : "";
+  return at && (at === CHRYSALIS || people.has(at) || groups.has(at) || dirs().includes(at.slice(DIR.length))) ? at : "";
 };
 const inScope = (c: Conversation, at = scopeOf()) => !at || whoOf(c) === at;
 function found() {
@@ -3904,6 +3854,45 @@ function found() {
     return title.startsWith(q) ? 0 : title.includes(q) ? 1 : fold(nameOf(whoOf(c))).includes(q) || fold(c.thread?.dir ?? "").includes(q) || fold(machineOf(c.thread?.machine)?.name ?? "").includes(q) ? 2 : -1;
   };
   return everyChat().map((c) => ({ c, at: score(c) })).filter((x) => x.at >= 0 && inScope(x.c)).sort((a, b) => a.at - b.at || b.c.updated - a.c.updated).map((x) => x.c);
+}
+const isRow = (key: string) => key === CHRYSALIS || key.startsWith(DIR) || groups.has(key) || people.has(key);
+function rowOrder(): string[] {
+  const all = [...[...people.values()].filter((p) => p.kind !== "persona").map((p) => ({ id: p.id, at: p.added })), ...[...groups.values()].map((g) => ({ id: g.id, at: g.added })), ...dirs().map((d) => ({ id: DIR + d, at: 0 }))];
+  const was = kept("rows"), fresh = all.filter((x) => !was.includes(x.id)).sort((a, b) => (chatsOf(b.id)[0]?.updated ?? b.at) - (chatsOf(a.id)[0]?.updated ?? a.at)).map((x) => x.id);
+  if (fresh.length) setPref("rows", JSON.stringify([...fresh, ...was]));
+  const now = [...fresh, ...was];
+  return all.map((x) => x.id).sort((a, b) => now.indexOf(a) - now.indexOf(b));
+}
+function keepRow(key: "pinned" | "settled", id: string, on: boolean) {
+  for (const k of ["pinned", "settled"] as const) setPref(k, JSON.stringify([...(on && k === key ? [id] : []), ...kept(k).filter((x) => x !== id)]));
+  renderList();
+  const name = nameOf(id) || "Unnamed";
+  toast(key === "pinned" ? (on ? `${name} is pinned` : `${name} is unpinned`) : on ? `${name} is settled` : `${name} is active again`, () => keepRow(key, id, !on));
+}
+function renameRow(id: string, value: string) {
+  const p = people.get(id), g = groups.get(id), name = value.trim().slice(0, 100);
+  if (p && name) { p.card.data.name = name; void savePerson(p); }
+  if (g) { if (name) g.name = name; else delete g.name; keepGroup(g); }
+  renderCast();
+  render();
+}
+function forkRow(id: string) {
+  const p = people.get(id), g = groups.get(id), taken = new Set([...[...people.values()].map((x) => x.card.data.name.trim()), ...[...groups.keys()].map(nameOf)]);
+  let n = 2;
+  while (taken.has(`${nameOf(id)} ${n}`)) n++;
+  const name = `${nameOf(id)} ${n}`;
+  let made = "";
+  if (p) {
+    const copy: Person = { id: randomId(), kind: "character", card: structuredClone(p.card), ...(p.image ? { image: p.image } : {}), added: Date.now() };
+    copy.card.data.name = name;
+    people.set(copy.id, copy);
+    setFace(copy);
+    void savePerson(copy);
+    made = copy.id;
+  } else if (g) made = makeGroup([...g.members], { name, ...(g.scenario ? { scenario: g.scenario } : {}) }).id;
+  if (!made) return;
+  renderCast();
+  toast(`${name} is a copy of ${nameOf(id)}`, () => void forget(made).then((f) => f.done()));
 }
 function renderList() {
   if (sorting) return void (listStale = true);
@@ -3932,11 +3921,9 @@ function renderList() {
   }
   $("side-search").setAttribute("aria-expanded", "false");
   const settled = new Set([...kept("settled"), ...(harness.threads ?? []).filter((t) => t.archived).map((t) => STUB + t.id)]), shelf: Conversation[] = [], pins: Conversation[] = [];
-  const order = kept("pinned"), pinned = new Set(order);
+  const order = kept("pinned"), pinned = new Set(order), rowAt = rowOrder();
   const shown = (id: string) => chatsOf(id).filter((c) => (c.messages.length || c.thread?.id) && inScope(c, scope) && (!settled.has(keyOf(c)) || (shelf.push(c), false)) && (!pinned.has(keyOf(c)) || (pins.push(c), false)));
-  const folders = [...[...people.values()].filter((p) => p.kind !== "persona").map((x) => ({ id: x.id, at: x.added })), ...[...castKeys()].map((id) => ({ id, at: conv.updated })),
-    ...dirs().map((d) => ({ id: DIR + d, at: 0 }))].map((x) => ({ ...x, list: shown(x.id) })).filter((x) => !scope || x.id === scope);
-  const rows = folders.sort((a, b) => (b.list[0]?.updated ?? b.at) - (a.list[0]?.updated ?? a.at)).map(({ id, list }) => {
+  const boxes = rowAt.map((id) => ({ id, list: shown(id) })).filter((x) => !scope || x.id === scope).map(({ id, list }) => {
     const open = unfolded.has(id) && list.length > 0, box = h("div", `folder${open ? " open" : ""}`);
     box.dataset.who = id;
     box.append(castRow(id, list, open));
@@ -3945,26 +3932,28 @@ function renderList() {
       kids.append(...list.map((c) => convRow(c)));
       box.append(kids);
     }
-    return box;
+    return { id, box };
   });
-  const above = h("div", pins.length ? "folder pinned open" : "pin-none"), below = h("div", shelf.length ? "folder settled" : "shelf-none");
-  if (pins.length) {
-    const kids = h("div", "folder-chats");
+  const held = boxes.filter((x) => pinned.has(x.id)).sort((a, b) => order.indexOf(a.id) - order.indexOf(b.id)).map((x) => x.box), away = boxes.filter((x) => !pinned.has(x.id) && settled.has(x.id)).map((x) => x.box);
+  const rows = boxes.filter((x) => !pinned.has(x.id) && !settled.has(x.id)).map((x) => x.box);
+  const above = h("div", pins.length || held.length ? "folder pinned open" : "pin-none"), below = h("div", shelf.length || away.length ? "folder settled" : "shelf-none");
+  if (pins.length || held.length) {
+    const kids = h("div", "folder-chats pin-chats");
     kids.append(...pins.sort((a, b) => order.indexOf(keyOf(a)) - order.indexOf(keyOf(b))).map((c) => convRow(c, false, true)));
-    above.append(h("div", "settled-head pin-head", "Pinned"), kids);
+    above.append(h("div", "settled-head pin-head", "Pinned"), ...held, kids);
   } else above.append(h("div", "pin-head", "Pinned"));
-  if (shelf.length) {
+  if (shelf.length || away.length) {
     const open = pref("settled-open", "") === "1", head = h("button", "settled-head");
     below.classList.toggle("open", open);
     head.type = "button";
     head.setAttribute("aria-expanded", String(open));
-    head.innerHTML = `<span>Settled</span><span class="cast-count">${shelf.length}</span>${icon("chevron")}`;
+    head.innerHTML = `<span>Settled</span><span class="cast-count">${shelf.length + away.length}</span>${icon("chevron")}`;
     head.onclick = () => { setPref("settled-open", open ? "" : "1"); renderList(); };
     below.append(head);
     if (open) {
-      const kids = h("div", "folder-chats");
+      const kids = h("div", "folder-chats shelf-chats");
       kids.append(...shelf.sort((a, b) => b.updated - a.updated).map((c) => convRow(c, true, true)));
-      below.append(kids);
+      below.append(...away, kids);
     }
   } else below.append(h("div", "shelf-head", "Settled"));
   $("side-pins").replaceChildren(above);
@@ -4028,7 +4017,7 @@ function newThreadIn() {
   const projects = [...all.slice(0, now ? 1 : 0), ...plain.slice(0, 1), ...all.slice(now ? 1 : 0), ...plain.slice(1)].map((x, k): PaletteItem => (typeof x === "string"
     ? { icon: face(DIR + x), title: dirName(x), note: where(x, dirMachine(x), x === now ? "Current" : ""), keys: k < 9 ? `${MOD}${k + 1}` : undefined, run: () => newChat(DIR + x) }
     : { ...x, keys: k < 9 ? `${MOD}${k + 1}` : undefined }));
-  const cast = [...[...people.values()].filter((p) => p.kind === "character").map((p) => p.id), ...castKeys()].map((id): PaletteItem => ({ icon: face(id), title: nameOf(id), run: () => newChat(id) }));
+  const cast = [...[...people.values()].filter((p) => p.kind === "character").map((p) => p.id), ...groups.keys()].map((id): PaletteItem => ({ icon: face(id), title: nameOf(id), run: () => newChat(id) }));
   openPalette([{ label: "Projects", items: harness.state === "on" ? projects : [{ icon: NO_PROJECT, title: "No project", run: () => newChat() }] }, ...(cast.length ? [{ label: "Characters", items: cast }] : [])]);
 }
 function addProject() {
@@ -4072,23 +4061,21 @@ function dropChat(c: Conversation) {
   remove(c.id);
 }
 function pin(c: Conversation, on: boolean, at = 0) {
-  const now = kept("pinned").filter((k) => k !== keyOf(c));
-  if (on) now.splice(at, 0, keyOf(c));
+  const now = kept("pinned").filter((k) => k !== keyOf(c)), among = now.filter((k) => !isRow(k));
+  if (on) now.splice(at < among.length ? now.indexOf(among[at]) : now.length, 0, keyOf(c));
   setPref("pinned", JSON.stringify(now));
   renderList();
 }
 const canMove = (c: Conversation, who: string) => {
   if (who === whoOf(c) || runs.get(c.id)) return false;
   if (who.startsWith(DIR)) return !!c.thread && (dirMachine(who.slice(DIR.length)) ?? "") === (c.thread.machine ?? "");
-  return (who === CHRYSALIS || people.get(who)?.kind === "character") && (!c.thread || c.thread.dir === homeOf(c.thread.machine));
+  return who === CHRYSALIS || people.get(who)?.kind === "character" || groups.has(who);
 };
 async function moveChat(c: Conversation, who: string) {
   if (who.startsWith(DIR)) return moveThread(c, who.slice(DIR.length));
   const mine = chats[c.id] ?? (c.id === conv.id ? conv : c);
-  if (who === CHRYSALIS) {
-    for (const k of ["who", "cast", "missing", "castName", "scenario"] as const) delete mine[k];
-    stow(mine);
-  } else seat(mine, [who]);
+  if (who === CHRYSALIS) delete mine.who; else mine.who = who;
+  stow(mine);
   unfold(who);
   if (mine.thread?.id) {
     const r = await fetch(`/api/threads/${mine.thread.id}`, { method: "PATCH", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ scene: sceneFor(mine) ?? null }) }).catch(() => null);
@@ -4103,7 +4090,7 @@ const chatAt = (row: HTMLElement) => everyChat().find((c) => keyOf(c) === row.da
 const dropVerb = (row: HTMLElement, drop: Drop): string | null => {
   const c = chatAt(row), isPinned = !!c && kept("pinned").includes(keyOf(c));
   if (!c) return null;
-  const away = !!row.closest(".folder.settled");
+  const away = !!row.closest(".shelf-chats");
   if (away) return drop.kind === "pin" ? "Pin" : drop.kind === "active" ? "Un-settle" : null;
   return drop.kind === "pin" ? (isPinned ? "" : "Pin") : drop.kind === "unpin" ? "Unpin" : drop.kind === "settle" ? "Settle" : drop.kind === "folder" && canMove(c, drop.who) ? nameOf(drop.who) : null;
 };
@@ -4114,7 +4101,7 @@ sidebarDrag($("conversations"), { pins: $("side-pins"), list: $("side-list"), sh
   done: (row, drop) => {
     const c = chatAt(row);
     if (!c) return;
-    if (row.closest(".folder.settled")) putAway(c, false, true);
+    if (row.closest(".shelf-chats")) putAway(c, false, true);
     if (drop.kind === "pin") pin(c, true, drop.index);
     else if (drop.kind === "unpin") pin(c, false);
     else if (drop.kind === "settle") putAway(c, true);
@@ -4155,27 +4142,22 @@ function openMenu(x: number, y: number, items: MenuItem[], head = "") {
   menu.style.top = `${Math.max(8, Math.min(y, innerHeight - menu.offsetHeight - 8))}px`;
   menuAt = performance.now();
 }
-function chatMenu(c: Conversation, settled: boolean): MenuItem[] {
-  const who = whoOf(c), pinned = kept("pinned").includes(keyOf(c)), sid = c.thread?.id;
-  return [
-    { label: who.startsWith(DIR) ? `New thread in ${nameOf(who)}` : who === CHRYSALIS ? "New chat" : `New chat with ${nameOf(who)}`, icon: "compose", run: () => newChat(who) },
-    { label: pinned ? "Unpin" : "Pin", icon: "pin", run: () => pin(c, !pinned) },
-    { label: settled ? "Un-settle" : "Settle", icon: settled ? "retry" : "check", run: () => putAway(c, !settled) },
-    { label: "Rename", icon: "edit", run: () => { renaming = keyOf(c); renderList(); } },
-    ...(sid ? [{ label: "Fork", icon: "fork" as const, run: () => void fetch(`/api/threads/${sid}/fork`, { method: "POST", headers: { "Content-Type": "application/json" }, body: "{}" })
-      .then(async (r) => { if (!r.ok) return toast("OpenCode did not fork that chat"); const { id } = await r.json(); await loadThreads(); location.hash = `#${STUB}${id}`; }) }] : []),
-    { label: "Delete", icon: "trash", danger: true, run: () => dropChat(c) },
+function menuOf(at: string | Conversation, away = false): MenuItem[] {
+  const c = typeof at === "string" ? undefined : at, id = c ? whoOf(c) : at as string, key = c ? keyOf(c) : id, sid = c?.thread?.id;
+  const folder = id.startsWith(DIR), mine = !c && (groups.has(id) || people.get(id)?.kind === "character"), pinned = kept("pinned").includes(key), settled = c ? away : kept("settled").includes(id);
+  const fork = () => void fetch(`/api/threads/${sid}/fork`, { method: "POST", headers: { "Content-Type": "application/json" }, body: "{}" })
+    .then(async (r) => { if (!r.ok) return toast("OpenCode did not fork that chat"); const { id } = await r.json(); await loadThreads(); location.hash = `#${STUB}${id}`; });
+  const items: (MenuItem | false | undefined)[] = [
+    { label: folder ? `New thread in ${nameOf(id)}` : id === CHRYSALIS ? "New chat" : `New chat with ${nameOf(id) || "Unnamed"}`, icon: "compose", run: () => newChat(id) },
+    { label: pinned ? "Unpin" : "Pin", icon: "pin", run: () => (c ? pin(c, !pinned) : keepRow("pinned", id, !pinned)) },
+    (c || id !== CHRYSALIS) && { label: settled ? "Un-settle" : "Settle", icon: settled ? "retry" : "check", run: () => (c ? putAway(c, !settled) : keepRow("settled", id, !settled)) },
+    (c || !folder) && { label: "Rename", icon: "edit", run: () => { renaming = key; renderList(); } },
+    (!!sid || mine) && { label: "Fork", icon: "fork", run: () => (c ? fork() : forkRow(id)) },
+    !c && (folder ? { label: "Copy path", icon: "copy", run: () => void navigator.clipboard.writeText(id.slice(DIR.length)).then(() => toast("Copied")) } : { label: "Card", icon: "agent", run: () => openSheet(id) }),
+    c ? { label: "Delete", icon: "trash", danger: true, run: () => dropChat(c) } : folder ? { label: "Close folder", icon: "x", danger: true, run: () => closeFolder(id.slice(DIR.length)) }
+      : mine && { label: "Delete", icon: "trash", danger: true, run: () => void drop(id) },
   ];
-}
-function castMenu(id: string, at: HTMLElement): MenuItem[] {
-  const d = id.startsWith(DIR), character = people.get(id)?.kind === "character" || id.startsWith(CAST);
-  return [
-    { label: d ? `New thread in ${nameOf(id)}` : id === CHRYSALIS ? "New chat" : `New chat with ${nameOf(id)}`, icon: "compose", run: () => newChat(id) },
-    ...(character || d ? [{ label: d ? "A new thread with a character…" : "A new chat with others…", icon: "personAdd" as const, run: () => openInvite(at, id) }] : []),
-    ...(d ? [{ label: "Copy path", icon: "copy" as const, run: () => void navigator.clipboard.writeText(id.slice(DIR.length)).then(() => toast("Copied")) },
-      { label: "Close folder", icon: "x" as const, run: () => closeFolder(id.slice(DIR.length)) }]
-      : [{ label: id.startsWith(CAST) ? "Who is in it" : "Card", icon: "agent" as const, run: () => openSheet(id) }]),
-  ];
+  return items.filter((x): x is MenuItem => !!x);
 }
 function menuOn(el: HTMLElement, items: () => MenuItem[]) {
   let timer = 0, from = [0, 0], held = false;
@@ -4201,14 +4183,14 @@ function convRow(s: Conversation, settled = false, faced = false) {
   a.dataset.key = keyOf(s);
   a.draggable = false;
   a.onclick = (e) => { if (!e.defaultPrevented) { mark(s); closeOver(panes.conversations); if (sideQuery) clearSearch(); else renderList(); } };
-  menuOn(a, () => chatMenu(s, settled));
+  menuOn(a, () => menuOf(s, settled));
   const st = statusOf(s), who = whoOf(s), pinned = kept("pinned").includes(keyOf(s));
   if (st) a.classList.add("fresh");
   const pic = face(who);
   pic.classList.add("conv-face");
   if (!who.startsWith(DIR)) {
     pic.dataset.card = who;
-    pic.title = who.startsWith(CAST) ? `${nameOf(who)}: who is in it` : `${nameOf(who)}'s card`;
+    pic.title = `${nameOf(who)}'s card`;
     pic.setAttribute("role", "button");
     pic.onclick = (e) => e.preventDefault();
   }
@@ -4381,7 +4363,7 @@ function lean(list: Message[]): Message[] {
     ...(m.versions ? { versions: { ...m.versions, others: m.versions.others.map(lean) } } : {}) }));
 }
 function save(c: Conversation) {
-  if (!c.messages.length && !c.cast) return;
+  if (!c.messages.length) return;
   chats[c.id] = structuredClone(c);
   keepChats();
   const at = location.hash.slice(1);
@@ -4392,37 +4374,26 @@ function save(c: Conversation) {
 const bypassed = new Set<string>();
 function request(c: Conversation, upto: Message[], o: { effort?: Effort; sampling?: Mode; final?: object; extra?: Record<string, unknown>; as?: string } = {}) {
   if (c.thread) {
-    const asked = upto.findLast((m) => m.role === "user");
+    const asked = upto.at(-1)?.role === "user" ? upto.at(-1) : undefined;
     const variant = threadVariant(c), files = (asked?.files ?? []).map((a) => {
       const body = bodies.get(a.id) ?? "";
       return { name: a.name, uri: a.kind === "text" ? `data:text/plain;base64,${base64(body)}` : body };
     });
-    const next = o.as && people.get(o.as)?.card.data.name.trim(), scene = sceneFor(c), char = writerOf(c)?.card.data.name ?? castOf(c).members[0]?.card.data.name ?? "";
-    const after = [writerOf(c), persona()].map((p) => p?.card.data.post_history_instructions?.trim()).filter(Boolean).map((t) => `[${fillCard(t!, char, userName())}]`);
-    const said = asked?.content ?? "", text = [noted([asked?.note, asked?.cut, editsNote(asked ?? { role: "user", content: "" }), asked?.point].filter(Boolean).join("\n\n") || undefined, said), ...(scene ? after : []), ...(next ? [`[${next} next.]`] : [])].join("\n\n");
+    const next = o.as && people.get(o.as)?.card.data.name.trim(), scene = sceneFor(c), cast = castOf(c), by = next || (cast.group ? undefined : cast.members[0]?.card.data.name.trim());
+    const said = asked?.content ?? "", text = [noted([asked?.note, asked?.cut, editsNote(asked ?? { role: "user", content: "" }), asked?.point].filter(Boolean).join("\n\n") || undefined, said), ...(next ? [`[${next} next.]`] : [])].filter(Boolean).join("\n\n");
     const straight = harness.models?.find((m) => m.id === threadModel(c))?.straight, mode: Mode = c.effort === "off" ? "fast" : "think";
     if (straight && (changed(mode) || settings.seed !== undefined) && !bypassed.has(`${c.thread.id}:${straight}`)) {
       bypassed.add(`${c.thread.id}:${straight}`);
       toast(`This OpenCode sends ${threadModel(c)} straight to ${straight}, so your sampler settings, max tokens and seed don't reach it`);
     }
     const tuned = threadModel(c) ? { sampling: { ...samplerFields(mode), ...(settings.max_tokens ? { max_tokens: settings.max_tokens } : {}), ...(settings.seed !== undefined ? { seed: settings.seed } : {}) } } : {};
-    return { stream: true, chrysalis_thread: { session: c.thread.id, ...(c.thread.machine ? { machine: c.thread.machine } : {}), dir: c.thread.dir, text, ...tuned, ...(text !== said ? { said } : {}), ...(next ? { next } : {}), ...(scene ? { scene } : {}),
+    return { stream: true, chrysalis_thread: { session: c.thread.id, ...(c.thread.machine ? { machine: c.thread.machine } : {}), dir: c.thread.dir, text, ...tuned, ...(text !== said ? { said } : {}), ...(by ? { next: by } : {}), ...(scene ? { scene } : {}),
       ...(c.thread.id ? {} : { title: c.title }), model: `${threadModel(c)}${variant ? `#${variant}` : ""}`, persona: threadPersona(c), ...(c.thread.agent && harness.agents?.some((a) => a.id === c.thread!.agent) ? { agent: c.thread.agent } : {}), ...(files.length ? { files } : {}) } };
   }
   const effort = o.effort ?? c.effort, mode: Mode = effort === "off" ? "fast" : "think";
-  const messages: object[] = sentHistory(upto), system = systemFor(c), { members, group } = castOf(c);
-  const writer = writerOf(c), char = writer?.card.data.name ?? members[0]?.card.data.name ?? "";
-  const after = [writer, persona()].map((p) => p?.card.data.post_history_instructions?.trim()).filter(Boolean).map((t) => `[${fillCard(t!, char, userName())}]`);
-  const asked = [...messages].reverse().find((x) => (x as { role: string }).role === "user") as { content: string | { type: string; text?: string }[] } | undefined;
-  if (after.length && asked) {
-    const note = `\n\n${after.join("\n\n")}`;
-    if (typeof asked.content === "string") asked.content += note;
-    else asked.content = [...asked.content, { type: "text", text: note }];
-  }
+  const { members, group } = castOf(c), next = o.as && people.get(o.as)?.card.data.name, system = systemFor(c);
+  const messages = cued([...sentHistory(upto, !!group), ...(next ? [cue(next)] : [])]);
   if ((members.length || c.messages[0]?.role === "assistant") && (messages[0] as { role: string } | undefined)?.role !== "user") messages.unshift({ role: "user", content: "[The scene begins.]" });
-  const next = o.as && people.get(o.as)?.card.data.name, last = messages.at(-1) as { role: string; content: unknown } | undefined;
-  if (next && last?.role === "user" && typeof last.content === "string") last.content += `\n\n[${next} next.]`;
-  else if (next) messages.push({ role: "user", content: `[${next} next.]` });
   if (system) messages.unshift({ role: "system", content: system });
   if (o.final) messages.push(o.final);
   const chrysalis = onChrysalis();
@@ -4436,11 +4407,23 @@ function request(c: Conversation, upto: Message[], o: { effort?: Effort; samplin
 const OTHER_EFFORT: Record<Effort, string | undefined> = { xhigh: undefined, medium: "medium", low: "low", off: "none" };
 const ran = (c: Call) => c.result !== undefined;
 const TALKED_OVER = " — [cut off: the user talked over this reply]";
-function sentHistory(upto: Message[]): object[] {
-  const at = upto.findLastIndex((m) => m.checkpoints?.length);
-  if (at < 0) return upto.flatMap((m) => wire(m));
+const cue = (name: string) => ({ role: "user", content: `[${name} next.]`, cue: true });
+function cued(messages: object[]): object[] {
+  const out: { role: string; content: unknown; cue?: boolean }[] = [];
+  for (const m of messages as { role: string; content: unknown; cue?: boolean }[]) {
+    const last = out.at(-1);
+    if (!m.cue) out.push(m);
+    else if (last?.role === "user" && typeof last.content === "string") last.content += `\n\n${m.content}`;
+    else if (last?.role === "user" && Array.isArray(last.content)) last.content = [...last.content, { type: "text", text: `\n\n${m.content}` }];
+    else out.push({ role: "user", content: m.content });
+  }
+  return out;
+}
+function sentHistory(upto: Message[], scene = false): object[] {
+  const at = upto.findLastIndex((m) => m.checkpoints?.length), by = (m: Message) => (scene && m.role === "assistant" && m.as && people.get(m.as) ? [cue(people.get(m.as)!.card.data.name), ...wire(m)] : wire(m));
+  if (at < 0) return upto.flatMap(by);
   const m = upto[at], k = m.checkpoints!.at(-1)!, asked = upto.slice(0, at).findLast((x) => x.role === "user");
-  return [withText(asked ? wire(asked)[0] : { role: "user" }, checkpointText(k), k.first), ...wire(m, k.at), ...upto.slice(at + 1).flatMap((x) => wire(x))];
+  return [withText(asked ? wire(asked)[0] : { role: "user" }, checkpointText(k), k.first), ...wire(m, k.at), ...upto.slice(at + 1).flatMap(by)];
 }
 function wire(m: Message, from = 0): object[] {
   if (m.role === "user") return [{ role: "user", content: userContent(m) }];
@@ -4454,8 +4437,7 @@ function wire(m: Message, from = 0): object[] {
   return out;
 }
 const systemFor = (c: Conversation) => castOf(c).members.length ? castSystem(c)
-  : [castPrompt(fill(settings.system.trim()),
-    [people.get(CHRYSALIS)!.card.data], userCard()),
+  : [fill(castPrompt("", [people.get(CHRYSALIS)!.card.data], userCard())),
     settings.artifacts === false ? "" : ARTIFACTS_PROMPT].filter(Boolean).join("\n\n");
 
 const DONE = Symbol("done");
@@ -4497,6 +4479,7 @@ const CUT_OFF = "The reply was cut off: the web server restarted while it was be
 async function generate(c: Conversation = conv, at = c.messages.length, as = c.messages[at]?.as) {
   const m: Message = { id: randomId(), role: "assistant", content: "", reasoning: "", params: changed(modeOf(c)) || undefined, effort: c.effort, ...(as ? { as } : {}) };
   branch(c, at, m);
+  if (as && voice?.c === c) pushVoice();
   const upto = c.messages.slice(0, at);
   await startRun(c, m, () => request(c, upto, { as }));
 }
@@ -4817,8 +4800,8 @@ function finish(run: Run) {
   if (c.thread) void loadThreads().then(() => syncThread(c));
   else if (!c.named && !m.error) void name(c);
   redoEdits(c, m);
-  if (talking && c === conv && !m.error && !m.stopped) setTimeout(talkOn, 400);
-  else if (talking) { talking = 0; renderCastNext(); }
+  if ((talking || lined.length) && c === conv && !m.error && !m.stopped) setTimeout(talkOn, 400);
+  else { talking = 0; lined = []; renderCastNext(); }
 }
 
 function redoEdits(c: Conversation, m: Message) {
@@ -4839,7 +4822,7 @@ function redoEdits(c: Conversation, m: Message) {
 }
 
 function stopRun(run: Run, now = false) {
-  if (talking) { talking = 0; renderCastNext(); }
+  if (talking || lined.length) { talking = 0; lined = []; renderCastNext(); }
   if (run.stopping && !now) return;
   run.stopping = true;
   if (run.m.job) void fetch(`/api/chat/${run.m.job}/stop`, { method: "POST" }).catch(() => {});
@@ -4868,10 +4851,13 @@ async function name(c: Conversation) {
   if (c === conv) $("title").textContent = document.title = c.title;
 }
 
-function addressed(c: Conversation, text: string) {
-  if (!c.cast) return undefined;
-  const tags = [...text.matchAll(/@([\p{L}\p{N}_-]+)/gu)].map((m) => m[1].toLowerCase());
-  return castOf(c).members.find((p) => { const n = p.card.data.name.trim().toLowerCase(); return tags.includes(n.replace(/\s+/g, "-")) || tags.includes(n.split(/\s+/)[0]); })?.id;
+function addressed(c: Conversation, text: string): string[] {
+  const { members, group } = castOf(c);
+  if (!group) return [];
+  const low = text.toLowerCase(), words = (p: Person) => p.card.data.name.toLowerCase().split(/\s+/).filter((w) => w.length > 2);
+  const at = (p: Person) => Math.min(...[p.card.data.name.toLowerCase(), ...words(p).filter((w) => !members.some((o) => o !== p && words(o).includes(w)))]
+    .map((w) => low.search(new RegExp(`(?<![\\p{L}\\p{N}])${w.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}(?![\\p{L}\\p{N}])`, "u"))).filter((k) => k >= 0));
+  return members.map((p) => ({ id: p.id, at: at(p) })).filter((x) => Number.isFinite(x.at)).sort((a, b) => a.at - b.at).map((x) => x.id);
 }
 function steer(text: string) {
   const sid = conv.thread!.id!;
@@ -4894,8 +4880,11 @@ function submit(text: string, reply = true) {
   if (!conv.messages.some((m) => m.role === "user")) conv.title = (text || files.map((f) => f.name).join(", ")).split("\n")[0].slice(0, 60);
   const note = noteFor(conv, false), cut = unheardNote(conv);
   conv.messages.push({ role: "user", content: text, ...(files.length ? { files } : {}), ...(note ? { note } : {}), ...(cut ? { cut } : {}), ...pointFields(false), ...takeEdits() });
-  if (reply) void generate(conv, conv.messages.length, addressed(conv, text));
-  else save(conv);
+  if (!reply) return save(conv);
+  const [first, ...rest] = addressed(conv, text);
+  talking = 0;
+  lined = rest;
+  void generate(conv, conv.messages.length, first ?? nextUp(conv));
 }
 
 type VoicePhase = "starting" | "listening" | "thinking" | "speaking" | "muted" | "error";
@@ -4919,8 +4908,7 @@ interface VoiceMode {
 let voice: VoiceMode | null = null;
 let voiceCatalog: VoiceReady["catalog"] = (() => { try { return JSON.parse(pref("voice-catalog", "{}")) ?? {}; } catch { return {}; } })();
 const cuts = new Map<Message, number | null>();
-const voicePrompt = () => settings.voice?.prompt ?? DEFAULT_VOICE_PROMPT;
-const voiceNote = () => fill(voicePrompt().trim());
+const voiceNote = () => fill(VOICE_PROMPT);
 function noteFor(c: Conversation, said: boolean): string | undefined {
   const users = c.messages.filter((m) => m.role === "user"), prev = users.at(-1);
   if (!said) return prev?.voice ? VOICE_OFF : undefined;
@@ -5458,7 +5446,8 @@ function setVoice(change: Partial<VoiceSettings>) {
 }
 function voiceWant(v: VoiceMode | null): VoiceAsk {
   const { members, group } = v ? castOf(v.c) : { members: [] as Person[], group: undefined };
-  const own = !group && members.length === 1 ? voiceOf(members[0].card.data) : undefined;
+  const speaks = group ? members.find((p) => p.id === v!.c.messages.findLast((m) => m.role === "assistant")?.as) : members[0];
+  const own = speaks ? voiceOf(speaks.card.data) : undefined;
   const s = { ...(settings.voice ?? {}), ...(own ?? {}) }, d = v?.defaults, tts = s.tts ?? d?.tts, name = s.name ?? (tts ? d?.voices[tts] : undefined);
   const stt = settings.voice?.stt ?? d?.stt, stack: VoiceAsk["stack"] = { ...(tts ? { tts } : {}), ...(stt ? { stt } : {}) };
   return { ...(Object.keys(stack).length ? { stack } : {}), ...(name ? { voice: name } : {}), speed: s.speed ?? 1 };
@@ -5662,12 +5651,9 @@ function openConversation(id: string, reveal = true) {
 function newChat(who = "") {
   closeVoice();
   stopReading();
-  const like = who.startsWith(CAST) ? sceneOf(who) : undefined;
   conv = blank();
   unfold(who || CHRYSALIS);
-  if (like) Object.assign(conv, structuredClone({ who, cast: like.cast, ...(like.missing ? { missing: like.missing } : {}), ...(like.scenario ? { scenario: like.scenario } : {}),
-    ...(like.castName ? { castName: like.castName } : {}) }));
-  else if (who.startsWith(DIR)) conv.thread = inDir(who.slice(DIR.length));
+  if (who.startsWith(DIR)) conv.thread = inDir(who.slice(DIR.length));
   else if (who && who !== CHRYSALIS) conv.who = who;
   if (!conv.thread && harness.state === "on" && harness.home && pref("tools", "on") === "on") conv.thread = freshThread();
   if (!who.startsWith(DIR)) greet(conv);
@@ -5818,7 +5804,7 @@ $("composer").addEventListener("submit", (e) => {
   else submit(input.value);
 });
 input.addEventListener("input", () => { grow(); if (!drafting) $("draft").title = input.value.trim() ? "Finish my message (draft)" : "Draft my next message"; });
-input.addEventListener("input", () => { if (talking) { talking = 0; renderCastNext(); } });
+input.addEventListener("input", () => { if (talking || lined.length) { talking = 0; lined = []; renderCastNext(); } });
 interface Slash { name: string; aliases?: string[]; hint?: string; about: string; run?: (arg: string) => void | Promise<void> }
 let slashFrom: { key: string; commands: { name: string; description: string }[]; skills: { id: string; name: string; description: string }[] } | undefined, slashAt = 0;
 async function slashSource() {
@@ -5998,7 +5984,7 @@ window.addEventListener("hashchange", () => {
   if (id && id !== conv.id) openConversation(id);
 });
 $("new-chat").addEventListener("click", (e) => {
-  const projects = dirs().length + [...people.values()].filter((p) => p.kind === "character").length + castKeys().size + Math.max(0, (harness.machines?.length ?? 1) - 1);
+  const projects = dirs().length + [...people.values()].filter((p) => p.kind === "character").length + groups.size + Math.max(0, (harness.machines?.length ?? 1) - 1);
   if (e.shiftKey) newChat(whoOf(conv));
   else if (scopeOf()) newChat(scopeOf());
   else if (!projects) newChat();
@@ -6020,7 +6006,7 @@ side.onkeydown = (e) => {
 $("side-clear").onclick = () => { clearSearch(); side.focus(); };
 function paintScope() {
   const pop = $("scope-pop"), q = fold($<HTMLInputElement>("scope-input").value), now = scopeOf();
-  const ids = [...[...people.values()].filter((p) => p.kind !== "persona").map((p) => p.id), ...castKeys(), ...dirs().map((d) => DIR + d)].filter((id) => !q || fold(nameOf(id)).includes(q));
+  const ids = [...[...people.values()].filter((p) => p.kind !== "persona").map((p) => p.id), ...groups.keys(), ...dirs().map((d) => DIR + d)].filter((id) => !q || fold(nameOf(id)).includes(q));
   const row = (id: string, label: string, pic: HTMLElement | string) => {
     const b = h("button", id === now ? "scope-item on" : "scope-item"), mark = h("span", "palette-icon");
     b.type = "button";
@@ -6577,7 +6563,8 @@ const shownMode = (): Mode => (panel.open && settingsMode) || modeOf(conv);
 function loadSettings(): Settings {
   const s = load<(Settings & Record<string, unknown>) | null>("settings2", null);
   if (s) {
-    if (OLD_SYSTEMS.includes(s.system)) s.system = DEFAULT_SYSTEM;
+    if (OLD_SYSTEMS.includes(String(s.system))) delete s.system;
+    if (s.voice) delete (s.voice as Record<string, unknown>).prompt;
     for (const k of ["systemTools", "prompts", "descriptions"]) delete s[k];
     if (s.v !== 5) for (const m of [s.think, s.fast]) if (m?.order && m.order.length < DEFAULT_STAGES.length) delete m.order;
     s.v = 5;
@@ -6585,7 +6572,7 @@ function loadSettings(): Settings {
   }
   const old = load<{ system?: string; sampling?: Record<string, number> } | null>("settings", null);
   const { max_tokens, seed, ...rest } = old?.sampling ?? {};
-  return { v: 5, system: old?.system?.trim() ?? DEFAULT_SYSTEM, think: { ...rest }, fast: { ...rest }, max_tokens, seed };
+  return { v: 5, ...(old?.system?.trim() ? { system: old.system.trim() } : {}), think: { ...rest }, fast: { ...rest }, max_tokens, seed };
 }
 function saveSettings() {
   store("settings2", settings);
@@ -6615,15 +6602,24 @@ function changed(mode: Mode) {
 }
 
 let toastTimer = 0;
-function toast(text: string, undo?: () => void) {
+let toastDone: (() => void) | undefined;
+function settleToast() {
+  const done = toastDone;
+  toastDone = undefined;
+  done?.();
+}
+function toast(text: string, undo?: () => void, done?: () => void) {
+  settleToast();
+  toastDone = done;
   const t = $("toast"), b = h("button", "btn", "Undo");
   b.type = "button";
-  b.onclick = () => { t.hidden = true; undo?.(); };
+  b.onclick = () => { t.hidden = true; toastDone = undefined; undo?.(); };
   t.replaceChildren(h("span", "", text), ...(undo ? [b] : []));
   t.hidden = false;
   clearTimeout(toastTimer);
-  toastTimer = window.setTimeout(() => { t.hidden = true; }, 6000);
+  toastTimer = window.setTimeout(() => { t.hidden = true; settleToast(); }, 6000);
 }
+addEventListener("pagehide", settleToast);
 
 function useSeed(seed: number) {
   const before = settings.seed;
@@ -6904,18 +6900,6 @@ function buildSettings() {
   });
   $("reply-knobs").replaceChildren(maxLen, seed);
 
-  const voicePromptInput = $<HTMLTextAreaElement>("voice-prompt");
-  voicePromptInput.addEventListener("input", () => {
-    setVoice({ prompt: voicePromptInput.value === DEFAULT_VOICE_PROMPT ? undefined : voicePromptInput.value });
-    saveSettings();
-    growAll(voicePromptInput);
-  });
-  $("voice-prompt-reset").onclick = () => {
-    const before = settings.voice?.prompt;
-    setVoice({ prompt: undefined });
-    saveSettings();
-    toast("The voice prompt is back to the default", () => { setVoice({ prompt: before }); saveSettings(); });
-  };
   knobs.push(voiceTrigger(settingsVoice, $<HTMLButtonElement>("voice-settings")).paint);
   knobs.push(voiceTrigger(settingsListen, $<HTMLButtonElement>("listen-settings")).paint);
   const speed = knob({
@@ -6927,29 +6911,16 @@ function buildSettings() {
 
 
 
-  systemInput.addEventListener("input", () => {
-    settings.system = systemInput.value;
-    growSystem();
-    saveSettings();
-  });
   $("sent-open").onclick = () => void showSent();
   $("sent-close").innerHTML = icon("x");
   $("sent-close").onclick = () => $<HTMLDialogElement>("sent-view").close();
   $("sent-copy").onclick = () => copy($("sent-text").textContent ?? "", $("sent-copy"));
-  $("system-reset").onclick = () => {
-    const before = settings.system;
-    settings.system = DEFAULT_SYSTEM;
-    saveSettings();
-    growSystem();
-    toast("The system prompt is back to the default", () => { settings.system = before; saveSettings(); growSystem(); });
-  };
   $("settings-reset").onclick = () => {
     if (!customized()) return toast("Everything is already at the recommended values");
     const before = structuredClone(settings);
-    settings = { v: 5, system: DEFAULT_SYSTEM, think: {}, fast: {} };
+    settings = { v: 5, think: {}, fast: {} };
     saveSettings();
-    growSystem();
-    toast("Everything is back to the recommended values", () => { settings = before; saveSettings(); growSystem(); });
+    toast("Everything is back to the recommended values", () => { settings = before; saveSettings(); });
   };
   measureScrollbar();
   addEventListener("resize", measureScrollbar);
@@ -6958,8 +6929,10 @@ function buildSettings() {
 async function showSent() {
   const c = conv, said = voice?.c === c, effort = c.effort;
   if (c.thread) {
-    $("sent-about").textContent = "OpenCode keeps this thread's messages and writes the request itself, with its own prompt and tools. Chrysalis gives it your message, the model, and who is working.";
-    $("sent-text").textContent = [`model: ${threadModel(c) ?? "none chosen"}${threadVariant(c) ? `, thinking ${threadVariant(c)}` : ""}`, `folder: ${c.thread.dir}`, "", "── instruction", threadPersona(c) || "(none: plain OpenCode)"].join("\n");
+    const who = threadPersona(c);
+    $("sent-about").textContent = `OpenCode writes this thread's request itself, with its own prompt and tools. ${who ? "Chrysalis adds who is working, after OpenCode's prompt:" : "Chrysalis adds nothing to it."}`;
+    $("sent-text").textContent = who;
+    $("sent-text").hidden = !who;
     return $<HTMLDialogElement>("sent-view").showModal();
   }
   await filesReady(c.messages);
@@ -6982,6 +6955,7 @@ async function showSent() {
   $("sent-about").textContent = "Your next message goes after these." +
     (said ? " Each spoken question is first checked, in a conversation of its own beside this one, for what speech recognition misheard." : "");
   $("sent-text").textContent = lines.join("\n");
+  $("sent-text").hidden = false;
   $<HTMLDialogElement>("sent-view").showModal();
 }
 
@@ -7159,10 +7133,6 @@ const settingsListen: VoiceSpot = {
   pick: (id) => { setVoice({ stt: id || undefined }); saveSettings(); },
 };
 
-const growAll = (t: HTMLTextAreaElement) => { t.style.height = "auto"; t.style.height = `${t.scrollHeight + 2}px`; };
-function growSystem() {
-  growAll(systemInput);
-}
 
 function openSettings(sec?: string) {
   settingsMode = modeOf(conv);
@@ -7175,17 +7145,10 @@ function showSettingsSec(sec: string) {
   for (const el of panel.querySelectorAll<HTMLElement>(".set-sec")) el.hidden = el.dataset.sec !== sec;
   setPref("settings-sec", sec);
   syncSettings();
-  growSystem();
-  growAll($<HTMLTextAreaElement>("voice-prompt"));
 }
 
 function syncSettings() {
   if (!panel.open) return;
-  if (document.activeElement !== systemInput && systemInput.value !== settings.system) systemInput.value = settings.system;
-  $("system-reset").classList.toggle("on", settings.system !== DEFAULT_SYSTEM);
-  const vp = $<HTMLTextAreaElement>("voice-prompt");
-  if (document.activeElement !== vp && vp.value !== voicePrompt()) { vp.value = voicePrompt(); growAll(vp); }
-  $("voice-prompt-reset").classList.toggle("on", settings.voice?.prompt !== undefined);
   $("artifacts-switch").setAttribute("aria-checked", String(settings.artifacts !== false));
   $("settings").classList.toggle("other-backend", !onChrysalis());
   for (const sync of knobs) sync();
@@ -7241,7 +7204,6 @@ buildControls();
 if (location.protocol === "https:") await checkTrust();
 $("to-latest").innerHTML = icon("down");
 $("settings-reset").insertAdjacentHTML("afterbegin", icon("retry"));
-for (const id of ["system-reset", "voice-prompt-reset"]) $(id).innerHTML = icon("retry");
 $("settings-open").innerHTML = icon("gear");
 $("settings-open").addEventListener("click", () => openSettings());
 $("settings-close").innerHTML = icon("x");
@@ -7274,20 +7236,26 @@ for (const c of Object.values(chats)) {
     people.set(p.id, p);
     setFace(p);
   }
-  for (const g of got?.groups ?? []) for (const c of Object.values(chats)) if (c.who === g.id) {
-    c.cast = g.members;
-    if (g.missing?.length) c.missing = g.missing;
-    if (g.scenario) c.scenario = g.scenario;
-    c.who = castKey(c.cast, c.missing);
-    if (g.name !== castNames(c)) c.castName = g.name;
+  const old = settings as { system?: string }, system = old.system?.trim();
+  if ("system" in old) {
+    delete old.system;
+    if (system) {
+      const d = people.get(CHRYSALIS)!.card.data;
+      d.description = [system, d.description?.trim()].filter(Boolean).join("\n\n");
+      await savePerson(people.get(CHRYSALIS)!);
+    }
+    saveSettings();
   }
-  if (got) for (const c of Object.values(chats)) if (c.cast?.some((m) => !people.has(m))) {
-    c.cast = c.cast.filter((m) => people.has(m));
-    c.who = castKey(c.cast, c.missing);
+  for (const g of got?.groups ?? []) groups.set(g.id, { id: g.id, members: (g.members ?? []).filter((m) => people.has(m)), added: g.added ?? 0, ...(g.name ? { name: g.name } : {}), ...(g.scenario ? { scenario: g.scenario } : {}) });
+  for (const c of Object.values(chats) as (Conversation & { cast?: string[]; castName?: string; scenario?: string; missing?: string[] })[]) if (c.cast) {
+    const members = c.cast.filter((m) => people.has(m));
+    if (c.who && members.length && !groups.has(c.who)) keepGroup({ id: c.who, members, added: Date.now(), ...(c.castName ? { name: c.castName } : {}), ...(c.scenario ? { scenario: c.scenario } : {}) });
+    for (const k of ["cast", "castName", "scenario", "missing"] as const) delete c[k];
   }
   if (got) keepChats();
   const orphans = got ? Object.values(chats).filter(castless).map((c) => c.id) : [];
   if (orphans.length) dropChats(orphans);
+  castReady.resolve();
   renderCast();
 }
 if (location.hash.length > 1) openConversation(location.hash.slice(1), false);

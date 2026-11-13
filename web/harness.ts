@@ -3,7 +3,7 @@ import { homedir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 
 export type Decision = "once" | "always" | "deny";
-export interface Scene { cast: string[]; scenario?: string; name?: string; greeting?: string }
+export interface Scene { cast: string[]; cards?: object[]; group?: string; scenario?: string; name?: string; greeting?: string; greeter?: string }
 export interface Thread { id: string; title: string; dir: string; updated: number; idle: number; busy: boolean; archived: boolean; model?: string; scene?: Scene; machine?: string }
 export interface Connector { name: string; state: typeof state; ensure: typeof ensure; stop: typeof stop; threads: typeof threads; models: typeof models; agents: typeof agents; transcript: typeof transcript;
   turn: typeof turn; say: typeof say; undo: typeof undo; fork: typeof fork; rewrite: typeof rewrite; change: typeof change; remove: typeof remove }
@@ -293,7 +293,7 @@ async function threadsOf(h: Host): Promise<Thread[]> {
     for (const s of page.data ?? []) if (!s.parentID && s.location?.directory && (!h.id || s.metadata?.[FROM])) {
       if (h.id) homes.set(s.id, h.id);
       out.push({ id: s.id, title: s.title ?? "", dir: s.location.directory, updated: s.time?.updated ?? s.time?.created ?? 0, idle: s.time?.idle ?? 0, busy: running.has(s.id), archived: !!s.time?.archived, model: idOf(s.model),
-        ...(sceneOf(s) ? { scene: sceneOf(s) } : {}), ...(h.id ? { machine: h.id } : {}) });
+        ...(sceneOf(s) ? { scene: { ...sceneOf(s)!, cards: undefined } } : {}), ...(h.id ? { machine: h.id } : {}) });
     }
     cursor = page.cursor?.next;
     if (!cursor || !page.data?.length) break;
@@ -371,7 +371,7 @@ export async function transcript(id: string): Promise<{ thread: Thread; messages
     cursor = page.cursor?.next;
     if (!cursor || !page.data?.length) break;
   }
-  const scene = sceneOf(s), messages: Said[] = scene?.greeting ? [{ role: "assistant", content: scene.greeting, ...(scene.cast.length === 1 ? { by: scene.cast[0] } : {}) }] : [];
+  const scene = sceneOf(s), greeter = scene?.greeter ?? (scene?.cast.length === 1 ? scene.cast[0] : undefined), messages: Said[] = scene?.greeting ? [{ role: "assistant", content: scene.greeting, ...(greeter ? { by: greeter } : {}) }] : [];
   let steps: Step[] = [], ids: string[] = [], shown: string | undefined, by: string | undefined = scene?.cast.length === 1 ? scene.cast[0] : undefined;
   let marks: NonNullable<Said["checkpoints"]> = [], used: number | undefined, fresh = false;
   const close = (more: Partial<Said> = {}) => {
@@ -391,7 +391,7 @@ export async function transcript(id: string): Promise<{ thread: Thread; messages
       const files = (m.files ?? []).filter((f: any) => typeof f.data === "string").map((f: any) => ({ name: f.name ?? "attachment", type: f.mime ?? "", data: f.data }));
       const ours = m.metadata?.[OURS];
       if (typeof ours?.next === "string") by = ours.next;
-      messages.push({ role: "user", content: typeof ours?.said === "string" ? ours.said : m.text ?? "", oc: m.id, ocs: [m.id], ...(files.length ? { files } : {}), ...(m.metadata?.source === "subagent" ? { sent: `Sub-agent${m.metadata.agent ? `: ${m.metadata.agent}` : ""}` } : {}) });
+      if (ours?.said !== "" || files.length) messages.push({ role: "user", content: typeof ours?.said === "string" ? ours.said : m.text ?? "", oc: m.id, ocs: [m.id], ...(files.length ? { files } : {}), ...(m.metadata?.source === "subagent" ? { sent: `Sub-agent${m.metadata.agent ? `: ${m.metadata.agent}` : ""}` } : {}) });
     }
     else if (m.type === "compaction") {
       if (m.status === "completed") { marks.push({ summary: m.summary ?? "", at: steps.length, recent: "", first: false }); used = undefined; fresh = true; }

@@ -51,9 +51,8 @@ export const REPLIES: Record<string, string> = {
   "the kettle": '*She smiles.* "Good morning," *she says.* "Did you *sleep* well?"\nThe kettle sings.\n"It\'s still open\nAnd «bonjour» and `say "hi"` in code.',
   "steady speech": '*She looks up.* "You came back," *she says, and smiles at the window, where the snow is still falling.* "I kept the lamp lit for you, all night long."',
   "write the letter": '```markdown letter\nShe wrote "come home"\nand signed it.\n```\n\nA letter.',
-  "a toast for the hive": "Mirela: *She raises a cup.* To the bees.\nTomas: To the bees!",
-  "the same speaker": "Mirela: One.\nMirela: Two.\n\n*She hums.*\nTomas: Three.",
-  "a duet": "Vox: *She sings.* La la.\nAda: Hum.\n\nHum hum.",
+  "a toast for the hive": "*She raises a cup.* To the bees.",
+  "a duet": "*She sings.* La la.",
   "hall on its line": HALL,
   "gate as an attribute": GATE,
   "rename the sign": '```edit hall\n<h1 id="sign">Goodbye</h1>\n```\n\nRenamed.',
@@ -160,8 +159,8 @@ const serveFake = () => Bun.serve({
     const next = /\[(.+) next\.\]$/.exec(said)?.[1];
     const think = summary ? "" : next ? `${next} has the floor.` : "";
     const slowly = said.includes("slowly") && !summary && (!said.startsWith("tool") || round === 0);
-    const text = summary ? (said.includes("Update the existing checkpoint") ? SUMMARY.replace("is lighthouse", "is still lighthouse") : SUMMARY) : slowly ? Array.from({ length: 100 }, (_, k) => `w${k} `).join("") : next ? `${next}: I go on.` : said.startsWith("slow")
-      ? Array.from({ length: 40 }, (_, k) => `w${k} `).join("") : Object.entries(REPLIES).find(([k]) => said.includes(k))?.[1] ?? `You said: ${said}`;
+    const text = summary ? (said.includes("Update the existing checkpoint") ? SUMMARY.replace("is lighthouse", "is still lighthouse") : SUMMARY) : slowly ? Array.from({ length: 100 }, (_, k) => `w${k} `).join("") : said.startsWith("slow")
+      ? Array.from({ length: 40 }, (_, k) => `w${k} `).join("") : Object.entries(REPLIES).find(([k]) => said.includes(k))?.[1] ?? (next ? `${next} goes on.` : `You said: ${said}`);
     const step = said.startsWith("slow") || slowly ? 4 : 9, gap = said.startsWith("slow") || slowly ? 60 : said.startsWith("steady") ? 25 : 5;
     let i = 0, j = 0, restated = !prefix, read = false;
     return new Response(new ReadableStream({
@@ -326,12 +325,7 @@ export async function untilIdle(page: Page) {
   await page.waitForFunction(() => document.querySelector("#send")?.getAttribute("aria-label") === "Send", { timeout: 20_000 });
 }
 
-export const noteShown = async (page: Page) => {
-  await openSettings(page);
-  const note = await page.$eval("#voice-prompt", (e) => (e as HTMLTextAreaElement).value);
-  await closeSettings(page);
-  return note;
-};
+export const noteShown = (page: Page) => page.$$eval(".msg-note", (notes) => notes.find((n) => n.querySelector("summary")!.textContent === "Voice mode note")!.querySelector(".msg-note-text")!.textContent!);
 
 export const sent = (b: any) => b.messages;
 

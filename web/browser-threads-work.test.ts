@@ -1,6 +1,6 @@
 import { expect, test } from "bun:test";
 import type { Page } from "puppeteer-core";
-import { card, connect, dir, harness, home, inRow, lastStream, lastText, menu, open, openFolder, opencode, send, streams, work } from "./browser-harness";
+import { card, castRows, closeSettings, connect, dir, harness, home, inRow, lastStream, lastText, menu, open, openFolder, openSettings, opencode, send, streams, work } from "./browser-harness";
 
 harness();
 
@@ -135,10 +135,12 @@ test("what OpenCode does shows in the thread without Chrysalis doing it: a sub-a
   await page.close();
 }, 90_000);
 
-test("a character's chat and a group's are the same system: with OpenCode connected a chat with a character goes to OpenCode with her card and greeting, a second character makes it a group whose next speaker OpenCode is told, and another tab finds the chat under the same people with its greeting, clean messages and speakers; Chat only makes a new chat a plain one", async () => {
+test("a character's chat and a group's are the same system: with OpenCode connected a chat with a character goes to OpenCode with her card and greeting, which is all What the model is sent shows of it, a second character makes it a group whose next speaker OpenCode is told, a face has that one answer with nothing said again, and another tab, which has no cards, gets the people from the thread when it opens it, once however often it is opened: who said each message, the group the chat is filed under, and the same people sent when it replies; Chat only makes a new chat a plain one", async () => {
   const speaker = (p: Page) => p.evaluate(() => [...document.querySelectorAll("#thread > article.assistant")].at(-1)!.querySelector(".speaker")?.textContent);
   const said = (p: Page) => p.evaluate(() => [...document.querySelectorAll("#thread > article.assistant")].at(-1)!.querySelector<HTMLElement>(":scope > .markdown")!.innerText.trim());
   const page = await open(), last = () => opencode.log.prompts.at(-1)!, scene = () => (opencode.sessions.get(last().session)!.metadata as { chrysalis: object }).chrysalis;
+  const held = (name: string, data: object) => ({ spec: "chara_card_v3", spec_version: "3.0", data: { name, ...data, group_only_greetings: [] } });
+  const mira = held("Mira", { description: "{{char}} keeps bees.", first_mes: "Welcome to the hive." }), otto = held("Otto", { description: "{{char}} mends boats." });
   await Bun.write(`${dir}/Mira2.png`, await card("Mira", { description: "{{char}} keeps bees.", first_mes: "Welcome to the hive." }));
   await Bun.write(`${dir}/Otto.png`, await card("Otto", { description: "{{char}} mends boats." }));
   for (const f of ["Mira2", "Otto"]) await (await page.$("input#cast-file"))!.uploadFile(`${dir}/${f}.png`);
@@ -150,25 +152,41 @@ test("a character's chat and a group's are the same system: with OpenCode connec
   await page.waitForFunction(() => document.querySelector("main")!.hasAttribute("data-thread") && document.querySelector("#thread > article.assistant .markdown")?.textContent?.trim() === "Welcome to the hive.");
   const chats = streams.length;
   await send(page, "count my jars");
-  expect([last().text, opencode.sessions.get(last().session)!.dir, opencode.sessions.get(last().session)!.title, scene(), streams.length - chats]).toEqual(["count my jars", home, "count my jars", { cast: ["Mira"], greeting: "Welcome to the hive." }, 0]);
+  expect([last().text, opencode.sessions.get(last().session)!.dir, opencode.sessions.get(last().session)!.title, last().meta, scene(), streams.length - chats]).toEqual(["count my jars", home, "count my jars", { next: "Mira" }, { cast: ["Mira"], cards: [mira], greeting: "Welcome to the hive.", greeter: "Mira" }, 0]);
   expect([/Write Mira's next reply/.test(last().persona!), /Mira keeps bees\./.test(last().persona!), /greeting:\nWelcome to the hive\./.test(last().persona!),
     await speaker(page), (await said(page)).startsWith("Mira here.")]).toEqual([true, true, true, "Mira", true]);
+  await openSettings(page);
+  await page.click("#sent-open");
+  await page.waitForFunction(() => (document.querySelector("#sent-view") as HTMLDialogElement).open);
+  expect(await page.$eval("#sent-view", (v) => [v.querySelector("#sent-about")!.textContent!.endsWith("Chrysalis adds who is working, after OpenCode's prompt:"), v.querySelector("#sent-text")!.textContent])).toEqual([true, last().persona!]);
+  await page.keyboard.press("Escape");
+  await closeSettings(page);
 
   await inRow(page, "Mira", ".cast-bring");
   await page.evaluate(() => [...document.querySelectorAll<HTMLElement>("#cast-invite .invite-row")].find((r) => r.querySelector(".invite-name")!.textContent === "Otto")!.click());
   await page.keyboard.press("Escape");
   await send(page, "@Otto what do you see");
-  expect([last().text, last().meta, scene(), /mends boats/.test(last().persona!) && /keeps bees/.test(last().persona!), (await said(page)).startsWith("Otto\nOtto here.")])
-    .toEqual(["@Otto what do you see\n\n[Otto next.]", { said: "@Otto what do you see", next: "Otto" }, { cast: ["Mira", "Otto"], greeting: "Welcome to the hive." }, true, true]);
+  const group = (scene() as { group: string }).group, both = { cast: ["Mira", "Otto"], cards: [mira, otto], group, greeting: "Welcome to the hive.", greeter: "Mira" };
+  expect([last().text, last().meta, scene(), /^cast:/.test(group), /mends boats/.test(last().persona!) && /keeps bees/.test(last().persona!), await speaker(page), (await said(page)).startsWith("Otto here.")])
+    .toEqual(["@Otto what do you see\n\n[Otto next.]", { said: "@Otto what do you see", next: "Otto" }, both, true, true, "Otto", true]);
+  const before = opencode.log.prompts.length;
+  await page.click('#cast-next button[title="Mira answers"]');
+  await page.waitForFunction(() => document.querySelectorAll("#thread > article").length === 6 && !!document.querySelector("#thread > article:last-child .stats") && document.querySelector("#send")?.getAttribute("aria-label") === "Send");
+  expect([opencode.log.prompts.length - before, last().text, last().meta, await speaker(page)]).toEqual([1, "[Mira next.]", { said: "", next: "Mira" }, "Mira"]);
 
   const other = await open();
-  await other.waitForFunction(() => [...document.querySelectorAll("#conversations .cast-row .cast-name")].some((n) => n.textContent === "Mira and Otto"));
-  await inRow(other, "Mira and Otto", ".cast-main");
-  await other.waitForSelector("#conversations .folder-chats a.conv");
-  await other.click("#conversations .folder-chats a.conv");
-  await other.waitForFunction(() => document.querySelectorAll("#thread > article").length === 5);
-  expect(await other.$$eval("#thread > article", (a) => a.map((x) => [x.querySelector(".speaker")?.textContent ?? "", (x.querySelector(".bubble") ?? x.querySelector(":scope > .markdown"))!.textContent!.trim().slice(0, 21)])))
-    .toEqual([["", "Welcome to the hive."], ["User", "count my jars"], ["", "Mira here. The file s"], ["User", "@Otto what do you see"], ["", "Otto here. The file s"]]);
+  await other.waitForSelector("#conversations a.conv");
+  expect(await castRows(other)).toEqual(["Chrysalis", "site"]);
+  await other.evaluate(() => [...document.querySelectorAll<HTMLElement>("#conversations a.conv")].find((a) => a.querySelector(".conv-title")!.textContent === "count my jars")!.click());
+  await other.waitForFunction(() => document.querySelectorAll("#thread > article").length === 6);
+  expect(await other.$$eval("#thread > article", (a) => a.map((x) => [x.querySelector(".speaker > span:last-child")?.textContent ?? "", (x.querySelector(".bubble") ?? x.querySelector(":scope > .markdown"))!.textContent!.trim().slice(0, 21)])))
+    .toEqual([["Mira", "Welcome to the hive."], ["User", "count my jars"], ["Mira", "Mira here. The file s"], ["User", "@Otto what do you see"], ["Otto", "Otto here. The file s"], ["Mira", "Mira here. The file s"]]);
+  expect([await castRows(other), await other.$eval("#conversations a.conv.active", (a) => a.closest(".folder")!.querySelector(".cast-name")!.textContent)]).toEqual([["Chrysalis", "Mira", "Mira and Otto", "Otto", "site"], "Mira and Otto"]);
+  await send(other, "Mira, and the smoker?");
+  expect([last().text, /mends boats/.test(last().persona!) && /keeps bees/.test(last().persona!), scene()]).toEqual(["Mira, and the smoker?\n\n[Mira next.]", true, both]);
+  await other.reload({ waitUntil: "load" });
+  await other.waitForSelector("#conversations .cast-row");
+  expect(await castRows(other)).toEqual(["Chrysalis", "Mira", "Mira and Otto", "Otto", "site"]);
   await other.close();
 
   await inRow(page, "Otto", ".cast-new");

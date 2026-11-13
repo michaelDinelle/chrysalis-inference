@@ -1,7 +1,7 @@
 import { expect, test } from "bun:test";
 import { mkdtempSync, readFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { cardPng, readCast, type Card } from "./cast";
+import { cardPng, castPrompt, readCast, type Card } from "./cast";
 
 const PY = `${import.meta.dir}/../data/venv/bin/python`;
 const py = (code: string, ...args: string[]) => {
@@ -42,14 +42,17 @@ test("a card exported as a PNG is the picture as it was, with the card in Pillow
   }
 });
 
-test("JSON cards of each version and the group file are read; other JSON is not a card", async () => {
+test("JSON cards of each version and the group file are read, a card's personality and example lines as part of its description; other JSON is not a card", async () => {
   const read = (j: unknown, name = "x.json") => readCast(new File([JSON.stringify(j)], name));
   const v1 = await read({ name: "Ion", description: "A ferryman.", first_mes: "Hi." });
   expect(v1 && "card" in v1 && [v1.card.spec, v1.card.data.name, v1.card.data.first_mes]).toEqual(["chara_card_v2", "Ion", "Hi."]);
-  const v2 = await read({ spec: "chara_card_v2", spec_version: "2.0", data: { name: "Ana", personality: "kind" } });
-  expect(v2 && "card" in v2 && v2.card.data.personality).toBe("kind");
+  const v2 = await read({ spec: "chara_card_v2", spec_version: "2.0", data: { name: "Ana", description: "{{char}} bakes.", personality: "kind", mes_example: "<START>\n{{user}}: Bread?\n{{char}}: Rye.",
+    post_history_instructions: "Stay in character.", creator: "someone" } });
+  expect(v2 && "card" in v2 && v2.card.data).toEqual({ name: "Ana", description: "{{char}} bakes.\n\n{{char}}'s personality: kind\n\nHow {{char}} talks:\n{{user}}: Bread?\n{{char}}: Rye.",
+    post_history_instructions: "Stay in character.", creator: "someone" });
+  expect(v2 && "card" in v2 && castPrompt("", [v2.card.data], { name: "Robin" })).toBe("Ana bakes.\n\nAna's personality: kind\n\nHow Ana talks:\nRobin: Bread?\nAna: Rye.");
   const g = await read({ spec: "chrysalis_group", name: "Court", members: ["Ana", "Ion"], scenario: "A feast." });
-  expect(g).toEqual({ group: { name: "Court", members: ["Ana", "Ion"], scenario: "A feast." } });
+  expect(g).toEqual({ group: { name: "Court", members: ["Ana", "Ion"], cards: [], scenario: "A feast." } });
   expect(await read({ name: "package", version: "1.0.0" })).toBeNull();
   expect(await read([1, 2, 3])).toBeNull();
 });

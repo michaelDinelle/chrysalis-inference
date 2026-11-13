@@ -165,7 +165,7 @@ test("a character works in a thread from the folder's invite: her card goes to O
   expect([await page.$eval("#thread > article.assistant:last-child .speaker", (e) => e.textContent),
     (await page.$eval("#thread > article.assistant:last-child", (e) => (e as HTMLElement).innerText)).includes("Mira here. The file says")]).toEqual(["Mira", true]);
 
-  await inRow(page, "site", ".cast-bring");
+  await inRow(page, "Mira", ".cast-bring");
   await pick("Mira");
   await page.keyboard.press("Escape");
   await page.click("#model-btn");

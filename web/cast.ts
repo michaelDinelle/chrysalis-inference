@@ -6,7 +6,7 @@ export interface CardData {
 }
 export interface Card { spec?: string; spec_version?: string; data: CardData; [k: string]: unknown }
 export interface Person { id: string; kind: "character" | "persona" | "assistant"; card: Card; image?: Blob; added: number }
-export interface Group { id: string; name: string; members: string[]; missing?: string[]; scenario?: string; added: number }
+export interface Group { id: string; name?: string; members: string[]; scenario?: string; added: number }
 export interface Voice { tts?: string; name?: string }
 
 const enc = new TextEncoder(), dec = new TextDecoder();
@@ -44,10 +44,19 @@ function asCard(j: any): Card | null {
   const data = j.spec === "chara_card_v2" || j.spec === "chara_card_v3" ? j.data : !("data" in j) && typeof j.name === "string" ? j : null;
   if (!data || typeof data.name !== "string" || !data.name.trim()) return null;
   if (!["description", "personality", "scenario", "first_mes", "mes_example"].some((k) => typeof data[k] === "string")) return null;
-  return data === j ? { spec: "chara_card_v2", spec_version: "2.0", data: { ...data } } : j;
+  const card: Card = data === j ? { spec: "chara_card_v2", spec_version: "2.0", data: { ...data } } : j;
+  folded(card.data);
+  return card;
+}
+export function folded(d: CardData, who = "{{char}}"): CardData {
+  const text = (v: unknown) => (typeof v === "string" ? v.trim() : ""), personality = text(d.personality), talk = examples(text(d.mes_example));
+  if (personality || talk) d.description = [text(d.description), personality ? `${who}'s personality: ${personality}` : "", talk ? `How ${who} talks:\n${talk}` : ""].filter(Boolean).join("\n\n");
+  delete d.personality;
+  delete d.mes_example;
+  return d;
 }
 
-export async function readCast(f: File): Promise<{ card: Card; image?: Blob } | { group: { name: string; members: string[]; scenario?: string } } | null> {
+export async function readCast(f: File): Promise<{ card: Card; image?: Blob } | { group: { name: string; members: string[]; cards: Card[]; scenario?: string } } | null> {
   const b = new Uint8Array(await f.slice(0, 64 << 20).arrayBuffer());
   if (isPng(b)) {
     const texts = chunks(b).filter((c) => c.type === "tEXt").map(textChunk).filter((t) => !!t);
@@ -62,7 +71,8 @@ export async function readCast(f: File): Promise<{ card: Card; image?: Blob } | 
   try {
     const j = JSON.parse(dec.decode(b));
     if (j?.spec === "chrysalis_group" && typeof j.name === "string" && Array.isArray(j.members))
-      return { group: { name: j.name, members: j.members.filter((x: unknown) => typeof x === "string"), ...(typeof j.scenario === "string" ? { scenario: j.scenario } : {}) } };
+      return { group: { name: j.name, members: j.members.filter((x: unknown) => typeof x === "string"), cards: (Array.isArray(j.cards) ? j.cards : []).map(asCard).filter((c: Card | null): c is Card => !!c),
+        ...(typeof j.scenario === "string" ? { scenario: j.scenario } : {}) } };
     const card = asCard(j);
     return card && { card };
   } catch { return null; }
@@ -109,11 +119,10 @@ const examples = (s: string) => s.replace(/^\s*<START>\s*$/gim, "").trim();
 
 export function castPrompt(base: string, cast: CardData[], user: CardData, scenario?: string): string {
   const one = cast.length === 1, out: string[] = [base];
-  if (!one) out.push(`This is a scene with ${list(cast.map((c) => c.name))}. Write it one paragraph per line, each beginning with the ` +
-    `speaker's name and a colon:\n\n${cast[0].name}: *What they do.* What they say.\n\nWrite only for them; {{user}} speaks ` +
-    `for themself. Everyone here takes part: whoever would answer or react does, often more than one, then stop when it is {{user}}'s turn.`);
-  const about = (c: CardData) => [c.description?.trim() ?? "", c.personality?.trim() ? `${c.name}'s personality: ${c.personality.trim()}` : "",
-    !scenario && c.scenario?.trim() ? `Scenario: ${c.scenario.trim()}` : "", c.mes_example?.trim() ? `How ${c.name} talks:\n${examples(c.mes_example)}` : ""].filter(Boolean);
+  if (!one) out.push(`This is a scene with ${list(cast.map((c) => c.name))}. Each reply is written by one of them: the note in brackets that ends ` +
+    `{{user}}'s message, such as [${cast[0].name} next.], names who. Write only that character's reply, what they do and say, with no name in front of it; ` +
+    `the others and {{user}} speak for themselves.`);
+  const about = (c: CardData) => [c.description?.trim() ?? "", !scenario && c.scenario?.trim() ? `Scenario: ${c.scenario.trim()}` : ""].filter(Boolean);
   for (const c of cast) out.push(fill([one ? "" : `## ${c.name}`, ...about(c)].filter(Boolean).join("\n\n"), c.name, user.name));
   if (scenario?.trim()) out.push(`Scenario: ${scenario.trim()}`);
   const you = about(user);
@@ -121,14 +130,6 @@ export function castPrompt(base: string, cast: CardData[], user: CardData, scena
   return fill(out.filter(Boolean).join("\n\n"), cast[0]?.name ?? "", user.name);
 }
 const list = (names: string[]) => names.length < 2 ? names.join("") : `${names.slice(0, -1).join(", ")} and ${names.at(-1)}`;
-
-export function speakerOf(text: string, names: string[]): { name: string; rest: number } | null {
-  for (const name of [...names].sort((a, b) => b.length - a.length)) {
-    const m = text.match(new RegExp(`^\\s*(?:\\*\\*)?${name.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}(?:\\*\\*)?\\s*:(?:\\*\\*)?\\s*`));
-    if (m) return { name, rest: m[0].length };
-  }
-  return null;
-}
 
 const ask = <T>(r: IDBRequest<T>) => new Promise<T>((ok, fail) => { r.onsuccess = () => ok(r.result); r.onerror = () => fail(r.error); });
 const db: Promise<IDBDatabase | null> = new Promise((resolve) => {
@@ -147,8 +148,11 @@ export async function loadCast(): Promise<{ people: Person[]; groups: Group[] } 
   const d = await db, t = d?.transaction(["people", "groups"], "readonly");
   if (!t) return null;
   const [people, groups] = await Promise.all([ask(t.objectStore("people").getAll()), ask(t.objectStore("groups").getAll())]);
+  for (const p of people as Person[]) folded(p.card.data, p.kind === "persona" ? "{{user}}" : "{{char}}");
   return { people: people as Person[], groups: groups as Group[] };
 }
 export const savePerson = async (x: Person) => { const s = await store("people", "readwrite"); if (s) await ask(s.put(x)); };
 export const dropPerson = async (id: string) => { const s = await store("people", "readwrite"); if (s) await ask(s.delete(id)); };
+export const saveGroup = async (x: Group) => { const s = await store("groups", "readwrite"); if (s) await ask(s.put(x)); };
+export const dropGroup = async (id: string) => { const s = await store("groups", "readwrite"); if (s) await ask(s.delete(id)); };
 export const voiceOf = (c: CardData): Voice | undefined => (c.extensions?.chrysalis as { voice?: Voice } | undefined)?.voice;

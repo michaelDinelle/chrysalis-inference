@@ -1,9 +1,22 @@
 import { expect, test } from "bun:test";
 import { existsSync, mkdtempSync, readFileSync, readdirSync, writeFileSync } from "node:fs";
-import type { Browser } from "puppeteer-core";
+import type { Browser, Page } from "puppeteer-core";
 import { harness, RUN, articles, card, castRows, dir, download, inRow, lastStream, look, open, openRow, pagerOf, pickVoice, png, pngText, send, sent, shown, streams, untilIdle, voiceLog } from "./browser-harness";
 
 harness();
+
+const rowMenu = async (page: Page, name: string, item = "") => {
+  await page.evaluate((name) => [...document.querySelectorAll("#conversations .cast-row")].find((r) => r.querySelector(".cast-name")?.textContent === name)!
+    .dispatchEvent(new MouseEvent("contextmenu", { bubbles: true, cancelable: true, clientX: 60, clientY: 300 })), name);
+  await page.waitForSelector("#row-menu:not([hidden])");
+  const labels = await page.$$eval("#row-menu button", (b) => b.map((x) => x.textContent!));
+  if (item) await page.evaluate((item) => [...document.querySelectorAll<HTMLElement>("#row-menu button")].find((b) => b.textContent === item)!.click(), item);
+  else await page.keyboard.press("Escape");
+  return labels;
+};
+const answers = (page: Page) => page.$$eval("#cast-next button[title$=' answers']", (b) => b.map((x) => (x as HTMLElement).title.replace(" answers", "")));
+const speakers = (page: Page) => page.$$eval("#thread > article.assistant", (a) => a.map((x) => x.querySelector(".speaker")?.textContent ?? ""));
+const toasted = (page: Page, text: RegExp) => page.waitForFunction((src) => new RegExp(src).test(document.querySelector("#toast:not([hidden]) span")?.textContent ?? ""), {}, text.source);
 
 test("a character card dropped in joins the cast: a row with their portrait among the chats, a chat that opens with their greeting (the others as versions), their replies with their portrait beside them, which opens their card to read and edit; the card is the system prompt and the persona {{user}}; a continued reply shows no thinking it did not have", async () => {
   const page = await open();
@@ -19,9 +32,8 @@ test("a character card dropped in joins the cast: a row with their portrait amon
   await page.click("#thread .msg.assistant .speaker .face");
   await page.waitForSelector("#cast-sheet:not([hidden]) .card-text");
   const fields = () => page.$$eval("#cast-sheet .card-field", (f) => f.map((x) => [x.querySelector(".card-label")!.textContent, (x.querySelector("textarea") as HTMLTextAreaElement).value]));
-  expect((await fields()).slice(0, 4)).toEqual([["Description", "{{char}} keeps bees for {{user}}."], ["Personality", "calm"], ["Scenario", "A hillside."], ["Greeting", "Hello, {{user}}."]]);
-  await page.click("#cast-sheet .card-field:nth-of-type(2) textarea");
-  await page.keyboard.press("End");
+  expect(await fields()).toEqual([["Description", "{{char}} keeps bees for {{user}}.\n\n{{char}}'s personality: calm\n\nHow {{char}} talks:\n{{user}}: Why bees?\n{{char}}: They listen."], ["Scenario", "A hillside."], ["Greeting", "Hello, {{user}}."]]);
+  await page.$eval("#cast-sheet .card-field textarea", (t) => { const at = (t as HTMLTextAreaElement).value.indexOf("calm") + 4; (t as HTMLTextAreaElement).focus(); (t as HTMLTextAreaElement).setSelectionRange(at, at); });
   await page.keyboard.type(" and kind");
   await page.keyboard.press("Escape");
 
@@ -36,9 +48,9 @@ test("a character card dropped in joins the cast: a row with their portrait amon
   expect([await page.$eval("#you .you-name", (e) => e.textContent), await page.$eval("#thread .msg.user .speaker", (e) => e.textContent)]).toEqual(["Robin", "Robin"]);
   const one = lastStream.messages;
   expect(one[0].content).toBe("Write Mirela's next reply in a fictional chat between Mirela and Robin.\n\nMirela keeps bees for Robin.\n\nMirela's personality: calm and kind" +
-    "\n\nScenario: A hillside.\n\nHow Mirela talks:\nRobin: Why bees?\nMirela: They listen.");
+    "\n\nHow Mirela talks:\nRobin: Why bees?\nMirela: They listen.\n\nScenario: A hillside.");
   expect(one.slice(1)).toEqual([{ role: "user", content: "[The scene begins.]" }, { role: "assistant", content: "Hello, User." },
-    { role: "user", content: "good morning mirela\n\n[Stay in character.]" }]);
+    { role: "user", content: "good morning mirela" }]);
   expect(await page.$$eval("#thread .msg.assistant .speaker", (s) => s.map((x) => x.textContent))).toEqual(["Mirela", "Mirela"]);
   await page.$eval('#thread > article[data-i="2"] [data-act="cont"]', (b) => (b as HTMLElement).click());
   await page.waitForFunction(() => /Good morning\..*Good morning\./.test(document.querySelector('#thread > article[data-i="2"] .markdown')?.textContent ?? ""));
@@ -63,10 +75,9 @@ test("the user is a character like any other: a portrait opens its card and clos
   await page.click("#you");
   expect(await parts()).toEqual(hers);
   await pickVoice(page, "#cast-sheet .card-voice .voice-name", "other-tts/bob");
-  for (const [label, text] of [["Personality", "curious"], ["Greeting", "Hi, {{char}}."], ["How they talk", "{{user}}: Hm."], ["After the chat", "Keep it short."]]) {
+  for (const [label, text] of [["Description", "{{user}} is curious."], ["Greeting", "Hi, {{char}}."]]) {
     await page.evaluate((label) => {
       const f = [...document.querySelectorAll("#cast-sheet .card-field")].find((x) => x.querySelector(".card-label")!.textContent === label)!;
-      f.closest("details")?.setAttribute("open", "");
       f.querySelector("textarea")!.focus();
     }, label);
     await page.keyboard.type(text);
@@ -79,8 +90,8 @@ test("the user is a character like any other: a portrait opens its card and clos
   await page.keyboard.press("Enter");
   await page.waitForFunction((n) => document.querySelectorAll(".msg .stats").length > n, { timeout: 20_000 }, done);
   expect(lastStream.messages[0].content).toBe("Write Mirela's next reply in a fictional chat between Mirela and User.\n\nMirela keeps bees.\n\n" +
-    "User's personality: curious\n\nHow User talks:\nUser: Hm.");
-  expect(lastStream.messages.at(-1)).toEqual({ role: "user", content: "Hi, Mirela.\n\n[Keep it short.]" });
+    "User is curious.");
+  expect(lastStream.messages.at(-1)).toEqual({ role: "user", content: "Hi, Mirela." });
   await page.waitForSelector("#conversations a.conv.active .conv-face[data-card]");
   const at = await page.evaluate(() => location.hash);
   await page.click("#conversations a.conv.active .conv-face[data-card]");
@@ -148,7 +159,7 @@ test("the conversations are folders, Chrysalis's and each character's: a folder 
   await page.close();
 }, 30_000);
 
-test("a character deleted takes their chats with them (none become Chrysalis's), Undo brings it all back, and a character deleted in another tab takes their chats here too", async () => {
+test("a character deleted from their row's menu takes their chats with them (none become Chrysalis's) on the first click, Undo brings it all back, and a character deleted in another tab takes their chats here too", async () => {
   const page = await open();
   await send(page, "one for chrysalis");
   await Bun.write(`${dir}/Mirela.png`, await card("Mirela", { description: "{{char}} keeps bees.", first_mes: "Hello, {{user}}." }));
@@ -159,11 +170,11 @@ test("a character deleted takes their chats with them (none become Chrysalis's),
   const folders = () => page.$$eval("#conversations .folder", (f) => f.map((x) => `${x.querySelector(".cast-name")!.textContent}: ${x.querySelectorAll(".conv").length || x.querySelector(".cast-count")?.textContent}`));
   const mirela = (await kept()).find((w) => w !== "chrysalis")!;
   await inRow(page, "Mirela", ".cast-pic");
-  await page.waitForSelector("#cast-sheet:not([hidden]) .card-acts .icon");
-  await page.click("#cast-sheet .card-acts .icon");
-  expect(await page.$eval("#cast-sheet .card-acts .icon", (b) => b.textContent)).toBe("Delete, with 1 chat?");
-  await page.click("#cast-sheet .card-acts .icon");
-  await page.waitForFunction(() => /^Mirela deleted, with 1 chat/.test(document.querySelector("#toast")?.textContent ?? ""));
+  await page.waitForSelector("#cast-sheet:not([hidden]) .card-field");
+  expect(await page.$$eval("#cast-sheet button", (b) => b.filter((x) => /delete/i.test(`${x.title}${x.textContent}`)).length)).toBe(0);
+  await page.keyboard.press("Escape");
+  await rowMenu(page, "Mirela", "Delete");
+  await toasted(page, /^Mirela deleted, with 1 chat/);
   expect([await kept(), await folders(), await page.$$eval("#thread .speaker", (s) => s.length)]).toEqual([["chrysalis"], ["Chrysalis: 1"], 0]);
   await page.click("#toast .btn");
   await page.waitForFunction(() => document.querySelectorAll("#conversations .folder").length === 2);
@@ -178,33 +189,46 @@ test("a character deleted takes their chats with them (none become Chrysalis's),
   await page.close();
 }, 30_000);
 
-test("a group whose file names characters with no card here yet shows them all (their initials, in its face and on its card) and takes each in as their card comes", async () => {
+test("a group's file brings its members' cards with it: those with no card here come from the file, a name with no card anywhere is left out and said, the group is there after a reload, its card lists its members, each opening their own card, and its exported file brings it to a browser that has none of them", async () => {
   const page = await open();
   await Bun.write(`${dir}/Ada.png`, await card("Ada", { description: "{{char}} hums." }));
-  await Bun.write(`${dir}/Bea.png`, await card("Bea", { description: "{{char}} drums." }));
-  writeFileSync(`${dir}/Duo.json`, JSON.stringify({ spec: "chrysalis_group", name: "Duo", members: ["Ada", "Bea"] }));
+  writeFileSync(`${dir}/Duo.json`, JSON.stringify({ spec: "chrysalis_group", name: "Duo", members: ["Ada", "Bea", "Cy"], scenario: "A cellar.",
+    cards: [{ spec: "chara_card_v2", spec_version: "2.0", data: { name: "Bea", description: "{{char}} drums." } }] }));
   await (await page.$("input#cast-file"))!.uploadFile(`${dir}/Ada.png`, `${dir}/Duo.json`);
-  await page.waitForFunction(() => document.querySelectorAll("#conversations .folder").length === 3);
+  await page.waitForFunction(() => document.querySelectorAll("#conversations .folder").length === 4);
   const tiles = () => page.evaluate(() => [...[...document.querySelectorAll("#conversations .cast-row")].find((r) => r.querySelector(".cast-name")!.textContent === "Duo")!
     .querySelectorAll(".face.mosaic > *")].map((f) => f.tagName === "IMG" ? "picture" : f.textContent));
-  expect(await tiles()).toEqual(["picture", "B"]);
-  await inRow(page, "Duo", ".cast-pic");
-  await page.waitForSelector("#cast-sheet:not([hidden]) .card-member.waiting");
-  expect(await page.$$eval("#cast-sheet .strips > *", (s) => s.length)).toBe(2);
-  await page.keyboard.press("Escape");
-  await (await page.$("input#cast-file"))!.uploadFile(`${dir}/Bea.png`);
-  await page.waitForFunction(() => document.querySelectorAll("#conversations .folder").length === 4);
-  expect(await tiles()).toEqual(["picture", "picture"]);
+  expect([await castRows(page), await tiles(), await page.$eval("#toast span", (t) => t.textContent)]).toEqual([["Ada", "Bea", "Chrysalis", "Duo"], ["picture", "B"], "Ada and Duo are here; no card here for Cy"]);
   await openRow(page, "Duo");
   await page.waitForSelector("#cast-next .talk");
-  expect(await page.$$eval("#cast-next button[title$=' next']", (b) => b.map((x) => (x as HTMLElement).title))).toEqual(["Ada next", "Bea next"]);
+  expect(await answers(page)).toEqual(["Ada", "Bea"]);
+  await send(page, "Bea, a beat");
+  expect([/Bea drums\./.test(lastStream.messages[0].content), /Scenario: A cellar\./.test(lastStream.messages[0].content), await speakers(page)]).toEqual([true, true, ["BBea"]]);
   await page.reload({ waitUntil: "load" });
   await page.waitForSelector("#conversations .folder");
-  expect(await tiles()).toEqual(["picture", "picture"]);
+  expect([await castRows(page), await tiles()]).toEqual([["Ada", "Bea", "Chrysalis", "Duo"], ["picture", "B"]]);
+  const into = mkdtempSync(`${dir}/duo-`), cdp = await page.createCDPSession();
+  await cdp.send("Browser.setDownloadBehavior", { behavior: "allow", downloadPath: into, browserContextId: page.browserContext().id });
+  await rowMenu(page, "Duo", "Card");
+  await page.waitForSelector("#cast-sheet:not([hidden]) .card-member");
+  expect(await page.$$eval("#cast-sheet .card-member", (m) => m.map((x) => [x.querySelector(".card-member-open span:last-child")!.textContent, x.querySelector<HTMLButtonElement>(".card-member-out")!.disabled]))).toEqual([["Ada", true], ["Bea", true]]);
+  await page.click("#cast-sheet .card-member:nth-child(2) .card-member-open");
+  await page.waitForFunction(() => document.querySelector<HTMLInputElement>("#cast-sheet input.card-name")?.value === "Bea");
+  await rowMenu(page, "Duo", "Card");
+  await page.waitForSelector("#cast-sheet:not([hidden]) .card-acts button");
+  await page.click("#cast-sheet .card-acts button");
+  for (let k = 0; k < 50 && !existsSync(`${into}/Duo.json`); k++) await Bun.sleep(100);
+  const file = JSON.parse(readFileSync(`${into}/Duo.json`, "utf8"));
+  expect([file.spec, file.name, file.members, file.cards.map((c: any) => c.data.name), file.scenario]).toEqual(["chrysalis_group", "Duo", ["Ada", "Bea"], ["Ada", "Bea"], "A cellar."]);
+  const other = await open();
+  await (await other.$("input#cast-file"))!.uploadFile(`${into}/Duo.json`);
+  await other.waitForFunction(() => document.querySelectorAll("#conversations .folder").length === 4);
+  expect(await castRows(other)).toEqual(["Ada", "Bea", "Chrysalis", "Duo"]);
+  await other.close();
   await page.close();
 }, 30_000);
 
-test("a group's replies are the scene, each paragraph its speaker's and one going on under the same face; a face has the next reply be theirs, thought through first; let them talk takes turns; cards dropped on a chat join it once (a chat with one character becomes a group, her replies hers); the cast stays after a reload", async () => {
+test("a group's replies are each one character's own message: whoever the message names answers, each of them in turn when it names several, and the next in turn when it names nobody; a face has that one answer, thought through first; let them talk takes turns; what was said before goes to the model with who said it; a card dropped on the chat joins the group where it is, and a character dragged onto another's chat makes a group of the two that the chat moves to; all of it there after a reload", async () => {
   const page = await open();
   await Bun.write(`${dir}/Mirela.png`, await card("Mirela", { description: "{{char}} keeps bees.", scenario: "A hillside.", first_mes: "Hello, {{user}}." }));
   await Bun.write(`${dir}/Tomas.png`, await card("Tomas", { description: "{{char}} sells honey.", first_mes: "Honey?" }));
@@ -214,20 +238,27 @@ test("a group's replies are the scene, each paragraph its speaker's and one goin
   await page.waitForFunction(() => document.querySelectorAll("#conversations .cast-row").length === 4);
   await openRow(page, "Hive");
   await page.waitForSelector("#cast-next .talk");
+  const told = (b: any) => b.messages.slice(1).map((m: any) => [m.role, m.content]);
+  const settled = (n: number) => page.waitForFunction((n) => document.querySelectorAll("#thread > article.assistant").length === n && document.querySelectorAll("#thread > article.assistant .stats").length === n
+    && document.querySelector("#send")?.getAttribute("aria-label") === "Send", { timeout: 20_000 }, n);
   await send(page, "a toast for the hive");
-  const lines = (i: number) => page.$$eval(`#thread > article[data-i="${i}"] p.line`, (p) => p.map((x) => [x.querySelector(".who")?.textContent ?? "", x.classList.contains("same")]));
-  expect(await lines(1)).toEqual([["Mirela", false], ["Tomas", false]]);
-  expect(await page.$$eval("#thread p.line", (p) => p.map((x) => x.textContent))).toEqual(["MirelaShe raises a cup. To the bees.", "TomasTo the bees!"]);
-  expect([lastStream.stop, lastStream.messages[0].content.includes("Scenario: Market day."), lastStream.messages[0].content.includes("A hillside.")])
-    .toEqual([["\nUser:", "\n**User"], true, false]);
-  await send(page, "the same speaker");
-  expect(await lines(3)).toEqual([["Mirela", false], ["", true], ["", true], ["Tomas", false]]);
+  expect([await speakers(page), told(lastStream), lastStream.stop, lastStream.messages[0].content.includes("Scenario: Market day."), lastStream.messages[0].content.includes("A hillside.")])
+    .toEqual([["Mirela"], [["user", "a toast for the hive\n\n[Mirela next.]"]], ["\nUser:", "\n**User"], true, false]);
+  expect(await page.$$eval("#thread > article.assistant > .markdown", (m) => m.map((x) => x.textContent!.trim()))).toEqual(["She raises a cup. To the bees."]);
+  await send(page, "Tomas, and you?");
+  expect([await speakers(page), told(lastStream)]).toEqual([["Mirela", "Tomas"],
+    [["user", "a toast for the hive\n\n[Mirela next.]"], ["assistant", "*She raises a cup.* To the bees."], ["user", "Tomas, and you?\n\n[Tomas next.]"]]]);
+  const n1 = streams.length;
+  await page.type("#input", "Tomas, then Mirela: a song");
+  await page.keyboard.press("Enter");
+  await settled(4);
+  expect([await speakers(page), streams.slice(n1).map((b) => b.messages.at(-1).content)]).toEqual([["Mirela", "Tomas", "Tomas", "Mirela"], ["Tomas, then Mirela: a song\n\n[Tomas next.]", "[Mirela next.]"]]);
 
-  await page.click('#cast-next button[title="Tomas next"]');
-  await untilIdle(page);
+  await page.click('#cast-next button[title="Tomas answers"]');
+  await settled(5);
   expect([lastStream.continue_final_message, lastStream.reasoning_effort !== undefined, lastStream.messages.at(-1)])
     .toEqual([undefined, true, { role: "user", content: "[Tomas next.]" }]);
-  expect([await lines(4), await page.$eval('#thread > article[data-i="4"] .thought', (t) => t.textContent)]).toEqual([[["Tomas", false]], "Tomas has the floor."]);
+  expect([await speakers(page), await page.$eval('#thread > article.assistant:last-child .thought', (t) => t.textContent)]).toEqual([["Mirela", "Tomas", "Tomas", "Mirela", "Tomas"], "Tomas has the floor."]);
   const n0 = streams.length;
   await page.click("#cast-next .talk");
   await page.waitForFunction(() => !!document.querySelector("#cast-next .talk:not(.on)")
@@ -235,9 +266,9 @@ test("a group's replies are the scene, each paragraph its speaker's and one goin
   expect(streams.slice(n0).map((b) => b.messages.at(-1))).toEqual(["Mirela", "Tomas", "Mirela", "Tomas"].map((n) => ({ role: "user", content: `[${n} next.]` })));
 
   await (await page.$("input#attach-file"))!.uploadFile(`${dir}/Ida.png`);
-  await page.waitForFunction(() => document.querySelectorAll("#cast-next button[title$=' next']").length === 3);
+  await page.waitForFunction(() => document.querySelectorAll("#cast-next button[title$=' answers']").length === 3);
   await (await page.$("input#attach-file"))!.uploadFile(`${dir}/Mirela.png`);
-  await page.waitForFunction(() => /Mirela is in this chat already/.test(document.querySelector("#toast")?.textContent ?? ""));
+  await toasted(page, /Mirela is in this chat already/);
   expect([await castRows(page), (await page.$$("#attachments .att")).length]).toEqual([["Chrysalis", "Hive", "Ida", "Mirela", "Tomas"], 0]);
   await openRow(page, "Mirela");
   await page.waitForFunction(() => document.querySelector("#thread .speaker")?.textContent === "Mirela");
@@ -248,8 +279,8 @@ test("a group's replies are the scene, each paragraph its speaker's and one goin
     for (const type of ["dragenter", "dragover", "drop"]) at.dispatchEvent(new DragEvent(type, { dataTransfer: dt, bubbles: true, cancelable: true }));
   });
   await page.waitForSelector("#cast-next .talk");
-  expect([await castRows(page), await page.$$eval("#cast-next button[title$=' next']", (b) => b.map((x) => (x as HTMLElement).title)), await lines(0)])
-    .toEqual([["Chrysalis", "Hive", "Ida", "Mirela", "Mirela and Tomas", "Tomas"], ["Mirela next", "Tomas next"], [[`Mirela`, false]]]);
+  expect([await castRows(page), await answers(page), await speakers(page)])
+    .toEqual([["Chrysalis", "Hive", "Ida", "Mirela", "Mirela and Tomas", "Tomas"], ["Mirela", "Tomas"], ["Mirela"]]);
 
   await page.reload({ waitUntil: "load" });
   await page.waitForSelector("#conversations .cast-row");
@@ -257,7 +288,7 @@ test("a group's replies are the scene, each paragraph its speaker's and one goin
   await page.close();
 }, 60_000);
 
-test("a chat's own people: the invite on its row in the sidebar brings characters in and takes them out with Undo (the last one stays, the chat hers again), on another's row it starts a new chat with them, the sidebar's add starts one from nobody, a new chat on their row has the same people, and one chat's change leaves the other's as they were, sent as such and after a reload", async () => {
+test("a group is edited where it is: the invite on a character's own chat makes a group of them that the chat moves to, picking again takes one out and Undo brings them back, the last two stay; the sidebar's add starts a chat from nobody; the invite on a group's row changes that group, whose row and chats stay; on a character's row it makes a new group; all sent as such and there after a reload", async () => {
   const page = await open();
   await Bun.write(`${dir}/Mirela.png`, await card("Mirela", { description: "{{char}} keeps bees.", first_mes: "Hello, {{user}}." }));
   await Bun.write(`${dir}/Tomas.png`, await card("Tomas", { description: "{{char}} sells honey.", first_mes: "Honey?" }));
@@ -265,68 +296,63 @@ test("a chat's own people: the invite on its row in the sidebar brings character
   await (await page.$("input#cast-file"))!.uploadFile(`${dir}/Mirela.png`, `${dir}/Tomas.png`, `${dir}/Ida.png`);
   await page.waitForFunction(() => document.querySelectorAll("#conversations .cast-row").length === 4);
   await page.waitForFunction(() => document.querySelector("#thread .speaker")?.textContent === "Mirela");
-  const next = () => page.$$eval("#cast-next button[title$=' next']", (b) => b.map((x) => (x as HTMLElement).title.replace(" next", "")));
   const rows = () => page.$$eval("#cast-invite .invite-row", (r) => r.map((x) => [x.querySelector(".invite-name")!.textContent, x.getAttribute("aria-pressed") === "true", (x as HTMLButtonElement).disabled]));
   const pick = (name: string) => page.evaluate((name) => [...document.querySelectorAll<HTMLElement>("#cast-invite .invite-row")]
     .find((r) => r.querySelector(".invite-name")!.textContent === name)!.click(), name);
   expect(await page.$eval("#cast-next", (b) => (b as HTMLElement).hidden)).toBe(true);
   await inRow(page, "Mirela", ".cast-bring");
   await page.waitForSelector("#cast-invite:not([hidden])");
-  expect(await rows()).toEqual([["Ida", false, false], ["Mirela", true, true], ["Tomas", false, false]]);
+  expect(await rows()).toEqual([["Ida", false, false], ["Mirela", true, false], ["Tomas", false, false]]);
   await pick("Tomas");
   await pick("Ida");
-  expect([await next(), await rows(), await castRows(page), await page.$eval("#input", (e) => (e as HTMLTextAreaElement).placeholder)])
+  expect([await answers(page), await rows(), await castRows(page), await page.$eval("#input", (e) => (e as HTMLTextAreaElement).placeholder), await speakers(page)])
     .toEqual([["Mirela", "Tomas", "Ida"], [["Ida", true, false], ["Mirela", true, false], ["Tomas", true, false]],
-      ["Chrysalis", "Ida", "Mirela", "Mirela, Tomas and Ida", "Tomas"], "Message Mirela, Tomas and Ida"]);
+      ["Chrysalis", "Ida", "Mirela", "Mirela, Tomas and Ida", "Tomas"], "Message Mirela, Tomas and Ida", ["Mirela"]]);
   await pick("Tomas");
-  expect([await next(), await page.$eval("#toast span", (t) => t.textContent)]).toEqual([["Mirela", "Ida"], "Tomas left"]);
+  expect([await answers(page), await page.$eval("#toast span", (t) => t.textContent), await rows()])
+    .toEqual([["Mirela", "Ida"], "Tomas left the group", [["Ida", true, true], ["Mirela", true, true], ["Tomas", false, false]]]);
   await page.click("#toast button");
-  expect(await next()).toEqual(["Mirela", "Tomas", "Ida"]);
-  await pick("Tomas");
-  await pick("Ida");
-  expect([await next(), await rows(), await castRows(page), await page.$("#cast-next .talk"), await page.$eval("#thread .speaker", (s) => s.textContent)])
-    .toEqual([[], [["Ida", false, false], ["Mirela", true, true], ["Tomas", false, false]], ["Chrysalis", "Ida", "Mirela", "Tomas"], null, "Mirela"]);
+  expect([await answers(page), await castRows(page)]).toEqual([["Mirela", "Tomas", "Ida"], ["Chrysalis", "Ida", "Mirela", "Mirela, Tomas and Ida", "Tomas"]]);
   await page.keyboard.press("Escape");
   expect(await page.$eval("#cast-invite", (e) => (e as HTMLElement).hidden)).toBe(true);
 
   await page.click("#add-cast");
   await page.click('#cast-add [data-add="group"]');
   await page.waitForSelector("#cast-invite:not([hidden])");
-  expect([await rows(), await castRows(page)]).toEqual([[["Ida", false, false], ["Mirela", false, false], ["Tomas", false, false]], ["Chrysalis", "Ida", "Mirela", "Tomas"]]);
+  expect([await page.$eval("#cast-invite .invite-head", (e) => e.textContent), await rows()]).toEqual(["A new chat with", [["Ida", false, false], ["Mirela", false, false], ["Tomas", false, false]]]);
   await pick("Tomas");
   await page.waitForFunction(() => document.querySelector("#thread .speaker")?.textContent === "Tomas");
   await pick("Ida");
-  expect([await next(), await castRows(page)]).toEqual([["Tomas", "Ida"], ["Chrysalis", "Ida", "Mirela", "Tomas", "Tomas and Ida"]]);
+  expect([await answers(page), await castRows(page)]).toEqual([["Tomas", "Ida"], ["Chrysalis", "Ida", "Mirela", "Mirela, Tomas and Ida", "Tomas", "Tomas and Ida"]]);
   await page.keyboard.press("Escape");
   await send(page, "a toast for the hive");
   const system = () => [/Tomas sells honey\./, /Ida paints hives\./, /Mirela keeps bees\./].map((r) => r.test(lastStream.messages[0].content));
-  expect(system()).toEqual([true, true, false]);
+  expect([system(), await speakers(page)]).toEqual([[true, true, false], ["Tomas", "Ida"]]);
 
   await inRow(page, "Tomas and Ida", ".cast-new");
   await page.waitForFunction(() => !document.querySelector("#thread > article"));
-  expect(await next()).toEqual(["Tomas", "Ida"]);
+  expect(await answers(page)).toEqual(["Tomas", "Ida"]);
   await inRow(page, "Tomas and Ida", ".cast-bring");
+  expect(await page.$eval("#cast-invite .invite-head", (e) => e.textContent)).toBe("Who is in Tomas and Ida");
   await pick("Mirela");
   await page.keyboard.press("Escape");
   await send(page, "a toast for the hive");
-  expect([system(), await castRows(page)]).toEqual([[true, true, true], ["Chrysalis", "Ida", "Mirela", "Tomas", "Tomas and Ida", "Tomas, Ida and Mirela"]]);
-  await page.evaluate(() => [...document.querySelectorAll<HTMLElement>("#conversations .folder")]
-    .find((f) => f.querySelector(".cast-name")!.textContent === "Tomas and Ida")!.querySelector<HTMLElement>("a.conv")!.click());
-  await page.waitForFunction(() => document.querySelectorAll("#cast-next button[title$=' next']").length === 2);
-  expect(await next()).toEqual(["Tomas", "Ida"]);
+  const all = ["Chrysalis", "Ida", "Mirela", "Mirela, Tomas and Ida", "Tomas", "Tomas, Ida and Mirela"];
+  expect([system(), await castRows(page), await page.evaluate(() => [...document.querySelectorAll("#conversations .folder")].find((f) => f.querySelector(".cast-name")!.textContent === "Tomas, Ida and Mirela")!.querySelectorAll("a.conv").length)]).toEqual([[true, true, true], all, 2]);
   await inRow(page, "Mirela", ".cast-bring");
-  expect([await page.$eval("#cast-invite .invite-head", (e) => e.textContent), await rows(), await next()])
-    .toEqual(["A new chat with Mirela and", [["Ida", false, false], ["Mirela", true, true], ["Tomas", false, false]], ["Tomas", "Ida"]]);
+  expect([await page.$eval("#cast-invite .invite-head", (e) => e.textContent), await rows(), await answers(page)])
+    .toEqual(["A new group with Mirela and", [["Ida", false, false], ["Mirela", true, true], ["Tomas", false, false]], ["Tomas", "Ida", "Mirela"]]);
   await pick("Ida");
-  const all = ["Chrysalis", "Ida", "Mirela", "Mirela and Ida", "Tomas", "Tomas and Ida", "Tomas, Ida and Mirela"];
-  expect([await next(), await castRows(page), await page.$$eval("#thread > article", (a) => a.length)]).toEqual([["Mirela", "Ida"], all, 1]);
+  const then = [...all, "Mirela and Ida"].sort();
+  expect([await answers(page), await castRows(page), await page.$$eval("#thread > article", (a) => a.length)]).toEqual([["Mirela", "Ida"], then, 0]);
+  await page.keyboard.press("Escape");
   await page.reload({ waitUntil: "load" });
-  await page.waitForSelector("#cast-next .talk");
-  expect([await next(), await castRows(page)]).toEqual([["Mirela", "Ida"], all]);
+  await page.waitForSelector("#conversations .cast-row");
+  expect(await castRows(page)).toEqual(then);
   await page.close();
 }, 60_000);
 
-test("a group saved by an earlier version becomes its chats' own: each chat filed under it keeps its people, its name and its scenario, and a member since deleted is left out", async () => {
+test("groups saved by earlier versions are groups still: one kept in the cast store keeps its chats, its name and its scenario, a member since deleted left out, and a chat that held its own people becomes a group of them", async () => {
   const page = await open();
   await Bun.write(`${dir}/Ada.png`, await card("Ada", { description: "{{char}} hums." }));
   await Bun.write(`${dir}/Bea.png`, await card("Bea", { description: "{{char}} drums." }));
@@ -345,33 +371,107 @@ test("a group saved by an earlier version becomes its chats' own: each chat file
     const t = db.transaction("groups", "readwrite");
     t.objectStore("groups").put({ id: "old-group", name: "The band", members: [id("Ada"), "gone", id("Bea")], scenario: "A cellar.", added: 1 });
     await new Promise((ok) => { t.oncomplete = ok; });
-    const chats = JSON.parse(sessionStorage.getItem("chats")!);
-    for (const c of Object.values(chats) as { who: string }[]) c.who = "old-group";
+    const chats = JSON.parse(sessionStorage.getItem("chats")!), [first] = Object.values(chats) as any[], key = `cast:${[id("Ada"), id("Bea")].sort().join("+")}`;
+    first.who = "old-group";
+    chats.older = { ...structuredClone(first), id: "older", title: "An older chat", who: key, cast: [id("Bea"), id("Ada")], castName: "The pair", scenario: "A porch." };
     sessionStorage.setItem("chats", JSON.stringify(chats));
   });
   await page.reload({ waitUntil: "load" });
   await page.waitForSelector("#cast-next .talk");
-  expect([await castRows(page), await page.$$eval("#cast-next button[title$=' next']", (b) => b.map((x) => (x as HTMLElement).title))])
-    .toEqual([["Ada", "Bea", "Chrysalis", "The band"], ["Ada next", "Bea next"]]);
+  expect([await castRows(page), await answers(page)]).toEqual([["Ada", "Bea", "Chrysalis", "The band", "The pair"], ["Ada", "Bea"]]);
   await send(page, "a duet");
   expect([/Scenario: A cellar\./, /Ada hums\./, /Bea drums\./].map((r) => r.test(lastStream.messages[0].content))).toEqual([true, true, true]);
+  await openRow(page, "The pair");
+  await page.evaluate(() => [...document.querySelectorAll<HTMLElement>("#conversations a.conv")].find((a) => a.querySelector(".conv-title")!.textContent === "An older chat")!.click());
+  await page.waitForFunction(() => (document.querySelector("#input") as HTMLTextAreaElement).placeholder === "Message The pair");
+  await send(page, "a duet");
+  expect([/Scenario: A porch\./.test(lastStream.messages[0].content), await answers(page), await page.evaluate(() => Object.values(JSON.parse(sessionStorage.getItem("chats")!)).some((c: any) => "cast" in c))]).toEqual([true, ["Bea", "Ada"], false]);
   await page.close();
 }, 30_000);
 
-test("in a group, a message that names one of them with @ has that one answer next; a message that names nobody leaves the scene to them all", async () => {
+test("in a group, a message that names one of them, by @ or by any word of their name that is theirs alone, has that one answer; a message that names nobody has the next in turn answer", async () => {
   const page = await open();
-  await Bun.write(`${dir}/Mirela.png`, await card("Mirela", { description: "{{char}} keeps bees." }));
-  await Bun.write(`${dir}/Tomas.png`, await card("Tomas", { description: "{{char}} sells honey." }));
+  await Bun.write(`${dir}/Mirela.png`, await card("Mirela Bee", { description: "{{char}} keeps bees." }));
+  await Bun.write(`${dir}/Tomas.png`, await card("Tomas Bee", { description: "{{char}} sells honey." }));
   await (await page.$("input#cast-file"))!.uploadFile(`${dir}/Mirela.png`, `${dir}/Tomas.png`);
   await page.waitForFunction(() => document.querySelectorAll("#conversations .cast-row").length === 3);
-  await page.waitForFunction(() => (document.querySelector("#input") as HTMLTextAreaElement).placeholder === "Message Mirela");
-  await inRow(page, "Mirela", ".cast-bring");
-  await page.evaluate(() => [...document.querySelectorAll<HTMLElement>("#cast-invite .invite-row")].find((r) => r.querySelector(".invite-name")!.textContent === "Tomas")!.click());
+  await page.waitForFunction(() => (document.querySelector("#input") as HTMLTextAreaElement).placeholder === "Message Mirela Bee");
+  await inRow(page, "Mirela Bee", ".cast-bring");
+  await page.evaluate(() => [...document.querySelectorAll<HTMLElement>("#cast-invite .invite-row")].find((r) => r.querySelector(".invite-name")!.textContent === "Tomas Bee")!.click());
   await page.keyboard.press("Escape");
   await page.waitForSelector("#cast-next .talk");
+  const last = () => lastStream.messages.at(-1).content;
   await send(page, "@tomas how is the market?");
-  expect(lastStream.messages.at(-1).content).toBe("@tomas how is the market?\n\n[Tomas next.]");
+  expect(last()).toBe("@tomas how is the market?\n\n[Tomas Bee next.]");
   await send(page, "and the weather, anyone?");
-  expect(lastStream.messages.at(-1).content).toBe("and the weather, anyone?");
+  expect(last()).toBe("and the weather, anyone?\n\n[Mirela Bee next.]");
+  await send(page, "what does tomas think, bee or no bee?");
+  expect(last()).toBe("what does tomas think, bee or no bee?\n\n[Tomas Bee next.]");
+  await send(page, "atomas is not a name");
+  expect(last()).toBe("atomas is not a name\n\n[Mirela Bee next.]");
   await page.close();
 }, 30_000);
+
+test("every row has the same menu: a character, a group and a folder are pinned, settled, renamed, forked and deleted from it as a chat is; a pinned row goes above the list and a settled one below it, a renamed row keeps its place, a fork is a copy under a new name, a group deleted takes its chats and leaves its people, and the rows keep their order whichever chat was written in last", async () => {
+  const page = await open();
+  await Bun.write(`${dir}/Mirela.png`, await card("Mirela", { description: "{{char}} keeps bees.", first_mes: "Hello, {{user}}." }));
+  await Bun.write(`${dir}/Tomas.png`, await card("Tomas", { description: "{{char}} sells honey." }));
+  writeFileSync(`${dir}/Hive.json`, JSON.stringify({ spec: "chrysalis_group", name: "Hive", members: ["Mirela", "Tomas"] }));
+  await (await page.$("input#cast-file"))!.uploadFile(`${dir}/Mirela.png`, `${dir}/Tomas.png`, `${dir}/Hive.json`);
+  await page.waitForFunction(() => document.querySelectorAll("#conversations .cast-row").length === 4);
+  const zones = () => page.evaluate(() => ["#side-pins", "#side-list", "#side-shelf"].map((z) => [...document.querySelectorAll(`${z} .cast-row .cast-name`)].map((n) => n.textContent)));
+  const order = (await zones())[1];
+  expect([await rowMenu(page, "Mirela"), await rowMenu(page, "Hive"), await rowMenu(page, "Chrysalis")]).toEqual([
+    ["New chat with Mirela", "Pin", "Settle", "Rename", "Fork", "Card", "Delete"], ["New chat with Hive", "Pin", "Settle", "Rename", "Fork", "Card", "Delete"], ["New chat", "Pin", "Rename", "Card"]]);
+  await openRow(page, "Tomas");
+  await send(page, "good morning mirela");
+  await openRow(page, "Hive");
+  await send(page, "a toast for the hive");
+  await page.evaluate(() => [...document.querySelectorAll("#conversations .folder")].find((f) => f.querySelector(".cast-name")!.textContent === "Hive")!.querySelector("a.conv")!
+    .dispatchEvent(new MouseEvent("contextmenu", { bubbles: true, cancelable: true, clientX: 60, clientY: 300 })));
+  await page.waitForSelector("#row-menu:not([hidden])");
+  expect(await page.$$eval("#row-menu button", (b) => b.map((x) => x.textContent))).toEqual(["New chat with Hive", "Pin", "Settle", "Rename", "Delete"]);
+  await page.keyboard.press("Escape");
+  expect((await zones())[1]).toEqual(order);
+
+  await rowMenu(page, "Tomas", "Pin");
+  expect(await zones()).toEqual([["Tomas"], order.filter((n) => n !== "Tomas"), []]);
+  await rowMenu(page, "Hive", "Settle");
+  await page.click("#side-shelf .settled-head");
+  expect(await zones()).toEqual([["Tomas"], order.filter((n) => n !== "Tomas" && n !== "Hive"), ["Hive"]]);
+  expect(await rowMenu(page, "Hive")).toEqual(["New chat with Hive", "Pin", "Un-settle", "Rename", "Fork", "Card", "Delete"]);
+  await rowMenu(page, "Hive", "Un-settle");
+  await rowMenu(page, "Tomas", "Unpin");
+  expect(await zones()).toEqual([[], order, []]);
+
+  await rowMenu(page, "Mirela", "Rename");
+  await page.waitForSelector("#conversations .cast-row input.conv-rename");
+  await page.keyboard.type("Mira");
+  await page.keyboard.press("Enter");
+  await page.waitForFunction(() => [...document.querySelectorAll("#conversations .cast-name")].some((n) => n.textContent === "Mira"));
+  expect((await zones())[1]).toEqual(order.map((n) => (n === "Mirela" ? "Mira" : n)));
+  await rowMenu(page, "Mira", "Fork");
+  await toasted(page, /^Mira 2 is a copy of Mira$/);
+  await rowMenu(page, "Hive", "Fork");
+  await toasted(page, /^Hive 2 is a copy of Hive$/);
+  expect(await castRows(page)).toEqual(["Chrysalis", "Hive", "Hive 2", "Mira", "Mira 2", "Tomas"]);
+  await openRow(page, "Hive 2");
+  await page.waitForSelector("#cast-next .talk");
+  expect(await answers(page)).toEqual(["Mira", "Tomas"]);
+
+  const kept = () => page.evaluate(() => Object.values(JSON.parse(sessionStorage.getItem("chats")!)).length);
+  expect(await kept()).toBe(2);
+  await rowMenu(page, "Hive", "Delete");
+  await toasted(page, /^Hive deleted, with 1 chat$/);
+  expect([await castRows(page), await kept()]).toEqual([["Chrysalis", "Hive 2", "Mira", "Mira 2", "Tomas"], 1]);
+  await page.click("#toast .btn");
+  await page.waitForFunction(() => [...document.querySelectorAll("#conversations .cast-name")].some((n) => n.textContent === "Hive"));
+  expect(await kept()).toBe(2);
+  await rowMenu(page, "Tomas", "Delete");
+  await toasted(page, /^Tomas deleted, with 1 chat$/);
+  expect([await castRows(page), await kept()]).toEqual([["Chrysalis", "Hive", "Hive 2", "Mira", "Mira 2"], 1]);
+  await openRow(page, "Hive");
+  await page.waitForSelector("#cast-next .talk");
+  expect(await answers(page)).toEqual(["Mira"]);
+  await page.close();
+}, 60_000);

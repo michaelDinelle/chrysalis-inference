@@ -1,7 +1,7 @@
 import { expect, test } from "bun:test";
 import { writeFileSync } from "node:fs";
 import { cardPng } from "./cast";
-import { harness, settled, card, checks, dir, fake, fill, inRow, lastStream, noteShown, open, openRow, pickVoice, png, replyText, send, sent, still, streams, voiceLog, voicePage } from "./browser-harness";
+import { harness, settled, untilIdle, card, checks, dir, fake, fill, inRow, lastStream, noteShown, open, openRow, pickVoice, png, replyText, send, sent, still, streams, voiceLog, voicePage } from "./browser-harness";
 
 harness();
 
@@ -36,7 +36,7 @@ test("a character's voice is picked and heard from their card with voice mode ne
   await page.close();
 }, 30_000);
 
-test("a reply is read aloud from its speaker button with voice mode never opened (no hello: no microphone, no speech recognition): a group's paragraphs each in their speaker's voice, without their names; the button shows it, and stops it", async () => {
+test("a reply is read aloud from its speaker button with voice mode never opened (no hello: no microphone, no speech recognition): in a group each reply in its own speaker's voice; the button shows it, and stops it", async () => {
   const page = await open();
   await Bun.write(`${dir}/Vox.png`, await card("Vox", { description: "{{char}} sings.", extensions: { chrysalis: { voice: { tts: "other-tts", name: "bob" } } } }));
   await Bun.write(`${dir}/Ada.png`, await card("Ada", { description: "{{char}} hums." }));
@@ -45,15 +45,19 @@ test("a reply is read aloud from its speaker button with voice mode never opened
   await page.waitForFunction(() => document.querySelectorAll("#conversations .cast-row").length === 4);
   await openRow(page, "Duet");
   await page.waitForSelector("#cast-next:not([hidden])");
-  await send(page, "a duet");
-  const n = voiceLog().length, button = '#thread > article[data-i="1"] [data-act="speak"]';
-  await page.click(button);
-  await page.waitForSelector(`${button}.on`);
-  await page.waitForFunction((b) => !document.querySelector(`${b}.on`), { timeout: 10_000 }, button);
+  await send(page, "Vox, a duet");
+  await page.click('#cast-next button[title="Ada answers"]');
+  await untilIdle(page);
+  expect(await page.$$eval("#thread > article.assistant .speaker", (s) => s.map((x) => x.textContent))).toEqual(["Vox", "Ada"]);
+  const n = voiceLog().length, button = '#thread > article[data-i="1"] [data-act="speak"]', hers = '#thread > article[data-i="2"] [data-act="speak"]';
+  for (const b of [button, hers]) {
+    await page.click(b);
+    await page.waitForSelector(`${b}.on`);
+    await page.waitForFunction((b) => !document.querySelector(`${b}.on`), { timeout: 10_000 }, b);
+  }
   const s = voiceLog().slice(n).find((e) => e.ev === "msg").s, mine = voiceLog().filter((e) => e.s === s);
-  expect(mine.filter((e) => e.ev === "msg").map((e) => e.type)).toEqual(["config", "config", "say", "say_end", "config", "say", "say_end"]);
   const says = mine.filter((e) => e.type === "say");
-  expect(says.map((e) => e.text)).toEqual(["*She sings.* La la.", "Hum.\n\nHum hum."]);
+  expect(says.map((e) => e.text)).toEqual(["*She sings.* La la.", "Ada goes on."]);
   expect(says.map((x) => [...new Set(mine.filter((e) => e.ev === "chunk" && e.id === x.id).map((e) => `${e.tts}/${e.voice}`))]))
     .toEqual([["other-tts/bob"], ["fake-tts/plain"]]);
   await page.click(button);

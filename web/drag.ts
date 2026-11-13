@@ -9,7 +9,7 @@ export function sidebarDrag(root: HTMLElement, at: Parts, o: Options) {
     const picked = (down.target as Element).closest<HTMLElement>("a.conv[data-key]");
     if (!picked || !down.isPrimary || down.button !== 0 || down.pointerType === "touch" || (down.target as Element).closest("button, input, [data-card]")) return;
     let row = picked;
-    const wasPinned = at.pins.contains(row), wasSettled = at.shelf.contains(row);
+    const wasPinned = !!row.closest(".pin-chats"), wasSettled = !!row.closest(".shelf-chats");
     let dragging = false, drop: Drop | undefined, done = false, ghost: HTMLElement | undefined, badge: HTMLElement | undefined, bar: HTMLElement | undefined;
     let scrolled = 0, top = 0, height = 0;
     let pins: { top: number; bottom: number; mid: number }[] = [], folders: { who: string; top: number; bottom: number }[] = [];
@@ -17,7 +17,7 @@ export function sidebarDrag(root: HTMLElement, at: Parts, o: Options) {
     const clearSelection = () => document.getSelection()?.removeAllRanges();
     const start = () => {
       if (!row.isConnected) {
-        const again = [...root.querySelectorAll<HTMLElement>("a.conv[data-key]")].find((el) => el.dataset.key === row.dataset.key && at.pins.contains(el) === wasPinned);
+        const again = [...root.querySelectorAll<HTMLElement>("a.conv[data-key]")].find((el) => el.dataset.key === row.dataset.key && !!el.closest(".pin-chats") === wasPinned);
         if (!again) return false;
         row = again;
       }
@@ -27,7 +27,7 @@ export function sidebarDrag(root: HTMLElement, at: Parts, o: Options) {
       scrolled = at.list.scrollTop;
       top = now.top;
       height = now.height;
-      pins = [...at.pins.querySelectorAll<HTMLElement>("a.conv")].filter((el) => el !== row).map((el) => { const r = el.getBoundingClientRect(); return { top: r.top, bottom: r.bottom, mid: r.top + r.height / 2 }; });
+      pins = [...at.pins.querySelectorAll<HTMLElement>(".pin-chats > a.conv")].filter((el) => el !== row).map((el) => { const r = el.getBoundingClientRect(); return { top: r.top, bottom: r.bottom, mid: r.top + r.height / 2 }; });
       folders = [...at.list.querySelectorAll<HTMLElement>(".folder[data-who]")].map((el) => { const r = el.getBoundingClientRect(); return { who: el.dataset.who!, top: r.top, bottom: r.bottom }; });
       ghost = row.cloneNode(true) as HTMLElement;
       ghost.removeAttribute("id");

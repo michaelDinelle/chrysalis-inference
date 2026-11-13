@@ -268,6 +268,7 @@ export class Speaker {
   private end = 0;
   private now?: string;
   private reading?: object;
+  private plain?: { tts?: string; voice?: string };
   private ids = 0;
   private listed: ((c: VoiceReady["catalog"] | null) => void)[] = [];
   private readied: ((r: VoiceReady | null) => void)[] = [];
@@ -297,9 +298,11 @@ export class Speaker {
     this.send({ type: "config", ...base });
     const r = await new Promise<VoiceReady | null>((ok) => this.readied.push(ok));
     let asked = "";
+    if (r) this.plain ??= { tts: r.stack.tts, voice: r.voice };
+    const own = { tts: base.stack?.tts ?? this.plain?.tts, voice: base.voice ?? this.plain?.voice };
     for (const p of parts) {
       if (this.reading !== run || !r) return;
-      const tts = p.voice?.name ? p.voice.tts ?? r.stack.tts : r.stack.tts, name = p.voice?.name ?? r.voice;
+      const tts = p.voice?.name ? p.voice.tts ?? own.tts : own.tts, name = p.voice?.name ?? own.voice;
       const want: VoiceAsk = { ...(tts ? { stack: { tts } } : {}), ...(name ? { voice: name } : {}), speed: base.speed };
       if (JSON.stringify(want) !== asked) this.send({ type: "config", ...want });
       asked = JSON.stringify(want);
