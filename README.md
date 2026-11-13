@@ -132,7 +132,7 @@ docker run -d --device /dev/kfd --device /dev/dri -p 127.0.0.1:8080:8080 -v chry
 - In a thread the tools, models, agents (Build, Plan), permissions, compaction, sub-agents, slash commands and routines
   are OpenCode's. OpenCode here is kept to Chrysalis's own models: it is started with every other provider denied, no
   other model is listed, and a turn naming one is refused. The switch under the OpenCode button allows the others,
-  past a warning, only from the computer Chrysalis runs on; a thread on one is then marked as leaving this computer.
+  past a warning, only from the computer Chrysalis runs on (`chrysalis.sh opencode outside` does the same in a terminal, and `chrysalis.sh opencode only` takes it back); a thread on one is then marked as leaving this computer.
   A thread uses one of Chrysalis's own models unless another is picked, takes text files, pictures and
   PDFs, and the thinking slider picks the model's own level. What OpenCode or a sub-agent asks is answered in a card. A
   message sent while a turn runs goes to OpenCode. Any message, yours or the reply, can be edited in place or

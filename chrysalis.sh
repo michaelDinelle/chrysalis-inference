@@ -128,7 +128,38 @@ usage: chrysalis.sh [--host 0.0.0.0]
 
   chrysalis.sh get <model>   download a model's files now (Chrysalis gets the one it loads by itself)
   chrysalis.sh link          retune the GPU's PCIe link at every boot and wake, when the board's own tuning fails
+  chrysalis.sh opencode      say whether OpenCode here is kept to Chrysalis's models (it is, until you change it)
+  chrysalis.sh opencode outside   allow models outside this computer, after a warning; takes effect at once
+  chrysalis.sh opencode only      keep OpenCode here to Chrysalis's models again
 EOF
+}
+
+opencode_models() {
+    local flag="$TLS_DIR/opencode-outside" up= answer
+    here -f -o /dev/null "$WEB_URL/" && up=1
+    case "${1:-}" in
+      "")   if { [ -n "$up" ] && here "$WEB_URL/api/threads" | grep -q '"outside":true'; } || { [ -z "$up" ] && [ -f "$flag" ]; }; then
+                echo "Models outside this computer are allowed: a thread on one sends that company your prompts, your files and what its tools read."
+                echo "chrysalis.sh opencode only keeps OpenCode here to Chrysalis's models again."
+            else
+                echo "Chrysalis only: OpenCode here runs on this computer's own models, and nothing is sent anywhere else."
+                echo "chrysalis.sh opencode outside allows the others."
+            fi ;;
+      only) if [ -n "$up" ]; then here -f -X DELETE "$WEB_URL/api/threads/outside" >/dev/null || { echo "Chrysalis did not take that" >&2; exit 1; }
+            else rm -f "$flag"; fi
+            echo "Chrysalis only: OpenCode here is kept to this computer's own models." ;;
+      outside)
+            [ -t 0 ] || { echo "run this in a terminal: it asks before it allows models outside this computer" >&2; exit 1; }
+            echo "Models outside this computer"
+            echo "A thread on one of these models sends that company your prompts, your files and whatever its tools read"
+            echo "on this computer. Chrysalis cannot take any of it back. Threads on Chrysalis's own models stay here as before."
+            read -r -p "Allow them? [y/N] " answer
+            case "$answer" in y|Y|yes) ;; *) echo "Kept to Chrysalis only."; exit 0 ;; esac
+            if [ -n "$up" ]; then here -f -X POST -H 'Content-Type: application/json' -d '{}' "$WEB_URL/api/threads/outside" >/dev/null || { echo "Chrysalis did not take that" >&2; exit 1; }
+            else mkdir -p "$TLS_DIR" && : > "$flag"; fi
+            echo "Allowed. chrysalis.sh opencode only takes it back." ;;
+      *)    usage; exit 1 ;;
+    esac
 }
 
 pick() {
@@ -453,6 +484,7 @@ case "${1:-}" in
             cd "$ROOT/web" && NODE_ENV=production CHRYSALIS_HOST=$to "$BUN" $web ;;
   gpu)      has_gpu ;;
   link)     tune_link ask ;;
+  opencode) opencode_models "${2:-}" ;;
   get)      setup; get "${@:2}" ;;
   serve)    if [ -z "$MAC" ]; then
                 ggml="$ROOT/ggml/avx2"; grep -qw avx512_vnni /proc/cpuinfo && ggml="$ROOT/ggml/avx512"

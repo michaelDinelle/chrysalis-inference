@@ -828,7 +828,7 @@ async function paintOcPop() {
       line.append(h("span", "", "Chrysalis only"), h("span", "oc-set", `set on ${host}`));
       models.push(line);
     }
-    note.append(only ? "Threads run on Chrysalis's own models, and nothing is sent anywhere else."
+    note.append(only ? `Threads run on Chrysalis's own models, and nothing is sent anywhere else.${status.here ? "" : ` Others are allowed only on ${host}: this switch in its own browser, or chrysalis.sh opencode outside in a terminal there.`}`
       : "Models outside this computer are allowed. A thread on one sends that company your prompts, your files and what its tools read.");
     models.push(note);
     if (!status.here && !only) {
