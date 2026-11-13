@@ -9,7 +9,7 @@ import { type Part, type VoiceAsk, type VoiceInfo, type VoiceReady, Speaker, Voi
 import { type Fix, applyFixes, fixedParts, readHeard } from "./heard";
 import { pointOf, shownWords, unitOf } from "./spoken";
 import { type Checkpoint, type WireCall, assistantTurn, checkpointText, noted, toolTurn, withText } from "./wire";
-import { type Block, type Span, type Version, ARTIFACTS_PROMPT, PAGE_DOC, elementById, elementSpans, idOf, artifactOf, infoOf, type Info, markSource, replay, setOpen, withAttr, withBackground,
+import { type Block, type Span, type Version, ARTIFACTS_PROMPT, PAGE_DOC, elementById, elementSpans, artifactOf, infoOf, type Info, markSource, replay, setOpen, withAttr, withBackground,
   withContent, withCopy, withOrder, withPaint, withoutElement, lineDiff } from "./artifacts";
 import { LATEX_CSS, latexToHtml } from "./latex";
 import logo from "./logo.svg";
@@ -2559,10 +2559,9 @@ function spanFor(paper: HTMLElement, el: Element, src: string): Span | undefined
   const spans = elementSpans(src), from = spans.findIndex((x) => x.tag.toLowerCase() === "svg"), tag = el.tagName.toLowerCase();
   const at = k >= 0 && from >= 0 ? spans[from + k] : undefined;
   if (at && at.tag.toLowerCase() === tag) return at;
-  const open = (x: Span) => src.slice(x.start, x.openEnd);
-  if (el.id) return spans.find((x) => new RegExp(`(?<![\\w:-])id\\s*=\\s*["']${el.id.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}["']`).test(open(x)));
+  if (el.id) return spans.find((x) => x.attrs.id === el.id);
   const geo = ["cx", "cy", "r", "rx", "ry", "x", "y", "width", "height", "d", "points", "x1", "y1", "x2", "y2"].filter((a) => el.hasAttribute(a));
-  const hits = geo.length ? spans.filter((x) => x.tag.toLowerCase() === tag && geo.every((a) => open(x).match(new RegExp(`\\s${a}\\s*=\\s*"([^"]*)"`))?.[1] === el.getAttribute(a))) : [];
+  const hits = geo.length ? spans.filter((x) => x.name === tag && geo.every((a) => x.attrs[a] === el.getAttribute(a))) : [];
   return hits.length === 1 ? hits[0] : undefined;
 }
 function editByHand(id: string, base: Version, src: string) {
@@ -2663,7 +2662,7 @@ function pagePoint(paper: HTMLElement, cx: unknown): Point | undefined {
   const host = paper.closest<HTMLElement>("[data-art]"), ver = shownVersion(paper);
   const span = typeof cx === "number" && ver ? elementSpans(ver.src)[cx] : undefined;
   if (!host || !ver || !span) return undefined;
-  return { art: host.dataset.art!, sel: `cx:${cx}`, cx: cx as number, partId: idOf(ver.src.slice(span.start, span.openEnd)), markup: ver.src.slice(span.start, span.end), tag: span.tag, paper };
+  return { art: host.dataset.art!, sel: `cx:${cx}`, cx: cx as number, partId: span.attrs.id, markup: ver.src.slice(span.start, span.end), tag: span.tag, paper };
 }
 const pagePointable = (paper: HTMLElement) => addToolbar(paper, "page");
 function editPage(paper: HTMLElement, act: string) {
@@ -2679,7 +2678,7 @@ function editPage(paper: HTMLElement, act: string) {
   }
   const src = act === "delete" ? withoutElement(ver.src, span) : act === "duplicate" ? withCopy(ver.src, span)
     : act === "up" || act === "down" ? withOrder(ver.src, span, spans, act === "down") : ver.src;
-  const at = was.partId ? elementSpans(src).findIndex((x) => idOf(src.slice(x.start, x.openEnd)) === was.partId)
+  const at = was.partId ? elementSpans(src).findIndex((x) => x.attrs.id === was.partId)
     : act === "duplicate" ? was.cx! : -1;
   pinned = undefined;
   editByHand(ver.id, ver, src);
@@ -2692,7 +2691,7 @@ function paintPage(paper: HTMLElement, cx: number) {
   if (!ver || !span) return;
   let inPicture = false;
   for (let p = span.parent; p >= 0 && !inPicture; p = spans[p].parent) inPicture = spans[p].tag.toLowerCase() === "svg";
-  const open = ver.src.slice(span.start, span.openEnd), mat = open.match(/\smaterial\s*=\s*"([^"]*)"/)?.[1];
+  const open = ver.src.slice(span.start, span.openEnd), mat = span.attrs.material;
   const entity = /^a-/i.test(span.tag) && (mat === undefined ? withAttr(open, "color", paintColor)
     : withAttr(open, "material", /(^|;)\s*color\s*:/.test(mat) ? mat.replace(/((?:^|;)\s*color\s*:)[^;]*/, `$1 ${paintColor}`) : `${mat.trim() ? `${mat.replace(/;?\s*$/, "")}; ` : ""}color: ${paintColor}`));
   editByHand(ver.id, ver, setOpen(ver.src, span, entity || (inPicture ? withPaint(open, "fill", paintColor) : withBackground(open, paintColor))));
@@ -2881,7 +2880,7 @@ function docSpans(paper: HTMLElement): { spans: Span[]; els: HTMLElement[] } {
   const els = [...paper.shadowRoot!.querySelectorAll<HTMLElement>("[data-at]")];
   const spans = els.map((el): Span => {
     const up = el.parentElement?.closest<HTMLElement>("[data-at]");
-    return { tag: el.tagName, start: Number(el.dataset.at), openEnd: Number(el.dataset.at), end: Number(el.dataset.end), parent: up ? els.indexOf(up) : -1 };
+    return { tag: el.tagName, name: el.tagName.toLowerCase(), attrs: {}, start: Number(el.dataset.at), openEnd: Number(el.dataset.at), end: Number(el.dataset.end), parent: up ? els.indexOf(up) : -1, closed: true };
   });
   return { spans, els };
 }
@@ -3634,7 +3633,7 @@ async function renderConnect() {
     item.append(h("span", "dev-name", a.name), h("code", "dev-ask-code", spaced(a.code)), deny, allow);
     asks.append(item);
   }
-  if (asking.length) asks.append(h("p", "set-note", "Allow the one whose code your device shows: one code per device, good for 10 minutes."));
+  if (asking.length) asks.append(h("p", "set-note", "Allow the one whose code your device shows: one code per device, good for 10 minutes. A device let in uses this computer through Chrysalis as you do, OpenCode and what it runs included; a computer running OpenCode gets the models alone."));
   const devs = h("div", "dev-list");
   devs.append(h("div", "set-title", "Let in"));
   if (!list.length) devs.append(h("p", "set-note", "None yet."));

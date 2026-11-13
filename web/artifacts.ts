@@ -1,3 +1,4 @@
+import { Tokenizer, TokenizerMode, type Token } from "parse5";
 
 export const ARTIFACTS_PROMPT = `You can make artifacts: pictures (SVG), web pages (HTML), diagrams (Mermaid), documents (LaTeX, Markdown) and code. Write each one in a fenced block whose info string is its kind and then a short id you choose, like \`\`\`svg panda\`\`\`. Give every part its own id, the background too: <rect id="background">, <g id="burger">, <section id="intro">. A page can load three.js or A-Frame from their usual CDN addresses and nothing else; for a 3D scene prefer A-Frame, whose entities take ids like any element: <a-box id="table">.
 
@@ -34,51 +35,48 @@ export interface Change { kind: "element" | "search" | "shape"; text: string; se
 export interface Applied { change: Change; ok: boolean; how: string }
 
 const HUNK = /<{7} SEARCH\n([\s\S]*?)\n?={7}\n([\s\S]*?)\n?>{7} REPLACE/g;
-const OPEN = /<([A-Za-z][\w:.-]*)\b((?:[^>"']|"[^"]*"|'[^']*')*?)(\/?)>/g;
-export const idOf = (attrs: string) => attrs.match(/(?<![\w:-])id\s*=\s*["']([^"']+)["']/)?.[1];
 const MARKUP = new Set(["svg", "html", "htm", "xml", "xhtml"]);
 export const isMarkup = (kind: string, src = "") => MARKUP.has(kind) || /^\s*<[!?A-Za-z]/.test(src);
 
-function elementEnd(s: string, at: number): number {
-  OPEN.lastIndex = at;
-  const m = OPEN.exec(s);
-  if (!m || m.index !== at) return -1;
-  if (m[3]) return OPEN.lastIndex;
-  const name = m[1], tags = new RegExp(`<(/?)${name.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}\\b((?:[^>"']|"[^"]*"|'[^']*')*?)(/?)>`, "g");
-  tags.lastIndex = OPEN.lastIndex;
-  for (let depth = 1, t = tags.exec(s); t; t = tags.exec(s)) {
-    if (t[3]) continue;
-    depth += t[1] ? -1 : 1;
-    if (!depth) return tags.lastIndex;
-  }
-  return -1;
+interface Tag { kind: "open" | "close" | "other"; name: string; start: number; end: number; self: boolean; attrs: Record<string, string>; at: Record<string, [number, number]> }
+const RAW: Record<string, (typeof TokenizerMode)[keyof typeof TokenizerMode]> = { script: TokenizerMode.SCRIPT_DATA, style: TokenizerMode.RAWTEXT, textarea: TokenizerMode.RCDATA, title: TokenizerMode.RCDATA };
+const VOID = new Set(["area", "base", "br", "col", "embed", "hr", "img", "input", "link", "meta", "source", "track", "wbr"]);
+function tagsOf(src: string): Tag[] {
+  const out: Tag[] = [];
+  const tag = (kind: "open" | "close") => (t: Token.TagToken) => {
+    const at = t.location!;
+    out.push({ kind, name: t.tagName, start: at.startOffset, end: at.endOffset, self: t.selfClosing || (kind === "open" && VOID.has(t.tagName)),
+      attrs: Object.fromEntries(t.attrs.map((a) => [a.name, a.value])), at: Object.fromEntries(Object.entries(at.attrs ?? {}).map(([k, v]) => [k, [v.startOffset, v.endOffset]])) });
+    if (kind === "open" && !t.selfClosing && t.tagName in RAW) {
+      tokenizer.state = RAW[t.tagName];
+      tokenizer.lastStartTagName = t.tagName;
+    }
+  };
+  const other = (t: Token.CommentToken | Token.DoctypeToken) => void out.push({ kind: "other", name: "", start: t.location!.startOffset, end: t.location!.endOffset, self: true, attrs: {}, at: {} });
+  const tokenizer = new Tokenizer({ sourceCodeLocationInfo: true }, { onStartTag: tag("open"), onEndTag: tag("close"), onComment: other, onDoctype: other,
+    onCharacter() {}, onNullCharacter() {}, onWhitespaceCharacter() {}, onEof() {} });
+  tokenizer.write(src, true);
+  return out;
 }
+const written = (src: string, t: { start: number; name: string }) => src.slice(t.start + 1, t.start + 1 + t.name.length);
 
 function closeOpen(s: string): string {
-  const stack: string[] = [];
+  const stack: Tag[] = [];
   let cut = 0;
-  for (let i = 0; ;) {
-    const lt = s.indexOf("<", i);
-    if (lt < 0) break;
-    if (s.startsWith("<!--", lt)) {
-      const e = s.indexOf("-->", lt);
-      if (e < 0) break;
-      i = cut = e + 3;
+  for (const t of tagsOf(s)) {
+    if (t.kind === "other") {
+      if (!s.slice(t.start, t.end).endsWith(s.startsWith("<!--", t.start) ? "-->" : ">")) break;
+      cut = t.end;
       continue;
     }
-    OPEN.lastIndex = lt;
-    const m = OPEN.exec(s), close = /^<\/([A-Za-z][\w:.-]*)\s*>/.exec(s.slice(lt));
-    if (close) {
-      const at = stack.lastIndexOf(close[1]);
+    if (t.kind === "close") {
+      const at = stack.findLastIndex((x) => x.name === t.name);
       if (at >= 0) stack.length = at;
-      i = cut = lt + close[0].length;
-    } else if (m && m.index === lt) {
-      if (!m[3]) stack.push(m[1]);
-      i = cut = OPEN.lastIndex;
-    } else break;
+    } else if (!t.self) stack.push(t);
+    cut = t.end;
     if (!stack.length) break;
   }
-  return s.slice(0, cut) + stack.reverse().map((t) => `</${t}>`).join("");
+  return s.slice(0, cut) + stack.reverse().map((t) => `</${written(s, t)}>`).join("");
 }
 
 export function changesOf(body: string, live = false, markup = true): Change[] {
@@ -91,39 +89,30 @@ export function changesOf(body: string, live = false, markup = true): Change[] {
   }
   const tail = body.slice(last), open = tail.indexOf("<<<<<<< SEARCH");
   rest += open >= 0 ? tail.slice(0, open) : tail;
-  for (let i = 0; markup;) {
-    OPEN.lastIndex = i;
-    const m = OPEN.exec(rest);
-    if (!m) break;
-    const end = elementEnd(rest, m.index), id = idOf(m[2]);
-    if (end < 0) {
-      if (live && id) out.push({ kind: "element", id, text: closeOpen(rest.slice(m.index)), partial: true });
+  for (const x of markup ? elementSpans(rest).filter((x) => x.parent < 0) : []) {
+    const id = x.attrs.id;
+    if (!x.closed) {
+      if (live && id) out.push({ kind: "element", id, text: closeOpen(rest.slice(x.start)), partial: true });
       break;
     }
-    out.push({ kind: id ? "element" : "shape", id, text: rest.slice(m.index, end) });
-    i = end;
+    out.push({ kind: id ? "element" : "shape", id, text: rest.slice(x.start, x.end) });
   }
   return out;
 }
 
-function byId(src: string, id: string): [number, number] | null {
-  const re = new RegExp(`<[A-Za-z][\\w:.-]*\\b(?:[^>"']|"[^"]*"|'[^']*')*?(?<![\\w:-])id\\s*=\\s*["']${id.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}["']`, "g");
-  const m = re.exec(src);
-  if (!m) return null;
-  const end = elementEnd(src, m.index);
-  return end < 0 ? null : [m.index, end];
-}
-
-function coversAll(text: string, src: string): boolean {
-  const vb = src.match(/<svg\b[^>]*\bviewBox\s*=\s*["']\s*([-\d.]+)[\s,]+([-\d.]+)[\s,]+([\d.]+)[\s,]+([\d.]+)/i), rect = text.match(/<rect\b[^>]*>/i);
-  if (!rect) return false;
-  const a = attrsOf(rect[0]), at = (k: string, v: string) => (a[k] ?? "0") === v || (a[k] ?? "") === "100%";
-  return !!vb && Number(a.x ?? 0) <= Number(vb[1]) && Number(a.y ?? 0) <= Number(vb[2]) && (at("width", vb[3]) || a.width === "100%")
-    && (at("height", vb[4]) || a.height === "100%");
-}
+const byId = (spans: Span[], id: string) => { const x = spans.find((x) => x.attrs.id === id); return x?.closed ? x : null; };
 
 const GEOMETRY = ["cx", "cy", "r", "rx", "ry", "x", "y", "x1", "y1", "x2", "y2", "width", "height", "d", "points"];
-const attrsOf = (tag: string) => Object.fromEntries([...tag.matchAll(/([\w:-]+)\s*=\s*"([^"]*)"/g)].map((a) => [a[1], a[2]]));
+const viewBox = (spans: Span[]) => spans.find((x) => x.name === "svg")?.attrs.viewbox?.match(/^\s*([-\d.]+)[\s,]+([-\d.]+)[\s,]+([\d.]+)[\s,]+([\d.]+)/);
+function coversAll(a: Record<string, string> | undefined, vb: RegExpMatchArray | null | undefined): boolean {
+  if (!a || !vb) return false;
+  const at = (k: string, v: string) => (a[k] ?? "0") === v || (a[k] ?? "") === "100%";
+  return Number(a.x ?? 0) <= Number(vb[1]) && Number(a.y ?? 0) <= Number(vb[2]) && (at("width", vb[3]) || a.width === "100%") && (at("height", vb[4]) || a.height === "100%");
+}
+function rootEnd(src: string): number {
+  const last = tagsOf(src).at(-1);
+  return last?.kind === "close" && /^(svg|body|html)$/.test(last.name) && !src.slice(last.end).trim() ? last.start : -1;
+}
 
 function looseFind(src: string, search: string): [number, number] | null {
   const want = search.split("\n").map((l) => l.trim()), lines = src.split("\n");
@@ -147,32 +136,31 @@ export function applyChanges(src: string, changes: Change[]): { src: string; app
       if (span) src = src.slice(0, span[0]) + c.text + src.slice(span[1]);
       applied.push({ change: c, ok: !!span, how: span ? (exact >= 0 ? "replaced" : "replaced, its indentation aside") : "its SEARCH text is not in it" });
     } else if (c.kind === "element") {
-      const span = byId(src, c.id!), bg = !span && coversAll(c.text, src);
-      const old = bg ? [...src.matchAll(/<rect\b(?:[^>"']|"[^"]*"|'[^']*')*>/gi)].find((m) => coversAll(m[0], src)) : undefined;
-      const back = bg && !old ? src.match(/<svg\b(?:[^>"']|"[^"]*"|'[^']*')*>/i) : null;
-      const root = span ? -1 : old ? -1 : back ? back.index! + back[0].length : src.search(/<\/(svg|body|html)\s*>\s*$/i);
-      if (span) src = src.slice(0, span[0]) + c.text + src.slice(span[1]);
-      else if (old) src = src.slice(0, old.index) + c.text + src.slice(elementEnd(src, old.index!));
+      const spans = elementSpans(src), span = byId(spans, c.id!), vb = viewBox(spans);
+      const bg = !span && coversAll(elementSpans(c.text).find((x) => x.name === "rect")?.attrs, vb);
+      const old = bg ? spans.find((x) => x.name === "rect" && coversAll(x.attrs, vb)) : undefined;
+      const back = bg && !old ? spans.find((x) => x.name === "svg") : undefined;
+      const root = span || old ? -1 : back ? back.openEnd : rootEnd(src);
+      if (span) src = src.slice(0, span.start) + c.text + src.slice(span.end);
+      else if (old) src = src.slice(0, old.start) + c.text + src.slice(old.end);
       else if (root >= 0) src = src.slice(0, root) + (back ? "\n" : "") + c.text + (back ? "" : "\n") + src.slice(root);
       applied.push({ change: c, ok: !!span || !!old || root >= 0, how: span ? `#${c.id} replaced` : old ? `#${c.id} in place of the background`
         : root >= 0 ? `#${c.id} added ${back ? "at the back" : "on top"}` : `no #${c.id} in it, and no root to add it to` });
     } else {
-      const tag = c.text.match(/^<([A-Za-z][\w:.-]*)\b[^>]*>/), want = tag ? attrsOf(tag[0]) : {};
-      const key = GEOMETRY.filter((k) => k in want);
-      const hits = tag && key.length ? [...src.matchAll(new RegExp(`<${tag[1]}\\b(?:[^>"']|"[^"]*"|'[^']*')*?/?>`, "g"))]
-        .filter((m) => { const a = attrsOf(m[0]); return key.every((k) => a[k] === want[k]); }) : [];
-      const end = hits.length === 1 ? elementEnd(src, hits[0].index!) : -1;
-      if (end >= 0) src = src.slice(0, hits[0].index) + c.text + src.slice(end);
-      applied.push({ change: c, ok: end >= 0, how: end >= 0 ? `<${tag![1]}> at the same place replaced`
-        : hits.length > 1 ? `${hits.length} <${tag?.[1]}> share its geometry` : `no <${tag?.[1] ?? "?"}> with its geometry` });
+      const first = elementSpans(c.text)[0], want = first?.attrs ?? {}, key = GEOMETRY.filter((k) => k in want);
+      const hits = first && key.length ? elementSpans(src).filter((x) => x.name === first.name && key.every((k) => x.attrs[k] === want[k])) : [];
+      const hit = hits.length === 1 && hits[0].closed ? hits[0] : undefined;
+      if (hit) src = src.slice(0, hit.start) + c.text + src.slice(hit.end);
+      applied.push({ change: c, ok: !!hit, how: hit ? `<${first.tag}> at the same place replaced`
+        : hits.length > 1 ? `${hits.length} <${first.tag}> share its geometry` : `no <${first?.tag ?? "?"}> with its geometry` });
     }
   }
   return { src, applied };
 }
 
 export function elementById(src: string, id: string): string | null {
-  const span = byId(src, id);
-  return span ? src.slice(span[0], span[1]) : null;
+  const span = byId(elementSpans(src), id);
+  return span ? src.slice(span.start, span.end) : null;
 }
 
 export interface Block { at: unknown; n: number; info: Info; text: string; live: boolean; label: string; by?: "user" }
@@ -197,31 +185,24 @@ export function replay(blocks: Block[]): Map<string, Version[]> {
   return all;
 }
 
-export interface Span { tag: string; start: number; openEnd: number; end: number; parent: number }
-const TAG = /<!--[\s\S]*?-->|<!\[CDATA\[[\s\S]*?\]\]>|<(\/?)([A-Za-z][\w:.-]*)\b((?:[^>"']|"[^"]*"|'[^']*')*?)(\/?)>/g;
-const RAW = new Set(["script", "style", "textarea", "title"]);
-const VOID = new Set(["area", "base", "br", "col", "embed", "hr", "img", "input", "link", "meta", "source", "track", "wbr"]);
+export interface Span { tag: string; name: string; attrs: Record<string, string>; start: number; openEnd: number; end: number; parent: number; closed: boolean }
 export function elementSpans(src: string): Span[] {
-  const out: Span[] = [], stack: number[] = [], re = new RegExp(TAG.source, "g");
-  for (let m = re.exec(src); m; m = re.exec(src)) {
-    if (!m[2]) continue;
-    const end = m.index + m[0].length, tag = m[2].toLowerCase();
-    if (m[1]) {
-      const at = stack.findLastIndex((k) => out[k].tag.toLowerCase() === tag);
-      if (at >= 0) { out[stack[at]].end = end; stack.length = at; }
+  const out: Span[] = [], stack: number[] = [];
+  for (const t of tagsOf(src)) {
+    if (t.kind === "other") continue;
+    if (t.kind === "close") {
+      const at = stack.findLastIndex((k) => out[k].name === t.name);
+      if (at >= 0) {
+        Object.assign(out[stack[at]], { end: t.end, closed: true });
+        stack.length = at;
+      }
       continue;
     }
-    out.push({ tag: m[2], start: m.index, openEnd: end, end, parent: stack.at(-1) ?? -1 });
-    if (m[4] || VOID.has(tag)) continue;
-    if (RAW.has(tag)) {
-      const close = src.slice(end).search(new RegExp(`</${tag}\\s*>`, "i"));
-      const at = close < 0 ? src.length : end + close;
-      out.at(-1)!.end = close < 0 ? src.length : at + src.slice(at).indexOf(">") + 1;
-      re.lastIndex = out.at(-1)!.end;
-      continue;
-    }
-    stack.push(out.length - 1);
+    out.push({ tag: written(src, t), name: t.name, attrs: t.attrs, start: t.start, openEnd: t.end, end: t.end, parent: stack.at(-1) ?? -1, closed: t.self });
+    if (!t.self) stack.push(out.length - 1);
   }
+  const open = out[stack.at(-1) ?? -1];
+  if (open && open.name in RAW) open.end = src.length;
   return out;
 }
 export const contentEnd = (src: string, s: Span) => (s.end > s.openEnd ? src.lastIndexOf("<", s.end - 1) : s.openEnd);
@@ -236,21 +217,24 @@ export function markSource(src: string): string {
   return out + src.slice(at);
 }
 
-const attrRe = (name: string) => new RegExp(`(\\s${name.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}\\s*=\\s*)("[^"]*"|'[^']*')`);
+const quoted = (value: string) => `"${value.replace(/&/g, "&amp;").replace(/"/g, "&quot;")}"`;
 export function withAttr(open: string, name: string, value: string | null): string {
-  const re = attrRe(name);
-  if (value === null) return open.replace(new RegExp(`\\s${name}\\s*=\\s*("[^"]*"|'[^']*')`), "");
-  return re.test(open) ? open.replace(re, `$1"${value}"`) : open.replace(/\s*(\/?)>$/, ` ${name}="${value}"$1>`);
+  const t = tagsOf(open)[0], at = t?.at[name.toLowerCase()];
+  if (!t) return open;
+  if (value === null) return at ? open.slice(0, at[0]).replace(/\s+$/, "") + open.slice(at[1]) : open;
+  if (at) return `${open.slice(0, at[0])}${open.slice(at[0], at[0] + name.length)}=${quoted(value)}${open.slice(at[1])}`;
+  const close = open.slice(0, t.end).endsWith("/>") ? 2 : 1;
+  return `${open.slice(0, t.end - close).replace(/\s+$/, "")} ${name}=${quoted(value)}${open.slice(t.end - close)}`;
 }
 export function withPaint(open: string, prop: string, color: string): string {
-  const style = open.match(attrRe("style"));
-  const inStyle = style && new RegExp(`(^|;)\\s*${prop}\\s*:`).test(style[2].slice(1, -1));
-  if (inStyle) return withAttr(open, "style", style![2].slice(1, -1).replace(new RegExp(`((?:^|;)\\s*${prop}\\s*:)[^;]*`), `$1 ${color}`));
-  if (attrRe(prop).test(open) || !attrRe("class").test(open)) return withAttr(open, prop, color);
-  return withAttr(open, "style", `${style ? style[2].slice(1, -1).replace(/;?\s*$/, "; ") : ""}${prop}: ${color}`);
+  const a = tagsOf(open)[0]?.attrs ?? {}, style = a.style;
+  const inStyle = style !== undefined && new RegExp(`(^|;)\\s*${prop}\\s*:`).test(style);
+  if (inStyle) return withAttr(open, "style", style.replace(new RegExp(`((?:^|;)\\s*${prop}\\s*:)[^;]*`), `$1 ${color}`));
+  if (prop in a || !("class" in a)) return withAttr(open, prop, color);
+  return withAttr(open, "style", `${style !== undefined ? style.replace(/;?\s*$/, "; ") : ""}${prop}: ${color}`);
 }
 export function withBackground(open: string, color: string): string {
-  const style = open.match(attrRe("style"))?.[2].slice(1, -1).replace(/(?:^|;)\s*background(?:-color|-image)?\s*:[^;]*/g, "").replace(/^\s*;\s*|[;\s]+$/g, "");
+  const style = tagsOf(open)[0]?.attrs.style?.replace(/(?:^|;)\s*background(?:-color|-image)?\s*:[^;]*/g, "").replace(/^\s*;\s*|[;\s]+$/g, "");
   return withAttr(open, "style", `${style ? `${style}; ` : ""}background: ${color}`);
 }
 export function withContent(src: string, s: Span, content: string): string {
@@ -262,19 +246,16 @@ export function withoutElement(src: string, s: Span): string {
   return indent && /^[ \t]*\n/.test(after) ? before.slice(0, indent.index) + after.replace(/^[ \t]*/, "") : before + after;
 }
 export function withCopy(src: string, s: Span, offset?: number): string {
-  let copy = src.slice(s.start, s.end);
-  const id = copy.match(/^<[^>]*?\bid\s*=\s*["']([^"']+)["']/)?.[1];
-  if (id) {
+  let open = src.slice(s.start, s.openEnd);
+  if (s.attrs.id) {
+    const ids = new Set(elementSpans(src).map((x) => x.attrs.id));
     let n = 2;
-    while (new RegExp(`\\bid\\s*=\\s*["']${id.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}-${n}["']`).test(src)) n++;
-    copy = copy.replace(/^(<[^>]*?\bid\s*=\s*["'])([^"']+)/, `$1$2-${n}`);
+    while (ids.has(`${s.attrs.id}-${n}`)) n++;
+    open = withAttr(open, "id", `${s.attrs.id}-${n}`);
   }
-  if (offset !== undefined) {
-    const open = copy.match(/^<(?:[^>"']|"[^"]*"|'[^']*')*>/)![0], t = open.match(attrRe("transform"))?.[2].slice(1, -1);
-    copy = withAttr(open, "transform", `translate(${offset} ${offset})${t ? ` ${t}` : ""}`) + copy.slice(open.length);
-  }
+  if (offset !== undefined) open = withAttr(open, "transform", `translate(${offset} ${offset})${s.attrs.transform ? ` ${s.attrs.transform}` : ""}`);
   const indent = src.slice(0, s.start).match(/\n([ \t]*)$/)?.[1] ?? "";
-  return src.slice(0, s.end) + `\n${indent}` + copy + src.slice(s.end);
+  return src.slice(0, s.end) + `\n${indent}` + open + src.slice(s.openEnd, s.end) + src.slice(s.end);
 }
 export function withOrder(src: string, s: Span, spans: Span[], forward: boolean): string {
   const siblings = spans.filter((x) => x.parent === s.parent), k = siblings.indexOf(s), other = siblings[k + (forward ? 1 : -1)];

@@ -15,6 +15,7 @@
     "marked": "^18.1.0",
     "mermaid": "^12.2.0",
     "multicast-dns": "7.2.5",
+    "parse5": "^8.1.1",
     "three": "0.186.1"
   },
   "devDependencies": {

@@ -1,5 +1,6 @@
 import { expect, test } from "bun:test";
 import type { Page } from "puppeteer-core";
+import { applyChanges, changesOf, elementById, elementSpans, markSource, withContent } from "./artifacts";
 import { harness, fakes, card, fill, inPage, lastStream, look, open, pageFrame, pageTool, pickColor, send, sent, shown, still, streams } from "./browser-harness";
 
 harness();
@@ -221,5 +222,29 @@ test("an artifact being written can be left for another: a tab chosen in the pan
   fakes.hurry = true;
   await page.waitForFunction((n) => document.querySelectorAll(".msg .stats").length > n, { timeout: 20_000 }, done);
   expect(await shown()).toBe("panda");
+  await page.close();
+}, 30_000);
+
+test("the parts of a page's source are the browser's own elements, in its order and nesting, whatever the source holds: a > in an attribute, tags inside a script's strings, a comment or a text box, an address with no quotes that ends in a slash, and ids quoted either way or not at all; text retyped into a part lands in that element alone, and a part replaced by its id takes its whole element with it", async () => {
+  const page = await open();
+  const read = (html: string) => page.evaluate((html) => [...new DOMParser().parseFromString(html, "text/html").querySelectorAll("[data-cx]")].map((e) =>
+    [Number(e.getAttribute("data-cx")), e.tagName.toLowerCase(), Number(e.parentElement?.closest("[data-cx]")?.getAttribute("data-cx") ?? -1), e.textContent] as const), html);
+  const cases = [
+    '<div id="box" title="1 > 0"><p id="part">old</p></div><u>after</u>',
+    '<div id="app"><script>const t = "</div><b>";</script><i id="part">old</i></div><u>after</u>',
+    '<main><!-- <b>no</b> --><i id="part">old</i></main><u>after</u>',
+    '<form><textarea><b>raw</b></textarea><input name=q><i id="part">old</i></form><u>after</u>',
+    '<a id=part href=/x/>old</a><em>after</em>',
+    "<svg viewBox='0 0 10 10'><rect id=r width=10 height=10 /><text id='part'>old</text><circle r=\"2\"/></svg><u>after</u>",
+  ];
+  for (const src of cases) {
+    const spans = elementSpans(src), k = spans.findIndex((x) => x.attrs.id === "part");
+    expect([src, (await read(markSource(src))).map((e) => e.slice(0, 3))]).toEqual([src, spans.map((x, i) => [i, x.name, x.parent])]);
+    const typed = await read(markSource(withContent(src, spans[k], "typed")));
+    expect([src, typed[k]?.[3], typed.at(-1)?.[3]]).toEqual([src, "typed", "after"]);
+  }
+  const swapped = applyChanges(cases[1], changesOf('<div id="app">new</div>')).src;
+  expect(await page.evaluate((html) => new DOMParser().parseFromString(html, "text/html").body.textContent, swapped)).toBe("newafter");
+  expect(elementById(cases[5], "r")).toBe("<rect id=r width=10 height=10 />");
   await page.close();
 }, 30_000);

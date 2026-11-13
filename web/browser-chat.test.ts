@@ -1,5 +1,5 @@
 import { expect, test } from "bun:test";
-import { harness, fakes, fill, lastStream, look, open, probes, send, shown, still } from "./browser-harness";
+import { harness, fakes, fill, lastStream, look, open, probes, send, shown, still, fake } from "./browser-harness";
 
 harness();
 
@@ -166,3 +166,12 @@ test("an HTML page runs in its sandbox and reaches nothing: its storage and cook
   expect(await frame.$eval("body", (b) => b.dataset.lock)).toBe("held");
   await page.close();
 }, 30_000);
+
+test("a page cannot leave for an address outside Chrysalis: the app refuses it where it stands, and nothing reaches that address", async () => {
+  const page = await open();
+  await page.evaluate(() => document.addEventListener("securitypolicyviolation", (e) => { document.body.dataset.refused = `${e.effectiveDirective} ${e.blockedURI}`; }));
+  await send(page, "leaving now");
+  await page.waitForFunction(() => !!document.body.dataset.refused, { timeout: 20_000 });
+  expect([await page.$eval("body", (b) => b.dataset.refused), probes]).toEqual([`frame-src ${new URL(fake.url).origin}`, 0]);
+  await page.close();
+}, 40_000);

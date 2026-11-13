@@ -90,6 +90,7 @@ export const REPLIES: Record<string, string> = {
   "script fails in the browser": "The quote on that line is never closed.",
   "snapped script": "```html\n<!DOCTYPE html>\n<html><head><title>Snapped</title></head><body>\n<p id=\"p\">before</p>\n<script>\nconst ok = 1;\nconst bad = 'rgb(1,2,3)`;\n" +
     "document.getElementById(\"p\").textContent = \"after\";\n</script>\n</body></html>\n```\n",
+  "leaving now": "```html\n<!DOCTYPE html>\n<html><head><title>Leaving</title></head><body>\n<p id=\"note\">here</p>\n<script>\nlocation.href = \"PROBE_URL/probe?left\";\n</script>\n</body></html>\n```\n\nAfter the page.\n",
   page: "```html\n<!DOCTYPE html>\n<html><head><title>Probe</title></head><body>\n<button id=\"b\" onclick=\"this.textContent = Number(this.textContent) + 1\">0</button>\n" +
     "<button id=\"lock\" onclick=\"this.requestPointerLock()\">hold</button><button id=\"full\" onclick=\"this.requestFullscreen().then(() => { document.body.dataset.full = 'yes'; }, (e) => { document.body.dataset.full = e.message; })\">fill</button>\n<pre id=\"out\">running</pre>\n<script>\nconst out = [];\n" +
     "document.addEventListener(\"pointerlockchange\", () => { document.body.dataset.lock = document.pointerLockElement ? \"held\" : \"free\"; });\n" +
@@ -184,7 +185,7 @@ const serveFake = () => Bun.serve({
 
 export let web: Bun.Subprocess<"ignore", "pipe", "inherit">, base = "", browser: Browser;
 export const dir = mkdtempSync(`${RUN}/web-`), LOG = `${dir}/mcp.log`, VOICE_LOG = `${dir}/voice.log`;
-const PAGE = REPLIES.page;
+const PAGE = REPLIES.page, LEAVING = REPLIES["leaving now"];
 export const opencode = fakeOpenCode("test-secret");
 export const home = mkdtempSync(`${RUN}/home-`);
 async function start() {
@@ -207,6 +208,7 @@ async function start() {
   }
   base = out.match(/chrysalis web: (\S+)/)![1].replace(/\/$/, "");
   REPLIES.page = PAGE.replaceAll("PROBE_URL", `http://127.0.0.1:${fake.port}`);
+  REPLIES["leaving now"] = LEAVING.replaceAll("PROBE_URL", `http://127.0.0.1:${fake.port}`);
   browser = process.env.CHROMIUM_WS ? await puppeteer.connect({ browserWSEndpoint: process.env.CHROMIUM_WS })
     : await puppeteer.launch({ executablePath: process.env.CHROMIUM ?? "/usr/bin/chromium", headless: true, args: [...CHAT_ARGS, ...BROWSER_ARGS] });
 }

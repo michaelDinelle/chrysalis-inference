@@ -965,7 +965,7 @@ if (tty) setInterval(() => {
     nextQuestion();
   }
   for (const a of LAN ? devices.waiting() : []) if (!a.allowed)
-    question(`ask ${a.code}`, `${a.name} asks to use ${a.kind === "computer" ? "this computer's Chrysalis" : "the chat"} · ${spaced(a.code)} · allow?`,
+    question(`ask ${a.code}`, `${a.name} asks to use ${a.kind === "computer" ? "this computer's Chrysalis" : "this computer through Chrysalis, as you do"} · ${spaced(a.code)} · allow?`,
       (yes) => void (yes ? devices.allow(a.code) : devices.deny(a.code)));
   const p = link.pairing;
   if (p?.state === "waiting" && p.code && !p.confirmed)
