@@ -946,8 +946,15 @@ label.set-switch { cursor: pointer; }
 .invite-none { margin: 0; padding: 10px 8px; color: var(--muted); font-size: 13px; }
 .invite-card { margin-top: 2px; padding: 9px 8px; border-top: 1px solid var(--line); border-radius: 0 0 9px 9px; color: var(--muted); }
 .invite-card .i { width: 16px; height: 16px; }
-.oc-btn { position: relative; }
-.oc-btn .dot { position: absolute; right: 3px; bottom: 3px; width: 7px; height: 7px; box-shadow: 0 0 0 2px var(--bg); }
+.act.oc-btn { display: inline-flex; gap: 8px; width: auto; padding: 0 9px 0 10px; border: 1px solid var(--line); }
+.oc-btn svg { display: block; flex: none; }
+.oc-btn .w { fill: #4b4b4b; }
+.oc-btn .b { fill: #aeaeae; }
+.oc-btn .s { fill: #eeeeee; }
+.oc-btn .oc-word { width: 78px; height: 14px; }
+.oc-btn .oc-mark { display: none; width: 11px; height: 14px; }
+.oc-btn .dot { width: 7px; height: 7px; }
+@media (max-width: 560px) { .act.oc-btn { padding: 0 8px; } .oc-btn .oc-word { display: none; } .oc-btn .oc-mark { display: block; } }
 .oc-pop { width: min(360px, calc(100vw - 24px)); }
 .oc-pop.exploring { width: min(400px, calc(100vw - 16px)); padding: 0; gap: 0; overflow: hidden; }
 .oc-title { flex: none; padding: 12px 14px 2px; color: var(--faint); font-size: 11px; font-weight: 600; letter-spacing: 0.06em; text-transform: uppercase; }

@@ -224,13 +224,16 @@ const ICONS = {
   speak: '<path d="M4 9.5h3.5L12 5.5v13l-4.5-4H4z"/><path d="M15.5 9a4 4 0 0 1 0 6M18 6.5a7.5 7.5 0 0 1 0 11"/>',
   person: '<circle cx="12" cy="8" r="4"/><path d="M4 21c1.5-4 4.5-6 8-6s6.5 2 8 6"/>',
   folder: '<path d="M3 7.5A2.5 2.5 0 0 1 5.5 5H9l2 2.5h7.5A2.5 2.5 0 0 1 21 10v6.5a2.5 2.5 0 0 1-2.5 2.5h-13A2.5 2.5 0 0 1 3 16.5z"/>',
-  opencode: '<rect x="5.5" y="3.5" width="13" height="17" rx="1"/><rect x="9.5" y="8" width="5" height="8" fill="currentColor" stroke="none"/>',
   personAdd: '<circle cx="10" cy="8" r="4"/><path d="M2.5 21c1.4-4 4.2-6 7.5-6 1.6 0 3 .5 4.3 1.3M19 14v6M16 17h6"/>',
   micOff: '<path d="M15 9.4V6a3 3 0 0 0-5.7-1.3M9 9v2a3 3 0 0 0 4.9 2.3M18.5 11a6.5 6.5 0 0 1-1 3.4M5.5 11a6.5 6.5 0 0 0 10.4 5.2M12 17.5V21M4 4l16 16"/>',
 };
 const TITLES = { copy: "Copy", edit: "Edit", trash: "Delete", tokens: "Token odds", retry: "Regenerate (a new version)", speak: "Read aloud",
   fork: "Fork: a new chat with everything before this message" };
 const icon = (name: keyof typeof ICONS) => `<svg class="i" viewBox="0 0 24 24" aria-hidden="true">${ICONS[name]}</svg>`;
+const OC_MARK = '<svg class="oc-mark" viewBox="0 0 16 20" aria-hidden="true"><path class="w" d="M12 16H4V8H12V16Z"/><path class="s" d="M12 4H4V16H12V4ZM16 20H0V0H16V20Z"/></svg>';
+const OC_WORD = '<svg class="oc-word" viewBox="0 0 234 42" aria-hidden="true"><path class="w" d="M18 30H6V18H18V30ZM48 30H36V18H48V30ZM84 24V30H66V24H84ZM108 36H96V18H108V36ZM144 30H126V18H144V30ZM168 30H156V18H168V30ZM198 30H186V18H198V30ZM234 24V30H216V24H234Z"/>'
+  + '<path class="b" d="M18 12H6V30H18V12ZM24 36H0V6H24V36ZM36 30H48V12H36V30ZM54 36H36V42H30V6H54V36ZM84 24H66V30H84V36H60V6H84V24ZM66 18H78V12H66V18ZM108 12H96V36H90V6H108V12ZM114 36H108V12H114V36Z"/>'
+  + '<path class="s" d="M144 12H126V30H144V36H120V6H144V12ZM168 12H156V30H168V12ZM174 36H150V6H174V36ZM198 12H186V30H198V12ZM204 36H180V6H198V0H204V36ZM216 12V18H228V12H216ZM234 24H216V30H234V36H210V6H234V24Z"/></svg>';
 
 const $ = <T extends HTMLElement = HTMLElement>(id: string) => document.getElementById(id) as T;
 const thread = $("thread"), scroller = $("scroller"), input = $<HTMLTextAreaElement>("input"), sendBtn = $<HTMLButtonElement>("send");
@@ -784,7 +787,7 @@ function openRoutines() {
 let ocAt = "", ocShown = "", ocPick: (path: string) => void = () => {};
 function paintHarness() {
   const b = $("opencode"), on = harness.state === "on";
-  b.innerHTML = `${icon("opencode")}<span class="dot ${on ? "online" : harness.state === "off" ? "" : "failed"}"></span>`;
+  b.innerHTML = `${OC_MARK}${OC_WORD}<span class="dot ${on ? "online" : harness.state === "off" ? "" : "failed"}"></span>`;
   b.title = b.ariaLabel = on ? `OpenCode ${harness.version}: connected` : harness.state === "off" ? "OpenCode: disconnected" : "OpenCode is not installed on the computer Chrysalis runs on";
   const shown = JSON.stringify([harness.state, harness.version, dirs()]);
   if (!$("oc-pop").hidden && !ocAt && shown !== ocShown) void paintOcPop();
