@@ -904,11 +904,10 @@ label.set-switch { cursor: pointer; }
 .folder.results .conv.card { padding-left: 10px; }
 .drag-bar { position: fixed; z-index: 30; height: 2px; border-radius: 1px; background: var(--accent); pointer-events: none; }
 .drag-bar[hidden] { display: none; }
-.drag-ghost { position: fixed; z-index: 60; margin: 0 !important; box-sizing: border-box; background: var(--panel) linear-gradient(color-mix(in srgb, var(--text) 11%, transparent), color-mix(in srgb, var(--text) 11%, transparent)) !important; box-shadow: 0 10px 15px -3px rgb(0 0 0 / 0.4), 0 4px 6px -4px rgb(0 0 0 / 0.4); pointer-events: none; cursor: grabbing; }
+.drag-ghost { position: fixed !important; z-index: 60; margin: 0 !important; box-sizing: border-box; background: var(--panel) linear-gradient(color-mix(in srgb, var(--text) 11%, transparent), color-mix(in srgb, var(--text) 11%, transparent)) !important; box-shadow: 0 10px 15px -3px rgb(0 0 0 / 0.4), 0 4px 6px -4px rgb(0 0 0 / 0.4); pointer-events: none; cursor: grabbing; }
 .drag-ghost .conv-slot > :not(.conv-verb) { display: none; }
 .drag-ghost > .conv-verb { margin-left: auto; }
-.conv.lifted { opacity: 0; }
-.cast-row.lifted, .member.lifted { opacity: 0.35; }
+.conv.lifted, .cast-row.lifted, .member.lifted { opacity: 0; }
 .drag-ghost.member { display: flex; align-items: center; gap: 6px; width: auto !important; height: auto !important; padding: 3px 8px 3px 3px; border-radius: 999px; white-space: nowrap; }
 .drag-ghost.cast-row > .act, .drag-ghost.cast-row .cast-count, .drag-ghost.cast-row .i { display: none; }
 .folder[data-who] > .folder-chats { margin-left: 16px; padding-left: 4px; border-left: 1px solid var(--line); }

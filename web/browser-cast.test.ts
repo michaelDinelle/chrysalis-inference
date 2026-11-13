@@ -1,7 +1,7 @@
 import { expect, test } from "bun:test";
 import { existsSync, mkdtempSync, readFileSync, readdirSync, writeFileSync } from "node:fs";
 import type { Browser, Page } from "puppeteer-core";
-import { harness, RUN, articles, card, castRows, dir, download, inRow, lastStream, look, open, openRow, pagerOf, pickVoice, png, pngText, send, sent, shown, streams, untilIdle, voiceLog } from "./browser-harness";
+import { harness, RUN, articles, card, fresh, castRows, dir, download, inRow, lastStream, look, open, openRow, pagerOf, pickVoice, png, pngText, send, sent, shown, streams, untilIdle, voiceLog } from "./browser-harness";
 
 harness();
 
@@ -21,7 +21,9 @@ const carry = async (page: Page, rows: string, name: string, to: () => Promise<n
   await page.mouse.move(from[0] + 3, from[1] + 9, { steps: 3 });
   const [x, y] = await to();
   await page.mouse.move(x, y, { steps: 10 });
-  const verb = await page.$eval(".drag-ghost", (g) => g.querySelector(".conv-verb:not([hidden])")?.textContent ?? "");
+  const [verb, off, faded] = await page.$eval(".drag-ghost", (g, y) => { const r = g.getBoundingClientRect(), lifted = document.querySelector<HTMLElement>("#conversations .lifted");
+    return [g.querySelector(".conv-verb:not([hidden])")?.textContent ?? "", Math.abs(r.y + r.height / 2 - y), lifted ? getComputedStyle(lifted).opacity : ""] as const; }, y);
+  expect([off < 16, faded]).toEqual([true, "0"]);
   await page.mouse.up();
   await page.evaluate(() => new Promise((done) => setTimeout(done)));
   return verb;
@@ -492,13 +494,18 @@ test("every row has the same menu: a character, a group and a folder are pinned,
   await page.close();
 }, 60_000);
 
-test("people are dragged like chats: a character onto another makes a group of the two, onto a group joins it, onto the open chat joins that; a member dragged out of a group's row leaves it, the last pair splits when the group has no chats and stays when it has; a chat dragged onto a group is that group's", async () => {
+test("people are dragged like chats: a character onto another makes a group of the two, onto a group joins it, onto the open chat joins that, or makes a plain chat theirs; a member dragged out of a group's row leaves it, the last pair splits when the group has no chats and stays when it has; a chat dragged onto a group is that group's", async () => {
   const page = await open();
   for (const [n, d] of [["Mirela", "keeps bees"], ["Tomas", "sells honey"], ["Ida", "paints hives"]]) await Bun.write(`${dir}/${n}.png`, await card(n, { description: `{{char}} ${d}.` }));
   await (await page.$("input#cast-file"))!.uploadFile(`${dir}/Mirela.png`, `${dir}/Tomas.png`, `${dir}/Ida.png`);
   await page.waitForFunction(() => document.querySelectorAll("#conversations .cast-row").length === 4);
   const people = '#conversations .cast-row[data-person]', member = "#conversations .member";
   const inside = () => page.$$eval("#conversations .folder", (f) => Object.fromEntries(f.filter((x) => x.querySelector(".members")).map((x) => [x.querySelector(".cast-name")!.textContent, [...x.querySelectorAll(".member")].map((m) => (m as HTMLElement).title.replace("'s card", ""))])));
+  const onChat = () => page.$eval("#thread", (t) => { const r = t.getBoundingClientRect(); return [r.x + r.width / 2, r.y + 200]; });
+  await fresh(page);
+  expect(await carry(page, people, "Ida", onChat)).toBe("Ida's chat");
+  await page.waitForFunction(() => (document.querySelector("#input") as HTMLTextAreaElement).placeholder === "Message Ida");
+  expect(await carry(page, people, "Ida", onChat)).toBe("");
   expect(await carry(page, people, "Tomas", rowAt(page, "Mirela"))).toBe("Group with Mirela");
   await page.waitForFunction(() => !!document.querySelector("#conversations .members"));
   expect([await castRows(page), await inside()]).toEqual([["Chrysalis", "Ida", "Mirela", "Mirela and Tomas", "Tomas"], { "Mirela and Tomas": ["Mirela", "Tomas"] }]);

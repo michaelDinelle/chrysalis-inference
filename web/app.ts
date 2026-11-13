@@ -4124,7 +4124,7 @@ const dropVerb = (row: HTMLElement, drop: Drop): string | null => {
       if (!people.has(person)) return null;
       return g ? (g.members.includes(person) ? null : `Join ${nameOf(g.id)}`) : people.get(drop.who)?.kind === "character" && drop.who !== person ? `Group with ${nameOf(drop.who)}` : null;
     }
-    if (drop.kind === "chat") return people.has(person) && folderOf(conv) && !castOf(conv).members.some((m) => m.id === person) ? "Join this chat" : null;
+    if (drop.kind === "chat") return !people.has(person) || running() || castOf(conv).members.some((m) => m.id === person) ? null : folderOf(conv) ? "Join this chat" : `${nameOf(person)}'s chat`;
     return drop.kind === "pin" ? (pinned ? "" : "Pin") : drop.kind === "unpin" ? "Unpin" : drop.kind === "settle" ? (settled ? "" : "Settle") : drop.kind === "active" ? "Un-settle" : null;
   }
   const c = chatAt(row), isPinned = !!c && kept("pinned").includes(keyOf(c));
