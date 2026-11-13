@@ -1,4 +1,4 @@
-import { existsSync, rmSync, statSync, writeFileSync } from "node:fs";
+import { existsSync, rmSync, statSync, writeFileSync, readFileSync } from "node:fs";
 import { homedir, hostname } from "node:os";
 import { createInterface } from "node:readline";
 import type { BunPlugin, Server, Subprocess } from "bun";
@@ -530,7 +530,7 @@ const serve = (hostname: string, port: number) => Bun.serve<VoiceSocket>({
     "/chrysalis.mobileconfig": { GET: open(() => authority((a) => appleProfile(a), "application/x-apple-aspen-config", "chrysalis.mobileconfig")) },
     "/chrysalis-ca.crt": { GET: open(() => authority((a) => a.ca, "application/octet-stream", "chrysalis-ca.crt")) },
     "/chrysalis-ca-firefox.crt": { GET: open(() => authority((a) => a.caDer, "application/x-x509-ca-cert")) },
-    "/opencode": { GET: open((req) => new Response(opencodeScript(new URL(req.url).origin, MACHINE, tls().dnsCa, fingerprint(tls().dnsCa), tls().cert, netName()),
+    "/opencode": { GET: open((req) => new Response(opencodeScript(new URL(req.url).origin, MACHINE, tls().dnsCa, fingerprint(tls().dnsCa), tls().cert, netName(), existsSync(MODEL_FILE) ? readFileSync(MODEL_FILE, "utf8").trim() || MODELS[0] : MODELS[0]),
       { headers: { "Content-Type": "text/x-shellscript", "Cache-Control": "no-store" } })) },
     "/.well-known/opencode": { GET: open((req) => Response.json(opencodeManifest(new URL(req.url).origin, MACHINE, tls().cert, process.platform !== "darwin"))) },
     "/opencode/ask": {

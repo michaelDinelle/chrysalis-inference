@@ -17,7 +17,7 @@ const pinned = (cert: string) => {
 
 export const opencodeLine = (origin: string, cert: string) => `${pinned(cert)} ${origin}/opencode | sh`;
 
-export function opencodeScript(origin: string, name: string, ca: string, fingerprint: string, cert: string, host: string): string {
+export function opencodeScript(origin: string, name: string, ca: string, fingerprint: string, cert: string, host: string, model: string): string {
   const named = `https://${host}:${new URL(origin).port}`;
   return `#!/bin/sh
 set -e
@@ -67,8 +67,15 @@ CHRYSALIS_JOB
 fi
 opencode auth login "$origin" --method login </dev/null
 FAVORITES="\${XDG_STATE_HOME:-$HOME/.local/state}/opencode/model.json" BUN_BE_BUN=1 opencode -e '${favorites(name)}' || true
-if [ -t 1 ] && (: </dev/tty) 2>/dev/null; then exec opencode </dev/tty; fi
-echo "OpenCode here now has Chrysalis's models from ${label(name)}: run opencode in a project folder and pick one. Its other models are still there, and a session on one of those leaves this network." >&2
+here="$dir/opencode-${label(name)}"
+cat > "$here" <<CHRYSALIS_HERE
+#!/bin/sh
+NODE_EXTRA_CA_CERTS="$ca" OPENCODE_CONFIG_CONTENT='{"enabled_providers":["${providerId(name)}"],"model":"${providerId(name)}/${model}"}' exec opencode --standalone "\\$@"
+CHRYSALIS_HERE
+chmod +x "$here"
+if [ -t 1 ] && (: </dev/tty) 2>/dev/null; then "$here" </dev/tty || true; fi
+echo "OpenCode on Chrysalis's models alone, with every other provider off: $here" >&2
+echo "Plain opencode has them beside its other models, and a session on one of those leaves this network." >&2
 `;
 }
 

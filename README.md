@@ -40,7 +40,8 @@ Chrysalis beats Strata's IQ3_S on every measure on the RX 7900. On the RTX 5070 
 ## Phones and other devices
 
 <p align="center"><img src="media/phone-pairing.png" width="760" alt="A phone connecting: the connect page, the code it shows, then the chat"></p>
-<p align="center"><img src="media/connect-desktop.png" width="520" alt="Devices on the computer: the QR code and the phone's code with Allow"></p>
+<p align="center"><img src="media/opencode-panel.png" width="380" alt="The OpenCode button's panel: OpenCode connected on this computer, Chrysalis only switched on, and Devices"></p>
+<p align="center"><img src="media/connect-desktop.png" width="520" alt="Devices on the computer: the QR code and a device's code with Allow"></p>
 
 <sub>Open Devices from the OpenCode button, scan the QR code, trust the certificate once, and allow the code.</sub>
 
@@ -54,11 +55,11 @@ Start Chrysalis with `chrysalis.sh --host 0.0.0.0`. The other computer needs [Op
 
 <p align="center"><img src="media/opencode-login.png" width="760" alt="The line pasted into a terminal: it shows a code to allow, then Connected"></p>
 
-<sub>Paste it into a terminal and allow the code.</sub>
+<sub>Paste it into a terminal and allow the code. OpenCode opens.</sub>
 
-<p align="center"><img src="media/opencode-models.png" width="440" alt="OpenCode's model picker: Qwen3.8 27B and Qwen3.8 Flash-Next, both Chrysalis, under Favorites at the top"> <img src="media/opencode-coding.png" width="440" alt="OpenCode writing and running fib.py on Qwen3.8 Flash-Next, in Chrysalis"></p>
+<p align="center"><img src="media/opencode-open.png" width="440" alt="OpenCode opened by the line: Build on Qwen3.8 Flash-Next, Chrysalis"> <img src="media/opencode-coding.png" width="440" alt="OpenCode writing and running fib.py on Qwen3.8 Flash-Next, in Chrysalis"></p>
 
-<sub>Press `ctrl+x m` and pick a model.</sub>
+<sub>It opens on Chrysalis's models alone, with every other provider off.</sub>
 
 ## Also
 
@@ -152,6 +153,10 @@ docker run -d --device /dev/kfd --device /dev/dri -p 127.0.0.1:8080:8080 -v chry
 
 - With no browser there, as over SSH, Chrysalis's terminal prints the same line. On Windows the line runs in WSL.
 - If OpenCode is open, the line asks to close it first. The line adds both models to OpenCode's favorites.
+- The OpenCode the line opens has Chrysalis's models and no other provider, and starts on the model Chrysalis last
+  loaded. The line leaves a command that opens it that way again, `~/.config/chrysalis/opencode-<computer>`, and prints
+  it when OpenCode closes. Plain `opencode` keeps its other models beside Chrysalis's: a session on one of those leaves
+  your network.
 - OpenCode retries while Chrysalis is off. Remove under Devices takes a computer's access away.
 - The line pins this computer's key. Only allowed computers can connect. OpenCode connects over HTTPS and trusts Chrysalis's
   authority for local names.

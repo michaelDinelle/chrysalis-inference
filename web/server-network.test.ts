@@ -314,6 +314,10 @@ test("a computer with only OpenCode gets in from one pinned line and an approval
     const both = Object.keys(provided.models).map((modelID) => ({ providerID, modelID }));
     expect(provided.name).toBe("Chrysalis");
     expect(both.length).toBe(2);
+    const alone = `${home}/.config/chrysalis/opencode-${providerID.replace(/^chrysalis-/, "")}`, kept = JSON.parse(/OPENCODE_CONFIG_CONTENT='([^']+)'/.exec(readFileSync(alone, "utf8"))![1]);
+    expect([kept.enabled_providers, both.some((m) => `${m.providerID}/${m.modelID}` === kept.model)]).toEqual([[providerID], true]);
+    expect(Bun.spawnSync([alone, "run", "two words"], { env: { PATH: `${bin}:${process.env.PATH}`, HOME: home } }).exitCode).toBe(0);
+    expect(calls().at(-1)).toBe("--standalone run two words");
     expect(chosen().favorite).toEqual(both);
     const mine = { providerID: "other", modelID: "theirs" };
     writeFileSync(state, JSON.stringify({ recent: [mine], favorite: [mine, both[1]], variant: { "other/theirs": "high" } }));

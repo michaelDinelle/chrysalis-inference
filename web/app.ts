@@ -839,8 +839,8 @@ async function paintOcPop() {
     if (!status.here && PHONE) return [h("div", "invite-head oc-part", "Models"), ...models];
     const devices = row("invite-row oc-devices", "", () => { pop.hidden = true; openConnect(); });
     devices.id = "oc-devices";
-    devices.innerHTML = `${icon(status.here ? "phone" : "code")}<span class="invite-name"></span>${status.here && status.waiting ? `<span class="oc-asking">${status.waiting} asking</span>` : ""}${icon("chevron")}`;
-    devices.querySelector(".invite-name")!.textContent = status.here ? "Let a phone or another computer in" : "Use Chrysalis's models from OpenCode here";
+    devices.innerHTML = `${icon(status.here ? "phone" : "code")}<span class="invite-name"></span>${status.here && status.waiting ? `<span class="oc-asking">${status.waiting}</span>` : ""}${icon("chevron")}`;
+    devices.querySelector(".invite-name")!.textContent = !status.here ? "Use Chrysalis's models from OpenCode here" : status.waiting ? "Asking to be let in" : "Let a phone or another computer in";
     return [h("div", "invite-head oc-part", "Models"), ...models, h("div", "invite-head oc-part", status.here ? "Devices" : "OpenCode on this computer"), devices];
   };
   const head = (version = "") => h("div", "invite-head", `OpenCode ${version}${host ? ` on ${host}` : ""}`.replace(/  +/g, " "));
@@ -3642,7 +3642,7 @@ async function renderConnect() {
   if (!status.here && oc?.line) {
     if (box.dataset.key !== oc.line) {
       box.dataset.key = oc.line;
-      box.replaceChildren(openCodeRow(oc.line, `Paste this into ${/Win/.test(navigator.platform) ? "WSL, with OpenCode installed there," : "a terminal on this computer,"} then allow the code it shows on the computer Chrysalis runs on. OpenCode here then has Chrysalis's models: its files and tools stay on this computer, and only what it asks a model goes to Chrysalis. Chrysalis only covers the computer Chrysalis runs on: OpenCode here keeps the other models it has, so pick a Chrysalis one.`));
+      box.replaceChildren(openCodeRow(oc.line, `Paste this into ${/Win/.test(navigator.platform) ? "WSL, with OpenCode installed there," : "a terminal on this computer,"} then allow the code it shows on the computer Chrysalis runs on. OpenCode here then has Chrysalis's models: its files and tools stay on this computer, and only what it asks a model goes to Chrysalis. It then opens OpenCode on Chrysalis's models alone, with every other provider off, and leaves a command that opens it that way again. Plain opencode keeps its other models beside them.`));
     }
     return;
   }
@@ -3703,7 +3703,7 @@ async function renderConnect() {
   done.innerHTML = icon("check");
   done.append(`${joined} is connected.`);
   box.replaceChildren(...(joined ? [done] : []), row, ...(asking.length ? [asks] : []),
-    ...(oc?.line ? [openCodeRow(oc.line, "On another computer: connect its browser, and the OpenCode button there has this line to copy. Pasted into a terminal there, it asks with a code that appears here. OpenCode there then has Chrysalis's models, and its files and tools stay on that computer. Chrysalis only does not reach it: OpenCode there keeps the other models it has.")] : []), devs, fp);
+    ...(oc?.line ? [openCodeRow(oc.line, "On another computer: connect its browser, and the OpenCode button there has this line to copy. Pasted into a terminal there, it asks with a code that appears here. It then opens OpenCode there on Chrysalis's models alone; its files and tools stay on that computer.")] : []), devs, fp);
 }
 function openCodeRow(line: string, how: string) {
   const row = h("div", "dev-list"), button = h("button", "btn small dev-copy", "Copy");
