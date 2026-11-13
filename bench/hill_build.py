@@ -18,6 +18,8 @@ shutil.rmtree(work, ignore_errors=True)
 try:
     shutil.copytree(os.path.join(tree, "engine"), os.path.join(work, "engine"))
     shutil.copy2(os.path.join(tree, "Makefile"), work)
+    os.mkdir(os.path.join(work, "tests"))
+    shutil.copy2(os.path.join(tree, "tests/tests.mk"), os.path.join(work, "tests"))
     os.symlink(os.path.join(tree, "data"), os.path.join(work, "data"))
     t = time.monotonic()
     out = subprocess.run(["make", "-s", "-j", f"BACKEND={MACHINE_BACKEND}", "engines"], cwd=work, capture_output=True, text=True)
