@@ -6,6 +6,11 @@ before touching anything and climb by it: choose a target, profile it, change on
 on every machine with a record, and report each verdict's table. It is not optional, and no task is too small or too
 urgent for it.
 
+**No guessed time limits and no fixed sleeps.** Never wrap a job in an arbitrary `timeout`, and never wait with a fixed
+`sleep`: both either cut real work short or burn wall clock doing nothing. Run a long job in the background and act when
+it completes; when something must wait, wait on the condition itself (the GPU reads empty, a file exists, a process has
+exited).
+
 README.md shows what Chrysalis is. This file is how to change it.
 
 ## Layout
