@@ -1,5 +1,6 @@
 import { expect, test } from "bun:test";
 import { mkdirSync } from "node:fs";
+import { until } from "./server-harness";
 import { card, cards, castRows, connect, dir, harness, home, inRow, menu, open, openFolder, opencode, send, streams, work, outside } from "./browser-harness";
 
 harness();
@@ -293,7 +294,7 @@ test("a chat's row has T3 Code's menu on a right click and on a long press: Pin 
   await menu(page, "The first jar", "Unpin");
   await menu(page, "The first jar", "Settle");
   await page.waitForSelector("#conversations .settled-head[aria-expanded]");
-  expect([await page.$("#conversations .folder.pinned"), !!opencode.sessions.get(session)!.archived]).toEqual([null, true]);
+  expect([await page.$("#conversations .folder.pinned"), await until(() => !!opencode.sessions.get(session)!.archived)]).toEqual([null, true]);
   await menu(page, "weigh the second jar", "Delete");
   await page.waitForFunction(() => ![...document.querySelectorAll("#conversations .conv-title")].some((t) => t.textContent === "weigh the second jar"));
   await page.evaluate(() => document.querySelector<HTMLElement>("#conversations .settled-head[aria-expanded]")!.click());

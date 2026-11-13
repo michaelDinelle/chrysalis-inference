@@ -805,7 +805,7 @@ img.src = ${JSON.stringify(checkUrl(req))} + "?t=" + Date.now();
           return { state: "offline", build: BUILD() };
         }
       })(), net = fromNetwork(req, srv), found = devices.find(req);
-      const res = Response.json({ ...state, backend, here: !net, ...(found && devices!.stale(found.device) ? { check: true } : {}),
+      const res = Response.json({ ...state, backend, here: !net, ...(net ? { machine: MACHINE } : {}), ...(found && devices!.stale(found.device) ? { check: true } : {}),
         ...(LAN && !net ? { waiting: devices.waiting().length } : {}),
         ...(!net && (state.state === "offline" || link.name || link.pairing) ? { link: link.state() } : {}) });
       if (found) res.headers.append("Set-Cookie", keyCookie(found.key));

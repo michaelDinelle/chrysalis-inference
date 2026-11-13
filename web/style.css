@@ -957,6 +957,10 @@ label.set-switch { cursor: pointer; }
 .dot.outside { background: var(--warn); box-shadow: 0 0 0 3px color-mix(in srgb, var(--warn) 18%, transparent); }
 .oc-part { margin-top: 4px; padding-top: 10px; border-top: 1px solid var(--line); }
 .oc-only { display: flex; align-items: center; justify-content: space-between; gap: 12px; padding: 4px 8px 2px; font-size: 13.5px; cursor: pointer; }
+.oc-only.locked { justify-content: flex-start; gap: 8px; cursor: default; }
+.oc-only.locked .i { width: 15px; height: 15px; color: var(--ok); }
+.oc-set { margin-left: auto; color: var(--faint); font-size: 12px; }
+.oc-back > .i { color: var(--muted); }
 .oc-note.outside { display: flex; gap: 8px; color: var(--warn); }
 .oc-note.outside .i { width: 15px; height: 15px; margin-top: 2px; }
 .oc-devices > .i:first-child { color: var(--muted); }

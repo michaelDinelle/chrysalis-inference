@@ -63,7 +63,7 @@ interface Settings {
   artifacts?: false;
 }
 interface VoiceSettings { tts?: string; name?: string; stt?: string; speed?: number; prompt?: string }
-interface Status { state: "online" | "loading" | "offline"; build?: string; model?: string; loading?: string; progress?: number; context?: number; kv_tokens?: number; cache?: { free_kv_tokens: number };
+interface Status { state: "online" | "loading" | "offline"; machine?: string; build?: string; model?: string; loading?: string; progress?: number; context?: number; kv_tokens?: number; cache?: { free_kv_tokens: number };
   check?: boolean; here?: boolean; waiting?: number;
   backend?: Backend; link?: Linking }
 interface Linking { linked?: { name: string }; found: { name: string; fp: string }[]; refused?: string;
@@ -224,6 +224,7 @@ const ICONS = {
   speak: '<path d="M4 9.5h3.5L12 5.5v13l-4.5-4H4z"/><path d="M15.5 9a4 4 0 0 1 0 6M18 6.5a7.5 7.5 0 0 1 0 11"/>',
   person: '<circle cx="12" cy="8" r="4"/><path d="M4 21c1.5-4 4.5-6 8-6s6.5 2 8 6"/>',
   folder: '<path d="M3 7.5A2.5 2.5 0 0 1 5.5 5H9l2 2.5h7.5A2.5 2.5 0 0 1 21 10v6.5a2.5 2.5 0 0 1-2.5 2.5h-13A2.5 2.5 0 0 1 3 16.5z"/>',
+  lock: '<rect x="5" y="10.5" width="14" height="10" rx="2"/><path d="M8.5 10.5V8a3.5 3.5 0 0 1 7 0v2.5"/>',
   warn: '<path d="M12 4 2.8 19.5h18.4z"/><path d="M12 10v4.5M12 17.3v.2"/>',
   personAdd: '<circle cx="10" cy="8" r="4"/><path d="M2.5 21c1.4-4 4.2-6 7.5-6 1.6 0 3 .5 4.3 1.3M19 14v6M16 17h6"/>',
   micOff: '<path d="M15 9.4V6a3 3 0 0 0-5.7-1.3M9 9v2a3 3 0 0 0 4.9 2.3M18.5 11a6.5 6.5 0 0 1-1 3.4M5.5 11a6.5 6.5 0 0 0 10.4 5.2M12 17.5V21M4 4l16 16"/>',
@@ -605,10 +606,12 @@ function sceneFor(c: Conversation): Scene | undefined {
   const { members, group } = castOf(c), cast = [...members.map((p) => p.card.data.name.trim()), ...(c.missing ?? [])], opened = greeted(c);
   return cast.length || opened ? { cast, ...(group?.scenario ? { scenario: group.scenario } : {}), ...(group?.castName ? { name: group.castName } : {}), ...(opened ? { greeting: opened } : {}) } : undefined;
 }
+let harnessAt = 0;
 async function loadThreads() {
-  const r = await fetch("/api/threads").catch(() => null);
+  const at = harnessAt, r = await fetch("/api/threads").catch(() => null);
   if (!r?.ok) return;
   const text = await r.text();
+  if (at !== harnessAt) return;
   if (text === JSON.stringify(harness)) return;
   const before = new Map((harness.threads ?? []).map((t) => [t.id, t.idle]));
   harness = JSON.parse(text);
@@ -805,31 +808,49 @@ async function paintOcPop() {
     x.onclick = onclick;
     return x;
   };
+  const host = status.here ? "" : status.machine ?? "the computer Chrysalis runs on";
   const rest = () => {
-    const only = !harness.outside, models = h("label", "oc-only"), sw = h("button", "switch"), devices = row("invite-row oc-devices", "", () => { pop.hidden = true; openConnect(); });
-    sw.type = "button";
-    sw.id = "oc-only";
-    sw.setAttribute("role", "switch");
-    sw.setAttribute("aria-checked", String(only));
-    sw.disabled = only && !status.here;
-    sw.onclick = () => (only ? $<HTMLDialogElement>("outside-view").showModal() : void setOutside(false));
-    models.append(h("span", "", "Chrysalis only"), sw);
-    const note = h("p", only ? "oc-note" : "oc-note outside");
+    const only = !harness.outside, note = h("p", only ? "oc-note" : "oc-note outside"), models: HTMLElement[] = [];
     if (!only) note.innerHTML = icon("warn");
-    note.append(only ? `Threads run on this computer's own models, and nothing is sent anywhere else.${status.here ? "" : " Models outside it can be allowed only on the computer Chrysalis runs on."}`
+    if (status.here) {
+      const line = h("label", "oc-only"), sw = h("button", "switch");
+      sw.type = "button";
+      sw.id = "oc-only";
+      sw.setAttribute("role", "switch");
+      sw.setAttribute("aria-checked", String(only));
+      sw.onclick = () => (only ? $<HTMLDialogElement>("outside-view").showModal() : void setOutside(false));
+      line.append(h("span", "", "Chrysalis only"), sw);
+      models.push(line);
+    } else if (only) {
+      const line = h("div", "oc-only locked");
+      line.id = "oc-locked";
+      line.innerHTML = icon("lock");
+      line.append(h("span", "", "Chrysalis only"), h("span", "oc-set", `set on ${host}`));
+      models.push(line);
+    }
+    note.append(only ? "Threads run on Chrysalis's own models, and nothing is sent anywhere else."
       : "Models outside this computer are allowed. A thread on one sends that company your prompts, your files and what its tools read.");
+    models.push(note);
+    if (!status.here && !only) {
+      const back = row("invite-row oc-back", `${icon("lock")}<span class="invite-name">Back to Chrysalis only</span>`, () => void setOutside(false));
+      back.id = "oc-back";
+      models.push(back);
+    }
+    if (!status.here && PHONE) return [h("div", "invite-head oc-part", "Models"), ...models];
+    const devices = row("invite-row oc-devices", "", () => { pop.hidden = true; openConnect(); });
     devices.id = "oc-devices";
-    devices.innerHTML = `${icon("phone")}<span class="invite-name"></span>${status.here && status.waiting ? `<span class="oc-asking">${status.waiting} asking</span>` : ""}${icon("chevron")}`;
-    devices.querySelector(".invite-name")!.textContent = status.here ? "Let a phone or another computer in" : "Use Chrysalis from OpenCode on this computer";
-    return [h("div", "invite-head oc-part", "Models"), models, note, ...(!status.here && PHONE ? [] : [h("div", "invite-head oc-part", "Devices"), devices])];
+    devices.innerHTML = `${icon(status.here ? "phone" : "code")}<span class="invite-name"></span>${status.here && status.waiting ? `<span class="oc-asking">${status.waiting} asking</span>` : ""}${icon("chevron")}`;
+    devices.querySelector(".invite-name")!.textContent = status.here ? "Let a phone or another computer in" : "Use Chrysalis's models from OpenCode here";
+    return [h("div", "invite-head oc-part", "Models"), ...models, h("div", "invite-head oc-part", status.here ? "Devices" : "OpenCode on this computer"), devices];
   };
+  const head = (version = "") => h("div", "invite-head", `OpenCode ${version}${host ? ` on ${host}` : ""}`.replace(/  +/g, " "));
   if (harness.state === "absent") {
     const line = h("code", "oc-line", harness.install ?? "");
-    return void pop.replaceChildren(h("div", "invite-head", "OpenCode"), h("p", "oc-note", "OpenCode is not installed on the computer Chrysalis runs on. Install it there, then press the button again:"), line,
+    return void pop.replaceChildren(head(), h("p", "oc-note", "OpenCode is not installed on the computer Chrysalis runs on. Install it there, then press the button again:"), line,
       row("invite-card", `${icon("copy")}Copy the line`, () => void navigator.clipboard.writeText(harness.install ?? "").then(() => toast("Copied"))), ...rest());
   }
   const connect = () => { harness.wanted = true; void paintOcPop(); void ensureHarness().catch((e) => { harness.wanted = false; toast(e instanceof Error ? e.message : String(e)); void paintOcPop(); }); };
-  if (harness.state !== "on") return void pop.replaceChildren(h("div", "invite-head", "OpenCode"), ...(harness.wanted ? [h("p", "oc-note", "Starting OpenCode…")]
+  if (harness.state !== "on") return void pop.replaceChildren(head(), ...(harness.wanted ? [h("p", "oc-note", "Starting OpenCode…")]
     : [h("p", "oc-note", "Disconnected: its folders and threads are hidden, and its routines do not run."), row("invite-card", `${icon("power")}Connect`, connect)]), ...rest());
   if (ocAt) {
     const r = await fetch(`/api/threads/folders?path=${encodeURIComponent(ocAt === "~" ? "" : ocAt)}`).catch(() => null), got = r?.ok ? await r.json() : null;
@@ -908,10 +929,11 @@ async function paintOcPop() {
     return;
   }
   const n = harness.threads?.length ?? 0;
-  pop.replaceChildren(h("div", "invite-head", `OpenCode ${harness.version ?? ""}`),
-    h("p", "oc-note", `Connected on the computer Chrysalis runs on. Its folders are in the sidebar${n ? `, with ${n} thread${n > 1 ? "s" : ""}` : ""}; the add button there opens another.`),
+  pop.replaceChildren(head(harness.version),
+    h("p", "oc-note", `Connected on ${host || "this computer"}. Its folders are in the sidebar${n ? `, with ${n} thread${n > 1 ? "s" : ""}` : ""}; the add button there opens another.`),
     row("invite-card", `${icon("power")}Disconnect`, () => {
-      harness = { state: "off", wanted: false };
+      harness = { state: "off", wanted: false, outside: harness.outside };
+      harnessAt++;
       paintHarness();
       void paintOcPop();
       renderCast();
@@ -3620,7 +3642,7 @@ async function renderConnect() {
   if (!status.here && oc?.line) {
     if (box.dataset.key !== oc.line) {
       box.dataset.key = oc.line;
-      box.replaceChildren(openCodeRow(oc.line, `Paste this into ${/Win/.test(navigator.platform) ? "WSL, with OpenCode installed there," : "a terminal on this computer,"} then allow the code it shows on the computer Chrysalis runs on. OpenCode here then has Chrysalis's models: its files and tools stay on this computer, and only what it asks a model goes to Chrysalis.`));
+      box.replaceChildren(openCodeRow(oc.line, `Paste this into ${/Win/.test(navigator.platform) ? "WSL, with OpenCode installed there," : "a terminal on this computer,"} then allow the code it shows on the computer Chrysalis runs on. OpenCode here then has Chrysalis's models: its files and tools stay on this computer, and only what it asks a model goes to Chrysalis. Chrysalis only covers the computer Chrysalis runs on: OpenCode here keeps the other models it has, so pick a Chrysalis one.`));
     }
     return;
   }
@@ -3681,7 +3703,7 @@ async function renderConnect() {
   done.innerHTML = icon("check");
   done.append(`${joined} is connected.`);
   box.replaceChildren(...(joined ? [done] : []), row, ...(asking.length ? [asks] : []),
-    ...(oc?.line ? [openCodeRow(oc.line, "On another computer: connect its browser, and the OpenCode button there has this line to copy. Pasted into a terminal there, it asks with a code that appears here. OpenCode there then has Chrysalis's models; its files and tools stay on that computer, and what else it is signed in to is its own.")] : []), devs, fp);
+    ...(oc?.line ? [openCodeRow(oc.line, "On another computer: connect its browser, and the OpenCode button there has this line to copy. Pasted into a terminal there, it asks with a code that appears here. OpenCode there then has Chrysalis's models, and its files and tools stay on that computer. Chrysalis only does not reach it: OpenCode there keeps the other models it has.")] : []), devs, fp);
 }
 function openCodeRow(line: string, how: string) {
   const row = h("div", "dev-list"), button = h("button", "btn small dev-copy", "Copy");

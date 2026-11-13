@@ -36,7 +36,7 @@ test("trusting the authority, Chromium and Firefox each show their own code on t
       expect(page.url()).toBe(lan.chat);
       await page.click("#opencode");
       await page.waitForSelector("#oc-devices");
-      expect(await page.$eval("#oc-only", (b) => [b.getAttribute("aria-checked"), (b as HTMLButtonElement).disabled])).toEqual(["true", true]);
+      expect([await page.$("#oc-only"), /^Chrysalis onlyset on \S/.test(await page.$eval("#oc-locked", (e) => e.textContent ?? "")), await page.$("#oc-back")]).toEqual([null, true, null]);
       expect(await page.evaluate(() => fetch("/api/threads/outside", { method: "POST", headers: { "Content-Type": "application/json" }, body: "{}" }).then((r) => r.status))).toBe(403);
       expect(await page.evaluate(() => fetch("/api/threads").then((r) => r.json()).then((j) => j.outside))).toBe(false);
       await page.click("#oc-devices");
@@ -58,7 +58,7 @@ test("trusting the authority, Chromium and Firefox each show their own code on t
       await phone.goto(lan.chat, { waitUntil: "load" });
       await phone.waitForSelector("#app:not([aria-busy])");
       await phone.click("#opencode");
-      await phone.waitForSelector("#oc-only");
+      await phone.waitForSelector("#oc-locked");
       expect(await phone.$("#oc-devices")).toBeNull();
       await phone.close();
       await local.waitForFunction((n) => (document.querySelector("#connect-view .dev-joined")?.textContent ?? "").includes(`${n} is connected`), { timeout: 5000 }, name);

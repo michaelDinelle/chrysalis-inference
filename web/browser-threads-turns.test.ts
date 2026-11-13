@@ -1,4 +1,5 @@
 import { expect, test } from "bun:test";
+import { until } from "./server-harness";
 import { cards, castRows, connect, dir, harness, home, lastText, open, openFolder, opencode, png, send, spokenOf, streams, voicePage, work, outside } from "./browser-harness";
 
 harness();
@@ -113,14 +114,14 @@ test("a thread is OpenCode's to change: a message sent while a turn runs goes to
 
   await page.evaluate(() => [...document.querySelectorAll("#conversations .folder:not(.settled) a.conv")].find((a) => a.querySelector(".conv-title")!.textContent === "sort the first shelf")!.querySelector<HTMLElement>(".conv-settle")!.click());
   await page.waitForFunction(() => !!document.querySelector("#conversations .settled-head"));
-  expect(!!opencode.sessions.get(session)!.archived).toBe(true);
+  expect(await until(() => !!opencode.sessions.get(session)!.archived)).toBe(true);
   const other = await open();
   await other.waitForSelector("#conversations .settled-head");
   await other.click("#conversations .settled-head");
   expect(await other.$$eval("#conversations .folder.settled .conv-title", (t) => t.map((x) => x.textContent))).toContain("sort the first shelf");
   await other.evaluate(() => [...document.querySelectorAll("#conversations .folder.settled a.conv")].find((a) => a.querySelector(".conv-title")!.textContent === "sort the first shelf")!.querySelector<HTMLElement>(".conv-settle")!.click());
   await other.waitForFunction(() => ![...document.querySelectorAll("#conversations .folder.settled .conv-title")].some((t) => t.textContent === "sort the first shelf"));
-  expect(!!opencode.sessions.get(session)!.archived).toBe(false);
+  expect(await until(() => !opencode.sessions.get(session)!.archived)).toBe(true);
   for (const p of [page, other]) await p.close();
 }, 90_000);
 

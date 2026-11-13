@@ -67,6 +67,7 @@ CHRYSALIS_JOB
 fi
 opencode auth login "$origin" --method login </dev/null
 FAVORITES="\${XDG_STATE_HOME:-$HOME/.local/state}/opencode/model.json" BUN_BE_BUN=1 opencode -e '${favorites(name)}' || true
+echo "OpenCode here now has Chrysalis's models from ${label(name)}: run opencode in a project folder and pick one. Its other models are still there, and a session on one of those leaves this network." >&2
 `;
 }
 
