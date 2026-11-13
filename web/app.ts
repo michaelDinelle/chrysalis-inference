@@ -430,6 +430,7 @@ function castRow(id: string, list: Conversation[], open: boolean): HTMLElement {
     bring.innerHTML = icon("personAdd");
     bring.onclick = () => ($("cast-invite").hidden ? openInvite(bring, here && !g ? null : id) : closeInvite());
     row.classList.toggle("here", here);
+    row.classList.toggle("open", here && !(open && list.some((c) => c.id === conv.id)));
     row.append(bring);
   }
   if (g || castable(id)) row.dataset.person = id;

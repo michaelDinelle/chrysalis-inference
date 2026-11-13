@@ -925,6 +925,7 @@ label.set-switch { cursor: pointer; }
 .cast-row { position: relative; display: flex; align-items: center; gap: 10px; height: 32px; margin-top: 8px; padding: 0 10px; border-radius: 6px; color: var(--muted); }
 .folder:first-child > .cast-row { margin-top: 0; }
 .cast-row:hover { background: color-mix(in srgb, var(--text) 8%, transparent); color: var(--text); }
+.cast-row.open { background: color-mix(in srgb, var(--text) 11%, transparent); color: var(--text); }
 .cast-pic { flex: none; padding: 0; border: 0; border-radius: 50%; background: none; cursor: pointer; }
 .cast-pic { display: grid; }
 .cast-pic > .face { width: 16px; height: 16px; font-size: 8px; }

@@ -613,7 +613,7 @@ test("Chrysalis is one of them: a character dragged onto it makes a group with i
   await page.close();
 }, 60_000);
 
-test("the sidebar's add makes a new character here, with no file: their card opens with the name to type and no row yet, the row is there once something is typed, in a colour that typing does not change and the card's colour picker does, the button again closes an empty card, what is typed is theirs in their chat and after a reload, and one left wholly empty leaves nothing; there is no menu behind the button", async () => {
+test("the sidebar's add makes a new character here, with no file: their card opens with the name to type and no row yet, the row is there once something is typed, in a colour that typing does not change and the card's colour picker does, the button again closes an empty card, what is typed is theirs in their chat and after a reload, their row lit while a new chat with them is open or their open chat is folded away, and the chat's own row lit otherwise, and one left wholly empty leaves nothing; there is no menu behind the button", async () => {
   const page = await open();
   await page.click("#add-cast");
   await page.waitForSelector("#cast-sheet:not([hidden]) input.card-name");
@@ -659,9 +659,16 @@ test("the sidebar's add makes a new character here, with no file: their card ope
   }
   await page.keyboard.press("Escape");
   expect(await castRows(page)).toEqual(["Chrysalis", "Wren"]);
+  const lit = () => page.evaluate(() => [...document.querySelectorAll("#conversations .cast-row.open .cast-name, #conversations a.conv.active .conv-title")].map((x) => x.textContent));
+  expect(await lit()).toEqual(["Chrysalis"]);
   await inRow(page, "Wren", ".cast-new");
   await page.waitForFunction(() => document.querySelector("#thread > article.assistant .markdown")?.textContent?.trim() === "Tick, User.");
+  expect(await lit()).toEqual(["Wren"]);
   await send(page, "what time is it");
+  expect(await lit()).toEqual(["what time is it"]);
+  await inRow(page, "Wren", ".cast-main");
+  expect(await lit()).toEqual(["Wren"]);
+  await inRow(page, "Wren", ".cast-main");
   expect([lastStream.messages[0].content, await speakers(page)]).toEqual(["Write Wren's next reply in a fictional chat between Wren and User.\n\nWren mends clocks for User.", ["WWren", "WWren"]]);
   await page.reload({ waitUntil: "load" });
   await page.waitForFunction(() => document.querySelectorAll("#conversations .cast-row").length === 2);
