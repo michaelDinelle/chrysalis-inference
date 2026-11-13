@@ -1226,10 +1226,21 @@ function openSheet(id: string) {
   };
   const art = h("div", "card-art"), title = h("div", "card-title"), body = h("div", "card-body"), scroll = h("div", "card-scroll");
   if (g) {
-    const all = membersOf(g).slice(0, 4).map((m) => { const f = face(m.id); f.dataset.card = m.id; f.title = `${m.card.data.name}'s card`; return f; }), strips = h("div", `strips s${Math.max(all.length, 1)}`);
+    const all = membersOf(g).slice(0, 4).map((m) => {
+      const f = m.kind === "assistant" && !m.image && seaPortrait() ? cardSea!.layer : face(m.id);
+      f.dataset.card = m.id;
+      f.title = `${nameOf(m.id)}'s card`;
+      return f;
+    }), strips = h("div", `strips s${Math.max(all.length, 1)}`);
     strips.append(...(all.length ? all : [face(id)]));
     art.append(strips);
+    if (all.includes(cardSea?.layer as HTMLElement)) {
+      scroll.addEventListener("scroll", () => cardSea!.ocean.place(), { passive: true });
+      requestAnimationFrame(() => cardSea!.ocean.place());
+    }
   } else if (person!.kind === "assistant" && !person!.image && seaPortrait()) {
+    delete cardSea!.layer.dataset.card;
+    cardSea!.layer.title = "";
     art.append(cardSea!.layer);
     scroll.addEventListener("scroll", () => cardSea!.ocean.place(), { passive: true });
   } else {

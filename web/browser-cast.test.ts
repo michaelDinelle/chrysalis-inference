@@ -551,7 +551,7 @@ test("people are dragged like chats: a character onto another makes a group of t
   await page.close();
 }, 60_000);
 
-test("Chrysalis is one of them: a character dragged onto it makes a group with it, where it answers when named, as itself and under its own face; a chat with Chrysalis that has been written in becomes a group when someone is brought in; deleted from its menu, Chrysalis goes with its chats and out of its groups, Undo brings it all back, and with it gone the next plain chat written brings its row back", async () => {
+test("Chrysalis is one of them: a character dragged onto it makes a group with it, where it answers when named, as itself and under its own face, its picture in the group's card the moving one its own card has; a chat with Chrysalis that has been written in becomes a group when someone is brought in; deleted from its menu, Chrysalis goes with its chats and out of its groups, Undo brings it all back, and with it gone the next plain chat written brings its row back", async () => {
   const page = await open();
   await Bun.write(`${dir}/Mirela.png`, await card("Mirela", { description: "{{char}} keeps bees." }));
   await (await page.$("input#cast-file"))!.uploadFile(`${dir}/Mirela.png`);
@@ -562,6 +562,13 @@ test("Chrysalis is one of them: a character dragged onto it makes a group with i
   await openRow(page, "Chrysalis and Mirela");
   await page.waitForSelector("#cast-next .talk");
   expect(await answers(page)).toEqual(["Chrysalis", "Mirela"]);
+  await inRow(page, "Chrysalis", ".cast-pic");
+  await page.waitForSelector("#cast-sheet:not([hidden]) .card-art > :first-child");
+  const own = await page.$eval("#cast-sheet .card-art > :first-child", (e) => e.className);
+  await rowMenu(page, "Chrysalis and Mirela", "Card");
+  await page.waitForSelector("#cast-sheet:not([hidden]) .strips");
+  expect([own, await page.$eval("#cast-sheet .strips > :first-child", (e) => e.className)]).toEqual(["card-sea", "card-sea"]);
+  await page.keyboard.press("Escape");
   await send(page, "Mirela, a toast for the hive");
   await send(page, "and you, Chrysalis?");
   expect([await speakers(page), lastStream.messages.at(-1).content, /## Chrysalis/.test(lastStream.messages[0].content), /Mirela keeps bees\./.test(lastStream.messages[0].content)])

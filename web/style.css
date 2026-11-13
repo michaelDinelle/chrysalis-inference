@@ -1150,6 +1150,8 @@ img.card-portrait { object-fit: cover; object-position: 50% 0; }
 .card-sea { overflow: hidden; }
 .card-sea > .ocean { position: absolute; touch-action: manipulation; }
 .card-sea-room { position: absolute; inset: 11% 0 43%; pointer-events: none; }
+.strips > .card-sea { position: relative; background: var(--bg); }
+.strips > .card-sea .card-sea-room { inset: 10% 0; }
 .card-art:has(> .card-sea) .card-scrim { background: linear-gradient(to bottom, transparent, var(--raised) 85%); }
 .card-art:has(> .card-sea) .card-name { color: var(--text); text-shadow: none; }
 .cast-sheet:has(.card-sea) .card-float { background: color-mix(in srgb, var(--raised) 70%, transparent); color: var(--muted); }
