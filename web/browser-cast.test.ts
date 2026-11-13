@@ -153,7 +153,7 @@ test("a card is saved from its Download card button, named for them and as it is
   await page.close();
 }, 30_000);
 
-test("the conversations are folders, Chrysalis's and each character's: a folder opened stays open while another's chat is, a closed one says how many chats it holds, and both stay as left after a reload", async () => {
+test("the conversations are folders, Chrysalis's and each character's: a click on a row starts a chat with them, and folds or unfolds the row when the open chat is already theirs; a folder opened stays open while another's chat is, a closed one says how many chats it holds, and both stay as left after a reload", async () => {
   const page = await open();
   await send(page, "one for chrysalis");
   await Bun.write(`${dir}/Mirela.png`, await card("Mirela", { description: "{{char}} keeps bees.", first_mes: "Hello, {{user}}." }));
@@ -164,9 +164,13 @@ test("the conversations are folders, Chrysalis's and each character's: a folder 
     x.classList.contains("open") ? `open: ${x.querySelectorAll(".conv").length}` : `closed: ${x.querySelector(".cast-count")?.textContent}`]));
   expect(await folders()).toEqual([["Mirela", "open: 1"], ["Chrysalis", "open: 1"]]);
   await openRow(page, "Chrysalis");
+  expect([await folders(), await page.$eval("#input", (e) => (e as HTMLTextAreaElement).placeholder), await page.$$eval("#thread > article", (a) => a.length)])
+    .toEqual([[["Mirela", "open: 1"], ["Chrysalis", "open: 1"]], "Message Chrysalis", 0]);
+  await openRow(page, "Chrysalis");
   expect(await folders()).toEqual([["Mirela", "open: 1"], ["Chrysalis", "closed: 1"]]);
   await openRow(page, "Chrysalis");
   await page.click("#conversations .folder:first-child .conv");
+  await page.waitForFunction(() => document.querySelectorAll("#thread > article").length > 1 && (document.querySelector("#input") as HTMLTextAreaElement).placeholder === "Message Mirela");
   expect(await folders()).toEqual([["Mirela", "open: 1"], ["Chrysalis", "open: 1"]]);
   await openRow(page, "Mirela");
   await page.reload({ waitUntil: "load" });
@@ -505,7 +509,7 @@ test("every row has its new-chat button in sight, and the people picker's only w
   await page.close();
 }, 60_000);
 
-test("people are dragged like chats: a character onto another makes a group of the two, in the list where it was dropped, or opens the one they already have, onto a group joins it, onto the open chat joins that, or makes a plain chat theirs; a face dragged out of a group's picture leaves it, the last pair splits when the group has no chats and stays when it has; a chat dragged onto a group is that group's", async () => {
+test("people are dragged like chats: a character onto another makes a group of the two, in the list where it was dropped, or opens the one they already have, onto a group joins it, onto the open chat joins that, or makes a plain chat theirs; a face dragged out of a group's picture leaves it, the last pair splits when the group has no chats and stays when it has; a chat dragged onto a group is that group's; a press that moves a little and lets go where nothing can be dropped is a click", async () => {
   const page = await open();
   for (const [n, d] of [["Mirela", "keeps bees"], ["Tomas", "sells honey"], ["Ida", "paints hives"]]) await Bun.write(`${dir}/${n}.png`, await card(n, { description: `{{char}} ${d}.` }));
   await (await page.$("input#cast-file"))!.uploadFile(`${dir}/Mirela.png`, `${dir}/Tomas.png`, `${dir}/Ida.png`);
@@ -555,6 +559,12 @@ test("people are dragged like chats: a character onto another makes a group of t
   await page.waitForFunction(() => document.querySelectorAll("#conversations .cast-pic .mosaic").length === 1);
   expect(await castRows(page)).toEqual(["Chrysalis", "Ida", "Mirela", "Mirela and Ida", "Tomas"]);
   await openRow(page, "Tomas");
+  const [mx, my] = await rowAt(page, "Mirela")();
+  await page.mouse.move(mx - 6, my - 6);
+  await page.mouse.down();
+  await page.mouse.move(mx, my, { steps: 3 });
+  await page.mouse.up();
+  await page.waitForFunction(() => (document.querySelector("#input") as HTMLTextAreaElement).placeholder === "Message Mirela");
   expect(await carry(page, people, "Ida", rowAt(page, "Mirela"))).toBe("Open Mirela and Ida");
   await page.waitForFunction(() => (document.querySelector("#input") as HTMLTextAreaElement).placeholder === "Message Mirela and Ida");
   expect(await castRows(page)).toEqual(["Chrysalis", "Ida", "Mirela", "Mirela and Ida", "Tomas"]);

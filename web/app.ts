@@ -414,7 +414,7 @@ function castRow(id: string, list: Conversation[], open: boolean): HTMLElement {
   }
   main.onclick = () => {
     if (renaming === id) return;
-    if (!list.length) return newChat(id);
+    if (!list.length || whoOf(conv) !== id) return newChat(id);
     unfold(id, !open);
     renderList();
   };

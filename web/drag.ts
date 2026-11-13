@@ -100,11 +100,11 @@ export function sidebarDrag(root: HTMLElement, at: Parts, o: Options) {
       drop = aim(Math.max(box.top + 1, Math.min(e.clientY, box.bottom - 1)), e.clientX);
       paint();
     };
-    const up = (e: PointerEvent) => { if (e.pointerId === down.pointerId) finish(false); };
+    const up = (e: PointerEvent) => { if (e.pointerId === down.pointerId) finish(false, e); };
     const cancel = () => finish(true);
     const key = (e: KeyboardEvent) => { if (e.code === "Escape") cancel(); };
     const stop = (e: Event) => e.preventDefault();
-    function finish(cancelled: boolean) {
+    function finish(cancelled: boolean, ev?: PointerEvent) {
       if (done) return;
       done = true;
       document.removeEventListener("pointermove", move, true);
@@ -121,6 +121,12 @@ export function sidebarDrag(root: HTMLElement, at: Parts, o: Options) {
       const to = cancelled ? undefined : drop;
       if (to) o.done(row, to);
       o.ended();
+      const under = !cancelled && !to && ev ? (document.elementFromPoint(ev.clientX, ev.clientY) as HTMLElement | null) : null;
+      if (under && same(under.closest<HTMLElement>("a.conv[data-key], [data-person]") ?? under)) {
+        document.removeEventListener("click", suppress, true);
+        (under.closest<HTMLElement>("a, button") ?? under).click();
+        document.addEventListener("click", suppress, true);
+      }
     }
     document.addEventListener("pointermove", move, { capture: true, passive: false });
     document.addEventListener("pointerup", up, true);
