@@ -314,7 +314,7 @@ test("a group is edited where it is: the invite on a character's own chat makes 
   await (await page.$("input#cast-file"))!.uploadFile(`${dir}/Mirela.png`, `${dir}/Tomas.png`, `${dir}/Ida.png`);
   await page.waitForFunction(() => document.querySelectorAll("#conversations .cast-row").length === 4);
   await page.waitForFunction(() => document.querySelector("#thread .speaker")?.textContent === "Mirela");
-  const rows = () => page.$$eval("#cast-invite .invite-row", (r) => r.map((x) => [x.querySelector(".invite-name")!.textContent, x.getAttribute("aria-pressed") === "true", (x as HTMLButtonElement).disabled]));
+  const rows = () => page.$$eval("#cast-invite .invite-row", (r) => r.map((x) => [x.querySelector(".invite-name")!.textContent, x.getAttribute("aria-pressed") === "true", (x as HTMLButtonElement).disabled]).filter(([name]) => name !== "Chrysalis"));
   const pick = (name: string) => page.evaluate((name) => [...document.querySelectorAll<HTMLElement>("#cast-invite .invite-row")]
     .find((r) => r.querySelector(".invite-name")!.textContent === name)!.click(), name);
   expect(await page.$eval("#cast-next", (b) => (b as HTMLElement).hidden)).toBe(true);
@@ -440,7 +440,7 @@ test("every row has the same menu: a character, a group and a folder are pinned,
   const zones = () => page.evaluate(() => ["#side-pins", "#side-list", "#side-shelf"].map((z) => [...document.querySelectorAll(`${z} .cast-row .cast-name`)].map((n) => n.textContent)));
   const order = (await zones())[1];
   expect([await rowMenu(page, "Mirela"), await rowMenu(page, "Hive"), await rowMenu(page, "Chrysalis")]).toEqual([
-    ["New chat with Mirela", "Pin", "Settle", "Rename", "Fork", "Card", "Delete"], ["New chat with Hive", "Pin", "Settle", "Rename", "Fork", "Card", "Delete"], ["New chat", "Pin", "Rename", "Card"]]);
+    ["New chat with Mirela", "Pin", "Settle", "Rename", "Fork", "Card", "Delete"], ["New chat with Hive", "Pin", "Settle", "Rename", "Fork", "Card", "Delete"], ["New chat", "Pin", "Settle", "Rename", "Fork", "Card", "Delete"]]);
   await openRow(page, "Tomas");
   await send(page, "good morning mirela");
   await openRow(page, "Hive");
@@ -543,5 +543,50 @@ test("people are dragged like chats: a character onto another makes a group of t
   expect(await carry(page, people, "Ida", rowAt(page, "Mirela"))).toBe("Open Mirela and Ida");
   await page.waitForFunction(() => (document.querySelector("#input") as HTMLTextAreaElement).placeholder === "Message Mirela and Ida");
   expect(await castRows(page)).toEqual(["Chrysalis", "Ida", "Mirela", "Mirela and Ida", "Tomas"]);
+  await page.close();
+}, 60_000);
+
+test("Chrysalis is one of them: a character dragged onto it makes a group with it, where it answers when named, as itself and under its own face; a chat with Chrysalis that has been written in becomes a group when someone is brought in; deleted from its menu, Chrysalis goes with its chats and out of its groups, Undo brings it all back, and with it gone the next plain chat written brings its row back", async () => {
+  const page = await open();
+  await Bun.write(`${dir}/Mirela.png`, await card("Mirela", { description: "{{char}} keeps bees." }));
+  await (await page.$("input#cast-file"))!.uploadFile(`${dir}/Mirela.png`);
+  await page.waitForFunction(() => document.querySelectorAll("#conversations .cast-row").length === 2);
+  const people = '#conversations .cast-row[data-person]';
+  expect(await carry(page, people, "Mirela", rowAt(page, "Chrysalis"))).toBe("Group with Chrysalis");
+  await page.waitForFunction(() => document.querySelectorAll("#conversations .member").length === 2);
+  await openRow(page, "Chrysalis and Mirela");
+  await page.waitForSelector("#cast-next .talk");
+  expect(await answers(page)).toEqual(["Chrysalis", "Mirela"]);
+  await send(page, "Mirela, a toast for the hive");
+  await send(page, "and you, Chrysalis?");
+  expect([await speakers(page), lastStream.messages.at(-1).content, /## Chrysalis/.test(lastStream.messages[0].content), /Mirela keeps bees\./.test(lastStream.messages[0].content)])
+    .toEqual([["Mirela", "Chrysalis"], "and you, Chrysalis?\n\n[Chrysalis next.]", true, true]);
+
+  await fresh(page);
+  await send(page, "one for chrysalis");
+  await inRow(page, "Chrysalis", ".cast-bring");
+  await page.waitForSelector("#cast-invite:not([hidden])");
+  expect(await page.$$eval("#cast-invite .invite-row", (r) => r.map((x) => [x.querySelector(".invite-name")!.textContent, x.getAttribute("aria-pressed") === "true", (x as HTMLButtonElement).disabled])))
+    .toEqual([["Chrysalis", true, true], ["Mirela", false, false]]);
+  await page.evaluate(() => [...document.querySelectorAll<HTMLElement>("#cast-invite .invite-row")].find((r) => r.querySelector(".invite-name")!.textContent === "Mirela")!.click());
+  await page.keyboard.press("Escape");
+  await page.waitForSelector("#cast-next .talk");
+  expect([await answers(page), await speakers(page), await page.$eval("#conversations a.conv.active", (a) => a.closest(".folder")!.querySelector(".cast-name")!.textContent)]).toEqual([["Chrysalis", "Mirela"], ["Chrysalis"], "Chrysalis and Mirela"]);
+
+  await fresh(page);
+  await send(page, "another for chrysalis");
+  const kept = () => page.evaluate(() => Object.values(JSON.parse(sessionStorage.getItem("chats")!)).length);
+  expect([await castRows(page), await kept()]).toEqual([["Chrysalis", "Chrysalis and Mirela", "Mirela"], 3]);
+  await rowMenu(page, "Chrysalis", "Delete");
+  await toasted(page, /^Chrysalis deleted, with 1 chat$/);
+  expect([await castRows(page), await kept(), await page.$$eval("#conversations .member", (m) => m.map((x) => (x as HTMLElement).title)), await page.$$eval("#thread > article", (a) => a.length)])
+    .toEqual([["Mirela", "Mirela"], 2, ["Mirela's card"], 0]);
+  await page.click("#toast .btn");
+  await page.waitForFunction(() => document.querySelectorAll("#conversations .member").length === 2);
+  expect([await castRows(page), await kept()]).toEqual([["Chrysalis", "Chrysalis and Mirela", "Mirela"], 3]);
+  await rowMenu(page, "Chrysalis", "Delete");
+  await toasted(page, /^Chrysalis deleted, with 1 chat$/);
+  await send(page, "is anyone there");
+  expect([await castRows(page), await speakers(page), lastStream.messages.at(-1).content]).toEqual([["Chrysalis", "Mirela", "Mirela"], ["Chrysalis"], "is anyone there"]);
   await page.close();
 }, 60_000);

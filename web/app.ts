@@ -279,6 +279,7 @@ interface Scene { cast: string[]; cards?: Card[]; group?: string; scenario?: str
 interface Harness { state: "absent" | "off" | "on"; outside?: boolean; machines?: { id: string; name: string; home: string; kind: string }[]; name?: string; version?: string; install?: string; wanted?: boolean; home?: string; models?: { id: string; name: string; provider: string; variants: string[]; straight?: string }[]; agents?: { id: string; name: string }[];
   threads?: { id: string; title: string; dir: string; updated: number; idle: number; busy: boolean; archived: boolean; job?: string; model?: string; scene?: Scene; machine?: string }[] }
 let harness: Harness = { state: "off" };
+const castable = (id: string) => !!people.get(id) && people.get(id)!.kind !== "persona";
 const folderOf = (c: Conversation) => (c.who && c.who !== CHRYSALIS && (groups.has(c.who) || people.has(c.who)) ? c.who : "");
 const DIR = "dir:", STUB = "oc-";
 const machineOf = (id?: string) => harness.machines?.find((m) => m.id === (id ?? ""));
@@ -409,7 +410,7 @@ function castRow(id: string, list: Conversation[], open: boolean): HTMLElement {
   add.onclick = () => newChat(id);
   row.append(pic, main, add);
   menuOn(row, () => menuOf(id));
-  if (g || d || people.get(id)?.kind === "character") {
+  if (g || d || castable(id)) {
     const bring = h("button", "act cast-bring"), here = whoOf(conv) === id;
     bring.type = "button";
     bring.title = bring.ariaLabel = d ? (here ? "Who works in this thread" : `A new thread in ${name} with a character`) : g ? `Who is in ${name}` : here ? "Bring someone into this chat" : `A new group with ${name} and others`;
@@ -418,7 +419,7 @@ function castRow(id: string, list: Conversation[], open: boolean): HTMLElement {
     row.classList.toggle("here", here);
     row.append(bring);
   }
-  if (g || people.get(id)?.kind === "character") row.dataset.person = id;
+  if (g || castable(id)) row.dataset.person = id;
   return row;
 }
 function pickFolder(id: string) {
@@ -455,7 +456,7 @@ function stow(c: Conversation) {
   keepChats();
   renderList();
 }
-const byName = (name: string) => [...people.values()].find((p) => p.kind === "character" && p.card.data.name.trim() === name.trim());
+const byName = (name: string) => [...people.values()].find((p) => p.kind !== "persona" && nameOf(p.id) === name.trim());
 const keepGroup = (g: Group) => { groups.set(g.id, g); void saveGroup(g); };
 function makeGroup(members: string[], more: Partial<Group> = {}): Group {
   const g: Group = { id: CAST + randomId(), members, added: Date.now(), ...more };
@@ -524,7 +525,8 @@ async function welcome(files: Iterable<File>, into: boolean): Promise<File[]> {
   return rest;
 }
 function join(ids: string[]) {
-  const c = conv, { members, group } = castOf(c), fresh = [...new Set(ids)].filter((id) => !members.some((m) => m.id === id));
+  const c = conv, { members: named, group } = castOf(c), members = named.length || !c.messages.length ? named : [people.get(CHRYSALIS)!];
+  const fresh = [...new Set(ids)].filter((id) => !members.some((m) => m.id === id));
   if (!fresh.length) return toast(`${names(ids)} ${ids.length > 1 ? "are" : "is"} in this chat already`);
   if (group) return setMembers(group, [...group.members, ...fresh], `${names(fresh)} joined ${called(group)}`);
   const was = c.who, had = new Set(groups.keys());
@@ -565,9 +567,15 @@ const doomed = new Set<string>();
 async function forget(id: string) {
   const p = people.get(id), name = nameOf(id), held = [...groups.values()].filter((g) => g.id === id || g.members.includes(id)).map((g) => ({ g, members: g.members }));
   const out = new Set([id, ...held.filter(({ g }) => g.id === id || g.members.length === 1).map(({ g }) => g.id)]);
-  const gone = [...new Set([...Object.values(chats), conv])].filter((c) => out.has(c.who ?? "")), threads = [...new Set(everyChat().filter((c) => c.thread?.id && out.has(c.who ?? "")).map((c) => c.thread!.id!))];
+  const theirs = (c: Conversation) => out.has(c.who ?? "") || (id === CHRYSALIS && whoOf(c) === CHRYSALIS);
+  const gone = [...new Set([...Object.values(chats), conv])].filter(theirs), threads = [...new Set(everyChat().filter((c) => c.thread?.id && theirs(c)).map((c) => c.thread!.id!))];
   const n = new Set([...gone.filter((c) => c.messages.length || c.thread?.id).map(keyOf), ...threads.map((t) => STUB + t)]).size;
   if (p) { people.delete(id); await dropPerson(id); }
+  if (id === CHRYSALIS) {
+    people.set(CHRYSALIS, { id: CHRYSALIS, kind: "assistant", card: { spec: "chara_card_v2", spec_version: "2.0", data: { name: "Chrysalis" } }, added: 0 });
+    setFace(people.get(CHRYSALIS)!);
+    setPref("chrysalis-gone", "1");
+  }
   for (const { g } of held) {
     if (out.has(g.id)) { groups.delete(g.id); void dropGroup(g.id); }
     else { g.members = g.members.filter((m) => m !== id); void saveGroup(g); }
@@ -577,6 +585,7 @@ async function forget(id: string) {
   renderCast();
   return { name, chats: n, undo: async () => {
     if (p) { people.set(id, p); setFace(p); await savePerson(p); }
+    if (id === CHRYSALIS) setPref("chrysalis-gone", "");
     for (const { g, members } of held) { g.members = members; keepGroup(g); }
     for (const t of threads) doomed.delete(t);
     for (const c of gone) if (c.messages.length) chats[c.id] = c;
@@ -713,7 +722,7 @@ async function openThread(sid: string): Promise<string | undefined> {
   c.thread!.dir = got.thread.dir;
   if (got.context) c.thread!.context = got.context;
   const said: Message[] = await Promise.all(got.messages.map(async ({ files, by, ...m }: Omit<Message, "files"> & { by?: string; files?: { name: string; type: string; data: string }[] }, i: number) => ({ id: randomId(), ...m,
-    ...(by && [...people.values()].find((p) => p.kind === "character" && p.card.data.name.trim() === by) ? { as: [...people.values()].find((p) => p.kind === "character" && p.card.data.name.trim() === by)!.id } : {}),
+    ...(by && byName(by) ? { as: byName(by)!.id } : {}),
     ...(files ? { files: await Promise.all(files.map((f, k) => sentFile(`${sid}-${i}-${k}`, f))) } : {}) })));
   if (got.job) {
     if (said.at(-1)?.role === "assistant") said.pop();
@@ -1099,18 +1108,19 @@ function openInvite(at: HTMLElement, from: string | null) {
 function paintInvite() {
   const box = $("cast-invite"), list = box.querySelector<HTMLElement>(".invite-list"), find = box.querySelector<HTMLInputElement>(".invite-find");
   if (box.hidden || !list || !find) return;
-  const all = [...people.values()].filter((p) => p.kind === "character").sort((a, b) => a.card.data.name.localeCompare(b.card.data.name));
+  const all = [...people.values()].filter((p) => p.kind !== "persona").sort((a, b) => nameOf(a.id).localeCompare(nameOf(b.id)));
   const from = inviteFrom, folder = !!from && from.startsWith(DIR), edited = from === null ? castOf(conv).group : groups.get(from ?? "");
-  const q = find.value.trim().toLowerCase(), members = edited ? membersOf(edited) : from === null ? castOf(conv).members : from && !folder ? [people.get(from)!] : [];
+  const plain = from === null && !folderOf(conv), q = find.value.trim().toLowerCase();
+  const members = edited ? membersOf(edited) : from === null ? (plain ? [people.get(CHRYSALIS)!] : castOf(conv).members) : from && !folder ? [people.get(from)!] : [];
   box.querySelector(".invite-head")!.textContent = folder ? `A new thread in ${nameOf(from!)} with` : edited ? `Who is in ${nameOf(edited.id)}`
-    : from === null ? (members.length ? "Bring into this chat" : whoOf(conv).startsWith(DIR) ? "Who works in this thread" : "Who this chat is with") : from ? `A new group with ${nameOf(from)} and` : "A new chat with";
+    : from === null ? (!plain || conv.messages.length ? "Bring into this chat" : whoOf(conv).startsWith(DIR) ? "Who works in this thread" : "Who this chat is with") : from ? `A new group with ${nameOf(from)} and` : "A new chat with";
   const shown = all.filter((p) => p.card.data.name.toLowerCase().includes(q));
   find.hidden = all.length < 7;
   list.replaceChildren(...shown.map((p) => {
     const inside = members.some((m) => m.id === p.id), b = h("button", "invite-row"), name = p.card.data.name;
     b.type = "button";
     b.setAttribute("aria-pressed", String(inside));
-    b.disabled = inside && (edited ? !canLeave(edited) : from !== null);
+    b.disabled = inside && (edited ? !canLeave(edited) : from !== null || plain);
     b.title = edited ? (inside ? (b.disabled ? `${name}: one of the last two in it, which has chats` : `${name}: in it (click to take out)`) : `Bring ${name} in`)
       : inside ? `${name}: this chat is theirs${from === null ? " (click for plain Chrysalis)" : ""}` : folder ? `${name} works in it, in character` : `Bring ${name} in`;
     b.append(face(p.id), h("span", "invite-name", name));
@@ -3873,7 +3883,8 @@ function found() {
 }
 const isRow = (key: string) => key === CHRYSALIS || key.startsWith(DIR) || groups.has(key) || people.has(key);
 function rowOrder(): string[] {
-  const all = [...[...people.values()].filter((p) => p.kind !== "persona").map((p) => ({ id: p.id, at: p.added })), ...[...groups.values()].map((g) => ({ id: g.id, at: g.added })), ...dirs().map((d) => ({ id: DIR + d, at: 0 }))];
+  if (pref("chrysalis-gone", "") && chatsOf(CHRYSALIS).some((c) => c.messages.length || c.thread?.id)) setPref("chrysalis-gone", "");
+  const all = [...[...people.values()].filter((p) => p.kind !== "persona" && !(p.id === CHRYSALIS && pref("chrysalis-gone", ""))).map((p) => ({ id: p.id, at: p.added })), ...[...groups.values()].map((g) => ({ id: g.id, at: g.added })), ...dirs().map((d) => ({ id: DIR + d, at: 0 }))];
   const was = kept("rows"), fresh = all.filter((x) => !was.includes(x.id)).sort((a, b) => (chatsOf(b.id)[0]?.updated ?? b.at) - (chatsOf(a.id)[0]?.updated ?? a.at)).map((x) => x.id);
   if (fresh.length) setPref("rows", JSON.stringify([...fresh, ...was]));
   const now = [...fresh, ...was];
@@ -4126,11 +4137,12 @@ const dropVerb = (row: HTMLElement, drop: Drop): string | null => {
       const g = groups.get(drop.who);
       if (!people.has(person)) return null;
       if (g) return g.members.includes(person) ? null : `Join ${nameOf(g.id)}`;
-      if (people.get(drop.who)?.kind !== "character" || drop.who === person) return null;
+      if (!castable(drop.who) || drop.who === person) return null;
       const theirs = groupOf([person, drop.who]);
       return theirs ? `Open ${nameOf(theirs.id)}` : `Group with ${nameOf(drop.who)}`;
     }
-    if (drop.kind === "chat") return !people.has(person) || running() || castOf(conv).members.some((m) => m.id === person) ? null : folderOf(conv) ? "Join this chat" : `${nameOf(person)}'s chat`;
+    if (drop.kind === "chat") return !people.has(person) || running() || castOf(conv).members.some((m) => m.id === person) || (person === CHRYSALIS && !folderOf(conv)) ? null
+      : folderOf(conv) || conv.messages.length ? "Join this chat" : `${nameOf(person)}'s chat`;
     return drop.kind === "pin" ? (pinned ? "" : "Pin") : drop.kind === "unpin" ? "Unpin" : drop.kind === "settle" ? (settled ? "" : "Settle") : drop.kind === "active" ? "Un-settle" : null;
   }
   const c = chatAt(row), isPinned = !!c && kept("pinned").includes(keyOf(c));
@@ -4198,13 +4210,13 @@ function openMenu(x: number, y: number, items: MenuItem[], head = "") {
 }
 function menuOf(at: string | Conversation, away = false): MenuItem[] {
   const c = typeof at === "string" ? undefined : at, id = c ? whoOf(c) : at as string, key = c ? keyOf(c) : id, sid = c?.thread?.id;
-  const folder = id.startsWith(DIR), mine = !c && (groups.has(id) || people.get(id)?.kind === "character"), pinned = kept("pinned").includes(key), settled = c ? away : kept("settled").includes(id);
+  const folder = id.startsWith(DIR), mine = !c && (groups.has(id) || castable(id)), pinned = kept("pinned").includes(key), settled = c ? away : kept("settled").includes(id);
   const fork = () => void fetch(`/api/threads/${sid}/fork`, { method: "POST", headers: { "Content-Type": "application/json" }, body: "{}" })
     .then(async (r) => { if (!r.ok) return toast("OpenCode did not fork that chat"); const { id } = await r.json(); await loadThreads(); location.hash = `#${STUB}${id}`; });
   const items: (MenuItem | false | undefined)[] = [
     { label: folder ? `New thread in ${nameOf(id)}` : id === CHRYSALIS ? "New chat" : `New chat with ${nameOf(id) || "Unnamed"}`, icon: "compose", run: () => newChat(id) },
     { label: pinned ? "Unpin" : "Pin", icon: "pin", run: () => (c ? pin(c, !pinned) : keepRow("pinned", id, !pinned)) },
-    (c || id !== CHRYSALIS) && { label: settled ? "Un-settle" : "Settle", icon: settled ? "retry" : "check", run: () => (c ? putAway(c, !settled) : keepRow("settled", id, !settled)) },
+    { label: settled ? "Un-settle" : "Settle", icon: settled ? "retry" : "check", run: () => (c ? putAway(c, !settled) : keepRow("settled", id, !settled)) },
     (c || !folder) && { label: "Rename", icon: "edit", run: () => { renaming = key; renderList(); } },
     (!!sid || mine) && { label: "Fork", icon: "fork", run: () => (c ? fork() : forkRow(id)) },
     !c && (folder ? { label: "Copy path", icon: "copy", run: () => void navigator.clipboard.writeText(id.slice(DIR.length)).then(() => toast("Copied")) } : { label: "Card", icon: "agent", run: () => openSheet(id) }),
