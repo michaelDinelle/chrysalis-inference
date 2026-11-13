@@ -1085,18 +1085,16 @@ function openFolders(at: HTMLElement, pick: { from: string; to: (path: string) =
   if (harness.state !== "on") void ensureHarness().then(() => paintOcPop(), (e) => { pop.hidden = true; toast(e instanceof Error ? e.message : String(e)); });
 }
 
+const unwritten = (p?: Person) => !!p && p.kind === "character" && !p.image && ![p.card.data.name, p.card.data.description, p.card.data.scenario, p.card.data.first_mes].some((t) => t?.trim());
 function newCharacter() {
+  if (unwritten(people.get(sheetOf))) return closeSheet();
   const p: Person = { id: randomId(), kind: "character", card: { spec: "chara_card_v2", spec_version: "2.0", data: { name: "", description: "" } }, added: Date.now() };
   people.set(p.id, p);
-  void savePerson(p);
-  renderCast();
   openSheet(p.id);
   $("cast-sheet").querySelector<HTMLInputElement>("input.card-name")?.focus();
 }
 function dropBlank(id: string) {
-  const p = people.get(id), d = p?.card.data;
-  if (!p || p.kind !== "character" || p.image || [d!.name, d!.description, d!.scenario, d!.first_mes].some((t) => t?.trim())) return;
-  if (chatsOf(id).length || folderOf(conv) === id || [...groups.values()].some((g) => g.members.includes(id))) return;
+  if (!unwritten(people.get(id)) || chatsOf(id).length || folderOf(conv) === id || [...groups.values()].some((g) => g.members.includes(id))) return;
   people.delete(id);
   void dropPerson(id);
   renderCast();
@@ -1130,7 +1128,7 @@ function openInvite(at: HTMLElement, from: string | null) {
 function paintInvite() {
   const box = $("cast-invite"), list = box.querySelector<HTMLElement>(".invite-list"), find = box.querySelector<HTMLInputElement>(".invite-find");
   if (box.hidden || !list || !find) return;
-  const all = [...people.values()].filter((p) => p.kind !== "persona").sort((a, b) => nameOf(a.id).localeCompare(nameOf(b.id)));
+  const all = [...people.values()].filter((p) => p.kind !== "persona" && !unwritten(p)).sort((a, b) => nameOf(a.id).localeCompare(nameOf(b.id)));
   const from = inviteFrom, folder = !!from && from.startsWith(DIR), edited = from === null ? castOf(conv).group : groups.get(from ?? "");
   const plain = from === null && !folderOf(conv), q = find.value.trim().toLowerCase();
   const members = edited ? membersOf(edited) : from === null ? (plain ? [people.get(CHRYSALIS)!] : castOf(conv).members) : from && !folder ? [people.get(from)!] : [];
@@ -1360,6 +1358,7 @@ async function cardFile(p: Person) {
 const cardName = (id: string) => `${nameOf(id) || "character"}.png`;
 function closeSheet() {
   if (menuAnchor?.closest("#cast-sheet")) voiceMenu.hidePopover();
+  if ($("cast-sheet").contains(document.activeElement)) (document.activeElement as HTMLElement).blur();
   $("cast-sheet").hidden = true;
   if (sheetFile) URL.revokeObjectURL(sheetFile.url);
   sheetFile = undefined;
@@ -1404,7 +1403,7 @@ document.addEventListener("pointerdown", (e) => {
   if (!$("cast-invite").hidden && !t.closest("#cast-invite, .cast-bring, .card-member-add, #toast")) closeInvite();
   if (!$("oc-pop").hidden && !t.closest("#oc-pop, #opencode, #toast, #outside-view")) $("oc-pop").hidden = true;
   if (!$("row-menu").hidden && !t.closest("#row-menu")) $("row-menu").hidden = true;
-  if (!$("cast-sheet").hidden && !t.closest("#cast-sheet, [data-card], #voice-menu")) closeSheet();
+  if (!$("cast-sheet").hidden && !t.closest("#cast-sheet, [data-card], #voice-menu, #add-cast")) closeSheet();
 });
 document.addEventListener("keydown", (e) => {
   if (e.key !== "Escape" || voiceMenu.matches(":popover-open")) return;
@@ -3920,7 +3919,7 @@ function found() {
 const isRow = (key: string) => key === CHRYSALIS || key.startsWith(DIR) || groups.has(key) || people.has(key);
 function rowOrder(): string[] {
   if (pref("chrysalis-gone", "") && chatsOf(CHRYSALIS).some((c) => c.messages.length || c.thread?.id)) setPref("chrysalis-gone", "");
-  const all = [...[...people.values()].filter((p) => p.kind !== "persona" && !(p.id === CHRYSALIS && pref("chrysalis-gone", ""))).map((p) => ({ id: p.id, at: p.added })), ...[...groups.values()].map((g) => ({ id: g.id, at: g.added })), ...dirs().map((d) => ({ id: DIR + d, at: 0 }))];
+  const all = [...[...people.values()].filter((p) => p.kind !== "persona" && !unwritten(p) && !(p.id === CHRYSALIS && pref("chrysalis-gone", ""))).map((p) => ({ id: p.id, at: p.added })), ...[...groups.values()].map((g) => ({ id: g.id, at: g.added })), ...dirs().map((d) => ({ id: DIR + d, at: 0 }))];
   const was = kept("rows"), fresh = all.filter((x) => !was.includes(x.id)).sort((a, b) => (chatsOf(b.id)[0]?.updated ?? b.at) - (chatsOf(a.id)[0]?.updated ?? a.at)).map((x) => x.id);
   if (fresh.length) setPref("rows", JSON.stringify([...fresh, ...was]));
   const now = [...fresh, ...was];

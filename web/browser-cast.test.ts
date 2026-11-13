@@ -602,13 +602,22 @@ test("Chrysalis is one of them: a character dragged onto it makes a group with i
   await page.close();
 }, 60_000);
 
-test("the sidebar's add makes a new character here, with no file: their card opens with the name to type, what is typed is theirs at once on their row and in their chat and after a reload, and one left wholly empty is not kept; there is no menu behind the button", async () => {
+test("the sidebar's add makes a new character here, with no file: their card opens with the name to type and no row yet, the row is there once something is typed, the button again closes an empty card, what is typed is theirs in their chat and after a reload, and one left wholly empty leaves nothing; there is no menu behind the button", async () => {
   const page = await open();
   await page.click("#add-cast");
   await page.waitForSelector("#cast-sheet:not([hidden]) input.card-name");
-  expect([await page.evaluate(() => document.activeElement === document.querySelector("#cast-sheet input.card-name")), await castRows(page), await page.$("#cast-add")]).toEqual([true, ["Chrysalis", "Unnamed"], null]);
+  const state = async () => [await page.evaluate(() => document.activeElement === document.querySelector("#cast-sheet input.card-name")), await castRows(page), await page.$eval("#cast-sheet", (s) => (s as HTMLElement).hidden)];
+  expect([await state(), await page.$("#cast-add")]).toEqual([[true, ["Chrysalis"], false], null]);
+  await page.click("#add-cast");
+  expect(await state()).toEqual([false, ["Chrysalis"], true]);
+  await page.click("#add-cast");
+  await page.waitForSelector("#cast-sheet:not([hidden]) input.card-name");
+  await page.keyboard.type("W");
+  expect(await state()).toEqual([true, ["Chrysalis", "W"], false]);
+  await page.keyboard.press("Backspace");
+  expect(await state()).toEqual([true, ["Chrysalis"], false]);
   await page.keyboard.press("Escape");
-  expect([await castRows(page), await page.$eval("#cast-sheet", (s) => (s as HTMLElement).hidden)]).toEqual([["Chrysalis"], true]);
+  expect(await state()).toEqual([false, ["Chrysalis"], true]);
 
   await page.click("#add-cast");
   await page.waitForSelector("#cast-sheet:not([hidden]) input.card-name");
