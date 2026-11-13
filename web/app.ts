@@ -527,18 +527,19 @@ function join(ids: string[]) {
   const c = conv, { members, group } = castOf(c), fresh = [...new Set(ids)].filter((id) => !members.some((m) => m.id === id));
   if (!fresh.length) return toast(`${names(ids)} ${ids.length > 1 ? "are" : "is"} in this chat already`);
   if (group) return setMembers(group, [...group.members, ...fresh], `${names(fresh)} joined ${called(group)}`);
-  const was = c.who;
+  const was = c.who, had = new Set(groups.keys());
   if (!members.length && fresh.length === 1) c.who = fresh[0];
   else {
     for (const m of c.messages) if (m.role === "assistant" && members.length) m.as ??= members[0].id;
-    c.who = makeGroup([...members.map((m) => m.id), ...fresh]).id;
+    const all = [...members.map((m) => m.id), ...fresh];
+    c.who = (groupOf(all) ?? makeGroup(all)).id;
   }
-  const now = c.who;
+  const now = c.who, made = !had.has(now);
   unfold(now);
   stow(c);
   toast(groups.has(now) ? `${names(fresh)} joined: a group now` : `This chat is ${names(fresh)}'s now`, () => {
     if (was) c.who = was; else delete c.who;
-    if (groups.delete(now)) void dropGroup(now);
+    if (made && groups.delete(now)) void dropGroup(now);
     stow(c);
     renderCast();
     render();
@@ -551,9 +552,11 @@ function takeOut(g: Group, id: string) {
   if (g.members.length > 2) setMembers(g, g.members.filter((m) => m !== id), `${nameOf(id)} left ${called(g)}`);
   else if (canLeave(g)) void drop(g.id);
 }
+const groupOf = (ids: string[]) => [...groups.values()].find((g) => g.members.length === ids.length && ids.every((m) => g.members.includes(m)));
 function together(a: string, b: string) {
-  const g = groups.get(b);
+  const g = groups.get(b), theirs = groupOf([a, b]);
   if (g) return setMembers(g, [...g.members, a], `${nameOf(a)} joined ${called(g)}`);
+  if (theirs) return pickFolder(theirs.id);
   const made = makeGroup([b, a]);
   renderCast();
   toast(`${nameOf(made.id)} are a group`, () => void forget(made.id).then((f) => f.done()));
@@ -1126,7 +1129,7 @@ function paintInvite() {
       else {
         inviteFrom = null;
         if (folder) { newChat(from); conv.who = p.id; renderCast(); render(); }
-        else if (from) newChat(makeGroup([from, p.id]).id);
+        else if (from) newChat((groupOf([from, p.id]) ?? makeGroup([from, p.id])).id);
         else newChat(p.id);
       }
       paintInvite();
@@ -4122,7 +4125,10 @@ const dropVerb = (row: HTMLElement, drop: Drop): string | null => {
     if (drop.kind === "folder") {
       const g = groups.get(drop.who);
       if (!people.has(person)) return null;
-      return g ? (g.members.includes(person) ? null : `Join ${nameOf(g.id)}`) : people.get(drop.who)?.kind === "character" && drop.who !== person ? `Group with ${nameOf(drop.who)}` : null;
+      if (g) return g.members.includes(person) ? null : `Join ${nameOf(g.id)}`;
+      if (people.get(drop.who)?.kind !== "character" || drop.who === person) return null;
+      const theirs = groupOf([person, drop.who]);
+      return theirs ? `Open ${nameOf(theirs.id)}` : `Group with ${nameOf(drop.who)}`;
     }
     if (drop.kind === "chat") return !people.has(person) || running() || castOf(conv).members.some((m) => m.id === person) ? null : folderOf(conv) ? "Join this chat" : `${nameOf(person)}'s chat`;
     return drop.kind === "pin" ? (pinned ? "" : "Pin") : drop.kind === "unpin" ? "Unpin" : drop.kind === "settle" ? (settled ? "" : "Settle") : drop.kind === "active" ? "Un-settle" : null;

@@ -494,7 +494,7 @@ test("every row has the same menu: a character, a group and a folder are pinned,
   await page.close();
 }, 60_000);
 
-test("people are dragged like chats: a character onto another makes a group of the two, onto a group joins it, onto the open chat joins that, or makes a plain chat theirs; a member dragged out of a group's row leaves it, the last pair splits when the group has no chats and stays when it has; a chat dragged onto a group is that group's", async () => {
+test("people are dragged like chats: a character onto another makes a group of the two, or opens the one they already have, onto a group joins it, onto the open chat joins that, or makes a plain chat theirs; a member dragged out of a group's row leaves it, the last pair splits when the group has no chats and stays when it has; a chat dragged onto a group is that group's", async () => {
   const page = await open();
   for (const [n, d] of [["Mirela", "keeps bees"], ["Tomas", "sells honey"], ["Ida", "paints hives"]]) await Bun.write(`${dir}/${n}.png`, await card(n, { description: `{{char}} ${d}.` }));
   await (await page.$("input#cast-file"))!.uploadFile(`${dir}/Mirela.png`, `${dir}/Tomas.png`, `${dir}/Ida.png`);
@@ -538,6 +538,10 @@ test("people are dragged like chats: a character onto another makes a group of t
   await page.waitForFunction(() => document.querySelectorAll("#conversations .members").length === 2);
   expect(await carry(page, '#conversations .folder:has(.cast-name) .member', "Ida's card", rowAt(page, "Chrysalis"))).toBe("Split up");
   await page.waitForFunction(() => document.querySelectorAll("#conversations .members").length === 1);
+  expect(await castRows(page)).toEqual(["Chrysalis", "Ida", "Mirela", "Mirela and Ida", "Tomas"]);
+  await openRow(page, "Tomas");
+  expect(await carry(page, people, "Ida", rowAt(page, "Mirela"))).toBe("Open Mirela and Ida");
+  await page.waitForFunction(() => (document.querySelector("#input") as HTMLTextAreaElement).placeholder === "Message Mirela and Ida");
   expect(await castRows(page)).toEqual(["Chrysalis", "Ida", "Mirela", "Mirela and Ida", "Tomas"]);
   await page.close();
 }, 60_000);
