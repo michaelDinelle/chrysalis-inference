@@ -86,13 +86,15 @@ test("the canvas's tools change the picture by hand, with no model: the paint bu
   await page.close();
 }, 30_000);
 
-test("while a page is being written its pill shows the code so far, which grows as it is written, and the same pill, where it was, brings the page back", async () => {
+test("while a page is being written the pill in its header, the only thing saying so, shows the code so far, which grows as it is written, and the same pill, where it was, brings the page back", async () => {
   const page = await open();
   await page.type("#input", "steady counter page");
   await page.keyboard.press("Enter");
   await page.waitForSelector(".page-fig.drawing .page-writing", { timeout: 10_000 });
   const spot = () => page.$eval(".page-fig.drawing .page-writing", (b) => { const r = b.getBoundingClientRect(), f = b.closest(".page-fig")!.getBoundingClientRect(); return [Math.round(r.left - f.left), Math.round(r.top - f.top), b.querySelector(".page-peek")!.textContent] as const; });
   const [x, y] = await spot();
+  expect(await page.$eval(".page-fig.drawing", (f) => [!!f.querySelector(".svg-bar > .page-writing"),
+    [...f.querySelectorAll<HTMLElement>("*")].filter((e) => e.checkVisibility() && [...e.childNodes].some((n) => n.nodeType === 3 && n.textContent!.includes("Writing"))).length])).toEqual([true, 1]);
   await page.click(".page-fig.drawing .page-writing");
   expect(await spot()).toEqual([x, y, "Page"]);
   expect(await page.$eval(".page-fig.drawing", (f) => Math.round(f.querySelector(".svg-code")!.getBoundingClientRect().top - f.querySelector(".page-writing")!.getBoundingClientRect().bottom) < 40)).toBe(true);

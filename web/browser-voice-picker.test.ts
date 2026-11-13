@@ -143,3 +143,56 @@ test("voice mode: mute stops the microphone's audio; ending it closes the socket
   expect(voiceLog().filter((e) => e.ev === "exit").length).toBe(starts);
   await page.close();
 }, 30_000);
+
+test("Settings picks the speech to text from the service's own models in the voice menu: one not downloaded yet is downloaded there, a pick is kept, and voice mode switches to it mid-session", async () => {
+  const { page, session } = await voicePage("silent");
+  await openSettings(page);
+  await page.click("#listen-settings");
+  await page.waitForSelector('#voice-menu:popover-open [data-get="big-stt"]');
+  const chips = () => page.$$eval("#voice-menu .voice-chip", (els) => els.map((e) => [(e as HTMLElement).dataset.voice ?? `get:${(e as HTMLElement).dataset.get}`, e.textContent,
+    e.getAttribute("aria-checked"), !!e.querySelector(".voice-play")]));
+  expect(await chips()).toEqual([["", "Default", "true", false], ["fake-stt", "Fake STT", "false", false], ["other-stt", "Other STT", "false", false],
+    ["get:big-stt", "Big STT · Download", null, false], ["get:huge-stt", "Huge STT · Download", null, false]]);
+  await page.click('#voice-menu [data-get="big-stt"]');
+  await page.waitForSelector('#voice-menu .voice-chip[data-voice="big-stt"]', { timeout: 10_000 });
+  expect(voiceLog().filter((e) => e.type === "get").map(({ stt, tts }) => ({ stt, tts })).at(-1)).toEqual({ stt: "big-stt", tts: undefined });
+  await page.click('#voice-menu .voice-chip[data-voice="other-stt"] > span');
+  await page.waitForFunction(() => !document.querySelector("#voice-menu:popover-open"));
+  expect([await page.$eval("#listen-settings .voice-pick-name", (b) => b.textContent), await stored(page)]).toEqual(["Other STT", { name: "silent", stt: "other-stt" }]);
+  const configs = () => session().filter((e) => e.type === "config").map(({ stack }) => stack);
+  expect(await settled(() => configs().length === 1)).toBe(true);
+  expect(configs()).toEqual([{ stt: "other-stt" }]);
+  await page.click("#listen-settings");
+  await page.waitForFunction(() => document.querySelector('#voice-menu:popover-open .voice-chip[aria-checked="true"]')?.getAttribute("data-voice") === "other-stt");
+  await page.click('#voice-menu .voice-chip[data-voice=""] > span');
+  expect(await settled(() => configs().length === 2)).toBe(true);
+  expect([configs()[1], await stored(page)]).toEqual([{ stt: "fake-stt" }, { name: "silent" }]);
+  await closeSettings(page);
+  await page.close();
+}, 30_000);
+
+test("the model menu picks speech to text and text to speech as it picks a model: the service's engines under the chat's models, the ones in use checked; a pick switches the voice session, and one not downloaded is downloaded, then used", async () => {
+  const { page, session } = await voicePage("silent");
+  const menu = () => page.$$eval("#model-pop > *", (els) => els.slice(els.findIndex((e) => e.textContent === "Speech to text")).map((e) =>
+    e.classList.contains("model-group") ? e.textContent : [(e as HTMLElement).dataset.speech, e.querySelector(".model-label")?.textContent, e.getAttribute("aria-selected"), e.querySelector(".model-check")?.textContent]));
+  await page.click("#model-btn");
+  await page.waitForSelector('#model-pop:not([hidden]) [data-speech="tts/big-tts"]');
+  expect(await menu()).toEqual(["Speech to text", ["stt/fake-stt", "Fake STT", "true", ""], ["stt/other-stt", "Other STT", "false", ""], ["stt/big-stt", "Big STT", "false", "Download"],
+    ["stt/huge-stt", "Huge STT", "false", "Download"], "Text to speech", ["tts/fake-tts", "Fake TTS", "true", ""], ["tts/other-tts", "Other TTS", "false", ""], ["tts/big-tts", "Big TTS", "false", "Download"]]);
+  const configs = () => session().filter((e) => e.type === "config").map(({ stack, voice }) => ({ stack, voice }));
+  await page.click('[data-speech="tts/other-tts"]');
+  await page.waitForFunction(() => document.getElementById("model-pop")!.hidden);
+  expect(await settled(() => configs().length === 1)).toBe(true);
+  expect([configs(), await stored(page)]).toEqual([[{ stack: { tts: "other-tts" }, voice: undefined }], { tts: "other-tts" }]);
+  await page.click("#model-btn");
+  await page.click('[data-speech="stt/huge-stt"]');
+  await page.waitForSelector('[data-speech="stt/huge-stt"] .model-check');
+  await page.waitForFunction(() => document.getElementById("model-pop")!.hidden, { timeout: 10_000 });
+  expect(voiceLog().filter((e) => e.type === "get").map(({ stt }) => stt).at(-1)).toBe("huge-stt");
+  expect(await settled(() => configs().length === 2)).toBe(true);
+  expect([configs()[1], await stored(page)]).toEqual([{ stack: { stt: "huge-stt" }, voice: undefined }, { tts: "other-tts", stt: "huge-stt" }]);
+  await page.click("#model-btn");
+  await page.waitForSelector('#model-pop:not([hidden]) [data-speech="stt/huge-stt"][aria-selected="true"]');
+  expect((await menu()).filter((r) => Array.isArray(r) && r[2] === "true").map((r) => r[0])).toEqual(["stt/huge-stt", "tts/other-tts"]);
+  await page.close();
+}, 30_000);

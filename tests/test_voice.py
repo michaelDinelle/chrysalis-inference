@@ -234,20 +234,20 @@ sample = [m for m in got if kind(m) == "audio"]
 heard = hear(np.concatenate([to16k(m[1], m[0]["rate"]) for m in sample])) if sample else ""
 check("a preview: the voice's sample, as audio of its own", sample and sample[0][0]["id"] == "preview" and got[-1] == {"type": "said", "id": "preview"}
       and wer("Hi, I'm Emma. This is how I sound.", heard) <= 0.2, repr(heard))
-ws.send(json.dumps({"type": "config", "stack": {"tts": "kitten"}}))
+ws.send(json.dumps({"type": "config", "voice": "am_adam"}))
 got = events(lambda m: kind(m) in ("ready", "error"), 60)[-1]
-check("config switches the speech mid-session", got.get("stack", {}).get("tts") == "kitten" and got.get("voice") == "0"
-      and len(got.get("voices", [])) == 8, f"{got.get('stack')}, voice {got.get('voice')}")
+check("config switches the voice mid-session", got.get("stack", {}).get("tts") == "kokoro" and got.get("voice") == "am_adam",
+      f"{got.get('stack')}, voice {got.get('voice')}")
 ws.send(json.dumps({"type": "config", "stack": {"tts": "no-such-tts"}}))
 got = events(lambda m: kind(m) == "ready", 10)
 err = next((m for m in got if kind(m) == "error"), {})
 check("an unknown part is an error, and the session keeps its own", "no-such-tts" in err.get("message", "")
-      and got[-1].get("stack", {}).get("tts") == "kitten", err.get("message", ""))
-ws.send(json.dumps({"type": "say", "id": "r4", "text": "This one comes from another model. "}))
+      and got[-1].get("stack", {}).get("tts") == "kokoro" and got[-1].get("voice") == "am_adam", err.get("message", ""))
+ws.send(json.dumps({"type": "say", "id": "r4", "text": "This one comes from another voice. "}))
 ws.send(json.dumps({"type": "say_end", "id": "r4"}))
 got = [m for m in events(lambda m: kind(m) == "said", 30) if kind(m) == "audio"]
 heard = hear(np.concatenate([to16k(m[1], m[0]["rate"]) for m in got])) if got else ""
-check("and speaks with it", wer("This one comes from another model.", heard) <= 0.2, repr(heard))
+check("and speaks with it", wer("This one comes from another voice.", heard) <= 0.2, repr(heard))
 
 sending.join()
 ws.close()

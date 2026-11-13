@@ -1,5 +1,7 @@
 interface Session { id: string; title: string; dir: string; created: number; updated: number; idle?: number; archived?: number; fork?: object; metadata?: object; model?: object; messages: any[]; persona?: string; parentID?: string; agent?: string }
 
+const PAGE = '<!doctype html>\n<html><head><title>Counter</title></head>\n<body>\n<h1 id="title">Clicks</h1>\n<button id="inc">Add</button>\n</body></html>\n';
+
 export function fakeOpenCode(secret: string) {
   const sessions = new Map<string, Session>(), listeners = new Set<(line: string) => void>(), asks = new Map<string, (reply: string, at: string) => void>();
   const stops = new Map<string, { now: boolean }>(), staged = new Map<string, string>();
@@ -7,6 +9,8 @@ export function fakeOpenCode(secret: string) {
     { prompts: [], replies: [], interrupts: 0, answers: [], routines: [] };
   const forms = new Map<string, (answer: object | undefined) => void>(), routines = new Map<string, { id: string; sessionID: string; name: string; status: string }>();
   let ids = 0;
+  const held: (() => void)[] = [];
+  const release = () => { for (const go of held.splice(0)) go(); };
   const emit = (type: string, data: object) => { for (const fn of listeners) fn(`data: ${JSON.stringify({ id: `evt_${++ids}`, type, data })}\n\n`); };
   const json = (data: unknown, status = 200) => Response.json(data, { status });
   const info = (s: Session) => ({ id: s.id, title: s.title, time: { created: s.created, updated: s.updated, idle: s.idle, ...(s.archived ? { archived: s.archived } : {}) }, ...(s.fork ? { fork: s.fork } : {}), ...(s.metadata ? { metadata: s.metadata } : {}), location: { directory: s.dir }, ...(s.model ? { model: s.model } : {}), ...(s.parentID ? { parentID: s.parentID } : {}) });
@@ -16,10 +20,11 @@ export function fakeOpenCode(secret: string) {
     stops.set(s.id, stopped);
     s.messages.push({ id: `msg_${++ids}`, type: "user", text, time: { created: Date.now() }, ...more });
     emit("session.execution.started", { sessionID });
-    const one = `msg_${++ids}`, call = `call_${++ids}`, input = { path: "note.txt" }, out = "hello\nhoney\n";
+    const one = `msg_${++ids}`, call = `call_${++ids}`, page = text.includes("page file"), tool = page ? "write" : "read";
+    const input: object = page ? { path: `${s.dir}/counter.html`, content: PAGE } : { path: "note.txt" }, out = page ? "Wrote file successfully." : "hello\nhoney\n";
     emit("session.step.started", { sessionID, assistantMessageID: one });
     emit("session.reasoning.delta", { sessionID, assistantMessageID: one, delta: "Look at the file first." });
-    emit("session.tool.input.started", { sessionID, assistantMessageID: one, id: call, name: "read" });
+    emit("session.tool.input.started", { sessionID, assistantMessageID: one, id: call, name: tool });
     emit("session.tool.input.ended", { sessionID, assistantMessageID: one, id: call, text: JSON.stringify(input) });
     emit("session.tool.called", { sessionID, assistantMessageID: one, id: call, input });
     let allowed = true;
@@ -81,13 +86,23 @@ export function fakeOpenCode(secret: string) {
       const id = `sch_${++ids}`;
       routines.set(id, { id, sessionID, name: "morning bees", status: "active" });
     }
-    if (text.includes("slowly")) for (let k = 0; k < (text.includes("very slowly") ? 160 : 40) && !stopped.now; k++) await Bun.sleep(50);
+    if (text.includes("until let go")) await new Promise<void>((go) => held.push(go));
+    else if (text.includes("slowly")) for (let k = 0; k < 40 && !stopped.now; k++) await Bun.sleep(50);
     const state = allowed ? { status: "completed", input, output: out } : { status: "error", input, error: "rejected" };
     if (allowed) emit("session.tool.success", { sessionID, assistantMessageID: one, id: call, content: [{ type: "text", text: out }] });
     else emit("session.tool.failed", { sessionID, assistantMessageID: one, id: call, error: { message: "rejected" } });
+    const edit = `call_${++ids}`, change = { path: `${s.dir}/counter.html`, oldString: "<h1 id=\"title\">Clicks</h1>", newString: "<h1 id=\"title\">Taps</h1>" };
+    if (page) {
+      emit("session.tool.input.started", { sessionID, assistantMessageID: one, id: edit, name: "edit" });
+      emit("session.tool.input.ended", { sessionID, assistantMessageID: one, id: edit, text: JSON.stringify(change) });
+      emit("session.tool.called", { sessionID, assistantMessageID: one, id: edit, input: change });
+      emit("session.tool.success", { sessionID, assistantMessageID: one, id: edit, content: [{ type: "text", text: "Edit applied successfully." }] });
+    }
     emit("session.step.ended", { sessionID, assistantMessageID: one, finish: "tool-calls", tokens: { input: 30, output: 12, cache: { read: 70 } } });
+    if (text.includes("page file until released")) await new Promise<void>((go) => held.push(go));
     s.messages.push({ id: one, type: "assistant", time: { created: Date.now() },
-      content: [{ type: "reasoning", text: "Look at the file first." }, { type: "tool", id: call, name: "read", state }] });
+      content: [{ type: "reasoning", text: "Look at the file first." }, { type: "tool", id: call, name: tool, state },
+        ...(page ? [{ type: "tool", id: edit, name: "edit", state: { status: "completed", input: change, output: "Edit applied successfully." } }] : [])] });
     const end = (outcome: string) => {
       s.messages.push({ id: `msg_${++ids}`, type: "idle", outcome, time: { created: Date.now() } });
       s.updated = s.idle = Date.now();
@@ -145,9 +160,9 @@ export function fakeOpenCode(secret: string) {
       }
       if (path === "/api/session" && method === "GET") return json({ data: [...sessions.values()].sort((a, b) => b.updated - a.updated).map(info), cursor: {} });
       if (path === "/api/experimental/session/import") {
-        const { info: was, messages } = await req.json();
+        const { info: was, messages, location } = await req.json();
         if (sessions.has(was.id)) return json({ message: "Session already exists" }, 409);
-        const back: Session = { id: was.id, title: was.title, dir: was.location.directory, created: was.time.created, updated: was.time.updated, idle: was.time.idle, archived: was.time.archived, metadata: was.metadata, model: was.model, messages };
+        const back: Session = { id: was.id, title: was.title, dir: location?.directory ?? process.cwd(), created: was.time.created, updated: was.time.updated, idle: was.time.idle, archived: was.time.archived, metadata: was.metadata, model: was.model, messages };
         sessions.set(back.id, back);
         return json({ data: info(back) });
       }
@@ -160,6 +175,7 @@ export function fakeOpenCode(secret: string) {
       if (!s) return json({ message: "not found" }, 404);
       if (!rest && method === "GET") return json({ data: info(s) });
       if (rest === "/export") return json({ data: { info: info(s), messages: s.messages } });
+      if (rest === "/move" && method === "POST") { s.dir = (await req.json()).directory; return new Response(null, { status: 204 }); }
       if (!rest && method === "DELETE") {
         sessions.delete(s.id);
         for (const r of [...routines.values()]) if (r.sessionID === s.id) routines.delete(r.id);
@@ -212,5 +228,5 @@ export function fakeOpenCode(secret: string) {
     },
   });
   const wake = (session: string, name: string, text: string) => run(sessions.get(session)!, text, { metadata: { schedule: { id: "sch_0", name, run: 1 } } });
-  return { server, log, sessions, wake };
+  return { server, log, sessions, wake, release };
 }

@@ -1,6 +1,6 @@
 export type Part = "vad" | "stt" | "turn" | "tts";
 export interface VoiceInfo { id: string; label: string; lang: string; gender: string }
-export interface ModelInfo { name: string; label: string; installed: boolean; hint?: string; voices?: VoiceInfo[] }
+export interface ModelInfo { name: string; label: string; installed: boolean; default?: boolean; hint?: string; voices?: VoiceInfo[] }
 export interface VoiceReady {
   stack: Partial<Record<Part, string>>; catalog: Partial<Record<Part, ModelInfo[]>>; voices: VoiceInfo[]; voice: string; speed: number;
   sample_rate: number; load_ms: number;
@@ -277,7 +277,7 @@ export class Speaker {
   previewed = false;
   constructor(private failed: (message: string) => void) {}
 
-  get(tts: string) { this.send({ type: "get", tts }); }
+  get(name: string, part: Part = "tts") { this.send({ type: "get", [part]: name }); }
   catalog(): Promise<VoiceReady["catalog"] | null> {
     return new Promise((done) => { this.listed.push(done); this.send({ type: "catalog" }); });
   }

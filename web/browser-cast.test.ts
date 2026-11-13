@@ -47,7 +47,7 @@ test("a character card dropped in joins the cast: a row with their portrait amon
   await page.close();
 }, 40_000);
 
-test("the user is a character like any other: a portrait opens its card and closes it again (another's switches to theirs); the user's card has every field a character's has, sent as theirs are, their greeting the first message of a new chat (in the box), their voice the one their messages are read in; their messages and the replies alike in bubbles, each from its writer's side", async () => {
+test("the user is a character like any other: a portrait opens its card and closes it again (another's switches to theirs), in the chat, on their sidebar row and on a chat's row; the user's card has every field a character's has, sent as theirs are, their greeting the first message of a new chat (in the box), their voice the one their messages are read in; their messages and the replies alike in bubbles, each from its writer's side", async () => {
   const page = await open();
   await Bun.write(`${dir}/Mirela.png`, await card("Mirela", { description: "{{char}} keeps bees.", first_mes: "Hello, {{user}}." }));
   await (await page.$("input#attach-file"))!.uploadFile(`${dir}/Mirela.png`);
@@ -81,6 +81,12 @@ test("the user is a character like any other: a portrait opens its card and clos
   expect(lastStream.messages[0].content).toBe("Write Mirela's next reply in a fictional chat between Mirela and User.\n\nMirela keeps bees.\n\n" +
     "User's personality: curious\n\nHow User talks:\nUser: Hm.");
   expect(lastStream.messages.at(-1)).toEqual({ role: "user", content: "Hi, Mirela.\n\n[Keep it short.]" });
+  await page.waitForSelector("#conversations a.conv.active .conv-face[data-card]");
+  const at = await page.evaluate(() => location.hash);
+  await page.click("#conversations a.conv.active .conv-face[data-card]");
+  expect([await shown(), await page.evaluate(() => location.hash)]).toEqual(["Mirela", at]);
+  await page.click("#conversations a.conv.active .conv-face[data-card]");
+  expect(await shown()).toBe("");
   const look = await page.evaluate(() => {
     const at = (s: string) => document.querySelector(s)!.getBoundingClientRect(), mine = at(".msg.user .bubble"), hers = at(".msg.assistant > .markdown");
     const style = (s: string) => { const c = getComputedStyle(document.querySelector(s)!); return [c.borderTopWidth, c.backgroundColor, c.paddingLeft]; };

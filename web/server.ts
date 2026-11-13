@@ -705,6 +705,15 @@ img.src = ${JSON.stringify(checkUrl(req))} + "?t=" + Date.now();
         return new Response(null, { status: 204 });
       })),
     },
+    "/api/threads/:id/move": {
+      POST: guarded(json(async (req) => {
+        const dir = String((await req.json().catch(() => ({})))?.dir ?? ""), id = (req as Request & { params: { id: string } }).params.id;
+        if (!dir || !existsSync(dir)) return Response.json({ error: { message: `There is no folder ${dir} on this computer` } }, { status: 400 });
+        if (turns.has(id)) return Response.json({ error: { message: "OpenCode is still working in this chat" } }, { status: 409 });
+        try { await harness.move(id, dir); } catch (e) { return Response.json({ error: { message: (e as Error).message } }, { status: 502 }); }
+        return new Response(null, { status: 204 });
+      })),
+    },
     "/api/threads/:id/rewrite": {
       POST: guarded(json(async (req) => {
         const { drop, edit } = (await req.json().catch(() => ({}))) ?? {}, id = (req as Request & { params: { id: string } }).params.id;

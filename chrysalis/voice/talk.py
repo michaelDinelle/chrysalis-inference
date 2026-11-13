@@ -368,11 +368,11 @@ class Talk:
             await self.sample(m.get("voice") or self.voice, m.get("text"), m.get("tts"))
         elif t == "catalog":
             await self.send({"type": "catalog", "catalog": self.lib.catalog()})
-        elif t == "get" and m.get("tts") in PARTS["tts"]:
+        elif t == "get" and (got := [PARTS[k][m[k]] for k in PARTS if m.get(k) in PARTS[k]]):
             try:
-                await asyncio.to_thread(fetch, PARTS["tts"][m["tts"]].DIR)
+                await asyncio.to_thread(fetch, got[0])
             except OSError as e:
-                await self.send({"type": "error", "message": f"{PARTS['tts'][m['tts']].label} could not be downloaded: {e}"})
+                await self.send({"type": "error", "message": f"{got[0].label} could not be downloaded: {e}"})
             await self.send({"type": "catalog", "catalog": self.lib.catalog()})
         else:
             await self.send({"type": "error", "message": f"unknown message type {t!r}"})

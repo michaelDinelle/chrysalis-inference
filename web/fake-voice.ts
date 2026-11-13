@@ -18,11 +18,11 @@ const SCRIPTS: Record<string, Line[]> = {
 };
 const voice = (id: string, lang: string, gender: string) => ({ id, label: id[0].toUpperCase() + id.slice(1), lang, gender });
 const CATALOG = {
-  vad: [{ name: "fake-vad", label: "Fake VAD", installed: true }],
-  stt: [{ name: "fake-stt", label: "Fake STT", installed: true }],
-  turn: [{ name: "fake-turn", label: "Fake Turn", installed: true }],
+  vad: [{ name: "fake-vad", label: "Fake VAD", installed: true, default: true }],
+  stt: [{ name: "fake-stt", label: "Fake STT", installed: true, default: true }, { name: "other-stt", label: "Other STT", installed: true }, { name: "big-stt", label: "Big STT", installed: false }, { name: "huge-stt", label: "Huge STT", installed: false }],
+  turn: [{ name: "fake-turn", label: "Fake Turn", installed: true, default: true }],
   tts: [
-    { name: "fake-tts", label: "Fake TTS", installed: true, voices: [...Object.keys(SCRIPTS).map((k) => voice(k, "en-us", "female")), voice("echo", "en-gb", "male")] },
+    { name: "fake-tts", label: "Fake TTS", installed: true, default: true, voices: [...Object.keys(SCRIPTS).map((k) => voice(k, "en-us", "female")), voice("echo", "en-gb", "male")] },
     { name: "other-tts", label: "Other TTS", installed: true, voices: [voice("ana", "es", "female"), voice("bob", "en-us", "male")] },
     { name: "big-tts", label: "Big TTS", installed: false, voices: [voice("zed", "en-us", "male")] },
   ],
@@ -117,6 +117,7 @@ function hear(ws: Bun.ServerWebSocket<Session>) {
   }
 }
 
+const fetched = new Set<string>();
 const voicesOf = (tts: string) => CATALOG.tts.find((t) => t.name === tts)?.voices ?? [];
 const ready = (ws: Bun.ServerWebSocket<Session>) => ws.send(JSON.stringify({ type: "ready", stack: ws.data.stack, catalog: CATALOG,
   voices: voicesOf(ws.data.stack.tts), voice: ws.data.voice, speed: ws.data.speed, sample_rate: RATE, load_ms: 5 }));
@@ -125,7 +126,7 @@ function ask(ws: Bun.ServerWebSocket<Session>, m: any) {
   const d = ws.data, stack = { ...d.stack };
   for (const [part, name] of Object.entries(m.stack ?? {}) as [Part, string][]) {
     const model = CATALOG[part]?.find((x) => x.name === name);
-    if (!model?.installed) {
+    if (!model?.installed && !fetched.has(name)) {
       ws.send(JSON.stringify({ type: "error", message: `${name} is ${model ? "not installed" : "unknown"}` }));
       return;
     }
@@ -150,9 +151,10 @@ function message(ws: Bun.ServerWebSocket<Session>, m: any) {
     ask(ws, m);
     ready(ws);
   } else if (m.type === "get") {
-    d.got = [...(d.got ?? []), m.tts];
+    d.got = [...(d.got ?? []), ...Object.keys(CATALOG).map((k) => m[k]).filter(Boolean)];
+    for (const n of d.got) fetched.add(n);
   } else if (m.type === "catalog") {
-    ws.send(JSON.stringify({ type: "catalog", catalog: { ...CATALOG, tts: CATALOG.tts.map((t) => d.got?.includes(t.name) ? { ...t, installed: true } : t) } }));
+    ws.send(JSON.stringify({ type: "catalog", catalog: Object.fromEntries(Object.entries(CATALOG).map(([k, list]) => [k, list.map((t) => d.got?.includes(t.name) ? { ...t, installed: true } : t)])) }));
   } else if (m.type === "preview") {
     const v = Object.values(CATALOG.tts).flatMap((t) => t.voices).find((x) => x.id === m.voice);
     const r: Reply = { text: Array.from(m.text ?? `This is ${v?.label ?? m.voice}.`), told: 0, seq: 0, sent: 0, ended: true, dropped: false };

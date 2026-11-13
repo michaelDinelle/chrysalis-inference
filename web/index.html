@@ -96,7 +96,6 @@
       <div id="cast-add" class="cast-add" role="menu" hidden>
         <button type="button" data-add="card" role="menuitem">A character from a card…</button>
         <button type="button" data-add="group" role="menuitem">A chat with several…</button>
-        <button type="button" data-add="folder" role="menuitem">A folder to work in…</button>
       </div>
       <div id="row-menu" class="cast-add row-menu" role="menu" hidden></div>
       <div id="cast-invite" class="cast-invite" role="dialog" aria-label="Who is in this chat" hidden></div>
@@ -141,6 +140,7 @@
               </div>
               <div class="composer-actions">
                 <span id="meter" class="meter"></span>
+                <button id="folder-btn" class="folder-btn" type="button" hidden></button>
                 <button id="model-btn" class="model-btn" type="button" aria-haspopup="listbox" aria-expanded="false" aria-controls="model-pop"></button>
                 <button id="power" class="act power" type="button"></button>
                 <button id="draft" class="draft" type="button" hidden></button>
@@ -200,6 +200,10 @@
               <span class="set-block-title">Voice</span>
               <button id="voice-settings" class="voice-name" type="button"></button>
               <div id="voice-knobs" class="knobs"></div>
+            </div>
+            <div class="voice-line">
+              <span class="set-block-title">Speech to text</span>
+              <button id="listen-settings" class="voice-name" type="button"></button>
             </div>
             <div class="set-block-head set-block-sub"><label class="set-block-title" for="voice-prompt">Voice prompt</label><button id="voice-prompt-reset" class="act knob-reset" type="button" title="Back to the default voice prompt" aria-label="Restore the default voice prompt"></button></div>
             <textarea id="voice-prompt" class="prompt-input" rows="1" placeholder="No prompt" title="A note to the model before the first question said aloud (and again when it changes); the system prompt stays as it is. What the reply writes is spoken."></textarea>

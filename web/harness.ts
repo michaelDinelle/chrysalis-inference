@@ -209,6 +209,7 @@ export async function agents(): Promise<{ id: string; name: string }[]> {
 }
 export const remove = (id: string) => call("DELETE", `/api/session/${id}`);
 export const change = (id: string, to: { title?: string; archived?: boolean }) => call("PATCH", `/api/session/${id}`, to);
+export const move = (id: string, directory: string) => call("POST", `/api/session/${id}/move`, { directory });
 export const say = (id: string, text: string) => call("POST", `/api/session/${id}/prompt`, { text });
 export const fork = async (id: string, before?: string) => (await call("POST", `/api/session/${id}/fork`, before ? { before } : {})).data.id as string;
 export async function rewrite(id: string, to: { drop?: string[]; edit?: { id: string; text: string } }) {
@@ -218,8 +219,8 @@ export async function rewrite(id: string, to: { drop?: string[]; edit?: { id: st
     : { ...m, content: [...(m.content ?? []).filter((p: any) => p.type !== "text"), { type: "text", text: to.edit!.text }] });
   const messages = was.messages.filter((m: any) => !to.drop?.includes(m.id)).map((m: any) => (m.id === to.edit?.id ? edited(m) : m));
   await call("DELETE", `/api/session/${id}`);
-  try { await call("POST", "/api/experimental/session/import", { info: was.info, messages }); }
-  catch (e) { await call("POST", "/api/experimental/session/import", was); throw e; }
+  try { await call("POST", "/api/experimental/session/import", { info: was.info, messages, location: was.info.location }); }
+  catch (e) { await call("POST", "/api/experimental/session/import", { ...was, location: was.info.location }); throw e; }
   const test = (c: any) => (c ? (c.type === "code" ? { code: c.code } : { run: c.run, ...(c.is !== undefined ? { is: c.is } : {}), ...(c.matches !== undefined ? { matches: c.matches } : {}), ...(c.changes ? { changes: true } : {}) }) : undefined);
   for (const r of kept.filter((r: any) => r.status !== "done")) {
     const tz = r.when.tz ? { tz: r.when.tz } : {}, when = r.when.type === "every" ? { every: r.when.every, ...tz } : r.when.type === "cron" ? { cron: r.when.cron, ...tz }

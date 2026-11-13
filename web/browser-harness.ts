@@ -87,6 +87,7 @@ export const REPLIES: Record<string, string> = {
     "It costs $5 and $10. Escaped: \\$x\\$. Code: `$HOME` stays.\n",
   diagram: "```mermaid\nflowchart LR\n  A[Ask] --> B{Cached?}\n  B -->|yes| C[Append]\n  B -->|no| D[Prefill]\n```\n\n" +
     "```mermaid\nsequenceDiagram\n  User->>Chrysalis: question\n  Chrysalis-->>User: answer\n```\n\n```mermaid\nflowchart TD\n  A -->\n  not mermaid ((\n```\n",
+  "script fails in the browser": "The quote on that line is never closed.",
   "snapped script": "```html\n<!DOCTYPE html>\n<html><head><title>Snapped</title></head><body>\n<p id=\"p\">before</p>\n<script>\nconst ok = 1;\nconst bad = 'rgb(1,2,3)`;\n" +
     "document.getElementById(\"p\").textContent = \"after\";\n</script>\n</body></html>\n```\n",
   page: "```html\n<!DOCTYPE html>\n<html><head><title>Probe</title></head><body>\n<button id=\"b\" onclick=\"this.textContent = Number(this.textContent) + 1\">0</button>\n" +
@@ -517,3 +518,33 @@ export const stageDrawn = async (page: Page) => {
   for (const end = Date.now() + 5000; Date.now() < end; await Bun.sleep(100)) if ((await look(page, stage)).pink > 1500) return true;
   return false;
 };
+
+export const work = `${dir}/site`;
+mkdirSync(work, { recursive: true });
+
+export async function connect(page: Page) {
+  await page.click("#opencode");
+  await page.waitForSelector("#oc-pop .invite-head");
+  await page.evaluate(() => [...document.querySelectorAll<HTMLElement>("#oc-pop .invite-card")].find((b) => b.textContent === "Connect")?.click());
+  await page.waitForFunction(() => /OpenCode 2/.test(document.querySelector("#oc-pop .invite-head")?.textContent ?? ""));
+}
+export async function openFolder(page: Page, path: string) {
+  await page.keyboard.press("Escape");
+  await page.click("#new-chat");
+  await page.waitForSelector("#folder-btn:not([hidden])");
+  await page.click("#folder-btn");
+  await page.waitForSelector("#oc-pop .oc-path");
+  await page.$eval("#oc-pop .oc-path", (e, v) => { (e as HTMLInputElement).value = v; (e as HTMLInputElement).focus(); }, path);
+  await page.keyboard.press("Enter");
+  await page.waitForFunction((want) => document.querySelector("#oc-pop .oc-use")?.getAttribute("title") === want, {}, path);
+  await page.click("#oc-pop .oc-use");
+  await page.waitForFunction((want) => document.querySelector("#folder-btn")?.getAttribute("title") === `Working in ${want}`, {}, path);
+}
+export async function menu(page: Page, title: string, item: string) {
+  await page.evaluate((title) => [...document.querySelectorAll<HTMLElement>("#conversations a.conv")].find((a) => a.querySelector(".conv-title")?.textContent === title)!
+    .dispatchEvent(new MouseEvent("contextmenu", { bubbles: true, cancelable: true, clientX: 60, clientY: 300 })), title);
+  await page.waitForSelector("#row-menu:not([hidden])");
+  await page.evaluate((item) => [...document.querySelectorAll<HTMLElement>("#row-menu button")].find((b) => b.textContent!.startsWith(item))!.click(), item);
+}
+export const cards = (page: Page) => page.$$eval("#thread .tool-card", (c) => c.map((x) => [x.querySelector(".tool-name")!.textContent, x.querySelector(".tool-src")!.textContent, (x as HTMLElement).dataset.state]));
+export const lastText = (page: Page) => page.$eval("#thread > article.assistant:last-child > .markdown", (e) => (e as HTMLElement).innerText.trim());

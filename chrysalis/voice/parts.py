@@ -1,4 +1,4 @@
-import collections, ctypes, gc, os, re, shutil, tarfile, tempfile, threading, urllib.request, wave
+import collections, ctypes, gc, os, re, shutil, tarfile, tempfile, threading, urllib.request
 
 import numpy as np
 import onnxruntime as ort
@@ -22,20 +22,10 @@ class Missing(RuntimeError):
 
 
 SHERPA = "https://github.com/k2-fsa/sherpa-onnx/releases/download"
-SOURCES = {
-    "silero": [("https://github.com/snakers4/silero-vad/raw/v6.2.3/src/silero_vad/data/silero_vad_16k_op15.onnx", "silero_vad.onnx")],
-    "smart-turn": [("https://huggingface.co/pipecat-ai/smart-turn-v3/resolve/main/smart-turn-v3.2-cpu.onnx", "smart-turn-v3.2-cpu.onnx")],
-    "kokoro": [("https://github.com/thewh1teagle/kokoro-onnx/releases/download/model-files-v1.0/kokoro-v1.0.int8.onnx", "kokoro-v1.0.int8.onnx"),
-               ("https://github.com/thewh1teagle/kokoro-onnx/releases/download/model-files-v1.0/voices-v1.0.bin", "voices-v1.0.bin")],
-    "parakeet-110m": f"{SHERPA}/asr-models/sherpa-onnx-nemo-parakeet_tdt_transducer_110m-en-36000-int8.tar.bz2",
-    "kitten": f"{SHERPA}/tts-models/kitten-micro-en-v0_8.tar.bz2",
-    "supertonic": f"{SHERPA}/tts-models/sherpa-onnx-supertonic-3-tts-int8-2026-05-11.tar.bz2",
-    "pocket": f"{SHERPA}/tts-models/sherpa-onnx-pocket-tts-int8-2026-01-26.tar.bz2",
-}
 
 
-def fetch(name):
-    src, dest = SOURCES[name], os.path.join(DATA, name)
+def fetch(cls):
+    src, dest = cls.SOURCE, os.path.join(DATA, cls.DIR)
     os.makedirs(DATA, exist_ok=True)
     tmp = tempfile.mkdtemp(dir=DATA, prefix=".fetch.")
     try:
@@ -59,7 +49,7 @@ def files(cls):
     paths = [os.path.join(DATA, cls.DIR, n) for n in cls.FILES]
     if not all(os.path.exists(p) for p in paths):
         try:
-            fetch(cls.DIR)
+            fetch(cls)
         except OSError as e:
             raise Missing(f"{cls.label} could not be downloaded: {e}") from e
     return paths
@@ -128,6 +118,7 @@ def terms(text):
 @part("vad", "silero")
 class Silero:
     label, DIR, FILES, FRAME = "Silero VAD v6", "silero", ("silero_vad.onnx",), 512
+    SOURCE = [("https://github.com/snakers4/silero-vad/raw/v6.2.3/src/silero_vad/data/silero_vad_16k_op15.onnx", "silero_vad.onnx")]
 
     def __init__(self, threads):
         self.s = session(files(Silero)[0], 1)
@@ -142,11 +133,15 @@ class Silero:
         st[1] = x[:, -64:]
         return float(p[0, 0])
 
+    def warm(self):
+        self.prob(self.state(), np.zeros(self.FRAME, np.float32))
+
 
 @part("stt", "parakeet-110m")
 class Parakeet:
     label, DIR = "Parakeet 110M (English)", "parakeet-110m"
     FILES = ("encoder.int8.onnx", "decoder.int8.onnx", "joiner.int8.onnx", "tokens.txt")
+    SOURCE = f"{SHERPA}/asr-models/sherpa-onnx-nemo-parakeet_tdt_transducer_110m-en-36000-int8.tar.bz2"
     HOT = 1.5
     PAUSE, LONGEST = int(0.3 * RATE), 9 * RATE
     EARLY = int(0.1 * RATE)
@@ -169,6 +164,11 @@ class Parakeet:
 
     def stream(self, terms=""):
         return ParakeetStream(self, terms)
+
+    def warm(self):
+        st = self.stream()
+        st.feed(np.zeros(RATE, np.float32))
+        st.finish()
 
 
 class ParakeetStream:
@@ -253,6 +253,7 @@ def whisper_features(x, filters):
 @part("turn", "smart-turn")
 class SmartTurn:
     label, DIR, FILES, SPAN = "Smart Turn v3.2", "smart-turn", ("smart-turn-v3.2-cpu.onnx",), 8 * RATE
+    SOURCE = [("https://huggingface.co/pipecat-ai/smart-turn-v3/resolve/main/smart-turn-v3.2-cpu.onnx", "smart-turn-v3.2-cpu.onnx")]
 
     def __init__(self, threads):
         self.s = session(files(SmartTurn)[0], threads)
@@ -263,10 +264,15 @@ class SmartTurn:
         x = np.pad(x, (self.SPAN - len(x), 0))
         return float(self.s.run(None, {"input_features": whisper_features(x, self.filters)[None]})[0].reshape(-1)[0])
 
+    def warm(self):
+        self.prob(np.zeros(RATE, np.float32))
+
 
 @part("tts", "kokoro")
 class Kokoro:
     label, DIR, FILES, VOICE = "Kokoro 82M", "kokoro", ("kokoro-v1.0.int8.onnx", "voices-v1.0.bin"), "af_heart"
+    SOURCE = [("https://github.com/thewh1teagle/kokoro-onnx/releases/download/model-files-v1.0/kokoro-v1.0.int8.onnx", "kokoro-v1.0.int8.onnx"),
+              ("https://github.com/thewh1teagle/kokoro-onnx/releases/download/model-files-v1.0/voices-v1.0.bin", "voices-v1.0.bin")]
     LANGS = {"a": ("en-US", "en-us"), "b": ("en-GB", "en-gb"), "e": ("es", "es"), "f": ("fr", "fr-fr"), "h": ("hi", "hi"),
              "i": ("it", "it"), "j": ("ja", "ja"), "p": ("pt", "pt-br"), "z": ("zh", "cmn")}
 
@@ -288,86 +294,9 @@ class Kokoro:
         trim()
         return audio
 
-
-class SherpaTts:
-    VOICE, LANG = "0", "en-US"
-
-    def __init__(self, threads):
-        import sherpa_onnx
-        self.so = sherpa_onnx
-        cfg = sherpa_onnx.OfflineTtsModelConfig(num_threads=threads, provider="cpu")
-        self.model(cfg, files(type(self)))
-        self.t = sherpa_onnx.OfflineTts(sherpa_onnx.OfflineTtsConfig(model=cfg, max_num_sentences=1))
-        self.rate = self.t.sample_rate
-
-    @classmethod
-    def voices(cls):
-        return [{"id": str(i), "label": f"Voice {i + 1}", "lang": cls.LANG, "gender": None} for i in range(cls.SPEAKERS)]
-
-    def config(self, g, voice):
-        g.sid = int(voice)
-
-    def synth(self, text, voice, speed):
-        g = self.so.GenerationConfig()
-        g.speed = speed
-        self.config(g, voice)
-        audio = np.asarray(self.t.generate(text, g).samples, np.float32)
-        trim()
-        return audio
-
-
-@part("tts", "kitten")
-class Kitten(SherpaTts):
-    label, DIR, FILES, SPEAKERS = "Kitten micro (English)", "kitten", ("model.onnx", "voices.bin", "tokens.txt"), 8
-
-    def model(self, cfg, f):
-        cfg.kitten = self.so.OfflineTtsKittenModelConfig(model=f[0], voices=f[1], tokens=f[2],
-                                                         data_dir=os.path.join(DATA, self.DIR, "espeak-ng-data"))
-
-
-@part("tts", "supertonic")
-class Supertonic(SherpaTts):
-    label, DIR, SPEAKERS, VOICE, LANG, STEPS = "Supertonic 3 (31 languages)", "supertonic", 10, "6", "en", 5
-    FILES = ("duration_predictor.int8.onnx", "text_encoder.int8.onnx", "vector_estimator.int8.onnx", "vocoder.int8.onnx",
-             "tts.json", "unicode_indexer.bin", "voice.bin")
-
-    def model(self, cfg, f):
-        cfg.supertonic = self.so.OfflineTtsSupertonicModelConfig(
-            duration_predictor=f[0], text_encoder=f[1], vector_estimator=f[2], vocoder=f[3], tts_json=f[4],
-            unicode_indexer=f[5], voice_style=f[6])
-
-    def config(self, g, voice):
-        g.sid, g.num_steps = int(voice), self.STEPS
-        g.extra["lang"] = self.LANG
-
-
-@part("tts", "pocket")
-class Pocket(SherpaTts):
-    label, DIR, VOICE, STEPS = "Pocket TTS (voice cloning)", "pocket", "bria", 5
-    FILES = ("lm_flow.int8.onnx", "lm_main.int8.onnx", "encoder.onnx", "decoder.int8.onnx", "text_conditioner.onnx",
-             "vocab.json", "token_scores.json")
-
-    def __init__(self, threads):
-        self.refs = {}
-        super().__init__(threads)
-
-    @classmethod
-    def voices(cls):
-        d = os.path.join(DATA, cls.DIR, "test_wavs")
-        return [{"id": f[:-4], "label": f[:-4].replace("_", " ").capitalize(), "lang": None, "gender": None}
-                for f in sorted(os.listdir(d)) if f.endswith(".wav")]
-
-    def model(self, cfg, f):
-        cfg.pocket = self.so.OfflineTtsPocketModelConfig(lm_flow=f[0], lm_main=f[1], encoder=f[2], decoder=f[3],
-                                                         text_conditioner=f[4], vocab_json=f[5], token_scores_json=f[6])
-
-    def config(self, g, voice):
-        if voice not in self.refs:
-            with wave.open(os.path.join(DATA, self.DIR, "test_wavs", voice + ".wav")) as w:
-                pcm = np.frombuffer(w.readframes(w.getnframes()), np.int16).reshape(-1, w.getnchannels())[:, 0]
-                self.refs[voice] = (pcm.astype(np.float32) / 32768, w.getframerate())
-        g.reference_audio, g.reference_sample_rate = self.refs[voice]
-        g.num_steps = self.STEPS
+    def warm(self):
+        self.synth("Hello there.", self.VOICE, 1.0)
+        self.voice_list = self.voices()
 
 
 DEFAULTS = {"vad": "silero", "stt": "parakeet-110m", "turn": "smart-turn", "tts": "kokoro"}
@@ -381,7 +310,7 @@ class Library:
 
     def catalog(self):
         def entry(kind, cls):
-            e = {"name": cls.name, "label": cls.label, "installed": installed(cls)}
+            e = {"name": cls.name, "label": cls.label, "installed": installed(cls), "default": DEFAULTS[kind] == cls.name}
             if kind == "tts":
                 e["voices"] = cls.voices() if e["installed"] else []
             return e
@@ -405,18 +334,8 @@ class Library:
             return self.loaded[key]
 
     def load(self, kind, name):
-        p = PARTS[kind][name]({"vad": 1, "stt": 1}.get(kind, self.threads))
-        if kind == "vad":
-            p.prob(p.state(), np.zeros(p.FRAME, np.float32))
-        elif kind == "stt":
-            st = p.stream()
-            st.feed(np.zeros(RATE, np.float32))
-            st.finish()
-        elif kind == "turn":
-            p.prob(np.zeros(RATE, np.float32))
-        else:
-            p.synth("Hello there.", p.VOICE, 1.0)
-            p.voice_list = type(p).voices()
+        p = PARTS[kind][name](self.threads)
+        p.warm()
         trim()
         return p
 
