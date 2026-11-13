@@ -614,7 +614,7 @@ img.src = ${JSON.stringify(checkUrl(req))} + "?t=" + Date.now();
     "/api/pair/deny": {
       POST: here(json(async (req) => new Response(null, { status: devices?.deny(String((await req.json().catch(() => ({})))?.code ?? "")) ? 204 : 404 }))),
     },
-    "/api/pair/:id": { DELETE: here((req) => {
+    "/api/pair/:id": { DELETE: guarded((req) => {
       const id = (req as Request & { params: { id: string } }).params.id;
       attached.get(id)?.close();
       return new Response(null, { status: devices?.remove(id) ? 204 : 404 });
@@ -751,30 +751,20 @@ img.src = ${JSON.stringify(checkUrl(req))} + "?t=" + Date.now();
         return new Response(null, { status: 204 });
       })),
     },
+    "/api/threads/:id/handoff": {
+      POST: guarded(json(async (req) => {
+        const id = (req as Request & { params: { id: string } }).params.id, machine = String((await req.json().catch(() => ({})))?.machine ?? "");
+        if (turns.has(id)) return Response.json({ error: { message: "OpenCode is still working in this chat" } }, { status: 409 });
+        try { return Response.json(await harness.handoff(id, machine || undefined)); }
+        catch (e) { return Response.json({ error: { message: (e as Error).message } }, { status: 502 }); }
+      })),
+    },
     "/api/threads/:id/fork": {
       POST: guarded(json(async (req) => {
         const before = (await req.json().catch(() => ({})))?.before;
         try { return Response.json({ id: await harness.fork((req as Request & { params: { id: string } }).params.id, typeof before === "string" ? before : undefined) }); }
         catch (e) { return Response.json({ error: { message: (e as Error).message } }, { status: 502 }); }
       })),
-    },
-    "/api/threads/:id/routines": {
-      GET: guarded(async (req) => {
-        try { return Response.json({ routines: await harness.routines((req as Request & { params: { id: string } }).params.id) }); }
-        catch (e) { return Response.json({ error: { message: (e as Error).message } }, { status: 502 }); }
-      }),
-    },
-    "/api/threads/routines/:routine": {
-      PATCH: guarded(json(async (req) => {
-        try { await harness.pause((req as Request & { params: { routine: string } }).params.routine, !!(await req.json().catch(() => ({})))?.paused); }
-        catch (e) { return Response.json({ error: { message: (e as Error).message } }, { status: 502 }); }
-        return new Response(null, { status: 204 });
-      })),
-      DELETE: guarded(async (req) => {
-        try { await harness.cancel((req as Request & { params: { routine: string } }).params.routine); }
-        catch (e) { return Response.json({ error: { message: (e as Error).message } }, { status: 502 }); }
-        return new Response(null, { status: 204 });
-      }),
     },
     "/api/threads/:id": {
       GET: guarded(async (req) => {
@@ -783,8 +773,9 @@ img.src = ${JSON.stringify(checkUrl(req))} + "?t=" + Date.now();
         catch (e) { return Response.json({ error: { message: (e as Error).message } }, { status: 502 }); }
       }),
       PATCH: guarded(json(async (req) => {
-        const { title, archived } = (await req.json().catch(() => ({}))) ?? {};
-        try { await harness.change((req as Request & { params: { id: string } }).params.id, { ...(String(title ?? "").trim() ? { title: String(title).trim() } : {}), ...(typeof archived === "boolean" ? { archived } : {}) }); }
+        const { title, archived, scene } = (await req.json().catch(() => ({}))) ?? {};
+        try { await harness.change((req as Request & { params: { id: string } }).params.id, { ...(String(title ?? "").trim() ? { title: String(title).trim() } : {}), ...(typeof archived === "boolean" ? { archived } : {}),
+          ...(scene === null || Array.isArray(scene?.cast) ? { scene } : {}) }); }
         catch (e) { return Response.json({ error: { message: (e as Error).message } }, { status: 502 }); }
         return new Response(null, { status: 204 });
       })),

@@ -5,9 +5,9 @@ const PAGE = '<!doctype html>\n<html><head><title>Counter</title></head>\n<body>
 export function fakeOpenCode(secret: string) {
   const sessions = new Map<string, Session>(), listeners = new Set<(line: string) => void>(), asks = new Map<string, (reply: string, at: string) => void>();
   const stops = new Map<string, { now: boolean }>(), staged = new Map<string, string>();
-  const log: { prompts: { session: string; text: string; persona?: string; model?: object; agent?: string; command?: string; meta?: any; files?: { uri: string; name?: string }[] }[]; replies: string[]; interrupts: number; answers: (object | string)[]; routines: string[] } =
-    { prompts: [], replies: [], interrupts: 0, answers: [], routines: [] };
-  const forms = new Map<string, (answer: object | undefined) => void>(), routines = new Map<string, { id: string; sessionID: string; name: string; status: string }>();
+  const log: { prompts: { session: string; text: string; persona?: string; model?: object; agent?: string; command?: string; meta?: any; files?: { uri: string; name?: string }[] }[]; replies: string[]; interrupts: number; answers: (object | string)[] } =
+    { prompts: [], replies: [], interrupts: 0, answers: [] };
+  const forms = new Map<string, (answer: object | undefined) => void>();
   let ids = 0;
   const held: (() => void)[] = [];
   const release = () => { for (const go of held.splice(0)) go(); };
@@ -82,10 +82,6 @@ export function fakeOpenCode(secret: string) {
       log.answers.push(answer ?? "skipped");
       chosen = answer ? ` You chose ${(answer as { q0?: string }).q0}.` : " You did not choose.";
     }
-    if (text.includes("every morning")) {
-      const id = `sch_${++ids}`;
-      routines.set(id, { id, sessionID, name: "morning bees", status: "active" });
-    }
     if (text.includes("until let go")) await new Promise<void>((go) => held.push(go));
     else if (text.includes("slowly")) for (let k = 0; k < 40 && !stopped.now; k++) await Bun.sleep(50);
     const state = allowed ? { status: "completed", input, output: out } : { status: "error", input, error: "rejected" };
@@ -128,23 +124,6 @@ export function fakeOpenCode(secret: string) {
       const url = new URL(req.url), path = url.pathname, method = req.method;
       if (req.headers.get("authorization") !== `Basic ${Buffer.from(`opencode:${secret}`).toString("base64")}`) return new Response("", { status: 401 });
       if (path === "/api/info") return json({ version: "2.2.7" });
-      const routine = /^\/api\/experimental\/schedule(?:\/([^/]+))?(?:\/(pause|resume))?$/.exec(path);
-      if (routine) {
-        const [, id, act] = routine, r = id ? routines.get(id) : undefined;
-        if (!id && method === "POST") {
-          const made = await req.json(), fresh = { id: `sch_${++ids}`, sessionID: made.sessionID, name: made.name ?? "", status: "active" };
-          routines.set(fresh.id, fresh);
-          log.routines.push(`POST ${fresh.name} ${JSON.stringify(made.when)}`);
-          return json({ data: fresh });
-        }
-        if (!id) return json({ data: [...routines.values()].filter((x) => x.sessionID === url.searchParams.get("sessionID")).map((x) => ({ ...x, when: { type: "cron", cron: "0 9 * * *" },
-          action: { type: "prompt", prompt: "Count the bees." }, nextDueAt: 1794500000000, runCount: 0 })) });
-        if (!r) return json({ message: "not found" }, 404);
-        log.routines.push(`${act ?? method} ${r.name}`);
-        if (act) r.status = act === "pause" ? "paused" : "active";
-        else routines.delete(id);
-        return act ? json({ data: r }) : new Response(null, { status: 204 });
-      }
       if (path === "/api/model") return json({ data: [{ id: "qwen3.8-27b", providerID: "chrysalis", name: "Qwen3.8 27B", variants: [{ id: "none" }, { id: "low" }, { id: "medium" }] }, { id: "cloud-1", providerID: "elsewhere", name: "Cloud One", settings: { baseURL: "https://cloud.example/v1" } }] });
       if (path === "/api/agent") return json({ data: [{ id: "build", name: "Build", mode: "primary", hidden: false }, { id: "plan", name: "Plan", mode: "primary", hidden: false },
         { id: "explore", name: "Explore", mode: "subagent", hidden: false }, { id: "title", name: "Title", mode: "primary", hidden: true }] });
@@ -178,7 +157,6 @@ export function fakeOpenCode(secret: string) {
       if (rest === "/move" && method === "POST") { s.dir = (await req.json()).directory; return new Response(null, { status: 204 }); }
       if (!rest && method === "DELETE") {
         sessions.delete(s.id);
-        for (const r of [...routines.values()]) if (r.sessionID === s.id) routines.delete(r.id);
         return new Response(null, { status: 204 });
       }
       if (!rest && method === "PATCH") {
@@ -227,6 +205,6 @@ export function fakeOpenCode(secret: string) {
       return json({ message: "not found" }, 404);
     },
   });
-  const wake = (session: string, name: string, text: string) => run(sessions.get(session)!, text, { metadata: { schedule: { id: "sch_0", name, run: 1 } } });
+  const wake = (session: string, agent: string, text: string) => run(sessions.get(session)!, text, { metadata: { source: "subagent", agent } });
   return { server, log, sessions, wake, release };
 }

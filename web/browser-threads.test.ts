@@ -1,7 +1,7 @@
 import { expect, test } from "bun:test";
 import { mkdirSync } from "node:fs";
 import { until } from "./server-harness";
-import { card, cards, castRows, connect, dir, harness, home, inRow, menu, open, openFolder, opencode, send, streams, work, outside } from "./browser-harness";
+import { card, cards, castRows, connect, dir, harness, home, inRow, menu, open, openFolder, opencode, send, streams, work, outside, fresh } from "./browser-harness";
 
 harness();
 
@@ -52,7 +52,7 @@ test("the folder button's explorer goes by its path's crumbs, a filter (Enter go
   const page = await open();
   await connect(page);
   await page.keyboard.press("Escape");
-  await page.click("#new-chat");
+  await fresh(page);
   await page.waitForSelector("#folder-btn:not([hidden])");
   await page.click("#folder-btn");
   await page.waitForSelector("#oc-pop .oc-path");
@@ -95,7 +95,7 @@ test("the folder button's explorer goes by its path's crumbs, a filter (Enter go
   await page.reload();
   await page.waitForSelector("#conversations .cast-row");
   expect((await sidebar()).includes("patch")).toBe(false);
-  await page.click("#new-chat");
+  await fresh(page);
   await page.waitForSelector("#folder-btn:not([hidden])");
   await page.click("#folder-btn");
   await page.waitForSelector("#oc-pop .oc-path");
@@ -121,7 +121,7 @@ test("a chat's folder is chosen from the folder button by the message box: befor
   const page = await open(), last = () => opencode.log.prompts.at(-1)!;
   if (!(await page.$("#opencode .dot.online"))) await connect(page);
   await page.keyboard.press("Escape");
-  await page.click("#new-chat");
+  await fresh(page);
   await page.waitForSelector("#folder-btn:not([hidden])");
   const chip = () => page.$eval("#folder-btn", (b) => [b.textContent, b.getAttribute("title")]);
   expect(await chip()).toEqual([home.split("/").pop()!, `Working in ${home}`]);
@@ -135,7 +135,7 @@ test("a chat's folder is chosen from the folder button by the message box: befor
   await send(page, "what grows here");
   expect([last().text, opencode.sessions.get(last().session)!.dir]).toEqual(["what grows here", there]);
   const sid = last().session;
-  await page.click("#new-chat");
+  await fresh(page);
   await send(page, "what is in the note");
   await page.click("#folder-btn");
   await openIn("shed");
@@ -194,29 +194,19 @@ test("a character works in a thread from the folder's invite: her card goes to O
   await page.close();
 }, 90_000);
 
-test("a routine made by asking is listed in its thread, where it can be paused and deleted; when OpenCode wakes the thread by itself, the open page shows the routine's message and the reply as it is written, and another chat's sidebar shows the thread working", async () => {
+test("when OpenCode wakes a thread by itself, the open page shows the message that woke it and the reply as it is written, and another chat's sidebar shows the thread working", async () => {
   const page = await open();
   await connect(page);
   await openFolder(page, work);
-  expect(await page.$("#routines .count")).toBe(null);
-  await send(page, "count the bees every morning");
+  await send(page, "count the bees");
   const session = opencode.log.prompts.at(-1)!.session;
-  await page.waitForSelector("#routines .count");
-  await page.click("#routines");
-  await page.waitForSelector("#routines-pop .routine");
-  const rows = () => page.$$eval("#routines-pop .routine", (r) => r.map((x) => [x.querySelector(".invite-name")!.textContent, x.querySelector(".routine-when")!.textContent!.split(" · ")[0], x.querySelector("button")!.title]));
-  expect(await rows()).toEqual([["morning bees", "cron 0 9 * * *", "Pause"]]);
-  await page.click('#routines-pop .routine button[title="Pause"]');
-  await page.waitForSelector('#routines-pop .routine button[title="Resume"]');
-  expect([opencode.log.routines.at(-1), await page.$eval("#routines-pop .routine-when", (e) => e.textContent)]).toEqual(["pause morning bees", "cron 0 9 * * * · paused"]);
-  await page.keyboard.press("Escape");
 
   const before = await page.$$eval("#thread > article", (a) => a.length), prompts = opencode.log.prompts.length;
-  void opencode.wake(session, "morning bees", "Count the bees until let go.");
+  void opencode.wake(session, "Explore", "Count the bees until let go.");
   await page.waitForFunction((n) => document.querySelectorAll("#thread > article").length === n + 2, { timeout: 15_000 }, before);
   await page.waitForSelector('#thread .tool-card[data-state="running"]');
   expect(await page.$eval("#thread > article.user:nth-last-child(2)", (e) => [e.querySelector(".point-chip")!.textContent, e.querySelector(".bubble, .markdown")!.textContent!.trim()]))
-    .toEqual(["Routine: morning bees", "Count the bees until let go."]);
+    .toEqual(["Sub-agent: Explore", "Count the bees until let go."]);
   expect(await page.$eval("#send", (e) => e.getAttribute("aria-label"))).toBe("Stop");
   opencode.release();
   const written = (text: string) => page.waitForFunction((text) => document.querySelector<HTMLElement>("#thread > article.assistant:last-child > .markdown")?.innerText.includes(text)
@@ -224,27 +214,14 @@ test("a routine made by asking is listed in its thread, where it can be paused a
   await written("You asked: Count the bees until let go.");
   expect(opencode.log.prompts.length - prompts).toBe(0);
 
-  await page.click("#new-chat");
-  void opencode.wake(session, "morning bees", "Count them again until let go.");
-  await page.waitForFunction(() => [...document.querySelectorAll("#conversations a.conv")].some((a) => a.querySelector(".conv-title")!.textContent === "count the bees every morning" && /Working/.test(a.querySelector(".conv-status")?.textContent ?? "")),
+  await fresh(page);
+  void opencode.wake(session, "Explore", "Count them again until let go.");
+  await page.waitForFunction(() => [...document.querySelectorAll("#conversations a.conv")].some((a) => a.querySelector(".conv-title")!.textContent === "count the bees" && /Working/.test(a.querySelector(".conv-status")?.textContent ?? "")),
     { timeout: 15_000 });
-  await page.evaluate(() => [...document.querySelectorAll<HTMLElement>("#conversations a.conv")].find((a) => a.querySelector(".conv-title")!.textContent === "count the bees every morning")!.click());
+  await page.evaluate(() => [...document.querySelectorAll<HTMLElement>("#conversations a.conv")].find((a) => a.querySelector(".conv-title")!.textContent === "count the bees")!.click());
   await page.waitForFunction((n) => document.querySelectorAll("#thread > article").length === n + 4, { timeout: 15_000 }, before);
   opencode.release();
   await written("You asked: Count them again until let go.");
-
-  const posts = opencode.log.routines.filter((r) => r.startsWith("POST")).length;
-  await page.evaluate(() => document.querySelector("#thread > article.user")!.querySelector<HTMLElement>('[data-act="trash"]')!.click());
-  await page.waitForFunction((n) => document.querySelectorAll("#thread > article").length === n + 3, {}, before);
-  await page.waitForSelector("#routines .count");
-  for (let k = 0; k < 100 && opencode.log.routines.at(-1) !== "pause morning bees"; k++) await Bun.sleep(50);
-  await Bun.sleep(300);
-  expect([opencode.log.routines.filter((r) => r.startsWith("POST")).slice(posts), await page.$eval("#routines .count", (c) => c.textContent)]).toEqual([['POST morning bees {"cron":"0 9 * * *"}'], "1"]);
-  await page.click("#routines");
-  await page.waitForSelector('#routines-pop .routine button[title="Resume"]');
-  await page.evaluate(() => document.querySelector<HTMLElement>('#routines-pop .routine button[title="Delete this routine"]')!.click());
-  await page.waitForFunction(() => !document.querySelector("#routines-pop .routine") && /None yet/.test(document.querySelector("#routines-pop .oc-note")?.textContent ?? ""));
-  expect([opencode.log.routines.at(-1), await page.$("#routines .count")]).toEqual(["DELETE morning bees", null]);
   await page.close();
 }, 90_000);
 
@@ -252,10 +229,10 @@ test("a chat's row has T3 Code's menu on a right click and on a long press: Pin 
   const page = await open();
   await connect(page);
   await page.keyboard.press("Escape");
-  await page.click("#new-chat");
+  await fresh(page);
   await send(page, "weigh the first jar");
   const session = opencode.log.prompts.at(-1)!.session;
-  await page.click("#new-chat");
+  await fresh(page);
   await send(page, "weigh the second jar");
   const titles = (sel: string) => page.$$eval(`#conversations ${sel} .conv-title`, (t) => t.map((x) => x.textContent));
   await page.evaluate(() => [...document.querySelectorAll<HTMLElement>("#conversations a.conv")].find((a) => a.querySelector(".conv-title")!.textContent === "weigh the first jar")!
@@ -358,7 +335,7 @@ test("OpenCode here is kept to Chrysalis's models until the switch under its but
   expect(await listed()).toEqual([true, ["chrysalis/qwen3.8-27b", "elsewhere/cloud-1"]]);
   await page.keyboard.press("Escape");
   const toasts = () => page.$eval("#toast span", (t) => t.textContent ?? "");
-  await page.click("#new-chat");
+  await fresh(page);
   await page.waitForFunction(() => !document.querySelector(".msg"));
   expect(await groups()).toContainEqual(["Elsewhere: leaves this computer", true]);
   expect(await page.$eval("#model-btn", (b) => b.classList.contains("outside"))).toBe(true);

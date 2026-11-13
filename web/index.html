@@ -80,8 +80,11 @@
           </div>
           <div class="side-body">
             <div class="side-top">
-              <button id="new-chat" class="btn" type="button"></button>
-              <button id="add-cast" class="btn" type="button" title="A character from a card, or a chat with several" aria-label="Add a character or start a chat with several"></button>
+              <label class="side-search"><input id="side-search" type="search" placeholder="Search" aria-label="Search threads" role="combobox" aria-autocomplete="list" aria-expanded="false" aria-controls="side-results" autocomplete="off" spellcheck="false" /><button id="side-clear" class="act" type="button" aria-label="Clear thread search" hidden></button></label>
+              <button id="side-scope" class="act" type="button" title="Filter" aria-label="Filter" aria-haspopup="menu"></button>
+              <button id="add-project" class="act" type="button" title="Add project" aria-label="Add project"></button>
+              <button id="add-cast" class="act" type="button" title="A character from a card, or a chat with several" aria-label="Add a character or start a chat with several"></button>
+              <button id="new-chat" class="act" type="button" title="New thread" aria-label="New thread"></button>
             </div>
             <nav id="conversations" aria-label="Conversations"></nav>
             <div class="side-foot">
@@ -100,7 +103,6 @@
       <div id="row-menu" class="cast-add row-menu" role="menu" hidden></div>
       <div id="cast-invite" class="cast-invite" role="dialog" aria-label="Who is in this chat" hidden></div>
       <div id="oc-pop" class="cast-invite oc-pop" role="dialog" aria-label="OpenCode" hidden></div>
-      <div id="routines-pop" class="cast-invite oc-pop" role="dialog" aria-label="Routines" hidden></div>
       <input id="cast-file" type="file" accept=".png,.json,image/png,application/json" multiple hidden />
       <main>
         <header class="topbar">
@@ -130,7 +132,6 @@
               <div class="composer-options">
                 <button id="attach" class="act attach" type="button" title="Attach text files or pictures (or drop or paste them)" aria-label="Attach files"></button>
                 <input id="attach-file" type="file" multiple hidden />
-                <button id="routines" class="act attach routines" type="button" title="Routines in this thread" aria-label="Routines in this thread" aria-haspopup="dialog" aria-controls="routines-pop"></button>
                 <div class="think-ctl">
                   <div id="energy" class="energy" role="slider" tabindex="0" aria-label="Thinking" aria-valuemin="0" aria-valuemax="3"></div>
                   <div id="energy-stops" class="energy-stops"></div>
@@ -241,6 +242,15 @@
       <p>A thread on one of these models sends that company your prompts, your files and whatever its tools read. Nothing can take that back.</p>
       <div class="outside-acts"><button id="outside-keep" class="btn primary" type="button" autofocus>Keep Chrysalis only</button><button id="outside-allow" class="btn warn" type="button">Allow them</button></div>
     </dialog>
+    <dialog id="palette" class="palette" aria-label="Command palette">
+      <div class="palette-head"><button id="palette-back" class="act" type="button" aria-label="Back"><svg class="i" viewBox="0 0 24 24" aria-hidden="true"><path d="M19 12H5M11 6l-6 6 6 6"/></svg></button><input id="palette-input" type="text" placeholder="Search..." aria-label="Search" autocomplete="off" spellcheck="false" /></div>
+      <div id="palette-list" class="palette-list" role="listbox"></div>
+      <div class="palette-foot"><span><kbd>↑</kbd><kbd>↓</kbd>Navigate</span><span><kbd>Enter</kbd>Select</span><span><kbd>Backspace</kbd>Back</span><span><kbd>Esc</kbd>Close</span></div>
+    </dialog>
+    <div id="scope-pop" class="scope-pop" role="dialog" aria-label="Filter projects" hidden>
+      <label class="scope-find"><svg class="i" viewBox="0 0 24 24" aria-hidden="true"><circle cx="11" cy="11" r="6.5"/><path d="m16 16 4 4"/></svg><input id="scope-input" type="text" placeholder="Search projects..." aria-label="Search projects" autocomplete="off" spellcheck="false" /></label>
+      <div id="scope-list" class="scope-list" role="listbox"></div>
+    </div>
     <script type="module" src="./app.ts"></script>
   </body>
 </html>

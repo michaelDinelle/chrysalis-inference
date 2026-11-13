@@ -1,6 +1,6 @@
 import { expect, test } from "bun:test";
 import { until } from "./server-harness";
-import { cards, castRows, connect, dir, harness, home, lastText, open, openFolder, opencode, png, send, spokenOf, streams, voicePage, work, outside } from "./browser-harness";
+import { cards, castRows, connect, dir, harness, home, lastText, open, openFolder, opencode, png, send, spokenOf, streams, voicePage, work, outside, fresh } from "./browser-harness";
 
 harness();
 
@@ -128,7 +128,7 @@ test("a thread is OpenCode's to change: a message sent while a turn runs goes to
 test("while OpenCode is connected, a chat with Chrysalis is OpenCode at work in the home folder: a new chat's message goes to OpenCode there and its steps are cards, the chat is listed under Chrysalis and not as a folder, voice mode asks OpenCode and speaks its reply with the model picker and thinking slider still in a narrow message box, and once disconnected a new chat is a plain one again", async () => {
   const page = await open(), last = () => opencode.log.prompts.at(-1)!, chats = streams.length;
   await page.waitForSelector("#opencode .dot.online");
-  await page.click("#new-chat");
+  await fresh(page);
   await send(page, "how much space is left on the computer");
   expect([last().text, opencode.sessions.get(last().session)!.dir, streams.length - chats, await cards(page)]).toEqual(["how much space is left on the computer", home, 0, [["Read", "OpenCode", "done"]]]);
   expect([(await castRows(page)).includes(home.split("/").pop()!), await page.$$eval("#conversations .folder.open .conv-title", (t) => t.map((x) => x.textContent))]).toEqual([false, ["how much space is left on the computer"]]);

@@ -1,6 +1,6 @@
 import { expect, test } from "bun:test";
 import { ARTIFACTS_PROMPT } from "./artifacts";
-import { harness, articles, card, closeSettings, fake, lastStream, noteShown, open, openSettings, send, sent, shown, streams, voicePage } from "./browser-harness";
+import { harness, articles, card, closeSettings, fake, lastStream, noteShown, open, openSettings, send, sent, shown, streams, voicePage, fresh } from "./browser-harness";
 
 harness();
 
@@ -68,7 +68,7 @@ test("What the model is sent shows the next request as Chrysalis gets it: the on
   await page.waitForSelector("#cast-sheet:not([hidden]) .card-field textarea");
   await typeIn("Greeting", "Hello, {{user}}.");
   await page.keyboard.press("Escape");
-  await page.click("#new-chat");
+  await fresh(page);
   expect(await articles(page)).toEqual(["Hello, User."]);
   await send(page, "sixth");
   expect(lastStream.messages.slice(1)).toEqual([{ role: "user", content: "[The scene begins.]" }, { role: "assistant", content: "Hello, User." }, { role: "user", content: "sixth" }]);

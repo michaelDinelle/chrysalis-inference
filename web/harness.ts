@@ -6,12 +6,11 @@ export type Decision = "once" | "always" | "deny";
 export interface Scene { cast: string[]; scenario?: string; name?: string; greeting?: string }
 export interface Thread { id: string; title: string; dir: string; updated: number; idle: number; busy: boolean; archived: boolean; model?: string; scene?: Scene; machine?: string }
 export interface Connector { name: string; state: typeof state; ensure: typeof ensure; stop: typeof stop; threads: typeof threads; models: typeof models; agents: typeof agents; transcript: typeof transcript;
-  turn: typeof turn; say: typeof say; undo: typeof undo; fork: typeof fork; rewrite: typeof rewrite; change: typeof change; remove: typeof remove; routines: typeof routines; pause: typeof pause; cancel: typeof cancel }
+  turn: typeof turn; say: typeof say; undo: typeof undo; fork: typeof fork; rewrite: typeof rewrite; change: typeof change; remove: typeof remove }
 export const name = "OpenCode";
 export interface Model { id: string; name: string; provider: string; variants: string[]; straight?: string }
 export interface Turn { session?: string; machine?: string; dir: string; text: string; model?: string; persona?: string; files?: { uri: string; name: string }[]; follow?: boolean; agent?: string;
   scene?: Scene; said?: string; next?: string; title?: string; sampling?: Record<string, unknown> }
-export interface Routine { id: string; name: string; when: string; prompt: string; status: string; next?: number; runs: number }
 export type Answer = Decision | "stop" | { answer: Record<string, unknown> };
 export interface Step { content: string; reasoning?: string; calls: Call[] }
 export interface Call { id: string; name: string; args: string; title: string; source: string; state: string; result?: string }
@@ -30,7 +29,7 @@ export type Send = (path: string, init: { method: string; headers: Record<string
 export interface Machine { id: string; name: string; home: string; kind: string }
 interface Host { id: string; url: string; auth: string; version: string; proc?: Bun.Subprocess; send?: Send; machine?: Machine }
 let host: Host | undefined, starting: Promise<void> | undefined;
-const away = new Map<string, Host>(), homes = new Map<string, string>(), plans = new Map<string, string>();
+const away = new Map<string, Host>(), homes = new Map<string, string>();
 const gone = (): never => { throw new Error("That computer is not connected to Chrysalis"); };
 const of = (machine?: string) => (machine ? away.get(machine) ?? gone() : host);
 const on = (session?: string) => of(session ? homes.get(session) : undefined);
@@ -83,7 +82,7 @@ async function ourModels(chrysalis: string) {
   const listed = await fetch(`${chrysalis}/v1/models`, { signal: AbortSignal.timeout(3000) }).then((r) => r.json()).catch(() => ({ data: [] }));
   return Object.fromEntries((listed.data ?? []).filter((m: any) => typeof m?.id === "string" && !m.id.endsWith("-fast")).map((m: any) => [m.id, { variants: THINKING, capabilities: { input: ["text", "image", "pdf"] } }]));
 }
-export const awayConfig = async (chrysalis: string) => ({ experimental: { schedules: true }, enabled_providers: ["chrysalis"],
+export const awayConfig = async (chrysalis: string) => ({ enabled_providers: ["chrysalis"],
   providers: { chrysalis: { name: "Chrysalis", package: "@opencode/ai/providers/openai-compatible", settings: {}, models: await ourModels(chrysalis) } } });
 export function ensure(chrysalis: string): Promise<void> {
   return (starting ??= (async () => {
@@ -105,7 +104,7 @@ export function ensure(chrysalis: string): Promise<void> {
         else others[provider].settings = { baseURL: via(base) };
       }
       const proc = Bun.spawn(["sh", "-c", WITH_US, "sh", bin, "serve", "--hostname", "127.0.0.1", "--port", String(port)], { stdin: "ignore", stdout: "ignore", stderr: "ignore",
-        env: { ...env, CHRYSALIS_WEB_PID: String(process.pid), OPENCODE_PASSWORD: password, OPENCODE_CONFIG_CONTENT: JSON.stringify({ experimental: { schedules: true }, ...(outside ? {} : { enabled_providers: ["chrysalis"] }), providers: { ...others, chrysalis: { name: "Chrysalis",
+        env: { ...env, CHRYSALIS_WEB_PID: String(process.pid), OPENCODE_PASSWORD: password, OPENCODE_CONFIG_CONTENT: JSON.stringify({ ...(outside ? {} : { enabled_providers: ["chrysalis"] }), providers: { ...others, chrysalis: { name: "Chrysalis",
           package: "@opencode/ai/providers/openai-compatible", settings: { baseURL: `${modelUrl}/v1`, apiKey: "chrysalis" }, models } } }) } });
       const at = await reach(`http://127.0.0.1:${port}`, password, proc, Object.keys(models).length > 0);
       const [providers, all] = await Promise.all([call("GET", "/api/provider", undefined, at), call("GET", "/api/model", undefined, at)]);
@@ -194,7 +193,9 @@ async function watch(h: Host) {
           try { ev = JSON.parse(data); } catch { continue; }
           const id = ev?.data?.sessionID ?? ev?.data?.form?.sessionID;
           if (typeof id !== "string") continue;
+          if (/^session\.(deleted|removed)$/.test(ev.type)) { if ((homes.get(id) ?? "") === h.id) homes.delete(id); continue; }
           if (h.id) homes.set(id, h.id);
+          else homes.delete(id);
           if (ev.type === "session.created") roots.set(id, ev.data.parentID ? await rootOf(ev.data.parentID) : id);
           const root = await rootOf(id), from = root === id ? undefined : id, to = listeners.get(root);
           if (ev.type === "session.execution.started") running.set(root, (running.get(root) ?? new Set()).add(id));
@@ -227,7 +228,7 @@ const textOf = (content: any) => (Array.isArray(content) ? content.map((p: any) 
 const titled = (name: string) => name.replace(/[_-]+/g, " ").replace(/^./, (c) => c.toUpperCase());
 
 export async function threads(): Promise<Thread[]> {
-  return (await Promise.all([...(host ? [host] : []), ...away.values()].map((h) => threadsOf(h).catch(() => [])))).flat();
+  return (await Promise.all([...(host ? [threadsOf(host)] : []), ...[...away.values()].map((h) => threadsOf(h).catch(() => []))])).flat();
 }
 async function threadsOf(h: Host): Promise<Thread[]> {
   const out: Thread[] = [];
@@ -253,7 +254,25 @@ export async function agents(): Promise<{ id: string; name: string }[]> {
   return ((await call("GET", "/api/agent", undefined, host ?? [...away.values()][0])).data ?? []).filter((a: any) => a.mode !== "subagent" && !a.hidden).map((a: any) => ({ id: a.id, name: a.name ?? a.id }));
 }
 export const remove = (id: string) => call("DELETE", `/api/session/${id}`, undefined, on(id));
-export const change = (id: string, to: { title?: string; archived?: boolean }) => call("PATCH", `/api/session/${id}`, to, on(id));
+export async function change(id: string, to: { title?: string; archived?: boolean; scene?: Scene | null }) {
+  const { scene, ...rest } = to;
+  if (scene === undefined) return call("PATCH", `/api/session/${id}`, rest, on(id));
+  const was = (await call("GET", `/api/session/${id}`, undefined, on(id))).data?.metadata ?? {};
+  return call("PATCH", `/api/session/${id}`, { ...rest, metadata: { ...was, [OURS]: scene } }, on(id));
+}
+export async function handoff(id: string, machine?: string): Promise<{ dir: string; machine?: string }> {
+  const from = on(id), to = of(machine);
+  if (!from || !to) throw new Error("OpenCode is not running");
+  if (from === to) throw new Error("This chat is on that computer already");
+  if (running.has(id)) throw new Error("OpenCode is still working in this chat");
+  const was = (await call("GET", `/api/experimental/session/${id}/export`, undefined, from)).data, dir = to.machine?.home ?? homedir();
+  const { [FROM]: _, ...kept } = was.info.metadata ?? {}, metadata = { ...kept, ...(to.id ? { [FROM]: true } : {}) }, location = { ...was.info.location, directory: dir };
+  await call("POST", "/api/experimental/session/import", { info: { ...was.info, metadata, location }, messages: was.messages, location }, to);
+  await call("DELETE", `/api/session/${id}`, undefined, from);
+  if (to.id) homes.set(id, to.id);
+  else homes.delete(id);
+  return { dir, ...(to.id ? { machine: to.id } : {}) };
+}
 export const move = (id: string, directory: string) => call("POST", `/api/session/${id}/move`, { directory }, on(id));
 export const say = (id: string, text: string) => call("POST", `/api/session/${id}/prompt`, { text }, on(id));
 export const fork = async (id: string, before?: string) => {
@@ -268,35 +287,19 @@ export const fork = async (id: string, before?: string) => {
 export async function rewrite(id: string, to: { drop?: string[]; edit?: { id: string; text: string } }) {
   const go = (method: string, path: string, body?: object) => call(method, path, body, on(id));
   if (running.has(id)) throw new Error("OpenCode is still working in this chat");
-  const was = (await go("GET", `/api/experimental/session/${id}/export`)).data, kept = (await go("GET", `/api/experimental/schedule?sessionID=${id}`).catch(() => ({ data: [] }))).data ?? [];
+  const was = (await go("GET", `/api/experimental/session/${id}/export`)).data;
   const edited = (m: any) => (m.type === "user" ? { ...m, text: to.edit!.text, metadata: { ...m.metadata, [OURS]: { ...m.metadata?.[OURS], said: to.edit!.text } } }
     : { ...m, content: [...(m.content ?? []).filter((p: any) => p.type !== "text"), { type: "text", text: to.edit!.text }] });
   const messages = was.messages.filter((m: any) => !to.drop?.includes(m.id)).map((m: any) => (m.id === to.edit?.id ? edited(m) : m));
   await go("DELETE", `/api/session/${id}`);
   try { await go("POST", "/api/experimental/session/import", { info: was.info, messages, location: was.info.location }); }
   catch (e) { await go("POST", "/api/experimental/session/import", { ...was, location: was.info.location }); throw e; }
-  const test = (c: any) => (c ? (c.type === "code" ? { code: c.code } : { run: c.run, ...(c.is !== undefined ? { is: c.is } : {}), ...(c.matches !== undefined ? { matches: c.matches } : {}), ...(c.changes ? { changes: true } : {}) }) : undefined);
-  for (const r of kept.filter((r: any) => r.status !== "done")) {
-    const tz = r.when.tz ? { tz: r.when.tz } : {}, when = r.when.type === "every" ? { every: r.when.every, ...tz } : r.when.type === "cron" ? { cron: r.when.cron, ...tz }
-      : { at: new Date(r.nextDueAt ?? Date.now() + 60_000).toISOString() };
-    const made = (await go("POST", "/api/experimental/schedule", { sessionID: id, ...(r.name ? { name: r.name } : {}), when, prompt: r.action.prompt, ...(r.if ? { if: test(r.if) } : {}), ...(r.until ? { until: test(r.until) } : {}) })).data;
-    if (r.status === "paused") await go("POST", `/api/experimental/schedule/${made.id}/pause`);
-  }
 }
 export async function undo(id: string, message: string) {
   const go = (method: string, path: string, body?: object) => call(method, path, body, on(id));
   await go("POST", `/api/session/${id}/revert/stage`, { messageID: message, files: true });
   await go("POST", `/api/session/${id}/revert/commit`);
 }
-
-const whenOf = (w: any) => (w.type === "every" ? `every ${w.every}` : w.type === "in" ? `once, ${w.in} after it was made` : w.type === "at" ? `once, at ${w.at}` : `cron ${w.cron}`);
-export async function routines(session: string): Promise<Routine[]> {
-  const list = (await call("GET", `/api/experimental/schedule?sessionID=${session}`, undefined, on(session))).data ?? [];
-  for (const r of list) plans.set(r.id, homes.get(session) ?? "");
-  return list.filter((r: any) => r.status !== "done").map((r: any) => ({ id: r.id, name: r.name ?? "", when: whenOf(r.when), prompt: r.action?.prompt ?? "", status: r.status, next: r.nextDueAt, runs: r.runCount ?? 0 }));
-}
-export const pause = (routine: string, paused: boolean) => call("POST", `/api/experimental/schedule/${routine}/${paused ? "pause" : "resume"}`, undefined, of(plans.get(routine)));
-export const cancel = (routine: string) => call("DELETE", `/api/experimental/schedule/${routine}`, undefined, of(plans.get(routine)));
 
 function callOf(p: any): Call {
   const s = p.state ?? {}, failed = s.status === "error", done = s.status === "completed";
@@ -329,7 +332,7 @@ export async function transcript(id: string): Promise<{ thread: Thread; messages
       const files = (m.files ?? []).filter((f: any) => typeof f.data === "string").map((f: any) => ({ name: f.name ?? "attachment", type: f.mime ?? "", data: f.data }));
       const ours = m.metadata?.[OURS];
       if (typeof ours?.next === "string") by = ours.next;
-      messages.push({ role: "user", content: typeof ours?.said === "string" ? ours.said : m.text ?? "", oc: m.id, ocs: [m.id], ...(files.length ? { files } : {}), ...(m.metadata?.schedule ? { sent: `Routine${m.metadata.schedule.name ? `: ${m.metadata.schedule.name}` : ""}` } : m.metadata?.source === "subagent" ? { sent: `Sub-agent${m.metadata.agent ? `: ${m.metadata.agent}` : ""}` } : {}) });
+      messages.push({ role: "user", content: typeof ours?.said === "string" ? ours.said : m.text ?? "", oc: m.id, ocs: [m.id], ...(files.length ? { files } : {}), ...(m.metadata?.source === "subagent" ? { sent: `Sub-agent${m.metadata.agent ? `: ${m.metadata.agent}` : ""}` } : {}) });
     }
     else if (m.type === "assistant") {
       ids.push(m.id);

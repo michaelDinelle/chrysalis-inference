@@ -16,6 +16,7 @@ import logo from "./logo.svg";
 import { type CardData, type Person, type Voice, cardPng, castPrompt, dropPerson, fill as fillCard, loadCast, readCast, savePerson, speakerOf,
   voiceOf } from "./cast";
 import { Ocean } from "./ocean";
+import { type Drop, sidebarDrag } from "./drag";
 
 type Effort = "xhigh" | "medium" | "low" | "off";
 interface Stats { ttft: number; tps: number; tokens: number; prompt: number; cached?: number; thought?: number; seed?: number; model?: string; ctx?: number }
@@ -191,6 +192,9 @@ const ICONS = {
   download: '<path d="M12 4v11M7.5 10.5 12 15l4.5-4.5M5 20h14"/>',
   clip: '<path d="M20 11.6 12.3 19.3a5.2 5.2 0 0 1-7.4-7.4l8.3-8.3a3.5 3.5 0 0 1 4.9 4.9l-8.3 8.3a1.7 1.7 0 0 1-2.5-2.5l7.4-7.4"/>',
   x: '<path d="M7 7l10 10M17 7 7 17"/>',
+  filter: '<path d="M3 6h18M7 12h10M10 18h4"/>',
+  folderPlus: '<path d="M3 7.5A2.5 2.5 0 0 1 5.5 5H9l2 2.5h7.5A2.5 2.5 0 0 1 21 10v6.5a2.5 2.5 0 0 1-2.5 2.5h-13A2.5 2.5 0 0 1 3 16.5z"/><path d="M12 10.5v6M9 13.5h6"/>',
+  pen: '<path d="M12 4H6a2 2 0 0 0-2 2v12a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2v-6"/><path d="M17.4 3.6a2 2 0 0 1 3 3L12 15l-4 1 1-4z"/>',
   search: '<circle cx="11" cy="11" r="6.5"/><path d="m20 20-4.2-4.2"/>',
   pin: '<path d="M9 4h6l-1 6 3 3H7l3-3z"/><path d="M12 13v7"/>',
   approval: '<path d="M20 13c0 5-3.5 7.5-7.66 8.95a1 1 0 0 1-.67-.01C7.5 20.5 4 18 4 13V6a1 1 0 0 1 1-1c2 0 4.5-1.2 6.24-2.72a1.17 1.17 0 0 1 1.52 0C14.51 3.81 17 5 19 5a1 1 0 0 1 1 1z"/><path d="M9.1 9a3 3 0 0 1 5.82 1c0 2-3 3-3 3"/><path d="M12 17h.01"/>',
@@ -198,8 +202,6 @@ const ICONS = {
   failed: '<circle cx="12" cy="12" r="10"/><path d="M12 8v4"/><path d="M12 16h.01"/>',
   done: '<circle cx="12" cy="12" r="10"/><path d="m9 12 2 2 4-4"/>',
   compose: '<path d="M12 3H5a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2v-7"/><path d="M18.375 2.625a1 1 0 0 1 3 3l-9.013 9.014a2 2 0 0 1-.853.505l-2.873.84a.5.5 0 0 1-.62-.62l.84-2.873a2 2 0 0 1 .506-.852z"/>',
-  clock: '<circle cx="12" cy="12" r="8.5"/><path d="M12 7.5V12l3 2"/>',
-  pause: '<path d="M9 6v12M15 6v12"/>',
   grip: '<circle cx="9" cy="6" r="1.3" fill="currentColor" stroke="none"/><circle cx="15" cy="6" r="1.3" fill="currentColor" stroke="none"/><circle cx="9" cy="12" r="1.3" fill="currentColor" stroke="none"/><circle cx="15" cy="12" r="1.3" fill="currentColor" stroke="none"/><circle cx="9" cy="18" r="1.3" fill="currentColor" stroke="none"/><circle cx="15" cy="18" r="1.3" fill="currentColor" stroke="none"/>',
   power: '<path d="M12 3.5v8"/><path d="M6.6 6.8a7.5 7.5 0 1 0 10.8 0"/>',
   dice: '<rect x="4" y="4" width="16" height="16" rx="3.5"/><circle cx="9" cy="9" r="1.1" fill="currentColor"/><circle cx="15" cy="15" r="1.1" fill="currentColor"/><circle cx="15" cy="9" r="1.1" fill="currentColor"/><circle cx="9" cy="15" r="1.1" fill="currentColor"/>',
@@ -275,7 +277,6 @@ const userName = () => nameOf(ME);
 const userCard = () => ({ ...persona().card.data, name: userName() });
 const CAST = "cast:";
 const castKey = (cast: string[], missing: string[] = []) => CAST + [...cast].sort().join("+") + (missing.length ? `|${[...missing].sort().join("|")}` : "");
-interface Routine { id: string; name: string; when: string; prompt: string; status: string; next?: number; runs: number }
 interface Scene { cast: string[]; scenario?: string; name?: string; greeting?: string }
 interface Harness { state: "absent" | "off" | "on"; outside?: boolean; machines?: { id: string; name: string; home: string; kind: string }[]; name?: string; version?: string; install?: string; wanted?: boolean; home?: string; models?: { id: string; name: string; provider: string; variants: string[]; straight?: string }[]; agents?: { id: string; name: string }[];
   threads?: { id: string; title: string; dir: string; updated: number; idle: number; busy: boolean; archived: boolean; job?: string; model?: string; scene?: Scene; machine?: string }[] }
@@ -717,7 +718,6 @@ async function threadAct(act: "fork" | "drop" | "edit" | "resend", m: Message, t
     return void (location.hash = `#${STUB}${id}`);
   }
   const files = act === "resend" ? asked!.files : undefined;
-  routinesOf = "";
   await showThread(sid);
   if (act !== "resend" || c.id !== conv.id) return;
   if (files?.length) pending = files;
@@ -753,10 +753,34 @@ async function moveThread(c: Conversation, dir: string) {
   renderList();
 }
 const machineIcon = (kind: string): keyof typeof ICONS => (kind === "darwin" ? "mac" : "monitor");
+async function handOff(c: Conversation, m: { id: string; name: string }) {
+  if (!c.thread?.id) return;
+  if (runs.get(c.id)) return toast("OpenCode is still working in this chat");
+  const r = await fetch(`/api/threads/${c.thread.id}/handoff`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ machine: m.id }) }).catch(() => null);
+  if (!r?.ok) return toast((await r?.json().catch(() => null))?.error?.message ?? "OpenCode did not hand it off");
+  const got = await r.json();
+  for (const x of new Set([c, chats[c.id], c.id === conv.id ? conv : undefined])) if (x?.thread) {
+    x.thread.dir = got.dir;
+    if (got.machine) x.thread.machine = got.machine; else delete x.thread.machine;
+  }
+  if (c.messages.length) save(c);
+  await loadThreads();
+  renderControls();
+  renderList();
+  toast(`Handed off to ${m.name}: the chat goes on there, in ${dirName(got.dir)}`);
+}
 function chooseMachine(at: HTMLElement) {
-  if (!conv.thread || conv.thread.id) return;
-  const r = at.getBoundingClientRect(), menu = $("row-menu");
+  if (!conv.thread) return;
+  const r = at.getBoundingClientRect(), menu = $("row-menu"), here = conv.thread.machine ?? "";
   if (!menu.hidden) return void (menu.hidden = true);
+  if (conv.thread.id) {
+    const others = (harness.machines ?? []).filter((m) => m.id !== here);
+    if (!others.length) return;
+    openMenu(r.left, r.top, others.map((m): MenuItem => ({ label: m.name, icon: machineIcon(m.kind), run: () => void handOff(conv, m) })), "Hand off to");
+    menu.style.top = "auto";
+    menu.style.bottom = `${innerHeight - r.top + 6}px`;
+    return;
+  }
   openMenu(r.left, r.top, [...(harness.machines ?? []).map((m): MenuItem => ({ label: m.name, icon: machineIcon(m.kind), run: () => {
     setPref("machine", m.id);
     conv.thread = freshThread();
@@ -778,48 +802,6 @@ function newThread(dir: string, who = "") {
   render();
 }
 
-let routines: Routine[] = [], routinesOf = "";
-async function loadRoutines() {
-  const of = conv.thread?.id ?? "", r = of ? await fetch(`/api/threads/${of}/routines`).catch(() => null) : null, got: Routine[] = r?.ok ? (await r.json()).routines : [];
-  if (of !== (conv.thread?.id ?? "") || (of === routinesOf && JSON.stringify(got) === JSON.stringify(routines))) return;
-  routines = got;
-  routinesOf = of;
-  const b = $("routines");
-  b.innerHTML = `${icon("clock")}${routines.length ? `<span class="count">${routines.length}</span>` : ""}`;
-  b.title = b.ariaLabel = routines.length ? `Routines in this thread: ${routines.length}` : "Routines in this thread";
-  if (!$("routines-pop").hidden) paintRoutines();
-}
-function paintRoutines() {
-  const pop = $("routines-pop"), list = h("div", "invite-list");
-  for (const r of routines) {
-    const row = h("div", "routine"), text = h("div", "routine-text"), hold = h("button", "act"), drop = h("button", "act"), paused = r.status === "paused";
-    const change = (method: string, body?: object) => void fetch(`/api/threads/routines/${r.id}`, { method, headers: { "Content-Type": "application/json" }, body: JSON.stringify(body ?? {}) })
-      .then((res) => { if (!res.ok) toast("OpenCode did not change that routine"); return loadRoutines(); });
-    text.append(h("span", "invite-name", r.name || r.prompt), h("span", "routine-when", [r.when, paused ? "paused" : r.next ? `next ${new Date(r.next).toLocaleString([], { dateStyle: "medium", timeStyle: "short" })}` : ""].filter(Boolean).join(" · ")));
-    text.title = r.prompt;
-    hold.type = drop.type = "button";
-    hold.innerHTML = icon(paused ? "play" : "pause");
-    hold.title = hold.ariaLabel = paused ? "Resume" : "Pause";
-    hold.onclick = () => change("PATCH", { paused: !paused });
-    drop.innerHTML = icon("trash");
-    drop.title = drop.ariaLabel = "Delete this routine";
-    drop.onclick = () => change("DELETE");
-    row.append(text, hold, drop);
-    list.append(row);
-  }
-  pop.replaceChildren(h("div", "invite-head", "Routines"), ...(routines.length ? [list] : []),
-    h("p", "oc-note", routines.length ? "They run while Chrysalis is running, and their replies land in this thread. Ask here to add or change one."
-      : "None yet. Ask in this thread, for example: every morning at 9, check the build and tell me what broke. It runs while Chrysalis is running, and its replies land here."));
-}
-function openRoutines() {
-  const pop = $("routines-pop"), r = $("routines").getBoundingClientRect();
-  if (!pop.hidden) return void (pop.hidden = true);
-  pop.hidden = false;
-  pop.style.left = `${Math.max(12, Math.min(r.left, innerWidth - pop.offsetWidth - 12))}px`;
-  pop.style.bottom = `${innerHeight - r.top + 6}px`;
-  paintRoutines();
-  void loadRoutines();
-}
 let ocAt = "", ocOn = "", ocShown = "", ocPick: (path: string) => void = () => {};
 function paintHarness() {
   const b = $("opencode"), on = harness.state === "on";
@@ -887,7 +869,7 @@ async function paintOcPop() {
   }
   const connect = () => { harness.wanted = true; void paintOcPop(); void ensureHarness().catch((e) => { harness.wanted = false; toast(e instanceof Error ? e.message : String(e)); void paintOcPop(); }); };
   if (harness.state !== "on") return void pop.replaceChildren(head(), ...(harness.wanted ? [h("p", "oc-note", "Starting OpenCode…")]
-    : [row("invite-card", `${icon("power")}Connect`, connect, "Start OpenCode: its folders, threads and routines come back")]), ...rest());
+    : [row("invite-card", `${icon("power")}Connect`, connect, "Start OpenCode: its folders and threads come back")]), ...rest());
   if (ocAt) {
     const r = await fetch(`/api/threads/folders?path=${encodeURIComponent(ocAt === "~" ? "" : ocAt)}${ocOn ? `&machine=${ocOn}` : ""}`).catch(() => null), got = r?.ok ? await r.json() : null;
     if (!got) { ocAt = ""; toast("That folder cannot be read"); return paintOcPop(); }
@@ -958,7 +940,23 @@ async function paintOcPop() {
     foot.append(keys, row("oc-use", `Use ${escapeHtml(dirName(here) || "/")}`, () => use(here), here));
     pop.classList.add("exploring");
     pop.classList.remove("loading");
-    pop.replaceChildren(h("div", "oc-title", "Choose a folder"), crumbs, find, list, foot);
+    const title = h("div", "oc-title", "Choose a folder");
+    if ((harness.machines?.length ?? 0) > 1 && conv.thread && !conv.thread.id) {
+      const pick = h("select", "oc-machine");
+      pick.ariaLabel = "On";
+      for (const m of harness.machines!) pick.append(Object.assign(h("option", "", m.name), { value: m.id, selected: m.id === ocOn }));
+      pick.onchange = () => {
+        setPref("machine", pick.value);
+        conv.thread = freshThread();
+        ocOn = conv.thread.machine ?? "";
+        ocAt = conv.thread.dir;
+        renderCast();
+        renderControls();
+        void paintOcPop();
+      };
+      title.append(" on ", pick);
+    }
+    pop.replaceChildren(title, crumbs, find, list, foot);
     crumbs.scrollLeft = crumbs.scrollWidth;
     crumbs.classList.toggle("clipped", crumbs.scrollWidth > crumbs.clientWidth);
     if (typed || matchMedia("(hover: hover)").matches) filter.focus();
@@ -974,7 +972,7 @@ async function paintOcPop() {
       renderList();
       if (conv.thread) newChat();
       void fetch("/api/threads", { method: "DELETE" }).then(() => loadThreads());
-    }, "Stop OpenCode: threads stop, and routines do not run until it is connected again"), ...rest());
+    }, "Stop OpenCode: threads stop until it is connected again"), ...rest());
 }
 async function setOutside(on: boolean) {
   const r = await fetch("/api/threads/outside", on ? { method: "POST", headers: { "Content-Type": "application/json" }, body: "{}" } : { method: "DELETE" }).catch(() => null);
@@ -1350,7 +1348,6 @@ document.addEventListener("pointerdown", (e) => {
   if (!$("cast-invite").hidden && !t.closest("#cast-invite, .cast-bring, #cast-add, #toast")) closeInvite();
   if (!$("oc-pop").hidden && !t.closest("#oc-pop, #opencode, #cast-add, #toast, #outside-view")) $("oc-pop").hidden = true;
   if (!$("row-menu").hidden && !t.closest("#row-menu")) $("row-menu").hidden = true;
-  if (!$("routines-pop").hidden && !t.closest("#routines-pop, #routines, #toast")) $("routines-pop").hidden = true;
   if (!$("cast-sheet").hidden && !t.closest("#cast-sheet, [data-card], #voice-menu")) closeSheet();
 });
 document.addEventListener("keydown", (e) => {
@@ -1359,7 +1356,6 @@ document.addEventListener("keydown", (e) => {
   else if (!$("cast-add").hidden) { $("cast-add").hidden = true; e.preventDefault(); }
   else if (!$("cast-invite").hidden) { closeInvite(); e.preventDefault(); }
   else if (!$("oc-pop").hidden) { $("oc-pop").hidden = true; e.preventDefault(); }
-  else if (!$("routines-pop").hidden) { $("routines-pop").hidden = true; e.preventDefault(); }
   else if (!$("cast-sheet").hidden) { closeSheet(); e.preventDefault(); }
 }, true);
 document.addEventListener("click", (e) => {
@@ -3707,7 +3703,7 @@ async function renderConnect() {
   const entry = (name: string, note: string, id?: string) => {
     const item = h("div", "dev-item");
     item.append(h("span", "dev-name", name), h("span", "dev-when", note));
-    if (id && status.here) {
+    if (id) {
       const remove = h("button", "btn small", "Remove");
       remove.type = "button";
       remove.onclick = async () => { await fetch(`/api/pair/${id}`, { method: "DELETE" }); box.dataset.key = ""; void renderConnect(); };
@@ -3893,14 +3889,53 @@ function putAway(c: Conversation, on: boolean, quiet = false) {
   renderList();
   if (!quiet) toast(on ? `${c.title} is settled` : `${c.title} is active again`, () => putAway(c, !on, true));
 }
+let sorting = false, listStale = false, sideQuery = "", sideAt = 0;
+const fold = (t: string) => t.normalize("NFKD").replace(/[\u0300-\u036f]/g, "").toLowerCase().trim();
+const everyChat = () => [...new Map([...Object.values(chats), ...stubs()].filter((c) => c.messages.length || c.thread?.id).map((c) => [keyOf(c), c])).values()];
+const scopeOf = () => {
+  const at = pref("scope", "");
+  return at && (at === CHRYSALIS || people.has(at) || castKeys().has(at) || dirs().includes(at.slice(DIR.length))) ? at : "";
+};
+const inScope = (c: Conversation, at = scopeOf()) => !at || whoOf(c) === at;
+function found() {
+  const q = fold(sideQuery), score = (c: Conversation) => {
+    const title = fold(c.title);
+    return title.startsWith(q) ? 0 : title.includes(q) ? 1 : fold(nameOf(whoOf(c))).includes(q) || fold(c.thread?.dir ?? "").includes(q) || fold(machineOf(c.thread?.machine)?.name ?? "").includes(q) ? 2 : -1;
+  };
+  return everyChat().map((c) => ({ c, at: score(c) })).filter((x) => x.at >= 0 && inScope(x.c)).sort((a, b) => a.at - b.at || b.c.updated - a.c.updated).map((x) => x.c);
+}
 function renderList() {
+  if (sorting) return void (listStale = true);
+  const scope = scopeOf(), scopeBtn = $("side-scope");
+  scopeBtn.classList.toggle("on", !!scope);
+  scopeBtn.title = scopeBtn.ariaLabel = scope ? `Showing ${nameOf(scope)} only` : "Filter";
+  $("side-clear").hidden = !sideQuery;
+  if (fold(sideQuery)) {
+    const hits = found(), box = h("div", "folder results open"), kids = h("div", "folder-chats");
+    sideAt = Math.max(0, Math.min(sideAt, hits.length - 1));
+    kids.id = "side-results";
+    kids.setAttribute("role", "listbox");
+    kids.append(...hits.map((c, k) => {
+      const row = convRow(c, false, true);
+      row.id = `side-result-${k}`;
+      row.setAttribute("role", "option");
+      row.setAttribute("aria-selected", String(k === sideAt));
+      row.classList.toggle("sel", k === sideAt);
+      return row;
+    }));
+    box.append(hits.length ? kids : h("p", "side-none", "No threads match"));
+    $("side-search").setAttribute("aria-expanded", String(hits.length > 0));
+    return void $("conversations").replaceChildren(box);
+  }
+  $("side-search").setAttribute("aria-expanded", "false");
   const settled = new Set([...kept("settled"), ...(harness.threads ?? []).filter((t) => t.archived).map((t) => STUB + t.id)]), shelf: Conversation[] = [], pins: Conversation[] = [];
-  const pinned = new Set(kept("pinned"));
-  const shown = (id: string) => chatsOf(id).filter((c) => (c.messages.length || c.thread?.id) && (!settled.has(keyOf(c)) || (shelf.push(c), false)) && (!pinned.has(keyOf(c)) || (pins.push(c), false)));
+  const order = kept("pinned"), pinned = new Set(order);
+  const shown = (id: string) => chatsOf(id).filter((c) => (c.messages.length || c.thread?.id) && inScope(c, scope) && (!settled.has(keyOf(c)) || (shelf.push(c), false)) && (!pinned.has(keyOf(c)) || (pins.push(c), false)));
   const folders = [...[...people.values()].filter((p) => p.kind !== "persona").map((x) => ({ id: x.id, at: x.added })), ...[...castKeys()].map((id) => ({ id, at: conv.updated })),
-    ...dirs().map((d) => ({ id: DIR + d, at: 0 }))].map((x) => ({ ...x, list: shown(x.id) }));
+    ...dirs().map((d) => ({ id: DIR + d, at: 0 }))].map((x) => ({ ...x, list: shown(x.id) })).filter((x) => !scope || x.id === scope);
   const rows = folders.sort((a, b) => (b.list[0]?.updated ?? b.at) - (a.list[0]?.updated ?? a.at)).map(({ id, list }) => {
     const open = unfolded.has(id) && list.length > 0, box = h("div", `folder${open ? " open" : ""}`);
+    box.dataset.who = id;
     box.append(castRow(id, list, open));
     if (open) {
       const kids = h("div", "folder-chats");
@@ -3911,8 +3946,8 @@ function renderList() {
   });
   if (pins.length) {
     const box = h("div", "folder pinned open"), kids = h("div", "folder-chats");
-    kids.append(...pins.sort((a, b) => b.updated - a.updated).map((c) => convRow(c, false, true)));
-    box.append(h("div", "settled-head", "Pinned"), kids);
+    kids.append(...pins.sort((a, b) => order.indexOf(keyOf(a)) - order.indexOf(keyOf(b))).map((c) => convRow(c, false, true)));
+    box.append(h("div", "settled-head pin-head", "Pinned"), kids);
     rows.unshift(box);
   }
   if (shelf.length) {
@@ -3931,6 +3966,93 @@ function renderList() {
   }
   $("conversations").replaceChildren(...rows);
 }
+interface PaletteItem { icon: string | HTMLElement; title: string; note?: (string | HTMLElement)[]; keys?: string; run: () => void }
+interface PaletteGroup { label: string; items: PaletteItem[] }
+const palette = $<HTMLDialogElement>("palette");
+let paletteGroups: PaletteGroup[] = [], paletteAt = 0, paletteBack: (() => void) | undefined;
+const paletteShown = () => {
+  const q = fold($<HTMLInputElement>("palette-input").value);
+  return paletteGroups.map((g) => ({ ...g, items: g.items.filter((it) => !q || fold(`${it.title} ${(it.note ?? []).map((n) => (typeof n === "string" ? n : n.textContent)).join(" ")}`).includes(q)) })).filter((g) => g.items.length);
+};
+function paintPalette() {
+  const groups = paletteShown(), flat = groups.flatMap((g) => g.items), list = $("palette-list");
+  paletteAt = Math.max(0, Math.min(paletteAt, flat.length - 1));
+  let k = 0;
+  list.replaceChildren(...(flat.length ? groups.flatMap((g) => [h("div", "palette-label", g.label), ...g.items.map((it) => {
+    const at = k++, b = h("button", at === paletteAt ? "palette-item on" : "palette-item"), text = h("span", "palette-text"), title = h("span", "palette-title", it.title);
+    b.type = "button";
+    b.id = `palette-item-${at}`;
+    b.setAttribute("role", "option");
+    b.setAttribute("aria-selected", String(at === paletteAt));
+    const pic = h("span", "palette-icon");
+    if (typeof it.icon === "string") pic.innerHTML = it.icon; else pic.append(it.icon);
+    text.append(title);
+    if (it.note?.length) {
+      const note = h("span", "palette-note");
+      it.note.forEach((n, j) => { if (j) note.append(h("span", "palette-dot", "·")); note.append(n); });
+      text.append(note);
+    }
+    b.append(pic, text);
+    if (it.keys) b.append(h("kbd", "palette-keys", it.keys));
+    b.onmousemove = () => { if (paletteAt !== at) { paletteAt = at; paintPalette(); } };
+    b.onclick = () => { palette.close(); it.run(); };
+    return b;
+  })]) : [h("div", "palette-none", "No results")]));
+  document.getElementById(`palette-item-${paletteAt}`)?.scrollIntoView({ block: "nearest" });
+}
+function openPalette(groups: PaletteGroup[], back?: () => void) {
+  paletteGroups = groups;
+  paletteBack = back;
+  paletteAt = 0;
+  $<HTMLInputElement>("palette-input").value = "";
+  if (!palette.open) palette.showModal();
+  paintPalette();
+  $("palette-input").focus();
+}
+const MOD = /Mac|iP(hone|ad)/.test(navigator.platform) ? "⌘" : "Ctrl+";
+const where = (dir: string, machine?: string, lead = ""): (string | HTMLElement)[] => {
+  const m = (harness.machines?.length ?? 0) > 1 ? machineOf(machine) : undefined, on = h("span", "palette-on");
+  if (m) { on.innerHTML = icon(machineIcon(m.kind)); on.append(m.name); }
+  return [...(lead ? [lead] : []), ...(m ? [on] : []), dir];
+};
+const NO_PROJECT = '<svg class="i" viewBox="0 0 24 24" aria-hidden="true"><path d="M5 3a2 2 0 0 0-2 2M19 3a2 2 0 0 1 2 2M21 19a2 2 0 0 1-2 2M5 21a2 2 0 0 1-2-2M9 3h1M9 21h1M14 3h1M14 21h1M3 9v1M21 9v1M3 14v1M21 14v1"/></svg>';
+function newThreadIn() {
+  const now = conv.thread && conv.thread.dir !== homeOf(conv.thread.machine) ? conv.thread.dir : "", all = [...(now ? [now] : []), ...dirs().filter((d) => d !== now)];
+  const plain = (harness.machines ?? [{ id: "", name: "", home: harness.home ?? "", kind: "" }]).map((m): PaletteItem => ({ icon: NO_PROJECT, title: "No project", note: where(m.home, m.id),
+    run: () => { setPref("machine", m.id); newChat(); } }));
+  const projects = [...all.slice(0, now ? 1 : 0), ...plain.slice(0, 1), ...all.slice(now ? 1 : 0), ...plain.slice(1)].map((x, k): PaletteItem => (typeof x === "string"
+    ? { icon: face(DIR + x), title: dirName(x), note: where(x, dirMachine(x), x === now ? "Current" : ""), keys: k < 9 ? `${MOD}${k + 1}` : undefined, run: () => newChat(DIR + x) }
+    : { ...x, keys: k < 9 ? `${MOD}${k + 1}` : undefined }));
+  const cast = [...[...people.values()].filter((p) => p.kind === "character").map((p) => p.id), ...castKeys()].map((id): PaletteItem => ({ icon: face(id), title: nameOf(id), run: () => newChat(id) }));
+  openPalette([{ label: "Projects", items: harness.state === "on" ? projects : [{ icon: NO_PROJECT, title: "No project", run: () => newChat() }] }, ...(cast.length ? [{ label: "Characters", items: cast }] : [])]);
+}
+function addProject() {
+  if (harness.state !== "on") return void openHarness();
+  const browse = (id: string) => {
+    setPref("machine", id);
+    newChat();
+    if (!conv.thread || (conv.thread.machine ?? "") !== id) conv.thread = freshThread();
+    renderCast();
+    renderControls();
+    openFolders($("add-project"), { from: conv.thread.dir, to: (dir) => void moveThread(conv, dir) });
+  };
+  const all = harness.machines ?? [];
+  if (all.length < 2) return browse("");
+  openPalette([{ label: "Environments", items: all.map((m): PaletteItem => ({ icon: icon(machineIcon(m.kind)), title: m.name, note: [m.id ? m.home : "Chrysalis runs here"], run: () => browse(m.id) })) }]);
+}
+$<HTMLInputElement>("palette-input").oninput = () => { paletteAt = 0; paintPalette(); };
+$("palette-back").onclick = () => { palette.close(); paletteBack?.(); };
+palette.addEventListener("click", (e) => { if (e.target === palette) palette.close(); });
+palette.addEventListener("keydown", (e) => {
+  const flat = paletteShown().flatMap((g) => g.items), n = flat.length, input = $<HTMLInputElement>("palette-input");
+  if ((e.key === "ArrowDown" || e.key === "ArrowUp") && n) { e.preventDefault(); paletteAt = (paletteAt + (e.key === "ArrowDown" ? 1 : n - 1)) % n; paintPalette(); }
+  else if (e.key === "Enter" && n) { e.preventDefault(); document.getElementById(`palette-item-${paletteAt}`)?.click(); }
+  else if (e.key === "Backspace" && !input.value) { e.preventDefault(); palette.close(); paletteBack?.(); }
+  else if ((e.metaKey || e.ctrlKey) && /^[1-9]$/.test(e.key)) {
+    const hit = flat.find((it) => it.keys === `${MOD}${e.key}`);
+    if (hit) { e.preventDefault(); palette.close(); hit.run(); }
+  }
+});
 function ago(t: number) {
   const s = (Date.now() - t) / 1000;
   return s < 60 ? "now" : s < 3600 ? `${Math.floor(s / 60)}m` : s < 86400 ? `${Math.floor(s / 3600)}h` : s < 7 * 86400 ? `${Math.floor(s / 86400)}d`
@@ -3944,12 +4066,56 @@ function dropChat(c: Conversation) {
   }
   remove(c.id);
 }
-function pin(c: Conversation, on: boolean) {
-  const now = new Set(kept("pinned"));
-  if (on) now.add(keyOf(c)); else now.delete(keyOf(c));
-  setPref("pinned", JSON.stringify([...now]));
+function pin(c: Conversation, on: boolean, at = 0) {
+  const now = kept("pinned").filter((k) => k !== keyOf(c));
+  if (on) now.splice(at, 0, keyOf(c));
+  setPref("pinned", JSON.stringify(now));
   renderList();
 }
+const canMove = (c: Conversation, who: string) => {
+  if (who === whoOf(c) || runs.get(c.id)) return false;
+  if (who.startsWith(DIR)) return !!c.thread && (dirMachine(who.slice(DIR.length)) ?? "") === (c.thread.machine ?? "");
+  return (who === CHRYSALIS || people.get(who)?.kind === "character") && (!c.thread || c.thread.dir === homeOf(c.thread.machine));
+};
+async function moveChat(c: Conversation, who: string) {
+  if (who.startsWith(DIR)) return moveThread(c, who.slice(DIR.length));
+  const mine = chats[c.id] ?? (c.id === conv.id ? conv : c);
+  if (who === CHRYSALIS) {
+    for (const k of ["who", "cast", "missing", "castName", "scenario"] as const) delete mine[k];
+    stow(mine);
+  } else seat(mine, [who]);
+  unfold(who);
+  if (mine.thread?.id) {
+    const r = await fetch(`/api/threads/${mine.thread.id}`, { method: "PATCH", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ scene: sceneFor(mine) ?? null }) }).catch(() => null);
+    if (!r?.ok) toast("OpenCode did not move that chat");
+    await loadThreads();
+  }
+  renderCast();
+  renderList();
+  if (mine.id === conv.id) render();
+}
+const chatAt = (row: HTMLElement) => everyChat().find((c) => keyOf(c) === row.dataset.key);
+const dropVerb = (row: HTMLElement, drop: Drop): string | null => {
+  const c = chatAt(row), isPinned = !!c && kept("pinned").includes(keyOf(c));
+  if (!c) return null;
+  const away = !!row.closest(".folder.settled");
+  if (away) return drop.kind === "pin" ? "Pin" : drop.kind === "active" ? "Un-settle" : null;
+  return drop.kind === "pin" ? (isPinned ? "" : "Pin") : drop.kind === "unpin" ? "Unpin" : drop.kind === "settle" ? "Settle" : drop.kind === "folder" && canMove(c, drop.who) ? nameOf(drop.who) : null;
+};
+sidebarDrag($("conversations"), {
+  verb: dropVerb,
+  started: () => { sorting = true; },
+  ended: () => { sorting = false; listStale = false; renderList(); },
+  done: (row, drop) => {
+    const c = chatAt(row);
+    if (!c) return;
+    if (row.closest(".folder.settled")) putAway(c, false, true);
+    if (drop.kind === "pin") pin(c, true, drop.index);
+    else if (drop.kind === "unpin") pin(c, false);
+    else if (drop.kind === "settle") putAway(c, true);
+    else if (drop.kind === "folder") void moveChat(c, drop.who);
+  },
+});
 function rename(c: Conversation, title: string) {
   title = title.trim().slice(0, 100);
   if (!title || title === c.title) return renderList();
@@ -3979,6 +4145,7 @@ function openMenu(x: number, y: number, items: MenuItem[], head = "") {
     return b;
   }));
   menu.hidden = false;
+  menu.style.bottom = "auto";
   menu.style.left = `${Math.max(8, Math.min(x, innerWidth - menu.offsetWidth - 8))}px`;
   menu.style.top = `${Math.max(8, Math.min(y, innerHeight - menu.offsetHeight - 8))}px`;
   menuAt = performance.now();
@@ -4026,7 +4193,9 @@ function convRow(s: Conversation, settled = false, faced = false) {
   put.innerHTML = `${icon(settled ? "retry" : "check")}${settled ? "Un-settle" : "Settle"}`;
   put.onclick = (e) => { e.preventDefault(); putAway(s, !settled); };
   a.href = `#${s.id}`;
-  a.onclick = (e) => { if (!e.defaultPrevented) { mark(s); closeOver(panes.conversations); renderList(); } };
+  a.dataset.key = keyOf(s);
+  a.draggable = false;
+  a.onclick = (e) => { if (!e.defaultPrevented) { mark(s); closeOver(panes.conversations); if (sideQuery) clearSearch(); else renderList(); } };
   menuOn(a, () => chatMenu(s, settled));
   const st = statusOf(s), who = whoOf(s), pinned = kept("pinned").includes(keyOf(s));
   if (st) a.classList.add("fresh");
@@ -4064,8 +4233,13 @@ function convRow(s: Conversation, settled = false, faced = false) {
   mid.append(body);
   a.append(top, mid);
   const where = s.thread?.dir && !who.startsWith(DIR) ? dirName(s.thread.dir) : "", model = s.thread?.model?.split("/").pop() ?? "";
-  if (where || model) {
+  const at = s.thread && (harness.machines?.length ?? 0) > 1 ? machineOf(s.thread.machine) : undefined;
+  if (where || model || at) {
     const meta = h("div", "conv-meta");
+    if (at) {
+      meta.insertAdjacentHTML("beforeend", icon(machineIcon(at.kind)));
+      meta.append(Object.assign(h("span", "conv-mach", at.name), { title: `Runs on ${at.name}` }));
+    }
     if (where) meta.insertAdjacentHTML("beforeend", icon("folder"));
     meta.append(h("span", "conv-where", where), h("span", "conv-model", model));
     a.append(meta);
@@ -4634,7 +4808,7 @@ function finish(run: Run) {
   save(c);
   mark(c, m.error ? "failed" : m.stopped ? undefined : "done");
   renderList();
-  if (c.thread) void loadThreads().then(() => { if (c === conv) void loadRoutines(); return syncThread(c); });
+  if (c.thread) void loadThreads().then(() => syncThread(c));
   else if (!c.named && !m.error) void name(c);
   redoEdits(c, m);
   if (talking && c === conv && !m.error && !m.stopped) setTimeout(talkOn, 400);
@@ -5694,7 +5868,62 @@ window.addEventListener("hashchange", () => {
   const id = location.hash.slice(1);
   if (id && id !== conv.id) openConversation(id);
 });
-$("new-chat").addEventListener("click", () => newChat());
+$("new-chat").addEventListener("click", (e) => {
+  const projects = dirs().length + [...people.values()].filter((p) => p.kind === "character").length + castKeys().size + Math.max(0, (harness.machines?.length ?? 1) - 1);
+  if (e.shiftKey) newChat(whoOf(conv));
+  else if (scopeOf()) newChat(scopeOf());
+  else if (!projects) newChat();
+  else newThreadIn();
+});
+const side = $<HTMLInputElement>("side-search");
+function clearSearch() {
+  sideQuery = side.value = "";
+  sideAt = 0;
+  renderList();
+}
+side.oninput = () => { sideQuery = side.value; sideAt = 0; renderList(); };
+side.onkeydown = (e) => {
+  const n = document.querySelectorAll("#side-results > a").length;
+  if (e.key === "Escape" && sideQuery) { e.preventDefault(); clearSearch(); }
+  else if ((e.key === "ArrowDown" || e.key === "ArrowUp") && n) { e.preventDefault(); sideAt = (sideAt + (e.key === "ArrowDown" ? 1 : n - 1)) % n; renderList(); document.getElementById(`side-result-${sideAt}`)?.scrollIntoView({ block: "nearest" }); }
+  else if (e.key === "Enter" && n) { e.preventDefault(); document.getElementById(`side-result-${sideAt}`)?.click(); }
+};
+$("side-clear").onclick = () => { clearSearch(); side.focus(); };
+function paintScope() {
+  const pop = $("scope-pop"), q = fold($<HTMLInputElement>("scope-input").value), now = scopeOf();
+  const ids = [...[...people.values()].filter((p) => p.kind !== "persona").map((p) => p.id), ...castKeys(), ...dirs().map((d) => DIR + d)].filter((id) => !q || fold(nameOf(id)).includes(q));
+  const row = (id: string, label: string, pic: HTMLElement | string) => {
+    const b = h("button", id === now ? "scope-item on" : "scope-item"), mark = h("span", "palette-icon");
+    b.type = "button";
+    b.setAttribute("role", "option");
+    b.setAttribute("aria-selected", String(id === now));
+    if (typeof pic === "string") mark.innerHTML = pic; else mark.append(pic);
+    b.append(mark, h("span", "scope-name", label));
+    const m = id.startsWith(DIR) && (harness.machines?.length ?? 0) > 1 ? machineOf(dirMachine(id.slice(DIR.length))) : undefined;
+    if (m) b.insertAdjacentHTML("beforeend", `<span class="scope-on" title="${escapeHtml(m.name)}">${icon(machineIcon(m.kind))}</span>`);
+    if (id === now) b.insertAdjacentHTML("beforeend", `<span class="scope-check">${icon("check")}</span>`);
+    b.onclick = () => { setPref("scope", id); pop.hidden = true; renderList(); };
+    return b;
+  };
+  $("scope-list").replaceChildren(...(!q ? [row("", "All projects", icon("folder"))] : []), ...ids.map((id) => row(id, nameOf(id), face(id))), ...(q && !ids.length ? [h("div", "palette-none", "No projects match")] : []));
+}
+$("side-scope").onclick = () => {
+  const pop = $("scope-pop"), r = $("side-scope").getBoundingClientRect();
+  if (!pop.hidden) return void (pop.hidden = true);
+  pop.hidden = false;
+  pop.style.left = `${Math.max(8, Math.min(r.left, innerWidth - 296))}px`;
+  pop.style.top = `${r.bottom + 6}px`;
+  $<HTMLInputElement>("scope-input").value = "";
+  paintScope();
+  $("scope-input").focus();
+};
+$<HTMLInputElement>("scope-input").oninput = paintScope;
+$("scope-input").onkeydown = (e) => {
+  if (e.key === "Escape") { e.preventDefault(); $("scope-pop").hidden = true; }
+  else if (e.key === "Enter") { e.preventDefault(); $("scope-list").querySelector<HTMLElement>(".scope-item")?.click(); }
+};
+document.addEventListener("pointerdown", (e) => { if (!$("scope-pop").hidden && !(e.target as Element).closest("#scope-pop, #side-scope")) $("scope-pop").hidden = true; });
+$("add-project").onclick = addProject;
 $("add-cast").addEventListener("click", (e) => { e.stopPropagation(); openAdd(e.currentTarget as HTMLElement); });
 $("attach").addEventListener("click", () => $("attach-file").click());
 $("attach-file").addEventListener("change", (e) => {
@@ -6047,7 +6276,6 @@ function renderControls() {
   renderBackend();
   document.querySelector("main")!.toggleAttribute("data-thread", !!conv.thread);
   document.querySelector("main")!.toggleAttribute("data-plain", !!conv.thread && !variantsOf(conv).length);
-  if ((conv.thread?.id ?? "") !== routinesOf) void loadRoutines();
   const effort = barEffort(), at = EFFORTS.indexOf(effort), energy = $("energy");
   energy.dataset.heat = HEAT[at];
   energy.style.setProperty("--v", String(at));
@@ -6059,12 +6287,12 @@ function renderControls() {
   $("energy-stops").querySelectorAll("button").forEach((b, k) => b.classList.toggle("on", k === at));
   const folder = $<HTMLButtonElement>("folder-btn");
   folder.hidden = !conv.thread || harness.state !== "on";
-  const run = $<HTMLButtonElement>("machine-btn"), m = machineOf(conv.thread?.machine), fixed = !!conv.thread?.id;
+  const run = $<HTMLButtonElement>("machine-btn"), m = machineOf(conv.thread?.machine), fixed = !!conv.thread?.id && (harness.machines?.length ?? 0) < 2;
   run.hidden = folder.hidden || !m;
   if (m && conv.thread) {
     run.innerHTML = `${icon(machineIcon(m.kind))}<span class="folder-name"></span>${fixed ? "" : icon("chevron")}`;
     run.querySelector(".folder-name")!.textContent = m.name;
-    run.title = run.ariaLabel = fixed ? `Runs on ${m.name}` : `Run on ${m.name}`;
+    run.title = run.ariaLabel = fixed ? `Runs on ${m.name}` : conv.thread.id ? `Runs on ${m.name}: hand it off to another computer` : `Run on ${m.name}`;
     run.classList.toggle("fixed", fixed);
   }
   if (conv.thread) {
@@ -6804,7 +7032,11 @@ function syncSettings() {
 
 document.addEventListener("visibilitychange", () => { if (!document.hidden) void refreshStatus(); });
 
-$("new-chat").innerHTML = `${icon("plus")}New chat`;
+$("new-chat").innerHTML = icon("pen");
+$("side-scope").innerHTML = icon("filter");
+$("add-project").innerHTML = icon("folderPlus");
+$("side-clear").innerHTML = icon("x");
+document.querySelector(".side-search")!.insertAdjacentHTML("afterbegin", icon("search"));
 $("add-cast").innerHTML = icon("personAdd");
 $("outside-title").insertAdjacentHTML("afterbegin", icon("warn"));
 $("outside-keep").onclick = () => $<HTMLDialogElement>("outside-view").close();
@@ -6818,8 +7050,6 @@ $("connect-close").innerHTML = icon("x");
 $("connect-close").onclick = () => connectView.close();
 connectView.addEventListener("click", (e) => { if (e.target === connectView) connectView.close(); });
 $("attach").innerHTML = icon("clip");
-$("routines").innerHTML = icon("clock");
-$("routines").onclick = openRoutines;
 $("draft").addEventListener("click", () => void draft());
 $("voice").innerHTML = icon("wave");
 $("voice").addEventListener("click", () => void openVoice());

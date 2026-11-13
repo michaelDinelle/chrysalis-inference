@@ -1,7 +1,7 @@
 import { expect, test } from "bun:test";
 import { chmodSync, mkdirSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
 import { hostname } from "node:os";
-import { RUN, base, connect, harness, lastText, open, opencode, send } from "./browser-harness";
+import { RUN, base, connect, harness, home, lastText, open, opencode, send, fresh } from "./browser-harness";
 import { fakeOpenCode } from "./fake-opencode";
 
 harness();
@@ -30,7 +30,7 @@ test("another computer let in runs its own OpenCode from this page: it is under 
 
     await page.reload();
     await page.waitForSelector("#opencode .dot.online");
-    await page.click("#new-chat");
+    await fresh(page);
     await page.waitForSelector("#machine-btn:not([hidden])");
     await page.click("#machine-btn");
     expect(await page.$$eval("#row-menu > *", (x) => x.map((e) => e.textContent))).toEqual(["Run on", name, name, "Add another computer"]);
@@ -54,9 +54,8 @@ test("another computer let in runs its own OpenCode from this page: it is under 
     const sent = den.log.prompts.at(-1)!;
     expect([opencode.log.prompts.length - here, sent.text, sent.model, den.sessions.get(sent.session)!.dir]).toEqual([0, "count the hives", { providerID: "chrysalis", id: "qwen3.8-27b" }, `${denHome}/hive`]);
     expect(await lastText(page)).toContain("You asked: count the hives");
-    expect(await page.$eval("#machine-btn", (b) => [b.classList.contains("fixed"), b.getAttribute("title")])).toEqual([true, `Runs on ${name}`]);
-    await page.click("#machine-btn");
-    expect(await page.$eval("#row-menu", (m) => (m as HTMLElement).hidden)).toBe(true);
+    expect(await page.$eval("#machine-btn", (b) => b.getAttribute("title"))).toBe(`Runs on ${name}: hand it off to another computer`);
+    expect(await page.$$eval("#conversations a.conv .conv-mach", (m) => m.map((e) => e.textContent))).toContain(name);
     const listed = () => page.evaluate(() => fetch("/api/threads").then((r) => r.json()).then((j) => j.threads.filter((t: { machine?: string }) => t.machine).map((t: { id: string; dir: string }) => [t.id, t.dir])));
     expect(await listed()).toEqual([[sent.session, `${denHome}/hive`]]);
 
@@ -64,9 +63,18 @@ test("another computer let in runs its own OpenCode from this page: it is under 
     await page.waitForSelector("#opencode .dot.online");
     await page.waitForFunction(() => [...document.querySelectorAll("#conversations .conv-title")].some((t) => t.textContent === "count the hives"));
     await page.evaluate(() => [...document.querySelectorAll<HTMLElement>("#conversations a.conv")].find((a) => a.querySelector(".conv-title")!.textContent === "count the hives")!.click());
-    await page.waitForFunction(() => document.querySelector("#machine-btn")?.classList.contains("fixed"));
+    await page.waitForFunction((n) => document.querySelector("#machine-btn")?.getAttribute("title") === `Runs on ${n}: hand it off to another computer`, {}, name);
     await send(page, "and the queens");
     expect([opencode.log.prompts.length - here, den.log.prompts.at(-1)!.text, den.log.prompts.at(-1)!.session]).toEqual([0, "and the queens", sent.session]);
+
+    const had = den.sessions.get(sent.session)!.messages.length;
+    await page.click("#machine-btn");
+    expect(await page.$$eval("#row-menu > *", (x) => x.map((e) => e.textContent))).toEqual(["Hand off to", name]);
+    await page.evaluate(() => document.querySelector<HTMLElement>("#row-menu button")!.click());
+    await page.waitForFunction((home) => document.querySelector("#folder-btn")?.getAttribute("title") === `Working in ${home}`, {}, home);
+    expect([den.sessions.has(sent.session), opencode.sessions.get(sent.session)?.dir, opencode.sessions.get(sent.session)?.messages.length, (await listed()).length]).toEqual([false, home, had, 0]);
+    await send(page, "and back at the house");
+    expect([opencode.log.prompts.at(-1)!.text, opencode.log.prompts.at(-1)!.session, den.log.prompts.at(-1)!.text]).toEqual(["and back at the house", sent.session, "and the queens"]);
   } finally {
     helper.kill();
     await helper.exited;

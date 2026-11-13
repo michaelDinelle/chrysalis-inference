@@ -128,7 +128,7 @@ CHRYSALIS_MACHINE
     fi
     echo "This computer is under Run on in Chrysalis's page on ${label(name)}: chats there can work in its folders." >&2
 fi
-if [ -t 1 ] && (: </dev/tty) 2>/dev/null; then "$here" </dev/tty || true; fi
+if [ -t 1 ]; then "$here" <&1 || true; fi
 echo "OpenCode on Chrysalis's models alone, with every other provider off: $here" >&2
 echo "Plain opencode has them beside its other models, and a session on one of those leaves this network." >&2
 `;

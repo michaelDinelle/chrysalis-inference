@@ -134,7 +134,7 @@ docker run -d --device /dev/kfd --device /dev/dri -p 127.0.0.1:8080:8080 -v chry
   model menu has Chat only, for a plain chat with no tools. Every other folder OpenCode has threads in is a row in the
   sidebar, and the add button there opens another. Chats are read from OpenCode, with their people, so they are the
   same after a reload and on other devices. The OpenCode button disconnects it: chats are then plain.
-- In a thread the tools, models, agents (Build, Plan), permissions, compaction, sub-agents, slash commands and routines
+- In a thread the tools, models, agents (Build, Plan), permissions, compaction, sub-agents and slash commands
   are OpenCode's. OpenCode here is kept to Chrysalis's own models: it is started with every other provider denied, no
   other model is listed, and a turn naming one is refused. The switch under the OpenCode button allows the others,
   past a warning, only from the computer Chrysalis runs on (`chrysalis.sh opencode outside` does the same in a terminal, and `chrysalis.sh opencode only` takes it back); a thread on one is then marked as leaving this computer.
@@ -142,9 +142,7 @@ docker run -d --device /dev/kfd --device /dev/dri -p 127.0.0.1:8080:8080 -v chry
   PDFs, and the thinking slider picks the model's own level. What OpenCode or a sub-agent asks is answered in a card. A
   message sent while a turn runs goes to OpenCode. Any message, yours or the reply, can be edited in place or
   deleted, through OpenCode's own export and import of the chat; an edited message sent again and Regenerate take the
-  chat back and answer anew, and Fork starts a new chat from a message. Deleting a thread deletes it in OpenCode, and settling archives it there. A routine
-  is made by asking for one ("every morning at 9, check the build"): the clock by the message box lists them, and they
-  run while Chrysalis is running. A character can do the work, in character. It needs OpenCode 2.2.4 or newer.
+  chat back and answer anew, and Fork starts a new chat from a message. Deleting a thread deletes it in OpenCode, and settling archives it there. A character can do the work, in character. It needs OpenCode 2.2.4 or newer.
 - Settling puts a chat or a thread away on a shelf at the bottom of the sidebar.
 - Voice mode: talking over a reply stops it and keeps its text, with what was not heard dimmer, and the next message
   tells the model how far you heard.
@@ -162,6 +160,13 @@ docker run -d --device /dev/kfd --device /dev/dri -p 127.0.0.1:8080:8080 -v chry
   so nothing listens on that computer. The page drives that OpenCode through it: its folders, its files, its tools.
   Only threads the page started there are listed. Remove under Add a computer ends it, and the helper then stops for good.
 - A computer pasted a second time is not asked for again: the line keeps its key in `~/.config/chrysalis`.
+- Hand off: the Run on control of a chat that has a thread lists the other computers under Hand off to. OpenCode's own
+  export and import move the whole chat there, into that computer's home; its files stay where they were.
+- The sidebar's top row is T3 Code's: Search finds threads by title, person, folder or computer; the filter narrows the
+  list to one project; Add project picks a computer, then a folder on it; New thread picks a project or a character
+  (Shift+click starts one where you are). A thread's row names its computer beside its folder.
+- A row is dragged as in T3 Code, after six pixels and on the vertical alone, and nothing else moves: onto the strip above the list it is
+  pinned (among pins, where the line shows), onto a character or a folder it is theirs, onto the strip below it is settled.
 - The OpenCode the line opens has Chrysalis's models and no other provider, and starts on the model Chrysalis last
   loaded. The line leaves a command that opens it that way again, `~/.config/chrysalis/opencode-<computer>`, and prints
   it when OpenCode closes. Plain `opencode` keeps its other models beside Chrysalis's: a session on one of those leaves

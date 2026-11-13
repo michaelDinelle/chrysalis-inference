@@ -1,5 +1,5 @@
 import { expect, test } from "bun:test";
-import { harness, fakes, fill, lastStream, look, open, probes, send, shown, still, fake } from "./browser-harness";
+import { harness, fakes, fill, lastStream, look, open, probes, send, shown, still, fake, fresh } from "./browser-harness";
 
 harness();
 
@@ -22,7 +22,7 @@ test("a chat that finishes while another is open says Done in the list until its
   await page.type("#input", "slow count");
   await page.keyboard.press("Enter");
   await page.waitForFunction(() => /^Working/.test(document.querySelector(".conv .conv-status")?.textContent ?? ""), { timeout: 10_000 });
-  await page.click("#new-chat");
+  await fresh(page);
   fakes.hurry = true;
   await page.waitForFunction(() => document.querySelector(".conv .conv-status.done")?.textContent === "Done", { timeout: 20_000 });
   expect(await page.$eval(".conv:has(.conv-status)", (c) => c.classList.contains("fresh"))).toBe(true);

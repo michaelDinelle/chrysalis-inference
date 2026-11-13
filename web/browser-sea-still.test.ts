@@ -1,6 +1,6 @@
 import { expect, test } from "bun:test";
 import puppeteer from "puppeteer-core";
-import { harness, CHAT_ARGS, base, browser, chatContext, checked, closeSettings, idle, look, openSettings, png, send } from "./browser-harness";
+import { harness, CHAT_ARGS, base, browser, chatContext, checked, closeSettings, idle, look, openSettings, png, send, fresh } from "./browser-harness";
 
 harness();
 
@@ -76,7 +76,7 @@ test("the sea stays behind a chat, the butterfly sunk into it and every click th
     expect([await hit(reply.x + 5, reply.y + reply.height / 2), await hit(margin.x + 20, margin.y + 20)]).toEqual(["scroller", "scroller"]);
 
     await page.evaluate(() => (window as any).slowMotion(0.25));
-    await page.click("#new-chat");
+    await fresh(page);
     const rising = (await look(page, middle)).pink;
     expect([rising < 0.7 * full, await risen(0.9 * full) > 0.9 * full]).toEqual([true, true]);
     await page.evaluate(() => (window as any).slowMotion(1));
@@ -87,7 +87,7 @@ test("the sea stays behind a chat, the butterfly sunk into it and every click th
     await closeSettings(page);
     await page.waitForFunction((x) => document.getElementById("thread")!.getBoundingClientRect().x === x, {}, column.x);
     expect((await look(page, margin)).lit).toBe(0);
-    await page.click("#new-chat");
+    await fresh(page);
     expect(await risen()).toBeGreaterThan(800);
     await idle(page, page.reload());
     expect(await page.$eval("#sea-switch", (b) => b.getAttribute("aria-checked"))).toBe("false");

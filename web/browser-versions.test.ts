@@ -1,7 +1,7 @@
 import { expect, test } from "bun:test";
 import { mkdtempSync, readFileSync, writeFileSync } from "node:fs";
 import { ARTIFACTS_PROMPT } from "./artifacts";
-import { harness, articles, card, dir, download, fakes, idle, lastStream, loading, open, pagerOf, send, sent, still, streams, untilIdle } from "./browser-harness";
+import { harness, articles, card, dir, download, fakes, idle, lastStream, loading, open, pagerOf, send, sent, still, streams, untilIdle, fresh } from "./browser-harness";
 
 harness();
 
@@ -10,7 +10,7 @@ test("a model picked while a reply is written is the one the next question asks 
   try {
     await page.type("#input", "slow one");
     await page.keyboard.press("Enter");
-    await page.click("#new-chat");
+    await fresh(page);
     await page.click("#model-btn");
     await page.waitForSelector("#model-pop .model-item");
     await page.evaluate(() => [...document.querySelectorAll<HTMLElement>("#model-pop .model-item")].find((b) => /Flash/.test(b.textContent ?? ""))!.click());
@@ -35,7 +35,7 @@ test("a question is kept as it is sent, before its reply begins: the chat left a
   page.on("request", (r) => { if (held && !(r.method() === "POST" && new URL(r.url()).pathname === "/api/chat")) void r.continue(); });
   await page.type("#input", "a held question");
   await page.keyboard.press("Enter");
-  await page.click("#new-chat");
+  await fresh(page);
   expect(await page.$$eval(".conv .conv-title", (t) => t.map((x) => x.textContent))).toEqual(["a held question"]);
   await page.reload({ waitUntil: "load" });
   await page.click(".conv");

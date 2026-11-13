@@ -524,6 +524,10 @@ export const stageDrawn = async (page: Page) => {
 export const work = `${dir}/site`;
 mkdirSync(work, { recursive: true });
 
+export async function fresh(page: Page) {
+  await page.click("#new-chat");
+  await page.evaluate(() => [...document.querySelectorAll<HTMLElement>("#palette[open] .palette-item")].find((b) => b.querySelector(".palette-title")!.textContent === "No project")?.click());
+}
 export async function outside(page: Page, on: boolean) {
   expect(await page.evaluate((on) => fetch("/api/threads/outside", on ? { method: "POST", headers: { "Content-Type": "application/json" }, body: "{}" } : { method: "DELETE" }).then((r) => r.status), on)).toBe(204);
   if (on) await page.reload();
@@ -536,7 +540,7 @@ export async function connect(page: Page) {
 }
 export async function openFolder(page: Page, path: string) {
   await page.keyboard.press("Escape");
-  await page.click("#new-chat");
+  await fresh(page);
   await page.waitForSelector("#folder-btn:not([hidden])");
   await page.click("#folder-btn");
   await page.waitForSelector("#oc-pop .oc-path");
