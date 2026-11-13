@@ -1,4 +1,4 @@
-import { existsSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { homedir, hostname } from "node:os";
 import { createInterface } from "node:readline";
 import type { BunPlugin, Server, Subprocess } from "bun";
@@ -14,9 +14,13 @@ import { assistantTurn, checkpointText, withText, type WireCall } from "./wire";
 import { ceiling, CONTINUE_AFTER_BREAK, covers, filled, NUDGE, recentText, saysTooLong, summaryPrompt, summaryRoom, tokens, tokensIn, type Turn } from "./compaction";
 
 const CHRYSALIS = process.env.CHRYSALIS_URL ?? "http://127.0.0.1:8080";
+const MODEL_KEY = crypto.randomUUID();
 const engineStats = () => fetch(`${CHRYSALIS}/chrysalis/stats`, { signal: AbortSignal.timeout(1000) });
-const BUILD = Bun.hash((await Promise.all(["index.html", "app.ts", "sampler.ts", "files.ts", "wire.ts", "voice.ts", "voice-worklet.js", "sandbox.js", "heard.ts", "spoken.ts", "ocean.ts",
-  "logo.svg", "style.css", "tokens.css"].map((f) => Bun.file(`${import.meta.dir}/${f}`).text()))).join("\0")).toString(36);
+const LIVE = import.meta.path.endsWith(".ts");
+const PAGE_FILES = ["index.html", "app.ts", "sampler.ts", "files.ts", "wire.ts", "voice.ts", "voice-worklet.js", "sandbox.js", "heard.ts", "spoken.ts", "ocean.ts", "logo.svg", "style.css", "tokens.css"]
+  .map((f) => `${import.meta.dir}/${f}`);
+const BUILT = Bun.hash((await Promise.all(PAGE_FILES.map((f) => Bun.file(f).text()))).join("\0")).toString(36);
+const BUILD = () => LIVE ? Bun.hash(PAGE_FILES.map((f) => { const at = statSync(f); return `${at.mtimeMs}:${at.size}`; }).join("\0")).toString(36) : BUILT;
 for (const sig of ["SIGINT", "SIGTERM"] as const) process.on(sig, () => process.exit(0));
 
 const NAMES = new Set(["", "localhost", hostname().toLowerCase(), `${hostname().toLowerCase()}.local`, netName()]);
@@ -453,9 +457,10 @@ const vendor3d = async (req: Request) => {
     : new Response(code, { headers: { "Content-Type": "text/javascript", "Cache-Control": "max-age=86400" } });
 };
 
-const SANDBOX = `<!doctype html><meta charset="utf-8"><script>${await Bun.file(`${import.meta.dir}/sandbox.js`).text()}</script>`;
+const sandboxPage = async () => `<!doctype html><meta charset="utf-8"><script>${await Bun.file(`${import.meta.dir}/sandbox.js`).text()}</script>`;
+const SANDBOX = await sandboxPage();
 const SANDBOX_CSP = "default-src 'none'; script-src 'unsafe-inline' 'unsafe-eval' blob:; style-src 'unsafe-inline'; img-src data: blob:; " +
-  "font-src data:; media-src data: blob:; form-action 'none'; base-uri 'none'; frame-ancestors 'self'; sandbox allow-scripts allow-modals";
+  "font-src data:; media-src data: blob:; form-action 'none'; base-uri 'none'; frame-ancestors 'self'; sandbox allow-scripts allow-modals allow-pointer-lock allow-orientation-lock";
 
 const ROOT = `${import.meta.dir}/..`;
 const VOICE_CMD: string[] = process.env.CHRYSALIS_VOICE_CMD ? JSON.parse(process.env.CHRYSALIS_VOICE_CMD) : [`${ROOT}/data/venv/bin/python`, "-m", "chrysalis.voice"];
@@ -539,6 +544,13 @@ const serve = (hostname: string, port: number) => Bun.serve<VoiceSocket>({
         return !got ? new Response("gone", { status: 404 }) : got.state === "allowed" ? new Response(got.key) : new Response(null, { status: 202 });
       }),
     },
+    "/opencode/:key/*": (req: Request, srv: Srv) => {
+      const key = (req as Request & { params: { key: string } }).params.key, rest = new URL(req.url).pathname.slice(`/opencode/${MODEL_KEY}`.length);
+      if (key !== MODEL_KEY || !self(req, srv)) return new Response("not found", { status: 404 });
+      const [, to, path] = /^\/via\/([\w-]+)(\/.*)?$/.exec(rest) ?? [];
+      if (to) return tunedProxy(req, srv, `${Buffer.from(to, "base64url").toString().replace(/\/+$/, "")}${path ?? ""}`);
+      return rest.startsWith("/v1/") ? tunedProxy(req, srv, `${CHRYSALIS}${rest}`) : new Response("not found", { status: 404 });
+    },
     "/v1/*": open((req, srv) => devices.find(req)?.device.kind === "computer" ? proxy(req, srv)
       : Response.json({ error: { message: "this computer is not let in to Chrysalis here" } }, { status: 401 })),
     "/pair/ask": {
@@ -608,7 +620,7 @@ img.src = ${JSON.stringify(checkUrl(req))} + "?t=" + Date.now();
     "/vendor/mermaid/*": { GET: guarded(vendor) },
     "/vendor/three/*": { GET: guarded(vendor3d) },
     "/vendor/aframe/*": { GET: guarded(vendor3d) },
-    "/sandbox": { GET: guarded(() => new Response(SANDBOX, { headers: { "Content-Type": "text/html; charset=utf-8", "Content-Security-Policy": SANDBOX_CSP } })) },
+    "/sandbox": { GET: guarded(async () => new Response(LIVE ? await sandboxPage() : SANDBOX, { headers: { "Content-Type": "text/html; charset=utf-8", "Content-Security-Policy": SANDBOX_CSP } })) },
 
     "/api/chat": {
       POST: guarded(json(async (req, srv) => {
@@ -758,18 +770,18 @@ img.src = ${JSON.stringify(checkUrl(req))} + "?t=" + Date.now();
 
     "/api/status": guarded(async (req, srv) => {
       const backend = await backends.about();
-      const state = backend.listed ? { state: backend.listed.ok ? "online" : "offline", build: BUILD } : await (async () => {
+      const state = backend.listed ? { state: backend.listed.ok ? "online" : "offline", build: BUILD() } : await (async () => {
         try {
           const r = await engineStats();
           if (r.status === 503) {
             const b = await r.json().catch(() => ({}));
-            return { state: "loading", build: BUILD, loading: b.model ?? undefined, progress: b.progress ?? undefined };
+            return { state: "loading", build: BUILD(), loading: b.model ?? undefined, progress: b.progress ?? undefined };
           }
           if (!r.ok) throw new Error("loading");
           const stats = await r.json();
-          return { state: stats.asleep ? "offline" : "online", build: BUILD, ...stats };
+          return { state: stats.asleep ? "offline" : "online", build: BUILD(), ...stats };
         } catch {
-          return { state: "offline", build: BUILD };
+          return { state: "offline", build: BUILD() };
         }
       })(), net = fromNetwork(req, srv), found = devices.find(req);
       const res = Response.json({ ...state, backend, here: !net, ...(found && devices!.stale(found.device) ? { check: true } : {}),
@@ -841,7 +853,7 @@ const letIn = (req: Request, srv: Srv) => {
   return !!found && devices.trusted(found.device);
 };
 const bundle = Bun.serve({ hostname: "127.0.0.1", port: 0, routes: { "/": app }, fetch: () => new Response("not found", { status: 404 }),
-  development: process.env.NODE_ENV !== "production" && { hmr: false } });
+  development: LIVE && { hmr: false } });
 async function local(req: Request): Promise<Response> {
   const url = new URL(req.url), r = await fetch(`http://127.0.0.1:${bundle.port}${url.pathname}${url.search}`, { method: req.method });
   const back = new Headers(r.headers);
@@ -859,6 +871,12 @@ const authority = (body: (a: ReturnType<typeof webTls>) => Uint8Array<ArrayBuffe
   new Response(body(tls()), { headers: { "Content-Type": type, "Cache-Control": "no-store", ...PAST_WARNING, ...(name ? { "Content-Disposition": `attachment; filename="${name}"` } : {}) } });
 
 const server = serve("127.0.0.1", Number(process.env.PORT ?? 8081));
+harness.routeModel(`http://127.0.0.1:${server.port}/opencode/${MODEL_KEY}`, (u) => {
+  try {
+    const at = new URL(u);
+    return ["127.0.0.1", "localhost", "[::1]", ...lanAddresses()].includes(at.hostname) && [server.port, linkPort].includes(Number(at.port)) && at.pathname.startsWith("/v1");
+  } catch { return false; }
+});
 const secure = LAN ? lanAddresses().map((ip) => serve(ip, server.port!)) : [];
 let checkPort = Number(process.env.CHRYSALIS_CHECK_PORT ?? 8083);
 const checks = (LAN ? lanAddresses() : []).map((ip) => {
@@ -968,13 +986,38 @@ function checkFetch(req: Request): Response {
   return new Response(TRUSTED_GIF, { headers: { "Content-Type": "image/gif", "Cache-Control": "no-store" } });
 }
 
+async function tuned(req: Request, body: string | undefined): Promise<string | undefined> {
+  const session = req.headers.get("x-opencode-session");
+  if (!body || !session || req.method !== "POST") return body;
+  let sent: Record<string, unknown>;
+  try { sent = JSON.parse(body); } catch { return body; }
+  if (!Array.isArray(sent?.messages)) return body;
+  const want = await harness.tuningOf(session).catch(() => undefined);
+  if (!want) return body;
+  const { max_tokens, ...rest } = want, cap = "max_completion_tokens" in sent ? "max_completion_tokens" : "max_tokens";
+  return JSON.stringify({ ...sent, ...rest, ...(max_tokens ? { [cap]: max_tokens } : {}) });
+}
+async function tunedProxy(req: Request, srv: Srv, to: string): Promise<Response> {
+  srv.timeout(req, 0);
+  const url = new URL(req.url), headers = new Headers(req.headers);
+  for (const h of ["host", "connection", "content-length"]) headers.delete(h);
+  const body = await tuned(req, req.method === "GET" || req.method === "HEAD" ? undefined : await req.text());
+  try {
+    const r = await fetch(`${to}${url.search}`, { method: req.method, headers, signal: req.signal, body });
+    const back = new Headers(r.headers);
+    for (const h of ["content-encoding", "content-length", "transfer-encoding", "connection"]) back.delete(h);
+    return new Response(r.body, { status: r.status, headers: back });
+  } catch {
+    return Response.json({ error: { message: `${new URL(to).host} could not be reached` } }, { status: 502 });
+  }
+}
 async function proxy(req: Request, srv: Srv): Promise<Response> {
   srv.timeout(req, 0);
   const url = new URL(req.url), headers = new Headers(req.headers);
   for (const h of ["host", "cookie", "authorization", "x-api-key", "connection", "content-length"]) headers.delete(h);
   try {
     const r = await fetch(`${CHRYSALIS}${url.pathname}${url.search}`, { method: req.method, headers, signal: req.signal,
-      body: req.method === "GET" || req.method === "HEAD" ? undefined : await req.arrayBuffer() });
+      body: await tuned(req, req.method === "GET" || req.method === "HEAD" ? undefined : await req.text()) });
     const back = new Headers(r.headers);
     for (const h of ["content-encoding", "content-length", "transfer-encoding", "connection"]) back.delete(h);
     return new Response(r.body, { status: r.status, headers: back });

@@ -3,7 +3,7 @@ import { harness, fakes, fill, lastStream, look, open, probes, send, shown, stil
 
 harness();
 
-test("a chat whose reply is being written says Working, and for how long, where the list shows its age; once written it shows its age again", async () => {
+test("a chat whose reply is being written says Working, and for how long, where the list shows its age; once written it says Done, the open chat too, until its row is clicked", async () => {
   const page = await open();
   await page.type("#input", "slow count");
   await page.keyboard.press("Enter");
@@ -11,7 +11,29 @@ test("a chat whose reply is being written says Working, and for how long, where 
   expect(await page.$(".conv .conv-ago")).toBeNull();
   fakes.hurry = true;
   await page.waitForSelector(".msg.assistant .stats", { timeout: 20_000 });
+  await page.waitForFunction(() => document.querySelector(".conv.active .conv-status.done")?.textContent === "Done");
+  await page.click(".conv.active");
   await page.waitForFunction(() => !document.querySelector(".conv .conv-status") && document.querySelector(".conv .conv-ago")?.textContent === "now");
+  await page.close();
+}, 30_000);
+
+test("a chat that finishes while another is open says Done in the list until its row is clicked, and its closed row carries a dot", async () => {
+  const page = await open();
+  await page.type("#input", "slow count");
+  await page.keyboard.press("Enter");
+  await page.waitForFunction(() => /^Working/.test(document.querySelector(".conv .conv-status")?.textContent ?? ""), { timeout: 10_000 });
+  await page.click("#new-chat");
+  fakes.hurry = true;
+  await page.waitForFunction(() => document.querySelector(".conv .conv-status.done")?.textContent === "Done", { timeout: 20_000 });
+  expect(await page.$eval(".conv:has(.conv-status)", (c) => c.classList.contains("fresh"))).toBe(true);
+  await page.click("#conversations .cast-main");
+  expect(await page.$eval("#conversations .cast-main .cast-dot", (d) => d.classList.contains("done"))).toBe(true);
+  await page.click("#conversations .cast-main");
+  await page.click(".conv:has(.conv-status)");
+  await page.waitForFunction(() => !document.querySelector(".conv .conv-status") && !!document.querySelector(".conv.active .conv-ago"));
+  await page.reload({ waitUntil: "load" });
+  await page.waitForSelector(".conv .conv-ago");
+  expect(await page.$(".conv .conv-status")).toBeNull();
   await page.close();
 }, 30_000);
 
@@ -112,15 +134,35 @@ test("Mermaid blocks become diagrams; one that does not parse shows its source",
   await page.close();
 }, 30_000);
 
-test("an HTML page runs in its sandbox and reaches nothing", async () => {
+test("a page whose script cannot run says so under it, with the error and its line, and they go to the model by themselves for a fix", async () => {
+  const page = await open();
+  page.removeAllListeners("pageerror");
+  await send(page, "snapped script");
+  await page.waitForSelector(".page-fig > .page-fail", { timeout: 10_000 });
+  expect(await page.$eval(".page-fail", (f) => [f.querySelector(".page-fail-what")!.textContent, f.querySelector(".page-fail-at")?.textContent])).toEqual(
+    ["This page's script stopped: SyntaxError: Invalid or unexpected token", "const bad = 'rgb(1,2,3)`;"]);
+  await page.waitForFunction(() => document.querySelectorAll(".msg.user").length === 2, { timeout: 10_000 });
+  const asked = await page.$$eval(".msg.user", (m) => m.at(-1)!.textContent ?? "");
+  expect([asked.includes("SyntaxError: Invalid or unexpected token"), asked.includes("const bad = 'rgb(1,2,3)`;")]).toEqual([true, true]);
+  await page.close();
+}, 30_000);
+
+test("an HTML page runs in its sandbox and reaches nothing: its storage and cookies are its own, kept in the page and not the app's, and a game in it can hold the mouse and fill the screen", async () => {
   const page = await open();
   await send(page, "a page");
   const frame = await (await page.waitForSelector("iframe.page-frame"))!.contentFrame();
   await frame.waitForFunction(() => document.getElementById("out")?.textContent !== "running", { timeout: 10_000 });
-  expect(await frame.$eval("#out", (o) => o.textContent)).toBe("cookie blocked,fetch blocked,image blocked,parent blocked,storage blocked");
-  expect(probes).toBe(0);
+  expect(await frame.$eval("#out", (o) => o.textContent)).toBe("cookie its own,fetch blocked,image blocked,parent blocked,storage its own");
+  expect([probes, await page.evaluate(() => localStorage.getItem("k")), await page.evaluate(() => document.cookie)]).toEqual([0, null, ""]);
   await frame.click("#b");
   await frame.click("#b");
   expect(await frame.$eval("#b", (b) => b.textContent)).toBe("2");
+  await frame.click("#full");
+  await frame.waitForFunction(() => document.body.dataset.full, { timeout: 10_000 });
+  expect(await frame.$eval("body", (b) => b.dataset.full)).toBe("yes");
+  await frame.evaluate(() => document.exitFullscreen());
+  await frame.click("#lock");
+  await frame.waitForFunction(() => document.body.dataset.lock, { timeout: 10_000 });
+  expect(await frame.$eval("body", (b) => b.dataset.lock)).toBe("held");
   await page.close();
 }, 30_000);

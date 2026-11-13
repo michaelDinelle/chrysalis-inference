@@ -30,6 +30,12 @@ async function openFolder(page: Page, path: string) {
   await page.click("#oc-pop .oc-use");
   await page.waitForFunction(() => document.querySelector("main")!.hasAttribute("data-thread"));
 }
+async function menu(page: Page, title: string, item: string) {
+  await page.evaluate((title) => [...document.querySelectorAll<HTMLElement>("#conversations a.conv")].find((a) => a.querySelector(".conv-title")?.textContent === title)!
+    .dispatchEvent(new MouseEvent("contextmenu", { bubbles: true, cancelable: true, clientX: 60, clientY: 300 })), title);
+  await page.waitForSelector("#row-menu:not([hidden])");
+  await page.evaluate((item) => [...document.querySelectorAll<HTMLElement>("#row-menu button")].find((b) => b.textContent!.startsWith(item))!.click(), item);
+}
 const cards = (page: Page) => page.$$eval("#thread .tool-card", (c) => c.map((x) => [x.querySelector(".tool-name")!.textContent, x.querySelector(".tool-src")!.textContent, (x as HTMLElement).dataset.state]));
 const lastText = (page: Page) => page.$eval("#thread > article.assistant:last-child > .markdown", (e) => (e as HTMLElement).innerText.trim());
 
@@ -81,7 +87,7 @@ test("OpenCode connects from its button, a folder opened there is a row, and a t
   await page.type("#input", "ask first, then read it");
   await page.keyboard.press("Enter");
   await page.waitForSelector(".tool-ask:not([hidden])");
-  expect([await page.$$eval("#conversations .conv-status", (s) => s.map((x) => x.textContent)), opencode.log.replies.length]).toEqual([["Needs you"], 0]);
+  expect([await page.$$eval("#conversations .conv-status", (s) => s.map((x) => x.textContent)), opencode.log.replies.length]).toEqual([["Approval"], 0]);
   await page.click('.tool-ask [data-decision="deny"]');
   await page.waitForFunction(() => document.querySelector("#send")?.getAttribute("aria-label") === "Send");
   expect([opencode.log.replies.at(-1), (await cards(page)).at(-1)]).toEqual(["reject", ["Read", "OpenCode", "declined"]]);
@@ -183,7 +189,7 @@ test("a thread takes what a chat takes: attached text files and pictures go to O
     await page.waitForFunction(() => document.querySelector("#send")?.getAttribute("aria-label") === "Send");
     return seen;
   };
-  expect(await asked("Heather")).toEqual(["Which jar", ["Clover", "Heather"], ["Needs you"]]);
+  expect(await asked("Heather")).toEqual(["Which jar", ["Clover", "Heather"], ["Input"]]);
   expect([opencode.log.answers.at(-1), (await lastText(page)).includes("You chose Heather.")]).toEqual([{ q0: "Heather" }, true]);
   await asked();
   expect([opencode.log.answers.at(-1), (await lastText(page)).includes("You did not choose.")]).toEqual(["skipped", true]);
@@ -262,7 +268,7 @@ test("what OpenCode does shows in the thread without Chrysalis doing it: a sub-a
   await page.keyboard.press("Enter");
   await page.waitForSelector(".tool-ask:not([hidden]) [data-decision]");
   expect([await sub(), await page.$eval(".tool-ask:not([hidden]) pre", (e) => e.textContent!.replace(/\s+/g, " ")), await page.$$eval("#conversations .conv-status", (s) => s.map((x) => x.textContent))])
-    .toEqual([["running", "running · N s · Shell"], '{ "shell": [ "ls jars" ] }', ["Needs you"]]);
+    .toEqual([["running", "running · N s · Shell"], '{ "shell": [ "ls jars" ] }', ["Approval"]]);
   await page.click('.tool-ask:not([hidden]) [data-decision="once"]');
   await page.waitForFunction(() => document.querySelector("#send")?.getAttribute("aria-label") === "Send");
   expect([opencode.log.replies.at(-1), (await sub())![0], await lastText(page)]).toEqual(["to the helper: once", "done", "The file says hello and honey. You asked: count the jars with a helper"]);
@@ -292,7 +298,7 @@ test("what OpenCode does shows in the thread without Chrysalis doing it: a sub-a
 
   const session = last().session, row = () => page.evaluate(() => [...document.querySelectorAll("#conversations a.conv")].map((a) => a.querySelector(".conv-title")!.textContent));
   expect([opencode.sessions.has(session), (await row()).includes("count the jars with a helper")]).toEqual([true, true]);
-  for (let k = 0; k < 2; k++) await page.evaluate(() => [...document.querySelectorAll("#conversations a.conv")].find((a) => a.querySelector(".conv-title")!.textContent === "count the jars with a helper")!.querySelector<HTMLElement>(".conv-del")!.click());
+  await menu(page, "count the jars with a helper", "Delete");
   await page.waitForFunction(() => ![...document.querySelectorAll("#conversations a.conv .conv-title")].some((t) => t.textContent === "count the jars with a helper"));
   await page.reload({ waitUntil: "load" });
   await connect(page);
@@ -461,3 +467,86 @@ test("a character's chat and a group's are the same system: with OpenCode connec
   await page.evaluate(() => localStorage.setItem("tools", "on"));
   await page.close();
 }, 90_000);
+
+test("a chat's row has T3 Code's menu on a right click and on a long press: Pin moves it to a Pinned section at the top, Rename changes its title here and in OpenCode, Settle and Delete act as their buttons do, a long press opens the menu without opening the chat, a plain tap opens it, and a chat whose session is gone from OpenCode leaves the list", async () => {
+  const page = await open();
+  await connect(page);
+  await page.keyboard.press("Escape");
+  await page.click("#new-chat");
+  await send(page, "weigh the first jar");
+  const session = opencode.log.prompts.at(-1)!.session;
+  await page.click("#new-chat");
+  await send(page, "weigh the second jar");
+  const titles = (sel: string) => page.$$eval(`#conversations ${sel} .conv-title`, (t) => t.map((x) => x.textContent));
+  await page.evaluate(() => [...document.querySelectorAll<HTMLElement>("#conversations a.conv")].find((a) => a.querySelector(".conv-title")!.textContent === "weigh the first jar")!
+    .dispatchEvent(new MouseEvent("contextmenu", { bubbles: true, cancelable: true, clientX: 60, clientY: 300 })));
+  await page.waitForSelector("#row-menu:not([hidden])");
+  expect(await page.$$eval("#row-menu button", (b) => b.map((x) => x.textContent))).toEqual(["New chat", "Pin", "Settle", "Rename", "Fork", "Delete"]);
+  await page.keyboard.press("Escape");
+  expect(await page.$eval("#row-menu", (m) => (m as HTMLElement).hidden)).toBe(true);
+
+  await menu(page, "weigh the first jar", "Pin");
+  expect([await titles(".folder.pinned"), (await titles(".folder:not(.pinned):not(.settled)")).includes("weigh the first jar")]).toEqual([["weigh the first jar"], false]);
+  await menu(page, "weigh the first jar", "Rename");
+  await page.waitForSelector("#conversations .conv-rename");
+  await page.$eval("#conversations .conv-rename", (i) => { (i as HTMLInputElement).value = "The first jar"; });
+  await page.keyboard.press("Enter");
+  await page.waitForFunction(() => [...document.querySelectorAll("#conversations .folder.pinned .conv-title")].some((t) => t.textContent === "The first jar"));
+  for (let k = 0; k < 100 && opencode.sessions.get(session)!.title !== "The first jar"; k++) await Bun.sleep(50);
+  expect(opencode.sessions.get(session)!.title).toBe("The first jar");
+  await page.reload({ waitUntil: "load" });
+  await page.waitForFunction(() => [...document.querySelectorAll("#conversations .folder.pinned .conv-title")].some((t) => t.textContent === "The first jar"));
+
+  const row = (await page.evaluateHandle(() => [...document.querySelectorAll("#conversations a.conv")].find((a) => a.querySelector(".conv-title")!.textContent === "The first jar")!)).asElement()!;
+  const box = (await row.boundingBox())!, at = { x: box.x + box.width / 2, y: box.y + box.height / 2 }, was = await page.$eval("#title", (t) => t.textContent);
+  const touch = await page.createCDPSession();
+  await touch.send("Input.dispatchTouchEvent", { type: "touchStart", touchPoints: [at] });
+  await page.waitForSelector("#row-menu:not([hidden])", { timeout: 3000 });
+  await touch.send("Input.dispatchTouchEvent", { type: "touchEnd", touchPoints: [] });
+  await Bun.sleep(300);
+  expect([await page.$eval("#title", (t) => t.textContent), await page.$eval("#row-menu", (m) => (m as HTMLElement).hidden)]).toEqual([was, false]);
+  await page.keyboard.press("Escape");
+  await touch.send("Input.dispatchTouchEvent", { type: "touchStart", touchPoints: [at] });
+  await touch.send("Input.dispatchTouchEvent", { type: "touchEnd", touchPoints: [] });
+  await page.waitForFunction(() => document.querySelector("#title")?.textContent === "The first jar");
+  expect(await page.$eval("#row-menu", (m) => (m as HTMLElement).hidden)).toBe(true);
+
+  await menu(page, "The first jar", "Unpin");
+  await menu(page, "The first jar", "Settle");
+  await page.waitForSelector("#conversations .settled-head[aria-expanded]");
+  expect([await page.$("#conversations .folder.pinned"), !!opencode.sessions.get(session)!.archived]).toEqual([null, true]);
+  await menu(page, "weigh the second jar", "Delete");
+  await page.waitForFunction(() => ![...document.querySelectorAll("#conversations .conv-title")].some((t) => t.textContent === "weigh the second jar"));
+  await page.evaluate(() => document.querySelector<HTMLElement>("#conversations .settled-head[aria-expanded]")!.click());
+  await page.waitForFunction(() => [...document.querySelectorAll("#conversations .conv-title")].some((t) => t.textContent === "The first jar"));
+  opencode.sessions.delete(session);
+  await page.waitForFunction(() => ![...document.querySelectorAll("#conversations .conv-title")].some((t) => t.textContent === "The first jar"), { timeout: 10_000 });
+  await page.close();
+}, 90_000);
+
+test("a thread's turns carry the settings' samplers, max tokens and seed to OpenCode's session, the thinking ones at a thinking level and the fast ones with thinking off", async () => {
+  const page = await open(), last = () => opencode.log.prompts.at(-1)!;
+  await page.evaluate(() => {
+    sessionStorage.setItem("settings2", JSON.stringify({ v: 5, system: "", think: { temperature: 0.31, top_k: 7 }, fast: { temperature: 0.12, presence_penalty: 0.4 }, max_tokens: 500, seed: 9 }));
+  });
+  await page.reload();
+  await connect(page);
+  await openFolder(page, work);
+  const sampling = async () => {
+    const r = await fetch(`http://127.0.0.1:${opencode.server.port}/api/session`, { headers: { authorization: `Basic ${Buffer.from("opencode:test-secret").toString("base64")}` } });
+    return (await r.json()).data.find((s: { id: string }) => s.id === last().session)?.metadata?.["chrysalis-sampling"];
+  };
+  await send(page, "tuned at max");
+  expect(await sampling()).toEqual({ temperature: 0.31, top_k: 7, max_tokens: 500, seed: 9 });
+  await page.click('#energy-stops [data-stop="0"]');
+  await send(page, "tuned with thinking off");
+  expect(await sampling()).toEqual({ temperature: 0.12, presence_penalty: 0.4, max_tokens: 500, seed: 9 });
+  expect(await page.$eval("#toast", (t) => t.classList.contains("show") && /straight to/.test(t.textContent ?? ""))).toBe(false);
+  await page.evaluate(() => localStorage.setItem("thread-model", "elsewhere/cloud-1"));
+  const toasts = () => page.$eval("#toast span", (t) => t.textContent ?? "");
+  await page.click("#new-chat");
+  await page.waitForFunction(() => !document.querySelector(".msg"));
+  await send(page, "tuned somewhere else");
+  expect(await toasts()).toBe("This OpenCode sends elsewhere/cloud-1 straight to cloud.example, so your sampler settings, max tokens and seed don't reach it");
+  await page.close();
+}, 60_000);

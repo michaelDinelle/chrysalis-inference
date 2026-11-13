@@ -130,7 +130,7 @@ export function fakeOpenCode(secret: string) {
         else routines.delete(id);
         return act ? json({ data: r }) : new Response(null, { status: 204 });
       }
-      if (path === "/api/model") return json({ data: [{ id: "qwen3.8-27b", providerID: "chrysalis", name: "Qwen3.8 27B", variants: [{ id: "none" }, { id: "low" }, { id: "medium" }] }, { id: "cloud-1", providerID: "elsewhere", name: "Cloud One" }] });
+      if (path === "/api/model") return json({ data: [{ id: "qwen3.8-27b", providerID: "chrysalis", name: "Qwen3.8 27B", variants: [{ id: "none" }, { id: "low" }, { id: "medium" }] }, { id: "cloud-1", providerID: "elsewhere", name: "Cloud One", settings: { baseURL: "https://cloud.example/v1" } }] });
       if (path === "/api/agent") return json({ data: [{ id: "build", name: "Build", mode: "primary", hidden: false }, { id: "plan", name: "Plan", mode: "primary", hidden: false },
         { id: "explore", name: "Explore", mode: "subagent", hidden: false }, { id: "title", name: "Title", mode: "primary", hidden: true }] });
       if (path === "/api/command") return json({ data: [{ name: "review", description: "review changes" }] });

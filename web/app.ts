@@ -82,6 +82,7 @@ interface Run {
   conv: Conversation; m: Message; live: Live;
   at: number; begun: number;
   stopping: boolean; gone?: boolean;
+  heard?: number; pace?: number; shown?: number; painted?: number;
   usage?: { prompt_tokens: number; completion_tokens: number; cached?: number }; last?: any;
   read?: number; written?: number;
   seed?: number; timing?: { start: number; first?: number; answer?: number; last?: number; gen?: number };
@@ -190,6 +191,12 @@ const ICONS = {
   download: '<path d="M12 4v11M7.5 10.5 12 15l4.5-4.5M5 20h14"/>',
   clip: '<path d="M20 11.6 12.3 19.3a5.2 5.2 0 0 1-7.4-7.4l8.3-8.3a3.5 3.5 0 0 1 4.9 4.9l-8.3 8.3a1.7 1.7 0 0 1-2.5-2.5l7.4-7.4"/>',
   x: '<path d="M7 7l10 10M17 7 7 17"/>',
+  pin: '<path d="M9 4h6l-1 6 3 3H7l3-3z"/><path d="M12 13v7"/>',
+  approval: '<path d="M20 13c0 5-3.5 7.5-7.66 8.95a1 1 0 0 1-.67-.01C7.5 20.5 4 18 4 13V6a1 1 0 0 1 1-1c2 0 4.5-1.2 6.24-2.72a1.17 1.17 0 0 1 1.52 0C14.51 3.81 17 5 19 5a1 1 0 0 1 1 1z"/><path d="M9.1 9a3 3 0 0 1 5.82 1c0 2-3 3-3 3"/><path d="M12 17h.01"/>',
+  input: '<path d="M7.9 20A9 9 0 1 0 4 16.1L2 22Z"/><path d="M9.09 9a3 3 0 0 1 5.83 1c0 2-3 3-3 3"/><path d="M12 17h.01"/>',
+  failed: '<circle cx="12" cy="12" r="10"/><path d="M12 8v4"/><path d="M12 16h.01"/>',
+  done: '<circle cx="12" cy="12" r="10"/><path d="m9 12 2 2 4-4"/>',
+  compose: '<path d="M12 3H5a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2v-7"/><path d="M18.375 2.625a1 1 0 0 1 3 3l-9.013 9.014a2 2 0 0 1-.853.505l-2.873.84a.5.5 0 0 1-.62-.62l.84-2.873a2 2 0 0 1 .506-.852z"/>',
   clock: '<circle cx="12" cy="12" r="8.5"/><path d="M12 7.5V12l3 2"/>',
   pause: '<path d="M9 6v12M15 6v12"/>',
   grip: '<circle cx="9" cy="6" r="1.3" fill="currentColor" stroke="none"/><circle cx="15" cy="6" r="1.3" fill="currentColor" stroke="none"/><circle cx="9" cy="12" r="1.3" fill="currentColor" stroke="none"/><circle cx="15" cy="12" r="1.3" fill="currentColor" stroke="none"/><circle cx="9" cy="18" r="1.3" fill="currentColor" stroke="none"/><circle cx="15" cy="18" r="1.3" fill="currentColor" stroke="none"/>',
@@ -262,7 +269,7 @@ const CAST = "cast:";
 const castKey = (cast: string[], missing: string[] = []) => CAST + [...cast].sort().join("+") + (missing.length ? `|${[...missing].sort().join("|")}` : "");
 interface Routine { id: string; name: string; when: string; prompt: string; status: string; next?: number; runs: number }
 interface Scene { cast: string[]; scenario?: string; name?: string; greeting?: string }
-interface Harness { state: "absent" | "off" | "on"; name?: string; version?: string; install?: string; wanted?: boolean; home?: string; models?: { id: string; name: string; provider: string; variants: string[] }[]; agents?: { id: string; name: string }[];
+interface Harness { state: "absent" | "off" | "on"; name?: string; version?: string; install?: string; wanted?: boolean; home?: string; models?: { id: string; name: string; provider: string; variants: string[]; straight?: string }[]; agents?: { id: string; name: string }[];
   threads?: { id: string; title: string; dir: string; updated: number; idle: number; busy: boolean; archived: boolean; job?: string; model?: string; scene?: Scene }[] }
 let harness: Harness = { state: "off" };
 const folderOf = (c: Conversation) => (c.who && c.who !== CHRYSALIS && (c.cast || people.has(c.who)) ? c.who : "");
@@ -358,11 +365,11 @@ function castRow(id: string, list: Conversation[], open: boolean): HTMLElement {
   else pic.dataset.card = id;
   main.append(h("span", "cast-name", name || "Unnamed"));
   if (list.length) {
-    main.insertAdjacentHTML("beforeend", icon("chevron"));
     main.setAttribute("aria-expanded", String(open));
-    const running = list.find((x) => runs.get(x.id));
-    if (!open && running) main.append(workingLabel(runs.get(running.id)!.begun));
-    else if (!open) main.append(h("span", "cast-count", String(list.length)));
+    const needs = open ? undefined : ["approval", "input", "failed", "working", "done"].find((k) => list.some((x) => statusOf(x)?.kind === k));
+    if (needs) main.append(Object.assign(h("span", `cast-dot ${needs}`), { title: STATUS[needs as keyof typeof STATUS][0] }));
+    if (!open) main.append(h("span", "cast-count", String(list.length)));
+    main.insertAdjacentHTML("beforeend", icon("chevron"));
   }
   main.onclick = () => {
     const idle = g ? chatsOf(id).find((x) => !x.messages.length) : undefined;
@@ -372,9 +379,10 @@ function castRow(id: string, list: Conversation[], open: boolean): HTMLElement {
     renderList();
   };
   add.title = add.ariaLabel = d ? `New thread in ${name}` : `New chat with ${name}`;
-  add.innerHTML = icon("plus");
+  add.innerHTML = icon("compose");
   add.onclick = () => newChat(id);
   row.append(pic, main, add);
+  menuOn(row, () => castMenu(id, row));
   if (g || d || people.get(id)?.kind === "character") {
     const bring = h("button", "act cast-bring"), here = whoOf(conv) === id;
     bring.type = "button";
@@ -585,8 +593,18 @@ function sceneFor(c: Conversation): Scene | undefined {
 async function loadThreads() {
   const r = await fetch("/api/threads").catch(() => null);
   if (!r?.ok) return;
-  harness = await r.json();
+  const text = await r.text();
+  if (text === JSON.stringify(harness)) return;
+  const before = new Map((harness.threads ?? []).map((t) => [t.id, t.idle]));
+  harness = JSON.parse(text);
+  for (const t of harness.threads ?? []) if (before.has(t.id) && before.get(t.id) !== t.idle && !t.job && conv.thread?.id !== t.id && ![...runs.values()].some((x) => x.conv.thread?.id === t.id))
+    mark({ id: STUB + t.id, thread: { dir: t.dir, id: t.id } } as Conversation, "done");
   const now = (c: Conversation) => (c.thread?.id ? harness.threads?.find((x) => x.id === c.thread!.id) : undefined);
+  if (harness.state === "on" && harness.threads) {
+    const gone = Object.values(chats).filter((c) => c.thread?.id && !now(c) && !runs.get(c.id) && c.id !== conv.id);
+    for (const c of gone) delete chats[c.id];
+    if (conv.thread?.id && !now(conv) && !runs.get(conv.id)) { delete chats[conv.id]; newChat(); }
+  }
   for (const c of new Set([...Object.values(chats), conv])) {
     const t = c.thread?.id ? harness.threads?.find((x) => x.id === c.thread!.id) : undefined;
     if (t?.title && c.title !== t.title && !runs.get(c.id)) { c.title = t.title; c.named = true; }
@@ -619,6 +637,11 @@ async function openThread(sid: string): Promise<string | undefined> {
     if (said.at(-1)?.role === "assistant") said.pop();
     said.push({ id: randomId(), role: "assistant", content: "", reasoning: "", job: got.job, ...(c.who && !c.cast ? { as: c.who } : {}) });
   }
+  const old = mine?.messages ?? [];
+  said.forEach((m, i) => {
+    const was = old.find((o) => o.oc && o.oc === m.oc) ?? (old[i]?.role === m.role && old[i]?.content === m.content ? old[i] : undefined);
+    if (was?.stats && !m.stats) m.stats = was.stats;
+  });
   Object.assign(c, { title: got.thread.title || c.title || "Thread", updated: got.thread.updated || c.updated, messages: said });
   chats[c.id] = c;
   keepChats();
@@ -1132,12 +1155,14 @@ document.addEventListener("pointerdown", (e) => {
   if (!$("cast-add").hidden && !t.closest("#cast-add, #add-cast")) $("cast-add").hidden = true;
   if (!$("cast-invite").hidden && !t.closest("#cast-invite, .cast-bring, #cast-add, #toast")) closeInvite();
   if (!$("oc-pop").hidden && !t.closest("#oc-pop, #opencode, #cast-add, #toast")) $("oc-pop").hidden = true;
+  if (!$("row-menu").hidden && !t.closest("#row-menu")) $("row-menu").hidden = true;
   if (!$("routines-pop").hidden && !t.closest("#routines-pop, #routines, #toast")) $("routines-pop").hidden = true;
   if (!$("cast-sheet").hidden && !t.closest("#cast-sheet, [data-card], #voice-menu")) closeSheet();
 });
 document.addEventListener("keydown", (e) => {
   if (e.key !== "Escape" || voiceMenu.matches(":popover-open")) return;
-  if (!$("cast-add").hidden) { $("cast-add").hidden = true; e.preventDefault(); }
+  if (!$("row-menu").hidden) { $("row-menu").hidden = true; e.preventDefault(); }
+  else if (!$("cast-add").hidden) { $("cast-add").hidden = true; e.preventDefault(); }
   else if (!$("cast-invite").hidden) { closeInvite(); e.preventDefault(); }
   else if (!$("oc-pop").hidden) { $("oc-pop").hidden = true; e.preventDefault(); }
   else if (!$("routines-pop").hidden) { $("routines-pop").hidden = true; e.preventDefault(); }
@@ -1732,7 +1757,8 @@ const scriptsOf = (src: string) => elementSpans(src).filter((s) => s.tag.toLower
 
 function pageFrame(fixed: boolean): HTMLIFrameElement {
   const frame = h("iframe", "page-frame");
-  frame.setAttribute("sandbox", "allow-scripts allow-modals");
+  frame.setAttribute("sandbox", "allow-scripts allow-modals allow-pointer-lock allow-orientation-lock");
+  frame.allow = "fullscreen; clipboard-write";
   frame.title = "Page from the reply";
   if (fixed) frame.dataset.fixed = "1";
   else frame.style.height = `${pageStart()}px`;
@@ -1807,7 +1833,12 @@ function pageFigure(old: Node | undefined, text: string, live = false, fixed = f
   }
   if (svgSource.get(fig) !== text) {
     svgSource.set(fig, text);
-    if (fig.classList.contains("show-code")) fig.querySelector(".svg-code code")!.innerHTML = hljs.highlight(text, { language: "xml", ignoreIllegals: true }).value;
+    fig.querySelector(":scope > .page-fail")?.remove();
+    if (fig.classList.contains("show-code")) {
+      const code = fig.querySelector<HTMLElement>(".svg-code code")!, pre = code.parentElement!;
+      code.innerHTML = hljs.highlight(text, { language: "xml", ignoreIllegals: true }).value;
+      if (live) pre.scrollTop = pre.scrollHeight;
+    }
   }
   const title = text.match(/<title[^>]*>([^<]*)<\/title>/i)?.[1].trim();
   fig.querySelector(".svg-state")!.textContent = live ? "Writing the page" : title ? `Page · ${title}` : "Page";
@@ -1815,11 +1846,47 @@ function pageFigure(old: Node | undefined, text: string, live = false, fixed = f
   const paper = fig.querySelector<HTMLElement>(".page-paper")!;
   let badge = paper.querySelector<HTMLElement>(":scope > .page-writing");
   if (live && !badge) {
-    paper.append(badge = h("div", "page-writing"));
-    badge.innerHTML = `${icon("gear")}<span>Writing the page…</span>`;
+    paper.append(badge = h("button", "page-writing"));
+    (badge as HTMLButtonElement).type = "button";
+    badge.dataset.page = "code";
+    badge.innerHTML = `${icon("gear")}<span>Writing the page…</span><span class="page-peek"></span>`;
+    pagePeek(fig);
   } else if (!live) badge?.remove();
   showPage(fig.querySelector<HTMLElement>(".page-paper")!, text, live);
   return fig;
+}
+
+const PAGE_FAILS = "The page's script fails in the browser with";
+function pageFailed(paper: HTMLElement, what: string, at: string) {
+  const fig = paper.closest<HTMLElement>(".page-fig");
+  if (!fig || fig.classList.contains("drawing") || fig.querySelector(":scope > .page-fail")) return;
+  const fail = h("div", "page-fail");
+  fail.append(h("span", "page-fail-what", `This page's script stopped: ${what}`));
+  if (at) fail.append(h("code", "page-fail-at", at));
+  const fix = h("button", "page-fail-fix", "Ask for a fix");
+  fix.type = "button";
+  fix.dataset.page = "fix";
+  fix.dataset.ask = `${PAGE_FAILS} "${what}"${at ? ` at this line:\n\n\`\`\`\n${at}\n\`\`\`\n` : "."}\nFix it.`;
+  fail.append(fix);
+  paper.after(fail);
+  const last = conv.messages.at(-1), src = svgSource.get(fig);
+  if (last?.role !== "assistant" || last.error || last.stopped || running() || drafting) return;
+  if (![...artifactsOf(conv).values()].some((vs) => vs.at(-1)!.block.at === last && vs.at(-1)!.src === src)) return;
+  let tried = 0;
+  for (let i = conv.messages.length - 2; i >= 0 && conv.messages[i].role === "user" && conv.messages[i].content.startsWith(PAGE_FAILS); i -= 2) tried++;
+  if (tried >= 2) return;
+  const typed = input.value;
+  submit(fix.dataset.ask);
+  input.value = typed;
+  grow();
+}
+
+function pagePeek(fig: HTMLElement) {
+  const coded = fig.classList.contains("show-code"), badge = fig.querySelector<HTMLElement>(".page-writing");
+  fig.querySelector(".svg-acts [data-page=code]")!.textContent = coded ? "Page" : "Code";
+  if (!badge) return;
+  badge.title = coded ? "Show the page as it is written" : "Show the code as it is written";
+  badge.querySelector(".page-peek")!.textContent = coded ? "Page" : "Code";
 }
 
 addEventListener("message", (e) => {
@@ -1842,6 +1909,7 @@ addEventListener("message", (e) => {
     if (d.loaded) swapIn(frame);
     return;
   }
+  if (typeof d.chrysalisFail === "string") return pageFailed(paper, d.chrysalisFail, typeof d.at === "string" ? d.at : "");
   if (frame !== frameOf(paper) || pageModeOf(paper) === "use") return;
   if ("chrysalisHover" in d) hovered = pagePoint(paper, d.chrysalisHover);
   else if ("chrysalisPick" in d) {
@@ -1869,13 +1937,17 @@ function pageAction(btn: HTMLElement) {
   }
   const fig = btn.closest<HTMLElement>(".page-fig")!, text = svgSource.get(fig) ?? "";
   if (act === "code") {
-    btn.textContent = fig.classList.toggle("show-code") ? "Page" : "Code";
-    const code = fig.querySelector(".svg-code code")!;
+    fig.classList.toggle("show-code");
+    pagePeek(fig);
+    const code = fig.querySelector<HTMLElement>(".svg-code code")!, pre = code.parentElement!;
     if (code.textContent !== text) code.innerHTML = hljs.highlight(text, { language: "xml", ignoreIllegals: true }).value;
+    if (fig.classList.contains("drawing")) pre.scrollTop = pre.scrollHeight;
   } else if (act === "copy") copy(text, btn);
   else if (act === "save") download("page.html", text, "text/html");
+  else if (act === "fix") submit(btn.dataset.ask ?? "");
   else if (act === "reload") {
     const paper = fig.querySelector<HTMLElement>(".page-paper")!;
+    fig.querySelector(":scope > .page-fail")?.remove();
     paper.querySelectorAll(":scope > iframe").forEach((f) => f.remove());
     paper.append(pageFrame(false));
     showPage(paper, text, false);
@@ -3591,8 +3663,9 @@ function putAway(c: Conversation, on: boolean, quiet = false) {
   if (!quiet) toast(on ? `${c.title} is settled` : `${c.title} is active again`, () => putAway(c, !on, true));
 }
 function renderList() {
-  const settled = new Set([...kept("settled"), ...(harness.threads ?? []).filter((t) => t.archived).map((t) => STUB + t.id)]), shelf: Conversation[] = [];
-  const shown = (id: string) => chatsOf(id).filter((c) => (c.messages.length || c.thread?.id) && (!settled.has(keyOf(c)) || (shelf.push(c), false)));
+  const settled = new Set([...kept("settled"), ...(harness.threads ?? []).filter((t) => t.archived).map((t) => STUB + t.id)]), shelf: Conversation[] = [], pins: Conversation[] = [];
+  const pinned = new Set(kept("pinned"));
+  const shown = (id: string) => chatsOf(id).filter((c) => (c.messages.length || c.thread?.id) && (!settled.has(keyOf(c)) || (shelf.push(c), false)) && (!pinned.has(keyOf(c)) || (pins.push(c), false)));
   const folders = [...[...people.values()].filter((p) => p.kind !== "persona").map((x) => ({ id: x.id, at: x.added })), ...[...castKeys()].map((id) => ({ id, at: conv.updated })),
     ...dirs().map((d) => ({ id: DIR + d, at: 0 }))].map((x) => ({ ...x, list: shown(x.id) }));
   const rows = folders.sort((a, b) => (b.list[0]?.updated ?? b.at) - (a.list[0]?.updated ?? a.at)).map(({ id, list }) => {
@@ -3605,6 +3678,12 @@ function renderList() {
     }
     return box;
   });
+  if (pins.length) {
+    const box = h("div", "folder pinned open"), kids = h("div", "folder-chats");
+    kids.append(...pins.sort((a, b) => b.updated - a.updated).map((c) => convRow(c, false, true)));
+    box.append(h("div", "settled-head", "Pinned"), kids);
+    rows.unshift(box);
+  }
   if (shelf.length) {
     const open = pref("settled-open", "") === "1", box = h("div", `folder settled${open ? " open" : ""}`), head = h("button", "settled-head");
     head.type = "button";
@@ -3614,7 +3693,7 @@ function renderList() {
     box.append(head);
     if (open) {
       const kids = h("div", "folder-chats");
-      kids.append(...shelf.sort((a, b) => b.updated - a.updated).map((c) => convRow(c, true)));
+      kids.append(...shelf.sort((a, b) => b.updated - a.updated).map((c) => convRow(c, true, true)));
       box.append(kids);
     }
     rows.push(box);
@@ -3626,46 +3705,165 @@ function ago(t: number) {
   return s < 60 ? "now" : s < 3600 ? `${Math.floor(s / 60)}m` : s < 86400 ? `${Math.floor(s / 3600)}h` : s < 7 * 86400 ? `${Math.floor(s / 86400)}d`
     : s < 30 * 86400 ? `${Math.floor(s / 604800)}w` : new Date(t).toLocaleDateString(undefined, { month: "short", day: "numeric" });
 }
-function convRow(s: Conversation, settled = false) {
-  const a = h("a", `conv${s.id === conv.id ? " active" : ""}`), del = h("button", "conv-del", "×"), put = h("button", "conv-settle");
+function dropChat(c: Conversation) {
+  const sid = c.thread?.id;
+  if (sid) {
+    harness.threads = harness.threads?.filter((t) => t.id !== sid);
+    void fetch(`/api/threads/${sid}`, { method: "DELETE" }).then((r) => { if (!r.ok) toast("OpenCode did not delete that chat"); return loadThreads(); });
+  }
+  remove(c.id);
+}
+function pin(c: Conversation, on: boolean) {
+  const now = new Set(kept("pinned"));
+  if (on) now.add(keyOf(c)); else now.delete(keyOf(c));
+  setPref("pinned", JSON.stringify([...now]));
+  renderList();
+}
+function rename(c: Conversation, title: string) {
+  title = title.trim().slice(0, 100);
+  if (!title || title === c.title) return renderList();
+  const mine = chats[c.id] ?? (c.id === conv.id ? conv : undefined), sid = c.thread?.id, t = harness.threads?.find((x) => x.id === sid);
+  for (const x of [c, mine, c.id === conv.id ? conv : undefined]) if (x) Object.assign(x, { title, named: true });
+  if (t) t.title = title;
+  if (sid) void fetch(`/api/threads/${sid}`, { method: "PATCH", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ title }) })
+    .then((r) => { if (!r.ok) toast("OpenCode did not rename that chat"); });
+  keepChats();
+  if (c.id === conv.id) $("title").textContent = document.title = title;
+  renderList();
+}
+interface MenuItem { label: string; icon: keyof typeof ICONS; run: () => void; danger?: boolean }
+let menuAt = 0;
+function openMenu(x: number, y: number, items: MenuItem[]) {
+  const menu = $("row-menu");
+  menu.replaceChildren(...items.map((it) => {
+    const b = h("button", it.danger ? "danger" : "");
+    b.type = "button";
+    b.setAttribute("role", "menuitem");
+    b.innerHTML = `${icon(it.icon)}<span></span>`;
+    b.querySelector("span")!.textContent = it.label;
+    b.onclick = () => {
+      menu.hidden = true;
+      it.run();
+    };
+    return b;
+  }));
+  menu.hidden = false;
+  menu.style.left = `${Math.max(8, Math.min(x, innerWidth - menu.offsetWidth - 8))}px`;
+  menu.style.top = `${Math.max(8, Math.min(y, innerHeight - menu.offsetHeight - 8))}px`;
+  menuAt = performance.now();
+}
+function chatMenu(c: Conversation, settled: boolean): MenuItem[] {
+  const who = whoOf(c), pinned = kept("pinned").includes(keyOf(c)), sid = c.thread?.id;
+  return [
+    { label: who.startsWith(DIR) ? `New thread in ${nameOf(who)}` : who === CHRYSALIS ? "New chat" : `New chat with ${nameOf(who)}`, icon: "compose", run: () => newChat(who) },
+    { label: pinned ? "Unpin" : "Pin", icon: "pin", run: () => pin(c, !pinned) },
+    { label: settled ? "Un-settle" : "Settle", icon: settled ? "retry" : "check", run: () => putAway(c, !settled) },
+    { label: "Rename", icon: "edit", run: () => { renaming = keyOf(c); renderList(); } },
+    ...(sid ? [{ label: "Fork", icon: "fork" as const, run: () => void fetch(`/api/threads/${sid}/fork`, { method: "POST", headers: { "Content-Type": "application/json" }, body: "{}" })
+      .then(async (r) => { if (!r.ok) return toast("OpenCode did not fork that chat"); const { id } = await r.json(); await loadThreads(); location.hash = `#${STUB}${id}`; }) }] : []),
+    { label: "Delete", icon: "trash", danger: true, run: () => dropChat(c) },
+  ];
+}
+function castMenu(id: string, at: HTMLElement): MenuItem[] {
+  const d = id.startsWith(DIR), character = people.get(id)?.kind === "character" || id.startsWith(CAST);
+  return [
+    { label: d ? `New thread in ${nameOf(id)}` : id === CHRYSALIS ? "New chat" : `New chat with ${nameOf(id)}`, icon: "compose", run: () => newChat(id) },
+    ...(character || d ? [{ label: d ? "A new thread with a character…" : "A new chat with others…", icon: "personAdd" as const, run: () => openInvite(at, id) }] : []),
+    ...(d ? [{ label: "Copy path", icon: "copy" as const, run: () => void navigator.clipboard.writeText(id.slice(DIR.length)).then(() => toast("Copied")) }]
+      : [{ label: id.startsWith(CAST) ? "Who is in it" : "Card", icon: "agent" as const, run: () => openSheet(id) }]),
+  ];
+}
+function menuOn(el: HTMLElement, items: () => MenuItem[]) {
+  let timer = 0, from = [0, 0], held = false;
+  el.addEventListener("contextmenu", (e) => { e.preventDefault(); if ($("row-menu").hidden || performance.now() - menuAt > 400) openMenu(e.clientX, e.clientY, items()); });
+  el.addEventListener("pointerdown", (e) => {
+    if (e.pointerType === "mouse") return;
+    from = [e.clientX, e.clientY];
+    held = false;
+    timer = window.setTimeout(() => { timer = 0; held = true; openMenu(from[0], from[1], items()); }, 280);
+  });
+  el.addEventListener("pointermove", (e) => { if (timer && Math.hypot(e.clientX - from[0], e.clientY - from[1]) > 8) { clearTimeout(timer); timer = 0; } });
+  for (const end of ["pointerup", "pointercancel", "pointerleave"]) el.addEventListener(end, () => { clearTimeout(timer); timer = 0; });
+  el.addEventListener("click", (e) => { if (held) { held = false; e.preventDefault(); e.stopImmediatePropagation(); } }, true);
+}
+let renaming = "";
+function convRow(s: Conversation, settled = false, faced = false) {
+  const a = h("a", `conv${s.id === conv.id ? " active" : ""}${settled ? "" : " card"}`), put = h("button", "conv-settle"), title = h("span", "conv-title", s.title);
   put.type = "button";
   put.title = put.ariaLabel = settled ? "Make it active again" : "Settle: put it away";
-  put.innerHTML = icon(settled ? "retry" : "check");
+  put.innerHTML = `${icon(settled ? "retry" : "check")}${settled ? "Un-settle" : "Settle"}`;
   put.onclick = (e) => { e.preventDefault(); putAway(s, !settled); };
   a.href = `#${s.id}`;
-  a.onclick = (e) => { if (!e.defaultPrevented) closeOver(panes.conversations); };
-  del.type = "button";
-  del.title = "Delete";
-  del.onclick = (e) => {
-    e.preventDefault();
-    if (del.classList.contains("armed")) {
-      const sid = s.thread?.id;
-      if (sid) {
-        harness.threads = harness.threads?.filter((t) => t.id !== sid);
-        void fetch(`/api/threads/${sid}`, { method: "DELETE" }).then((r) => { if (!r.ok) toast("OpenCode did not delete that thread"); return loadThreads(); });
-      }
-      return void remove(s.id);
-    }
-    del.classList.add("armed");
-    del.textContent = "Delete";
-    setTimeout(() => { del.classList.remove("armed"); del.textContent = "×"; }, 2500);
-  };
-  const r = runs.get(s.id), away = !r && s.thread?.id ? harness.threads?.find((t) => t.id === s.thread!.id && t.job) : undefined;
-  a.append(h("span", "conv-title", s.title), r?.asking ? askingLabel() : r ? workingLabel(r.begun) : away ? workingLabel(away.updated) : h("span", "conv-ago", ago(s.updated)), put, del);
+  a.onclick = (e) => { if (!e.defaultPrevented) { mark(s); closeOver(panes.conversations); renderList(); } };
+  menuOn(a, () => chatMenu(s, settled));
+  const st = statusOf(s), who = whoOf(s), pinned = kept("pinned").includes(keyOf(s));
+  if (st) a.classList.add("fresh");
+  const pic = face(who);
+  pic.classList.add("conv-face");
+  const label = st ? statusLabel(st) : h("span", "conv-ago", ago(s.updated));
+  let body: HTMLElement = title;
+  if (renaming === keyOf(s)) {
+    const box = h("input", "conv-rename");
+    box.value = s.title;
+    box.ariaLabel = "Chat title";
+    box.onclick = (e) => e.preventDefault();
+    box.onkeydown = (e) => { if (e.key === "Enter") { renaming = ""; rename(s, box.value); } else if (e.key === "Escape") { renaming = ""; renderList(); } e.stopPropagation(); };
+    box.onblur = () => { if (renaming === keyOf(s)) { renaming = ""; rename(s, box.value); } };
+    queueMicrotask(() => { box.focus(); box.select(); });
+    body = box;
+  }
+  if (settled) {
+    if (faced) a.append(pic);
+    a.append(body);
+    if (body === title) a.append(label, put);
+    return a;
+  }
+  const top = h("div", "conv-top"), slot = h("span", "conv-slot"), mid = h("div", "conv-mid");
+  top.append(pic);
+  if (pinned) top.insertAdjacentHTML("beforeend", `<span class="conv-pin">${icon("pin")}</span>`);
+  slot.append(label, put);
+  top.append(h("span", "conv-who", nameOf(who)), slot);
+  mid.append(body);
+  a.append(top, mid);
+  const where = s.thread?.dir && !who.startsWith(DIR) ? dirName(s.thread.dir) : "", model = s.thread?.model?.split("/").pop() ?? "";
+  if (where || model) {
+    const meta = h("div", "conv-meta");
+    if (where) meta.insertAdjacentHTML("beforeend", icon("folder"));
+    meta.append(h("span", "conv-where", where), h("span", "conv-model", model));
+    a.append(meta);
+  }
   return a;
 }
 const workingFor = (ms: number) => {
   const sec = Math.max(0, Math.floor(ms / 1000)), min = Math.floor(sec / 60);
   return sec < 60 ? `${sec}s` : min < 60 ? `${min}m` : `${Math.floor(min / 60)}h ${min % 60}m`;
 };
-const askingLabel = () => h("span", "conv-status asking", "Needs you");
-function workingLabel(begun: number) {
-  const el = h("span", "conv-status"), dur = h("span", "conv-dur", workingFor(Date.now() - begun));
-  dur.dataset.since = String(begun);
-  dur.ariaHidden = "true";
-  el.innerHTML = icon("working");
-  el.append(h("span", "", "Working"), dur);
-  workingTick ||= window.setInterval(tickWorking, 1000);
+const STATUS = { working: ["Working", "working"], approval: ["Approval", "approval"], input: ["Input", "input"], failed: ["Failed", "failed"], done: ["Done", "done"] } as const;
+const unseen = (): Record<string, "done" | "failed"> => { try { return JSON.parse(pref("unseen", "{}")) ?? {}; } catch { return {}; } };
+function mark(c: Conversation, as?: "done" | "failed") {
+  const now = unseen(), key = keyOf(c);
+  if (now[key] === as) return;
+  if (as) now[key] = as; else delete now[key];
+  setPref("unseen", JSON.stringify(now));
+}
+function statusOf(c: Conversation): { kind: keyof typeof STATUS; since?: number } | null {
+  const r = runs.get(c.id), away = !r && c.thread?.id ? harness.threads?.find((t) => t.id === c.thread!.id && t.job) : undefined;
+  if (r?.asking) return { kind: r.m.calls?.some((x) => x.state === "asking") ? "input" : "approval" };
+  if (r || away) return { kind: "working", since: r?.begun ?? away!.updated };
+  const was = unseen()[keyOf(c)];
+  return was ? { kind: was } : null;
+}
+function statusLabel(st: { kind: keyof typeof STATUS; since?: number }) {
+  const el = h("span", `conv-status ${st.kind}`);
+  el.innerHTML = icon(STATUS[st.kind][1]);
+  el.append(h("span", "", STATUS[st.kind][0]));
+  if (st.since !== undefined) {
+    const dur = h("span", "conv-dur", workingFor(Date.now() - st.since));
+    dur.dataset.since = String(st.since);
+    dur.ariaHidden = "true";
+    el.append(dur);
+    workingTick ||= window.setInterval(tickWorking, 1000);
+  }
   return el;
 }
 let workingTick = 0;
@@ -3775,6 +3973,7 @@ function save(c: Conversation) {
   renderList();
 }
 
+const bypassed = new Set<string>();
 function request(c: Conversation, upto: Message[], o: { effort?: Effort; sampling?: Mode; final?: object; extra?: Record<string, unknown>; as?: string } = {}) {
   if (c.thread) {
     const asked = upto.findLast((m) => m.role === "user");
@@ -3785,7 +3984,13 @@ function request(c: Conversation, upto: Message[], o: { effort?: Effort; samplin
     const next = o.as && people.get(o.as)?.card.data.name.trim(), scene = sceneFor(c), char = writerOf(c)?.card.data.name ?? castOf(c).members[0]?.card.data.name ?? "";
     const after = [writerOf(c), persona()].map((p) => p?.card.data.post_history_instructions?.trim()).filter(Boolean).map((t) => `[${fillCard(t!, char, userName())}]`);
     const said = asked?.content ?? "", text = [noted([asked?.note, asked?.cut, editsNote(asked ?? { role: "user", content: "" }), asked?.point].filter(Boolean).join("\n\n") || undefined, said), ...(scene ? after : []), ...(next ? [`[${next} next.]`] : [])].join("\n\n");
-    return { stream: true, chrysalis_thread: { session: c.thread.id, dir: c.thread.dir, text, ...(text !== said ? { said } : {}), ...(next ? { next } : {}), ...(scene ? { scene } : {}),
+    const straight = harness.models?.find((m) => m.id === threadModel(c))?.straight, mode: Mode = c.effort === "off" ? "fast" : "think";
+    if (straight && (changed(mode) || settings.seed !== undefined) && !bypassed.has(`${c.thread.id}:${straight}`)) {
+      bypassed.add(`${c.thread.id}:${straight}`);
+      toast(`This OpenCode sends ${threadModel(c)} straight to ${straight}, so your sampler settings, max tokens and seed don't reach it`);
+    }
+    const tuned = threadModel(c) ? { sampling: { ...samplerFields(mode), ...(settings.max_tokens ? { max_tokens: settings.max_tokens } : {}), ...(settings.seed !== undefined ? { seed: settings.seed } : {}) } } : {};
+    return { stream: true, chrysalis_thread: { session: c.thread.id, dir: c.thread.dir, text, ...tuned, ...(text !== said ? { said } : {}), ...(next ? { next } : {}), ...(scene ? { scene } : {}),
       ...(c.thread.id ? {} : { title: c.title }), model: `${threadModel(c)}${variant ? `#${variant}` : ""}`, persona: threadPersona(c), ...(c.thread.agent && harness.agents?.some((a) => a.id === c.thread!.agent) ? { agent: c.thread.agent } : {}), ...(files.length ? { files } : {}) } };
   }
   const effort = o.effort ?? c.effort, mode: Mode = effort === "off" ? "fast" : "think";
@@ -4068,11 +4273,18 @@ function take(run: Run, ev: any) {
   if (asking !== !!run.asking) {
     run.asking = asking;
     renderList();
-    if (asking && run.conv !== conv) toast(`${run.conv.title}: a tool is waiting for you to allow it`);
+    if (asking && run.conv !== conv) toast(`${run.conv.title} is waiting for you`);
   }
   if (now - run.saved > 2000) {
     run.saved = now;
     save(run.conv);
+  }
+  if (d.content || d.reasoning_content) {
+    const gap = now - (run.heard ?? now);
+    if (gap > 20 || run.heard === undefined) {
+      if (run.heard !== undefined) run.pace = run.pace ? run.pace * 0.7 + Math.min(gap, 400) * 0.3 : Math.min(gap, 400);
+      run.heard = now;
+    }
   }
   feedVoice(m);
   schedule(run);
@@ -4113,7 +4325,22 @@ function schedule(run: Run) {
     run.frame = 0;
     const v = views.get(run.m);
     if (!v) return;
-    paint(v, run.m, run.live);
+    const m = run.m, now = performance.now(), whole = { content: m.content, reasoning: m.reasoning ?? "" };
+    const size = whole.content.length + whole.reasoning.length, pace = run.pace ?? 0;
+    run.shown = Math.min(run.shown ?? 0, size);
+    if (pace > 50 && run.heard !== undefined) {
+      const left = size - run.shown, dt = now - (run.painted ?? now);
+      run.shown += Math.min(left, Math.max(1, Math.ceil(left * dt / Math.max(pace - (now - run.heard), dt, 16))));
+    } else run.shown = size;
+    run.painted = now;
+    const think = Math.min(run.shown, whole.reasoning.length);
+    if (m.reasoning !== undefined) m.reasoning = whole.reasoning.slice(0, think);
+    m.content = whole.content.slice(0, run.shown - think);
+    try { paint(v, m, run.live); } finally {
+      m.content = whole.content;
+      if (m.reasoning !== undefined) m.reasoning = whole.reasoning;
+    }
+    if (run.shown < size) schedule(run);
     if (voice?.reply?.m === run.m) paintSpoken(voice, performance.now(), true);
     if (run.conv === conv) { renderMeter(); shelfSoon(); }
     keepUp();
@@ -4168,6 +4395,8 @@ function finish(run: Run) {
   if (c === conv) render();
   else renderList();
   save(c);
+  mark(c, m.error ? "failed" : m.stopped ? undefined : "done");
+  renderList();
   if (c.thread) void loadThreads().then(() => { if (c === conv) void loadRoutines(); return syncThread(c); });
   else if (!c.named && !m.error) void name(c);
   redoEdits(c, m);

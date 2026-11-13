@@ -277,8 +277,9 @@ test("a chat deleted while it is written stops its reply at Chrysalis, and the c
   await ask(page, "Write a 300-word story about a lost umbrella.");
   await page.waitForFunction(() => document.querySelectorAll(".conv:has(.conv-status)").length === 2, { timeout: 30_000 });
   await page.evaluate((href) => {
-    const del = document.querySelector<HTMLElement>(`.conv[href="${href}"] .conv-del`)!;
-    del.click(); del.click();
+    document.querySelector<HTMLElement>(`.conv[href="${href}"]`)!.dispatchEvent(new MouseEvent("contextmenu", { bubbles: true, cancelable: true, clientX: 40, clientY: 200 }));
+    const del = [...document.querySelectorAll<HTMLElement>("#row-menu button")].find((b) => b.textContent === "Delete")!;
+    del.click();
   }, doomed);
   await page.waitForFunction(() => document.querySelectorAll(".conv").length === 1, { timeout: 10_000 });
   await idle(page);

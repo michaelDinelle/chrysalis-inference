@@ -8,9 +8,9 @@ export interface Thread { id: string; title: string; dir: string; updated: numbe
 export interface Connector { name: string; state: typeof state; ensure: typeof ensure; stop: typeof stop; threads: typeof threads; models: typeof models; agents: typeof agents; transcript: typeof transcript;
   turn: typeof turn; say: typeof say; undo: typeof undo; fork: typeof fork; rewrite: typeof rewrite; change: typeof change; remove: typeof remove; routines: typeof routines; pause: typeof pause; cancel: typeof cancel }
 export const name = "OpenCode";
-export interface Model { id: string; name: string; provider: string; variants: string[] }
+export interface Model { id: string; name: string; provider: string; variants: string[]; straight?: string }
 export interface Turn { session?: string; dir: string; text: string; model?: string; persona?: string; files?: { uri: string; name: string }[]; follow?: boolean; agent?: string;
-  scene?: Scene; said?: string; next?: string; title?: string }
+  scene?: Scene; said?: string; next?: string; title?: string; sampling?: Record<string, unknown> }
 export interface Routine { id: string; name: string; when: string; prompt: string; status: string; next?: number; runs: number }
 export type Answer = Decision | "stop" | { answer: Record<string, unknown> };
 export interface Step { content: string; reasoning?: string; calls: Call[] }
@@ -35,15 +35,26 @@ async function rootOf(id: string): Promise<string> {
   roots.set(id, root);
   return root;
 }
+const TUNED = "chrysalis-sampling", tunings = new Map<string, Record<string, unknown> | undefined>();
+let modelUrl: string | undefined;
+let reached: (url: string) => boolean = () => false;
+export const routeModel = (url: string, ours: (url: string) => boolean) => { modelUrl = url; reached = (u) => u.startsWith(`${url}/`) || ours(u); };
+const via = (base: string) => `${modelUrl}/via/${Buffer.from(base).toString("base64url")}`;
+const routes = new Map<string, string>();
+export async function tuningOf(session: string): Promise<Record<string, unknown> | undefined> {
+  const root = await rootOf(session);
+  if (!tunings.has(root)) tunings.set(root, await call("GET", `/api/session/${root}`).then((r) => r.data?.metadata?.[TUNED], () => undefined));
+  return tunings.get(root);
+}
 let woken: (session: string) => void = () => {};
 export const onWake = (fn: (session: string) => void) => { woken = fn; };
 process.on("exit", () => host?.proc?.kill());
 
 export const state = () => (host ? { state: "on" as const, version: host.version } : { state: binary() || process.env.CHRYSALIS_OPENCODE_URL ? "off" as const : "absent" as const });
 
-async function call(method: string, path: string, body?: object): Promise<any> {
-  if (!host) throw new Error("OpenCode is not running");
-  const r = await fetch(host.url + path, { method, headers: { authorization: host.auth, ...(body ? { "content-type": "application/json" } : {}) }, body: body && JSON.stringify(body) });
+async function call(method: string, path: string, body?: object, to = host): Promise<any> {
+  if (!to) throw new Error("OpenCode is not running");
+  const r = await fetch(to.url + path, { method, headers: { authorization: to.auth, ...(body ? { "content-type": "application/json" } : {}) }, body: body && JSON.stringify(body) });
   const text = await r.text();
   if (!r.ok) throw new Error(`OpenCode: ${(() => { try { const j = JSON.parse(text); return j.message ?? j.error?.message ?? text; } catch { return text; } })() || `HTTP ${r.status}`}`);
   return text ? JSON.parse(text) : undefined;
@@ -57,21 +68,48 @@ async function freePort() {
 
 export function ensure(chrysalis: string): Promise<void> {
   return (starting ??= (async () => {
-    const outer = process.env.CHRYSALIS_OPENCODE_URL, password = outer ? process.env.CHRYSALIS_OPENCODE_PASSWORD ?? "" : `${crypto.randomUUID()}${crypto.randomUUID()}`;
-    let url = outer, proc: Bun.Subprocess | undefined, local = 0;
-    if (!url) {
-      const bin = binary();
-      if (!bin) throw new Error("OpenCode is not installed on this computer");
-      const listed = await fetch(`${chrysalis}/v1/models`, { signal: AbortSignal.timeout(3000) }).then((r) => r.json(), () => ({ data: [] }));
-      const models = Object.fromEntries((listed.data ?? []).filter((m: any) => typeof m?.id === "string" && !m.id.endsWith("-fast")).map((m: any) => [m.id, { variants: THINKING, capabilities: { input: ["text", "image", "pdf"] } }]));
-      const { OPENCODE_SERVER_PASSWORD: _, BUN_BE_BUN: __, ...env } = process.env, port = await freePort();
-      local = Object.keys(models).length;
-      proc = Bun.spawn(["sh", "-c", WITH_US, "sh", bin, "serve", "--hostname", "127.0.0.1", "--port", String(port)], { stdin: "ignore", stdout: "ignore", stderr: "ignore",
-        env: { ...env, CHRYSALIS_WEB_PID: String(process.pid), OPENCODE_PASSWORD: password, OPENCODE_CONFIG_CONTENT: JSON.stringify({ experimental: { schedules: true }, providers: { chrysalis: { name: "Chrysalis",
-          package: "@opencode/ai/providers/openai-compatible", settings: { baseURL: `${chrysalis}/v1`, apiKey: "chrysalis" }, models } } }) } });
-      url = `http://127.0.0.1:${port}`;
-      void proc.exited.then(() => { if (host?.proc === proc) { host = undefined; starting = undefined; lost(); } });
+    const outer = process.env.CHRYSALIS_OPENCODE_URL;
+    if (outer) {
+      host = await reach(outer, process.env.CHRYSALIS_OPENCODE_PASSWORD ?? "");
+      return void watch(host);
     }
+    const bin = binary();
+    if (!bin) throw new Error("OpenCode is not installed on this computer");
+    const listed = await fetch(`${chrysalis}/v1/models`, { signal: AbortSignal.timeout(3000) }).then((r) => r.json(), () => ({ data: [] }));
+    const models = Object.fromEntries((listed.data ?? []).filter((m: any) => typeof m?.id === "string" && !m.id.endsWith("-fast")).map((m: any) => [m.id, { variants: THINKING, capabilities: { input: ["text", "image", "pdf"] } }]));
+    for (;;) {
+      const password = `${crypto.randomUUID()}${crypto.randomUUID()}`, port = await freePort(), { OPENCODE_SERVER_PASSWORD: _, BUN_BE_BUN: __, ...env } = process.env;
+      const others: Record<string, any> = {};
+      for (const [key, base] of routes) {
+        const [provider, model] = key.split("\0");
+        others[provider] ??= {};
+        if (model) ((others[provider].models ??= {})[model] = { settings: { baseURL: via(base) } });
+        else others[provider].settings = { baseURL: via(base) };
+      }
+      const proc = Bun.spawn(["sh", "-c", WITH_US, "sh", bin, "serve", "--hostname", "127.0.0.1", "--port", String(port)], { stdin: "ignore", stdout: "ignore", stderr: "ignore",
+        env: { ...env, CHRYSALIS_WEB_PID: String(process.pid), OPENCODE_PASSWORD: password, OPENCODE_CONFIG_CONTENT: JSON.stringify({ experimental: { schedules: true }, providers: { ...others, chrysalis: { name: "Chrysalis",
+          package: "@opencode/ai/providers/openai-compatible", settings: { baseURL: `${modelUrl}/v1`, apiKey: "chrysalis" }, models } } }) } });
+      const at = await reach(`http://127.0.0.1:${port}`, password, proc, Object.keys(models).length > 0);
+      const [providers, all] = await Promise.all([call("GET", "/api/provider", undefined, at), call("GET", "/api/model", undefined, at)]);
+      const bases = new Map<string, string>((providers.data ?? []).map((p: any) => [p.id, p.settings?.baseURL]));
+      let more = false;
+      for (const p of providers.data ?? []) if (p.id !== "chrysalis" && /^https?:/.test(p.settings?.baseURL ?? "") && !reached(p.settings.baseURL)) { routes.set(p.id, p.settings.baseURL); more = true; }
+      for (const m of all.data ?? []) {
+        const base = m.settings?.baseURL;
+        if (m.providerID !== "chrysalis" && /^https?:/.test(base ?? "") && !reached(base) && base !== bases.get(m.providerID)) { routes.set(`${m.providerID}\0${m.id}`, base); more = true; }
+      }
+      if (!more) {
+        void proc.exited.then(() => { if (host?.proc === proc) { host = undefined; starting = undefined; lost(); } });
+        host = at;
+        return void watch(at);
+      }
+      proc.kill();
+      await proc.exited;
+    }
+  })().catch((e) => { starting = undefined; throw e; }));
+}
+
+async function reach(url: string, password: string, proc?: Bun.Subprocess, local = false): Promise<NonNullable<typeof host>> {
     const auth = `Basic ${Buffer.from(`opencode:${password}`, "utf8").toString("base64")}`;
     for (const deadline = Date.now() + 30_000; ; await Bun.sleep(150)) {
       const info = await fetch(`${url}/api/info`, { headers: { authorization: auth }, signal: AbortSignal.timeout(2000) }).then((r) => (r.ok ? r.json() : r.status === 401 ? 401 : null), () => null);
@@ -81,12 +119,10 @@ export function ensure(chrysalis: string): Promise<void> {
         if (short >= 0 && !(has[short] > OLDEST[short])) { proc?.kill(); throw new Error(`OpenCode ${OLDEST.join(".")} or newer is needed and this is ${info.version}: run opencode upgrade on this computer`); }
         const listed = !proc || !local || await fetch(`${url}/api/model`, { headers: { authorization: auth } }).then((r) => r.json())
           .then((j) => (j.data ?? []).some((m: any) => m.providerID === "chrysalis"), () => false);
-        if (listed) { host = { url, auth, version: info.version, proc }; break; }
+        if (listed) return { url, auth, version: info.version, proc };
       }
       if (Date.now() > deadline || (proc && proc.exitCode !== null)) { proc?.kill(); throw new Error("OpenCode did not start"); }
     }
-    void watch(host);
-  })().catch((e) => { starting = undefined; throw e; }));
 }
 
 export function stop() {
@@ -166,7 +202,7 @@ export async function models(): Promise<Model[]> {
   const [list, providers] = await Promise.all([call("GET", "/api/model"), call("GET", "/api/provider")]);
   const names = new Map<string, string>((providers.data ?? []).map((p: any) => [p.id, p.name ?? p.id]));
   return (list.data ?? []).flatMap((m: any) => (idOf(m) ? [{ id: idOf(m)!, name: m.name ?? m.id, provider: names.get(m.providerID) ?? m.providerID,
-    variants: (m.variants ?? []).map((v: any) => v.id) }] : []));
+    variants: (m.variants ?? []).map((v: any) => v.id), ...(/^https?:/.test(m.settings?.baseURL ?? "") && !reached(m.settings.baseURL) ? { straight: new URL(m.settings.baseURL).host } : {}) }] : []));
 }
 export async function agents(): Promise<{ id: string; name: string }[]> {
   return ((await call("GET", "/api/agent")).data ?? []).filter((a: any) => a.mode !== "subagent" && !a.hidden).map((a: any) => ({ id: a.id, name: a.name ?? a.id }));
@@ -257,10 +293,11 @@ export function folders(path: string) {
 
 export async function turn(t: Turn, push: (d: object) => void, signal: AbortSignal, ask: (id: string) => Promise<Answer>, began: (session: string) => void) {
   if (!t.follow && !existsSync(t.dir)) throw new Error(`There is no folder ${t.dir} on this computer`);
-  const meta = t.scene ? { metadata: { [OURS]: t.scene } } : {};
+  const meta = t.scene || t.sampling ? { metadata: { ...(t.scene ? { [OURS]: t.scene } : {}), ...(t.sampling ? { [TUNED]: t.sampling } : {}) } } : {};
   const id = t.session ?? (await call("POST", "/api/session", { location: { directory: t.dir }, ...(t.title?.trim() ? { title: t.title.trim().slice(0, 100) } : {}), ...meta })).data.id as string;
+  if (t.sampling && !t.follow) tunings.set(id, t.sampling);
   began(id);
-  if (t.session && t.scene && !t.follow) await call("PATCH", `/api/session/${id}`, meta);
+  if (t.session && (t.scene || t.sampling) && !t.follow) await call("PATCH", `/api/session/${id}`, meta);
   const entry = `/api/experimental/session/${id}/instructions/entries/${PERSONA}`;
   if (t.model && !t.follow) await call("POST", `/api/session/${id}/model`, { model: refOf(t.model) });
   if (t.agent && !t.follow) await call("POST", `/api/session/${id}/agent`, { agent: t.agent });

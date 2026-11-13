@@ -86,6 +86,29 @@ test("the canvas's tools change the picture by hand, with no model: the paint bu
   await page.close();
 }, 30_000);
 
+test("while a page is being written its pill shows the code so far, which grows as it is written, and the same pill, where it was, brings the page back", async () => {
+  const page = await open();
+  await page.type("#input", "steady counter page");
+  await page.keyboard.press("Enter");
+  await page.waitForSelector(".page-fig.drawing .page-writing", { timeout: 10_000 });
+  const spot = () => page.$eval(".page-fig.drawing .page-writing", (b) => { const r = b.getBoundingClientRect(), f = b.closest(".page-fig")!.getBoundingClientRect(); return [Math.round(r.left - f.left), Math.round(r.top - f.top), b.querySelector(".page-peek")!.textContent] as const; });
+  const [x, y] = await spot();
+  await page.click(".page-fig.drawing .page-writing");
+  expect(await spot()).toEqual([x, y, "Page"]);
+  expect(await page.$eval(".page-fig.drawing", (f) => Math.round(f.querySelector(".svg-code")!.getBoundingClientRect().top - f.querySelector(".page-writing")!.getBoundingClientRect().bottom) < 40)).toBe(true);
+  const code = () => page.$eval(".page-fig .svg-code code", (c) => c.textContent ?? "");
+  expect(await page.$eval(".page-fig", (f) => f.classList.contains("show-code"))).toBe(true);
+  await page.waitForFunction(() => (document.querySelector(".page-fig .svg-code code")?.textContent ?? "").length > 0, { timeout: 10_000 });
+  const first = await code();
+  await page.waitForFunction((n) => (document.querySelector(".page-fig .svg-code code")?.textContent ?? "").length > n, { timeout: 10_000 }, first.length);
+  expect((await code()).startsWith(first)).toBe(true);
+  await page.click(".page-fig.drawing .page-writing");
+  expect([await page.$eval(".page-fig", (f) => f.classList.contains("show-code")), await spot()]).toEqual([false, [x, y, "Code"]]);
+  fakes.hurry = true;
+  await page.waitForSelector(".msg.assistant .stats", { timeout: 20_000 });
+  await page.close();
+}, 40_000);
+
 test("a page artifact is drawn as it is written, its script waiting, and runs once whole; an edit to its look goes into the running page, which keeps what it holds, and one to its script runs it anew", async () => {
   const page = await open();
   const done = await page.$$eval(".msg .stats", (s) => s.length);

@@ -1,6 +1,38 @@
 (() => {
   const S = (window.__chrysalis ??= { mode: "use", pin: null, prev: null, hover: null, code: document.currentScript?.textContent ?? "" });
   const send = (m) => parent.postMessage(m, "*");
+  const store = () => {
+    const kept = new Map();
+    const api = { getItem: (k) => (kept.has(String(k)) ? kept.get(String(k)) : null), setItem: (k, v) => void kept.set(String(k), String(v)),
+      removeItem: (k) => void kept.delete(String(k)), clear: () => kept.clear(), key: (i) => [...kept.keys()][i] ?? null };
+    return new Proxy(api, {
+      get: (t, k) => (k === "length" ? kept.size : k in t ? t[k] : typeof k === "string" && kept.has(k) ? kept.get(k) : undefined),
+      set: (t, k, v) => (t.setItem(k, v), true),
+      deleteProperty: (t, k) => (t.removeItem(k), true),
+      has: (t, k) => k in t || kept.has(String(k)),
+      ownKeys: () => [...kept.keys()],
+      getOwnPropertyDescriptor: (t, k) => (kept.has(String(k)) ? { value: kept.get(String(k)), enumerable: true, configurable: true, writable: true } : undefined),
+    });
+  };
+  S.stores ??= { localStorage: store(), sessionStorage: store() };
+  for (const name of Object.keys(S.stores)) Object.defineProperty(window, name, { value: S.stores[name], configurable: true });
+  S.jar ??= new Map();
+  Object.defineProperty(document, "cookie", { configurable: true, get: () => [...S.jar].map(([k, v]) => `${k}=${v}`).join("; "),
+    set: (line) => {
+      const [pair, ...rest] = String(line).split(";"), at = pair.indexOf("="), name = (at < 0 ? "" : pair.slice(0, at)).trim(), value = pair.slice(at + 1).trim();
+      const gone = rest.some((r) => /^\s*max-age\s*=\s*(0|-\d+)\s*$/i.test(r) || (/^\s*expires\s*=/i.test(r) && Date.parse(r.slice(r.indexOf("=") + 1)) < Date.now()));
+      if (gone) S.jar.delete(name);
+      else S.jar.set(name, value);
+    } });
+  const fail = (err, line, col) => {
+    const text = String(err ?? "").replace(/^Uncaught /, "").replace(/^(\w+): Failed to execute 'write' on 'Document': /, "$1: ");
+    const found = !text.startsWith("SyntaxError") || !line ? [] : [...new Set([...(S.prev ?? "").matchAll(/<script\b[^>]*>([\s\S]*?)<\/script>/gi)]
+      .map((m) => m[1].split("\n")[line - 1] ?? "").filter((l) => l.trim() && l.length >= col - 1).map((l) => l.trim()))];
+    const at = found.length === 1 ? found[0] : "";
+    if (text) send({ chrysalisFail: text, at: at.length > 240 ? `${at.slice(0, 240)}…` : at });
+  };
+  addEventListener("error", (e) => fail(e.message, e.lineno, e.colno));
+  addEventListener("unhandledrejection", (e) => fail(e.reason?.stack ? `${e.reason.name}: ${e.reason.message}` : e.reason, 0, 0));
   const html = document.documentElement;
 
   const windowSized = (el) => {
@@ -230,7 +262,11 @@
     const { page: body, map } = withLibs(src, libs);
     const page = body.replace(/^(\s*(?:<!--[\s\S]*?-->\s*)*<!doctype[^>]*>)?/i, (d) => `${d}<script data-chrysalis-ui>${S.code}<\/script>${map}`);
     document.open();
-    document.write(page);
+    try {
+      document.write(page);
+    } catch (err) {
+      fail(`${err.name}: ${err.message}`, 0, 0);
+    }
     document.close();
   }
 

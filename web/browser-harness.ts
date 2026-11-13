@@ -87,10 +87,14 @@ export const REPLIES: Record<string, string> = {
     "It costs $5 and $10. Escaped: \\$x\\$. Code: `$HOME` stays.\n",
   diagram: "```mermaid\nflowchart LR\n  A[Ask] --> B{Cached?}\n  B -->|yes| C[Append]\n  B -->|no| D[Prefill]\n```\n\n" +
     "```mermaid\nsequenceDiagram\n  User->>Chrysalis: question\n  Chrysalis-->>User: answer\n```\n\n```mermaid\nflowchart TD\n  A -->\n  not mermaid ((\n```\n",
+  "snapped script": "```html\n<!DOCTYPE html>\n<html><head><title>Snapped</title></head><body>\n<p id=\"p\">before</p>\n<script>\nconst ok = 1;\nconst bad = 'rgb(1,2,3)`;\n" +
+    "document.getElementById(\"p\").textContent = \"after\";\n</script>\n</body></html>\n```\n",
   page: "```html\n<!DOCTYPE html>\n<html><head><title>Probe</title></head><body>\n<button id=\"b\" onclick=\"this.textContent = Number(this.textContent) + 1\">0</button>\n" +
-    "<pre id=\"out\">running</pre>\n<script>\nconst out = [];\ntry { out.push(\"parent \" + parent.document.title); } catch { out.push(\"parent blocked\"); }\n" +
-    "try { localStorage.setItem(\"k\", \"1\"); out.push(\"storage open\"); } catch { out.push(\"storage blocked\"); }\n" +
-    "try { document.cookie = \"a=1\"; out.push(document.cookie ? \"cookie open\" : \"cookie blocked\"); } catch { out.push(\"cookie blocked\"); }\n" +
+    "<button id=\"lock\" onclick=\"this.requestPointerLock()\">hold</button><button id=\"full\" onclick=\"this.requestFullscreen().then(() => { document.body.dataset.full = 'yes'; }, (e) => { document.body.dataset.full = e.message; })\">fill</button>\n<pre id=\"out\">running</pre>\n<script>\nconst out = [];\n" +
+    "document.addEventListener(\"pointerlockchange\", () => { document.body.dataset.lock = document.pointerLockElement ? \"held\" : \"free\"; });\n" +
+    "document.addEventListener(\"pointerlockerror\", () => { document.body.dataset.lock = \"refused\"; });\ntry { out.push(\"parent \" + parent.document.title); } catch { out.push(\"parent blocked\"); }\n" +
+    "try { localStorage.setItem(\"k\", \"1\"); out.push(localStorage.getItem(\"k\") === \"1\" && localStorage.length === 1 ? \"storage its own\" : \"storage broken\"); } catch { out.push(\"storage blocked\"); }\n" +
+    "try { document.cookie = \"a=1\"; out.push(document.cookie === \"a=1\" ? \"cookie its own\" : \"cookie broken\"); } catch { out.push(\"cookie blocked\"); }\n" +
     "const img = new Image(); img.onload = () => out.push(\"image open\"); img.onerror = () => out.push(\"image blocked\"); img.src = \"PROBE_URL/probe.png\";\n" +
     "fetch(\"PROBE_URL/probe\", { method: \"POST\", mode: \"no-cors\" }).then(() => out.push(\"fetch open\"), () => out.push(\"fetch blocked\"))\n" +
     "  .finally(() => setTimeout(() => { document.getElementById(\"out\").textContent = out.sort().join(\",\"); }, 300));\n" +
