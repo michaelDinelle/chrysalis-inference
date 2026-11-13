@@ -39,7 +39,10 @@ Every reward in hill.json is held by `.hill/hill`. A change is promoted only whe
 a record and at least one is better: no trade-offs, no net gains, no "within noise" after the fact, no blaming the
 machine. `.hill/hill gate` is the only judge; if it is wrong, fix it and gate again. The ledger is append-only. Rewards
 are never dropped, re-keyed or loosened. Only the user can make an exception, and agents never propose one. Harness
-changes (bench/, hill.json, .hill/) land on their own, never with a product change. The README has no Rewards table and
+changes (bench/, hill.json, .hill/) land on their own, never with a product change. A change is the hill's to judge when it
+touches hill.json's measured paths (engine/, chrysalis/, the Makefile) outside its not_measured ones (chrysalis/voice,
+which the server never imports): web/, tests/ (the test targets are tests/tests.mk), the voice service and these notes
+commit with no gate. The README has no Rewards table and
 `hill table` isn't run: report each verdict's table to the user instead, and keep the README's charts and its For agents
 numbers true to what Chrysalis does now. media/charts.json holds those numbers, and `data/venv/bin/python media/charts.py`
 is the only thing that writes the charts and the tables, both from that file: never edit them by hand. `python3
@@ -81,13 +84,8 @@ None: no comments or docstrings anywhere in the repo, in any language, including
   pictured), `make build/test_cpujob_fn && build/test_cpujob_fn`, `make test_voice` (the voice service: its features against
   transformers', turns, echo and barge-in over its WebSocket), `make test_web` (the web UI's sampler against
   the engine's, its server against a fake Chrysalis and a fake OpenCode, the page in headless Chromium, and Firefox past and trusting the network's
-  certificate; certutil makes their trust). `cd web && bun tests.ts` runs the same files side by side, as many as the free
-  memory holds, sharing one Chromium, in well under a minute; `bun tests.ts ./<file>.test.ts` runs some of them.
-- With Chrysalis running Flash-Next: `make test_chaos` (the chat for real, used oddly: replies through reloads, closed
-  tabs and chat switches, several at once, Stop / regenerate / edit mid-reply, settings, a 3D page, memory taken
-  by another program, and threads through OpenCode itself, with a picture, a question and a routine (it needs
-  `opencode` 2.2.4 or newer installed); it restarts Chrysalis
-  and switches models, so ask first, as for stopping it).
+  certificate; certutil makes their trust: the files side by side, as many as the free memory holds, sharing one
+  Chromium). `cd web && bun tests.ts ./<file>.test.ts` runs some of them.
 - GPU, with Chrysalis's model server stopped (the chat's Stop, which frees the GPU; the user runs Chrysalis: check the GPU
   is idle, ask once per task, then just say when it stops and for how long): `make test` (test_web, the 27B kernels,
   then the model in-process: chat format, cache, snapshots and generation (held answers' masked steps too), the server
