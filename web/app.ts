@@ -3925,7 +3925,9 @@ function renderList() {
     }));
     box.append(hits.length ? kids : h("p", "side-none", "No threads match"));
     $("side-search").setAttribute("aria-expanded", String(hits.length > 0));
-    return void $("conversations").replaceChildren(box);
+    $("side-pins").replaceChildren();
+    $("side-shelf").replaceChildren();
+    return void $("side-list").replaceChildren(box);
   }
   $("side-search").setAttribute("aria-expanded", "false");
   const settled = new Set([...kept("settled"), ...(harness.threads ?? []).filter((t) => t.archived).map((t) => STUB + t.id)]), shelf: Conversation[] = [], pins: Conversation[] = [];
@@ -3944,27 +3946,29 @@ function renderList() {
     }
     return box;
   });
+  const above = h("div", pins.length ? "folder pinned open" : "pin-none"), below = h("div", shelf.length ? "folder settled" : "shelf-none");
   if (pins.length) {
-    const box = h("div", "folder pinned open"), kids = h("div", "folder-chats");
+    const kids = h("div", "folder-chats");
     kids.append(...pins.sort((a, b) => order.indexOf(keyOf(a)) - order.indexOf(keyOf(b))).map((c) => convRow(c, false, true)));
-    box.append(h("div", "settled-head pin-head", "Pinned"), kids);
-    rows.unshift(box);
-  }
+    above.append(h("div", "settled-head pin-head", "Pinned"), kids);
+  } else above.append(h("div", "pin-head", "Pinned"));
   if (shelf.length) {
-    const open = pref("settled-open", "") === "1", box = h("div", `folder settled${open ? " open" : ""}`), head = h("button", "settled-head");
+    const open = pref("settled-open", "") === "1", head = h("button", "settled-head");
+    below.classList.toggle("open", open);
     head.type = "button";
     head.setAttribute("aria-expanded", String(open));
     head.innerHTML = `<span>Settled</span><span class="cast-count">${shelf.length}</span>${icon("chevron")}`;
     head.onclick = () => { setPref("settled-open", open ? "" : "1"); renderList(); };
-    box.append(head);
+    below.append(head);
     if (open) {
       const kids = h("div", "folder-chats");
       kids.append(...shelf.sort((a, b) => b.updated - a.updated).map((c) => convRow(c, true, true)));
-      box.append(kids);
+      below.append(kids);
     }
-    rows.push(box);
-  }
-  $("conversations").replaceChildren(...rows);
+  } else below.append(h("div", "shelf-head", "Settled"));
+  $("side-pins").replaceChildren(above);
+  $("side-shelf").replaceChildren(below);
+  $("side-list").replaceChildren(...rows);
 }
 interface PaletteItem { icon: string | HTMLElement; title: string; note?: (string | HTMLElement)[]; keys?: string; run: () => void }
 interface PaletteGroup { label: string; items: PaletteItem[] }
@@ -4102,7 +4106,7 @@ const dropVerb = (row: HTMLElement, drop: Drop): string | null => {
   if (away) return drop.kind === "pin" ? "Pin" : drop.kind === "active" ? "Un-settle" : null;
   return drop.kind === "pin" ? (isPinned ? "" : "Pin") : drop.kind === "unpin" ? "Unpin" : drop.kind === "settle" ? "Settle" : drop.kind === "folder" && canMove(c, drop.who) ? nameOf(drop.who) : null;
 };
-sidebarDrag($("conversations"), {
+sidebarDrag($("conversations"), { pins: $("side-pins"), list: $("side-list"), shelf: $("side-shelf") }, {
   verb: dropVerb,
   started: () => { sorting = true; },
   ended: () => { sorting = false; listStale = false; renderList(); },

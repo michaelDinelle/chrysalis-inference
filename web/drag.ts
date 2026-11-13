@@ -1,92 +1,77 @@
 export type Drop = { kind: "pin"; index: number } | { kind: "unpin" } | { kind: "folder"; who: string } | { kind: "settle" } | { kind: "active" };
 interface Options { verb: (row: HTMLElement, drop: Drop) => string | null; done: (row: HTMLElement, drop: Drop) => void; started: () => void; ended: () => void }
+interface Parts { pins: HTMLElement; list: HTMLElement; shelf: HTMLElement }
 
-const DISTANCE = 6, EDGE = 10;
+const DISTANCE = 6;
 
-export function sidebarDrag(list: HTMLElement, o: Options) {
-  list.addEventListener("pointerdown", (down) => {
+export function sidebarDrag(root: HTMLElement, at: Parts, o: Options) {
+  root.addEventListener("pointerdown", (down) => {
     const picked = (down.target as Element).closest<HTMLElement>("a.conv[data-key]");
     if (!picked || !down.isPrimary || down.button !== 0 || down.pointerType === "touch" || (down.target as Element).closest("button, input, [data-card]")) return;
     let row = picked;
-    const wasPinned = !!row.closest(".folder.pinned"), wasSettled = !!row.closest(".folder.settled");
-    let dragging = false, drop: Drop | undefined, done = false, badge: HTMLElement | undefined;
+    const wasPinned = at.pins.contains(row), wasSettled = at.shelf.contains(row);
+    let dragging = false, drop: Drop | undefined, done = false, ghost: HTMLElement | undefined, badge: HTMLElement | undefined, bar: HTMLElement | undefined;
     let scrolled = 0, top = 0, height = 0;
-    let pins: { top: number; bottom: number; mid: number }[] = [], pinned: { top: number; bottom: number } | undefined, shelf: { top: number } | undefined;
-    let folders: { who: string; top: number; bottom: number }[] = [];
-    const made: HTMLElement[] = [];
-    let pinStrip: HTMLElement | undefined, settleStrip: HTMLElement | undefined, bar: HTMLElement | undefined;
+    let pins: { top: number; bottom: number; mid: number }[] = [], folders: { who: string; top: number; bottom: number }[] = [];
     const suppress = (e: Event) => { e.stopPropagation(); e.preventDefault(); document.removeEventListener("click", suppress, true); };
     const clearSelection = () => document.getSelection()?.removeAllRanges();
-    const strip = (label: string, over: DOMRect) => {
-      const el = document.createElement("div");
-      el.className = "drag-strip";
-      el.textContent = label;
-      el.style.cssText = `left:${over.left}px;width:${over.width}px;top:${over.top}px;height:${over.height}px`;
-      document.body.append(el);
-      made.push(el);
-      return el;
-    };
     const start = () => {
       if (!row.isConnected) {
-        const again = [...list.querySelectorAll<HTMLElement>("a.conv[data-key]")].find((el) => el.dataset.key === row.dataset.key && !!el.closest(".folder.pinned") === wasPinned);
+        const again = [...root.querySelectorAll<HTMLElement>("a.conv[data-key]")].find((el) => el.dataset.key === row.dataset.key && at.pins.contains(el) === wasPinned);
         if (!again) return false;
         row = again;
       }
       dragging = true;
       o.started();
-      const now = row.getBoundingClientRect(), box = list.getBoundingClientRect(), rect = (el: Element | null) => el?.getBoundingClientRect();
-      scrolled = list.scrollTop;
+      const now = row.getBoundingClientRect(), box = root.getBoundingClientRect();
+      scrolled = at.list.scrollTop;
       top = now.top;
       height = now.height;
-      pins = [...list.querySelectorAll<HTMLElement>(".folder.pinned a.conv")].filter((el) => el !== row).map((el) => { const r = el.getBoundingClientRect(); return { top: r.top, bottom: r.bottom, mid: r.top + r.height / 2 }; });
-      pinned = rect(list.querySelector(".folder.pinned"));
-      shelf = rect(list.querySelector(".folder.settled"));
-      folders = [...list.querySelectorAll<HTMLElement>(".folder[data-who]")].map((el) => { const r = el.getBoundingClientRect(); return { who: el.dataset.who!, top: r.top, bottom: r.bottom }; });
-      const above = list.previousElementSibling?.getBoundingClientRect(), below = list.nextElementSibling?.getBoundingClientRect();
-      if (!pinned && above) pinStrip = strip("Pinned", above);
-      if (!shelf && below) settleStrip = strip("Settled", below);
+      pins = [...at.pins.querySelectorAll<HTMLElement>("a.conv")].filter((el) => el !== row).map((el) => { const r = el.getBoundingClientRect(); return { top: r.top, bottom: r.bottom, mid: r.top + r.height / 2 }; });
+      folders = [...at.list.querySelectorAll<HTMLElement>(".folder[data-who]")].map((el) => { const r = el.getBoundingClientRect(); return { who: el.dataset.who!, top: r.top, bottom: r.bottom }; });
+      ghost = row.cloneNode(true) as HTMLElement;
+      ghost.removeAttribute("id");
+      ghost.classList.add("drag-ghost");
+      ghost.style.cssText = `left:${now.left}px;top:${now.top}px;width:${now.width}px;height:${now.height}px`;
+      badge = document.createElement("span");
+      badge.className = "conv-verb";
+      badge.setAttribute("role", "status");
+      badge.hidden = true;
+      (ghost.querySelector(".conv-slot") ?? ghost).append(badge);
       bar = document.createElement("div");
       bar.className = "drag-bar";
       bar.hidden = true;
       bar.style.left = `${box.left + 8}px`;
       bar.style.width = `${box.width - 16}px`;
-      document.body.append(bar);
-      made.push(bar);
-      list.classList.add("sorting");
-      row.classList.add("dragging");
-      badge = document.createElement("span");
-      badge.className = "conv-verb";
-      badge.setAttribute("role", "status");
-      badge.hidden = true;
-      (row.querySelector(".conv-slot") ?? row).append(badge);
+      document.body.append(ghost, bar);
+      row.classList.add("lifted");
+      root.classList.add("sorting");
       document.addEventListener("click", suppress, true);
       document.addEventListener("selectionchange", clearSelection);
       clearSelection();
       return true;
     };
-    const aim = (seen: number, scroll: number, pointer: number): Drop | undefined => {
-      const y = seen + scroll, box = list.getBoundingClientRect(), tries: Drop[] = [];
-      if (pinned ? y <= pinned.bottom : pointer <= box.top + EDGE) tries.push({ kind: "pin", index: pins.filter((p) => p.mid < y).length });
-      else if (shelf ? y >= shelf.top : pointer >= box.bottom - EDGE) tries.push({ kind: "settle" });
+    const aim = (y: number): Drop | undefined => {
+      const above = at.pins.getBoundingClientRect(), below = at.shelf.getBoundingClientRect(), tries: Drop[] = [];
+      if (y <= above.bottom) tries.push({ kind: "pin", index: pins.filter((p) => p.mid < y).length });
+      else if (y >= below.top) tries.push({ kind: "settle" });
       else {
-        const folder = folders.find((f) => y >= f.top && y <= f.bottom);
+        const inList = y + at.list.scrollTop - scrolled, folder = folders.find((f) => inList >= f.top && inList <= f.bottom);
         if (folder) tries.push({ kind: "folder", who: folder.who });
         if (wasPinned) tries.push({ kind: "unpin" });
         if (wasSettled) tries.push({ kind: "active" });
       }
       return tries.find((t) => o.verb(row, t) !== null);
     };
-    const paint = (scroll: number) => {
-      for (const el of list.querySelectorAll(".drop")) el.classList.remove("drop");
-      list.querySelector(".pin-head")?.classList.toggle("target", drop?.kind === "pin");
-      pinStrip?.classList.toggle("target", drop?.kind === "pin");
-      settleStrip?.classList.toggle("target", drop?.kind === "settle");
-      if (drop?.kind === "folder") list.querySelector(`.folder[data-who="${CSS.escape(drop.who)}"]`)?.classList.add("drop");
-      if (drop?.kind === "settle") list.querySelector(".folder.settled")?.classList.add("drop");
-      const at = drop?.kind === "pin" && pins.length ? (drop.index < pins.length ? pins[drop.index].top - 2 : pins[pins.length - 1].bottom + 1) - scroll : undefined, box = list.getBoundingClientRect();
+    const paint = () => {
+      for (const el of at.list.querySelectorAll(".drop")) el.classList.remove("drop");
+      at.pins.classList.toggle("target", drop?.kind === "pin");
+      at.shelf.classList.toggle("target", drop?.kind === "settle");
+      if (drop?.kind === "folder") at.list.querySelector(`.folder[data-who="${CSS.escape(drop.who)}"]`)?.classList.add("drop");
+      const line = drop?.kind === "pin" && pins.length ? (drop.index < pins.length ? pins[drop.index].top - 2 : pins[pins.length - 1].bottom + 1) : undefined;
       if (bar) {
-        bar.hidden = at === undefined || at < box.top || at > box.bottom;
-        if (at !== undefined) bar.style.top = `${at}px`;
+        bar.hidden = line === undefined;
+        if (line !== undefined) bar.style.top = `${line}px`;
       }
       const verb = drop ? o.verb(row, drop) : null;
       if (badge) { badge.hidden = !verb; badge.textContent = verb ?? ""; }
@@ -99,13 +84,14 @@ export function sidebarDrag(list: HTMLElement, o: Options) {
         if (!start()) return finish(true);
       }
       if (e.cancelable) e.preventDefault();
-      const box = list.getBoundingClientRect();
-      if (e.clientY < box.top + 28) list.scrollTop -= 10;
-      else if (e.clientY > box.bottom - 28) list.scrollTop += 10;
-      const scroll = list.scrollTop - scrolled, at = Math.max(box.top, Math.min(top + (e.clientY - down.clientY), box.bottom - height));
-      row.style.transform = `translateY(${at - (top - scroll)}px)`;
-      drop = aim(at + height / 2, scroll, e.clientY);
-      paint(scroll);
+      const box = root.getBoundingClientRect(), scroll = at.list.getBoundingClientRect();
+      if (e.clientY > scroll.top && e.clientY < scroll.top + 28) at.list.scrollTop -= 10;
+      else if (e.clientY < scroll.bottom && e.clientY > scroll.bottom - 28) at.list.scrollTop += 10;
+      const label = at.pins.querySelector(".pin-head")?.getBoundingClientRect().bottom ?? box.top, floor = at.shelf.querySelector(".shelf-head, .settled-head")?.getBoundingClientRect().top ?? box.bottom;
+      const y = Math.max(label, Math.min(top + (e.clientY - down.clientY), floor - height));
+      ghost!.style.top = `${y}px`;
+      drop = aim(Math.max(box.top + 1, Math.min(e.clientY, box.bottom - 1)));
+      paint();
     };
     const up = (e: PointerEvent) => { if (e.pointerId === down.pointerId) finish(false); };
     const cancel = () => finish(true);
@@ -122,8 +108,9 @@ export function sidebarDrag(list: HTMLElement, o: Options) {
       document.removeEventListener("selectionchange", clearSelection);
       if (!dragging) return;
       setTimeout(() => document.removeEventListener("click", suppress, true));
-      for (const el of made) el.remove();
-      list.classList.remove("sorting");
+      ghost?.remove();
+      bar?.remove();
+      for (const el of [root, at.pins, at.shelf]) el.classList.remove("sorting", "target");
       const to = cancelled ? undefined : drop;
       if (to) o.done(row, to);
       o.ended();

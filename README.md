@@ -165,8 +165,9 @@ docker run -d --device /dev/kfd --device /dev/dri -p 127.0.0.1:8080:8080 -v chry
 - The sidebar's top row is T3 Code's: Search finds threads by title, person, folder or computer; the filter narrows the
   list to one project; Add project picks a computer, then a folder on it; New thread picks a project or a character
   (Shift+click starts one where you are). A thread's row names its computer beside its folder.
-- A row is dragged as in T3 Code, after six pixels and on the vertical alone, and nothing else moves: onto the strip above the list it is
-  pinned (among pins, where the line shows), onto a character or a folder it is theirs, onto the strip below it is settled.
+- Pinned sits above the list and Settled below it, each in its own place. A row is dragged as in T3 Code, after six
+  pixels and on the vertical alone, and nothing else moves: onto Pinned it is pinned (among pins, where the line
+  shows), onto a character or a folder it is theirs, onto Settled it is settled, and a settled row dragged up is active.
 - The OpenCode the line opens has Chrysalis's models and no other provider, and starts on the model Chrysalis last
   loaded. The line leaves a command that opens it that way again, `~/.config/chrysalis/opencode-<computer>`, and prints
   it when OpenCode closes. Plain `opencode` keeps its other models beside Chrysalis's: a session on one of those leaves
