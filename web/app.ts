@@ -1085,13 +1085,22 @@ function openFolders(at: HTMLElement, pick: { from: string; to: (path: string) =
   if (harness.state !== "on") void ensureHarness().then(() => paintOcPop(), (e) => { pop.hidden = true; toast(e instanceof Error ? e.message : String(e)); });
 }
 
-function openAdd(at: HTMLElement) {
-  const menu = $("cast-add"), r = at.getBoundingClientRect();
-  menu.hidden = false;
-  menu.style.left = `${r.left}px`;
-  menu.style.top = `${r.bottom + 6}px`;
+function newCharacter() {
+  const p: Person = { id: randomId(), kind: "character", card: { spec: "chara_card_v2", spec_version: "2.0", data: { name: "", description: "" } }, added: Date.now() };
+  people.set(p.id, p);
+  void savePerson(p);
+  renderCast();
+  openSheet(p.id);
+  $("cast-sheet").querySelector<HTMLInputElement>("input.card-name")?.focus();
 }
-for (const [add, svg] of [["card", icon("personAdd")], ["group", icon("agent")]]) $("cast-add").querySelector(`[data-add="${add}"]`)!.insertAdjacentHTML("afterbegin", svg);
+function dropBlank(id: string) {
+  const p = people.get(id), d = p?.card.data;
+  if (!p || p.kind !== "character" || p.image || [d!.name, d!.description, d!.scenario, d!.first_mes].some((t) => t?.trim())) return;
+  if (chatsOf(id).length || folderOf(conv) === id || [...groups.values()].some((g) => g.members.includes(id))) return;
+  people.delete(id);
+  void dropPerson(id);
+  renderCast();
+}
 let fileInto = false, inviteFrom: string | null = null;
 function openInvite(at: HTMLElement, from: string | null) {
   const box = $("cast-invite"), find = h("input", "invite-find"), list = h("div", "invite-list"), card = h("button", "invite-card");
@@ -1126,7 +1135,7 @@ function paintInvite() {
   const plain = from === null && !folderOf(conv), q = find.value.trim().toLowerCase();
   const members = edited ? membersOf(edited) : from === null ? (plain ? [people.get(CHRYSALIS)!] : castOf(conv).members) : from && !folder ? [people.get(from)!] : [];
   box.querySelector(".invite-head")!.textContent = folder ? `A new thread in ${nameOf(from!)} with` : edited ? `Who is in ${nameOf(edited.id)}`
-    : from === null ? (!plain || conv.messages.length ? "Bring into this chat" : whoOf(conv).startsWith(DIR) ? "Who works in this thread" : "Who this chat is with") : from ? `A new group with ${nameOf(from)} and` : "A new chat with";
+    : from === null ? (!plain || conv.messages.length ? "Bring into this chat" : whoOf(conv).startsWith(DIR) ? "Who works in this thread" : "Who this chat is with") : `A new group with ${nameOf(from!)} and`;
   const shown = all.filter((p) => p.card.data.name.toLowerCase().includes(q));
   find.hidden = all.length < 7;
   list.replaceChildren(...shown.map((p) => {
@@ -1152,8 +1161,7 @@ function paintInvite() {
       else {
         inviteFrom = null;
         if (folder) { newChat(from); conv.who = p.id; renderCast(); render(); }
-        else if (from) newChat((groupOf([from, p.id]) ?? makeGroup([from, p.id])).id);
-        else newChat(p.id);
+        else newChat((groupOf([from!, p.id]) ?? makeGroup([from!, p.id])).id);
       }
       paintInvite();
     };
@@ -1162,31 +1170,32 @@ function paintInvite() {
   if (!shown.length) list.append(h("p", "invite-none", all.length ? "No one by that name" : "No characters yet: add one from a card"));
 }
 const closeInvite = () => { $("cast-invite").hidden = true; inviteFrom = null; };
-$("cast-add").addEventListener("click", async (e) => {
-  const b = (e.target as HTMLElement).closest<HTMLElement>("[data-add]");
-  if (!b) return;
-  $("cast-add").hidden = true;
-  fileInto = false;
-  if (b.dataset.add === "card") return $("cast-file").click();
-  openInvite($("add-cast"), "");
-});
 $("cast-file").addEventListener("change", async (e) => {
   const input = e.currentTarget as HTMLInputElement;
   for (const f of await welcome(input.files ?? [], fileInto)) toast(`${f.name} holds no character card`);
   input.value = "";
 });
 
-let sheetOf = "", sampler: Speaker | undefined, sheetFile: { id: string; url: string } | undefined;
+let sheetOf = "", sampler: Speaker | undefined, sheetFile: { id: string; url: string } | undefined, sheetKeep = () => {};
 function openSheet(id: string) {
+  if (sheetOf && sheetOf !== id) dropBlank(sheetOf);
   const sheet = $("cast-sheet"), person = people.get(id), g = groups.get(id);
   if (!person && !g) return;
   const again = sheetOf === id, top = sheet.querySelector(".card-scroll")?.scrollTop ?? 0;
   sheetOf = id;
+  sheetKeep();
   let saving = 0;
+  const saved = () => {
+    if (!saving) return;
+    clearTimeout(saving);
+    saving = 0;
+    if (person && people.has(id)) { void savePerson(person); void cardFile(person); } else if (g && groups.has(id)) keepGroup(g);
+  };
   const keep = () => {
     clearTimeout(saving);
-    saving = window.setTimeout(() => { if (person) { void savePerson(person); void cardFile(person); } else keepGroup(g!); }, 300);
+    saving = window.setTimeout(saved, 300);
   };
+  sheetKeep = saved;
   const btn = (cls: string, title: string, html: string, onclick: () => void) => {
     const b = h("button", cls);
     b.type = "button";
@@ -1266,6 +1275,8 @@ function openSheet(id: string) {
     else if (name.value.trim()) g!.name = name.value; else delete g!.name;
     const file = body.querySelector<HTMLAnchorElement>("a.card-file");
     if (file) file.download = cardName(id);
+    const letter = art.querySelector(":scope > .face.card-portrait");
+    if (letter) { const now = face(id); now.classList.add("card-portrait"); letter.replaceWith(now); }
     keep();
     renderCast();
     if (castOf(conv).members.some((m) => m.id === id) || folderOf(conv) === id) render();
@@ -1352,7 +1363,10 @@ function closeSheet() {
   $("cast-sheet").hidden = true;
   if (sheetFile) URL.revokeObjectURL(sheetFile.url);
   sheetFile = undefined;
+  const was = sheetOf;
   sheetOf = "";
+  sheetKeep();
+  dropBlank(was);
   sampler?.close();
   sampler = undefined;
 }
@@ -1387,16 +1401,14 @@ function voicePick(p: Person, keep: () => void) {
 }
 document.addEventListener("pointerdown", (e) => {
   const t = e.target as HTMLElement;
-  if (!$("cast-add").hidden && !t.closest("#cast-add, #add-cast")) $("cast-add").hidden = true;
-  if (!$("cast-invite").hidden && !t.closest("#cast-invite, .cast-bring, .card-member-add, #cast-add, #toast")) closeInvite();
-  if (!$("oc-pop").hidden && !t.closest("#oc-pop, #opencode, #cast-add, #toast, #outside-view")) $("oc-pop").hidden = true;
+  if (!$("cast-invite").hidden && !t.closest("#cast-invite, .cast-bring, .card-member-add, #toast")) closeInvite();
+  if (!$("oc-pop").hidden && !t.closest("#oc-pop, #opencode, #toast, #outside-view")) $("oc-pop").hidden = true;
   if (!$("row-menu").hidden && !t.closest("#row-menu")) $("row-menu").hidden = true;
   if (!$("cast-sheet").hidden && !t.closest("#cast-sheet, [data-card], #voice-menu")) closeSheet();
 });
 document.addEventListener("keydown", (e) => {
   if (e.key !== "Escape" || voiceMenu.matches(":popover-open")) return;
   if (!$("row-menu").hidden) { $("row-menu").hidden = true; e.preventDefault(); }
-  else if (!$("cast-add").hidden) { $("cast-add").hidden = true; e.preventDefault(); }
   else if (!$("cast-invite").hidden) { closeInvite(); e.preventDefault(); }
   else if (!$("oc-pop").hidden) { $("oc-pop").hidden = true; e.preventDefault(); }
   else if (!$("cast-sheet").hidden) { closeSheet(); e.preventDefault(); }
@@ -4586,7 +4598,7 @@ function continueReply(m: Message, pick?: { ch: "reasoning" | "content"; i: numb
 }
 
 let leaving = false;
-addEventListener("pagehide", () => { leaving = true; });
+addEventListener("pagehide", () => { leaving = true; sheetKeep(); });
 async function startRun(c: Conversation, m: Message, body: () => object, pick?: Tok) {
   const phase = m.content ? "writing" : m.reasoning ? "thinking" : "waiting";
   const run: Run = { conv: c, m, live: { phase, since: performance.now(), note: "Reading the prompt" }, at: 0, begun: Date.now(), stopping: false, frame: 0, saved: 0, pick };
@@ -6117,7 +6129,7 @@ $("scope-input").onkeydown = (e) => {
 document.addEventListener("pointerdown", (e) => { if (!$("ctx-pop").hidden && !(e.target as Element).closest("#ctx-pop, #meter")) $("ctx-pop").hidden = true; });
 document.addEventListener("pointerdown", (e) => { if (!$("scope-pop").hidden && !(e.target as Element).closest("#scope-pop, #side-scope")) $("scope-pop").hidden = true; });
 $("add-project").onclick = addProject;
-$("add-cast").addEventListener("click", (e) => { e.stopPropagation(); openAdd(e.currentTarget as HTMLElement); });
+$("add-cast").addEventListener("click", (e) => { e.stopPropagation(); newCharacter(); });
 $("attach").addEventListener("click", () => $("attach-file").click());
 $("attach-file").addEventListener("change", (e) => {
   const picker = e.currentTarget as HTMLInputElement;

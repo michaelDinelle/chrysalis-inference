@@ -306,7 +306,7 @@ test("a group's replies are each one character's own message: whoever the messag
   await page.close();
 }, 60_000);
 
-test("a group is edited where it is: the invite on a character's own chat makes a group of them that the chat moves to, picking again takes one out and Undo brings them back, the last two stay; the sidebar's add starts a chat from nobody; the invite on a group's row changes that group, whose row and chats stay; on a character's row it makes a new group; all sent as such and there after a reload", async () => {
+test("a group is edited where it is: the invite on a character's own chat makes a group of them that the chat moves to, picking again takes one out and Undo brings them back, the last two stay; the invite on a group's row changes that group, whose row and chats stay; on a character's row it makes a new group; all sent as such and there after a reload", async () => {
   const page = await open();
   await Bun.write(`${dir}/Mirela.png`, await card("Mirela", { description: "{{char}} keeps bees.", first_mes: "Hello, {{user}}." }));
   await Bun.write(`${dir}/Tomas.png`, await card("Tomas", { description: "{{char}} sells honey.", first_mes: "Honey?" }));
@@ -334,12 +334,11 @@ test("a group is edited where it is: the invite on a character's own chat makes 
   await page.keyboard.press("Escape");
   expect(await page.$eval("#cast-invite", (e) => (e as HTMLElement).hidden)).toBe(true);
 
-  await page.click("#add-cast");
-  await page.click('#cast-add [data-add="group"]');
-  await page.waitForSelector("#cast-invite:not([hidden])");
-  expect([await page.$eval("#cast-invite .invite-head", (e) => e.textContent), await rows()]).toEqual(["A new chat with", [["Ida", false, false], ["Mirela", false, false], ["Tomas", false, false]]]);
-  await pick("Tomas");
+  await inRow(page, "Tomas", ".cast-new");
   await page.waitForFunction(() => document.querySelector("#thread .speaker")?.textContent === "Tomas");
+  await inRow(page, "Tomas", ".cast-bring");
+  await page.waitForSelector("#cast-invite:not([hidden])");
+  expect([await page.$eval("#cast-invite .invite-head", (e) => e.textContent), await rows()]).toEqual(["Bring into this chat", [["Ida", false, false], ["Mirela", false, false], ["Tomas", true, false]]]);
   await pick("Ida");
   expect([await answers(page), await castRows(page)]).toEqual([["Tomas", "Ida"], ["Chrysalis", "Ida", "Mirela", "Mirela, Tomas and Ida", "Tomas", "Tomas and Ida"]]);
   await page.keyboard.press("Escape");
@@ -602,3 +601,31 @@ test("Chrysalis is one of them: a character dragged onto it makes a group with i
   expect([await castRows(page), await speakers(page), lastStream.messages.at(-1).content]).toEqual([["Chrysalis", "Mirela", "Mirela"], ["Chrysalis"], "is anyone there"]);
   await page.close();
 }, 60_000);
+
+test("the sidebar's add makes a new character here, with no file: their card opens with the name to type, what is typed is theirs at once on their row and in their chat and after a reload, and one left wholly empty is not kept; there is no menu behind the button", async () => {
+  const page = await open();
+  await page.click("#add-cast");
+  await page.waitForSelector("#cast-sheet:not([hidden]) input.card-name");
+  expect([await page.evaluate(() => document.activeElement === document.querySelector("#cast-sheet input.card-name")), await castRows(page), await page.$("#cast-add")]).toEqual([true, ["Chrysalis", "Unnamed"], null]);
+  await page.keyboard.press("Escape");
+  expect([await castRows(page), await page.$eval("#cast-sheet", (s) => (s as HTMLElement).hidden)]).toEqual([["Chrysalis"], true]);
+
+  await page.click("#add-cast");
+  await page.waitForSelector("#cast-sheet:not([hidden]) input.card-name");
+  await page.keyboard.type("Wren");
+  expect(await page.$eval("#cast-sheet .card-portrait", (f) => f.textContent)).toBe("W");
+  for (const [label, text] of [["Description", "{{char}} mends clocks for {{user}}."], ["Greeting", "Tick, {{user}}."]]) {
+    await page.evaluate((label) => [...document.querySelectorAll("#cast-sheet .card-field")].find((x) => x.querySelector(".card-label")!.textContent === label)!.querySelector("textarea")!.focus(), label);
+    await page.keyboard.type(text);
+  }
+  await page.keyboard.press("Escape");
+  expect(await castRows(page)).toEqual(["Chrysalis", "Wren"]);
+  await inRow(page, "Wren", ".cast-new");
+  await page.waitForFunction(() => document.querySelector("#thread > article.assistant .markdown")?.textContent?.trim() === "Tick, User.");
+  await send(page, "what time is it");
+  expect([lastStream.messages[0].content, await speakers(page)]).toEqual(["Write Wren's next reply in a fictional chat between Wren and User.\n\nWren mends clocks for User.", ["WWren", "WWren"]]);
+  await page.reload({ waitUntil: "load" });
+  await page.waitForSelector("#conversations .cast-row");
+  expect(await castRows(page)).toEqual(["Chrysalis", "Wren"]);
+  await page.close();
+}, 30_000);
