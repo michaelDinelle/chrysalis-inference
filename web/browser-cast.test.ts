@@ -659,13 +659,13 @@ test("the sidebar's add makes a new character here, with no file: their card ope
   }
   await page.keyboard.press("Escape");
   expect(await castRows(page)).toEqual(["Chrysalis", "Wren"]);
-  const lit = () => page.evaluate(() => [...document.querySelectorAll("#conversations .cast-row.open .cast-name, #conversations a.conv.active .conv-title")].map((x) => x.textContent));
+  const lit = () => page.evaluate(() => [...document.querySelectorAll("#conversations .cast-row.open .cast-name, #conversations a.conv.active .conv-title")].map((x) => (x.classList.contains("conv-title") ? "the chat" : x.textContent)));
   expect(await lit()).toEqual(["Chrysalis"]);
   await inRow(page, "Wren", ".cast-new");
   await page.waitForFunction(() => document.querySelector("#thread > article.assistant .markdown")?.textContent?.trim() === "Tick, User.");
   expect(await lit()).toEqual(["Wren"]);
   await send(page, "what time is it");
-  expect(await lit()).toEqual(["what time is it"]);
+  expect(await lit()).toEqual(["the chat"]);
   await inRow(page, "Wren", ".cast-main");
   expect(await lit()).toEqual(["Wren"]);
   await inRow(page, "Wren", ".cast-main");
