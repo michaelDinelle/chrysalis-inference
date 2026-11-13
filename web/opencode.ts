@@ -45,6 +45,19 @@ if [ -n "$fresh" ] || ! ps axeww | grep -F 'serve --service' | grep -qF "NODE_EX
     opencode service restart >/dev/null
 fi
 origin=${origin}
+key="$dir/key-${label(name)}"
+if ! { [ -s "$key" ] && ${pinned(cert)} -H "Authorization: Bearer $(cat "$key")" "$origin/opencode/machine" >/dev/null 2>&1; }; then
+    a=$(${pinned(cert)} -H 'Content-Type: application/json' -d "{\\"name\\":\\"$(hostname -s | tr -cd 'A-Za-z0-9.-')\\"}" "$origin/opencode/ask")
+    echo "Allow \${a#* } on ${label(name)}" >&2
+    while :; do
+        k=$(${pinned(cert)} "$origin/opencode/ask/\${a%% *}") || { echo "${label(name)} did not allow this computer" >&2; exit 1; }
+        [ -z "$k" ] || break
+        sleep 1
+    done
+    (umask 077; printf %s "$k" > "$key")
+fi
+agent="$dir/machine-${label(name)}.js"
+${pinned(cert)} -o "$agent" "$origin/opencode/machine.js"
 if ${pinned(cert)} -m 3 ${named}/.well-known/opencode >/dev/null 2>&1; then origin=${named}; fi
 if [ "$(uname)" = Darwin ]; then
     port=$(($(printf %s ${host} | cksum | cut -d' ' -f1) % 20000 + 20000))
@@ -73,6 +86,48 @@ cat > "$here" <<CHRYSALIS_HERE
 NODE_EXTRA_CA_CERTS="$ca" OPENCODE_CONFIG_CONTENT='{"enabled_providers":["${providerId(name)}"],"model":"${providerId(name)}/${model}"}' exec opencode --standalone "\\$@"
 CHRYSALIS_HERE
 chmod +x "$here"
+if [ -s "$key" ]; then
+    bin=$(command -v opencode)
+    if [ "$(uname)" = Darwin ]; then
+        mjob=chrysalis-machine-${host}
+        mplist="$HOME/Library/LaunchAgents/$mjob.plist"
+        cat > "$mplist" <<CHRYSALIS_MACHINE
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0"><dict>
+<key>Label</key><string>$mjob</string>
+<key>ProgramArguments</key><array><string>$bin</string><string>$agent</string><string>$origin</string><string>$key</string></array>
+<key>EnvironmentVariables</key><dict><key>BUN_BE_BUN</key><string>1</string><key>NODE_EXTRA_CA_CERTS</key><string>$ca</string><key>PATH</key><string>$PATH</string></dict>
+<key>RunAtLoad</key><true/>
+<key>KeepAlive</key><dict><key>SuccessfulExit</key><false/></dict>
+</dict></plist>
+CHRYSALIS_MACHINE
+        launchctl bootout "gui/$(id -u)/$mjob" 2>/dev/null || true
+        launchctl bootstrap "gui/$(id -u)" "$mplist" || true
+    elif systemctl --user show-environment >/dev/null 2>&1; then
+        units="\${XDG_CONFIG_HOME:-$HOME/.config}/systemd/user"
+        mkdir -p "$units"
+        cat > "$units/chrysalis-machine-${label(name)}.service" <<CHRYSALIS_MACHINE
+[Unit]
+Description=OpenCode on this computer, run from Chrysalis on ${label(name)}
+
+[Service]
+Environment=BUN_BE_BUN=1 NODE_EXTRA_CA_CERTS=$ca "PATH=$PATH"
+ExecStart="$bin" "$agent" "$origin" "$key"
+Restart=on-failure
+RestartSec=2
+
+[Install]
+WantedBy=default.target
+CHRYSALIS_MACHINE
+        systemctl --user daemon-reload
+        systemctl --user enable chrysalis-machine-${label(name)}.service >/dev/null 2>&1 || true
+        systemctl --user restart chrysalis-machine-${label(name)}.service || true
+    else
+        BUN_BE_BUN=1 NODE_EXTRA_CA_CERTS="$ca" nohup "$bin" "$agent" "$origin" "$key" >/dev/null 2>&1 &
+    fi
+    echo "This computer is under Run on in Chrysalis's page on ${label(name)}: chats there can work in its folders." >&2
+fi
 if [ -t 1 ] && (: </dev/tty) 2>/dev/null; then "$here" </dev/tty || true; fi
 echo "OpenCode on Chrysalis's models alone, with every other provider off: $here" >&2
 echo "Plain opencode has them beside its other models, and a session on one of those leaves this network." >&2
@@ -81,7 +136,9 @@ echo "Plain opencode has them beside its other models, and a session on one of t
 
 export function opencodeManifest(origin: string, name: string, cert: string, vision: boolean) {
   const curl = pinned(cert), who = label(name);
-  const ask = `a=$(${curl} -H 'Content-Type: application/json' -d "{\\"name\\":\\"$(hostname -s | tr -cd 'A-Za-z0-9.-')\\"}" ${origin}/opencode/ask)
+  const ask = `f="\${XDG_CONFIG_HOME:-$HOME/.config}/chrysalis/key-${who}"
+if [ -s "$f" ] && ${curl} -H "Authorization: Bearer $(cat "$f")" ${origin}/opencode/machine >/dev/null 2>&1; then cat "$f"; exit 0; fi
+a=$(${curl} -H 'Content-Type: application/json' -d "{\\"name\\":\\"$(hostname -s | tr -cd 'A-Za-z0-9.-')\\"}" ${origin}/opencode/ask)
 echo "Allow \${a#* } on ${who}" >&2
 while :; do
     k=$(${curl} ${origin}/opencode/ask/\${a%% *}) || { echo "${who} did not allow this computer" >&2; exit 1; }

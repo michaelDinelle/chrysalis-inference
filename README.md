@@ -55,7 +55,11 @@ Start Chrysalis with `chrysalis.sh --host 0.0.0.0`. The other computer needs [Op
 
 <p align="center"><img src="media/opencode-login.png" width="760" alt="The line pasted into a terminal: it shows a code to allow, then Connected"></p>
 
-<sub>Paste it into a terminal and allow the code. OpenCode opens.</sub>
+<sub>Paste it into a terminal and allow the code. OpenCode opens there.</sub>
+
+<p align="center"><img src="media/run-on.png" width="560" alt="Run on, under the message box: this computer, the other computer, and Add another computer"></p>
+
+<sub>That computer is then under Run on: a chat picked onto it works in its folders, from any browser.</sub>
 
 <p align="center"><img src="media/opencode-open.png" width="440" alt="OpenCode opened by the line: Build on Qwen3.8 Flash-Next, Chrysalis"> <img src="media/opencode-coding.png" width="440" alt="OpenCode writing and running fib.py on Qwen3.8 Flash-Next, in Chrysalis"></p>
 
@@ -153,6 +157,11 @@ docker run -d --device /dev/kfd --device /dev/dri -p 127.0.0.1:8080:8080 -v chry
 
 - With no browser there, as over SSH, Chrysalis's terminal prints the same line. On Windows the line runs in WSL.
 - If OpenCode is open, the line asks to close it first. The line adds both models to OpenCode's favorites.
+- Run on: the line also leaves a small helper on that computer (a launchd job on a Mac, a systemd user service on
+  Linux) that starts its own OpenCode on Chrysalis's models alone and holds one outgoing HTTPS connection to Chrysalis,
+  so nothing listens on that computer. The page drives that OpenCode through it: its folders, its files, its tools.
+  Only threads the page started there are listed. Remove under Devices ends it, and the helper then stops for good.
+- A computer pasted a second time is not asked for again: the line keeps its key in `~/.config/chrysalis`.
 - The OpenCode the line opens has Chrysalis's models and no other provider, and starts on the model Chrysalis last
   loaded. The line leaves a command that opens it that way again, `~/.config/chrysalis/opencode-<computer>`, and prints
   it when OpenCode closes. Plain `opencode` keeps its other models beside Chrysalis's: a session on one of those leaves

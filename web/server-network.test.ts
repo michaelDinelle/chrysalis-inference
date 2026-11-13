@@ -1,4 +1,5 @@
 import { expect, test } from "bun:test";
+import { hostname } from "node:os";
 import { chmodSync, existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { createHash } from "node:crypto";
 import mdns from "multicast-dns";
@@ -268,6 +269,9 @@ test("a computer with only OpenCode gets in from one pinned line and an approval
   const carries = `${home}/service-carries-ca`, window = `${home}/window`;
   writeFileSync(`${bin}/opencode`, `#!/bin/sh\n[ -z "$BUN_BE_BUN" ] || exec "${process.execPath}" "$@"\necho "$*" >> "${log}"\n[ "$1 $2" != "service get" ] || echo '{ "NODE_EXTRA_CA_CERTS": "${home}/corporate.pem" }'\n[ "$1 $2" != "service restart" ] || touch "${carries}"\n`);
   writeFileSync(`${bin}/ps`, `#!/bin/sh\nif [ "$1" = -axo ]; then echo "/opt/x/opencode.exe serve --service"; [ ! -f "${window}" ] || echo "opencode2"; else\n[ ! -f "${carries}" ] || echo "1 ?? S 0:00 opencode.exe serve --service NODE_EXTRA_CA_CERTS=${home}/.config/chrysalis/opencode-ca.pem"; fi\n`);
+  writeFileSync(`${bin}/systemctl`, `#!/bin/sh\necho "$*" >> "${home}/units"\n`);
+  chmodSync(`${bin}/systemctl`, 0o755);
+  const MACHINE_LABEL = hostname().replace(/\.local$/, "").replace(/[^\w.-]/g, "-").slice(0, 60);
   const realCurl = Bun.which("curl")!, noName = `${home}/no-local-name`;
   writeFileSync(noName, "");
   writeFileSync(`${bin}/curl`, `#!/bin/sh\ncase "$*" in *.local:*) [ ! -f "${noName}" ] || exit 6; exit 0 ;; esac\nexec "${realCurl}" "$@"\n`);
@@ -289,11 +293,23 @@ test("a computer with only OpenCode gets in from one pinned line and an approval
 
     writeFileSync(window, "");
     const held = Bun.spawn(["sh", "-c", line], { env: { ...process.env, HOME: home, XDG_CONFIG_HOME: "", XDG_STATE_HOME: "", PATH: `${bin}:${process.env.PATH}` }, stdout: "ignore", stderr: "pipe" });
-    expect(new TextDecoder().decode((await held.stderr.getReader().read()).value)).toContain("Close OpenCode to go on");
+    const said = held.stderr.getReader(), text = new TextDecoder();
+    expect(text.decode((await said.read()).value)).toContain("Close OpenCode to go on");
     await Bun.sleep(1200);
     expect(calls().filter((c) => c !== "service get env")).toEqual([]);
     rmSync(window);
+    let asked = "";
+    while (!/Allow \d{6} on /.test(asked)) asked += text.decode((await said.read()).value);
+    expect((await fetch(`${here}/api/pair/allow`, { method: "POST", headers: json, body: JSON.stringify({ code: /Allow (\d{6})/.exec(asked)![1] }) })).status).toBe(200);
+    void (async () => { while (!(await said.read()).done); })();
     expect(await held.exited).toBe(0);
+    const units = () => (existsSync(`${home}/units`) ? readFileSync(`${home}/units`, "utf8").trim().split("\n") : []);
+    const unit = readFileSync(`${home}/.config/systemd/user/chrysalis-machine-${MACHINE_LABEL}.service`, "utf8");
+    expect([units().slice(-2), /^ExecStart="\S+\/opencode" "(\S+)" "(\S+)" "(\S+)"$/m.exec(unit)!.slice(1), /^Restart=on-failure$/m.test(unit), readFileSync(`${home}/.config/chrysalis/machine-${MACHINE_LABEL}.js`, "utf8")])
+      .toEqual([[`--user enable chrysalis-machine-${MACHINE_LABEL}.service`, `--user restart chrysalis-machine-${MACHINE_LABEL}.service`],
+        [`${home}/.config/chrysalis/machine-${MACHINE_LABEL}.js`, net, `${home}/.config/chrysalis/key-${MACHINE_LABEL}`], true, readFileSync(`${import.meta.dir}/machine.js`, "utf8")]);
+    const waiting = async () => (await (await fetch(`${here}/api/pair`)).json()).waiting.length;
+    expect(await waiting()).toBe(0);
     const trust = `${home}/.config/chrysalis/opencode-ca.pem`, restarts = () => calls().filter((c) => c === "service restart").length;
     expect(calls().filter((c) => c === `service set env NODE_EXTRA_CA_CERTS ${trust}`).length).toBe(1);
     expect(calls().at(-1)).toBe(`auth login ${net} --method login`);
@@ -338,10 +354,14 @@ test("a computer with only OpenCode gets in from one pinned line and an approval
     rmSync(refused);
     expect(paste(line, onMac).exitCode).toBe(0);
     const job = JSON.parse(String(Bun.spawnSync(["python3", "-c", "import json, plistlib, sys; print(json.dumps(plistlib.load(open(sys.argv[1], 'rb'))))",
-      readFileSync(jobs, "utf8").trim().split("\n").at(-1)!.split(" ").at(-1)!], { stdout: "pipe" }).stdout));
+      readFileSync(jobs, "utf8").trim().split("\n").filter((l) => l.includes("chrysalis-opencode-")).at(-1)!.split(" ").at(-1)!], { stdout: "pipe" }).stdout));
     const listener = job.Sockets.Listeners, local = `https://127.0.0.1:${listener.SockServiceName}`;
     expect([job.ProgramArguments, job.inetdCompatibility, listener.SockNodeName]).toEqual([["/usr/bin/nc", netName(), new URL(net).port], { Wait: false }, "127.0.0.1"]);
     expect(calls().at(-1)).toBe(`auth login ${local} --method login`);
+    const helper = JSON.parse(String(Bun.spawnSync(["python3", "-c", "import json, plistlib, sys; print(json.dumps(plistlib.load(open(sys.argv[1], 'rb'))))",
+      readFileSync(jobs, "utf8").trim().split("\n").filter((l) => l.includes("chrysalis-machine-")).at(-1)!.split(" ").at(-1)!], { stdout: "pipe" }).stdout));
+    expect([helper.ProgramArguments, helper.EnvironmentVariables.BUN_BE_BUN, helper.EnvironmentVariables.NODE_EXTRA_CA_CERTS, helper.KeepAlive, helper.RunAtLoad])
+      .toEqual([[`${bin}/opencode`, `${home}/.config/chrysalis/machine-${MACHINE_LABEL}.js`, local, `${home}/.config/chrysalis/key-${MACHINE_LABEL}`], "1", trust, { SuccessfulExit: false }, true]);
     forward = Bun.spawn([process.execPath, "-e", `require("net").createServer((c) => { const far = require("net").connect(${new URL(net).port}, ${JSON.stringify(new URL(net).hostname)}); c.on("error", () => {}); far.on("error", () => {}); c.pipe(far).pipe(c); }).listen(${listener.SockServiceName}, "127.0.0.1", () => console.log("up"))`], { stdout: "pipe" });
     await forward.stdout.getReader().read();
 

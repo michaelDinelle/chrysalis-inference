@@ -4,12 +4,12 @@ import { dirname, join, resolve } from "node:path";
 
 export type Decision = "once" | "always" | "deny";
 export interface Scene { cast: string[]; scenario?: string; name?: string; greeting?: string }
-export interface Thread { id: string; title: string; dir: string; updated: number; idle: number; busy: boolean; archived: boolean; model?: string; scene?: Scene }
+export interface Thread { id: string; title: string; dir: string; updated: number; idle: number; busy: boolean; archived: boolean; model?: string; scene?: Scene; machine?: string }
 export interface Connector { name: string; state: typeof state; ensure: typeof ensure; stop: typeof stop; threads: typeof threads; models: typeof models; agents: typeof agents; transcript: typeof transcript;
   turn: typeof turn; say: typeof say; undo: typeof undo; fork: typeof fork; rewrite: typeof rewrite; change: typeof change; remove: typeof remove; routines: typeof routines; pause: typeof pause; cancel: typeof cancel }
 export const name = "OpenCode";
 export interface Model { id: string; name: string; provider: string; variants: string[]; straight?: string }
-export interface Turn { session?: string; dir: string; text: string; model?: string; persona?: string; files?: { uri: string; name: string }[]; follow?: boolean; agent?: string;
+export interface Turn { session?: string; machine?: string; dir: string; text: string; model?: string; persona?: string; files?: { uri: string; name: string }[]; follow?: boolean; agent?: string;
   scene?: Scene; said?: string; next?: string; title?: string; sampling?: Record<string, unknown> }
 export interface Routine { id: string; name: string; when: string; prompt: string; status: string; next?: number; runs: number }
 export type Answer = Decision | "stop" | { answer: Record<string, unknown> };
@@ -19,19 +19,27 @@ export interface Said { role: "user" | "assistant"; content: string; files?: { n
 type Listener = (type: string, data: any, from?: string) => void;
 
 export const INSTALL = "curl -fsSL https://opencode.ai/v2/install | bash";
-const SOURCE = name, PERSONA = "character", OURS = "chrysalis";
+const SOURCE = name, PERSONA = "character", OURS = "chrysalis", FROM = "chrysalis-page";
 const sceneOf = (s: any): Scene | undefined => (Array.isArray(s?.metadata?.[OURS]?.cast) ? s.metadata[OURS] : undefined);
 const WITH_US = '"$@" & c=$!; trap "kill $c" TERM INT; while kill -0 "$CHRYSALIS_WEB_PID" 2>/dev/null && kill -0 $c 2>/dev/null; do sleep 1; done; kill $c 2>/dev/null';
 const SKIPPED = "The user chose not to answer.", OLDEST = [2, 2, 4];
 const THINKING = ["none", "low", "medium"].map((id) => ({ id, body: { reasoning_effort: id } }));
 
 const binary = () => process.env.CHRYSALIS_OPENCODE ?? Bun.which("opencode") ?? [`${homedir()}/.opencode/bin/opencode`].find((p) => existsSync(p));
-let host: { url: string; auth: string; version: string; proc?: Bun.Subprocess } | undefined, starting: Promise<void> | undefined;
+export type Send = (path: string, init: { method: string; headers: Record<string, string>; body?: string; signal?: AbortSignal }) => Promise<Response>;
+export interface Machine { id: string; name: string; home: string; kind: string }
+interface Host { id: string; url: string; auth: string; version: string; proc?: Bun.Subprocess; send?: Send; machine?: Machine }
+let host: Host | undefined, starting: Promise<void> | undefined;
+const away = new Map<string, Host>(), homes = new Map<string, string>(), plans = new Map<string, string>();
+const gone = (): never => { throw new Error("That computer is not connected to Chrysalis"); };
+const of = (machine?: string) => (machine ? away.get(machine) ?? gone() : host);
+const on = (session?: string) => of(session ? homes.get(session) : undefined);
+const live = (h: Host) => (h.id ? away.get(h.id) === h : host === h);
 const listeners = new Map<string, Set<Listener>>(), running = new Map<string, Set<string>>(), early = new Map<string, [string, any, string?][]>(), roots = new Map<string, string>();
 async function rootOf(id: string): Promise<string> {
   const known = roots.get(id);
   if (known) return known;
-  const parent = await call("GET", `/api/session/${id}`).then((r) => r.data?.parentID as string | undefined, () => undefined), root = parent ? await rootOf(parent) : id;
+  const parent = await call("GET", `/api/session/${id}`, undefined, on(id)).then((r) => r.data?.parentID as string | undefined, () => undefined), root = parent ? await rootOf(parent) : id;
   roots.set(id, root);
   return root;
 }
@@ -43,7 +51,7 @@ const via = (base: string) => `${modelUrl}/via/${Buffer.from(base).toString("bas
 const routes = new Map<string, string>();
 export async function tuningOf(session: string): Promise<Record<string, unknown> | undefined> {
   const root = await rootOf(session);
-  if (!tunings.has(root)) tunings.set(root, await call("GET", `/api/session/${root}`).then((r) => r.data?.metadata?.[TUNED], () => undefined));
+  if (!tunings.has(root)) tunings.set(root, await call("GET", `/api/session/${root}`, undefined, on(root)).then((r) => r.data?.metadata?.[TUNED], () => undefined));
   return tunings.get(root);
 }
 let outside = false;
@@ -56,9 +64,10 @@ process.on("exit", () => host?.proc?.kill());
 
 export const state = () => (host ? { state: "on" as const, version: host.version } : { state: binary() || process.env.CHRYSALIS_OPENCODE_URL ? "off" as const : "absent" as const });
 
-async function call(method: string, path: string, body?: object, to = host): Promise<any> {
+async function call(method: string, path: string, body: object | undefined, to: Host | undefined): Promise<any> {
   if (!to) throw new Error("OpenCode is not running");
-  const r = await fetch(to.url + path, { method, headers: { authorization: to.auth, ...(body ? { "content-type": "application/json" } : {}) }, body: body && JSON.stringify(body) });
+  const init = { method, headers: { ...(to.send ? {} : { authorization: to.auth }), ...(body ? { "content-type": "application/json" } : {}) }, body: body && JSON.stringify(body) };
+  const r = await (to.send ? to.send(path, init) : fetch(to.url + path, init));
   const text = await r.text();
   if (!r.ok) throw new Error(`OpenCode: ${(() => { try { const j = JSON.parse(text); return j.message ?? j.error?.message ?? text; } catch { return text; } })() || `HTTP ${r.status}`}`);
   return text ? JSON.parse(text) : undefined;
@@ -70,6 +79,12 @@ async function freePort() {
   return port;
 }
 
+async function ourModels(chrysalis: string) {
+  const listed = await fetch(`${chrysalis}/v1/models`, { signal: AbortSignal.timeout(3000) }).then((r) => r.json()).catch(() => ({ data: [] }));
+  return Object.fromEntries((listed.data ?? []).filter((m: any) => typeof m?.id === "string" && !m.id.endsWith("-fast")).map((m: any) => [m.id, { variants: THINKING, capabilities: { input: ["text", "image", "pdf"] } }]));
+}
+export const awayConfig = async (chrysalis: string) => ({ experimental: { schedules: true }, enabled_providers: ["chrysalis"],
+  providers: { chrysalis: { name: "Chrysalis", package: "@opencode/ai/providers/openai-compatible", settings: {}, models: await ourModels(chrysalis) } } });
 export function ensure(chrysalis: string): Promise<void> {
   return (starting ??= (async () => {
     const outer = process.env.CHRYSALIS_OPENCODE_URL;
@@ -79,8 +94,7 @@ export function ensure(chrysalis: string): Promise<void> {
     }
     const bin = binary();
     if (!bin) throw new Error("OpenCode is not installed on this computer");
-    const listed = await fetch(`${chrysalis}/v1/models`, { signal: AbortSignal.timeout(3000) }).then((r) => r.json(), () => ({ data: [] }));
-    const models = Object.fromEntries((listed.data ?? []).filter((m: any) => typeof m?.id === "string" && !m.id.endsWith("-fast")).map((m: any) => [m.id, { variants: THINKING, capabilities: { input: ["text", "image", "pdf"] } }]));
+    const models = await ourModels(chrysalis);
     for (;;) {
       const password = `${crypto.randomUUID()}${crypto.randomUUID()}`, port = await freePort(), { OPENCODE_SERVER_PASSWORD: _, BUN_BE_BUN: __, ...env } = process.env;
       const others: Record<string, any> = {};
@@ -103,7 +117,7 @@ export function ensure(chrysalis: string): Promise<void> {
         if (m.providerID !== "chrysalis" && /^https?:/.test(base ?? "") && !reached(base) && base !== bases.get(m.providerID)) { routes.set(`${m.providerID}\0${m.id}`, base); more = true; }
       }
       if (!more) {
-        void proc.exited.then(() => { if (host?.proc === proc) { host = undefined; starting = undefined; lost(); } });
+        void proc.exited.then(() => { if (host?.proc === proc) { host = undefined; starting = undefined; lost(at); } });
         host = at;
         return void watch(at);
       }
@@ -113,17 +127,20 @@ export function ensure(chrysalis: string): Promise<void> {
   })().catch((e) => { starting = undefined; throw e; }));
 }
 
-async function reach(url: string, password: string, proc?: Bun.Subprocess, local = false): Promise<NonNullable<typeof host>> {
+const tooOld = (version: string) => {
+  const has = String(version).split(".").map(Number), short = OLDEST.findIndex((n, k) => has[k] !== n);
+  return short >= 0 && !(has[short] > OLDEST[short]);
+};
+async function reach(url: string, password: string, proc?: Bun.Subprocess, local = false): Promise<Host> {
     const auth = `Basic ${Buffer.from(`opencode:${password}`, "utf8").toString("base64")}`;
     for (const deadline = Date.now() + 30_000; ; await Bun.sleep(150)) {
       const info = await fetch(`${url}/api/info`, { headers: { authorization: auth }, signal: AbortSignal.timeout(2000) }).then((r) => (r.ok ? r.json() : r.status === 401 ? 401 : null), () => null);
       if (info === 401) { proc?.kill(); throw new Error("OpenCode refused the password"); }
       if (info?.version) {
-        const has = String(info.version).split(".").map(Number), short = OLDEST.findIndex((n, k) => has[k] !== n);
-        if (short >= 0 && !(has[short] > OLDEST[short])) { proc?.kill(); throw new Error(`OpenCode ${OLDEST.join(".")} or newer is needed and this is ${info.version}: run opencode upgrade on this computer`); }
+        if (tooOld(info.version)) { proc?.kill(); throw new Error(`OpenCode ${OLDEST.join(".")} or newer is needed and this is ${info.version}: run opencode upgrade on this computer`); }
         const listed = !proc || !local || await fetch(`${url}/api/model`, { headers: { authorization: auth } }).then((r) => r.json())
           .then((j) => (j.data ?? []).some((m: any) => m.providerID === "chrysalis"), () => false);
-        if (listed) return { url, auth, version: info.version, proc };
+        if (listed) return { id: "", url, auth, version: info.version, proc };
       }
       if (Date.now() > deadline || (proc && proc.exitCode !== null)) { proc?.kill(); throw new Error("OpenCode did not start"); }
     }
@@ -134,21 +151,39 @@ export function stop() {
   host = undefined;
   starting = undefined;
   was?.proc?.kill();
-  if (was) lost();
+  if (was) lost(was);
 }
-function lost() {
-  running.clear();
-  for (const set of [...listeners.values()]) for (const fn of [...set]) fn("lost", {});
+function lost(h: Host) {
+  const here = (id: string) => (homes.get(id) ?? "") === h.id;
+  for (const id of [...running.keys()]) if (here(id)) running.delete(id);
+  for (const [id, set] of [...listeners]) if (here(id)) for (const fn of [...set]) fn("lost", {});
 }
-async function watch(h: NonNullable<typeof host>) {
-  while (host === h) {
+export async function attach(machine: Machine, send: Send): Promise<void> {
+  const info = await send("/api/info", { method: "GET", headers: {} }).then((r) => r.json());
+  if (!info?.version || tooOld(info.version)) throw new Error(`OpenCode ${OLDEST.join(".")} or newer is needed on ${machine.name}: run opencode upgrade there`);
+  detach(machine.id);
+  const h: Host = { id: machine.id, url: "", auth: "", version: info.version, send, machine };
+  away.set(machine.id, h);
+  void watch(h);
+  await threadsOf(h).catch(() => []);
+}
+export function detach(id: string) {
+  const h = away.get(id);
+  if (!h) return;
+  away.delete(id);
+  lost(h);
+}
+export const machines = () => [...away.values()].map((h) => ({ ...h.machine!, version: h.version }));
+async function watch(h: Host) {
+  while (live(h)) {
     try {
-      const r = await fetch(`${h.url}/api/event`, { headers: { authorization: h.auth, accept: "text/event-stream" } });
+      const headers = { ...(h.send ? {} : { authorization: h.auth }), accept: "text/event-stream" };
+      const r = await (h.send ? h.send("/api/event", { method: "GET", headers }) : fetch(`${h.url}/api/event`, { headers }));
       if (!r.ok || !r.body) throw new Error(`HTTP ${r.status}`);
       const reader = r.body.getReader(), decoder = new TextDecoder();
       for (let buf = ""; ; ) {
         const { value, done } = await reader.read();
-        if (host !== h) return void reader.cancel().catch(() => {});
+        if (!live(h)) return void reader.cancel().catch(() => {});
         if (done) break;
         buf += decoder.decode(value, { stream: true });
         for (let end = buf.indexOf("\n\n"); end >= 0; end = buf.indexOf("\n\n")) {
@@ -159,6 +194,7 @@ async function watch(h: NonNullable<typeof host>) {
           try { ev = JSON.parse(data); } catch { continue; }
           const id = ev?.data?.sessionID ?? ev?.data?.form?.sessionID;
           if (typeof id !== "string") continue;
+          if (h.id) homes.set(id, h.id);
           if (ev.type === "session.created") roots.set(id, ev.data.parentID ? await rootOf(ev.data.parentID) : id);
           const root = await rootOf(id), from = root === id ? undefined : id, to = listeners.get(root);
           if (ev.type === "session.execution.started") running.set(root, (running.get(root) ?? new Set()).add(id));
@@ -169,8 +205,8 @@ async function watch(h: NonNullable<typeof host>) {
         }
       }
     } catch {  }
-    if (host !== h) return;
-    lost();
+    if (!live(h)) return;
+    lost(h);
     await Bun.sleep(1000);
   }
 }
@@ -191,60 +227,76 @@ const textOf = (content: any) => (Array.isArray(content) ? content.map((p: any) 
 const titled = (name: string) => name.replace(/[_-]+/g, " ").replace(/^./, (c) => c.toUpperCase());
 
 export async function threads(): Promise<Thread[]> {
+  return (await Promise.all([...(host ? [host] : []), ...away.values()].map((h) => threadsOf(h).catch(() => [])))).flat();
+}
+async function threadsOf(h: Host): Promise<Thread[]> {
   const out: Thread[] = [];
   for (let cursor: string | undefined, pages = 0; pages < 10; pages++) {
-    const page = await call("GET", `/api/session?limit=100${cursor ? `&cursor=${encodeURIComponent(cursor)}` : ""}`);
-    for (const s of page.data ?? []) if (!s.parentID && s.location?.directory)
+    const page = await call("GET", `/api/session?limit=100${cursor ? `&cursor=${encodeURIComponent(cursor)}` : ""}`, undefined, h);
+    for (const s of page.data ?? []) if (!s.parentID && s.location?.directory && (!h.id || s.metadata?.[FROM])) {
+      if (h.id) homes.set(s.id, h.id);
       out.push({ id: s.id, title: s.title ?? "", dir: s.location.directory, updated: s.time?.updated ?? s.time?.created ?? 0, idle: s.time?.idle ?? 0, busy: running.has(s.id), archived: !!s.time?.archived, model: idOf(s.model),
-        ...(sceneOf(s) ? { scene: sceneOf(s) } : {}) });
+        ...(sceneOf(s) ? { scene: sceneOf(s) } : {}), ...(h.id ? { machine: h.id } : {}) });
+    }
     cursor = page.cursor?.next;
     if (!cursor || !page.data?.length) break;
   }
   return out;
 }
 export async function models(): Promise<Model[]> {
-  const [list, providers] = await Promise.all([call("GET", "/api/model"), call("GET", "/api/provider")]);
+  const h = host ?? [...away.values()][0], [list, providers] = await Promise.all([call("GET", "/api/model", undefined, h), call("GET", "/api/provider", undefined, h)]);
   const names = new Map<string, string>((providers.data ?? []).map((p: any) => [p.id, p.name ?? p.id]));
   return (list.data ?? []).flatMap((m: any) => (idOf(m) && (outside || local(idOf(m)!)) ? [{ id: idOf(m)!, name: m.name ?? m.id, provider: names.get(m.providerID) ?? m.providerID,
     variants: (m.variants ?? []).map((v: any) => v.id), ...(/^https?:/.test(m.settings?.baseURL ?? "") && !reached(m.settings.baseURL) ? { straight: new URL(m.settings.baseURL).host } : {}) }] : []));
 }
 export async function agents(): Promise<{ id: string; name: string }[]> {
-  return ((await call("GET", "/api/agent")).data ?? []).filter((a: any) => a.mode !== "subagent" && !a.hidden).map((a: any) => ({ id: a.id, name: a.name ?? a.id }));
+  return ((await call("GET", "/api/agent", undefined, host ?? [...away.values()][0])).data ?? []).filter((a: any) => a.mode !== "subagent" && !a.hidden).map((a: any) => ({ id: a.id, name: a.name ?? a.id }));
 }
-export const remove = (id: string) => call("DELETE", `/api/session/${id}`);
-export const change = (id: string, to: { title?: string; archived?: boolean }) => call("PATCH", `/api/session/${id}`, to);
-export const move = (id: string, directory: string) => call("POST", `/api/session/${id}/move`, { directory });
-export const say = (id: string, text: string) => call("POST", `/api/session/${id}/prompt`, { text });
-export const fork = async (id: string, before?: string) => (await call("POST", `/api/session/${id}/fork`, before ? { before } : {})).data.id as string;
+export const remove = (id: string) => call("DELETE", `/api/session/${id}`, undefined, on(id));
+export const change = (id: string, to: { title?: string; archived?: boolean }) => call("PATCH", `/api/session/${id}`, to, on(id));
+export const move = (id: string, directory: string) => call("POST", `/api/session/${id}/move`, { directory }, on(id));
+export const say = (id: string, text: string) => call("POST", `/api/session/${id}/prompt`, { text }, on(id));
+export const fork = async (id: string, before?: string) => {
+  const made = (await call("POST", `/api/session/${id}/fork`, before ? { before } : {}, on(id))).data.id as string;
+  if (homes.has(id)) {
+    homes.set(made, homes.get(id)!);
+    const was = (await call("GET", `/api/session/${made}`, undefined, on(id))).data?.metadata ?? {};
+    await call("PATCH", `/api/session/${made}`, { metadata: { ...was, [FROM]: true } }, on(id));
+  }
+  return made;
+};
 export async function rewrite(id: string, to: { drop?: string[]; edit?: { id: string; text: string } }) {
+  const go = (method: string, path: string, body?: object) => call(method, path, body, on(id));
   if (running.has(id)) throw new Error("OpenCode is still working in this chat");
-  const was = (await call("GET", `/api/experimental/session/${id}/export`)).data, kept = (await call("GET", `/api/experimental/schedule?sessionID=${id}`).catch(() => ({ data: [] }))).data ?? [];
+  const was = (await go("GET", `/api/experimental/session/${id}/export`)).data, kept = (await go("GET", `/api/experimental/schedule?sessionID=${id}`).catch(() => ({ data: [] }))).data ?? [];
   const edited = (m: any) => (m.type === "user" ? { ...m, text: to.edit!.text, metadata: { ...m.metadata, [OURS]: { ...m.metadata?.[OURS], said: to.edit!.text } } }
     : { ...m, content: [...(m.content ?? []).filter((p: any) => p.type !== "text"), { type: "text", text: to.edit!.text }] });
   const messages = was.messages.filter((m: any) => !to.drop?.includes(m.id)).map((m: any) => (m.id === to.edit?.id ? edited(m) : m));
-  await call("DELETE", `/api/session/${id}`);
-  try { await call("POST", "/api/experimental/session/import", { info: was.info, messages, location: was.info.location }); }
-  catch (e) { await call("POST", "/api/experimental/session/import", { ...was, location: was.info.location }); throw e; }
+  await go("DELETE", `/api/session/${id}`);
+  try { await go("POST", "/api/experimental/session/import", { info: was.info, messages, location: was.info.location }); }
+  catch (e) { await go("POST", "/api/experimental/session/import", { ...was, location: was.info.location }); throw e; }
   const test = (c: any) => (c ? (c.type === "code" ? { code: c.code } : { run: c.run, ...(c.is !== undefined ? { is: c.is } : {}), ...(c.matches !== undefined ? { matches: c.matches } : {}), ...(c.changes ? { changes: true } : {}) }) : undefined);
   for (const r of kept.filter((r: any) => r.status !== "done")) {
     const tz = r.when.tz ? { tz: r.when.tz } : {}, when = r.when.type === "every" ? { every: r.when.every, ...tz } : r.when.type === "cron" ? { cron: r.when.cron, ...tz }
       : { at: new Date(r.nextDueAt ?? Date.now() + 60_000).toISOString() };
-    const made = (await call("POST", "/api/experimental/schedule", { sessionID: id, ...(r.name ? { name: r.name } : {}), when, prompt: r.action.prompt, ...(r.if ? { if: test(r.if) } : {}), ...(r.until ? { until: test(r.until) } : {}) })).data;
-    if (r.status === "paused") await call("POST", `/api/experimental/schedule/${made.id}/pause`);
+    const made = (await go("POST", "/api/experimental/schedule", { sessionID: id, ...(r.name ? { name: r.name } : {}), when, prompt: r.action.prompt, ...(r.if ? { if: test(r.if) } : {}), ...(r.until ? { until: test(r.until) } : {}) })).data;
+    if (r.status === "paused") await go("POST", `/api/experimental/schedule/${made.id}/pause`);
   }
 }
 export async function undo(id: string, message: string) {
-  await call("POST", `/api/session/${id}/revert/stage`, { messageID: message, files: true });
-  await call("POST", `/api/session/${id}/revert/commit`);
+  const go = (method: string, path: string, body?: object) => call(method, path, body, on(id));
+  await go("POST", `/api/session/${id}/revert/stage`, { messageID: message, files: true });
+  await go("POST", `/api/session/${id}/revert/commit`);
 }
 
 const whenOf = (w: any) => (w.type === "every" ? `every ${w.every}` : w.type === "in" ? `once, ${w.in} after it was made` : w.type === "at" ? `once, at ${w.at}` : `cron ${w.cron}`);
 export async function routines(session: string): Promise<Routine[]> {
-  const list = (await call("GET", `/api/experimental/schedule?sessionID=${session}`)).data ?? [];
+  const list = (await call("GET", `/api/experimental/schedule?sessionID=${session}`, undefined, on(session))).data ?? [];
+  for (const r of list) plans.set(r.id, homes.get(session) ?? "");
   return list.filter((r: any) => r.status !== "done").map((r: any) => ({ id: r.id, name: r.name ?? "", when: whenOf(r.when), prompt: r.action?.prompt ?? "", status: r.status, next: r.nextDueAt, runs: r.runCount ?? 0 }));
 }
-export const pause = (routine: string, on: boolean) => call("POST", `/api/experimental/schedule/${routine}/${on ? "pause" : "resume"}`);
-export const cancel = (routine: string) => call("DELETE", `/api/experimental/schedule/${routine}`);
+export const pause = (routine: string, paused: boolean) => call("POST", `/api/experimental/schedule/${routine}/${paused ? "pause" : "resume"}`, undefined, of(plans.get(routine)));
+export const cancel = (routine: string) => call("DELETE", `/api/experimental/schedule/${routine}`, undefined, of(plans.get(routine)));
 
 function callOf(p: any): Call {
   const s = p.state ?? {}, failed = s.status === "error", done = s.status === "completed";
@@ -252,9 +304,10 @@ function callOf(p: any): Call {
     ...(done || failed ? { result: typeof s.output === "string" ? s.output : textOf(s.content) || s.error?.message || (typeof s.error === "string" ? s.error : "") } : {}) };
 }
 export async function transcript(id: string): Promise<{ thread: Thread; messages: Said[] }> {
-  const s = (await call("GET", `/api/session/${id}`)).data, all: any[] = [];
+  const go = (method: string, path: string, body?: object) => call(method, path, body, on(id));
+  const s = (await go("GET", `/api/session/${id}`)).data, all: any[] = [];
   for (let cursor: string | undefined; ; ) {
-    const page = await call("GET", `/api/session/${id}/message?limit=200&${cursor ? `cursor=${encodeURIComponent(cursor)}` : "order=asc"}`);
+    const page = await go("GET", `/api/session/${id}/message?limit=200&${cursor ? `cursor=${encodeURIComponent(cursor)}` : "order=asc"}`);
     all.push(...(page.data ?? []));
     cursor = page.cursor?.next;
     if (!cursor || !page.data?.length) break;
@@ -287,29 +340,32 @@ export async function transcript(id: string): Promise<{ thread: Thread; messages
   }
   close();
   return { thread: { id: s.id, title: s.title ?? "", dir: s.location?.directory ?? "", updated: s.time?.updated ?? 0, idle: s.time?.idle ?? 0, busy: running.has(s.id), archived: !!s.time?.archived, model: idOf(s.model),
-    ...(scene ? { scene } : {}) }, messages };
+    ...(scene ? { scene } : {}), ...(homes.get(s.id) ? { machine: homes.get(s.id) } : {}) }, messages };
 }
 
-export function folders(path: string) {
+export async function folders(path: string, machine?: string) {
+  if (machine) return call("GET", `/chrysalis/folders?path=${encodeURIComponent(path)}`, undefined, of(machine));
   const at = resolve(path || homedir());
   const dirs = readdirSync(at, { withFileTypes: true }).filter((e) => e.isDirectory() && !e.name.startsWith(".")).map((e) => e.name).sort((a, b) => a.localeCompare(b));
   return { path: at, up: dirname(at) === at ? undefined : dirname(at), home: homedir(), dirs: dirs.map((name) => ({ name, path: join(at, name) })) };
 }
 
 export async function turn(t: Turn, push: (d: object) => void, signal: AbortSignal, ask: (id: string) => Promise<Answer>, began: (session: string) => void) {
-  if (!t.follow && !existsSync(t.dir)) throw new Error(`There is no folder ${t.dir} on this computer`);
-  const stored = t.model || !t.session || outside ? undefined : idOf((await call("GET", `/api/session/${t.session}`)).data?.model);
-  for (const model of [t.model, stored]) if (!outside && model && !local(model)) throw new Error(`${model.split("#")[0]} is outside this computer, and OpenCode here is kept to Chrysalis's models: allow models outside this computer from the OpenCode button, on the computer Chrysalis runs on`);
-  const meta = t.scene || t.sampling ? { metadata: { ...(t.scene ? { [OURS]: t.scene } : {}), ...(t.sampling ? { [TUNED]: t.sampling } : {}) } } : {};
-  const id = t.session ?? (await call("POST", "/api/session", { location: { directory: t.dir }, ...(t.title?.trim() ? { title: t.title.trim().slice(0, 100) } : {}), ...meta })).data.id as string;
+  const to = t.session ? on(t.session) : of(t.machine), go = (method: string, path: string, body?: object) => call(method, path, body, to);
+  if (!t.follow && !to?.id && !existsSync(t.dir)) throw new Error(`There is no folder ${t.dir} on this computer`);
+  const stored = t.model || !t.session || (outside && !to?.id) ? undefined : idOf((await go("GET", `/api/session/${t.session}`)).data?.model);
+  for (const model of [t.model, stored]) if ((!outside || to?.id) && model && !local(model)) throw new Error(`${model.split("#")[0]} is outside this computer, and OpenCode here is kept to Chrysalis's models: allow models outside this computer from the OpenCode button, on the computer Chrysalis runs on`);
+  const meta = t.scene || t.sampling || to?.id ? { metadata: { ...(to?.id ? { [FROM]: true } : {}), ...(t.scene ? { [OURS]: t.scene } : {}), ...(t.sampling ? { [TUNED]: t.sampling } : {}) } } : {};
+  const id = t.session ?? (await go("POST", "/api/session", { location: { directory: t.dir }, ...(t.title?.trim() ? { title: t.title.trim().slice(0, 100) } : {}), ...meta })).data.id as string;
+  if (to?.id) homes.set(id, to.id);
   if (t.sampling && !t.follow) tunings.set(id, t.sampling);
   began(id);
-  if (t.session && (t.scene || t.sampling) && !t.follow) await call("PATCH", `/api/session/${id}`, meta);
+  if (t.session && (t.scene || t.sampling) && !t.follow) await go("PATCH", `/api/session/${id}`, meta);
   const entry = `/api/experimental/session/${id}/instructions/entries/${PERSONA}`;
-  if (t.model && !t.follow) await call("POST", `/api/session/${id}/model`, { model: refOf(t.model) });
-  if (t.agent && !t.follow) await call("POST", `/api/session/${id}/agent`, { agent: t.agent });
-  if (t.persona && !t.follow) await call("PUT", entry, { value: t.persona });
-  else if (t.session && !t.follow) await call("DELETE", entry).catch(() => {});
+  if (t.model && !t.follow) await go("POST", `/api/session/${id}/model`, { model: refOf(t.model) });
+  if (t.agent && !t.follow) await go("POST", `/api/session/${id}/agent`, { agent: t.agent });
+  if (t.persona && !t.follow) await go("PUT", entry, { value: t.persona });
+  else if (t.session && !t.follow) await go("DELETE", entry).catch(() => {});
   const delta = (d: object) => push({ choices: [{ index: 0, delta: d }] });
   const index = new Map<string, number>(), names = new Map<string, string>(), since = new Map<string, number>(), declined = new Set<string>();
   let steps = 0;
@@ -342,7 +398,7 @@ export async function turn(t: Turn, push: (d: object) => void, signal: AbortSign
           const allowed = say === "once" || say === "always";
           if (from) tool(callId, allowed ? "done" : "declined", { result: allowed ? "Allowed." : "Not run: it was not allowed." });
           else if (!allowed) { declined.add(callId); tool(callId, say === "deny" ? "declined" : "stopped", { result: "Not run: it was not allowed." }); }
-          return call("POST", `/api/session/${at}/permission/${d.id}/reply`, { decision: allowed ? say : "reject" });
+          return go("POST", `/api/session/${at}/permission/${d.id}/reply`, { decision: allowed ? say : "reject" });
         }).catch(reject);
       }
       else if (type === "form.created") {
@@ -351,8 +407,8 @@ export async function turn(t: Turn, push: (d: object) => void, signal: AbortSign
         const put = async (error?: string): Promise<unknown> => {
           tool(callId, "asking", { form: { title: form.title, fields: form.fields, ...(error ? { error } : {}) } });
           const say = await ask(callId);
-          if (typeof say !== "object") return call("DELETE", `${path}?message=${encodeURIComponent(SKIPPED)}`).finally(() => { if (from) tool(callId, "declined", { result: "Skipped." }); });
-          return call("POST", `${path}/reply`, { answer: say.answer }).then(() => (from ? tool(callId, "done", { result: "Answered." }) : tool(callId, "running")), (e) => put(e instanceof Error ? e.message : String(e)));
+          if (typeof say !== "object") return go("DELETE", `${path}?message=${encodeURIComponent(SKIPPED)}`).finally(() => { if (from) tool(callId, "declined", { result: "Skipped." }); });
+          return go("POST", `${path}/reply`, { answer: say.answer }).then(() => (from ? tool(callId, "done", { result: "Answered." }) : tool(callId, "running")), (e) => put(e instanceof Error ? e.message : String(e)));
         };
         void put().catch(() => {});
       }
@@ -375,20 +431,20 @@ export async function turn(t: Turn, push: (d: object) => void, signal: AbortSign
       else if (type === "session.compaction.started") push({ waiting: "Compacting the context" });
     });
   });
-  const interrupt = () => { for (const one of new Set([id, ...family])) void call("POST", `/api/session/${one}/interrupt`).catch(() => {}); };
+  const interrupt = () => { for (const one of new Set([id, ...family])) void go("POST", `/api/session/${one}/interrupt`).catch(() => {}); };
   signal.addEventListener("abort", interrupt, { once: true });
   try {
     const [, slash, rest] = /^\/(\S+)\s*([^]*)$/.exec(t.said ?? t.text) ?? [], files = t.files?.length ? { files: t.files } : {};
-    const command = slash && ((await call("GET", `/api/command?directory=${encodeURIComponent(t.dir)}`)).data ?? []).some((c: any) => c.name === slash);
+    const command = slash && ((await go("GET", `/api/command?directory=${encodeURIComponent(t.dir)}`)).data ?? []).some((c: any) => c.name === slash);
     const ours = t.said !== undefined || t.next ? { metadata: { [OURS]: { ...(t.said !== undefined ? { said: t.said } : {}), ...(t.next ? { next: t.next } : {}) } } } : {};
-    if (command) await call("POST", `/api/session/${id}/command`, { name: slash, text: rest, ...files });
-    else if (!t.follow) await call("POST", `/api/session/${id}/prompt`, { text: t.text, ...files, ...ours });
+    if (command) await go("POST", `/api/session/${id}/command`, { name: slash, text: rest, ...files });
+    else if (!t.follow) await go("POST", `/api/session/${id}/prompt`, { text: t.text, ...files, ...ours });
     if (signal.aborted) interrupt();
     await done;
   } finally {
     stop();
     signal.removeEventListener("abort", interrupt);
   }
-  push({ idle: (await call("GET", `/api/session/${id}`).catch(() => null))?.data?.time?.idle ?? 0 });
+  push({ idle: (await go("GET", `/api/session/${id}`).catch(() => null))?.data?.time?.idle ?? 0 });
   if (signal.aborted) throw new DOMException("stopped", "AbortError");
 }

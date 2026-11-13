@@ -745,6 +745,12 @@ label.set-switch { cursor: pointer; }
 .folder-btn:hover { background: var(--hover); color: var(--text); }
 .folder-btn .i { flex: none; width: 15px; height: 15px; }
 .folder-btn .i:last-child { width: 13px; height: 13px; }
+.machine-btn.fixed { cursor: default; }
+.machine-btn.fixed:hover { background: none; color: var(--muted); }
+.machine-btn.fixed .i:last-child { width: 15px; height: 15px; }
+.menu-head { padding: 6px 10px 4px; color: var(--faint); font-size: 11.5px; }
+.row-menu button.quiet, .row-menu button.quiet .i { color: var(--faint); }
+.row-menu button.quiet:hover, .row-menu button.quiet:hover .i { color: var(--text); }
 .folder-name { overflow: hidden; white-space: nowrap; text-overflow: ellipsis; }
 @container composer (max-width: 420px) { .composer-actions { gap: 4px; } }
 @container composer (max-width: 990px) { #composer.voicing .meter { display: none; } }
@@ -1210,3 +1216,4 @@ p.line > .who .face { position: absolute; left: -72px; top: 1px; width: 44px; he
   .speaker .face, p.line > .who .face { position: relative; top: auto; right: auto; left: auto; width: 26px; height: 26px; font-size: 11px; }
 }
 
+#oc-pop > .invite-card { border-top: 0; margin-top: 0; }

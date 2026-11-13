@@ -139,6 +139,7 @@
               </div>
               <div class="composer-actions">
                 <span id="meter" class="meter"></span>
+                <button id="machine-btn" class="folder-btn machine-btn" type="button" aria-haspopup="menu" hidden></button>
                 <button id="folder-btn" class="folder-btn" type="button" hidden></button>
                 <button id="model-btn" class="model-btn" type="button" aria-haspopup="listbox" aria-expanded="false" aria-controls="model-pop"></button>
                 <button id="power" class="act power" type="button"></button>
@@ -237,8 +238,7 @@
     </dialog>
     <dialog id="outside-view" class="connect-view outside-view" aria-labelledby="outside-title">
       <h2 id="outside-title">Models outside this computer</h2>
-      <p>A thread on one of these models sends that company your prompts, your files and whatever its tools read on this computer. Chrysalis cannot take any of it back.</p>
-      <p>Threads on Chrysalis's own models stay on this computer as before. A thread that leaves is marked on its model button for as long as it does.</p>
+      <p>A thread on one of these models sends that company your prompts, your files and whatever its tools read. Nothing can take that back.</p>
       <div class="outside-acts"><button id="outside-keep" class="btn primary" type="button" autofocus>Keep Chrysalis only</button><button id="outside-allow" class="btn warn" type="button">Allow them</button></div>
     </dialog>
     <script type="module" src="./app.ts"></script>

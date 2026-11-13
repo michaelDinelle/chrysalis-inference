@@ -7,6 +7,7 @@ import { Backends, standard } from "./backend";
 import { Devices, keyCookie } from "./devices";
 import { advertise, answerName, Link } from "./link";
 import { opencodeLine, opencodeManifest, opencodeScript } from "./opencode";
+import { tunnel } from "./machines";
 import { appleProfile, connectPage, deviceScript, TRUSTED_GIF } from "./setup";
 import * as harness from "./harness";
 import { fingerprint, lanAddresses, netName, routeAddress, tlsDir, webTls } from "./tls";
@@ -466,7 +467,8 @@ const SANDBOX_CSP = "default-src 'none'; script-src 'unsafe-inline' 'unsafe-eval
 const ROOT = `${import.meta.dir}/..`;
 const VOICE_CMD: string[] = process.env.CHRYSALIS_VOICE_CMD ? JSON.parse(process.env.CHRYSALIS_VOICE_CMD) : [`${ROOT}/data/venv/bin/python`, "-m", "chrysalis.voice"];
 const VOICE_IDLE_MS = Number(process.env.CHRYSALIS_VOICE_IDLE_MS ?? 60_000);
-interface VoiceSocket { up?: WebSocket; queue: (string | Buffer<ArrayBuffer>)[]; closed: boolean }
+interface VoiceSocket { up?: WebSocket; queue: (string | Buffer<ArrayBuffer>)[]; closed: boolean; machine?: { id: string; name: string; home?: string; kind?: string; line: ReturnType<typeof tunnel> } }
+const attached = new Map<string, { close(): void }>();
 let speech: { proc: Subprocess<"pipe", "pipe", "inherit">; url: Promise<string> } | undefined;
 let voiceSockets = 0, voiceIdle: Timer | undefined;
 
@@ -545,6 +547,15 @@ const serve = (hostname: string, port: number) => Bun.serve<VoiceSocket>({
         return !got ? new Response("gone", { status: 404 }) : got.state === "allowed" ? new Response(got.key) : new Response(null, { status: 202 });
       }),
     },
+    "/opencode/machine": {
+      GET: open((req, srv) => {
+        const device = devices.find(req)?.device;
+        if (device?.kind !== "computer") return Response.json({ error: { message: "this computer is not let in to Chrysalis here" } }, { status: 401 });
+        if (req.headers.get("upgrade")?.toLowerCase() !== "websocket") return Response.json({ name: MACHINE });
+        return srv.upgrade(req, { data: { queue: [], closed: false, machine: { id: device.id, name: device.name, line: tunnel(() => {}) } } }) ? undefined : new Response("a WebSocket only", { status: 426 });
+      }),
+    },
+    "/opencode/machine.js": { GET: open(() => new Response(Bun.file(`${import.meta.dir}/machine.js`), { headers: { "Content-Type": "text/javascript", "Cache-Control": "no-store" } })) },
     "/opencode/:key/*": (req: Request, srv: Srv) => {
       const key = (req as Request & { params: { key: string } }).params.key, rest = new URL(req.url).pathname.slice(`/opencode/${MODEL_KEY}`.length);
       if (key !== MODEL_KEY || !self(req, srv)) return new Response("not found", { status: 404 });
@@ -603,7 +614,11 @@ img.src = ${JSON.stringify(checkUrl(req))} + "?t=" + Date.now();
     "/api/pair/deny": {
       POST: here(json(async (req) => new Response(null, { status: devices?.deny(String((await req.json().catch(() => ({})))?.code ?? "")) ? 204 : 404 }))),
     },
-    "/api/pair/:id": { DELETE: here((req) => new Response(null, { status: devices?.remove((req as Request & { params: { id: string } }).params.id) ? 204 : 404 })) },
+    "/api/pair/:id": { DELETE: here((req) => {
+      const id = (req as Request & { params: { id: string } }).params.id;
+      attached.get(id)?.close();
+      return new Response(null, { status: devices?.remove(id) ? 204 : 404 });
+    }) },
     "/api/link": {
       GET: here(() => Response.json(link.state())),
       POST: here(json(async (req) => {
@@ -673,7 +688,7 @@ img.src = ${JSON.stringify(checkUrl(req))} + "?t=" + Date.now();
         const at = harness.state();
         if (at.state !== "on") return Response.json({ ...at, outside: harness.outsideAllowed(), install: harness.INSTALL, wanted: !existsSync(OPENCODE_OFF) });
         const [threads, models, agents] = await Promise.all([harness.threads(), harness.models(), harness.agents()]);
-        return Response.json({ ...at, outside: harness.outsideAllowed(), name: connector.name, home: homedir(), models, agents, threads: threads.map((t) => ({ ...t, job: turns.get(t.id)?.id })) });
+        return Response.json({ ...at, outside: harness.outsideAllowed(), machines: [{ id: "", name: MACHINE, home: homedir(), kind: process.platform }, ...harness.machines()], name: connector.name, home: homedir(), models, agents, threads: threads.map((t) => ({ ...t, job: turns.get(t.id)?.id })) });
       }),
       DELETE: guarded(() => {
         writeFileSync(OPENCODE_OFF, "");
@@ -697,8 +712,8 @@ img.src = ${JSON.stringify(checkUrl(req))} + "?t=" + Date.now();
       }),
     },
     "/api/threads/folders": {
-      GET: guarded((req) => {
-        try { return Response.json(harness.folders(new URL(req.url).searchParams.get("path") ?? "")); }
+      GET: guarded(async (req) => {
+        try { return Response.json(await harness.folders(new URL(req.url).searchParams.get("path") ?? "", new URL(req.url).searchParams.get("machine") || undefined)); }
         catch { return Response.json({ error: { message: "that folder cannot be read" } }, { status: 404 }); }
       }),
     },
@@ -840,6 +855,13 @@ img.src = ${JSON.stringify(checkUrl(req))} + "?t=" + Date.now();
   },
   websocket: {
     open(ws) {
+      const m = ws.data.machine;
+      if (m) {
+        m.line = tunnel((text) => { if (!ws.data.closed) ws.send(text); });
+        attached.get(m.id)?.close();
+        attached.set(m.id, ws);
+        return;
+      }
       voiceSockets++;
       clearTimeout(voiceIdle);
       speechService().then((url) => {
@@ -856,12 +878,36 @@ img.src = ${JSON.stringify(checkUrl(req))} + "?t=" + Date.now();
       });
     },
     message(ws, m) {
+      const machine = ws.data.machine;
+      if (machine) {
+        let got: any;
+        try { got = JSON.parse(String(m)); } catch { return; }
+        if (got.hello) {
+          machine.home = String(got.hello.home ?? "");
+          machine.kind = String(got.hello.kind ?? "");
+          if (String(got.hello.name ?? "").trim()) machine.name = String(got.hello.name).trim().slice(0, 60);
+          void harness.awayConfig(CHRYSALIS).then((config) => ws.send(JSON.stringify({ config })));
+        } else if (got.ready) {
+          void harness.attach({ id: machine.id, name: machine.name, home: machine.home ?? "", kind: machine.kind ?? "" }, machine.line.send).catch((e) => {
+            console.error(`chrysalis web: ${machine.name} could not be run from here: ${(e as Error).message}`);
+            ws.close();
+          });
+        } else if (got.failed) console.error(`chrysalis web: ${machine.name}: ${got.failed}`);
+        else machine.line.got(got);
+        return;
+      }
       const up = ws.data.up;
       if (up?.readyState === WebSocket.OPEN) up.send(m);
       else ws.data.queue.push(m);
     },
     close(ws) {
       ws.data.closed = true;
+      const machine = ws.data.machine;
+      if (machine) {
+        machine.line.closed();
+        if (attached.get(machine.id) === ws) { attached.delete(machine.id); harness.detach(machine.id); }
+        return;
+      }
       ws.data.up?.close();
       voiceClosed();
     },
