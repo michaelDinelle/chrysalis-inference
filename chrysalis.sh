@@ -97,7 +97,7 @@ sys.exit(1)' 2>/dev/null
 
 usage() {
     cat <<EOF
-usage: chrysalis.sh [--host 0.0.0.0 | --insecure] [--model <model>]
+usage: chrysalis.sh [--host 0.0.0.0 | --insecure] [--model <model>] [--incognito]
 
   Runs Chrysalis in this terminal: the model and the web chat, each request as it finishes, and the questions when a
   phone or computer wants in. Type help there for what it takes: local, network and insecure move it without stopping,
@@ -109,6 +109,7 @@ usage: chrysalis.sh [--host 0.0.0.0 | --insecure] [--model <model>]
   chat on port 8081 and the API on 8080. Anyone on the network can use it and read what is sent, and other devices
   get no voice mode and no OpenCode
   --model qwen3.8-27b or qwen3.8-flash-next: start with that model and ask nothing
+  --incognito: start incognito: OpenCode keeps its chats in memory only, and they are gone when Chrysalis stops
 
   chrysalis.sh get <model>   download a model's files now (Chrysalis gets the one it loads by itself)
   chrysalis.sh link          retune the GPU's PCIe link at every boot and wake, when the board's own tuning fails
@@ -391,13 +392,14 @@ native() {
 }
 
 case "${1:-}" in
-  ""|--host|--insecure|--model)
-            mode=local first=
+  ""|--host|--insecure|--model|--incognito)
+            mode=local first= hidden=
             while [ $# -gt 0 ]; do
                 case "$1:${2:-}" in
                     --host:0.0.0.0) mode=network; shift 2 ;;
                     --host:127.0.0.1) shift 2 ;;
                     --insecure:*) mode=insecure; shift ;;
+                    --incognito:*) hidden=--incognito; shift ;;
                     --model:qwen3.8-27b|--model:qwen3.8-flash-next) first=$2; shift 2 ;;
                     *) usage; exit 1 ;;
                 esac
@@ -414,7 +416,7 @@ case "${1:-}" in
             build
             cli=cli.ts; [ -f "$ROOT/web/cli.js" ] && cli=cli.js
             [ -f "$ROOT/web/cli.js" ] || [ -d "$ROOT/web/node_modules/ink" ] || (cd "$ROOT/web" && "$BUN" install --frozen-lockfile >/dev/null)
-            run=("$BUN" "$ROOT/web/$cli" --mode $mode)
+            run=("$BUN" "$ROOT/web/$cli" --mode $mode $hidden)
             if has_gpu; then
                 if [ -n "$first" ]; then mkdir -p "$TLS_DIR" && printf %s "$first" > "$TLS_DIR/model"; else pick; fi
                 model=$(cat "$TLS_DIR/model" 2>/dev/null || true)

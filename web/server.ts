@@ -40,10 +40,15 @@ const self = (req: Request, srv: Srv) => {
 };
 const fromNetwork = (req: Request, srv: Srv) => !self(req, srv);
 const PAST_WARNING = { Connection: "close" };
+const unkept = async (res: Response | undefined | Promise<Response>) => {
+  const r = await res;
+  if (r && !r.headers.has("Cache-Control")) try { r.headers.set("Cache-Control", "no-store"); } catch { }
+  return r as Response;
+};
 const guarded = (handler: Handler) => open((req, srv) => {
-  if (OPEN || !fromNetwork(req, srv)) return handler(req, srv);
+  if (OPEN || !fromNetwork(req, srv)) return unkept(handler(req, srv));
   const found = devices?.find(req);
-  if (found && devices!.trusted(found.device)) return handler(req, srv);
+  if (found && devices!.trusted(found.device)) return unkept(handler(req, srv));
   return Response.json(found ? { error: { message: "this browser has not shown lately that it trusts Chrysalis: its page checks again" }, check: true }
     : { error: { message: "this device is not connected to Chrysalis: its page at / connects it" } }, { status: 401 });
 });
@@ -719,6 +724,10 @@ img.src = ${JSON.stringify(checkUrl(req))} + "?t=" + Date.now();
         return Response.json(harness.state());
       }),
     },
+    "/api/incognito": {
+      POST: trusted(json(() => incognitoAsked(true))),
+      DELETE: trusted(() => incognitoAsked(false)),
+    },
     "/api/threads/outside": {
       POST: here(json(async () => {
         writeFileSync(OPENCODE_OUTSIDE, "");
@@ -765,6 +774,7 @@ img.src = ${JSON.stringify(checkUrl(req))} + "?t=" + Date.now();
         const gone = Array.isArray(drop) ? drop.filter((x: unknown) => typeof x === "string") : [], put = typeof edit?.id === "string" && typeof edit?.text === "string" ? { id: edit.id, text: edit.text } : undefined;
         if (!gone.length && !put && typeof last !== "string") return Response.json({ error: { message: "drop, edit or last" } }, { status: 400 });
         if (turns.has(id)) return Response.json({ error: { message: "OpenCode is still working in this chat" } }, { status: 409 });
+        if (typeof last === "string") await harness.settled(id, req.signal);
         try { await harness.rewrite(id, typeof last === "string" ? { last } : { drop: gone, ...(put ? { edit: put } : {}) }); } catch (e) { return Response.json({ error: { message: (e as Error).message } }, { status: 502 }); }
         return new Response(null, { status: 204 });
       })),
@@ -853,7 +863,7 @@ img.src = ${JSON.stringify(checkUrl(req))} + "?t=" + Date.now();
           return { state: "offline", build: BUILD() };
         }
       })(), net = fromNetwork(req, srv), found = devices.find(req);
-      const res = Response.json({ ...state, backend, here: !net, ...(net ? { machine: MACHINE } : {}), ...(found && devices!.stale(found.device) ? { check: true } : {}),
+      const res = Response.json({ ...state, backend, ...(harness.shaded() ? { incognito: true } : {}), here: !net, ...(net ? { machine: MACHINE } : {}), ...(found && devices!.stale(found.device) ? { check: true } : {}),
         ...(LAN && !net ? { waiting: devices.waiting().length } : {}),
         ...(!net && (state.state === "offline" || link.name || link.pairing) ? { link: link.state() } : {}) });
       if (found) res.headers.append("Set-Cookie", keyCookie(found.key));
@@ -1039,6 +1049,8 @@ const answers = new Map<string, (yes: boolean) => void>(), answered = new Set<st
 let told = "[]";
 if (process.send) {
   process.on("message", (m: any) => {
+    if (typeof m?.incognito === "string") return incognitoNow(m.incognito || undefined);
+    if (m?.incognito === false) return void [...switched].forEach((done) => done());
     const key = String(m?.answer?.key ?? ""), answer = answers.get(key);
     if (!answer) return;
     answered.add(key);
@@ -1111,6 +1123,24 @@ async function tuned(req: Request, body: string | undefined): Promise<string | u
   if (!want) return body;
   const { max_tokens, ...rest } = want, cap = "max_completion_tokens" in sent ? "max_completion_tokens" : "max_tokens";
   return JSON.stringify({ ...sent, ...rest, ...(max_tokens ? { [cap]: max_tokens } : {}) });
+}
+const switched = new Set<() => void>();
+function incognitoNow(dir?: string) {
+  const was = harness.state().state === "on";
+  for (const job of jobs.values()) job.ctrl.abort();
+  jobs.clear();
+  turns.clear();
+  void harness.shadeTo(dir).then(() => tell({ shaded: !!dir }));
+  for (const done of [...switched]) done();
+  if (was) void harness.ensure(CHRYSALIS).catch((e) => tell({ note: `OpenCode did not start again: ${(e as Error).message}` }));
+}
+async function incognitoAsked(on: boolean): Promise<Response> {
+  if (!process.send) return Response.json({ error: { message: "Incognito is switched by Chrysalis's terminal, which also keeps the model server's prompt cache off the disk" } }, { status: 409 });
+  if (harness.shaded() !== on) {
+    tell({ incognito: on });
+    await new Promise<void>((done) => { const go = () => { switched.delete(go); done(); }; switched.add(go); });
+  }
+  return harness.shaded() === on ? new Response(null, { status: 204 }) : Response.json({ error: { message: "Chrysalis's terminal did not switch incognito" } }, { status: 409 });
 }
 async function outsideNow(on: boolean): Promise<Response> {
   if (harness.outsideAllowed() === on) return new Response(null, { status: 204 });

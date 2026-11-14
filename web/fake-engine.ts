@@ -11,6 +11,7 @@ Bun.serve({
   async fetch(req) {
     const path = new URL(req.url).pathname;
     if (path === "/chrysalis/stats") return Response.json(asleep ? { model, asleep: true } : { model, context: 257920 });
+    if (path === "/chrysalis/env") return Response.json({ pid: process.pid, snapshots: process.env.CHRYSALIS_SNAPSHOTS, tmp: process.env.TMPDIR });
     if (path === "/metrics") return new Response(`chrysalis_replies_writing ${writing}\n`);
     if (path === "/chrysalis/unload") { asleep = true; return Response.json({ asleep: true }); }
     if (path === "/chrysalis/load") {

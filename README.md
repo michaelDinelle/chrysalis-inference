@@ -140,6 +140,15 @@ docker run -d --device /dev/kfd --device /dev/dri -p 127.0.0.1:8080:8080 -v chry
   the left and right arrow keys do the same, and on a touch screen a drag across the reply does. Every version is kept,
   and going between them is instant. In an OpenCode thread a new version asks OpenCode again, the versions are kept in
   the tab, and the one on screen becomes the reply OpenCode holds.
+- Incognito: the ghost button in the top bar on any device that is let in, `incognito` or the Incognito switch in the
+  terminal, or `chrysalis.sh --incognito`. It is one state for every device, shown by a white frame around the page
+  that says Incognito. The model stays loaded and the page stays where it is: only OpenCode starts again, on an empty
+  store in memory (`/dev/shm`), with its tools. While it is on, the model server's prompt cache cannot be written, its
+  temporary files are in memory, none of the servers may leave a core dump or swap, the page writes nothing to the
+  browser's storage, the terminal shows none of the requests, and other computers under Run on are out of reach. The
+  chats from before are out of sight and untouched. Turning it off, or stopping Chrysalis, deletes OpenCode's store;
+  the model server's memory of those chats goes as its cache turns over. It needs Linux, and what a tool writes into
+  your folders is still written.
 - Settings has a system prompt: it goes with every chat, after whoever the chat is with. In a thread it goes in the one
   instruction Chrysalis gives OpenCode, beside OpenCode's own prompt.
 - Artifacts render as they are written. Hovering highlights a part. Clicking attaches it to the next message. The paint

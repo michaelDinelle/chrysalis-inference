@@ -3,7 +3,7 @@ import hljs from "highlight.js/lib/common";
 import katex from "katex";
 import "katex/dist/katex.min.css";
 import { marked, type Links, type Token, type Tokens } from "marked";
-import { type Attachment, KINDS, attach, dataUrl, fmtBytes, get as getFile, put as putFile, textBlock } from "./files";
+import { type Attachment, KINDS, attach, dataUrl, fmtBytes, get as getFile, lasts, put as putFile, textBlock } from "./files";
 import { type Cand, type Odds, type SamplerKey, type Stage, DEFAULT_STAGES, sample } from "./sampler";
 import { type Part, type VoiceAsk, type VoiceInfo, type VoiceReady, Speaker, VoiceClient } from "./voice";
 import { type Fix, applyFixes, fixedParts, readHeard } from "./heard";
@@ -17,6 +17,11 @@ import { type Card, type CardData, type Group, type Person, type Voice, cardPng,
   voiceOf } from "./cast";
 import { Ocean } from "./ocean";
 import { type Drop, sidebarDrag } from "./drag";
+
+let hiding: boolean = await fetch("/api/status").then((r) => (r.ok ? r.json() : {}), () => ({})).then((s: { incognito?: boolean }) => !!s.incognito);
+const held = new Map<string, string>();
+lasts(!hiding);
+document.documentElement.toggleAttribute("data-incognito", hiding);
 
 type Effort = "xhigh" | "medium" | "low" | "off";
 interface Stats { ttft: number; tps: number; tokens: number; prompt: number; cached?: number; thought?: number; seed?: number; model?: string; ctx?: number }
@@ -66,7 +71,7 @@ interface Settings {
   global?: string;
 }
 interface VoiceSettings { tts?: string; name?: string; stt?: string; speed?: number }
-interface Status { state: "online" | "loading" | "offline"; machine?: string; build?: string; model?: string; loading?: string; progress?: number; context?: number; kv_tokens?: number; cache?: { free_kv_tokens: number };
+interface Status { incognito?: boolean; state: "online" | "loading" | "offline"; machine?: string; build?: string; model?: string; loading?: string; progress?: number; context?: number; kv_tokens?: number; cache?: { free_kv_tokens: number };
   check?: boolean; here?: boolean; waiting?: number;
   backend?: Backend; link?: Linking }
 interface Linking { linked?: { name: string }; found: { name: string; fp: string }[]; refused?: string;
@@ -206,6 +211,7 @@ const ICONS = {
   compose: '<path d="M12 3H5a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2v-7"/><path d="M18.375 2.625a1 1 0 0 1 3 3l-9.013 9.014a2 2 0 0 1-.853.505l-2.873.84a.5.5 0 0 1-.62-.62l.84-2.873a2 2 0 0 1 .506-.852z"/>',
   grip: '<circle cx="9" cy="6" r="1.3" fill="currentColor" stroke="none"/><circle cx="15" cy="6" r="1.3" fill="currentColor" stroke="none"/><circle cx="9" cy="12" r="1.3" fill="currentColor" stroke="none"/><circle cx="15" cy="12" r="1.3" fill="currentColor" stroke="none"/><circle cx="9" cy="18" r="1.3" fill="currentColor" stroke="none"/><circle cx="15" cy="18" r="1.3" fill="currentColor" stroke="none"/>',
   power: '<path d="M12 3.5v8"/><path d="M6.6 6.8a7.5 7.5 0 1 0 10.8 0"/>',
+  incognito: '<path d="M9 10h.01"/><path d="M15 10h.01"/><path d="M12 2.5a7.5 7.5 0 0 0-7.5 7.5v11.5l2.8-2.6 2.4 2.6 2.3-2.6 2.3 2.6 2.4-2.6 2.8 2.6V10A7.5 7.5 0 0 0 12 2.5z"/>',
   dice: '<rect x="4" y="4" width="16" height="16" rx="3.5"/><circle cx="9" cy="9" r="1.1" fill="currentColor"/><circle cx="15" cy="15" r="1.1" fill="currentColor"/><circle cx="15" cy="9" r="1.1" fill="currentColor"/><circle cx="9" cy="15" r="1.1" fill="currentColor"/>',
   prev: '<path d="M14.5 6.5 9 12l5.5 5.5"/>',
   next: '<path d="M9.5 6.5 15 12l-5.5 5.5"/>',
@@ -732,11 +738,12 @@ async function sentFile(key: string, f: { name: string; type: string; data: stri
   return { id: key, name: f.name, type: f.type, size: bytes.length, kind };
 }
 async function openThread(sid: string): Promise<string | undefined> {
-  const mine = Object.values(chats).find((c) => c.thread?.id === sid);
-  if (mine && runs.get(mine.id)) return mine.id;
+  const held = () => Object.values(chats).find((c) => c.thread?.id === sid);
+  if (held() && runs.get(held()!.id)) return held()!.id;
   const r = await fetch(`/api/threads/${sid}`).catch(() => null), got = r?.ok ? await r.json() : null;
-  if (!got) { if (!mine) toast("OpenCode could not give that thread"); return mine?.id; }
+  if (!got) { if (!held()) toast("OpenCode could not give that thread"); return held()?.id; }
   await castReady.promise;
+  const mine = held();
   meet(got.thread.scene);
   if (mine && !folderOf(mine)) Object.assign(mine, seated(got.thread.scene));
   const c: Conversation = mine ?? { id: STUB + sid, title: "", named: true, updated: 0, effort: pref("effort", "xhigh") as Effort, messages: [], thread: { dir: got.thread.dir, id: sid, ...(got.thread.machine ? { machine: got.thread.machine } : {}) }, ...seated(got.thread.scene) };
@@ -3238,15 +3245,20 @@ const fmtS = (s: number) => `${s < 10 ? s.toFixed(1) : Math.round(s)} s`;
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
 
 function pref(key: string, fallback: string) {
+  if (held.has(`pref ${key}`)) return held.get(`pref ${key}`)!;
   try { return localStorage.getItem(key) ?? fallback; } catch { return fallback; }
 }
 function setPref(key: string, value: string) {
+  if (hiding) return void held.set(`pref ${key}`, value);
   try { localStorage.setItem(key, value); } catch {  }
 }
 function load<T>(key: string, fallback: T): T {
+  if (held.has(`tab ${key}`)) return JSON.parse(held.get(`tab ${key}`)!);
+  if (hiding && key === "chats") return fallback;
   try { return JSON.parse(sessionStorage.getItem(key) ?? "null") ?? fallback; } catch { return fallback; }
 }
 function store(key: string, value: unknown) {
+  if (hiding) return held.set(`tab ${key}`, JSON.stringify(value)), true;
   try { sessionStorage.setItem(key, JSON.stringify(value)); return true; } catch { return false; }
 }
 
@@ -3284,7 +3296,7 @@ function render() {
   thread.append(...(conv.messages.length ? conv.messages.map(messageView) : [emptyState()]));
   for (const el of was) el.remove();
   $("title").textContent = conv.title;
-  document.title = conv.messages.length ? `${conv.title} · Chrysalis Inference` : "Chrysalis Inference";
+  document.title = conv.messages.length && !hiding ? `${conv.title} · Chrysalis Inference` : "Chrysalis Inference";
   renderComposer();
   renderList();
   paintGhost();
@@ -4553,6 +4565,7 @@ async function refreshStatus(again = true) {
       return location.replace("/");
     }
     status = await r.json();
+    if (!!status.incognito !== hiding && !flipping) hide(!hiding)();
   } catch { status = { state: "offline", backend: status.backend }; }
   if (status.check) void checkTrust();
   paintHarness();
@@ -5884,6 +5897,38 @@ function openConversation(id: string, reveal = true) {
   keepUp();
 }
 
+function paintIncognito() {
+  document.documentElement.toggleAttribute("data-incognito", hiding);
+  $("incognito").setAttribute("aria-pressed", String(hiding));
+  $("incognito").title = $("incognito").ariaLabel = hiding ? "Leave incognito: its chats are deleted, on every device" : "Go incognito, on every device: chats are kept in memory only";
+}
+let flipping = false;
+function hide(on: boolean): () => void {
+  closeVoice();
+  stopReading();
+  for (const run of runs.values()) { run.gone = true; stopRun(run); }
+  runs.clear();
+  hiding = on;
+  held.clear();
+  lasts(!on);
+  bodies.clear();
+  thumbs.clear();
+  tokens.clear();
+  pending = [];
+  renderPending();
+  input.value = "";
+  for (const id of Object.keys(chats)) delete chats[id];
+  Object.assign(chats, load("chats", {}));
+  settings = loadSettings();
+  const tools = harness.state === "on";
+  harness = { ...harness, ...(tools ? { state: "off" as const } : {}), threads: [] };
+  paintIncognito();
+  newChat();
+  return () => {
+    if (tools) void ensureHarness().then(() => { if (!conv.messages.length && !running()) newChat(); }, () => {});
+    else void loadThreads();
+  };
+}
 function newChat(who = "") {
   closeVoice();
   stopReading();
@@ -6475,6 +6520,18 @@ function buildControls() {
     else if (e.key === "Home" || e.key === "End") setEffort(e.key === "Home" ? 0 : 3);
     else return;
     e.preventDefault();
+  });
+  $("incognito").innerHTML = icon("incognito");
+  paintIncognito();
+  $("incognito").addEventListener("click", async () => {
+    if (flipping) return;
+    flipping = true;
+    const to = !hiding, attach = hide(to);
+    const r = await fetch("/api/incognito", { method: to ? "POST" : "DELETE", headers: { "Content-Type": "application/json" }, body: "{}" }).catch(() => null);
+    flipping = false;
+    if (r?.ok) return attach();
+    toast((await r?.json().catch(() => null))?.error?.message ?? "Chrysalis did not answer");
+    hide(!to)();
   });
   $("model-btn").addEventListener("click", () => setModelsOpen(!modelsOpen));
   $("machine-btn").addEventListener("click", () => chooseMachine($("machine-btn")));

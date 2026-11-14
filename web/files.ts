@@ -52,9 +52,12 @@ void db.then(async (d) => {
 });
 
 const memo = new Map<string, Blob | string>();
+let lasting = true;
+export const lasts = (on: boolean) => { lasting = on; memo.clear(); };
 
 export async function put(id: string, data: Blob | string) {
   memo.set(id, data);
+  if (!lasting) return;
   const files = await store("files", "readwrite");
   if (files) await ask(files.put({ id, tab, data } satisfies Stored));
 }

@@ -75,7 +75,7 @@ export const commands = (dir: string, machine?: string) => commandsOn(of(machine
 export const INSTALL = "curl -fsSL https://opencode.ai/v2/install | bash";
 const SOURCE = name, PERSONA = "character", OURS = "chrysalis";
 const sceneOf = (s: any): Scene | undefined => (Array.isArray(s?.metadata?.[OURS]?.cast) ? s.metadata[OURS] : undefined);
-const WITH_US = '"$@" & c=$!; trap "kill $c" TERM INT; while kill -0 "$CHRYSALIS_WEB_PID" 2>/dev/null && kill -0 $c 2>/dev/null; do sleep 1; done; kill $c 2>/dev/null';
+const WITH_US = '"$@" & c=$!; trap "kill $c" TERM INT; (while kill -0 "$CHRYSALIS_WEB_PID" 2>/dev/null; do sleep 1; done; kill $c 2>/dev/null) & w=$!; wait $c; wait $c 2>/dev/null; kill $w 2>/dev/null';
 const SKIPPED = "The user chose not to answer.", OLDEST = [2, 2, 4];
 const THINKING = ["none", "low", "medium"].map((id) => ({ id, body: { reasoning_effort: id } }));
 
@@ -86,7 +86,8 @@ interface Host { id: string; url: string; auth: string; version: string; proc?: 
 let host: Host | undefined, starting: Promise<void> | undefined;
 const away = new Map<string, Host>(), homes = new Map<string, string>();
 const gone = (): never => { throw new Error("That computer is not connected to Chrysalis"); };
-const of = (machine?: string) => (machine ? away.get(machine) ?? gone() : host);
+const others = () => (shade ? [] : [...away.values()]);
+const of = (machine?: string) => (machine ? (shade ? undefined : away.get(machine)) ?? gone() : host);
 const on = (session?: string) => of(session ? homes.get(session) : undefined);
 const live = (h: Host) => (h.id ? away.get(h.id) === h : host === h);
 const listeners = new Map<string, Set<Listener>>(), running = new Map<string, Set<string>>(), early = new Map<string, [string, any, string?][]>(), roots = new Map<string, string>();
@@ -116,6 +117,19 @@ let woken: (session: string) => void = () => {};
 export const onWake = (fn: (session: string) => void) => { woken = fn; };
 process.on("exit", () => host?.proc?.kill());
 
+let shade = process.env.CHRYSALIS_INCOGNITO || undefined;
+let scope: boolean | undefined;
+export const shaded = () => !!shade;
+export function shadeTo(dir?: string) {
+  const gone = stop();
+  shade = dir;
+  return gone;
+}
+function unswapped(cmd: string[]) {
+  try { scope ??= Bun.spawnSync(["systemd-run", "--user", "--scope", "-q", "true"], { stdout: "ignore", stderr: "ignore" }).exitCode === 0; } catch { scope = false; }
+  return scope ? ["systemd-run", "--user", "--scope", "-q", "-p", "MemorySwapMax=0", ...cmd] : cmd;
+}
+
 export const state = () => (host ? { state: "on" as const, version: host.version } : { state: binary() || process.env.CHRYSALIS_OPENCODE_URL ? "off" as const : "absent" as const });
 
 async function call(method: string, path: string, body: object | undefined, to: Host | undefined): Promise<any> {
@@ -143,6 +157,7 @@ export const awayConfig = async (chrysalis: string) => ({ enabled_providers: ["c
 export function ensure(chrysalis: string): Promise<void> {
   return (starting ??= (async () => {
     const outer = process.env.CHRYSALIS_OPENCODE_URL;
+    if (outer && shade) throw new Error("Incognito needs Chrysalis to start OpenCode itself, on a store in memory");
     if (outer) {
       host = await reach(outer, process.env.CHRYSALIS_OPENCODE_PASSWORD ?? "");
       return void watch(host);
@@ -159,8 +174,9 @@ export function ensure(chrysalis: string): Promise<void> {
         if (model) ((others[provider].models ??= {})[model] = { settings: { baseURL: via(base) } });
         else others[provider].settings = { baseURL: via(base) };
       }
-      const proc = Bun.spawn(["sh", "-c", WITH_US, "sh", bin, "serve", "--hostname", "127.0.0.1", "--port", String(port)], { stdin: "ignore", stdout: "ignore", stderr: "ignore",
-        env: { ...env, CHRYSALIS_WEB_PID: String(process.pid), OPENCODE_PASSWORD: password, OPENCODE_CONFIG_CONTENT: JSON.stringify({ ...(outside ? {} : { enabled_providers: ["chrysalis"] }), providers: { ...others, chrysalis: { name: "Chrysalis",
+      const cmd = ["sh", "-c", shade ? `ulimit -c 0; ${WITH_US}` : WITH_US, "sh", bin, "serve", "--hostname", "127.0.0.1", "--port", String(port)];
+      const proc = Bun.spawn(shade ? unswapped(cmd) : cmd, { stdin: "ignore", stdout: "ignore", stderr: "ignore",
+        env: { ...env, ...(shade ? { XDG_DATA_HOME: `${shade}/data`, XDG_STATE_HOME: `${shade}/state`, TMPDIR: `${shade}/tmp` } : {}), CHRYSALIS_WEB_PID: String(process.pid), OPENCODE_PASSWORD: password, OPENCODE_CONFIG_CONTENT: JSON.stringify({ ...(outside ? {} : { enabled_providers: ["chrysalis"] }), providers: { ...others, chrysalis: { name: "Chrysalis",
           package: "@opencode/ai/providers/openai-compatible", settings: { baseURL: `${modelUrl}/v1`, apiKey: "chrysalis" }, models } } }) } });
       const at = await reach(`http://127.0.0.1:${port}`, password, proc, Object.keys(models).length > 0);
       const [providers, all] = await Promise.all([call("GET", "/api/provider", undefined, at), call("GET", "/api/model", undefined, at)]);
@@ -201,12 +217,13 @@ async function reach(url: string, password: string, proc?: Bun.Subprocess, local
     }
 }
 
-export function stop() {
+export function stop(): Promise<unknown> {
   const was = host;
   host = undefined;
   starting = undefined;
   was?.proc?.kill();
   if (was) lost(was);
+  return was?.proc?.exited ?? Promise.resolve();
 }
 function lost(h: Host) {
   const here = (id: string) => (homes.get(id) ?? "") === h.id;
@@ -228,7 +245,7 @@ export function detach(id: string) {
   away.delete(id);
   lost(h);
 }
-export const machines = () => [...away.values()].map((h) => ({ ...h.machine!, version: h.version }));
+export const machines = () => others().map((h) => ({ ...h.machine!, version: h.version }));
 async function watch(h: Host) {
   while (live(h)) {
     try {
@@ -284,7 +301,7 @@ const textOf = (content: any) => (Array.isArray(content) ? content.map((p: any) 
 const titled = (name: string) => name.replace(/[_-]+/g, " ").replace(/^./, (c) => c.toUpperCase());
 
 export async function threads(): Promise<Thread[]> {
-  return (await Promise.all([...(host ? [threadsOf(host)] : []), ...[...away.values()].map((h) => threadsOf(h).catch(() => []))])).flat();
+  return (await Promise.all([...(host ? [threadsOf(host)] : []), ...others().map((h) => threadsOf(h).catch(() => []))])).flat();
 }
 async function threadsOf(h: Host): Promise<Thread[]> {
   const out: Thread[] = [];
@@ -301,13 +318,13 @@ async function threadsOf(h: Host): Promise<Thread[]> {
   return out;
 }
 export async function models(): Promise<Model[]> {
-  const h = host ?? [...away.values()][0], [list, providers] = await Promise.all([call("GET", "/api/model", undefined, h), call("GET", "/api/provider", undefined, h)]);
+  const h = host ?? others()[0], [list, providers] = await Promise.all([call("GET", "/api/model", undefined, h), call("GET", "/api/provider", undefined, h)]);
   const names = new Map<string, string>((providers.data ?? []).map((p: any) => [p.id, p.name ?? p.id]));
   return (list.data ?? []).flatMap((m: any) => (idOf(m) && (outside || local(idOf(m)!)) ? [{ id: idOf(m)!, name: m.name ?? m.id, provider: names.get(m.providerID) ?? m.providerID,
     variants: (m.variants ?? []).map((v: any) => v.id), ...(/^https?:/.test(m.settings?.baseURL ?? "") && !reached(m.settings.baseURL) ? { straight: new URL(m.settings.baseURL).host } : {}) }] : []));
 }
 export async function agents(): Promise<{ id: string; name: string }[]> {
-  return ((await call("GET", "/api/agent", undefined, host ?? [...away.values()][0])).data ?? []).filter((a: any) => a.mode !== "subagent" && !a.hidden).map((a: any) => ({ id: a.id, name: a.name ?? a.id }));
+  return ((await call("GET", "/api/agent", undefined, host ?? others()[0])).data ?? []).filter((a: any) => a.mode !== "subagent" && !a.hidden).map((a: any) => ({ id: a.id, name: a.name ?? a.id }));
 }
 export const remove = (id: string) => call("DELETE", `/api/session/${id}`, undefined, on(id));
 export async function change(id: string, to: { title?: string; archived?: boolean; scene?: Scene | null }) {

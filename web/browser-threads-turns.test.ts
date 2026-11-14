@@ -180,7 +180,7 @@ test("swiping in a thread: the latest reply has an arrow at either end of the ro
   expect([count, held()]).toEqual(["1 / 1", first]);
   expect(await page.$$eval("#thread > article.assistant .msg-foot > .swipe", (b) => b.map((x) => [(x as HTMLElement).dataset.act, (x as HTMLButtonElement).disabled]))).toEqual([["prev", true], ["next", false]]);
 
-  await page.click("#thread > article.assistant .swipe.next");
+  await page.evaluate(() => document.querySelector<HTMLElement>("#thread > article.assistant .swipe.next")!.click());
   await at("2 / 2");
   expect([await shown(), held(), opencode.log.prompts.length - asked, users()]).toEqual([["2 / 2", first + 1], first + 1, 1, ["draw a card"]]);
 
@@ -195,7 +195,7 @@ test("swiping in a thread: the latest reply has an arrow at either end of the ro
   expect([await shown(), held(), opencode.log.prompts.length - asked, users()]).toEqual([["3 / 3", first + 2], first + 2, 2, ["draw a card"]]);
   await page.evaluate(() => [...document.querySelectorAll("#thread > article.assistant")].at(-1)!.querySelector<HTMLElement>('[data-act="retry"]')!.click());
   await at("4 / 4");
-  await page.click("#thread > article.assistant .swipe.prev");
+  await page.evaluate(() => document.querySelector<HTMLElement>("#thread > article.assistant .swipe.prev")!.click());
   expect(await shown()).toEqual(["3 / 4", first + 2]);
 
   await send(page, "and another thing");

@@ -32,6 +32,12 @@ README.md shows what Chrysalis is. This file is how to change it.
   web/cli-ui.tsx draws it with Ink (the switches, the status line, the prompt), and without a terminal it is plain
   lines. The web server tells it who asks and what to ask over Bun's IPC. It shows the servers' own output only after `verbose`, and keeps
   nothing: no log, no history file.
+- Incognito is the terminal's to switch (web/cli-core.ts `setIncognito`), and nothing restarts but OpenCode. The model
+  server always gets CHRYSALIS_SNAPSHOTS and TMPDIR under a folder in /dev/shm: its snapshot folders are links the
+  terminal points at data/cache normally and at read-only folders while incognito, because chrysalis/cache.py writes
+  each pinned prompt snapshot, tokens and all, to disk. The web server moves OpenCode onto a store in that folder
+  (web/harness.ts `shadeTo`), and the page keeps what it would store in memory (`hide` in web/app.ts). Anything new
+  that writes a chat to disk has to be closed there too.
 - tests/<backend>/ hold kernel checks; tests/*.py check any backend through the C API.
 - A new backend: engine/<name>/build.mk building build/libchrysalis and build/libchrysalis_fn, with `kernels` and
   `kernels_fn`, its model checks in BACKEND_TESTS and BACKEND_TESTS_FN (the builds they need in TEST_BUILDS and
@@ -88,7 +94,7 @@ None: no comments or docstrings anywhere in the repo, in any language, including
   `data/venv/bin/python tests/test_chat.py`, `data/venv/bin/python tests/test_documents.py` (which PDF pages are
   pictured), `make build/test_cpujob_fn && build/test_cpujob_fn`, `make test_voice` (the voice service: its features against
   transformers', turns, echo and barge-in over its WebSocket), `make test_web` (the web UI's sampler against
-  the engine's, its server against a fake Chrysalis and a fake OpenCode, the terminal against a fake model server, the page in headless Chromium, and Firefox past and trusting the network's
+  the engine's, its server against a fake Chrysalis and a fake OpenCode, the terminal against a fake model server, incognito against a fake OpenCode binary with a store of its own, the page in headless Chromium, and Firefox past and trusting the network's
   certificate; certutil makes their trust: the files side by side, as many as the free memory holds, sharing one
   Chromium). `cd web && bun tests.ts ./<file>.test.ts` runs some of them.
 - GPU, with Chrysalis's model server stopped (`model unload` in its terminal frees the GPU; the user runs Chrysalis: check the GPU

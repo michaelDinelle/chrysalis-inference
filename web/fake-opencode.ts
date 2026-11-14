@@ -1,15 +1,18 @@
+import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { dirname } from "node:path";
 interface Session { id: string; title: string; dir: string; created: number; updated: number; idle?: number; archived?: number; fork?: object; metadata?: object; model?: object; messages: any[]; persona?: string; parentID?: string; agent?: string }
 
 const PAGE = '<!doctype html>\n<html><head><title>Counter</title></head>\n<body>\n<h1 id="title">Clicks</h1>\n<button id="inc">Add</button>\n</body></html>\n';
 
-export function fakeOpenCode(secret: string) {
+export function fakeOpenCode(secret: string, port = 0, store?: string) {
   let cards = 0;
-  const sessions = new Map<string, Session>(), listeners = new Set<(line: string) => void>(), asks = new Map<string, (reply: string, at: string) => void>();
+  const keep = () => { if (store) { mkdirSync(dirname(store), { recursive: true }); writeFileSync(store, JSON.stringify([...sessions.values()])); } };
+  const sessions = new Map<string, Session>(store && existsSync(store) ? (JSON.parse(readFileSync(store, "utf8")) as Session[]).map((s) => [s.id, s]) : []), listeners = new Set<(line: string) => void>(), asks = new Map<string, (reply: string, at: string) => void>();
   const stops = new Map<string, { now: boolean }>(), staged = new Map<string, string>();
   const log: { prompts: { session: string; text: string; persona?: string; model?: object; agent?: string; command?: string; meta?: any; files?: { uri: string; name?: string }[] }[]; replies: string[]; interrupts: number; answers: (object | string)[] } =
     { prompts: [], replies: [], interrupts: 0, answers: [] };
   const forms = new Map<string, (answer: object | undefined) => void>();
-  let ids = 0;
+  let ids = sessions.size * 1000;
   const held: (() => void)[] = [];
   const release = () => { for (const go of held.splice(0)) go(); };
   const emit = (type: string, data: object) => { for (const fn of listeners) fn(`data: ${JSON.stringify({ id: `evt_${++ids}`, type, data })}\n\n`); };
@@ -104,6 +107,7 @@ export function fakeOpenCode(secret: string) {
       s.messages.push({ id: `msg_${++ids}`, type: "idle", outcome, time: { created: Date.now() } });
       s.updated = s.idle = Date.now();
       stops.delete(s.id);
+      keep();
     };
     if (stopped.now) { end("interrupted"); return emit("session.execution.interrupted", { sessionID, reason: "user" }); }
     const two = `msg_${++ids}`, answer = `${lead}${allowed ? "The file says hello and honey." : "I did not read it."}${chosen}${text === "draw a card" ? ` Card ${++cards}.` : ""} You asked: ${text}`;
@@ -120,12 +124,12 @@ export function fakeOpenCode(secret: string) {
   }
 
   const server = Bun.serve({
-    hostname: "127.0.0.1", port: 0, idleTimeout: 0,
+    hostname: "127.0.0.1", port, idleTimeout: 0,
     async fetch(req) {
       const url = new URL(req.url), path = url.pathname, method = req.method;
       if (req.headers.get("authorization") !== `Basic ${Buffer.from(`opencode:${secret}`).toString("base64")}`) return new Response("", { status: 401 });
       if (path === "/api/info") return json({ version: "2.2.7" });
-      if (path === "/api/model") return json({ data: [{ id: "qwen3.8-27b", providerID: "chrysalis", name: "Qwen3.8 27B", variants: [{ id: "none" }, { id: "low" }, { id: "medium" }] }, { id: "cloud-1", providerID: "elsewhere", name: "Cloud One", settings: { baseURL: "https://cloud.example/v1" } }] });
+      if (path === "/api/model") return json({ data: [{ id: "qwen3.8-27b", providerID: "chrysalis", name: "Qwen3.8 27B", variants: [{ id: "none" }, { id: "low" }, { id: "medium" }] }, ...(store ? [] : [{ id: "cloud-1", providerID: "elsewhere", name: "Cloud One", settings: { baseURL: "https://cloud.example/v1" } }])] });
       if (path === "/api/agent") return json({ data: [{ id: "build", name: "Build", mode: "primary", hidden: false }, { id: "plan", name: "Plan", mode: "primary", hidden: false },
         { id: "explore", name: "Explore", mode: "subagent", hidden: false }, { id: "title", name: "Title", mode: "primary", hidden: true }] });
       if (path === "/api/command") return json({ data: [{ name: "review", description: "review changes" }] });
@@ -165,6 +169,7 @@ export function fakeOpenCode(secret: string) {
       if (rest === "/move" && method === "POST") { s.dir = (await req.json()).directory; return new Response(null, { status: 204 }); }
       if (!rest && method === "DELETE") {
         sessions.delete(s.id);
+        keep();
         return new Response(null, { status: 204 });
       }
       if (!rest && method === "PATCH") {

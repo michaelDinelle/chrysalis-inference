@@ -17,6 +17,7 @@ function rows(): Row[] {
         set: (i: number) => (i === 2 ? core.unload() : core.setModel(core.MODELS[i])) },
     ] : []),
     { label: "Shows", options: ["requests only", "everything"], current: state.verbose ? 1 : 0, set: (i) => core.setVerbose(i === 1) },
+    { label: "Incognito", options: ["off", "on"], current: state.incognito ? 1 : 0, set: (i) => core.setIncognito(i === 1) },
     ...(state.opencode ? [{ label: "OpenCode", options: ["Chrysalis's models only", "outside models too"], current: state.opencode.outside ? 1 : 0, set: (i: number) => core.setOutside(i === 1) }] : []),
     { label: "Restart", options: ["model server", "web chat", "both"], current: -1, set: (i) => core.restart(["model", "web", ""][i]) },
     { label: "Print", options: ["addresses", "QR code", "OpenCode line"], current: -1, set: (i) => [core.links, core.qr, core.opencodeLine][i]() },
@@ -40,6 +41,7 @@ function Status() {
       <Text dimColor> · </Text>
       {state.mode === "local" ? <Text dimColor>this computer only</Text> : state.mode === "network" ? <>network<Text dimColor> · encrypted</Text></> : <Text color="yellow">network · unencrypted</Text>}
       {state.verbose ? <><Text dimColor> · </Text>shows everything</> : null}
+      {state.incognito ? <><Text dimColor> · </Text>incognito</> : null}
     </Text>
   );
 }
