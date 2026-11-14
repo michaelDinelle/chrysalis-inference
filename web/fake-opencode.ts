@@ -3,6 +3,7 @@ interface Session { id: string; title: string; dir: string; created: number; upd
 const PAGE = '<!doctype html>\n<html><head><title>Counter</title></head>\n<body>\n<h1 id="title">Clicks</h1>\n<button id="inc">Add</button>\n</body></html>\n';
 
 export function fakeOpenCode(secret: string) {
+  let cards = 0;
   const sessions = new Map<string, Session>(), listeners = new Set<(line: string) => void>(), asks = new Map<string, (reply: string, at: string) => void>();
   const stops = new Map<string, { now: boolean }>(), staged = new Map<string, string>();
   const log: { prompts: { session: string; text: string; persona?: string; model?: object; agent?: string; command?: string; meta?: any; files?: { uri: string; name?: string }[] }[]; replies: string[]; interrupts: number; answers: (object | string)[] } =
@@ -105,7 +106,7 @@ export function fakeOpenCode(secret: string) {
       stops.delete(s.id);
     };
     if (stopped.now) { end("interrupted"); return emit("session.execution.interrupted", { sessionID, reason: "user" }); }
-    const two = `msg_${++ids}`, answer = `${lead}${allowed ? "The file says hello and honey." : "I did not read it."}${chosen} You asked: ${text}`;
+    const two = `msg_${++ids}`, answer = `${lead}${allowed ? "The file says hello and honey." : "I did not read it."}${chosen}${text === "draw a card" ? ` Card ${++cards}.` : ""} You asked: ${text}`;
     emit("session.step.started", { sessionID, assistantMessageID: two });
     for (let k = 0; k < answer.length; k += 12) emit("session.text.delta", { sessionID, assistantMessageID: two, delta: answer.slice(k, k + 12) });
     emit("session.step.ended", { sessionID, assistantMessageID: two, finish: "stop", tokens: { input: 40, output: 20, cache: { read: 100 } } });

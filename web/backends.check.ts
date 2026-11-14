@@ -162,8 +162,8 @@ for (const b of BACKENDS) {
     }, MINUTES(10));
 
     if (b.name === "llama.cpp") {
-      test("the page, in a browser: the top bar shows the address it is connected to; llama.cpp's pasted there (and its key) connects it, and a reply shows its thinking and its answer", async () => {
-        expect((await connect("127.0.0.1:9")).status).toBe(200);
+      test("the page, in a browser, on llama.cpp: its model is the one offered, and a reply shows its thinking and its answer", async () => {
+        expect((await connect(`localhost:${b.port}`)).status).toBe(200);
         const browser = await puppeteer.launch({ executablePath: process.env.CHROMIUM ?? "/usr/bin/chromium", headless: true,
           args: ["--no-sandbox", "--ignore-certificate-errors"] });
         try {
@@ -171,14 +171,7 @@ for (const b of BACKENDS) {
           const page = await ctx.newPage();
           page.on("pageerror", (e) => { throw e; });
           await page.goto(`${base}/`, { waitUntil: "load" });
-          await page.waitForSelector("#backend:not([hidden])");
-          expect(await page.$eval("#backend-url", (e) => (e as HTMLInputElement).value)).toBe("http://127.0.0.1:9/v1");
-          await page.click("#backend-url", { count: 3 });
-          await page.type("#backend-url", `localhost:${b.port}`);
-          await page.keyboard.press("Enter");
-          await page.waitForFunction((url) => (document.querySelector("#backend-url") as HTMLInputElement).value === url
-            && (document.querySelector("#backend-go") as HTMLElement).hidden && document.querySelector("#backend-dot")!.classList.contains("online"),
-          { timeout: 20_000 }, `http://localhost:${b.port}/v1`);
+          await page.waitForFunction(() => document.querySelector("#model-btn")?.textContent === "Qwen3.5-2B-Q8_0", { timeout: 20_000 });
           expect(await page.$eval("#model-btn", (e) => e.textContent)).toBe("Qwen3.5-2B-Q8_0");
           await page.type("#input", "What is 17 + 25? Answer with the number only.");
           await page.keyboard.press("Enter");

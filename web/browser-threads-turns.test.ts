@@ -162,3 +162,74 @@ test("while OpenCode is connected, a chat with Chrysalis is OpenCode at work in 
   expect([opencode.log.prompts.length - asked, streams.length - chats > 0, await plain.$eval("main", (m) => m.hasAttribute("data-thread"))]).toEqual([0, true, false]);
   await plain.close();
 }, 90_000);
+
+test("swiping in a thread: the latest reply has an arrow at either end of the row under it and a count; the right arrow, the right arrow key with the message box empty, and Regenerate each ask OpenCode again and keep what was written before; an earlier version shows at once and becomes the reply OpenCode holds; the right arrow while a reply is being written starts it over; the next message starts its own count", async () => {
+  const page = await open();
+  await connect(page);
+  await openFolder(page, work);
+  await send(page, "draw a card");
+  const session = opencode.log.prompts.at(-1)!.session, asked = opencode.log.prompts.length;
+  const replies = () => opencode.sessions.get(session)!.messages.filter((m) => m.type === "assistant").map((m) => ((m.content as any[]).find((p) => p.type === "text")?.text ?? "") as string).filter(Boolean);
+  const card = (text: string) => Number(/Card (\d+)\./.exec(text)?.[1]), held = () => card(replies().at(-1)!);
+  const shown = () => page.evaluate(() => { const a = [...document.querySelectorAll<HTMLElement>("#thread > article")].at(-1)!;
+    return [a.querySelector(".pager-n")?.textContent ?? "", Number(/Card (\d+)\./.exec(a.innerText)?.[1])] as [string, number]; });
+  const at = (count: string) => page.waitForFunction((count) => document.querySelector("#send")?.getAttribute("aria-label") === "Send"
+    && [...document.querySelectorAll("#thread > article")].at(-1)!.querySelector(".pager-n")?.textContent === count, { timeout: 20_000 }, count);
+  const users = () => opencode.sessions.get(session)!.messages.filter((m) => m.type === "user").map((m) => m.text);
+  const [count, first] = await shown();
+  expect([count, held()]).toEqual(["1 / 1", first]);
+  expect(await page.$$eval("#thread > article.assistant .msg-foot > .swipe", (b) => b.map((x) => [(x as HTMLElement).dataset.act, (x as HTMLButtonElement).disabled]))).toEqual([["prev", true], ["next", false]]);
+
+  await page.click("#thread > article.assistant .swipe.next");
+  await at("2 / 2");
+  expect([await shown(), held(), opencode.log.prompts.length - asked, users()]).toEqual([["2 / 2", first + 1], first + 1, 1, ["draw a card"]]);
+
+  await page.focus("#input");
+  await page.keyboard.press("ArrowLeft");
+  expect(await shown()).toEqual(["1 / 2", first]);
+  expect([await until(() => held() === first), opencode.log.prompts.length - asked]).toEqual([true, 1]);
+  await page.keyboard.press("ArrowRight");
+  expect(await shown()).toEqual(["2 / 2", first + 1]);
+  await page.keyboard.press("ArrowRight");
+  await at("3 / 3");
+  expect([await shown(), held(), opencode.log.prompts.length - asked, users()]).toEqual([["3 / 3", first + 2], first + 2, 2, ["draw a card"]]);
+  await page.evaluate(() => [...document.querySelectorAll("#thread > article.assistant")].at(-1)!.querySelector<HTMLElement>('[data-act="retry"]')!.click());
+  await at("4 / 4");
+  await page.click("#thread > article.assistant .swipe.prev");
+  expect(await shown()).toEqual(["3 / 4", first + 2]);
+
+  await send(page, "and another thing");
+  expect([(await shown())[0], await page.$$eval("#thread > article.assistant .pager-n", (n) => n.length), users(), card(replies()[0])]).toEqual(["1 / 1", 1, ["draw a card", "and another thing"], first + 2]);
+
+  const before = opencode.log.prompts.length;
+  await page.type("#input", "draw a card slowly");
+  await page.keyboard.press("Enter");
+  await page.waitForSelector('#thread .tool-card[data-state="running"]');
+  await page.keyboard.press("ArrowRight");
+  expect(await until(() => opencode.log.prompts.length - before === 2)).toBe(true);
+  await at("1 / 1");
+  expect([users(), opencode.log.prompts.length - before, await page.$$eval("#thread > article", (a) => a.length)]).toEqual([["draw a card", "and another thing", "draw a card slowly"], 2, 6]);
+  await page.close();
+}, 90_000);
+
+test("the system prompt written in Settings goes to a thread with who is working, in the one instruction Chrysalis gives OpenCode, and leaves it when it is emptied", async () => {
+  const page = await open(), last = () => opencode.log.prompts.at(-1)!;
+  await connect(page);
+  await openFolder(page, work);
+  await send(page, "sort the first shelf");
+  const plain = last().persona ?? "";
+  expect(plain.includes("Keep every answer short.")).toBe(false);
+  await page.click("#settings-open");
+  await page.waitForSelector("#system-input");
+  await page.type("#system-input", "Keep every answer short.");
+  await page.click("#settings-close");
+  await send(page, "and the second");
+  expect(last().persona).toBe([plain, "Keep every answer short."].filter(Boolean).join("\n\n"));
+  await page.click("#settings-open");
+  await page.click("#system-input", { count: 3 });
+  await page.keyboard.press("Backspace");
+  await page.click("#settings-close");
+  await send(page, "and the third");
+  expect(last().persona ?? "").toBe(plain);
+  await page.close();
+}, 60_000);

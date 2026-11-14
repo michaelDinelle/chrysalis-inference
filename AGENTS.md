@@ -27,6 +27,11 @@ README.md shows what Chrysalis is. This file is how to change it.
   takes ("Selected queue", with its refCount); a fifth queue costs the KV cache VRAM and decode about 2%.
 - chrysalis/models.py picks the backend from the platform (CHRYSALIS_BACKEND overrides it), with each backend's own
   settings in ON; bench/measure.py does the same for the bench.
+- chrysalis.sh sets a machine up and hands its terminal to web/cli.ts, which runs the model server and web/server.ts,
+  shows each request as it finishes and takes commands: web/cli-core.ts is the servers, the state and the commands,
+  web/cli-ui.tsx draws it with Ink (the switches, the status line, the prompt), and without a terminal it is plain
+  lines. The web server tells it who asks and what to ask over Bun's IPC. It shows the servers' own output only after `verbose`, and keeps
+  nothing: no log, no history file.
 - tests/<backend>/ hold kernel checks; tests/*.py check any backend through the C API.
 - A new backend: engine/<name>/build.mk building build/libchrysalis and build/libchrysalis_fn, with `kernels` and
   `kernels_fn`, its model checks in BACKEND_TESTS and BACKEND_TESTS_FN (the builds they need in TEST_BUILDS and
@@ -83,10 +88,10 @@ None: no comments or docstrings anywhere in the repo, in any language, including
   `data/venv/bin/python tests/test_chat.py`, `data/venv/bin/python tests/test_documents.py` (which PDF pages are
   pictured), `make build/test_cpujob_fn && build/test_cpujob_fn`, `make test_voice` (the voice service: its features against
   transformers', turns, echo and barge-in over its WebSocket), `make test_web` (the web UI's sampler against
-  the engine's, its server against a fake Chrysalis and a fake OpenCode, the page in headless Chromium, and Firefox past and trusting the network's
+  the engine's, its server against a fake Chrysalis and a fake OpenCode, the terminal against a fake model server, the page in headless Chromium, and Firefox past and trusting the network's
   certificate; certutil makes their trust: the files side by side, as many as the free memory holds, sharing one
   Chromium). `cd web && bun tests.ts ./<file>.test.ts` runs some of them.
-- GPU, with Chrysalis's model server stopped (the chat's Stop, which frees the GPU; the user runs Chrysalis: check the GPU
+- GPU, with Chrysalis's model server stopped (`model unload` in its terminal frees the GPU; the user runs Chrysalis: check the GPU
   is idle, ask once per task, then just say when it stops and for how long): `make test` (test_web, the 27B kernels,
   then the model in-process: chat format, cache, snapshots and generation (held answers' masked steps too), the server
   (its Anthropic and Responses APIs through those SDKs, which data/venv has; held answers and strict tool calls,

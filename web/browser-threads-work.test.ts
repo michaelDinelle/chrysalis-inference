@@ -155,12 +155,6 @@ test("a character's chat and a group's are the same system: with OpenCode connec
   expect([last().text, opencode.sessions.get(last().session)!.dir, opencode.sessions.get(last().session)!.title, last().meta, scene(), streams.length - chats]).toEqual(["count my jars", home, "count my jars", { next: "Mira" }, { cast: ["Mira"], cards: [mira], greeting: "Welcome to the hive.", greeter: "Mira" }, 0]);
   expect([/Write Mira's next reply/.test(last().persona!), /Mira keeps bees\./.test(last().persona!), /greeting:\nWelcome to the hive\./.test(last().persona!),
     await speaker(page), (await said(page)).startsWith("Mira here.")]).toEqual([true, true, true, "Mira", true]);
-  await openSettings(page);
-  await page.click("#sent-open");
-  await page.waitForFunction(() => (document.querySelector("#sent-view") as HTMLDialogElement).open);
-  expect(await page.$eval("#sent-view", (v) => [v.querySelector("#sent-about")!.textContent!.endsWith("Chrysalis adds who is working, after OpenCode's prompt:"), v.querySelector("#sent-text")!.textContent])).toEqual([true, last().persona!]);
-  await page.keyboard.press("Escape");
-  await closeSettings(page);
 
   await inRow(page, "Mira", ".cast-bring");
   await page.evaluate(() => [...document.querySelectorAll<HTMLElement>("#cast-invite .invite-row")].find((r) => r.querySelector(".invite-name")!.textContent === "Otto")!.click());

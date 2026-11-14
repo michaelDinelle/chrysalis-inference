@@ -11,7 +11,7 @@ test("voice mode's note goes before the first question said and not again, the t
   const note = await noteShown(page);
   expect(note).toMatch(/^The user is talking to you by voice/);
   await openSettings(page);
-  expect(await page.$$eval("#settings textarea", (t) => t.length)).toBe(0);
+  expect(await page.$$eval("#settings textarea", (t) => t.map((x) => [x.id, (x as HTMLTextAreaElement).value]))).toEqual([["system-input", ""]]);
   await page.$eval("#knob-voice_speed", (el) => { (el as HTMLInputElement).value = "1.2"; el.dispatchEvent(new Event("change")); });
   await closeSettings(page);
   await page.waitForFunction(() => /^voice /.test(document.querySelector('#thread > article[data-i="7"] .stats')?.textContent ?? ""), { timeout: 15_000 });
@@ -26,25 +26,25 @@ test("voice mode's note goes before the first question said and not again, the t
   await page.close();
 }, 45_000);
 
-test("What the model is sent shows the next request as Chrysalis gets it: the one system prompt, every message; Chrysalis's card is that prompt, its description as written and its scenario after it", async () => {
+test("a chat is sent one system prompt: the system prompt written in Settings goes with every chat, kept through Reset, after whoever the chat is with and before how to make artifacts, and nothing of it once it is emptied; Chrysalis's card is its own prompt, its description as written and its scenario after it", async () => {
   const page = await open();
   await page.setViewport({ width: 1600, height: 900 });
   await send(page, "first");
+  expect(lastStream.messages[0]).toEqual({ role: "system", content: ARTIFACTS_PROMPT });
   await openSettings(page, "chat");
-  await page.click("#sent-open");
-  await page.waitForFunction(() => (document.querySelector("#sent-view") as HTMLDialogElement).open && !!document.querySelector("#sent-text")?.textContent);
-  const shown = await page.$eval("#sent-text", (e) => e.textContent!);
-  await page.keyboard.press("Escape");
+  await page.type("#system-input", "Answer {{MODEL}}'s way: plainly.");
+  await page.click("#settings-reset");
   await closeSettings(page);
   await send(page, "second");
-  const next = lastStream;
-  let at = 0;
-  for (const m of next.messages.slice(0, -1)) {
-    const k = shown.indexOf(`── ${m.role}\n${m.content}`, at);
-    expect([m.role, k]).not.toEqual([m.role, -1]);
-    at = k;
-  }
-  expect(next.messages[0]).toEqual({ role: "system", content: ARTIFACTS_PROMPT });
+  expect(lastStream.messages.filter((m: any) => m.role === "system")).toEqual([{ role: "system", content: `Answer Qwen3.8-27B's way: plainly.\n\n${ARTIFACTS_PROMPT}` }]);
+  expect(await page.evaluate(() => JSON.parse(sessionStorage.getItem("settings2")!).global)).toBe("Answer {{MODEL}}'s way: plainly.");
+  await openSettings(page, "chat");
+  expect(await page.$eval("#system-input", (t) => (t as HTMLTextAreaElement).value)).toBe("Answer {{MODEL}}'s way: plainly.");
+  await page.click("#system-input", { count: 3 });
+  await page.keyboard.press("Backspace");
+  await closeSettings(page);
+  await send(page, "third");
+  expect(lastStream.messages[0]).toEqual({ role: "system", content: ARTIFACTS_PROMPT });
   await page.click("#thread > article.msg.assistant .speaker");
   await page.waitForSelector("#cast-sheet:not([hidden]) .card-field textarea");
   const typeIn = async (label: string, text: string) => {

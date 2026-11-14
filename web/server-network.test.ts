@@ -105,7 +105,7 @@ test("on the network only the devices this computer let in get past the pages, a
     expect(await connecting()).toBe(true);
     expect([(await asked("/api/status")).status, (await asked("/api/threads")).status, (await asked("/api/pair")).status,
       (await asked("/api/chat", { method: "POST", body: JSON.stringify({ stream: true, messages: [] }), headers: json })).status,
-      (await asked("/api/chrysalis/stop", { method: "POST" })).status]).toEqual([401, 401, 401, 401, 401]);
+      (await asked("/api/chrysalis/load", { method: "POST", body: JSON.stringify({ model: "qwen3.8-27b" }), headers: json })).status]).toEqual([401, 401, 401, 401, 401]);
     expect(await voice()).toBe("refused");
     expect((await fetch(`${here}/api/status`)).status).toBe(200);
 
@@ -429,36 +429,6 @@ test("a computer with only OpenCode gets in from one pinned line and an approval
   }
 });
 
-test("a question answered elsewhere leaves the terminal, so the next one is asked rather than queued behind it", async () => {
-  const dir = TLS(), free = Bun.serve({ hostname: "127.0.0.1", port: 0, fetch: () => new Response() }), port = free.port!, here = `http://127.0.0.1:${port}`;
-  free.stop(true);
-  const proc = Bun.spawn(["python3", "-c", "import pty, sys; pty.spawn(sys.argv[1:])", process.execPath, "server.ts"], {
-    cwd: import.meta.dir, stdin: "pipe", stdout: "pipe", stderr: "inherit",
-    env: { ...process.env, PORT: String(port), CHRYSALIS_URL: `http://127.0.0.1:${fake.port}`, CHRYSALIS_HOST: "0.0.0.0", NODE_ENV: "production",
-      CHRYSALIS_SELF_AS_NETWORK: "1", CHRYSALIS_TLS_DIR: dir, CHRYSALIS_CHECK_PORT: "0", CHRYSALIS_LINK_PORT: "0" },
-  });
-  const reader = proc.stdout.getReader(), dec = new TextDecoder(), json = { "Content-Type": "application/json" };
-  let out = "";
-  void (async () => { for (let r = await reader.read(); !r.done; r = await reader.read()) out += dec.decode(r.value); })();
-  const shown = async (text: string) => {
-    for (const end = Date.now() + 8000; !out.includes(text); await Bun.sleep(100))
-      if (Date.now() > end) throw new Error(`the terminal never said ${text}: ${out}`);
-  };
-  try {
-    await shown("OpenCode on another computer");
-    const net = /https:\/\/[\d.]+:\d+/.exec(out)![0];
-    const ask = async (name: string) => (await (await fetch(`${net}/opencode/ask`, { method: "POST", headers: json, body: JSON.stringify({ name }), tls: { rejectUnauthorized: false } })).text()).split(" ");
-    const [, first] = await ask("first"), [, second] = await ask("second");
-    await shown("first asks");
-    expect(out).not.toContain("second asks");
-    expect((await fetch(`${here}/api/pair/deny`, { method: "POST", headers: json, body: JSON.stringify({ code: first }) })).status).toBe(204);
-    await shown("answered elsewhere");
-    await shown(`second asks to use this computer's Chrysalis · ${second.slice(0, 3)} ${second.slice(3)}`);
-  } finally {
-    proc.kill();
-  }
-}, 30_000);
-
 test("the page hears Chrysalis is off where its address takes a connection and never answers, as a port no one listens on does in WSL's mirrored networking", async () => {
   const mute = Bun.listen({ hostname: "127.0.0.1", port: 0, socket: { data() {} } }), run = mkdtempSync(`${RUN}/run-`);
   const proc = Bun.spawn([process.execPath, "server.ts"], {
@@ -502,7 +472,7 @@ test("a computer with neither systemd nor openssl, as a Mac is, runs the chat: t
       fetch(`${url}${path}`, { method: "POST", headers: json, body: JSON.stringify(body) });
     const status = await fetch(`${url}/api/status`), seen = status.ok ? await status.json() : {};
     expect([status.status, seen.state, Array.isArray(seen.link?.found)]).toEqual([200, "offline", true]);
-    expect([(await post("/api/chrysalis/stop", {})).status, (await post("/api/chrysalis/load", { model: "qwen3.8-27b" })).status]).toEqual([204, 502]);
+    expect((await post("/api/chrysalis/load", { model: "qwen3.8-27b" })).status).toBe(502);
   } finally {
     proc.kill();
   }

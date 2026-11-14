@@ -39,7 +39,7 @@ test("the sea drawn by the CPU, in a browser without WebGL, is the sea WebGL2 dr
   }
 }, 90_000);
 
-test("the sea stays behind a chat, the butterfly sunk into it and every click the chat's, and a new chat raises it again; Settings takes the sea away from chats (remembered) and leaves it in a new chat", async () => {
+test("the sea stays behind a chat, the butterfly sunk into it and every click the chat's, and a new chat raises it again; Settings takes the sea away (remembered), from chats and from a new chat, which is then empty, and brings it back", async () => {
   const gl = await puppeteer.launch({ executablePath: process.env.CHROMIUM ?? "/usr/bin/chromium", headless: true, args: [...CHAT_ARGS, "--enable-unsafe-swiftshader"] });
   try {
     const page = await (await chatContext(gl)).newPage();
@@ -88,9 +88,16 @@ test("the sea stays behind a chat, the butterfly sunk into it and every click th
     await page.waitForFunction((x) => document.getElementById("thread")!.getBoundingClientRect().x === x, {}, column.x);
     expect((await look(page, margin)).lit).toBe(0);
     await fresh(page);
-    expect(await risen()).toBeGreaterThan(800);
+    const plainly = () => page.evaluate(() => [document.querySelector("#thread .empty")!.childElementCount === 0, getComputedStyle(document.querySelector(".sea")!).display]);
+    expect(await plainly()).toEqual([true, "none"]);
+    expect((await look(page, margin)).lit).toBe(0);
     await idle(page, page.reload());
-    expect(await page.$eval("#sea-switch", (b) => b.getAttribute("aria-checked"))).toBe("false");
+    expect([await page.$eval("#sea-switch", (b) => b.getAttribute("aria-checked")), await plainly()]).toEqual(["false", [true, "none"]]);
+    await openSettings(page);
+    await page.click("#sea-switch");
+    await closeSettings(page);
+    expect((await plainly())[1]).toBe("block");
+    expect(await risen()).toBeGreaterThan(800);
     await page.close();
   } finally {
     await gl.close();

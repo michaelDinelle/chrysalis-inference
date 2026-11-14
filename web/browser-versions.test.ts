@@ -117,3 +117,58 @@ test("a reply being written in a version that is not on screen goes on, and show
   expect(await pagerOf(page, 1)).toBe("2 / 2");
   await page.close();
 }, 60_000);
+
+test("swiping the latest reply: its pager shows from the first version and its next arrow writes a new one; with the message box empty the arrow keys go between versions and past the last to a new one, and move the caret once there is text; the right arrow while a reply is being written starts that reply over; a drag across the reply on a touch screen does the same", async () => {
+  const page = await open();
+  await send(page, "one");
+  await send(page, "two");
+  expect([await pagerOf(page, 1), await pagerOf(page, 3)]).toEqual(["", "1 / 1"]);
+  await page.click('#thread > article[data-i="3"] [data-act="next"]');
+  await untilIdle(page);
+  expect([await articles(page), await pagerOf(page, 3)]).toEqual([["one", "You said: one", "two", "You said: two"], "2 / 2"]);
+  expect(lastStream.messages.filter((m: any) => m.role !== "system").map((m: any) => m.content)).toEqual(["one", "You said: one", "two"]);
+
+  await page.focus("#input");
+  await page.keyboard.press("ArrowLeft");
+  expect(await pagerOf(page, 3)).toBe("1 / 2");
+  await page.keyboard.press("ArrowRight");
+  expect(await pagerOf(page, 3)).toBe("2 / 2");
+  await page.keyboard.press("ArrowRight");
+  await untilIdle(page);
+  expect(await pagerOf(page, 3)).toBe("3 / 3");
+  expect(await page.evaluate(() => document.activeElement?.id)).toBe("input");
+  await page.type("#input", "ab");
+  await page.keyboard.press("ArrowLeft");
+  await page.keyboard.type("c");
+  expect([await pagerOf(page, 3), await page.$eval("#input", (t) => (t as HTMLTextAreaElement).value)]).toEqual(["3 / 3", "acb"]);
+
+  const box = (await (await page.$('#thread > article[data-i="3"] .markdown'))!.boundingBox())!, y = box.y + box.height / 2;
+  const drag = async (from: number, to: number, down = 0) => {
+    await page.touchscreen.touchStart(from, y);
+    await page.touchscreen.touchMove(to, y + down);
+    await page.touchscreen.touchEnd();
+  };
+  await drag(box.x + 80, box.x + 260);
+  expect(await pagerOf(page, 3)).toBe("2 / 3");
+  await drag(box.x + 80, box.x + 120);
+  await drag(box.x + 80, box.x + 180, 120);
+  expect(await pagerOf(page, 3)).toBe("2 / 3");
+  await drag(box.x + 260, box.x + 80);
+  expect(await pagerOf(page, 3)).toBe("3 / 3");
+  await drag(box.x + 260, box.x + 80);
+  await untilIdle(page);
+  expect(await pagerOf(page, 3)).toBe("4 / 4");
+
+  await page.$eval("#input", (t) => { (t as HTMLTextAreaElement).value = ""; });
+  await page.type("#input", "slow three");
+  await page.keyboard.press("Enter");
+  await page.waitForFunction(() => /w3/.test(document.querySelector('#thread > article[data-i="5"] .markdown')?.textContent ?? ""), { timeout: 10_000 });
+  const begun = streams.length;
+  await page.keyboard.press("ArrowRight");
+  await page.waitForFunction(() => !/w3/.test(document.querySelector('#thread > article[data-i="5"] .markdown')?.textContent ?? ""), { timeout: 10_000 });
+  fakes.hurry = true;
+  await untilIdle(page);
+  fakes.hurry = false;
+  expect([await pagerOf(page, 5), streams.length - begun, (await articles(page)).length]).toEqual(["1 / 1", 1, 6]);
+  await page.close();
+}, 60_000);

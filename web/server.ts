@@ -1,6 +1,5 @@
 import { existsSync, rmSync, statSync, writeFileSync, readFileSync } from "node:fs";
 import { homedir, hostname } from "node:os";
-import { createInterface } from "node:readline";
 import type { BunPlugin, Server, Subprocess } from "bun";
 import app from "./index.html";
 import { Backends, standard } from "./backend";
@@ -23,6 +22,8 @@ const PAGE_FILES = ["index.html", "app.ts", "sampler.ts", "files.ts", "wire.ts",
 const BUILT = Bun.hash((await Promise.all(PAGE_FILES.map((f) => Bun.file(f).text()))).join("\0")).toString(36);
 const BUILD = () => LIVE ? Bun.hash(PAGE_FILES.map((f) => { const at = statSync(f); return `${at.mtimeMs}:${at.size}`; }).join("\0")).toString(36) : BUILT;
 for (const sig of ["SIGINT", "SIGTERM"] as const) process.on(sig, () => process.exit(0));
+process.on("disconnect", () => process.exit(0));
+const tell = (m: object) => void process.send?.(m);
 
 const NAMES = new Set(["", "localhost", hostname().toLowerCase(), `${hostname().toLowerCase()}.local`, netName()]);
 const hostOk = (req: Request) => {
@@ -32,7 +33,7 @@ const hostOk = (req: Request) => {
 type Srv = Server<VoiceSocket>;
 type Handler = (req: Request, srv: Srv) => Response | undefined | Promise<Response>;
 const open = (handler: Handler) => (req: Request, srv: Srv) => (hostOk(req) ? handler(req, srv) : new Response("unknown host", { status: 403 }));
-const SELF_AS_NETWORK = process.env.CHRYSALIS_SELF_AS_NETWORK === "1";
+const SELF_AS_NETWORK = process.env.CHRYSALIS_SELF_AS_NETWORK === "1", OPEN = process.env.CHRYSALIS_INSECURE === "1";
 const self = (req: Request, srv: Srv) => {
   const at = srv.requestIP(req)?.address.replace(/^::ffff:/, "") ?? "";
   return at.startsWith("127.") || at === "::1" || (!SELF_AS_NETWORK && lanAddresses().includes(at));
@@ -40,7 +41,7 @@ const self = (req: Request, srv: Srv) => {
 const fromNetwork = (req: Request, srv: Srv) => !self(req, srv);
 const PAST_WARNING = { Connection: "close" };
 const guarded = (handler: Handler) => open((req, srv) => {
-  if (!fromNetwork(req, srv)) return handler(req, srv);
+  if (OPEN || !fromNetwork(req, srv)) return handler(req, srv);
   const found = devices?.find(req);
   if (found && devices!.trusted(found.device)) return handler(req, srv);
   return Response.json(found ? { error: { message: "this browser has not shown lately that it trusts Chrysalis: its page checks again" }, check: true }
@@ -48,6 +49,13 @@ const guarded = (handler: Handler) => open((req, srv) => {
 });
 const here = (handler: Handler) => guarded((req, srv) => fromNetwork(req, srv)
   ? Response.json({ error: { message: "only on the computer Chrysalis runs on" } }, { status: 403 }) : handler(req, srv));
+const KEPT_HERE = "Chrysalis is on the network without encryption, so OpenCode and voice stay on the computer it runs on";
+const trusted = (handler: Handler) => guarded((req, srv) => OPEN && fromNetwork(req, srv)
+  ? Response.json({ error: { message: KEPT_HERE } }, { status: 403 }) : handler(req, srv));
+const ASKS = /\/(chat\/completions|messages|responses)$/;
+const arrived = (req: Request, srv: Srv) => {
+  if (fromNetwork(req, srv)) tell({ from: devices?.find(req)?.device.name ?? srv.requestIP(req)?.address.replace(/^::ffff:/, "") ?? "the network" });
+};
 const json = (handler: (req: Request, srv: Srv) => Response | Promise<Response>) => (req: Request, srv: Srv) =>
   (req.headers.get("content-type") ?? "").startsWith("application/json") ? handler(req, srv) : new Response("JSON only", { status: 415 });
 
@@ -103,6 +111,19 @@ function startJob(body: string): Job {
           job.ctrl.signal.addEventListener("abort", () => (job.asks.delete(call), resolve("stop")), { once: true });
         });
         await harness.ensure(CHRYSALIS);
+        const before = raw.chrysalis_thread.session && turns.get(raw.chrysalis_thread.session);
+        if (before) {
+          before.ctrl.abort();
+          await new Promise<void>((over) => {
+            const check = () => { if (before.done || before.events.at(-1) === "[DONE]") { before.waiters.delete(check); over(); } };
+            before.waiters.add(check);
+            check();
+          });
+        }
+        if (raw.chrysalis_thread.again && raw.chrysalis_thread.session) {
+          await harness.settled(raw.chrysalis_thread.session, job.ctrl.signal);
+          await harness.again(raw.chrysalis_thread.session);
+        }
         let from = 0, to = 0;
         const first = (d: any) => {
           if (d?.choices?.[0]?.delta) { const now = Date.now(); job.tFirst ??= now; job.tLast = to = now; from ||= now; if (d.choices[0].delta.content) job.tAnswer ??= now; }
@@ -514,7 +535,7 @@ function voiceClosed() {
   }, VOICE_IDLE_MS);
 }
 
-const LAN = process.env.CHRYSALIS_HOST === "0.0.0.0", dir = tlsDir();
+const LAN = process.env.CHRYSALIS_HOST === "0.0.0.0" && !OPEN, dir = tlsDir();
 let certs: ReturnType<typeof webTls> | undefined;
 const tls = () => (certs ??= webTls(dir));
 const devices = new Devices(`${dir}/devices.json`), backends = new Backends(`${dir}/backend.json`, `${CHRYSALIS}/v1`), sea = await deviceScript();
@@ -522,7 +543,7 @@ const link = new Link(`${dir}/link.json`, LAN ? tls().link.fingerprint : ""), MA
 const PAGE = { "Content-Type": "text/html; charset=utf-8", "Cache-Control": "no-store" };
 const serve = (hostname: string, port: number) => Bun.serve<VoiceSocket>({
   hostname,
-  tls: hostname === "127.0.0.1" ? undefined : { cert: tls().cert, key: tls().key },
+  tls: hostname === "127.0.0.1" || OPEN ? undefined : { cert: tls().cert, key: tls().key },
   maxRequestBodySize: 1 << 30,
   port,
   development: process.env.NODE_ENV !== "production",
@@ -564,7 +585,7 @@ const serve = (hostname: string, port: number) => Bun.serve<VoiceSocket>({
       if (to) return tunedProxy(req, srv, `${Buffer.from(to, "base64url").toString().replace(/\/+$/, "")}${path ?? ""}`);
       return rest.startsWith("/v1/") ? tunedProxy(req, srv, `${CHRYSALIS}${rest}`) : new Response("not found", { status: 404 });
     },
-    "/v1/*": open((req, srv) => devices.find(req)?.device.kind === "computer" ? proxy(req, srv)
+    "/v1/*": open((req, srv) => OPEN || devices.find(req)?.device.kind === "computer" ? proxy(req, srv)
       : Response.json({ error: { message: "this computer is not let in to Chrysalis here" } }, { status: 401 })),
     "/pair/ask": {
       POST: open(json(async (req) => {
@@ -614,7 +635,7 @@ img.src = ${JSON.stringify(checkUrl(req))} + "?t=" + Date.now();
     "/api/pair/deny": {
       POST: here(json(async (req) => new Response(null, { status: devices?.deny(String((await req.json().catch(() => ({})))?.code ?? "")) ? 204 : 404 }))),
     },
-    "/api/pair/:id": { DELETE: guarded((req) => {
+    "/api/pair/:id": { DELETE: trusted((req) => {
       const id = (req as Request & { params: { id: string } }).params.id;
       attached.get(id)?.close();
       return new Response(null, { status: devices?.remove(id) ? 204 : 404 });
@@ -642,8 +663,10 @@ img.src = ${JSON.stringify(checkUrl(req))} + "?t=" + Date.now();
     "/api/chat": {
       POST: guarded(json(async (req, srv) => {
         srv.timeout(req, 0);
-        const body = await req.text();
-        if ((() => { try { return JSON.parse(body).stream; } catch { return false; } })()) return follow(startJob(body), 0);
+        const body = await req.text(), sent = (() => { try { return JSON.parse(body); } catch { return undefined; } })();
+        if (sent?.chrysalis_thread && OPEN && fromNetwork(req, srv)) return Response.json({ error: { message: KEPT_HERE } }, { status: 403 });
+        arrived(req, srv);
+        if (sent?.stream) return follow(startJob(body), 0);
         try {
           const r = await fetch(`${backends.url}/chat/completions`, {
             method: "POST", body: backends.isChrysalis ? body : JSON.stringify(standard(JSON.parse(body))), headers: backends.headers(), signal: req.signal,
@@ -652,11 +675,6 @@ img.src = ${JSON.stringify(checkUrl(req))} + "?t=" + Date.now();
         } catch {
           return Response.json({ error: { message: new ChrysalisDown().message } }, { status: 502 });
         }
-      })),
-    },
-    "/api/preview": {
-      POST: guarded(json(async (req) => {
-        return Response.json({ body: asSent(await req.json().catch(() => ({}))) });
       })),
     },
     "/api/chat/:id": {
@@ -684,18 +702,18 @@ img.src = ${JSON.stringify(checkUrl(req))} + "?t=" + Date.now();
     },
 
     "/api/threads": {
-      GET: guarded(async () => {
+      GET: trusted(async () => {
         const at = harness.state();
         if (at.state !== "on") return Response.json({ ...at, outside: harness.outsideAllowed(), install: harness.INSTALL, wanted: !existsSync(OPENCODE_OFF) });
         const [threads, models, agents] = await Promise.all([harness.threads(), harness.models(), harness.agents()]);
         return Response.json({ ...at, outside: harness.outsideAllowed(), machines: [{ id: "", name: MACHINE, home: homedir(), kind: process.platform }, ...harness.machines()], name: connector.name, home: homedir(), models, agents, threads: threads.map((t) => ({ ...t, job: turns.get(t.id)?.id })) });
       }),
-      DELETE: guarded(() => {
+      DELETE: trusted(() => {
         writeFileSync(OPENCODE_OFF, "");
         harness.stop();
         return new Response(null, { status: 204 });
       }),
-      POST: guarded(async () => {
+      POST: trusted(async () => {
         rmSync(OPENCODE_OFF, { force: true });
         try { await harness.ensure(CHRYSALIS); } catch (e) { return Response.json({ error: { message: (e as Error).message } }, { status: 502 }); }
         return Response.json(harness.state());
@@ -706,19 +724,19 @@ img.src = ${JSON.stringify(checkUrl(req))} + "?t=" + Date.now();
         writeFileSync(OPENCODE_OUTSIDE, "");
         return outsideNow(true);
       })),
-      DELETE: guarded(async () => {
+      DELETE: trusted(async () => {
         rmSync(OPENCODE_OUTSIDE, { force: true });
         return outsideNow(false);
       }),
     },
     "/api/threads/folders": {
-      GET: guarded(async (req) => {
+      GET: trusted(async (req) => {
         try { return Response.json(await harness.folders(new URL(req.url).searchParams.get("path") ?? "", new URL(req.url).searchParams.get("machine") || undefined)); }
         catch { return Response.json({ error: { message: "that folder cannot be read" } }, { status: 404 }); }
       }),
     },
     "/api/threads/:id/say": {
-      POST: guarded(json(async (req) => {
+      POST: trusted(json(async (req) => {
         const text = String((await req.json().catch(() => ({})))?.text ?? "");
         if (!text.trim()) return Response.json({ error: { message: "text" } }, { status: 400 });
         try { await harness.say((req as Request & { params: { id: string } }).params.id, text); } catch (e) { return Response.json({ error: { message: (e as Error).message } }, { status: 502 }); }
@@ -726,14 +744,14 @@ img.src = ${JSON.stringify(checkUrl(req))} + "?t=" + Date.now();
       })),
     },
     "/api/threads/:id/undo": {
-      POST: guarded(json(async (req) => {
+      POST: trusted(json(async (req) => {
         try { await harness.undo((req as Request & { params: { id: string } }).params.id, String((await req.json().catch(() => ({})))?.message ?? "")); }
         catch (e) { return Response.json({ error: { message: (e as Error).message } }, { status: 502 }); }
         return new Response(null, { status: 204 });
       })),
     },
     "/api/threads/:id/move": {
-      POST: guarded(json(async (req) => {
+      POST: trusted(json(async (req) => {
         const dir = String((await req.json().catch(() => ({})))?.dir ?? ""), id = (req as Request & { params: { id: string } }).params.id;
         if (!dir || !existsSync(dir)) return Response.json({ error: { message: `There is no folder ${dir} on this computer` } }, { status: 400 });
         if (turns.has(id)) return Response.json({ error: { message: "OpenCode is still working in this chat" } }, { status: 409 });
@@ -742,17 +760,17 @@ img.src = ${JSON.stringify(checkUrl(req))} + "?t=" + Date.now();
       })),
     },
     "/api/threads/:id/rewrite": {
-      POST: guarded(json(async (req) => {
-        const { drop, edit } = (await req.json().catch(() => ({}))) ?? {}, id = (req as Request & { params: { id: string } }).params.id;
+      POST: trusted(json(async (req) => {
+        const { drop, edit, last } = (await req.json().catch(() => ({}))) ?? {}, id = (req as Request & { params: { id: string } }).params.id;
         const gone = Array.isArray(drop) ? drop.filter((x: unknown) => typeof x === "string") : [], put = typeof edit?.id === "string" && typeof edit?.text === "string" ? { id: edit.id, text: edit.text } : undefined;
-        if (!gone.length && !put) return Response.json({ error: { message: "drop or edit" } }, { status: 400 });
+        if (!gone.length && !put && typeof last !== "string") return Response.json({ error: { message: "drop, edit or last" } }, { status: 400 });
         if (turns.has(id)) return Response.json({ error: { message: "OpenCode is still working in this chat" } }, { status: 409 });
-        try { await harness.rewrite(id, { drop: gone, ...(put ? { edit: put } : {}) }); } catch (e) { return Response.json({ error: { message: (e as Error).message } }, { status: 502 }); }
+        try { await harness.rewrite(id, typeof last === "string" ? { last } : { drop: gone, ...(put ? { edit: put } : {}) }); } catch (e) { return Response.json({ error: { message: (e as Error).message } }, { status: 502 }); }
         return new Response(null, { status: 204 });
       })),
     },
     "/api/threads/commands": {
-      GET: guarded(async (req) => {
+      GET: trusted(async (req) => {
         const q = new URL(req.url).searchParams, dir = q.get("dir") ?? "", machine = q.get("machine") || undefined;
         try {
           const [commands, skills] = await Promise.all([harness.commands(dir, machine), harness.skills(dir, machine).catch(() => [])]);
@@ -761,7 +779,7 @@ img.src = ${JSON.stringify(checkUrl(req))} + "?t=" + Date.now();
       }),
     },
     "/api/threads/:id/compact": {
-      POST: guarded(json(async (req) => {
+      POST: trusted(json(async (req) => {
         const id = (req as Request & { params: { id: string } }).params.id;
         if (turns.has(id)) return Response.json({ error: { message: "OpenCode is still working in this chat" } }, { status: 409 });
         try { await harness.compact(id); } catch (e) { return Response.json({ error: { message: (e as Error).message } }, { status: 502 }); }
@@ -769,14 +787,14 @@ img.src = ${JSON.stringify(checkUrl(req))} + "?t=" + Date.now();
       })),
     },
     "/api/threads/:id/skill": {
-      POST: guarded(json(async (req) => {
+      POST: trusted(json(async (req) => {
         const id = (req as Request & { params: { id: string } }).params.id, which = String((await req.json().catch(() => ({})))?.id ?? "");
         try { await harness.skill(id, which); } catch (e) { return Response.json({ error: { message: (e as Error).message } }, { status: 502 }); }
         return new Response(null, { status: 204 });
       })),
     },
     "/api/threads/:id/handoff": {
-      POST: guarded(json(async (req) => {
+      POST: trusted(json(async (req) => {
         const id = (req as Request & { params: { id: string } }).params.id, machine = String((await req.json().catch(() => ({})))?.machine ?? "");
         if (turns.has(id)) return Response.json({ error: { message: "OpenCode is still working in this chat" } }, { status: 409 });
         try { return Response.json(await harness.handoff(id, machine || undefined)); }
@@ -784,26 +802,26 @@ img.src = ${JSON.stringify(checkUrl(req))} + "?t=" + Date.now();
       })),
     },
     "/api/threads/:id/fork": {
-      POST: guarded(json(async (req) => {
+      POST: trusted(json(async (req) => {
         const before = (await req.json().catch(() => ({})))?.before;
         try { return Response.json({ id: await harness.fork((req as Request & { params: { id: string } }).params.id, typeof before === "string" ? before : undefined) }); }
         catch (e) { return Response.json({ error: { message: (e as Error).message } }, { status: 502 }); }
       })),
     },
     "/api/threads/:id": {
-      GET: guarded(async (req) => {
+      GET: trusted(async (req) => {
         const id = (req as Request & { params: { id: string } }).params.id;
         try { return Response.json({ ...(await harness.transcript(id)), job: turns.get(id)?.id }); }
         catch (e) { return Response.json({ error: { message: (e as Error).message } }, { status: 502 }); }
       }),
-      PATCH: guarded(json(async (req) => {
+      PATCH: trusted(json(async (req) => {
         const { title, archived, scene } = (await req.json().catch(() => ({}))) ?? {};
         try { await harness.change((req as Request & { params: { id: string } }).params.id, { ...(String(title ?? "").trim() ? { title: String(title).trim() } : {}), ...(typeof archived === "boolean" ? { archived } : {}),
           ...(scene === null || Array.isArray(scene?.cast) ? { scene } : {}) }); }
         catch (e) { return Response.json({ error: { message: (e as Error).message } }, { status: 502 }); }
         return new Response(null, { status: 204 });
       })),
-      DELETE: guarded(async (req) => {
+      DELETE: trusted(async (req) => {
         const id = (req as Request & { params: { id: string } }).params.id;
         turns.get(id)?.ctrl.abort();
         try { await harness.remove(id); } catch (e) { return Response.json({ error: { message: (e as Error).message } }, { status: 502 }); }
@@ -811,7 +829,7 @@ img.src = ${JSON.stringify(checkUrl(req))} + "?t=" + Date.now();
       }),
     },
 
-    "/api/voice": guarded((req, srv) => {
+    "/api/voice": trusted((req, srv) => {
       let same = false;
       try { same = new URL(req.headers.get("origin") ?? "").host === req.headers.get("host"); } catch {  }
       if (!same) return new Response("only Chrysalis's own pages", { status: 403 });
@@ -866,7 +884,6 @@ img.src = ${JSON.stringify(checkUrl(req))} + "?t=" + Date.now();
         }
       }),
     },
-    "/api/chrysalis/stop": { POST: guarded(async () => (await engineCall("/chrysalis/unload").catch(() => {}), new Response(null, { status: 204 }))) },
   },
   websocket: {
     open(ws) {
@@ -930,7 +947,7 @@ img.src = ${JSON.stringify(checkUrl(req))} + "?t=" + Date.now();
 });
 
 const letIn = (req: Request, srv: Srv) => {
-  if (self(req, srv)) return true;
+  if (OPEN || self(req, srv)) return true;
   const found = devices.find(req);
   return !!found && devices.trusted(found.device);
 };
@@ -959,7 +976,7 @@ harness.routeModel(`http://127.0.0.1:${server.port}/opencode/${MODEL_KEY}`, (u) 
     return ["127.0.0.1", "localhost", "[::1]", ...lanAddresses()].includes(at.hostname) && [server.port, linkPort].includes(Number(at.port)) && at.pathname.startsWith("/v1");
   } catch { return false; }
 });
-const secure = LAN ? lanAddresses().map((ip) => serve(ip, server.port!)) : [];
+const secure = LAN || OPEN ? lanAddresses().map((ip) => serve(ip, server.port!)) : [];
 let checkPort = Number(process.env.CHRYSALIS_CHECK_PORT ?? 8083);
 const checks = (LAN ? lanAddresses() : []).map((ip) => {
   const s = Bun.serve({ hostname: ip, port: checkPort, tls: tls().check, fetch: checkFetch });
@@ -1013,37 +1030,39 @@ function forwardHere() {
       fetch: (req, srv) => (srv.timeout(req, 0), link.forward(req)) });
   } catch (e) {
     console.log(`chrysalis link: ${CHRYSALIS} is taken, so Chrysalis runs here (${(e as Error).message})`);
+    tell({ note: `${CHRYSALIS} is taken, so the model runs here and not on ${link.name}` });
   }
 }
 forwardHere();
 const spaced = (code: string) => `${code.slice(0, 3)} ${code.slice(3)}`;
-const questions: { key: string; text: string; answer: (yes: boolean) => void }[] = [], asked = new Set<string>();
-const tty = process.stdin.isTTY ? createInterface({ input: process.stdin }) : undefined;
-const nextQuestion = () => { if (questions[0]) process.stdout.write(`${questions[0].text} [y/N] `); };
-tty?.on("line", (line) => {
-  questions.shift()?.answer(/^\s*y/i.test(line));
-  nextQuestion();
-});
-function question(key: string, text: string, answer: (yes: boolean) => void) {
-  if (!tty || asked.has(key)) return;
-  asked.add(key);
-  questions.push({ key, text, answer });
-  if (questions.length === 1) nextQuestion();
+const answers = new Map<string, (yes: boolean) => void>(), answered = new Set<string>();
+let told = "[]";
+if (process.send) {
+  process.on("message", (m: any) => {
+    const key = String(m?.answer?.key ?? ""), answer = answers.get(key);
+    if (!answer) return;
+    answered.add(key);
+    answer(!!m.answer.yes);
+  });
+  setInterval(() => {
+    const open: { key: string; text: string }[] = [];
+    const question = (key: string, text: string, answer: (yes: boolean) => void) => {
+      if (answered.has(key)) return;
+      answers.set(key, answer);
+      open.push({ key, text });
+    };
+    answers.clear();
+    for (const a of LAN ? devices.waiting() : []) if (!a.allowed)
+      question(`ask ${a.code}`, `${a.name} asks to use ${a.kind === "computer" ? "this computer's Chrysalis" : "this computer through Chrysalis, as you do"} · ${spaced(a.code)}`,
+        (yes) => void (yes ? devices.allow(a.code) : devices.deny(a.code)));
+    const p = link.pairing;
+    if (p?.state === "waiting" && p.code && !p.confirmed)
+      question(`link ${p.code}`, `${p.name}'s code is ${spaced(p.code)}: the same as on ${p.name}?`, (yes) => yes ? (link.confirm(), forwardHere()) : link.forget());
+    const now = JSON.stringify(open);
+    if (now !== told) tell({ questions: open });
+    told = now;
+  }, 1000);
 }
-if (tty) setInterval(() => {
-  const open = new Set((LAN ? devices.waiting() : []).filter((a) => !a.allowed).map((a) => `ask ${a.code}`)), first = questions[0];
-  questions.splice(0, questions.length, ...questions.filter((q) => !q.key.startsWith("ask ") || open.has(q.key)));
-  if (first && first !== questions[0]) {
-    process.stdout.write("answered elsewhere\n");
-    nextQuestion();
-  }
-  for (const a of LAN ? devices.waiting() : []) if (!a.allowed)
-    question(`ask ${a.code}`, `${a.name} asks to use ${a.kind === "computer" ? "this computer's Chrysalis" : "this computer through Chrysalis, as you do"} · ${spaced(a.code)} · allow?`,
-      (yes) => void (yes ? devices.allow(a.code) : devices.deny(a.code)));
-  const p = link.pairing;
-  if (p?.state === "waiting" && p.code && !p.confirmed)
-    question(`link ${p.code}`, `${p.name}'s code: ${spaced(p.code)}. Same as on ${p.name}?`, (yes) => yes ? (link.confirm(), forwardHere()) : link.forget());
-}, 1000);
 const declined = new Set<string>();
 if (Bun.spawnSync([`${import.meta.dir}/../chrysalis.sh`, "gpu"]).exitCode !== 0) setInterval(() => {
   const s = link.state(), to = s.found.find((f) => !declined.has(f.fp));
@@ -1052,12 +1071,26 @@ if (Bun.spawnSync([`${import.meta.dir}/../chrysalis.sh`, "gpu"]).exitCode !== 0)
     forwardHere();
   });
 }, 2000);
-if (LAN) console.log(`  OpenCode on another computer: ${opencodeLine((await connectUrls())[0].replace(/\/$/, ""), tls().cert)}`);
-if (!process.stdout.isTTY) {
+const API_PORT = process.env.CHRYSALIS_API_PORT ?? (new URL(CHRYSALIS).port || "80"), apis = new Map<string, number>();
+for (const ip of OPEN ? lanAddresses() : []) {
+  try {
+    apis.set(ip, Bun.serve({ hostname: ip, port: Number(API_PORT), maxRequestBodySize: 1 << 30, development: false,
+      fetch(req, srv) {
+        const path = new URL(req.url).pathname;
+        return hostOk(req) && (path.startsWith("/v1/") || LINKED.includes(path)) ? proxy(req, srv as unknown as Srv) : new Response("not found", { status: 404 });
+      } }).port!);
+  } catch (e) {
+    tell({ note: `the API is not on http://${ip}:${API_PORT}, which something else holds (${(e as Error).message})` });
+  }
+}
+const network = LAN || OPEN ? (await connectUrls()).map((u) => u.replace(/\/$/, "")) : [];
+tell({ up: { local: `http://localhost:${server.port}`, network, api: network.flatMap((u) => { const ip = new URL(u).hostname; return apis.has(ip) ? [`http://${ip}:${apis.get(ip)}/v1`] : []; }) } });
+if (!process.send) {
   console.log(`chrysalis web: ${server.url}`);
   for (const s of secure) console.log(`chrysalis web: ${s.url}`);
   for (const s of checks) console.log(`chrysalis check: ${s.url}`);
   for (const s of links) console.log(`chrysalis link: ${s.url}`);
+  for (const [ip, port] of apis) console.log(`chrysalis api: http://${ip}:${port}`);
 }
 
 function checkFetch(req: Request): Response {
@@ -1104,6 +1137,7 @@ async function tunedProxy(req: Request, srv: Srv, to: string): Promise<Response>
 }
 async function proxy(req: Request, srv: Srv): Promise<Response> {
   srv.timeout(req, 0);
+  if (req.method === "POST" && ASKS.test(new URL(req.url).pathname)) arrived(req, srv);
   const url = new URL(req.url), headers = new Headers(req.headers);
   for (const h of ["host", "cookie", "authorization", "x-api-key", "connection", "content-length"]) headers.delete(h);
   try {
@@ -1118,7 +1152,7 @@ async function proxy(req: Request, srv: Srv): Promise<Response> {
 }
 async function connectUrls(): Promise<string[]> {
   const first = await routeAddress();
-  return lanAddresses().sort((a, b) => Number(b === first) - Number(a === first)).map((ip) => `https://${ip}:${server.port}/`);
+  return lanAddresses().sort((a, b) => Number(b === first) - Number(a === first)).map((ip) => `${OPEN ? "http" : "https"}://${ip}:${server.port}/`);
 }
 
 const qrs = new Map<string, string | undefined>();

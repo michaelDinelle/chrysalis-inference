@@ -53,6 +53,7 @@ interface Message {
   edits?: { id: string; kind: string; src: string }[];
 }
 interface Conversation { id: string; title: string; named?: boolean; updated: number; effort: Effort; messages: Message[];
+  unsynced?: boolean;
   pending?: Record<string, { kind: string; srcs: string[] }>;
   who?: string;
   thread?: { dir: string; id?: string; model?: string; at?: number; agent?: string; machine?: string; context?: { used?: number; compacted?: boolean; window: number; ceiling: number; auto: boolean } } }
@@ -62,6 +63,7 @@ interface Settings {
   v?: 5;
   think: Sampler; fast: Sampler; max_tokens?: number; seed?: number; voice?: VoiceSettings;
   artifacts?: false;
+  global?: string;
 }
 interface VoiceSettings { tts?: string; name?: string; stt?: string; speed?: number }
 interface Status { state: "online" | "loading" | "offline"; machine?: string; build?: string; model?: string; loading?: string; progress?: number; context?: number; kv_tokens?: number; cache?: { free_kv_tokens: number };
@@ -82,7 +84,7 @@ interface Live { phase: "waiting" | "thinking" | "writing"; since: number; note:
 interface Run {
   conv: Conversation; m: Message; live: Live;
   at: number; begun: number;
-  stopping: boolean; gone?: boolean;
+  stopping: boolean; gone?: boolean; ended?: () => void;
   heard?: number; pace?: number; shown?: number; painted?: number;
   usage?: { prompt_tokens: number; completion_tokens: number; cached?: number }; last?: any;
   read?: number; written?: number;
@@ -685,9 +687,9 @@ const greeted = (c: Conversation) => { const at = c.messages.findIndex((m) => m.
 function threadPersona(c: Conversation) {
   const { members, group } = castOf(c), opened = greeted(c);
   if (!members.length) return [fill(castPrompt("", [people.get(CHRYSALIS)!.card.data], userCard())),
-    opened ? `The chat opened with this greeting from you:\n${opened}` : ""].filter(Boolean).join("\n\n");
+    opened ? `The chat opened with this greeting from you:\n${opened}` : "", globalPrompt()].filter(Boolean).join("\n\n");
   return [castSystem(c), `Stay in character in everything you say. ${group ? "Whoever is speaking" : members[0].card.data.name} can use the tools here to do what ${userName()} asks, for real.`,
-    opened ? `The chat opened with this greeting:\n${opened}` : ""].filter(Boolean).join("\n\n");
+    opened ? `The chat opened with this greeting:\n${opened}` : "", globalPrompt()].filter(Boolean).join("\n\n");
 }
 function sceneFor(c: Conversation): Scene | undefined {
   const { members, group } = castOf(c), opened = greeted(c), first = c.messages.find((m) => m.role === "assistant" && !m.job);
@@ -749,7 +751,10 @@ async function openThread(sid: string): Promise<string | undefined> {
     if (said.at(-1)?.role === "assistant") said.pop();
     said.push({ id: randomId(), role: "assistant", content: "", reasoning: "", job: got.job, ...(people.has(c.who ?? "") ? { as: c.who } : {}) });
   }
-  const old = mine?.messages ?? [];
+  const old = mine?.messages ?? [], was = old.at(-1), tail = said.at(-1);
+  if (mine && was?.versions && was.role === "assistant" && tail?.role === "assistant" && !tail.job && said.length === old.length)
+    said[said.length - 1] = mine.unsynced || tail.content.trim() === was.content.trim() ? { ...was, oc: tail.oc, ocs: tail.ocs } : { ...tail, versions: was.versions };
+  else if (mine) delete mine.unsynced;
   said.forEach((m, i) => {
     const was = old.find((o) => o.oc && o.oc === m.oc) ?? (old[i]?.role === m.role && old[i]?.content === m.content ? old[i] : undefined);
     if (was?.stats && !m.stats) m.stats = was.stats;
@@ -3442,13 +3447,51 @@ function* walk(list: Message[]): Generator<Message> {
     for (const v of m.versions?.others ?? []) yield* walk(v);
   }
 }
-function pager(m: Message) {
+function pager(m: Message, side = false) {
   const vs = m.versions;
-  if (!vs) return "";
-  const n = vs.others.length + 1, k = vs.shown, b = (act: "prev" | "next", on: boolean, label: string) =>
-    `<button type="button" class="act" data-act="${act}" title="${label}" aria-label="${label}"${on ? "" : " disabled"}>${icon(act)}</button>`;
-  return `<span class="pager" role="group" aria-label="Version ${k + 1} of ${n}">${b("prev", k > 0, "Previous version")}` +
-    `<span class="pager-n" aria-hidden="true">${k + 1} / ${n}</span>${b("next", k < n - 1, "Next version")}</span>`;
+  if (!vs && !side) return "";
+  const n = (vs?.others.length ?? 0) + 1, k = vs?.shown ?? 0, b = (act: "prev" | "next", on: boolean, label: string) =>
+    `<button type="button" class="act${side ? ` swipe ${act}` : ""}" data-act="${act}" title="${label}" aria-label="${label}"${on ? "" : " disabled"}>${icon(act)}</button>`;
+  const prev = b("prev", k > 0, "Previous version"), next = b("next", k < n - 1 || side, k < n - 1 ? "Next version" : "A new version");
+  const count = `<span class="pager-n" aria-hidden="true">${k + 1} / ${n}</span>`;
+  return side ? `${prev}<span class="pager swipe-end" aria-label="Version ${k + 1} of ${n}">${count}</span>${next}`
+    : `<span class="pager" role="group" aria-label="Version ${k + 1} of ${n}">${prev}${count}${next}</span>`;
+}
+const syncing = new Map<string, Promise<void>>(), syncTimers = new Map<string, Timer>();
+const chatOf = (id: string) => (conv.id === id ? conv : chats[id]);
+function syncThreadText(id: string): Promise<void> {
+  clearTimeout(syncTimers.get(id));
+  syncTimers.delete(id);
+  const c = chatOf(id), sid = c?.thread?.id, last = c?.messages.at(-1), before = syncing.get(id) ?? Promise.resolve();
+  if (!c || !sid || !c.unsynced || runs.get(id) || last?.role !== "assistant") return before;
+  const text = last.content;
+  const done: Promise<void> = before.then(async () => {
+    const r = await fetch(`/api/threads/${sid}/rewrite`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ last: text }) }).catch(() => null);
+    if (r?.ok) for (const x of [conv.id === id ? conv : undefined, chats[id]]) if (x?.unsynced && x.messages.findLast((m) => m.role === "assistant" && !m.job && !m.starting)?.content === text) delete x.unsynced;
+    if (r?.ok) keepChats();
+    if (syncing.get(id) === done) syncing.delete(id);
+  });
+  syncing.set(id, done);
+  return done;
+}
+function settleSoon(id: string) {
+  clearTimeout(syncTimers.get(id));
+  syncTimers.set(id, setTimeout(() => void syncThreadText(id), 400));
+}
+async function renew(i: number) {
+  const c = conv, run = running(c), as = c.messages[i].as;
+  if (run) {
+    if (run.m !== c.messages[i]) return;
+    stopRun(run);
+    await new Promise<void>((over) => { run.ended = over; });
+    if (c !== conv || running(c)) return;
+    const all = versionsAt(c, i);
+    all.splice(c.messages[i].versions?.shown ?? 0, 1);
+    if (all.length) showVersion(c, i, all, all.length - 1);
+    else c.messages.splice(i);
+  }
+  delete c.unsynced;
+  void generate(c, i, as, !!c.thread);
 }
 
 const stale = (c: Conversation, i: number) => { for (const m of c.messages.slice(i + 1)) delete m.checkpoints; };
@@ -3684,7 +3727,8 @@ function paint(v: View, m: Message, live?: Live) {
   }
   syncCards(v.calls, m.calls ?? [], m, !!live);
   if (v.notes.childElementCount !== (m.notes?.length ?? 0)) v.notes.replaceChildren(...(m.notes ?? []).map((n) => h("div", "note", n)));
-  if (live && v.foot.dataset.pager !== pager(m)) v.foot.innerHTML = v.foot.dataset.pager = pager(m);
+  const drawn = live ? pager(m, conv.messages.at(-1) === m && m.role === "assistant") : "";
+  if (live && v.foot.dataset.pager !== drawn) v.foot.innerHTML = v.foot.dataset.pager = drawn;
   v.think.hidden = !m.reasoning;
   v.think.classList.toggle("live", live?.phase === "thinking");
   if (m.reasoning) {
@@ -3731,7 +3775,7 @@ function paint(v: View, m: Message, live?: Live) {
   const cut = m.finish === "length" || m.stopped || (ranCalls && !m.error);
   const cont = cut ? `<button type="button" class="btn" data-act="cont" title="Continue">${icon("cont")}Continue</button>`
     : `<button type="button" class="act" data-act="cont" title="Continue">${icon("cont")}</button>`;
-  v.foot.innerHTML = pager(m) + `<span class="stats">${facts.join(" · ")}</span>` + slots([["cont", last && !busy && canCont, cont], ["retry", !busy]])
+  v.foot.innerHTML = pager(m, last) + `<span class="stats">${facts.join(" · ")}</span>` + slots([["cont", last && !busy && canCont, cont], ["retry", !busy]])
     + slots([["tokens", !!m.id && tokens.has(m.id)], ["speak", !!m.content.trim() && !voice, reading === m ? `<button type="button" class="act on" data-act="speak" title="Stop reading">${icon("stop")}</button>` : undefined],
       ["copy", true], ["edit", !busy], ["trash", !busy]]);
   delete v.foot.dataset.pager;
@@ -3741,13 +3785,13 @@ function paint(v: View, m: Message, live?: Live) {
 const ocean = new Ocean($("sea")), seaReady = ocean.start(), seaSwitch = $<HTMLButtonElement>("sea-switch");
 function emptyState() {
   const e = h("div", "empty");
-  if (seaReady) ocean.butterfly(e);
-  else e.innerHTML = `<img class="logo" src="${logo}" alt="">`;
+  if (seaReady && document.querySelector("main")!.hasAttribute("data-sea")) ocean.butterfly(e);
   return e;
 }
 function showSea(on: boolean) {
   document.querySelector("main")!.toggleAttribute("data-sea", on && seaReady);
   seaSwitch.setAttribute("aria-checked", String(on && seaReady));
+  thread.querySelector(":scope > .empty")?.replaceWith(emptyState());
 }
 seaSwitch.disabled = !seaReady;
 if (!seaReady) seaSwitch.title = "This browser cannot draw it";
@@ -4556,7 +4600,7 @@ function save(c: Conversation) {
 }
 
 const bypassed = new Set<string>();
-function request(c: Conversation, upto: Message[], o: { effort?: Effort; sampling?: Mode; final?: object; extra?: Record<string, unknown>; as?: string } = {}) {
+function request(c: Conversation, upto: Message[], o: { effort?: Effort; sampling?: Mode; final?: object; extra?: Record<string, unknown>; as?: string; again?: boolean } = {}) {
   if (c.thread) {
     const asked = upto.at(-1)?.role === "user" ? upto.at(-1) : undefined;
     const variant = threadVariant(c), files = (asked?.files ?? []).map((a) => {
@@ -4571,7 +4615,7 @@ function request(c: Conversation, upto: Message[], o: { effort?: Effort; samplin
       toast(`This OpenCode sends ${threadModel(c)} straight to ${straight}, so your sampler settings, max tokens and seed don't reach it`);
     }
     const tuned = threadModel(c) ? { sampling: { ...samplerFields(mode), ...(settings.max_tokens ? { max_tokens: settings.max_tokens } : {}), ...(settings.seed !== undefined ? { seed: settings.seed } : {}) } } : {};
-    return { stream: true, chrysalis_thread: { session: c.thread.id, ...(c.thread.machine ? { machine: c.thread.machine } : {}), dir: c.thread.dir, text, ...tuned, ...(text !== said ? { said } : {}), ...(by ? { next: by } : {}), ...(scene ? { scene } : {}),
+    return { stream: true, chrysalis_thread: { ...(o.again && c.thread.id ? { again: true } : {}), session: c.thread.id, ...(c.thread.machine ? { machine: c.thread.machine } : {}), dir: c.thread.dir, text, ...tuned, ...(text !== said ? { said } : {}), ...(by ? { next: by } : {}), ...(scene ? { scene } : {}),
       ...(c.thread.id ? {} : { title: c.title }), model: `${threadModel(c)}${variant ? `#${variant}` : ""}`, persona: threadPersona(c), ...(c.thread.agent && harness.agents?.some((a) => a.id === c.thread!.agent) ? { agent: c.thread.agent } : {}), ...(files.length ? { files } : {}) } };
   }
   const effort = o.effort ?? c.effort, mode: Mode = effort === "off" ? "fast" : "think";
@@ -4620,9 +4664,10 @@ function wire(m: Message, from = 0): object[] {
   if (!ended && (m.content || m.reasoning)) out.push(assistantTurn(m.interrupted && m.heardTo === undefined ? m.content + TALKED_OVER : m.content, m.reasoning));
   return out;
 }
-const systemFor = (c: Conversation) => castOf(c).members.length ? castSystem(c)
-  : [fill(castPrompt("", [people.get(CHRYSALIS)!.card.data], userCard())),
-    settings.artifacts === false ? "" : ARTIFACTS_PROMPT].filter(Boolean).join("\n\n");
+const globalPrompt = () => fill(settings.global?.trim() ?? "");
+const systemFor = (c: Conversation) => (castOf(c).members.length ? [castSystem(c), globalPrompt()]
+  : [fill(castPrompt("", [people.get(CHRYSALIS)!.card.data], userCard())), globalPrompt(),
+    settings.artifacts === false ? "" : ARTIFACTS_PROMPT]).filter(Boolean).join("\n\n");
 
 const DONE = Symbol("done");
 async function* events(body: ReadableStream<Uint8Array>, seen?: (id: number) => void): AsyncGenerator<any> {
@@ -4660,12 +4705,12 @@ async function ensureOnline(run: { stopping: boolean }) {
 
 const CUT_OFF = "The reply was cut off: the web server restarted while it was being written";
 
-async function generate(c: Conversation = conv, at = c.messages.length, as = c.messages[at]?.as) {
+async function generate(c: Conversation = conv, at = c.messages.length, as = c.messages[at]?.as, again = false) {
   const m: Message = { id: randomId(), role: "assistant", content: "", reasoning: "", params: changed(modeOf(c)) || undefined, effort: c.effort, ...(as ? { as } : {}) };
   branch(c, at, m);
   if (as && voice?.c === c) pushVoice();
   const upto = c.messages.slice(0, at);
-  await startRun(c, m, () => request(c, upto, { as }));
+  await startRun(c, m, () => request(c, upto, { as, again }));
 }
 
 function continueReply(m: Message, pick?: { ch: "reasoning" | "content"; i: number; alt: Alt; before: string }) {
@@ -4721,6 +4766,7 @@ async function startRun(c: Conversation, m: Message, body: () => object, pick?: 
     }
     if (run.stopping) throw new DOMException("stopped", "AbortError");
     await filesReady(c.messages);
+    await syncing.get(c.id);
     const res = await fetch("/api/chat", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body()) });
     if (!res.ok || !res.body) throw new Error((await res.json().catch(() => null))?.error?.message ?? `HTTP ${res.status}`);
     m.job = res.headers.get("X-Chrysalis-Job") ?? undefined;
@@ -4974,7 +5020,9 @@ function finish(run: Run) {
   delete m.starting;
   cancelAnimationFrame(run.frame);
   if (runs.get(c.id) === run) runs.delete(c.id);
+  run.ended?.();
   if (run.gone) return;
+  if (c.thread && c.messages.at(-1) !== m && !m.stopped) { c.unsynced = true; settleSoon(c.id); }
   c.updated = Date.now();
   if (c === conv) render();
   else renderList();
@@ -5063,6 +5111,10 @@ function submit(text: string, reply = true) {
   renderPending();
   if (!conv.messages.some((m) => m.role === "user")) conv.title = (text || files.map((f) => f.name).join(", ")).split("\n")[0].slice(0, 60);
   const note = noteFor(conv, false), cut = unheardNote(conv);
+  if (conv.thread) {
+    void syncThreadText(conv.id);
+    for (const m of conv.messages) delete m.versions;
+  }
   conv.messages.push({ role: "user", content: text, ...(files.length ? { files } : {}), ...(note ? { note } : {}), ...(cut ? { cut } : {}), ...pointFields(false), ...takeEdits() });
   if (!reply) return save(conv);
   const [first, ...rest] = addressed(conv, text);
@@ -5165,7 +5217,7 @@ async function openVoice() {
   renderVoice();
   if (status.state === "offline" && onService()) void start().then(() => refreshStatus());
   if (!navigator.mediaDevices?.getUserMedia) {
-    voice.error = "This browser gives no page a microphone";
+    voice.error = isSecureContext ? "This browser gives no page a microphone" : "Voice needs an encrypted page: Chrysalis is on the network without encryption";
     return renderVoice();
   }
   void warmVoice(voice);
@@ -5932,21 +5984,24 @@ thread.addEventListener("click", (e) => {
     if (!tokenView.delete(m.id)) tokenView.add(m.id);
     return render();
   }
-  if ((act.dataset.act === "prev" || act.dataset.act === "next") && m.versions) {
-    const k = m.versions.shown + (act.dataset.act === "prev" ? -1 : 1);
+  const turn = act.dataset.act === "prev" ? -1 : act.dataset.act === "next" ? 1 : 0;
+  if (turn > 0 && (m.versions?.shown ?? 0) === (m.versions?.others.length ?? 0)) return void (m.role === "assistant" && conv.messages.at(-1) === m && renew(i));
+  if (turn && m.versions) {
+    const k = m.versions.shown + turn;
     editing = null;
     showVersion(conv, i, versionsAt(conv, i), k);
+    if (conv.thread) { conv.unsynced = true; settleSoon(conv.id); }
     save(conv);
     render();
     const again = thread.querySelector<HTMLButtonElement>(`article[data-i="${i}"] [data-act=${act.dataset.act}]`);
-    return void (again && !again.disabled ? again : thread.querySelector<HTMLElement>(`article[data-i="${i}"] .pager [data-act]:not(:disabled)`))?.focus();
+    return void (again && !again.disabled ? again : thread.querySelector<HTMLElement>(`article[data-i="${i}"] .msg-foot :is([data-act="prev"], [data-act="next"]):not(:disabled)`))?.focus();
   }
   if (act.dataset.act === "card" || act.dataset.act === "more") return toggleCard(act);
   if (act.dataset.act === "decide") return void decide(act);
   if (act.dataset.act === "speak") return readAloud(m);
   if (running()) return;
   if (act.dataset.act === "fork") return void threadAct("fork", m);
-  if (conv.thread?.id && act.dataset.act === "retry") return void threadAct("resend", m);
+  if (conv.thread?.id && act.dataset.act === "retry") return void (conv.messages.at(-1) === m ? renew(i) : threadAct("resend", m));
   if (conv.thread?.id && act.dataset.act === "trash") return void threadAct("drop", m);
   if (act.dataset.act === "retry") void generate(conv, i);
   else if (act.dataset.act === "cont") continueReply(m);
@@ -6156,6 +6211,33 @@ scroller.addEventListener("touchmove", (e) => {
   touchY = e.touches[0].clientY;
 }, { passive: true });
 scroller.addEventListener("pointerdown", (e) => { if (e.target === scroller && e.offsetX >= scroller.clientWidth) stopFollowing(); });
+function swipe(act: "prev" | "next") {
+  const last = [...thread.querySelectorAll<HTMLElement>(":scope > article")].at(-1), was = document.activeElement;
+  const to = last?.classList.contains("assistant") ? last.querySelector<HTMLButtonElement>(`.msg-foot [data-act="${act}"]`) : null;
+  if (!to || to.disabled) return false;
+  to.click();
+  if (was === $("input")) $("input").focus();
+  return true;
+}
+document.addEventListener("keydown", (e) => {
+  if ((e.key !== "ArrowLeft" && e.key !== "ArrowRight") || e.ctrlKey || e.metaKey || e.altKey || e.shiftKey || editing || document.querySelector("dialog[open]")) return;
+  const t = e.target as HTMLElement, box = $<HTMLTextAreaElement>("input");
+  if (t !== document.body && !(t === box && !box.value) && !t.closest?.('[data-act="prev"], [data-act="next"]')) return;
+  if (swipe(e.key === "ArrowLeft" ? "prev" : "next")) e.preventDefault();
+});
+let swipeFrom: { x: number; y: number } | null = null;
+thread.addEventListener("touchstart", (e) => {
+  const t = e.target as Element, last = [...thread.querySelectorAll(":scope > article")].at(-1);
+  swipeFrom = e.touches.length === 1 && last?.contains(t) && !t.closest("pre, table, .katex-display, iframe, input, textarea, button")
+    ? { x: e.touches[0].clientX, y: e.touches[0].clientY } : null;
+}, { passive: true });
+thread.addEventListener("touchend", (e) => {
+  const from = swipeFrom, at = e.changedTouches[0];
+  swipeFrom = null;
+  if (!from || !at || getSelection()?.toString()) return;
+  const dx = at.clientX - from.x, dy = at.clientY - from.y;
+  if (Math.abs(dx) > 70 && Math.abs(dx) > 2 * Math.abs(dy)) swipe(dx < 0 ? "next" : "prev");
+}, { passive: true });
 document.addEventListener("keydown", (e) => {
   if (["PageUp", "ArrowUp", "Home"].includes(e.key) && !(e.target as Element).closest?.("input, textarea, select, [contenteditable]")) stopFollowing();
 });
@@ -6397,15 +6479,6 @@ function buildControls() {
   $("model-btn").addEventListener("click", () => setModelsOpen(!modelsOpen));
   $("machine-btn").addEventListener("click", () => chooseMachine($("machine-btn")));
   $("folder-btn").addEventListener("click", () => ($("oc-pop").hidden ? chooseFolder($("folder-btn")) : void ($("oc-pop").hidden = true)));
-  $("backend").addEventListener("submit", (e) => { e.preventDefault(); void setBackend(); });
-  $("backend").addEventListener("input", () => { backendEdited = true; backendNote(""); renderBackend(); });
-  $("backend").addEventListener("keydown", (e) => { if (e.key === "Escape") { resetBackend(); (e.target as HTMLElement).blur(); } });
-  $("backend-far").addEventListener("click", () => void setBackend(true));
-  $("power").addEventListener("click", async () => {
-    if (status.state === "online") await fetch("/api/chrysalis/stop", { method: "POST" });
-    else await start();
-    await refreshStatus();
-  });
   document.addEventListener("pointerdown", (e) => {
     if (modelsOpen && !(e.target as Element).closest("#model-pop, #model-btn")) setModelsOpen(false);
   });
@@ -6420,26 +6493,6 @@ function setEffort(i: number) {
   renderComposer();
 }
 
-let backendEdited = false;
-function renderBackend() {
-  const b = status.backend, form = $("backend");
-  form.hidden = !b;
-  if (!b) return;
-  const url = $<HTMLInputElement>("backend-url"), here = !!status.here;
-  const down = b.listed && !b.listed.ok ? b.listed.error : "", dot = $("backend-dot");
-  dot.className = `dot ${down ? "offline" : b.remote ? "remote" : status.state}`;
-  dot.title = down || (b.remote ? "Off this computer and its network" : status.state === "online" ? "Answering" : status.state === "loading" ? "Loading" : "Stopped");
-  if (!backendEdited && document.activeElement !== url) url.value = b.url;
-  url.readOnly = !here;
-  url.title = here ? `${b.name}: replies come from here. Paste another backend's address and press Enter.` : "Set on the computer Chrysalis runs on";
-  $("backend-go").hidden = !here || !backendEdited;
-  let known: string[] = [];
-  try { known = JSON.parse(pref("backends", "[]")); } catch {  }
-  if (!known.includes(b.url)) setPref("backends", JSON.stringify((known = [b.url, ...known].slice(0, 8))));
-  const list = $("backend-known");
-  if (list.childElementCount !== known.length) list.replaceChildren(...known.map((u) => Object.assign(h("option"), { value: u })));
-  renderLink();
-}
 function renderLink() {
   const l = status.link, p = l?.pairing, note = $("link-note"), parts: (string | Node)[] = [];
   if (l?.refused) parts.push(l.refused);
@@ -6462,43 +6515,8 @@ function renderLink() {
   }
   const key = JSON.stringify([parts.map((x) => typeof x === "string" ? x : x.textContent), l?.found]);
   if (note.dataset.key !== key) { note.dataset.key = key; note.replaceChildren(...parts); }
-  note.hidden = !parts.length || !$("backend-note").hidden;
+  note.hidden = !parts.length;
 }
-function backendNote(text: string, error = false, far = false) {
-  $("backend-why").textContent = text;
-  $("backend-note").classList.toggle("error", error);
-  $("backend-note").hidden = !text;
-  $("backend-far").hidden = !far;
-}
-function resetBackend() {
-  backendEdited = false;
-  $<HTMLInputElement>("backend-url").value = status.backend?.url ?? "";
-  backendNote("");
-  renderBackend();
-}
-async function setBackend(confirmRemote = false) {
-  const url = $<HTMLInputElement>("backend-url").value.trim(), go = $<HTMLButtonElement>("backend-go");
-  go.disabled = true;
-  backendNote("Checking…");
-  try {
-    const r = await fetch("/api/backend", { method: "POST", headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ url, ...(confirmRemote ? { confirmRemote: true } : {}) }) });
-    const body = await r.json().catch(() => ({}));
-    if (r.status === 409 && body.remote)
-      return backendNote(`Every chat you send would go to ${body.remote}, off this computer and its network.`, true, true);
-    if (!r.ok) return backendNote(body.error?.message ?? `HTTP ${r.status}`, true);
-    status = { ...status, backend: body };
-    resetBackend();
-    (document.activeElement as HTMLElement | null)?.blur();
-    await refreshStatus();
-    if (!conv.messages.length) render();
-  } catch (e) {
-    backendNote(e instanceof Error ? e.message : String(e), true);
-  } finally {
-    go.disabled = false;
-  }
-}
-
 function setModelsOpen(open: boolean, refocus = false) {
   modelsOpen = open;
   $("model-pop").hidden = !open;
@@ -6602,7 +6620,7 @@ function threadControls() {
     ...speechRows());
 }
 function renderControls() {
-  renderBackend();
+  renderLink();
   document.querySelector("main")!.toggleAttribute("data-thread", !!conv.thread);
   document.querySelector("main")!.toggleAttribute("data-plain", !!conv.thread && !variantsOf(conv).length);
   const effort = barEffort(), at = EFFORTS.indexOf(effort), energy = $("energy");
@@ -6641,11 +6659,6 @@ function renderControls() {
   btn.classList.toggle("open", modelsOpen);
   btn.classList.remove("outside");
   renderMeter();
-  const power = $<HTMLButtonElement>("power");
-  power.innerHTML = icon("power");
-  power.title = power.ariaLabel = state === "online" ? `Unload ${name}` : state === "loading" ? `Loading ${name}` : `Load ${name}`;
-  power.disabled = state === "loading";
-  power.hidden = !onService();
   if (!modelsOpen) return;
   const pop = $("model-pop");
   const tools = harness.state === "on" && !!harness.home && !conv.messages.some((m) => m.role === "user");
@@ -7092,52 +7105,21 @@ function buildSettings() {
 
 
 
-  $("sent-open").onclick = () => void showSent();
-  $("sent-close").innerHTML = icon("x");
-  $("sent-close").onclick = () => $<HTMLDialogElement>("sent-view").close();
-  $("sent-copy").onclick = () => copy($("sent-text").textContent ?? "", $("sent-copy"));
+  $<HTMLTextAreaElement>("system-input").oninput = (e) => {
+    const text = (e.target as HTMLTextAreaElement).value;
+    if (text.trim()) settings.global = text;
+    else delete settings.global;
+    saveSettings();
+  };
   $("settings-reset").onclick = () => {
     if (!customized()) return toast("Everything is already at the recommended values");
     const before = structuredClone(settings);
-    settings = { v: 5, think: {}, fast: {} };
+    settings = { v: 5, think: {}, fast: {}, ...(settings.global ? { global: settings.global } : {}) };
     saveSettings();
     toast("Everything is back to the recommended values", () => { settings = before; saveSettings(); });
   };
   measureScrollbar();
   addEventListener("resize", measureScrollbar);
-}
-
-async function showSent() {
-  const c = conv, said = voice?.c === c, effort = c.effort;
-  if (c.thread) {
-    const who = threadPersona(c);
-    $("sent-about").textContent = `OpenCode writes this thread's request itself, with its own prompt and tools. ${who ? "Chrysalis adds who is working, after OpenCode's prompt:" : "Chrysalis adds nothing to it."}`;
-    $("sent-text").textContent = who;
-    $("sent-text").hidden = !who;
-    return $<HTMLDialogElement>("sent-view").showModal();
-  }
-  await filesReady(c.messages);
-  const body = request(c, [...c.messages], { effort }) as { messages: object[] };
-  const res = await fetch("/api/preview", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body) }).catch(() => null);
-  const sent = res?.ok ? (await res.json()).body : null;
-  if (!sent) return toast("The web server did not answer");
-  const kb = (url: string) => `${Math.round((url.length * 3) / 4 / 1024)} KB`;
-  const part = (p: any): string => p.type === "text" ? p.text : p.type === "image_url" ? `[picture, ${kb(p.image_url.url)}]`
-    : p.type === "file" ? `[PDF ${p.file.filename}, ${kb(p.file.file_data)}]` : p.type === "video_url" ? `[video, ${kb(p.video_url.url)}]` : JSON.stringify(p);
-  const lines = [`model: ${sent.model}${sent.reasoning_effort ? `, thinking ${sent.reasoning_effort}` : ""}`];
-  for (const m of sent.messages) {
-    lines.push("", `── ${m.role}${m.tool_call_id ? ` (${m.tool_call_id})` : ""}`);
-    if (m.reasoning_content) lines.push(`[reasoning] ${m.reasoning_content}`);
-    lines.push(typeof m.content === "string" ? m.content : (m.content ?? []).map(part).join(""));
-    if (m.tool_calls) lines.push(JSON.stringify(m.tool_calls, null, 2));
-  }
-  const note = said ? noteFor(c, true) : undefined;
-  if (note) lines.push("", "── your next question said aloud, after this note:", `[${note}]`);
-  $("sent-about").textContent = "Your next message goes after these." +
-    (said ? " Each spoken question is first checked, in a conversation of its own beside this one, for what speech recognition misheard." : "");
-  $("sent-text").textContent = lines.join("\n");
-  $("sent-text").hidden = false;
-  $<HTMLDialogElement>("sent-view").showModal();
 }
 
 function measureScrollbar() {
@@ -7331,6 +7313,8 @@ function showSettingsSec(sec: string) {
 function syncSettings() {
   if (!panel.open) return;
   $("artifacts-switch").setAttribute("aria-checked", String(settings.artifacts !== false));
+  const system = $<HTMLTextAreaElement>("system-input");
+  if (document.activeElement !== system) system.value = settings.global ?? "";
   $("settings").classList.toggle("other-backend", !onChrysalis());
   for (const sync of knobs) sync();
   drawCharts();

@@ -9,7 +9,7 @@ export interface Connector { name: string; state: typeof state; ensure: typeof e
   turn: typeof turn; say: typeof say; undo: typeof undo; fork: typeof fork; rewrite: typeof rewrite; change: typeof change; remove: typeof remove }
 export const name = "OpenCode";
 export interface Model { id: string; name: string; provider: string; variants: string[]; straight?: string }
-export interface Turn { session?: string; machine?: string; dir: string; text: string; model?: string; persona?: string; files?: { uri: string; name: string }[]; follow?: boolean; agent?: string;
+export interface Turn { again?: boolean; session?: string; machine?: string; dir: string; text: string; model?: string; persona?: string; files?: { uri: string; name: string }[]; follow?: boolean; agent?: string;
   scene?: Scene; said?: string; next?: string; title?: string; sampling?: Record<string, unknown> }
 export type Answer = Decision | "stop" | { answer: Record<string, unknown> };
 export interface Step { content: string; reasoning?: string; calls: Call[] }
@@ -336,16 +336,38 @@ export const fork = async (id: string, before?: string) => {
   if (homes.has(id)) homes.set(made, homes.get(id)!);
   return made;
 };
-export async function rewrite(id: string, to: { drop?: string[]; edit?: { id: string; text: string } }) {
+export async function rewrite(id: string, to: { drop?: string[]; edit?: { id: string; text: string }; last?: string }) {
   const go = (method: string, path: string, body?: object) => call(method, path, body, on(id));
   if (running.has(id)) throw new Error("OpenCode is still working in this chat");
   const was = (await go("GET", `/api/experimental/session/${id}/export`)).data;
+  if (to.last !== undefined) {
+    const reply = was.messages.findLast((m: any) => m.type === "assistant" && (m.content ?? []).some((p: any) => p.type === "text"));
+    if (!reply) throw new Error("OpenCode has no reply in this chat to change");
+    if (reply.content.filter((p: any) => p.type === "text").map((p: any) => p.text).join("") === to.last) return;
+    to = { edit: { id: reply.id, text: to.last } };
+  }
   const edited = (m: any) => (m.type === "user" ? { ...m, text: to.edit!.text, metadata: { ...m.metadata, [OURS]: { ...m.metadata?.[OURS], said: to.edit!.text } } }
     : { ...m, content: [...(m.content ?? []).filter((p: any) => p.type !== "text"), { type: "text", text: to.edit!.text }] });
   const messages = was.messages.filter((m: any) => !to.drop?.includes(m.id)).map((m: any) => (m.id === to.edit?.id ? edited(m) : m));
   await go("DELETE", `/api/session/${id}`);
   try { await go("POST", "/api/experimental/session/import", { info: was.info, messages, location: was.info.location }); }
   catch (e) { await go("POST", "/api/experimental/session/import", { ...was, location: was.info.location }); throw e; }
+}
+export async function settled(id: string, signal: AbortSignal) {
+  while (running.has(id) && !signal.aborted) await Bun.sleep(20);
+}
+export async function again(id: string) {
+  const asked = (await said(id)).findLast((m) => m.type === "user");
+  if (asked) await undo(id, asked.id);
+}
+async function said(id: string): Promise<any[]> {
+  const all: any[] = [];
+  for (let cursor: string | undefined; ; ) {
+    const page = await call("GET", `/api/session/${id}/message?limit=200&${cursor ? `cursor=${encodeURIComponent(cursor)}` : "order=asc"}`, undefined, on(id));
+    all.push(...(page.data ?? []));
+    cursor = page.cursor?.next;
+    if (!cursor || !page.data?.length) return all;
+  }
 }
 export async function undo(id: string, message: string) {
   const go = (method: string, path: string, body?: object) => call(method, path, body, on(id));
@@ -360,13 +382,7 @@ function callOf(p: any): Call {
 }
 export async function transcript(id: string): Promise<{ thread: Thread; messages: Said[]; context?: Context }> {
   const go = (method: string, path: string, body?: object) => call(method, path, body, on(id));
-  const s = (await go("GET", `/api/session/${id}`)).data, all: any[] = [];
-  for (let cursor: string | undefined; ; ) {
-    const page = await go("GET", `/api/session/${id}/message?limit=200&${cursor ? `cursor=${encodeURIComponent(cursor)}` : "order=asc"}`);
-    all.push(...(page.data ?? []));
-    cursor = page.cursor?.next;
-    if (!cursor || !page.data?.length) break;
-  }
+  const s = (await go("GET", `/api/session/${id}`)).data, all = await said(id);
   const scene = sceneOf(s), greeter = scene?.greeter ?? (scene?.cast.length === 1 ? scene.cast[0] : undefined), messages: Said[] = scene?.greeting ? [{ role: "assistant", content: scene.greeting, ...(greeter ? { by: greeter } : {}) }] : [];
   let steps: Step[] = [], ids: string[] = [], shown: string | undefined, by: string | undefined = scene?.cast.length === 1 ? scene.cast[0] : undefined;
   let marks: NonNullable<Said["checkpoints"]> = [], used: number | undefined, fresh = false;

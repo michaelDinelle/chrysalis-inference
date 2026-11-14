@@ -95,36 +95,20 @@ for d in range(n.value):
 sys.exit(1)' 2>/dev/null
 }
 
-engine() {
-    local run=("$ROOT/chrysalis.sh" serve)
-    systemd-run --user --scope -q true 2>/dev/null && run=(systemd-run --user --scope -q -p MemorySwapMax=0 "${run[@]}")
-    local rc t0 quick=0
-    while :; do
-        t0=$SECONDS rc=0
-        "${run[@]}" </dev/null || rc=$?
-        (( rc != 0 )) || return 0
-        if (( rc == 137 )); then
-            echo "chrysalis: the model server was killed, most likely by the kernel for memory (journalctl -k shows which):" \
-                "not starting it again, so the desktop keeps its memory; start Chrysalis again once there is room"
-            return 1
-        fi
-        (( SECONDS - t0 < 120 )) && quick=$((quick + 1)) || quick=0
-        if (( quick >= 3 )); then
-            echo "chrysalis: the model server stopped $quick times in a row within two minutes of starting (exit $rc): not starting it again"
-            return 1
-        fi
-        sleep 3
-    done
-}
-
 usage() {
     cat <<EOF
-usage: chrysalis.sh [--host 0.0.0.0]
+usage: chrysalis.sh [--host 0.0.0.0 | --insecure] [--model <model>]
 
-  Runs Chrysalis in this terminal: the model and the web chat, their log, and the questions when a phone or computer
-  wants in. Ctrl+C stops it. Requests pick the model (qwen3.8-27b or qwen3.8-flash-next); Chrysalis switches between them.
-  --host 0.0.0.0: on the local network too, for the phones and computers let in: a QR code connects a phone, and
-  Chrysalis on another computer finds this one and uses its GPU
+  Runs Chrysalis in this terminal: the model and the web chat, each request as it finishes, and the questions when a
+  phone or computer wants in. Type help there for what it takes: local, network and insecure move it without stopping,
+  verbose shows what the servers print. Ctrl+C stops it. Nothing it shows is written to disk.
+  Requests pick the model (qwen3.8-27b or qwen3.8-flash-next); Chrysalis switches between them.
+  --host 0.0.0.0: on the local network too, encrypted, for the phones and computers let in: a QR code connects a
+  phone, and Chrysalis on another computer finds this one and uses its GPU
+  --insecure: on the local network over plain HTTP, as llama.cpp serves: no certificates and nobody to let in, the
+  chat on port 8081 and the API on 8080. Anyone on the network can use it and read what is sent, and other devices
+  get no voice mode and no OpenCode
+  --model qwen3.8-27b or qwen3.8-flash-next: start with that model and ask nothing
 
   chrysalis.sh get <model>   download a model's files now (Chrysalis gets the one it loads by itself)
   chrysalis.sh link          retune the GPU's PCIe link at every boot and wake, when the board's own tuning fails
@@ -245,30 +229,35 @@ EOF
 UFW_NOTE=~/.config/chrysalis/ufw
 blocked() {
     systemctl is-active -q ufw 2>/dev/null || return 1
-    local net; net=$(lan_subnet)
-    { ! grep -qsE "allow tcp 808[01]:8083 0.0.0.0/0 any $net in" /etc/ufw/user.rules || ! grep -qsF "allow udp 5353 0.0.0.0/0 any $net in" /etc/ufw/user.rules; } &&
-        ! grep -qsx "$net 8081:8083 5353" "$UFW_NOTE"
+    local net ports='808[01]'; net=$(lan_subnet)
+    [ "${1:-}" != insecure ] || ports=8080
+    { ! grep -qsE "allow tcp $ports:8083 0.0.0.0/0 any $net in" /etc/ufw/user.rules || ! grep -qsF "allow udp 5353 0.0.0.0/0 any $net in" /etc/ufw/user.rules; } &&
+        ! grep -qsE "^$net $ports:8083 5353\$" "$UFW_NOTE"
 }
 let_in() {
+    local from=8081 rule=Chrysalis script
+    [ "${1:-}" != insecure ] || { from=8080; rule=ChrysalisOpen; }
     if [ -n "$WIN" ]; then
-        [ -n "$(win 'Get-NetFirewallHyperVRule -Name Chrysalis -ErrorAction SilentlyContinue | ForEach-Object Name')" ] && return 0
-        echo "Windows keeps other devices out: letting the private networks reach Chrysalis (TCP 8081-8083) asks Windows for an administrator, once"
-        win "$(cat <<'EOF'
-$rule = "New-NetFirewallHyperVRule -Name Chrysalis -DisplayName 'Chrysalis Inference' -Direction Inbound -Action Allow -VMCreatorId '{40E0AC32-46A5-438A-A0B2-2B479E8F2E90}' -Protocol TCP -LocalPorts 8081-8083 -RemoteAddresses 10.0.0.0/8, 172.16.0.0/12, 192.168.0.0/16, 100.64.0.0/10, 169.254.0.0/16"
+        [ -n "$(win "Get-NetFirewallHyperVRule -Name $rule -ErrorAction SilentlyContinue | ForEach-Object Name")" ] && return 0
+        echo "Windows keeps other devices out: letting the private networks reach Chrysalis (TCP $from-8083) asks Windows for an administrator, once"
+        script="$(cat <<'EOF'
+$rule = "New-NetFirewallHyperVRule -Name @RULE@ -DisplayName 'Chrysalis Inference' -Direction Inbound -Action Allow -VMCreatorId '{40E0AC32-46A5-438A-A0B2-2B479E8F2E90}' -Protocol TCP -LocalPorts @FROM@-8083 -RemoteAddresses 10.0.0.0/8, 172.16.0.0/12, 192.168.0.0/16, 100.64.0.0/10, 169.254.0.0/16"
 $enc = [Convert]::ToBase64String([Text.Encoding]::Unicode.GetBytes($rule))
 Start-Process powershell -Verb RunAs -Wait -WindowStyle Hidden -ArgumentList '-NoProfile', '-EncodedCommand', $enc
 EOF
 )"
+        script=${script//@RULE@/$rule}
+        win "${script//@FROM@/$from}"
         return 0
     fi
-    blocked || return 0
+    blocked "${1:-}" || return 0
     local net; net=$(lan_subnet)
-    echo "ufw keeps other devices out: letting $net reach Chrysalis (TCP 8081-8083, mDNS) takes your password, once"
-    if [ -t 0 ] && sudo sh -c "ufw allow from $net to any port 8081:8083 proto tcp comment 'Chrysalis Inference' &&
+    echo "ufw keeps other devices out: letting $net reach Chrysalis (TCP $from-8083, mDNS) takes your password, once"
+    if [ -t 0 ] && sudo sh -c "ufw allow from $net to any port $from:8083 proto tcp comment 'Chrysalis Inference' &&
             ufw allow from $net to any port 5353 proto udp comment 'Chrysalis Inference: found on the network'" >/dev/null; then
-        mkdir -p "${UFW_NOTE%/*}" && echo "$net 8081:8083 5353" >> "$UFW_NOTE"
+        mkdir -p "${UFW_NOTE%/*}" && echo "$net $from:8083 5353" >> "$UFW_NOTE"
     else
-        echo "  not changed: run 'chrysalis.sh --host 0.0.0.0' in a terminal, which asks for the password"
+        echo "  not changed: Chrysalis started in a terminal asks for the password"
     fi
 }
 
@@ -295,57 +284,6 @@ tune_link() {
     fi
 }
 
-urls() {
-    local at=127.0.0.1
-    if [ "$1" = 0.0.0.0 ]; then at=$(lan_ip); fi
-    echo "  chat    http://localhost:8081"
-    echo "  API     http://127.0.0.1:8080/v1"
-    if [ "$at" != 127.0.0.1 ]; then
-        echo "  phone   scan this, or open https://$at:8081 past its warning; this terminal asks to let it in"
-        if command -v qrencode >/dev/null; then qrencode -t ANSIUTF8 -m 2 "https://$at:8081"; fi
-        echo "  laptop  run Chrysalis there: it finds this one, and both terminals ask with the same code"
-        if blocked; then echo "  ufw keeps other devices out: 'chrysalis.sh --host 0.0.0.0' in a terminal lets this network in"; fi
-    fi
-}
-
-CHATTER='^chrysalis(-fn)?: (loading |CPU |weights |loaded in |warmed up |the expert pool as the last run)'
-loading() {
-    local spin=(⠋ ⠙ ⠹ ⠸ ⠼ ⠴ ⠦ ⠧ ⠇ ⠏) t0=$SECONDS i=0 name=model step="loading the weights" line buf= rc vram= ram= ctx n pct=0 bar rest
-    local sizes='weights ([0-9.]+) GB.*buffers ([0-9.]+) GB.*\(([0-9.]+) GB\)' cold='cold experts ([0-9.]+) GB' tokens='context ([0-9]+)'
-    local progress='"progress": ([0-9]+)\.?([0-9]*)'
-    while :; do
-        rc=0; IFS= read -r -t 0.1 line || rc=$?
-        if (( rc > 128 )); then
-            buf+=$line
-            [ -t 1 ] || continue
-            if (( i % 3 == 0 )) && [[ $(here -m 0.5 "$API/health") =~ $progress ]]; then
-                rest=${BASH_REMATCH[2]}00 pct=$((10#${BASH_REMATCH[1]} * 100 + 10#${rest:0:2}))
-            fi
-            printf -v bar '%*s%*s' $((pct / 5)) "" $((20 - pct / 5)) ""
-            rest=${bar:pct / 5} bar=${bar:0:pct / 5}
-            printf '\r\e[K  \e[35m%s\e[0m \e[1m%s\e[0m  \e[35m%s\e[90m%s\e[0m %3d%%  \e[2m%s · %d s\e[0m' \
-                "${spin[i++ % 10]}" "$name" "${bar// /━}" "${rest// /━}" $pct "$step" $((SECONDS - t0))
-            continue
-        fi
-        (( rc == 0 )) || return 1
-        line=$buf$line buf=
-        if [[ $line =~ $sizes ]]; then
-            vram=$(awk "BEGIN { printf \"%.1f\", ${BASH_REMATCH[1]} + ${BASH_REMATCH[2]} + ${BASH_REMATCH[3]} }") step="warming up"
-            [[ $line =~ $cold ]] && ram=$(awk "BEGIN { printf \"%.1f\", ${BASH_REMATCH[1]} }")
-        fi
-        case $line in
-            "chrysalis: loading "*) name=${line#chrysalis: loading } ;;
-            "chrysalis: serving "*)
-                [[ $line =~ $tokens ]] && n=${BASH_REMATCH[1]}
-                while (( n >= 1000 )); do ctx=$(printf ',%03d' $((n % 1000)))$ctx n=$((n / 1000)); done
-                printf '\r\e[K  \e[32m✓\e[0m \e[1m%s\e[0m ready in %d s  \e[2m%s tokens of context · %s GB VRAM%s\e[0m\n' \
-                    "$name" $((SECONDS - t0)) "$n$ctx" "$vram" "${ram:+ · $ram GB RAM}"
-                return 0 ;;
-            *) [[ $line =~ $CHATTER ]] || printf '\r\e[K%s\n' "$line" ;;
-        esac
-    done
-}
-
 release() {
     set -uo pipefail
     local VER="${1:-$(git -C "$ROOT" describe --tags --always)}" OUT=dist/chrysalis R=data/rocm/lib
@@ -369,10 +307,10 @@ release() {
     mv "$(find "$UV/python" -mindepth 1 -maxdepth 1 -type d -name 'cpython-3.12.*')" "$OUT/data/venv"
     "$UV/uv" pip install -q --python "$OUT/data/venv/bin/python3" --break-system-packages "${PKGS[@]}"
     ln -sf python3 "$OUT/data/venv/bin/python"
-    find web -maxdepth 1 -type f \( -name '*.ts' -o -name '*.html' -o -name '*.css' -o -name '*.js' -o -name '*.svg' -o -name '*.json' -o -name 'bun.lock' \) \
+    find web -maxdepth 1 -type f \( -name '*.ts' -o -name '*.tsx' -o -name '*.html' -o -name '*.css' -o -name '*.js' -o -name '*.svg' -o -name '*.json' -o -name 'bun.lock' \) \
         ! -name '*.test.ts' ! -name '*.check.ts' ! -name 'fake-*' ! -name 'bench-*' -exec cp {} "$OUT/web/" \;
     (cd web && bun install --frozen-lockfile >/dev/null)
-    bun build web/server.ts --target=bun --production --outdir "$OUT/web" >/dev/null
+    bun build web/server.ts web/cli.ts --target=bun --production --external react-devtools-core --outdir "$OUT/web" >/dev/null
     for p in mermaid/dist/mermaid.esm.min.mjs mermaid/dist/chunks/mermaid.esm.min aframe/dist/aframe-v1.8.0.min.js three/package.json three/build three/examples/jsm; do
         mkdir -p "$OUT/web/node_modules/${p%/*}" && cp -r "web/node_modules/$p" "$OUT/web/node_modules/$p"
     done
@@ -453,35 +391,40 @@ native() {
 }
 
 case "${1:-}" in
-  ""|--host) case "${1:-}:${2:-}" in --host:0.0.0.0) to=0.0.0.0 ;; --host:127.0.0.1|:) to=127.0.0.1 ;; *) usage; exit 1 ;; esac
+  ""|--host|--insecure|--model)
+            mode=local first=
+            while [ $# -gt 0 ]; do
+                case "$1:${2:-}" in
+                    --host:0.0.0.0) mode=network; shift 2 ;;
+                    --host:127.0.0.1) shift 2 ;;
+                    --insecure:*) mode=insecure; shift ;;
+                    --model:qwen3.8-27b|--model:qwen3.8-flash-next) first=$2; shift 2 ;;
+                    *) usage; exit 1 ;;
+                esac
+            done
             if here -f -o /dev/null "$WEB_URL/"; then echo "Chrysalis is running already, in another terminal (Ctrl+C there stops it)"; exit 1; fi
             wsl_ready
             tune_link
-            if [ $to = 0.0.0.0 ]; then let_in; fi
+            if [ $mode != local ]; then let_in $mode; fi
             if [ -n "$MAC" ]; then
                 codesign -v "$APP" 2>/dev/null || codesign --force -s - "$APP" 2>/dev/null
             fi
-            trap 'trap - EXIT; [ ! -t 1 ] || printf "\e[?25h"; kill 0' EXIT
+            trap '[ ! -t 1 ] || printf "\e[?25h"' EXIT
             setup
             build
+            cli=cli.ts; [ -f "$ROOT/web/cli.js" ] && cli=cli.js
+            [ -f "$ROOT/web/cli.js" ] || [ -d "$ROOT/web/node_modules/ink" ] || (cd "$ROOT/web" && "$BUN" install --frozen-lockfile >/dev/null)
+            run=("$BUN" "$ROOT/web/$cli" --mode $mode)
             if has_gpu; then
-                pick
+                if [ -n "$first" ]; then mkdir -p "$TLS_DIR" && printf %s "$first" > "$TLS_DIR/model"; else pick; fi
                 model=$(cat "$TLS_DIR/model" 2>/dev/null || true)
                 get ${model:+"$model"}
-                if roomy && ! get --check qwen3.8-flash-next; then
-                    get qwen3.8-flash-next >/dev/null 2>&1 &
-                    echo "  Qwen3.8-Flash-Next is downloading in the background: the model picker has it once it is here"
-                fi
-                exec 3< <(trap "" INT; engine 2>&1)
-                loading <&3
-                grep --line-buffered -vE "$CHATTER" <&3 &
+                if roomy && ! get --check qwen3.8-flash-next; then run+=(--get qwen3.8-flash-next); fi
             else
-                echo "no GPU Chrysalis runs on here: the web chat uses Chrysalis on another computer on your network, or your Ollama, LM Studio or llama.cpp"
+                run+=(--no-model)
             fi
-            urls $to
-            web=server.ts; [ -f "$ROOT/web/server.js" ] && web=server.js
-            [ -d "$ROOT/web/node_modules" ] || (cd "$ROOT/web" && "$BUN" install --frozen-lockfile >/dev/null)
-            cd "$ROOT/web" && NODE_ENV=production CHRYSALIS_HOST=$to "$BUN" $web ;;
+            exec "${run[@]}" ;;
+  firewall) let_in "${2:-}" ;;
   gpu)      has_gpu ;;
   link)     tune_link ask ;;
   opencode) opencode_models "${2:-}" ;;

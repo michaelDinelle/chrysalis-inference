@@ -70,7 +70,6 @@ Start Chrysalis with `chrysalis.sh --host 0.0.0.0`. The other computer needs [Op
 - **Voice mode** you can interrupt by talking
 - **OpenCode threads** in the chat: work in a folder, with OpenCode's tools, on Chrysalis's models unless you allow others
 - **Claude Code** and **OpenCode**, through OpenAI and Anthropic APIs
-- The same chat on **llama.cpp, Ollama, LM Studio, KoboldCpp or vLLM**
 - **Qwen3.8-27B** with its full 262K context
 
 ## Run it
@@ -82,7 +81,10 @@ curl -fsSL https://github.com/michaelDinelle/chrysalis-inference/releases/latest
 chrysalis/chrysalis.sh
 ```
 
-<p align="center"><img src="media/run.png" width="760" alt="Chrysalis starting in a terminal: it asks which model, says it is ready, and prints the chat's and API's addresses"></p>
+<p align="center"><img src="media/run.png" width="760" alt="Chrysalis in a terminal: the chat's and API's addresses, the model ready, two requests with their sizes and speeds, and a prompt"></p>
+<p align="center"><img src="media/switches.png" width="760" alt="The switches, opened with Tab: Reach, Model, Shows, OpenCode, Restart and Print, each a row of choices"></p>
+
+<sub>Tab opens the switches: who reaches Chrysalis, the model, and what the terminal shows.</sub>
 
 <sub>The first start downloads 16 GB for the 27B or 117 GB for Flash-Next from [Hugging Face](https://huggingface.co/michaelDinelle/chrysalis).</sub>
 
@@ -110,9 +112,20 @@ docker run -d --device /dev/kfd --device /dev/dri -p 127.0.0.1:8080:8080 -v chry
 
 - Everything stays in the release's folder. With 64 GB of RAM, each start asks which model to run. With less, it runs the
   27B. Ctrl+C in its terminal stops it.
+- The terminal shows each request as it finishes, by its sizes and speeds and never its words. Tab opens the switches,
+  rows set with the arrows and Enter: where Chrysalis is reachable, the model (or none, which frees the GPU), what the terminal shows,
+  OpenCode's models, restarts. Each is a command too (`help` lists them): `local`, `network` and `insecure` move
+  Chrysalis without stopping it, `model` switches the model, `restart` starts the servers again, and `verbose` also
+  shows what the servers print, for that run. Nothing it shows is written to disk.
+- `chrysalis.sh --model qwen3.8-27b` (or `qwen3.8-flash-next`) starts with that model and asks nothing.
 - `chrysalis.sh --host 0.0.0.0` puts Chrysalis on the network. The same Chrysalis on a laptop finds it. After y in both
   terminals, once, the laptop's apps use its GPU at `http://127.0.0.1:8080`.
-- With no supported GPU, Chrysalis is the chat alone, for Ollama, LM Studio or llama.cpp.
+- `chrysalis.sh --insecure` puts it on the network over plain HTTP, as llama.cpp serves: no certificates and nobody to
+  let in, the chat on port 8081 and the API at `http://<address>:8080/v1`. Anyone on the network can use it and read
+  what is sent, and other devices get no voice mode (browsers give a microphone only to encrypted pages) and no OpenCode.
+- With no supported GPU, Chrysalis is the chat alone, for Chrysalis on another computer. The page has no box for another
+  backend's address now: `curl -X POST localhost:8081/api/backend -H 'Content-Type: application/json' -d '{"url": "localhost:11434"}'`
+  on the computer it runs on points the chat at llama.cpp, Ollama, LM Studio, KoboldCpp or vLLM.
 - Mac: the first `./chrysalis.sh` in a clone gets Python and Bun and builds the Metal engines with Xcode's Metal compiler.
   The release, `chrysalis-macos-arm64.tar.gz`, is a laptop's chat alone, and `chrysalis/Chrysalis.app` opens it in Terminal.
 - NVIDIA: needs Linux with NVIDIA's driver and CUDA toolkit. The first `./chrysalis.sh` in a clone builds the CUDA engines.
@@ -122,6 +135,13 @@ docker run -d --device /dev/kfd --device /dev/dri -p 127.0.0.1:8080:8080 -v chry
 
 **Features**
 
+- Swiping: the latest reply has an arrow at either end of the row under it, and a count. The right arrow on the last
+  version writes a new one, and while a reply is being written it starts that reply over. With the message box empty,
+  the left and right arrow keys do the same, and on a touch screen a drag across the reply does. Every version is kept,
+  and going between them is instant. In an OpenCode thread a new version asks OpenCode again, the versions are kept in
+  the tab, and the one on screen becomes the reply OpenCode holds.
+- Settings has a system prompt: it goes with every chat, after whoever the chat is with. In a thread it goes in the one
+  instruction Chrysalis gives OpenCode, beside OpenCode's own prompt.
 - Artifacts render as they are written. Hovering highlights a part. Clicking attaches it to the next message. The paint
   bucket edits the artifact by hand.
 - SillyTavern cards: speech and narration look the way they do in SillyTavern, and each speaker in a group chat has a
@@ -153,7 +173,7 @@ docker run -d --device /dev/kfd --device /dev/dri -p 127.0.0.1:8080:8080 -v chry
 
 **OpenCode on another computer**
 
-- With no browser there, as over SSH, Chrysalis's terminal prints the same line. On Windows the line runs in WSL.
+- With no browser there, as over SSH, `opencode` typed in Chrysalis's terminal prints the same line. On Windows the line runs in WSL.
 - If OpenCode is open, the line asks to close it first. The line adds both models to OpenCode's favorites.
 - Run on: the line also leaves a small helper on that computer (a launchd job on a Mac, a systemd user service on
   Linux) that starts its own OpenCode on Chrysalis's models alone and holds one outgoing HTTPS connection to Chrysalis,

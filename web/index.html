@@ -103,14 +103,7 @@
       <main>
         <header class="topbar">
           <h1 id="title">New chat</h1>
-          <form id="backend" class="backend" autocomplete="off" hidden>
-            <span id="backend-dot" class="dot"></span>
-            <input id="backend-url" class="backend-input backend-url" type="text" inputmode="url" spellcheck="false" list="backend-known" aria-label="Backend address" placeholder="http://localhost:11434/v1" />
-            <datalist id="backend-known"></datalist>
-            <button id="backend-go" class="btn small primary" type="submit" hidden>Connect</button>
-            <p id="backend-note" class="backend-note" role="status" hidden><span id="backend-why"></span><button id="backend-far" class="btn small primary" type="button" hidden>Send my chats there</button></p>
-            <p id="link-note" class="backend-note" role="status" hidden></p>
-          </form>
+          <div class="link"><p id="link-note" class="link-note" role="status" hidden></p></div>
           <button id="artifacts-toggle" class="act art-btn" type="button" title="Artifacts" aria-label="Artifacts" aria-controls="shelf" hidden></button>
           <button id="opencode" class="act oc-btn" type="button" aria-haspopup="dialog" aria-controls="oc-pop"></button>
         </header>
@@ -140,7 +133,6 @@
                 <button id="machine-btn" class="folder-btn machine-btn" type="button" aria-haspopup="menu" hidden></button>
                 <button id="folder-btn" class="folder-btn" type="button" hidden></button>
                 <button id="model-btn" class="model-btn" type="button" aria-haspopup="listbox" aria-expanded="false" aria-controls="model-pop"></button>
-                <button id="power" class="act power" type="button"></button>
                 <button id="draft" class="draft" type="button" hidden></button>
                 <button id="voice" class="voice" type="button" title="Voice mode" aria-label="Voice mode"></button>
                 <div id="voice-pill" class="voice-pill" hidden>
@@ -186,9 +178,10 @@
       <div class="set-body">
         <section class="set-sec" data-sec="chat">
           <div class="set-block">
+            <label class="set-block-title" for="system-input">System prompt</label>
+            <textarea id="system-input" class="system-input" rows="4" spellcheck="false" placeholder="Nothing added" title="Sent with every chat, after whoever it is with. In a thread it goes with who is working, beside OpenCode's own prompt and not in its place."></textarea>
             <div class="set-block-foot">
               <label class="set-switch" title="After the system prompt, how to make artifacts (with an id for each part) and change them in place with edits that hold only what changes"><button id="artifacts-switch" class="switch" type="button" role="switch" aria-checked="true"></button><span>Artifacts the model changes in place</span></label>
-              <button id="sent-open" class="btn small" type="button" title="The open chat's next request, exactly as the backend gets it">What the model is sent</button>
             </div>
           </div>
           <div class="set-block">
@@ -221,11 +214,6 @@
     <div id="voice-menu" class="voice-menu" popover="auto" role="dialog" aria-label="Voices"></div>
     <dialog id="svg-zoom" class="svg-zoom" aria-label="SVG, full size"><div class="svg-zoom-paper"></div></dialog>
     <dialog id="page-zoom" class="page-zoom" aria-label="Page, full size"><div class="page-zoom-box"></div></dialog>
-    <dialog id="sent-view" class="sent-view" aria-labelledby="sent-title">
-      <header class="sent-head"><h2 id="sent-title">What the model is sent</h2><button id="sent-copy" class="btn small" type="button">Copy</button><button id="sent-close" class="act" type="button" aria-label="Close"></button></header>
-      <p id="sent-about" class="set-note"></p>
-      <pre id="sent-text" class="sent-text"></pre>
-    </dialog>
     <dialog id="connect-view" class="connect-view" aria-labelledby="connect-title">
       <header class="sent-head"><h2 id="connect-title">Devices</h2><button id="connect-close" class="act" type="button" aria-label="Close"></button></header>
       <div id="connect-body" class="connect-body"></div>

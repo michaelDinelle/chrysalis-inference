@@ -177,11 +177,3 @@ test("a reply whose stream from Chrysalis keeps breaking off is tried again, the
   expect(got.filter((e) => e.error).map((e) => e.error.message)).toEqual(["Chrysalis's reply broke off (Chrysalis's log has why)"]);
 });
 
-test("the preview of a reply's request is what Chrysalis is then sent for it", async () => {
-  const said = `run ${JSON.stringify([{ text: "Hi." }])}\n${unique()}`;
-  const body = { stream: true, model: "m", messages: [{ role: "system", content: "S" }, { role: "user", content: said }] };
-  const preview = await (await fetch(`${base}/api/preview`, { method: "POST", headers: json, body: JSON.stringify(body) })).json();
-  await collect(await fetch(`${base}/api/chat`, { method: "POST", headers: json, body: JSON.stringify(body) }));
-  expect(preview.body).toEqual(seen.get(said)![0]);
-  expect((await fetch(`${base}/api/preview`, { method: "POST", body: JSON.stringify(body) })).status).toBe(415);
-}, 30_000);
