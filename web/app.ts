@@ -18,11 +18,6 @@ import { type Card, type CardData, type Group, type Person, type Voice, cardPng,
 import { Ocean } from "./ocean";
 import { type Drop, sidebarDrag } from "./drag";
 
-let hiding: boolean = await fetch("/api/status").then((r) => (r.ok ? r.json() : {}), () => ({})).then((s: { incognito?: boolean }) => !!s.incognito);
-const held = new Map<string, string>();
-lasts(!hiding);
-document.documentElement.toggleAttribute("data-incognito", hiding);
-
 type Effort = "xhigh" | "medium" | "low" | "off";
 interface Stats { ttft: number; tps: number; tokens: number; prompt: number; cached?: number; thought?: number; seed?: number; model?: string; ctx?: number }
 type CallState = "approval" | "asking" | "running" | "done" | "failed" | "declined" | "stopped";
@@ -59,9 +54,10 @@ interface Message {
 }
 interface Conversation { id: string; title: string; named?: boolean; updated: number; effort: Effort; messages: Message[];
   unsynced?: boolean;
+  incognito?: true;
   pending?: Record<string, { kind: string; srcs: string[] }>;
   who?: string;
-  thread?: { dir: string; id?: string; model?: string; at?: number; agent?: string; machine?: string; context?: { used?: number; compacted?: boolean; window: number; ceiling: number; auto: boolean } } }
+  thread?: { hidden?: true; dir: string; id?: string; model?: string; at?: number; agent?: string; machine?: string; context?: { used?: number; compacted?: boolean; window: number; ceiling: number; auto: boolean } } }
 type Sampler = Partial<Record<SamplerKey, number>> & { order?: Stage[] };
 type Mode = "think" | "fast";
 interface Settings {
@@ -71,7 +67,7 @@ interface Settings {
   global?: string;
 }
 interface VoiceSettings { tts?: string; name?: string; stt?: string; speed?: number }
-interface Status { incognito?: boolean; state: "online" | "loading" | "offline"; machine?: string; build?: string; model?: string; loading?: string; progress?: number; context?: number; kv_tokens?: number; cache?: { free_kv_tokens: number };
+interface Status { state: "online" | "loading" | "offline"; machine?: string; build?: string; model?: string; loading?: string; progress?: number; context?: number; kv_tokens?: number; cache?: { free_kv_tokens: number };
   check?: boolean; here?: boolean; waiting?: number;
   backend?: Backend; link?: Linking }
 interface Linking { linked?: { name: string }; found: { name: string; fp: string }[]; refused?: string;
@@ -286,7 +282,7 @@ const userCard = () => ({ ...persona().card.data, name: userName() });
 const CAST = "cast:";
 interface Scene { cast: string[]; cards?: Card[]; group?: string; scenario?: string; name?: string; greeting?: string; greeter?: string }
 interface Harness { state: "absent" | "off" | "on"; outside?: boolean; machines?: { id: string; name: string; home: string; kind: string }[]; name?: string; version?: string; install?: string; wanted?: boolean; home?: string; models?: { id: string; name: string; provider: string; variants: string[]; straight?: string }[]; agents?: { id: string; name: string }[];
-  threads?: { id: string; title: string; dir: string; updated: number; idle: number; busy: boolean; archived: boolean; job?: string; model?: string; scene?: Scene; machine?: string }[] }
+  threads?: { id: string; title: string; dir: string; updated: number; idle: number; busy: boolean; archived: boolean; job?: string; model?: string; scene?: Scene; machine?: string; hidden?: boolean }[] }
 let harness: Harness = { state: "off" };
 const castable = (id: string) => !!people.get(id) && people.get(id)!.kind !== "persona";
 const folderOf = (c: Conversation) => (c.who && c.who !== CHRYSALIS && (groups.has(c.who) || people.has(c.who)) ? c.who : "");
@@ -676,7 +672,7 @@ function meet(scene?: Scene) {
   if (who) unfold(who);
 }
 const stubs = (): Conversation[] => { const mine = new Set([...Object.values(chats), conv, ...[...runs.values()].map((r) => r.conv)].map((c) => c.thread?.id)); return (harness.threads ?? []).filter((t) => !mine.has(t.id) && !doomed.has(t.id))
-  .map((t) => ({ id: STUB + t.id, title: t.title || "Thread", named: true, updated: t.updated, effort: "xhigh" as Effort, messages: [], thread: { dir: t.dir, id: t.id, ...(t.machine ? { machine: t.machine } : {}) }, ...seated(t.scene) })); };
+  .map((t) => ({ id: STUB + t.id, title: t.title || "Thread", named: true, updated: t.updated, effort: "xhigh" as Effort, messages: [], thread: { dir: t.dir, id: t.id, ...(t.machine ? { machine: t.machine } : {}), ...(t.hidden ? { hidden: true as const } : {}) }, ...(t.hidden ? { incognito: true as const } : {}), ...seated(t.scene) })); };
 const keyOf = (c: Conversation) => (c.thread?.id ? STUB + c.thread.id : c.id);
 const threadModel = (c: Conversation) => [c.thread?.model, pref("thread-model", "")].find((id) => id && harness.models?.some((m) => m.id === id))
   ?? harness.models?.find((m) => m.id === `chrysalis/${current()}`)?.id ?? harness.models?.find((m) => m.id.startsWith("chrysalis/"))?.id;
@@ -712,7 +708,7 @@ async function loadThreads() {
   if (text === JSON.stringify(harness)) return;
   const before = new Map((harness.threads ?? []).map((t) => [t.id, t.idle]));
   harness = JSON.parse(text);
-  for (const t of harness.threads ?? []) if (before.has(t.id) && before.get(t.id) !== t.idle && !t.job && conv.thread?.id !== t.id && ![...runs.values()].some((x) => x.conv.thread?.id === t.id))
+  for (const t of harness.threads ?? []) if (!t.hidden && before.has(t.id) && before.get(t.id) !== t.idle && !t.job && conv.thread?.id !== t.id && ![...runs.values()].some((x) => x.conv.thread?.id === t.id))
     mark({ id: STUB + t.id, thread: { dir: t.dir, id: t.id, ...(t.machine ? { machine: t.machine } : {}) } } as Conversation, "done");
   const now = (c: Conversation) => (c.thread?.id ? harness.threads?.find((x) => x.id === c.thread!.id) : undefined);
   if (harness.state === "on" && harness.threads) {
@@ -728,13 +724,13 @@ async function loadThreads() {
   paintHarness();
   renderList();
   if (conv.thread) { $("title").textContent = conv.title; renderControls(); }
-  if (harness.home && !conv.thread && !conv.messages.some((m) => m.role === "user") && !runs.get(conv.id) && pref("tools", "on") === "on") { conv.thread = freshThread(); renderControls(); }
+  if (harness.home && !conv.thread && !conv.messages.some((m) => m.role === "user") && !runs.get(conv.id) && pref("tools", "on") === "on") { conv.thread = conv.incognito ? hiddenThread() : freshThread(); renderControls(); }
   const t = runs.get(conv.id) ? undefined : now(conv);
   if (t && !voice && (t.job ? !conv.messages.some((m) => m.job === t.job) : t.idle !== (conv.thread!.at ?? t.idle))) showThread(t.id);
 }
-async function sentFile(key: string, f: { name: string; type: string; data: string }): Promise<Attachment> {
+async function sentFile(key: string, f: { name: string; type: string; data: string }, keep: boolean): Promise<Attachment> {
   const bytes = Uint8Array.from(atob(f.data), (ch) => ch.charCodeAt(0)), kind = f.type.startsWith("image/") ? "image" : f.type === "application/pdf" ? "pdf" : "text";
-  await putFile(key, kind === "text" ? new TextDecoder().decode(bytes) : new Blob([bytes], { type: f.type }));
+  await putFile(key, kind === "text" ? new TextDecoder().decode(bytes) : new Blob([bytes], { type: f.type }), keep);
   return { id: key, name: f.name, type: f.type, size: bytes.length, kind };
 }
 async function openThread(sid: string): Promise<string | undefined> {
@@ -748,12 +744,13 @@ async function openThread(sid: string): Promise<string | undefined> {
   if (mine && !folderOf(mine)) Object.assign(mine, seated(got.thread.scene));
   const c: Conversation = mine ?? { id: STUB + sid, title: "", named: true, updated: 0, effort: pref("effort", "xhigh") as Effort, messages: [], thread: { dir: got.thread.dir, id: sid, ...(got.thread.machine ? { machine: got.thread.machine } : {}) }, ...seated(got.thread.scene) };
   if (runs.get(c.id)) return c.id;
+  if (got.thread.hidden) { c.incognito = true; c.thread!.hidden = true; }
   c.thread!.at = got.thread.idle;
   c.thread!.dir = got.thread.dir;
   if (got.context) c.thread!.context = got.context;
   const said: Message[] = await Promise.all(got.messages.map(async ({ files, by, ...m }: Omit<Message, "files"> & { by?: string; files?: { name: string; type: string; data: string }[] }, i: number) => ({ id: randomId(), ...m,
     ...(by && byName(by) ? { as: byName(by)!.id } : {}),
-    ...(files ? { files: await Promise.all(files.map((f, k) => sentFile(`${sid}-${i}-${k}`, f))) } : {}) })));
+    ...(files ? { files: await Promise.all(files.map((f, k) => sentFile(`${sid}-${i}-${k}`, f, !got.thread.hidden))) } : {}) })));
   if (got.job) {
     if (said.at(-1)?.role === "assistant") said.pop();
     said.push({ id: randomId(), role: "assistant", content: "", reasoning: "", job: got.job, ...(people.has(c.who ?? "") ? { as: c.who } : {}) });
@@ -3245,27 +3242,22 @@ const fmtS = (s: number) => `${s < 10 ? s.toFixed(1) : Math.round(s)} s`;
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
 
 function pref(key: string, fallback: string) {
-  if (held.has(`pref ${key}`)) return held.get(`pref ${key}`)!;
   try { return localStorage.getItem(key) ?? fallback; } catch { return fallback; }
 }
 function setPref(key: string, value: string) {
-  if (hiding) return void held.set(`pref ${key}`, value);
   try { localStorage.setItem(key, value); } catch {  }
 }
 function load<T>(key: string, fallback: T): T {
-  if (held.has(`tab ${key}`)) return JSON.parse(held.get(`tab ${key}`)!);
-  if (hiding && key === "chats") return fallback;
   try { return JSON.parse(sessionStorage.getItem(key) ?? "null") ?? fallback; } catch { return fallback; }
 }
 function store(key: string, value: unknown) {
-  if (hiding) return held.set(`tab ${key}`, JSON.stringify(value)), true;
   try { sessionStorage.setItem(key, JSON.stringify(value)); return true; } catch { return false; }
 }
 
 const chats: Record<string, Conversation> = load("chats", {});
 let tabFull = false;
 function keepChats() {
-  const kept = store("chats", Object.fromEntries(Object.entries(chats).map(([id, c]) => [id, { ...c, messages: lean(c.messages) }])));
+  const kept = store("chats", Object.fromEntries(Object.entries(chats).filter(([, c]) => !c.incognito).map(([id, c]) => [id, { ...c, messages: lean(c.messages) }])));
   if (!kept && !tabFull) toast("This tab has no room left to keep its chats through a reload: export or delete some");
   tabFull = !kept;
 }
@@ -3291,12 +3283,15 @@ function blank(): Conversation {
 
 function render() {
   views.clear();
+  lasts(!conv.incognito);
+  document.documentElement.toggleAttribute("data-incognito", !!conv.incognito);
+  $("incognito").setAttribute("aria-pressed", String(!!conv.incognito));
   renderCastNext();
   const was = [...thread.children];
   thread.append(...(conv.messages.length ? conv.messages.map(messageView) : [emptyState()]));
   for (const el of was) el.remove();
   $("title").textContent = conv.title;
-  document.title = conv.messages.length && !hiding ? `${conv.title} · Chrysalis Inference` : "Chrysalis Inference";
+  document.title = conv.messages.length && !conv.incognito ? `${conv.title} · Chrysalis Inference` : "Chrysalis Inference";
   renderComposer();
   renderList();
   paintGhost();
@@ -4415,6 +4410,7 @@ function menuOn(el: HTMLElement, items: () => MenuItem[]) {
 let renaming = "";
 function convRow(s: Conversation, settled = false, faced = false) {
   const a = h("a", `conv${s.id === conv.id ? " active" : ""}${settled ? "" : " card"}`), put = h("button", "conv-settle"), title = h("span", "conv-title", s.title);
+  if (s.incognito) title.insertAdjacentHTML("afterbegin", icon("incognito"));
   put.type = "button";
   put.title = put.ariaLabel = settled ? "Make it active again" : "Settle: put it away";
   put.innerHTML = `${icon(settled ? "retry" : "check")}${settled ? "Un-settle" : "Settle"}`;
@@ -4480,6 +4476,7 @@ const workingFor = (ms: number) => {
 const STATUS = { working: ["Working", "working"], approval: ["Approval", "approval"], input: ["Input", "input"], failed: ["Failed", "failed"], done: ["Done", "done"] } as const;
 const unseen = (): Record<string, "done" | "failed"> => { try { return JSON.parse(pref("unseen", "{}")) ?? {}; } catch { return {}; } };
 function mark(c: Conversation, as?: "done" | "failed") {
+  if (c.incognito) return;
   const now = unseen(), key = keyOf(c);
   if (now[key] === as) return;
   if (as) now[key] = as; else delete now[key];
@@ -4565,7 +4562,6 @@ async function refreshStatus(again = true) {
       return location.replace("/");
     }
     status = await r.json();
-    if (!!status.incognito !== hiding && !flipping) hide(!hiding)();
   } catch { status = { state: "offline", backend: status.backend }; }
   if (status.check) void checkTrust();
   paintHarness();
@@ -4628,7 +4624,7 @@ function request(c: Conversation, upto: Message[], o: { effort?: Effort; samplin
       toast(`This OpenCode sends ${threadModel(c)} straight to ${straight}, so your sampler settings, max tokens and seed don't reach it`);
     }
     const tuned = threadModel(c) ? { sampling: { ...samplerFields(mode), ...(settings.max_tokens ? { max_tokens: settings.max_tokens } : {}), ...(settings.seed !== undefined ? { seed: settings.seed } : {}) } } : {};
-    return { stream: true, chrysalis_thread: { ...(o.again && c.thread.id ? { again: true } : {}), session: c.thread.id, ...(c.thread.machine ? { machine: c.thread.machine } : {}), dir: c.thread.dir, text, ...tuned, ...(text !== said ? { said } : {}), ...(by ? { next: by } : {}), ...(scene ? { scene } : {}),
+    return { stream: true, chrysalis_thread: { ...(o.again && c.thread.id ? { again: true } : {}), session: c.thread.id, ...(c.thread.machine ? { machine: c.thread.machine } : {}), ...(c.thread.hidden ? { hidden: true } : {}), dir: c.thread.dir, text, ...tuned, ...(text !== said ? { said } : {}), ...(by ? { next: by } : {}), ...(scene ? { scene } : {}),
       ...(c.thread.id ? {} : { title: c.title }), model: `${threadModel(c)}${variant ? `#${variant}` : ""}`, persona: threadPersona(c), ...(c.thread.agent && harness.agents?.some((a) => a.id === c.thread!.agent) ? { agent: c.thread.agent } : {}), ...(files.length ? { files } : {}) } };
   }
   const effort = o.effort ?? c.effort, mode: Mode = effort === "off" ? "fast" : "think";
@@ -4641,7 +4637,7 @@ function request(c: Conversation, upto: Message[], o: { effort?: Effort; samplin
   return {
     model: chrysalis && effort === "off" ? `${current()}-fast` : current(), reasoning_effort: chrysalis ? (effort === "off" ? undefined : effort) : OTHER_EFFORT[effort],
     ...samplerFields(o.sampling ?? mode), max_tokens: settings.max_tokens, seed: settings.seed, ...(chrysalis ? { logprobs: true, top_logprobs: 5 } : {}),
-    messages, stream: true, stream_options: { include_usage: true },
+    messages, stream: true, stream_options: { include_usage: true }, ...(c.incognito ? { chrysalis_incognito: true } : {}),
     ...(group ? { stop: [`\n${userName()}:`, `\n**${userName()}`] } : {}), ...o.extra,
   };
 }
@@ -5897,37 +5893,17 @@ function openConversation(id: string, reveal = true) {
   keepUp();
 }
 
-function paintIncognito() {
-  document.documentElement.toggleAttribute("data-incognito", hiding);
-  $("incognito").setAttribute("aria-pressed", String(hiding));
-  $("incognito").title = $("incognito").ariaLabel = hiding ? "Leave incognito: its chats are deleted, on every device" : "Go incognito, on every device: chats are kept in memory only";
-}
-let flipping = false;
-function hide(on: boolean): () => void {
+const hiddenThread = () => ({ dir: harness.home!, hidden: true as const });
+function incognito() {
+  if (conv.incognito && !conv.messages.length) return newChat();
   closeVoice();
   stopReading();
-  for (const run of runs.values()) { run.gone = true; stopRun(run); }
-  runs.clear();
-  hiding = on;
-  held.clear();
-  lasts(!on);
-  bodies.clear();
-  thumbs.clear();
-  tokens.clear();
-  pending = [];
-  renderPending();
-  input.value = "";
-  for (const id of Object.keys(chats)) delete chats[id];
-  Object.assign(chats, load("chats", {}));
-  settings = loadSettings();
-  const tools = harness.state === "on";
-  harness = { ...harness, ...(tools ? { state: "off" as const } : {}), threads: [] };
-  paintIncognito();
-  newChat();
-  return () => {
-    if (tools) void ensureHarness().then(() => { if (!conv.messages.length && !running()) newChat(); }, () => {});
-    else void loadThreads();
-  };
+  conv = { ...blank(), named: true, incognito: true };
+  if (harness.state === "on" && harness.home && pref("tools", "on") === "on") conv.thread = hiddenThread();
+  history.replaceState(null, "", location.pathname);
+  closeOver(panes.conversations);
+  render();
+  input.focus();
 }
 function newChat(who = "") {
   closeVoice();
@@ -6522,17 +6498,8 @@ function buildControls() {
     e.preventDefault();
   });
   $("incognito").innerHTML = icon("incognito");
-  paintIncognito();
-  $("incognito").addEventListener("click", async () => {
-    if (flipping) return;
-    flipping = true;
-    const to = !hiding, attach = hide(to);
-    const r = await fetch("/api/incognito", { method: to ? "POST" : "DELETE", headers: { "Content-Type": "application/json" }, body: "{}" }).catch(() => null);
-    flipping = false;
-    if (r?.ok) return attach();
-    toast((await r?.json().catch(() => null))?.error?.message ?? "Chrysalis did not answer");
-    hide(!to)();
-  });
+  $("incognito").title = $("incognito").ariaLabel = "Incognito chat: kept in memory only, in OpenCode too";
+  $("incognito").addEventListener("click", incognito);
   $("model-btn").addEventListener("click", () => setModelsOpen(!modelsOpen));
   $("machine-btn").addEventListener("click", () => chooseMachine($("machine-btn")));
   $("folder-btn").addEventListener("click", () => ($("oc-pop").hidden ? chooseFolder($("folder-btn")) : void ($("oc-pop").hidden = true)));
@@ -6692,7 +6659,7 @@ function renderControls() {
   const folder = $<HTMLButtonElement>("folder-btn");
   folder.hidden = !conv.thread || harness.state !== "on";
   const run = $<HTMLButtonElement>("machine-btn"), m = machineOf(conv.thread?.machine), fixed = !!conv.thread?.id && (harness.machines?.length ?? 0) < 2;
-  run.hidden = folder.hidden || !m;
+  run.hidden = folder.hidden || !m || !!conv.thread?.hidden;
   if (m && conv.thread) {
     run.innerHTML = `${icon(machineIcon(m.kind))}<span class="folder-name"></span>${fixed ? "" : icon("chevron")}`;
     run.querySelector(".folder-name")!.textContent = m.name;

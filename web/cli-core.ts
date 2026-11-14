@@ -1,6 +1,7 @@
-import { chmodSync, copyFileSync, existsSync, mkdirSync, mkdtempSync, readdirSync, renameSync, rmSync, symlinkSync } from "node:fs";
+import { chmodSync, copyFileSync, existsSync, mkdirSync, mkdtempSync, readdirSync, rmSync } from "node:fs";
 import type { Subprocess } from "bun";
 import { clean, fold, paint, plain } from "./terminal";
+import { MODELS, point } from "./veil";
 
 const { bold, dim, green, yellow, red, gray } = paint;
 const ROOT = `${import.meta.dir}/..`, SH = `${ROOT}/chrysalis.sh`;
@@ -9,7 +10,7 @@ const WEB_FILE = existsSync(`${import.meta.dir}/server.js`) ? "server.js" : "ser
 const ENGINE_CMD: string[] = process.env.CHRYSALIS_ENGINE_CMD ? JSON.parse(process.env.CHRYSALIS_ENGINE_CMD) : [SH, "serve"];
 export const MODES = ["local", "network", "insecure"] as const;
 export type Mode = (typeof MODES)[number];
-export const MODELS = ["qwen3.8-27b", "qwen3.8-flash-next"];
+export { MODELS };
 const SEP = dim(" · "), JSON_BODY = { "Content-Type": "application/json" };
 
 const args = process.argv.slice(2), flag = (name: string) => (args.includes(name) ? args[args.indexOf(name) + 1] : undefined);
@@ -18,7 +19,8 @@ export interface Ask { key: string; text: string; answer?: (yes: boolean) => voi
 export const state = {
   mode: (MODES.find((m) => m === flag("--mode")) ?? "local") as Mode,
   verbose: false,
-  incognito: args.includes("--incognito"),
+  incognito: false,
+  veiled: 0,
   serving: HAS_MODEL,
   web: undefined as { local: string; network: string[]; api: string[] } | undefined,
   questions: [] as Ask[],
@@ -100,7 +102,6 @@ class Service {
   private ended(proc: Proc, ms: number) {
     if (this.proc !== proc) return;
     this.proc = undefined;
-    moved?.();
     sync();
     if (this.asked || quitting) return;
     for (const l of this.tail) ui.log(dim(`  ${this.name}  ${clean(l)}`));
@@ -151,11 +152,11 @@ function ready(model: string, seconds: string | number, context?: string) {
 function engineLine(l: string): boolean {
   let m: RegExpExecArray | null;
   if ((m = REQUEST.exec(l))) {
-    if (!state.incognito) note(`${stamp()}  ${read(m[1], m[2])}${m[3] ? `${SEP}${m[3]} pictures` : ""}${SEP}first token ${m[4]} s${SEP}${count(m[5])} written at ${m[6]} tok/s${m[7] === "stop" ? "" : SEP + (FINISH[m[7]] ?? m[7])}`);
+    if (!state.veiled) note(`${stamp()}  ${read(m[1], m[2])}${m[3] ? `${SEP}${m[3]} pictures` : ""}${SEP}first token ${m[4]} s${SEP}${count(m[5])} written at ${m[6]} tok/s${m[7] === "stop" ? "" : SEP + (FINISH[m[7]] ?? m[7])}`);
     return !state.verbose;
   }
   if ((m = STOPPED.exec(l))) {
-    if (!state.incognito) note(`${stamp()}  ${read(m[1], m[2])}${SEP}stopped by the client after ${count(m[3])} written`);
+    if (!state.veiled) note(`${stamp()}  ${read(m[1], m[2])}${SEP}stopped by the client after ${count(m[3])} written`);
     return !state.verbose;
   }
   if ((m = FAILED.exec(l))) return note(`${stamp()}  ${red(`a request failed: ${clean(m[1])}`)}`), true;
@@ -183,9 +184,9 @@ engineSvc = new Service("model server", () => Bun.spawn(scoped(ENGINE_CMD), { st
   () => Object.assign(engine, { state: "down", since: Date.now(), progress: 0, writing: 0 }));
 webSvc = new Service("web chat", () => Bun.spawn(scoped([process.execPath, WEB_FILE]), {
   cwd: import.meta.dir, stdin: "ignore", stdout: "pipe", stderr: "pipe",
-  env: { ...process.env, NODE_ENV: "production", PORT, CHRYSALIS_HOST: state.mode === "local" ? "127.0.0.1" : "0.0.0.0", CHRYSALIS_INSECURE: state.mode === "insecure" ? "1" : "", CHRYSALIS_INCOGNITO: store ?? "" },
+  env: { ...process.env, NODE_ENV: "production", PORT, CHRYSALIS_HOST: state.mode === "local" ? "127.0.0.1" : "0.0.0.0", CHRYSALIS_INSECURE: state.mode === "insecure" ? "1" : "", CHRYSALIS_MEMORY: run ?? "", CHRYSALIS_KEPT: KEPT },
   ipc: heard,
-}), () => false, () => { state.web = undefined; state.questions = []; });
+}), () => false, () => { state.web = undefined; state.questions = []; state.veiled = 0; hidden(false); });
 
 let scope: boolean | undefined;
 function scoped(cmd: string[]) {
@@ -201,9 +202,9 @@ function heard(m: any) {
     for (const q of state.questions) if (!now.some((x) => x.key === q.key)) note(dim(`${q.text} · answered elsewhere`));
     state.questions = now;
   }
-  if (typeof m?.incognito === "boolean") act(() => setIncognito(m.incognito));
-  if (typeof m?.shaded === "boolean") moved?.();
-  if (typeof m?.from === "string" && !state.incognito) note(`${stamp()}  ${dim("from")} ${clean(m.from)}`);
+  if (typeof m?.hidden === "boolean") hidden(m.hidden);
+  if (typeof m?.veiled === "number") state.veiled = m.veiled;
+  if (typeof m?.from === "string") note(`${stamp()}  ${dim("from")} ${clean(m.from)}`);
   if (typeof m?.note === "string") note(yellow(clean(m.note)));
   sync();
 }
@@ -262,7 +263,7 @@ const HELP: [string, string][] = [
   ["model [name]", "the model that is loaded; 27b or flash-next loads one, unload frees the GPU"],
   ["restart [part]", "start the model server and the web chat again; model or web for one of them"],
   ["verbose", "also show what the servers print, for this run; again turns it off"],
-  ["incognito", "chats kept in memory only, in OpenCode too, and gone when it is turned off; again turns it off"],
+  ["incognito [end]", "whether incognito chats are open; end forgets them all"],
   ["qr", "the code to scan with a phone, again"],
   ["opencode", "the line that connects OpenCode on another computer"],
   ["links", "the addresses again"],
@@ -301,7 +302,7 @@ export function setVerbose(on: boolean) {
 }
 
 const SHM = "/dev/shm", RUN = "chrysalis-run-", KEPT = process.env.CHRYSALIS_SNAPSHOTS || `${ROOT}/data/cache`;
-let run: string | undefined, store: string | undefined, moved: (() => void) | undefined;
+let run: string | undefined;
 const cores = new Map<number, string>();
 function wipe(dir: string) {
   Bun.spawnSync(["chmod", "-R", "u+w", dir], { stdout: "ignore", stderr: "ignore" });
@@ -314,15 +315,6 @@ function sweep() {
     try { process.kill(pid, 0); } catch { wipe(`${SHM}/${old}`); }
   }
 }
-function point(hidden: boolean) {
-  for (const model of MODELS) {
-    const link = `${run}/snapshots/${model}`;
-    mkdirSync(`${KEPT}/${model}`, { recursive: true });
-    rmSync(`${link}.next`, { force: true });
-    symlinkSync(hidden ? `${run}/none/${model}` : `${KEPT}/${model}`, `${link}.next`);
-    renameSync(`${link}.next`, link);
-  }
-}
 function memory() {
   if (!existsSync(SHM)) return;
   run = mkdtempSync(`${SHM}/${RUN}${process.pid}-`);
@@ -333,7 +325,7 @@ function memory() {
     if (existsSync(`${KEPT}/${model}/pool.bin`)) copyFileSync(`${KEPT}/${model}/pool.bin`, `${run}/none/${model}/pool.bin`);
     chmodSync(`${run}/none/${model}`, 0o555);
   }
-  point(false);
+  point(run, KEPT, false);
 }
 function dumps(proc: { pid: number } | undefined, off: boolean) {
   if (!proc || process.env.CHRYSALIS_ENGINE_CMD) return;
@@ -346,26 +338,15 @@ function dumps(proc: { pid: number } | undefined, off: boolean) {
     cores.delete(proc.pid);
   }
 }
-export async function setIncognito(on: boolean) {
+function hidden(on: boolean) {
   if (on === state.incognito) return;
-  if (on && !run) {
-    webSvc.proc?.send({ incognito: false });
-    return note(red("incognito keeps everything in memory, and this system has no /dev/shm to hold it"));
-  }
   state.incognito = on;
-  sync();
-  point(on);
   for (const svc of [engineSvc, webSvc]) dumps(svc.proc, on);
-  const old = store;
-  store = on ? mkdtempSync(`${run}/opencode-`) : undefined;
-  if (webSvc.proc) {
-    const there = new Promise<void>((done) => { moved = done; });
-    webSvc.proc.send({ incognito: store ?? "" });
-    await there;
-  }
-  if (old) wipe(old);
-  note(on ? "incognito is on, for every device: the model server writes no prompt cache, OpenCode keeps its chats in memory only, and requests don't show here"
-    : "incognito is off: OpenCode's chats from it are deleted, and its own are back");
+  note(on ? "an incognito chat is open: OpenCode keeps it in memory only, and its requests don't show here" : "the incognito chats are gone");
+}
+export function forget() {
+  if (!state.incognito) return note(dim("no incognito chat is open"));
+  webSvc.proc?.send({ forget: true });
 }
 
 export async function restart(part: string) {
@@ -440,7 +421,7 @@ async function command(line: string) {
     case "clear": return ui.clear();
     case "quit": case "exit": case "q": return quit();
     case "verbose": return setVerbose(arg ? arg === "on" : !state.verbose);
-    case "incognito": return setIncognito(arg ? arg === "on" : !state.incognito);
+    case "incognito": return arg === "end" ? forget() : note(state.incognito ? `an incognito chat is open${SEP}${dim("incognito end forgets them all")}` : `no incognito chat is open${SEP}${dim("the ghost button in the page starts one")}`);
     case "model": {
       if (!arg) return note(`${engine.model || "no model"} is ${engine.state === "stopped" ? "unloaded" : "loaded"}${SEP}${dim("model 27b, model flash-next or model unload")}`);
       if (/^(unload|none|off)$/.test(arg)) return unload();
@@ -474,11 +455,8 @@ export function start() {
   setInterval(() => { if (ticks++ % (engine.state === "ready" || engine.state === "stopped" ? 4 : 1) === 0) void poll(); }, 250);
   sweep();
   memory();
-  state.incognito &&= !!run;
-  if (state.incognito) { point(true); store = mkdtempSync(`${run}/opencode-`); }
   ui.log("");
   note(bold("Chrysalis Inference"));
-  if (state.incognito) note("incognito is on, for every device: the model server writes no prompt cache, OpenCode keeps its chats in memory only, and requests don't show here");
   if (flag("--get")) {
     getting = Bun.spawn([SH, "get", flag("--get")!], { stdin: "ignore", stdout: "ignore", stderr: "ignore" });
     note(dim(`${flag("--get")} is downloading in the background: model has it once it is here`));

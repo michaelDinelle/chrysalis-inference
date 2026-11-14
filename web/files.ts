@@ -53,11 +53,11 @@ void db.then(async (d) => {
 
 const memo = new Map<string, Blob | string>();
 let lasting = true;
-export const lasts = (on: boolean) => { lasting = on; memo.clear(); };
+export const lasts = (on: boolean) => { lasting = on; };
 
-export async function put(id: string, data: Blob | string) {
+export async function put(id: string, data: Blob | string, keep = lasting) {
   memo.set(id, data);
-  if (!lasting) return;
+  if (!keep) return;
   const files = await store("files", "readwrite");
   if (files) await ask(files.put({ id, tab, data } satisfies Stored));
 }

@@ -1,15 +1,15 @@
-import { existsSync, readdirSync } from "node:fs";
+import { existsSync, mkdtempSync, readdirSync, rmSync } from "node:fs";
 import { homedir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 
 export type Decision = "once" | "always" | "deny";
 export interface Scene { cast: string[]; cards?: object[]; group?: string; scenario?: string; name?: string; greeting?: string; greeter?: string }
-export interface Thread { id: string; title: string; dir: string; updated: number; idle: number; busy: boolean; archived: boolean; model?: string; scene?: Scene; machine?: string }
+export interface Thread { id: string; title: string; dir: string; updated: number; idle: number; busy: boolean; archived: boolean; model?: string; scene?: Scene; machine?: string; hidden?: boolean }
 export interface Connector { name: string; state: typeof state; ensure: typeof ensure; stop: typeof stop; threads: typeof threads; models: typeof models; agents: typeof agents; transcript: typeof transcript;
   turn: typeof turn; say: typeof say; undo: typeof undo; fork: typeof fork; rewrite: typeof rewrite; change: typeof change; remove: typeof remove }
 export const name = "OpenCode";
 export interface Model { id: string; name: string; provider: string; variants: string[]; straight?: string }
-export interface Turn { again?: boolean; session?: string; machine?: string; dir: string; text: string; model?: string; persona?: string; files?: { uri: string; name: string }[]; follow?: boolean; agent?: string;
+export interface Turn { again?: boolean; hidden?: boolean; session?: string; machine?: string; dir: string; text: string; model?: string; persona?: string; files?: { uri: string; name: string }[]; follow?: boolean; agent?: string;
   scene?: Scene; said?: string; next?: string; title?: string; sampling?: Record<string, unknown> }
 export type Answer = Decision | "stop" | { answer: Record<string, unknown> };
 export interface Step { content: string; reasoning?: string; calls: Call[] }
@@ -82,12 +82,13 @@ const THINKING = ["none", "low", "medium"].map((id) => ({ id, body: { reasoning_
 const binary = () => process.env.CHRYSALIS_OPENCODE ?? Bun.which("opencode") ?? [`${homedir()}/.opencode/bin/opencode`].find((p) => existsSync(p));
 export type Send = (path: string, init: { method: string; headers: Record<string, string>; body?: string; signal?: AbortSignal }) => Promise<Response>;
 export interface Machine { id: string; name: string; home: string; kind: string }
-interface Host { id: string; url: string; auth: string; version: string; proc?: Bun.Subprocess; send?: Send; machine?: Machine }
+interface Host { id: string; url: string; auth: string; version: string; proc?: Bun.Subprocess; send?: Send; machine?: Machine; store?: string }
 let host: Host | undefined, starting: Promise<void> | undefined;
 const away = new Map<string, Host>(), homes = new Map<string, string>();
 const gone = (): never => { throw new Error("That computer is not connected to Chrysalis"); };
-const others = () => (shade ? [] : [...away.values()]);
-const of = (machine?: string) => (machine ? (shade ? undefined : away.get(machine)) ?? gone() : host);
+const HIDDEN = "incognito";
+const others = () => [...away.values()].filter((h) => h.id !== HIDDEN);
+const of = (machine?: string) => (machine ? away.get(machine) ?? gone() : host);
 const on = (session?: string) => of(session ? homes.get(session) : undefined);
 const live = (h: Host) => (h.id ? away.get(h.id) === h : host === h);
 const listeners = new Map<string, Set<Listener>>(), running = new Map<string, Set<string>>(), early = new Map<string, [string, any, string?][]>(), roots = new Map<string, string>();
@@ -117,14 +118,11 @@ let woken: (session: string) => void = () => {};
 export const onWake = (fn: (session: string) => void) => { woken = fn; };
 process.on("exit", () => host?.proc?.kill());
 
-let shade = process.env.CHRYSALIS_INCOGNITO || undefined;
-let scope: boolean | undefined;
-export const shaded = () => !!shade;
-export function shadeTo(dir?: string) {
-  const gone = stop();
-  shade = dir;
-  return gone;
-}
+const MEMORY = process.env.CHRYSALIS_MEMORY || undefined;
+let scope: boolean | undefined, ours = "", veil: Promise<Host> | undefined, veiled: (on: boolean) => void = () => {};
+export const onHidden = (fn: (on: boolean) => void) => { veiled = fn; };
+export const hiddenOn = () => away.has(HIDDEN);
+export const hiddenAt = (session: string) => homes.get(session) === HIDDEN;
 function unswapped(cmd: string[]) {
   try { scope ??= Bun.spawnSync(["systemd-run", "--user", "--scope", "-q", "true"], { stdout: "ignore", stderr: "ignore" }).exitCode === 0; } catch { scope = false; }
   return scope ? ["systemd-run", "--user", "--scope", "-q", "-p", "MemorySwapMax=0", ...cmd] : cmd;
@@ -154,49 +152,73 @@ async function ourModels(chrysalis: string) {
 }
 export const awayConfig = async (chrysalis: string) => ({ enabled_providers: ["chrysalis"],
   providers: { chrysalis: { name: "Chrysalis", package: "@opencode/ai/providers/openai-compatible", settings: {}, models: await ourModels(chrysalis) } } });
+async function launch(chrysalis: string, store?: string): Promise<Host> {
+  const bin = binary();
+  if (!bin) throw new Error("OpenCode is not installed on this computer");
+  const models = await ourModels(chrysalis);
+  for (;;) {
+    const password = `${crypto.randomUUID()}${crypto.randomUUID()}`, port = await freePort(), { OPENCODE_SERVER_PASSWORD: _, BUN_BE_BUN: __, ...env } = process.env;
+    const others: Record<string, any> = {};
+    for (const [key, base] of outside && !store ? routes : []) {
+      const [provider, model] = key.split("\0");
+      others[provider] ??= {};
+      if (model) ((others[provider].models ??= {})[model] = { settings: { baseURL: via(base) } });
+      else others[provider].settings = { baseURL: via(base) };
+    }
+    const cmd = ["sh", "-c", store ? `ulimit -c 0; ${WITH_US}` : WITH_US, "sh", bin, "serve", "--hostname", "127.0.0.1", "--port", String(port)];
+    const proc = Bun.spawn(store ? unswapped(cmd) : cmd, { stdin: "ignore", stdout: "ignore", stderr: "ignore",
+      env: { ...env, ...(store ? { XDG_DATA_HOME: `${store}/data`, XDG_STATE_HOME: `${store}/state`, TMPDIR: `${store}/tmp` } : {}), CHRYSALIS_WEB_PID: String(process.pid), OPENCODE_PASSWORD: password,
+        OPENCODE_CONFIG_CONTENT: JSON.stringify({ ...(outside && !store ? {} : { enabled_providers: ["chrysalis"] }), providers: { ...others, chrysalis: { name: "Chrysalis",
+          package: "@opencode/ai/providers/openai-compatible", settings: { baseURL: `${modelUrl}${store ? "/hidden" : ""}/v1`, apiKey: "chrysalis" }, models } } }) } });
+    const at = await reach(`http://127.0.0.1:${port}`, password, proc, Object.keys(models).length > 0);
+    if (store) return { ...at, id: HIDDEN };
+    const [providers, all] = await Promise.all([call("GET", "/api/provider", undefined, at), call("GET", "/api/model", undefined, at)]);
+    const bases = new Map<string, string>((providers.data ?? []).map((p: any) => [p.id, p.settings?.baseURL]));
+    let more = false;
+    for (const p of providers.data ?? []) if (p.id !== "chrysalis" && /^https?:/.test(p.settings?.baseURL ?? "") && !reached(p.settings.baseURL)) { routes.set(p.id, p.settings.baseURL); more = true; }
+    for (const m of all.data ?? []) {
+      const base = m.settings?.baseURL;
+      if (m.providerID !== "chrysalis" && /^https?:/.test(base ?? "") && !reached(base) && base !== bases.get(m.providerID)) { routes.set(`${m.providerID}\0${m.id}`, base); more = true; }
+    }
+    if (!more) return at;
+    proc.kill();
+    await proc.exited;
+  }
+}
 export function ensure(chrysalis: string): Promise<void> {
+  ours = chrysalis;
   return (starting ??= (async () => {
     const outer = process.env.CHRYSALIS_OPENCODE_URL;
-    if (outer && shade) throw new Error("Incognito needs Chrysalis to start OpenCode itself, on a store in memory");
-    if (outer) {
-      host = await reach(outer, process.env.CHRYSALIS_OPENCODE_PASSWORD ?? "");
-      return void watch(host);
-    }
-    const bin = binary();
-    if (!bin) throw new Error("OpenCode is not installed on this computer");
-    const models = await ourModels(chrysalis);
-    for (;;) {
-      const password = `${crypto.randomUUID()}${crypto.randomUUID()}`, port = await freePort(), { OPENCODE_SERVER_PASSWORD: _, BUN_BE_BUN: __, ...env } = process.env;
-      const others: Record<string, any> = {};
-      for (const [key, base] of outside ? routes : []) {
-        const [provider, model] = key.split("\0");
-        others[provider] ??= {};
-        if (model) ((others[provider].models ??= {})[model] = { settings: { baseURL: via(base) } });
-        else others[provider].settings = { baseURL: via(base) };
-      }
-      const cmd = ["sh", "-c", shade ? `ulimit -c 0; ${WITH_US}` : WITH_US, "sh", bin, "serve", "--hostname", "127.0.0.1", "--port", String(port)];
-      const proc = Bun.spawn(shade ? unswapped(cmd) : cmd, { stdin: "ignore", stdout: "ignore", stderr: "ignore",
-        env: { ...env, ...(shade ? { XDG_DATA_HOME: `${shade}/data`, XDG_STATE_HOME: `${shade}/state`, TMPDIR: `${shade}/tmp` } : {}), CHRYSALIS_WEB_PID: String(process.pid), OPENCODE_PASSWORD: password, OPENCODE_CONFIG_CONTENT: JSON.stringify({ ...(outside ? {} : { enabled_providers: ["chrysalis"] }), providers: { ...others, chrysalis: { name: "Chrysalis",
-          package: "@opencode/ai/providers/openai-compatible", settings: { baseURL: `${modelUrl}/v1`, apiKey: "chrysalis" }, models } } }) } });
-      const at = await reach(`http://127.0.0.1:${port}`, password, proc, Object.keys(models).length > 0);
-      const [providers, all] = await Promise.all([call("GET", "/api/provider", undefined, at), call("GET", "/api/model", undefined, at)]);
-      const bases = new Map<string, string>((providers.data ?? []).map((p: any) => [p.id, p.settings?.baseURL]));
-      let more = false;
-      for (const p of providers.data ?? []) if (p.id !== "chrysalis" && /^https?:/.test(p.settings?.baseURL ?? "") && !reached(p.settings.baseURL)) { routes.set(p.id, p.settings.baseURL); more = true; }
-      for (const m of all.data ?? []) {
-        const base = m.settings?.baseURL;
-        if (m.providerID !== "chrysalis" && /^https?:/.test(base ?? "") && !reached(base) && base !== bases.get(m.providerID)) { routes.set(`${m.providerID}\0${m.id}`, base); more = true; }
-      }
-      if (!more) {
-        void proc.exited.then(() => { if (host?.proc === proc) { host = undefined; starting = undefined; lost(at); } });
-        host = at;
-        return void watch(at);
-      }
-      proc.kill();
-      await proc.exited;
-    }
+    const at = outer ? await reach(outer, process.env.CHRYSALIS_OPENCODE_PASSWORD ?? "") : await launch(chrysalis);
+    void at.proc?.exited.then(() => { if (host === at) { host = undefined; starting = undefined; lost(at); } });
+    host = at;
+    void watch(at);
   })().catch((e) => { starting = undefined; throw e; }));
 }
+function hidden(): Promise<Host> {
+  return (veil ??= (async () => {
+    if (!MEMORY) throw new Error("Incognito keeps OpenCode in memory, which needs Chrysalis started from its terminal on Linux");
+    if (process.env.CHRYSALIS_OPENCODE_URL) throw new Error("Incognito needs Chrysalis to start OpenCode itself, on a store in memory");
+    const store = mkdtempSync(`${MEMORY}/opencode-`), at = { ...(await launch(ours, store)), store };
+    void at.proc!.exited.then(() => { if (away.get(HIDDEN) === at) void forget(); });
+    away.set(HIDDEN, at);
+    veiled(true);
+    void watch(at);
+    return at;
+  })().catch((e) => { veil = undefined; throw e; }));
+}
+export async function forget() {
+  const at = away.get(HIDDEN);
+  veil = undefined;
+  if (!at) return;
+  away.delete(HIDDEN);
+  at.proc?.kill();
+  lost(at);
+  await at.proc?.exited;
+  if (at.store) rmSync(at.store, { recursive: true, force: true, maxRetries: 3 });
+  veiled(false);
+}
+process.on("exit", () => away.get(HIDDEN)?.proc?.kill());
 
 const tooOld = (version: string) => {
   const has = String(version).split(".").map(Number), short = OLDEST.findIndex((n, k) => has[k] !== n);
@@ -301,7 +323,7 @@ const textOf = (content: any) => (Array.isArray(content) ? content.map((p: any) 
 const titled = (name: string) => name.replace(/[_-]+/g, " ").replace(/^./, (c) => c.toUpperCase());
 
 export async function threads(): Promise<Thread[]> {
-  return (await Promise.all([...(host ? [threadsOf(host)] : []), ...others().map((h) => threadsOf(h).catch(() => []))])).flat();
+  return (await Promise.all([...(host ? [threadsOf(host)] : []), ...[...away.values()].map((h) => threadsOf(h).catch(() => []))])).flat();
 }
 async function threadsOf(h: Host): Promise<Thread[]> {
   const out: Thread[] = [];
@@ -310,7 +332,7 @@ async function threadsOf(h: Host): Promise<Thread[]> {
     for (const s of page.data ?? []) if (!s.parentID && s.location?.directory) {
       if (h.id) homes.set(s.id, h.id);
       out.push({ id: s.id, title: s.title ?? "", dir: s.location.directory, updated: s.time?.updated ?? s.time?.created ?? 0, idle: s.time?.idle ?? 0, busy: running.has(s.id), archived: !!s.time?.archived, model: idOf(s.model),
-        ...(sceneOf(s) ? { scene: { ...sceneOf(s)!, cards: undefined } } : {}), ...(h.id ? { machine: h.id } : {}) });
+        ...(sceneOf(s) ? { scene: { ...sceneOf(s)!, cards: undefined } } : {}), ...(h.id === HIDDEN ? { hidden: true } : h.id ? { machine: h.id } : {}) });
     }
     cursor = page.cursor?.next;
     if (!cursor || !page.data?.length) break;
@@ -326,7 +348,11 @@ export async function models(): Promise<Model[]> {
 export async function agents(): Promise<{ id: string; name: string }[]> {
   return ((await call("GET", "/api/agent", undefined, host ?? others()[0])).data ?? []).filter((a: any) => a.mode !== "subagent" && !a.hidden).map((a: any) => ({ id: a.id, name: a.name ?? a.id }));
 }
-export const remove = (id: string) => call("DELETE", `/api/session/${id}`, undefined, on(id));
+export async function remove(id: string) {
+  const at = on(id);
+  await call("DELETE", `/api/session/${id}`, undefined, at);
+  if (at?.id === HIDDEN && !(await threadsOf(at).catch(() => [id])).length) await forget();
+}
 export async function change(id: string, to: { title?: string; archived?: boolean; scene?: Scene | null }) {
   const { scene, ...rest } = to;
   if (scene === undefined) return call("PATCH", `/api/session/${id}`, rest, on(id));
@@ -437,7 +463,7 @@ export async function transcript(id: string): Promise<{ thread: Thread; messages
   if (marks.length) messages.push({ role: "assistant", content: "", checkpoints: marks });
   const context = await contextOf(on(id), idOf(s.model), used).catch(() => undefined);
   return { ...(context ? { context: { ...context, ...(fresh ? { compacted: true } : {}) } } : {}), thread: { id: s.id, title: s.title ?? "", dir: s.location?.directory ?? "", updated: s.time?.updated ?? 0, idle: s.time?.idle ?? 0, busy: running.has(s.id), archived: !!s.time?.archived, model: idOf(s.model),
-    ...(scene ? { scene } : {}), ...(homes.get(s.id) ? { machine: homes.get(s.id) } : {}) }, messages };
+    ...(scene ? { scene } : {}), ...(homes.get(s.id) === HIDDEN ? { hidden: true } : homes.get(s.id) ? { machine: homes.get(s.id) } : {}) }, messages };
 }
 
 export async function folders(path: string, machine?: string) {
@@ -448,8 +474,8 @@ export async function folders(path: string, machine?: string) {
 }
 
 export async function turn(t: Turn, push: (d: object) => void, signal: AbortSignal, ask: (id: string) => Promise<Answer>, began: (session: string) => void) {
-  const to = t.session ? on(t.session) : of(t.machine), go = (method: string, path: string, body?: object) => call(method, path, body, to);
-  if (!t.follow && !to?.id && !existsSync(t.dir)) throw new Error(`There is no folder ${t.dir} on this computer`);
+  const to = t.session ? on(t.session) : t.hidden ? await hidden() : of(t.machine), go = (method: string, path: string, body?: object) => call(method, path, body, to);
+  if (!t.follow && (!to?.id || to.id === HIDDEN) && !existsSync(t.dir)) throw new Error(`There is no folder ${t.dir} on this computer`);
   const stored = t.model || !t.session || (outside && !to?.id) ? undefined : idOf((await go("GET", `/api/session/${t.session}`)).data?.model);
   for (const model of [t.model, stored]) if ((!outside || to?.id) && model && !local(model)) throw new Error(`${model.split("#")[0]} is outside this computer, and OpenCode here is kept to Chrysalis's models: allow models outside this computer from the OpenCode button, on the computer Chrysalis runs on`);
   const meta = t.scene || t.sampling ? { metadata: { ...(t.scene ? { [OURS]: t.scene } : {}), ...(t.sampling ? { [TUNED]: t.sampling } : {}) } } : {};

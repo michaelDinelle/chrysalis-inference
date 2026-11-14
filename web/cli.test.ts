@@ -38,7 +38,7 @@ function chrysalis(o: { pty?: boolean; mode?: string; env?: Record<string, strin
 }
 const files = (dir: string): string[] => readdirSync(dir, { withFileTypes: true }).flatMap((f) => (f.isDirectory() ? files(`${dir}/${f.name}`) : f.isFile() ? [`${dir}/${f.name}`] : []));
 
-test("the terminal shows each request to the model as it finishes, by its sizes and speeds and never its words, and nothing else the servers print until verbose is typed; none of it reaches a file; incognito, typed there, turns it on in the web chat and keeps requests off the terminal until it is typed again", async () => {
+test("the terminal shows each request to the model as it finishes, by its sizes and speeds and never its words, and nothing else the servers print until verbose is typed; none of it reaches a file; a request from an incognito chat stays off the terminal, and while it runs the model server cannot write its prompt cache, which the next ordinary request writes again", async () => {
   const c = chrysalis();
   try {
     await c.shown("qwen3.8-flash-next ready in");
@@ -74,25 +74,16 @@ test("the terminal shows each request to the model as it finishes, by its sizes 
     expect(c.out(at)).not.toContain("slot 1");
     expect(files(c.dir).filter((f) => /14982|14,982|tokens read|slot 1/.test(readFileSync(f, "latin1")))).toEqual([]);
 
-    const incognito = async () => (await (await fetch(`${c.here}/api/status`)).json()).incognito;
+    const asked = async (words: string, more: object = {}) => (await (await fetch(`${c.here}/api/chat`, { method: "POST", headers: json, body: JSON.stringify({ messages: [{ role: "user", content: words }], ...more }) })).json()).choices[0].message.content;
     at = c.mark();
-    c.type("incognito\n");
-    await c.shown("incognito is on", at);
-    for (const end = Date.now() + 10_000; !(await incognito().catch(() => false)) && Date.now() < end;) await Bun.sleep(50);
-    expect(await incognito()).toBe(true);
-    at = c.mark();
-    await c.reply(c.engine, "while hidden");
-    await fetch(`${c.engine}/chrysalis/load`, { method: "POST", body: JSON.stringify({ model: "qwen3.8-27b" }) });
-    await c.shown("qwen3.8-27b ready in", at);
+    expect(await asked("probe hidden", { chrysalis_incognito: true })).toBe("refused");
+    await fetch(`${c.engine}/chrysalis/load`, { method: "POST", body: JSON.stringify({ model: "qwen3.8-flash-next" }) });
+    await c.shown("qwen3.8-flash-next ready in", at);
     expect(c.out(at)).not.toContain("tokens read");
     at = c.mark();
-    c.type("incognito\n");
-    await c.shown("incognito is off", at);
-    for (const end = Date.now() + 10_000; (await incognito().catch(() => true)) && Date.now() < end;) await Bun.sleep(50);
-    expect(await incognito()).toBeUndefined();
-    at = c.mark();
-    await c.reply(c.engine, "in sight again");
+    expect(await asked("probe seen")).toBe("written");
     await c.shown("14,982 tokens read", at);
+    expect(readdirSync(`${c.dir}/cache/qwen3.8-flash-next`)).toEqual(["seen.snap"]);
   } finally {
     await c.stop();
   }
@@ -190,60 +181,57 @@ test("in a terminal on the network, the code a phone scans shows first, above th
 }, 60_000);
 
 const holding = (dir: string, text: string) => (existsSync(dir) ? files(dir) : []).filter((f) => statSync(f).size < 1 << 20 && readFileSync(f, "latin1").includes(text));
-test("incognito, asked for from the page, restarts nothing but OpenCode: the model server runs on, with the folder it writes its prompt cache through pointed at one it cannot write and its temporary folder in memory; OpenCode moves onto a store in memory, its threads keep its tools yet nothing of them is under the home folder, and the threads from before are out of sight and untouched; turning it off deletes that store and points the cache back, and stopping Chrysalis deletes everything it held in memory", async () => {
+test("an incognito thread lives beside the ordinary ones: a second OpenCode starts for it on a store in memory, with its tools, and nothing else restarts; both kinds are listed together, the incognito one marked; nothing of it is under the home folder and the ordinary store is untouched; deleting the last incognito thread, incognito end in the terminal, or stopping Chrysalis deletes that store", async () => {
   const bin = `${tmpdir()}/chrysalis-cli-opencode-${process.pid}`;
   writeFileSync(bin, `#!/bin/sh\nexec ${process.execPath} ${import.meta.dir}/fake-opencode-bin.ts "$@"\n`);
   chmodSync(bin, 0o755);
-  const c = chrysalis({ env: { CHRYSALIS_OPENCODE: bin } }), work = `${c.dir}/work`, model = "qwen3.8-flash-next";
+  const c = chrysalis({ env: { CHRYSALIS_OPENCODE: bin } }), work = `${c.dir}/work`;
   mkdirSync(work);
   const held = () => readdirSync("/dev/shm").filter((d) => d.startsWith(`chrysalis-run-${c.proc.pid}-`)).map((d) => `/dev/shm/${d}`);
   const stores = () => held().flatMap((d) => readdirSync(d).filter((x) => x.startsWith("opencode-")).map((x) => `${d}/${x}`));
   const until = async (ok: () => unknown) => { for (const end = Date.now() + 15_000; Date.now() < end; await Bun.sleep(50)) if (await Promise.resolve().then(ok).catch(() => false)) return true; return false; };
-  const status = async () => (await (await fetch(`${c.here}/api/status`)).json()).incognito;
   const connect = () => until(async () => (await fetch(`${c.here}/api/threads`, { method: "POST" })).status === 200);
-  const threads = async () => ((await (await fetch(`${c.here}/api/threads`)).json()).threads ?? []).map((t: any) => t.title);
-  const say = async (text: string) => {
-    const r = await fetch(`${c.here}/api/chat`, { method: "POST", headers: json, body: JSON.stringify({ stream: true, chrysalis_thread: { dir: work, text, title: text, model: "chrysalis/qwen3.8-27b" } }) }), sent = await r.text();
+  const threads = async (): Promise<{ id: string; title: string; hidden?: boolean }[]> => ((await (await fetch(`${c.here}/api/threads`)).json()).threads ?? []);
+  const listed = async () => (await threads()).map((t) => [t.title, !!t.hidden]).sort();
+  const say = async (text: string, hidden = false) => {
+    const r = await fetch(`${c.here}/api/chat`, { method: "POST", headers: json, body: JSON.stringify({ stream: true, chrysalis_thread: { dir: work, text, title: text, model: "chrysalis/qwen3.8-27b", ...(hidden ? { hidden: true } : {}) } }) }), sent = await r.text();
     return [r.status, sent.includes('"error"'), sent.trimEnd().endsWith("[DONE]")];
   };
-  const engine = async () => (await fetch(`${c.engine}/chrysalis/env`)).json();
-  const cached = (name: string, through: string) => { try { writeFileSync(`${through}/${model}/${name}`, "x"); } catch { return "refused"; } return existsSync(`${c.dir}/cache/${model}/${name}`) ? "on disk" : "elsewhere"; };
+  const engine = async () => (await (await fetch(`${c.engine}/chrysalis/env`)).json()).pid;
   try {
     await c.shown("ready in");
-    const [run] = held(), was = await engine();
-    expect([held().length, was.snapshots, was.tmp, cached("before.snap", was.snapshots)]).toEqual([1, `${run}/snapshots`, `${run}/tmp`, "on disk"]);
+    const model = await engine();
     expect(await connect()).toBe(true);
     expect(await say("an ordinary errand")).toEqual([200, false, true]);
-    expect([await threads(), holding(c.dir, "an ordinary errand").length > 0, await status(), stores()]).toEqual([["an ordinary errand"], true, undefined, []]);
+    expect([await listed(), stores()]).toEqual([[["an ordinary errand", false]], []]);
 
     let at = c.mark();
-    expect((await fetch(`${c.here}/api/incognito`, { method: "POST", headers: json, body: "{}" })).status).toBe(204);
-    expect(await status()).toBe(true);
-    await c.shown("incognito is on", at);
-    expect([await until(async () => (await status()) === true), stores().length, await engine(), cached("hidden.snap", was.snapshots)]).toEqual([true, 1, was, "refused"]);
-    expect(await connect()).toBe(true);
-    expect(await threads()).toEqual([]);
-    expect(await say("the secret plan")).toEqual([200, false, true]);
+    expect(await say("the secret plan", true)).toEqual([200, false, true]);
+    await c.shown("an incognito chat is open", at);
+    expect([await listed(), stores().length, await engine()]).toEqual([[["an ordinary errand", false], ["the secret plan", true]], 1, model]);
     expect(await until(() => holding(stores()[0], "the secret plan").length > 0)).toBe(true);
-    expect([await threads(), holding(c.dir, "the secret plan"), readdirSync(`${c.dir}/cache/${model}`)]).toEqual([["the secret plan"], [], ["before.snap"]]);
+    expect([holding(c.dir, "the secret plan"), holding(stores()[0], "an ordinary errand"), holding(c.dir, "an ordinary errand").length > 0]).toEqual([[], [], true]);
+    expect(await say("an ordinary errand, again")).toEqual([200, false, true]);
+    expect(holding(stores()[0], "an ordinary errand, again")).toEqual([]);
 
     at = c.mark();
-    c.type("incognito\n");
-    await c.shown("incognito is off", at);
-    expect([await until(async () => (await status()) === undefined), stores(), await engine(), cached("after.snap", was.snapshots), holding(run, "the secret plan")]).toEqual([true, [], was, "on disk", []]);
-    expect(await connect()).toBe(true);
-    expect([await threads(), holding(c.dir, "the secret plan"), holding(c.dir, "an ordinary errand").length > 0]).toEqual([["an ordinary errand"], [], true]);
+    const secret = (await threads()).find((t) => t.hidden)!.id;
+    expect((await fetch(`${c.here}/api/threads/${secret}`, { method: "DELETE" })).status).toBe(204);
+    await c.shown("the incognito chats are gone", at);
+    expect([await listed(), stores(), holding(held()[0], "the secret plan")]).toEqual([[["an ordinary errand, again", false], ["an ordinary errand", false]], [], []]);
 
     at = c.mark();
-    c.type("incognito\n");
-    await c.shown("incognito is on", at);
-    await until(async () => (await status()) === true);
-    await connect();
-    await say("another secret");
+    expect(await say("a second secret", true)).toEqual([200, false, true]);
+    await c.shown("an incognito chat is open", at);
+    c.type("incognito end\n");
+    await c.shown("the incognito chats are gone", at);
+    expect([(await listed()).length, stores()]).toEqual([2, []]);
+
+    expect(await say("a third secret", true)).toEqual([200, false, true]);
     expect(stores().length).toBe(1);
     c.proc.kill();
     await c.proc.exited;
-    expect([held(), holding(c.dir, "another secret")]).toEqual([[], []]);
+    expect([held(), holding(c.dir, "a third secret")]).toEqual([[], []]);
   } finally {
     await c.stop();
     rmSync(bin, { force: true });

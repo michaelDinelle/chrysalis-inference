@@ -27,6 +27,12 @@ Bun.serve({
       writing++;
       if (gap) await Bun.sleep(gap);
       writing--;
+      if (secret.startsWith("probe ")) {
+        let wrote = "written";
+        try { (await import("node:fs")).writeFileSync(`${process.env.CHRYSALIS_SNAPSHOTS}/${model}/${secret.slice(6)}.snap`, "x"); } catch { wrote = "refused"; }
+        say("chrysalis: prompt 14982 (cached 14272) ttft 1.08s | gen 1088 42.6 tok/s 1.80/step | stop | slot 1");
+        return Response.json({ choices: [{ message: { content: wrote } }] });
+      }
       if (secret === "fail") { say("chrysalis: request failed: ValueError('boom')"); return Response.json({ error: { message: "internal error" } }, { status: 500 }); }
       if (secret === "leave") say("chrysalis: prompt 14982 (cached 14272) | stopped by the client after 12 tokens | slot 1");
       else say(`chrysalis: prompt 14982 (cached ${secret === "cold" ? 0 : 14272}) ttft 1.08s | gen 1088 42.6 tok/s 1.80/step | ${secret === "long" ? "length" : "stop"} | slot 1`);

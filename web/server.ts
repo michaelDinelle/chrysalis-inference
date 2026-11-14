@@ -7,6 +7,7 @@ import { Devices, keyCookie } from "./devices";
 import { advertise, answerName, Link } from "./link";
 import { opencodeLine, opencodeManifest, opencodeScript } from "./opencode";
 import { tunnel } from "./machines";
+import { point } from "./veil";
 import { appleProfile, connectPage, deviceScript, TRUSTED_GIF } from "./setup";
 import * as harness from "./harness";
 import { fingerprint, lanAddresses, netName, routeAddress, tlsDir, webTls } from "./tls";
@@ -95,7 +96,7 @@ const SUMMARY_THINKING = 2048, WORTH_IT = 4;
 const ROOM_MS = 2000;
 const FIRST_ONLY = ["continue_final_message", "chrysalis_original", "chrysalis_append_token"];
 
-function startJob(body: string): Job {
+function startJob(body: string, over?: () => void): Job {
   const job: Job = { id: crypto.randomUUID(), events: [], folds: [], folded: 0, done: false, ctrl: new AbortController(), waiters: new Set(), asks: new Map(),
     t0: Date.now(), gen: 0 };
   jobs.set(job.id, job);
@@ -150,6 +151,7 @@ function startJob(body: string): Job {
       push({ timing: { start: job.t0, first: job.tFirst, answer: job.tAnswer, last: job.tLast, gen: job.gen } });
       push("[DONE]");
       job.done = true;
+      over?.();
       setTimeout(() => jobs.delete(job.id), KEEP_MS);
     }
   })();
@@ -588,6 +590,7 @@ const serve = (hostname: string, port: number) => Bun.serve<VoiceSocket>({
       const [, to, path] = /^\/via\/([\w-]+)(\/.*)?$/.exec(rest) ?? [];
       if (to && !harness.outsideAllowed()) return Response.json({ error: { message: "OpenCode here is kept to Chrysalis's models" } }, { status: 403 });
       if (to) return tunedProxy(req, srv, `${Buffer.from(to, "base64url").toString().replace(/\/+$/, "")}${path ?? ""}`);
+      if (rest.startsWith("/hidden/v1/")) return veiled(() => tunedProxy(req, srv, `${CHRYSALIS}${rest.slice("/hidden".length)}`));
       return rest.startsWith("/v1/") ? tunedProxy(req, srv, `${CHRYSALIS}${rest}`) : new Response("not found", { status: 404 });
     },
     "/v1/*": open((req, srv) => OPEN || devices.find(req)?.device.kind === "computer" ? proxy(req, srv)
@@ -670,16 +673,24 @@ img.src = ${JSON.stringify(checkUrl(req))} + "?t=" + Date.now();
         srv.timeout(req, 0);
         const body = await req.text(), sent = (() => { try { return JSON.parse(body); } catch { return undefined; } })();
         if (sent?.chrysalis_thread && OPEN && fromNetwork(req, srv)) return Response.json({ error: { message: KEPT_HERE } }, { status: 403 });
-        arrived(req, srv);
-        if (sent?.stream) return follow(startJob(body), 0);
-        try {
-          const r = await fetch(`${backends.url}/chat/completions`, {
-            method: "POST", body: backends.isChrysalis ? body : JSON.stringify(standard(JSON.parse(body))), headers: backends.headers(), signal: req.signal,
-          });
-          return new Response(r.body, { status: r.status, headers: { "Content-Type": r.headers.get("Content-Type") ?? "application/json" } });
-        } catch {
-          return Response.json({ error: { message: new ChrysalisDown().message } }, { status: 502 });
+        const hidden = !!sent?.chrysalis_incognito, asked = hidden ? JSON.stringify({ ...sent, chrysalis_incognito: undefined }) : body;
+        if (hidden && !MEMORY) return NO_MEMORY();
+        if (!hidden) arrived(req, srv);
+        if (sent?.stream) {
+          if (hidden) veil();
+          return follow(startJob(asked, hidden ? unveil : undefined), 0);
         }
+        const plain = async () => {
+          try {
+            const r = await fetch(`${backends.url}/chat/completions`, {
+              method: "POST", body: backends.isChrysalis ? asked : JSON.stringify(standard(JSON.parse(asked))), headers: backends.headers(), signal: req.signal,
+            });
+            return new Response(r.body, { status: r.status, headers: { "Content-Type": r.headers.get("Content-Type") ?? "application/json" } });
+          } catch {
+            return Response.json({ error: { message: new ChrysalisDown().message } }, { status: 502 });
+          }
+        };
+        return hidden ? veiled(plain) : plain();
       })),
     },
     "/api/chat/:id": {
@@ -725,8 +736,7 @@ img.src = ${JSON.stringify(checkUrl(req))} + "?t=" + Date.now();
       }),
     },
     "/api/incognito": {
-      POST: trusted(json(() => incognitoAsked(true))),
-      DELETE: trusted(() => incognitoAsked(false)),
+      DELETE: trusted(async () => (await harness.forget(), new Response(null, { status: 204 }))),
     },
     "/api/threads/outside": {
       POST: here(json(async () => {
@@ -863,7 +873,7 @@ img.src = ${JSON.stringify(checkUrl(req))} + "?t=" + Date.now();
           return { state: "offline", build: BUILD() };
         }
       })(), net = fromNetwork(req, srv), found = devices.find(req);
-      const res = Response.json({ ...state, backend, ...(harness.shaded() ? { incognito: true } : {}), here: !net, ...(net ? { machine: MACHINE } : {}), ...(found && devices!.stale(found.device) ? { check: true } : {}),
+      const res = Response.json({ ...state, backend, here: !net, ...(net ? { machine: MACHINE } : {}), ...(found && devices!.stale(found.device) ? { check: true } : {}),
         ...(LAN && !net ? { waiting: devices.waiting().length } : {}),
         ...(!net && (state.state === "offline" || link.name || link.pairing) ? { link: link.state() } : {}) });
       if (found) res.headers.append("Set-Cookie", keyCookie(found.key));
@@ -1049,8 +1059,7 @@ const answers = new Map<string, (yes: boolean) => void>(), answered = new Set<st
 let told = "[]";
 if (process.send) {
   process.on("message", (m: any) => {
-    if (typeof m?.incognito === "string") return incognitoNow(m.incognito || undefined);
-    if (m?.incognito === false) return void [...switched].forEach((done) => done());
+    if (m?.forget) return void harness.forget();
     const key = String(m?.answer?.key ?? ""), answer = answers.get(key);
     if (!answer) return;
     answered.add(key);
@@ -1124,24 +1133,36 @@ async function tuned(req: Request, body: string | undefined): Promise<string | u
   const { max_tokens, ...rest } = want, cap = "max_completion_tokens" in sent ? "max_completion_tokens" : "max_tokens";
   return JSON.stringify({ ...sent, ...rest, ...(max_tokens ? { [cap]: max_tokens } : {}) });
 }
-const switched = new Set<() => void>();
-function incognitoNow(dir?: string) {
-  const was = harness.state().state === "on";
-  for (const job of jobs.values()) job.ctrl.abort();
-  jobs.clear();
-  turns.clear();
-  void harness.shadeTo(dir).then(() => tell({ shaded: !!dir }));
-  for (const done of [...switched]) done();
-  if (was) void harness.ensure(CHRYSALIS).catch((e) => tell({ note: `OpenCode did not start again: ${(e as Error).message}` }));
+const MEMORY = process.env.CHRYSALIS_MEMORY, KEPT = process.env.CHRYSALIS_KEPT ?? "";
+let veils = 0;
+function unveil() {
+  if (--veils === 0) point(MEMORY!, KEPT, false);
+  tell({ veiled: veils });
 }
-async function incognitoAsked(on: boolean): Promise<Response> {
-  if (!process.send) return Response.json({ error: { message: "Incognito is switched by Chrysalis's terminal, which also keeps the model server's prompt cache off the disk" } }, { status: 409 });
-  if (harness.shaded() !== on) {
-    tell({ incognito: on });
-    await new Promise<void>((done) => { const go = () => { switched.delete(go); done(); }; switched.add(go); });
-  }
-  return harness.shaded() === on ? new Response(null, { status: 204 }) : Response.json({ error: { message: "Chrysalis's terminal did not switch incognito" } }, { status: 409 });
+const NO_MEMORY = () => Response.json({ error: { message: "Incognito keeps everything in memory, which needs Chrysalis started from its terminal on Linux" } }, { status: 409 });
+function veil() {
+  if (veils++ === 0) point(MEMORY!, KEPT, true);
+  tell({ veiled: veils });
 }
+async function veiled(answer: () => Response | Promise<Response>): Promise<Response> {
+  if (!MEMORY) return NO_MEMORY();
+  veil();
+  let r: Response;
+  try { r = await answer(); } catch (e) { unveil(); throw e; }
+  if (!r.body) return unveil(), r;
+  const reader = r.body.getReader();
+  let over = false;
+  const end = () => { if (!over) { over = true; unveil(); } };
+  return new Response(new ReadableStream<Uint8Array>({
+    async pull(ctl) {
+      const { value, done } = await reader.read().catch((e) => { end(); throw e; });
+      if (done) return end(), ctl.close();
+      ctl.enqueue(value);
+    },
+    cancel(why) { end(); return reader.cancel(why); },
+  }), { status: r.status, headers: r.headers });
+}
+harness.onHidden((on) => tell({ hidden: on }));
 async function outsideNow(on: boolean): Promise<Response> {
   if (harness.outsideAllowed() === on) return new Response(null, { status: 204 });
   harness.allowOutside(on);
