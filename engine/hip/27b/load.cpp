@@ -1,4 +1,5 @@
 #include "model.h"
+#include "../gpu.h"
 #include "../../gguf.h"
 #include <algorithm>
 #include <atomic>
@@ -211,6 +212,7 @@ void Engine::load(const std::string &path, int max_seqs, size_t reserve_bytes) {
     const double t_gpu = now();
     hipDeviceProp_t prop;
     CK(hipGetDeviceProperties(&prop, 0));
+    if (!gpu_runs()) FAIL("%s cannot run this engine", prop.name);
     uint8_t *ring;
     if (prop.isLargeBar) CK(hipExtMallocWithFlags((void **)&ring, RING, hipDeviceMallocFinegrained));
     else CK(hipHostMalloc(&ring, RING));

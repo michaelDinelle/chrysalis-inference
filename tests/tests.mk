@@ -1,4 +1,5 @@
-kernels kernels_fn test test_fn test_fn_model: export HIP_VISIBLE_DEVICES ?= $(shell env -u HIP_VISIBLE_DEVICES bun web/gpu.ts 2>/dev/null)
+kernels kernels_fn test test_fn test_fn_model: export HIP_VISIBLE_DEVICES ?= $(patsubst HIP_VISIBLE_DEVICES=%,%,$(shell env -u HIP_VISIBLE_DEVICES ./build/gpu 2>/dev/null))
+kernels kernels_fn test test_fn test_fn_model: | $(if $(filter hip,$(BACKEND)),build/gpu)
 
 build/test_sampler: tests/test_sampler.cpp engine/sampler.h
 	@mkdir -p build

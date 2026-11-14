@@ -1,4 +1,5 @@
 #include "model.h"
+#include "../gpu.h"
 #include <stdexcept>
 #include "../../gguf.h"
 #include <algorithm>
@@ -239,6 +240,9 @@ void Engine::load(const std::string &path, int max_seqs, size_t reserve_bytes) {
 
     CK(hipInit(0));
     CK(hipSetDevice(0));
+    hipDeviceProp_t gpu{};
+    CK(hipGetDeviceProperties(&gpu, 0));
+    if (!gpu_runs()) FAIL("%s cannot run this engine", gpu.name);
     CK(hipStreamCreateWithFlags(&st, hipStreamNonBlocking));
     CK(hipStreamCreateWithFlags(&cst, hipStreamNonBlocking));
     CK(hipStreamCreateWithFlags(&lst, hipStreamNonBlocking));

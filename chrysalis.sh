@@ -407,7 +407,7 @@ case "${1:-}" in
                 ggml="$ROOT/ggml/avx2"; grep -qw avx512_vnni /proc/cpuinfo && ggml="$ROOT/ggml/avx512"
                 export LD_LIBRARY_PATH="$ROOT/data/rocm/lib:$ROOT/data/rocm/lib/rocm_sysdeps/lib:$ggml${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
                 [ -e /dev/dxg ] && export HSA_ENABLE_DXG_DETECTION=1
-                if [ -z "${HIP_VISIBLE_DEVICES+x}${ROCR_VISIBLE_DEVICES+x}" ]; then g=$("$BUN" "$ROOT/web/gpu.ts" 2>/dev/null) && [ -n "$g" ] && export HIP_VISIBLE_DEVICES="$g"; fi
+                if [ -z "${HIP_VISIBLE_DEVICES+x}${ROCR_VISIBLE_DEVICES+x}" ] && [ -x "$ROOT/build/gpu" ]; then g=$("$ROOT/build/gpu") && export "$g"; fi
             fi
             m=$(cat "$TLS_DIR/model" 2>/dev/null || true)
             cd "$ROOT" && exec "$PY" -m chrysalis serve --host 127.0.0.1 ${m:+--use "$m"} "${@:2}" ;;

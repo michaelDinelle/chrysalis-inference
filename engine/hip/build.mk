@@ -2,7 +2,7 @@ ROCM  ?= $(CURDIR)/data/rocm
 HIPCC := $(ROCM)/bin/hipcc
 FLAGS := -O3 -std=c++20 -fPIC --offload-arch=gfx1100 -Wno-unused-result -ffunction-sections -fdata-sections -fvisibility=hidden -fvisibility-inlines-hidden
 H     := engine/hip
-SRC   := $(H)/27b/relayout.hip $(H)/27b/quant.hip $(H)/27b/ops.hip $(H)/gdn.hip $(H)/27b/attn.hip $(H)/vision.hip $(H)/27b/model.cpp $(H)/27b/load.cpp \
+SRC   := $(H)/27b/relayout.hip $(H)/27b/quant.hip $(H)/27b/ops.hip $(H)/gdn.hip $(H)/27b/attn.hip $(H)/vision.hip $(H)/gpu.hip $(H)/27b/model.cpp $(H)/27b/load.cpp \
          $(H)/27b/api.cpp
 KERN  := $(filter %.hip,$(SRC))
 LIBS  := -L$(ROCM)/lib -lhipblaslt -Wl,-rpath,$(ROCM)/lib -Wl,--no-undefined -Wl,--gc-sections
@@ -18,12 +18,18 @@ build/o27/%.cpp.o: %.cpp $(wildcard engine/*.h $(H)/*.h $(H)/27b/*.h)
 build/libchrysalis.so: $(OBJ)
 	$(HIPCC) $(FLAGS) -shared -s -o $@ $(OBJ) $(LIBS)
 
+build/gpu: $(H)/gpu_pick.hip $(H)/gpu.hip $(H)/gpu.h
+	@mkdir -p build
+	$(HIPCC) $(FLAGS) -s -o $@ $(H)/gpu_pick.hip $(H)/gpu.hip $(LIBS)
+
+engines: build/gpu
+
 build/test_quant build/test_attn build/test_gdn build/test_vision: build/%: tests/hip/%.hip $(KERN) $(wildcard engine/*.h $(H)/*.h $(H)/27b/*.h)
 	@mkdir -p build
 	$(HIPCC) $(FLAGS) -I$(H)/27b -o $@ $< $(KERN) $(LIBS)
 
 FN_SRC := $(H)/flash-next/relayout.hip $(H)/flash-next/quant.hip $(H)/flash-next/ops.hip $(H)/gdn.hip $(H)/flash-next/attn.hip \
-          $(H)/flash-next/moe.hip $(H)/flash-next/ple.hip $(H)/vision.hip $(H)/flash-next/model.cpp $(H)/flash-next/load.cpp \
+          $(H)/flash-next/moe.hip $(H)/flash-next/ple.hip $(H)/vision.hip $(H)/gpu.hip $(H)/flash-next/model.cpp $(H)/flash-next/load.cpp \
           $(H)/flash-next/experts.cpp $(H)/flash-next/api.cpp $(H)/flash-next/cpu_moe.cpp $(H)/flash-next/cpu_vnni.cpp
 FN_LIBS := $(LIBS) -L$(GGML)/build/bin -lggml-cpu -lggml-base -Wl,-rpath,$(GGML)/build/bin
 
