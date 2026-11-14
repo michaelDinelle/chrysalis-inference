@@ -13,7 +13,7 @@ function chrysalis(o: { pty?: boolean; mode?: string; env?: Record<string, strin
   const cmd = [process.execPath, "cli.ts", ...(o.mode ? ["--mode", o.mode] : [])];
   const proc = Bun.spawn(o.pty ? ["python3", "-c", "import pty, sys; pty.spawn(sys.argv[1:])", ...cmd] : cmd, {
     cwd: import.meta.dir, stdin: "pipe", stdout: "pipe", stderr: "inherit",
-    env: { ...process.env, PORT: String(port), CHRYSALIS_URL: `http://127.0.0.1:${engine}`, FAKE_ENGINE_PORT: String(engine), HOME: dir, CHRYSALIS_TLS_DIR: `${dir}/tls`,
+    env: { ...process.env, PORT: String(port), CHRYSALIS_URL: `http://127.0.0.1:${engine}`, FAKE_ENGINE_PORT: String(engine), HOME: dir, BUN_RUNTIME_TRANSPILER_CACHE_PATH: "0", CHRYSALIS_TLS_DIR: `${dir}/tls`,
       CHRYSALIS_ENGINE_CMD: JSON.stringify([process.execPath, `${import.meta.dir}/fake-engine.ts`]), CHRYSALIS_CHECK_PORT: "0", CHRYSALIS_LINK_PORT: "0",
       CHRYSALIS_API_PORT: "0", CHRYSALIS_SELF_AS_NETWORK: "1", XDG_DATA_HOME: `${dir}/.local/share`, XDG_STATE_HOME: `${dir}/.local/state`, CHRYSALIS_SNAPSHOTS: `${dir}/cache`, ...o.env },
   });

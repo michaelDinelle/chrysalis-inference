@@ -1,6 +1,7 @@
 import { chmodSync, copyFileSync, existsSync, mkdirSync, mkdtempSync, readdirSync, rmSync } from "node:fs";
 import type { Subprocess } from "bun";
 import { clean, fold, paint, plain } from "./terminal";
+import { gpuEnv } from "./gpu";
 import { MODELS, point } from "./veil";
 
 const { bold, dim, green, yellow, red, gray } = paint;
@@ -180,7 +181,7 @@ function engineLine(l: string): boolean {
 
 let engineSvc: Service, webSvc: Service;
 engineSvc = new Service("model server", () => Bun.spawn(scoped(ENGINE_CMD), { stdin: "ignore", stdout: "pipe", stderr: "pipe",
-  env: { ...process.env, ...(run ? { CHRYSALIS_SNAPSHOTS: `${run}/snapshots`, TMPDIR: `${run}/tmp` } : {}) } }), (l) => { const took = engineLine(l); sync(); return took; },
+  env: { ...process.env, ...gpuEnv(), ...(run ? { CHRYSALIS_SNAPSHOTS: `${run}/snapshots`, TMPDIR: `${run}/tmp` } : {}) } }), (l) => { const took = engineLine(l); sync(); return took; },
   () => Object.assign(engine, { state: "down", since: Date.now(), progress: 0, writing: 0 }));
 webSvc = new Service("web chat", () => Bun.spawn(scoped([process.execPath, WEB_FILE]), {
   cwd: import.meta.dir, stdin: "ignore", stdout: "pipe", stderr: "pipe",

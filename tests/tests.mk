@@ -1,3 +1,5 @@
+kernels kernels_fn test test_fn test_fn_model: export HIP_VISIBLE_DEVICES ?= $(shell env -u HIP_VISIBLE_DEVICES bun web/gpu.ts 2>/dev/null)
+
 build/test_sampler: tests/test_sampler.cpp engine/sampler.h
 	@mkdir -p build
 	$(CXX_HOST) -O2 -std=c++20 $(LLAMA_INC) -o $@ $< $(LLAMA_LIBS)
