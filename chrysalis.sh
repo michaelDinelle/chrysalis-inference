@@ -111,7 +111,6 @@ usage: chrysalis.sh [--host 0.0.0.0 | --insecure] [--model <model>]
   --model qwen3.8-27b or qwen3.8-flash-next: start with that model and ask nothing
 
   chrysalis.sh get <model>   download a model's files now (Chrysalis gets the one it loads by itself)
-  chrysalis.sh link          retune the GPU's PCIe link at every boot and wake, when the board's own tuning fails
   chrysalis.sh opencode      say whether OpenCode here is kept to Chrysalis's models (it is, until you change it)
   chrysalis.sh opencode outside   allow models outside this computer, after a warning; takes effect at once
   chrysalis.sh opencode only      keep OpenCode here to Chrysalis's models again
@@ -261,29 +260,6 @@ EOF
     fi
 }
 
-LINK_FIX=/usr/local/libexec/chrysalis-pcie-link
-LINK_NOTE=~/.config/chrysalis/pcie-link
-tune_link() {
-    [ -z "$MAC$WIN" ] && command -v systemctl >/dev/null || return 0
-    if cmp -s "$ROOT/system/chrysalis-pcie-link" "$LINK_FIX"; then return 0; fi
-    if [ "${1:-}" != ask ] && grep -qsx no "$LINK_NOTE"; then return 0; fi
-    local v big=
-    for v in /sys/class/drm/card*/device/mem_info_vram_total; do
-        if [ -r "$v" ] && (( $(cat "$v") >= 4 << 30 )); then big=1; fi
-    done
-    [ -n "$big" ] || return 0
-    echo "A GPU's PCIe link comes up below its speed when the board's power-on tuning fails: Chrysalis retunes it at every boot and wake, which takes your password, once"
-    if [ -t 0 ] && sudo sh -c "install -Dm755 '$ROOT/system/chrysalis-pcie-link' $LINK_FIX &&
-            install -Dm644 '$ROOT/system/chrysalis-pcie-link.service' /etc/systemd/system/chrysalis-pcie-link.service &&
-            install -Dm644 '$ROOT/system/90-chrysalis-pcie-link.rules' /etc/udev/rules.d/90-chrysalis-pcie-link.rules &&
-            systemctl daemon-reload && systemctl enable --now chrysalis-pcie-link.service" >/dev/null 2>&1; then
-        rm -f "$LINK_NOTE"
-    else
-        mkdir -p "${LINK_NOTE%/*}" && echo no > "$LINK_NOTE"
-        echo "  not installed: 'chrysalis.sh link' in a terminal installs it"
-    fi
-}
-
 release() {
     set -uo pipefail
     local VER="${1:-$(git -C "$ROOT" describe --tags --always)}" OUT=dist/chrysalis R=data/rocm/lib
@@ -404,7 +380,6 @@ case "${1:-}" in
             done
             if here -f -o /dev/null "$WEB_URL/"; then echo "Chrysalis is running already, in another terminal (Ctrl+C there stops it)"; exit 1; fi
             wsl_ready
-            tune_link
             if [ $mode != local ]; then let_in $mode; fi
             if [ -n "$MAC" ]; then
                 codesign -v "$APP" 2>/dev/null || codesign --force -s - "$APP" 2>/dev/null
@@ -426,7 +401,6 @@ case "${1:-}" in
             exec "${run[@]}" ;;
   firewall) let_in "${2:-}" ;;
   gpu)      has_gpu ;;
-  link)     tune_link ask ;;
   opencode) opencode_models "${2:-}" ;;
   get)      setup; get "${@:2}" ;;
   serve)    if [ -z "$MAC" ]; then
