@@ -201,6 +201,7 @@ export function fakeOpenCode(secret: string, port = 0, store?: string) {
         return new Response(null, { status: 204 });
       }
       if (rest === "/message") return json({ data: s.messages, cursor: {} });
+      if (rest === "/context") return json({ data: s.messages.slice(s.messages.findLastIndex((m) => m.type === "compaction" && m.status === "completed") + 1) });
       if (rest === "/model") { s.model = (await req.json()).model; return new Response(null, { status: 204 }); }
       if (rest === "/instructions/entries/character") { s.persona = method === "PUT" ? (await req.json()).value : undefined; return new Response(null, { status: 204 }); }
       if (rest === "/interrupt") { log.interrupts++; const stop = stops.get(s.id); if (stop) stop.now = true; return new Response(null, { status: 204 }); }

@@ -17,6 +17,7 @@ import { type Card, type CardData, type Group, type Person, type Voice, cardPng,
   voiceOf } from "./cast";
 import { Ocean } from "./ocean";
 import { type Drop, sidebarDrag } from "./drag";
+import type { SessionContextBreakdownKey, SessionContextBreakdownSegment } from "./breakdown";
 
 type Effort = "xhigh" | "medium" | "low" | "off";
 interface Stats { ttft: number; tps: number; tokens: number; prompt: number; cached?: number; thought?: number; seed?: number; model?: string; ctx?: number }
@@ -57,7 +58,7 @@ interface Conversation { id: string; title: string; named?: boolean; updated: nu
   incognito?: true;
   pending?: Record<string, { kind: string; srcs: string[] }>;
   who?: string;
-  thread?: { hidden?: true; dir: string; id?: string; model?: string; at?: number; agent?: string; machine?: string; context?: { used?: number; compacted?: boolean; window: number; ceiling: number; auto: boolean } } }
+  thread?: { hidden?: true; dir: string; id?: string; model?: string; at?: number; agent?: string; machine?: string; context?: { used?: number; compacted?: boolean; window: number; ceiling: number; auto: boolean; breakdown?: SessionContextBreakdownSegment[] } } }
 type Sampler = Partial<Record<SamplerKey, number>> & { order?: Stage[] };
 type Mode = "think" | "fast";
 interface Settings {
@@ -170,6 +171,17 @@ const CHECK = "You fix speech recognition errors in what a user says to {{MODEL}
   "was misheard.";
 const VOICE_OFF = "The user is typing again and reads your replies.";
 const TITLE_PROMPT = "You are a title generator. Reply with a title of at most six words for the conversation that starts with the user's message below. Reply with the title only.";
+const BREAKDOWN_COLOR: Record<SessionContextBreakdownKey, string> = {
+  system: "var(--syntax-info)",
+  user: "var(--syntax-success)",
+  assistant: "var(--syntax-property)",
+  tool: "var(--syntax-warning)",
+  other: "var(--syntax-comment)",
+};
+const BREAKDOWN_LABEL: Record<SessionContextBreakdownKey, string> = { system: "System", user: "User", assistant: "Assistant", tool: "Tool Calls", other: "Other" };
+const BREAKDOWN_NOTE = 'Approximate breakdown of the tokens in context. "Other" includes tool definitions and overhead.';
+const RING = 2 * Math.PI * 6.5;
+const DRAFT_FIRST = "Write a first message I might send to open this conversation, as me: one natural, brief line of plain text, a question or a request. Reply with only that message.";
 const DRAFT_PROMPT = "Write the next message I would send in this conversation, as me: same voice, same goals, natural and brief. Reply with only that message.";
 const fill = (text: string) => text.replaceAll("{{MODEL}}", modelName(current()) || "a Qwen model");
 const EFFORTS: Effort[] = ["off", "low", "medium", "xhigh"];
@@ -4008,6 +4020,7 @@ function pickToken(m: Message, ch: "reasoning" | "content", i: number, a: Alt) {
 }
 
 
+const draftTitle = () => (drafting ? "Stop the draft" : input.value.trim() ? "Finish my message (draft)" : "Draft my next message");
 function renderComposer() {
   const busy = !!running();
   sendBtn.innerHTML = icon(busy || voice ? "stop" : "send");
@@ -4016,10 +4029,9 @@ function renderComposer() {
   sendBtn.classList.toggle("stop", busy || !!voice);
   const draftBtn = $<HTMLButtonElement>("draft");
   draftBtn.innerHTML = icon(drafting ? "stop" : "wand");
-  draftBtn.title = drafting ? "Stop the draft" : input.value.trim() ? "Finish my message (draft)" : "Draft my next message";
+  draftBtn.title = draftTitle();
   draftBtn.setAttribute("aria-label", draftBtn.title);
   draftBtn.classList.toggle("on", !!drafting);
-  draftBtn.hidden = busy || !conv.messages.length || !onChrysalis();
   $("composer").classList.toggle("drafting", !!drafting);
   renderControls();
   if (modeOf(conv) !== chatMode) {
@@ -4548,7 +4560,7 @@ async function pickModel(model: string) {
 }
 
 function renderStatus() {
-  renderControls();
+  renderComposer();
 }
 
 let asked = 0;
@@ -5842,15 +5854,14 @@ async function draft() {
     if (drafting.job) void fetch(`/api/chat/${drafting.job}/stop`, { method: "POST" }).catch(() => {});
     return;
   }
-  const c = conv, begin = input.value;
-  if (running(c) || !c.messages.length || status.state !== "online" || c.thread) return;
+  const begin = input.value, c: Conversation = conv.thread ? { ...conv, thread: undefined, messages: conv.messages.filter((m) => m.content.trim()).map(({ rounds, calls, reasoning, checkpoints, ...m }) => m) } : conv;
   const d: { job?: string; stop: boolean } = (drafting = { stop: false });
   try { await filesReady(c.messages); } catch (e) { drafting = null; return toast(`The draft failed: ${e instanceof Error ? e.message : e}`); }
   const body = request(c, c.messages, {
     sampling: "fast", final: begin.trim() ? { role: "assistant", content: begin } : undefined,
     extra: { chrysalis_aside: true, max_tokens: 400, logprobs: false, seed: undefined, ...(begin.trim() ? { continue_final_message: true } : {}) },
   }) as { messages: object[] };
-  (body.messages as object[]).splice(begin.trim() ? -1 : body.messages.length, 0, { role: "user", content: DRAFT_PROMPT });
+  (body.messages as object[]).splice(begin.trim() ? -1 : body.messages.length, 0, { role: "user", content: c.messages.length ? DRAFT_PROMPT : DRAFT_FIRST });
   input.readOnly = true;
   renderComposer();
   try {
@@ -6074,7 +6085,7 @@ $("composer").addEventListener("submit", (e) => {
   else if (r) stopRun(r);
   else submit(input.value);
 });
-input.addEventListener("input", () => { grow(); if (!drafting) $("draft").title = input.value.trim() ? "Finish my message (draft)" : "Draft my next message"; });
+input.addEventListener("input", () => { grow(); if (!drafting) $("draft").title = $("draft").ariaLabel = draftTitle(); });
 input.addEventListener("input", () => { if (talking || lined.length) { talking = 0; lined = []; renderCastNext(); } });
 interface Slash { name: string; aliases?: string[]; hint?: string; about: string; run?: (arg: string) => void | Promise<void> }
 let slashFrom: { key: string; commands: { name: string; description: string }[]; skills: { id: string; name: string; description: string }[] } | undefined, slashAt = 0;
@@ -6568,53 +6579,100 @@ function setModelsOpen(open: boolean, refocus = false) {
 const JSON_POST = { method: "POST", headers: { "Content-Type": "application/json" } };
 
 const shortName = (id: string) => modelName(id).replace(/^Qwen3\.8-/, "");
-function renderMeter() {
+interface Gauge { used?: number; top?: number; window?: number; mark?: number; pct: string; left: string; title: string[]; rows: [string, string][]; breakdown?: SessionContextBreakdownSegment[]; thread: boolean }
+function gauge(): Gauge | undefined {
+  const n = (x: number) => x.toLocaleString("en-US");
   if (conv.thread) {
-    const at = conv.thread.context, meter = $("meter");
-    if (!at || harness.state !== "on") { meter.title = ""; return void meter.replaceChildren(); }
-    const used = at.used ?? 0, top = at.auto ? at.ceiling : at.window, share = Math.min(1, used / top), left = Math.max(0, top - used), b = h("button", `ctx${share >= 0.9 ? " near" : share >= 0.7 ? " warm" : ""}`);
+    const at = conv.thread.context;
+    if (harness.state !== "on") return undefined;
+    if (!at) return { pct: "Context", left: "", title: ["The next reply measures this thread's context"], rows: [["Tokens", "not measured yet"]], thread: true };
+    const used = at.used ?? 0, top = at.auto ? at.ceiling : at.window, left = Math.max(0, top - used);
+    return { ...(at.used === undefined ? {} : { used }), top, window: at.window, ...(at.auto ? { mark: at.ceiling } : {}), breakdown: at.used === undefined ? undefined : at.breakdown, thread: true,
+      pct: at.used === undefined ? (at.compacted ? "Compacted" : "Context") : `${Math.round(Math.min(1, used / top) * 100)}%`, left: at.used === undefined ? `${fmtK(top)} free` : `${fmtK(left)} left`,
+      title: [at.used === undefined ? (at.compacted ? "The context was just compacted: the next reply measures it" : "The next reply measures this thread's context") : `Context: ${n(used)} tokens used`,
+        at.auto ? `OpenCode compacts it at ${n(at.ceiling)}${at.used === undefined ? "" : ` (${n(left)} to go)`}` : "OpenCode does not compact it by itself", `The model's window is ${n(at.window)}`],
+      rows: [["Tokens", at.used === undefined ? (at.compacted ? "just compacted" : "not measured yet") : n(used)], ["Context", `${Math.round((used / at.window) * 100)}% of ${n(at.window)}`],
+        [at.auto ? "Compacts at" : "Compacts", at.auto ? n(at.ceiling) : "only when asked"]] };
+  }
+  const online = status.state === "online" && !status.loading, ctx = status.context ?? 262144;
+  const r = running(), s = conv.messages.findLast((m) => m.stats)?.stats;
+  const used = r?.read !== undefined ? r.read + (r.written ?? 0) : s ? s.ctx ?? s.prompt + s.tokens : undefined;
+  if (!onService()) return { ...(used === undefined ? {} : { used }), thread: false, pct: used === undefined ? "Context" : `${fmtK(used)} tokens`, left: "",
+    title: [used === undefined ? "The next reply measures this chat's context" : `This chat: ${n(used)} tokens`], rows: [["Tokens", used === undefined ? "not measured yet" : n(used)]] };
+  const free = status.cache?.free_kv_tokens ?? 0, kv = status.kv_tokens ?? 0;
+  return { ...(used === undefined ? {} : { used }), top: ctx, window: ctx, thread: false, pct: `${Math.round(Math.min(1, (used ?? 0) / ctx) * 100)}%`, left: `${fmtK(Math.max(0, ctx - (used ?? 0)))} left`,
+    title: [used === undefined ? `This chat: nothing of ${n(ctx)} tokens of context yet` : `This chat: ${n(used)} of ${n(ctx)} tokens of context`,
+      ...(online ? [`Cache: ${fmtK(free)} of ${fmtK(kv)} KV tokens free (cached conversations are dropped as needed)`] : [])],
+    rows: [["Tokens", n(used ?? 0)], ["Context", `${Math.round(((used ?? 0) / ctx) * 100)}% of ${n(ctx)}`], ...(online && kv ? [["Cache free", `${fmtK(free)} of ${fmtK(kv)}`] as [string, string]] : [])] };
+}
+function renderContext() {
+  const pop = $("ctx-pop"), g = gauge();
+  if (!g) return void (pop.hidden = true);
+  const key = JSON.stringify([g, !!running()]);
+  if (pop.dataset.key === key) return;
+  pop.dataset.key = key;
+  const share = g.top ? Math.min(1, (g.used ?? 0) / g.top) : 0, head = h("div", "ctx-head"), parts: HTMLElement[] = [head];
+  head.append(h("div", "invite-head", "Context"));
+  if (g.thread) {
+    const go = h("button", "btn small", "Compact now");
+    go.type = "button";
+    go.disabled = !conv.thread?.id || !!running();
+    go.onclick = () => { pop.hidden = true; void PAGE_SLASH.find((c) => c.name === "compact")!.run!(""); };
+    head.append(go);
+  }
+  if (g.window) {
+    const bar = h("div", `ctx-track${share >= 0.9 ? " near" : share >= 0.7 ? " warm" : ""}`), fill = h("i"), mark = h("b");
+    fill.style.width = `${(Math.min(g.used ?? 0, g.window) / g.window) * 100}%`;
+    mark.style.left = `${((g.mark ?? 0) / g.window) * 100}%`;
+    mark.hidden = !g.mark;
+    bar.append(fill, mark);
+    parts.push(bar);
+  }
+  parts.push(...g.rows.map(([label, value]) => { const x = h("div", "ctx-row"); x.append(h("span", "", label), h("span", "ctx-num", value)); return x; }));
+  if (g.breakdown?.length) {
+    const block = h("div", "ctx-block"), bar = h("div", "ctx-breakdown"), legend = h("div", "ctx-legend");
+    block.title = BREAKDOWN_NOTE;
+    for (const segment of g.breakdown) {
+      const piece = h("div"), item = h("div", "ctx-key"), dot = h("div", "ctx-dot");
+      piece.style.width = `${segment.width}%`;
+      piece.style.backgroundColor = dot.style.backgroundColor = BREAKDOWN_COLOR[segment.key];
+      bar.append(piece);
+      item.append(dot, h("div", "", BREAKDOWN_LABEL[segment.key]), h("div", "ctx-weaker", `${segment.percent.toLocaleString("en-US")}%`));
+      legend.append(item);
+    }
+    block.append(h("div", "ctx-label", "Context Breakdown"), bar, legend);
+    parts.push(block);
+  }
+  pop.replaceChildren(...parts);
+}
+function renderMeter() {
+  const meter = $("meter"), g = gauge();
+  if (!g) { $("ctx-pop").hidden = true; return void meter.replaceChildren(); }
+  let b = meter.querySelector<HTMLButtonElement>(".ctx");
+  if (!b) {
+    b = h("button", "ctx");
     b.type = "button";
-    b.innerHTML = `<svg class="ctx-ring" viewBox="0 0 20 20" aria-hidden="true"><circle cx="10" cy="10" r="7.5"/><circle class="on" cx="10" cy="10" r="7.5" pathLength="100" stroke-dasharray="${Math.max(share ? 3 : 0, Math.round(share * 100))} 100"/></svg>`;
-    b.append(h("span", "ctx-pct", at.used === undefined ? (at.compacted ? "Compacted" : "Context") : `${Math.round(share * 100)}%`), h("span", "ctx-left", at.used === undefined ? `${fmtK(top)} free` : `${fmtK(left)} left`));
-    b.title = b.ariaLabel = [at.used === undefined ? (at.compacted ? "The context was just compacted: the next reply measures it" : "The next reply measures this thread's context") : `Context: ${used.toLocaleString("en-US")} tokens used`,
-      at.auto ? `OpenCode compacts it at ${at.ceiling.toLocaleString("en-US")}${at.used === undefined ? "" : ` (${left.toLocaleString("en-US")} to go)`}` : "OpenCode does not compact it by itself",
-      `The model's window is ${at.window.toLocaleString("en-US")}`].join("\n");
+    b.setAttribute("aria-haspopup", "dialog");
+    b.setAttribute("aria-controls", "ctx-pop");
+    b.innerHTML = `<svg class="ctx-ring" width="16" height="16" viewBox="0 0 16 16" fill="none" aria-hidden="true"><circle cx="8" cy="8" r="6.5" stroke-width="3"/><circle class="on" cx="8" cy="8" r="6.5" stroke-width="3" stroke-dasharray="${RING}" stroke-dashoffset="${RING}"/></svg><span class="ctx-pct"></span><span class="ctx-left"></span>`;
     b.onclick = () => {
-      const pop = $("ctx-pop"), r = b.getBoundingClientRect();
+      const pop = $("ctx-pop"), r = b!.getBoundingClientRect();
       if (!pop.hidden) return void (pop.hidden = true);
-      const row = (label: string, value: string) => { const x = h("div", "ctx-row"); x.append(h("span", "", label), h("span", "ctx-num", value)); return x; }, bar = h("div", "ctx-track"), fill = h("i"), mark = h("b"), go = h("button", "btn small", "Compact now");
-      fill.style.width = `${(Math.min(used, at.window) / at.window) * 100}%`;
-      mark.style.left = `${(at.ceiling / at.window) * 100}%`;
-      mark.hidden = !at.auto;
-      bar.className = `ctx-track${share >= 0.9 ? " near" : share >= 0.7 ? " warm" : ""}`;
-      bar.append(fill, mark);
-      go.type = "button";
-      go.disabled = !conv.thread?.id || !!running();
-      go.onclick = () => { pop.hidden = true; void PAGE_SLASH.find((c) => c.name === "compact")!.run!(""); };
-      pop.replaceChildren(h("div", "invite-head", "Context"), bar, row("Used", at.used === undefined ? (at.compacted ? "just compacted" : "not measured yet") : `${used.toLocaleString("en-US")} tokens`),
-        row(at.auto ? "Compacts at" : "Compacts", at.auto ? `${at.ceiling.toLocaleString("en-US")}` : "only when asked"), ...(at.auto && at.used !== undefined ? [row("Until then", `${left.toLocaleString("en-US")} tokens`)] : []),
-        row("Model's window", at.window.toLocaleString("en-US")), go);
+      delete pop.dataset.key;
+      renderContext();
       pop.hidden = false;
       pop.style.left = `${Math.max(8, Math.min(r.left, innerWidth - pop.offsetWidth - 8))}px`;
       pop.style.bottom = `${innerHeight - r.top + 8}px`;
     };
-    meter.title = "";
     meter.replaceChildren(b);
-    return;
   }
-  const online = status.state === "online" && !status.loading, ctx = status.context ?? 262144;
-  const used = status.kv_tokens && status.cache ? 1 - status.cache.free_kv_tokens / status.kv_tokens : 0;
-  const r = running(), s = conv.messages.findLast((m) => m.stats)?.stats;
-  const n = r?.read !== undefined ? r.read + (r.written ?? 0) : s ? s.ctx ?? s.prompt + s.tokens : undefined;
-  if (!onService()) {
-    $("meter").replaceChildren(...(n !== undefined ? [h("span", "", `${fmtK(n)} tokens`)] : []));
-    $("meter").title = n !== undefined ? `This chat: ${n.toLocaleString("en-US")} tokens` : "";
-    return;
-  }
-  const meter = $("meter"), parts = [n !== undefined ? `${fmtK(n)} / ${fmtK(ctx)}` : online ? `${fmtK(ctx)} context` : "", online ? `cache ${Math.round(used * 100)}%` : ""];
-  meter.replaceChildren(...parts.filter(Boolean).map((t) => h("span", "", t)));
-  meter.title = [n !== undefined ? `This chat: ${n.toLocaleString("en-US")} of ${ctx.toLocaleString("en-US")} tokens of context` : "",
-    online ? `Cache: ${fmtK(status.cache?.free_kv_tokens ?? 0)} of ${fmtK(status.kv_tokens ?? 0)} KV tokens free (cached conversations are dropped as needed)` : ""].filter(Boolean).join("\n");
+  const share = g.top ? Math.min(1, (g.used ?? 0) / g.top) : 0;
+  b.className = `ctx${share >= 0.9 ? " near" : share >= 0.7 ? " warm" : ""}`;
+  b.querySelector(".on")!.setAttribute("stroke-dashoffset", String(RING * (1 - share)));
+  b.querySelector(".ctx-pct")!.textContent = g.pct;
+  b.querySelector(".ctx-left")!.textContent = g.left;
+  b.title = b.ariaLabel = g.title.join("\n");
+  if (!$("ctx-pop").hidden) renderContext();
 }
 function threadControls() {
   const id = threadModel(conv), btn = $("model-btn"), on = harness.state === "on";
@@ -6663,7 +6721,10 @@ function renderControls() {
   energy.style.setProperty("--v", String(at));
   energy.setAttribute("aria-valuenow", String(at));
   energy.setAttribute("aria-valuetext", LEVEL[effort][0]);
-  energy.title = `Thinking: ${LEVEL[effort][0]}`;
+  const level = !!conv.thread && !variantsOf(conv).length;
+  energy.title = level ? "This model has no thinking levels" : `Thinking: ${LEVEL[effort][0]}`;
+  energy.tabIndex = level ? -1 : 0;
+  energy.setAttribute("aria-disabled", String(level));
   energy.querySelectorAll(".energy-dot").forEach((d, k) => d.classList.toggle("lit", at > 0 && k <= at));
   $("energy-stops").dataset.heat = HEAT[at];
   $("energy-stops").querySelectorAll("button").forEach((b, k) => b.classList.toggle("on", k === at));

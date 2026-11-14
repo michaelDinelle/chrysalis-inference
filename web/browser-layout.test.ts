@@ -5,7 +5,7 @@ harness();
 
 test("the context in the message box counts up while a reply is written (the prompt once read, then each token) and ends at the reply's own count", async () => {
   const page = await open();
-  const used = async () => parseInt(await page.$eval("#meter > span", (s) => s.textContent ?? ""));
+  const used = async () => parseInt(/This chat: ([\d,]+) of 262,144/.exec(await page.$eval("#meter .ctx", (b) => (b as HTMLElement).title))![1].replace(/,/g, ""));
   await page.type("#input", "slow count");
   await page.keyboard.press("Enter");
   await page.waitForFunction(() => /w3 /.test(document.querySelector(".msg.assistant")?.textContent ?? ""));

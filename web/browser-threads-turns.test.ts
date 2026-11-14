@@ -1,10 +1,10 @@
 import { expect, test } from "bun:test";
 import { until } from "./server-harness";
-import { cards, castRows, connect, dir, harness, home, lastText, open, openFolder, opencode, png, send, spokenOf, streams, voicePage, work, outside, fresh } from "./browser-harness";
+import { CLEAN, SIZES, cards, castRows, composerFaults, connect, dir, harness, home, lastStream, lastText, open, openFolder, opencode, png, resize, send, shown, spokenOf, streams, voicePage, work, outside, fresh } from "./browser-harness";
 
 harness();
 
-test("a thread takes what a chat takes: attached text files and pictures go to OpenCode with the message and come back with the thread after a reload, a video does not; the thinking slider picks the model's own level and hides for a model with none; a question OpenCode asks is answered or skipped in its card", async () => {
+test("a thread takes what a chat takes: attached text files and pictures go to OpenCode with the message and come back with the thread after a reload, a video does not; the thinking slider picks the model's own level and, for a model with none, stays in its place dimmed and out of reach; a question OpenCode asks is answered or skipped in its card", async () => {
   const page = await open(), last = () => opencode.log.prompts.at(-1)!;
   await outside(page, true);
   await Bun.write(`${dir}/jar.txt`, "clover honey, 12 jars");
@@ -47,12 +47,12 @@ test("a thread takes what a chat takes: attached text files and pictures go to O
   await asked();
   expect([opencode.log.answers.at(-1), (await lastText(page)).includes("You did not choose.")]).toEqual(["skipped", true]);
 
-  const slider = () => page.$eval(".think-ctl", (e) => getComputedStyle(e).display !== "none");
-  expect(await slider()).toBe(true);
+  const slider = () => page.$eval(".think-ctl", (e) => { const s = getComputedStyle(e), k = document.querySelector("#energy")!; return [e.getBoundingClientRect().width > 0, s.pointerEvents !== "none" && k.getAttribute("aria-disabled") !== "true" && (k as HTMLElement).tabIndex === 0]; });
+  expect(await slider()).toEqual([true, true]);
   await page.click("#model-btn");
   await page.waitForSelector("#model-pop:not([hidden]) .model-group");
   await page.evaluate(() => [...document.querySelectorAll<HTMLElement>("#model-pop .model-item")].find((i) => i.textContent!.includes("Cloud One"))!.click());
-  expect(await slider()).toBe(false);
+  expect(await slider()).toEqual([true, false]);
   await send(page, "plainly");
   expect(last().model).toEqual({ providerID: "elsewhere", id: "cloud-1" });
   await page.evaluate(() => localStorage.removeItem("thread-model"));
@@ -231,5 +231,36 @@ test("the system prompt written in Settings goes to a thread with who is working
   await page.click("#settings-close");
   await send(page, "and the third");
   expect(last().persona ?? "").toBe(plain);
+  await page.close();
+}, 60_000);
+
+test("a thread's message box keeps every control at each size, the context ring and the draft button among them, and the draft button works from the first: in an empty chat it drafts my opening message, while a reply is written it is still there to press, and after one it drafts my next message with Chrysalis's model from the thread's words alone, its tool steps left out; OpenCode is sent nothing", async () => {
+  const page = await open();
+  await page.emulateMediaFeatures([{ name: "prefers-reduced-motion", value: "reduce" }]);
+  await connect(page);
+  await openFolder(page, work);
+  const draft = () => page.$eval("#draft", (d) => [d.getBoundingClientRect().width > 0, (d as HTMLButtonElement).disabled]);
+  const drafted = async () => {
+    await page.click("#draft");
+    await page.waitForFunction(() => /^You said: Write (the next message I would send|a first message I might send)/.test((document.querySelector("#input") as HTMLTextAreaElement).value) && !document.querySelector("#composer.drafting"));
+    await page.$eval("#input", (i) => { (i as HTMLTextAreaElement).value = ""; });
+    return (lastStream.messages as { role: string; content: string; tool_calls?: object[] }[]).filter((m) => m.role !== "system").map((m) => [m.role, m.content.replace(/^Write the next message[^]*$/, "the draft prompt").replace(/^Write a first message[^]*$/, "the opening prompt"), !!m.tool_calls]);
+  };
+  const prompts = opencode.log.prompts.length, chats = streams.length;
+  expect([await draft(), await shown(page, "#meter .ctx")]).toEqual([[true, false], true]);
+  expect(await drafted()).toEqual([["user", "the opening prompt", false]]);
+  await page.type("#input", "read it slowly");
+  await page.keyboard.press("Enter");
+  await page.waitForFunction(() => document.querySelector("#send")?.getAttribute("aria-label") === "Stop");
+  expect(await draft()).toEqual([true, false]);
+  await page.waitForFunction(() => document.querySelector("#send")?.getAttribute("aria-label") === "Send" && !!document.querySelector("#thread > article.assistant:last-child .stats"), { timeout: 20_000 });
+  for (const [width, height] of SIZES) {
+    await resize(page, width, height);
+    expect({ width, ...await composerFaults(page) }).toEqual({ width, ...CLEAN });
+    expect([width, ...await Promise.all(["#attach", ".think-ctl", "#meter .ctx", "#machine-btn", "#folder-btn", "#model-btn", "#draft", "#voice", "#send"].map((q) => shown(page, q)))]).toEqual([width, true, true, true, true, true, true, true, true, true]);
+  }
+  await resize(page, 1200, 900);
+  expect(await drafted()).toEqual([["user", "read it slowly", false], ["assistant", "The file says hello and honey. You asked: read it slowly", false], ["user", "the draft prompt", false]]);
+  expect([opencode.log.prompts.length - prompts, streams.length - chats, lastStream.chrysalis_aside, lastStream.chrysalis_thread]).toEqual([1, 2, true, undefined]);
   await page.close();
 }, 60_000);

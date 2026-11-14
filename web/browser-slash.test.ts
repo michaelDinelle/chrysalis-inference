@@ -3,8 +3,8 @@ import { connect, harness, open, openFolder, opencode, send, work } from "./brow
 
 harness();
 
-test("a thread takes OpenCode's slash commands and shows its context: typing / lists OpenCode's own commands and the terminal's, the meter says how much of the context is used and where OpenCode compacts it, /compact compacts it and the thread shows the summary, live and after a reload, and /rename, /variants and /new do what they do in the terminal while an unknown one is sent as text", async () => {
-  const page = await open(), meter = () => page.$eval("#meter", (m) => [...m.querySelectorAll(".ctx-pct, .ctx-left")].map((e) => e.textContent).join(" · "));
+test("a thread takes OpenCode's slash commands and shows its context: typing / lists OpenCode's own commands and the terminal's, the meter says how much of the context is used and where OpenCode compacts it, and opens on OpenCode's breakdown of what the context is made of, estimated from the messages OpenCode says are in it, /compact compacts it and the thread shows the summary, live and after a reload, and /rename, /variants and /new do what they do in the terminal while an unknown one is sent as text", async () => {
+  const page = await open(), meter = () => page.$eval("#meter", (m) => [...m.querySelectorAll(".ctx-pct, .ctx-left")].map((e) => e.textContent).filter(Boolean).join(" · "));
   const ask = async (text: string, said = text) => {
     await page.type("#input", text);
     await page.keyboard.press("Enter");
@@ -13,13 +13,15 @@ test("a thread takes OpenCode's slash commands and shows its context: typing / l
   };
   await connect(page);
   await openFolder(page, work);
-  expect(await meter()).toBe("");
+  expect(await meter()).toBe("Context");
   await send(page, "sort the first shelf");
   const session = opencode.log.prompts.at(-1)!.session;
   expect([await meter(), await page.$eval("#meter .ctx", (b) => (b as HTMLElement).title.split("\n"))])
     .toEqual(["0% · 170K left", ["Context: 160 tokens used", "OpenCode compacts it at 170,000 (169,840 to go)", "The model's window is 200,000"]]);
   await page.click("#meter .ctx");
-  expect(await page.$$eval("#ctx-pop .ctx-row", (r) => r.map((x) => [...x.children].map((c) => c.textContent)))).toEqual([["Used", "160 tokens"], ["Compacts at", "170,000"], ["Until then", "169,840 tokens"], ["Model's window", "200,000"]]);
+  expect(await page.$$eval("#ctx-pop .ctx-row", (r) => r.map((x) => [...x.children].map((c) => c.textContent)))).toEqual([["Tokens", "160"], ["Context", "0% of 200,000"], ["Compacts at", "170,000"]]);
+  expect(await page.$$eval("#ctx-pop .ctx-key", (k) => k.map((x) => [...x.children].slice(1).map((c) => c.textContent)))).toEqual([["User", "3.1%"], ["Assistant", "13.8%"], ["Tool Calls", "4.4%"], ["Other", "78.8%"]]);
+  expect(await page.$$eval("#ctx-pop .ctx-breakdown > div", (d) => d.map((x) => Math.round(parseFloat((x as HTMLElement).style.width) * 160 / 100)))).toEqual([5, 22, 7, 126]);
   await page.click("#meter .ctx");
   expect(await page.$eval("#ctx-pop", (e) => (e as HTMLElement).hidden)).toBe(true);
 
@@ -43,6 +45,7 @@ test("a thread takes OpenCode's slash commands and shows its context: typing / l
   await ask("and the second shelf");
   expect([await meter(), await page.$$eval("#thread details.checkpoint", (d) => d.length)]).toEqual(["0% · 170K left", 1]);
   await page.click("#meter .ctx");
+  expect(await page.$$eval("#ctx-pop .ctx-key", (k) => k.map((x) => [...x.children].slice(1).map((c) => c.textContent)))).toEqual([["User", "3.1%"], ["Assistant", "13.8%"], ["Tool Calls", "4.4%"], ["Other", "78.8%"]]);
   await page.click("#ctx-pop .btn");
   await page.waitForFunction(() => document.querySelectorAll("#thread details.checkpoint").length === 2);
 

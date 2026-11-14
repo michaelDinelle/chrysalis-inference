@@ -1,6 +1,7 @@
 import { existsSync, mkdtempSync, readdirSync, rmSync } from "node:fs";
 import { homedir } from "node:os";
 import { dirname, join, resolve } from "node:path";
+import { sessionContextBreakdown, type SessionContextBreakdownSegment } from "./breakdown";
 
 export type Decision = "once" | "always" | "deny";
 export interface Scene { cast: string[]; cards?: object[]; group?: string; scenario?: string; name?: string; greeting?: string; greeter?: string }
@@ -14,7 +15,7 @@ export interface Turn { again?: boolean; hidden?: boolean; session?: string; mac
 export type Answer = Decision | "stop" | { answer: Record<string, unknown> };
 export interface Step { content: string; reasoning?: string; calls: Call[] }
 export interface Call { id: string; name: string; args: string; title: string; source: string; state: string; result?: string }
-export interface Context { used?: number; compacted?: boolean; window: number; ceiling: number; auto: boolean }
+export interface Context { used?: number; compacted?: boolean; window: number; ceiling: number; auto: boolean; breakdown?: SessionContextBreakdownSegment[] }
 export interface Said { role: "user" | "assistant"; content: string; checkpoints?: { summary: string; at: number; recent: string; first: boolean }[]; files?: { name: string; type: string; data: string }[]; sent?: string; oc?: string; ocs?: string[]; by?: string; reasoning?: string; rounds?: Step[]; calls?: Call[]; error?: string; stopped?: boolean }
 type Listener = (type: string, data: any, from?: string) => void;
 
@@ -412,6 +413,7 @@ async function said(id: string): Promise<any[]> {
     if (!cursor || !page.data?.length) return all;
   }
 }
+const breakdownOf = (id: string) => call("GET", `/api/session/${id}/context`, undefined, on(id)).then((r) => sessionContextBreakdown(r.data ?? []), () => []);
 export async function undo(id: string, message: string) {
   const go = (method: string, path: string, body?: object) => call(method, path, body, on(id));
   await go("POST", `/api/session/${id}/revert/stage`, { messageID: message, files: true });
@@ -461,8 +463,8 @@ export async function transcript(id: string): Promise<{ thread: Thread; messages
   }
   close();
   if (marks.length) messages.push({ role: "assistant", content: "", checkpoints: marks });
-  const context = await contextOf(on(id), idOf(s.model), used).catch(() => undefined);
-  return { ...(context ? { context: { ...context, ...(fresh ? { compacted: true } : {}) } } : {}), thread: { id: s.id, title: s.title ?? "", dir: s.location?.directory ?? "", updated: s.time?.updated ?? 0, idle: s.time?.idle ?? 0, busy: running.has(s.id), archived: !!s.time?.archived, model: idOf(s.model),
+  const [context, breakdown] = await Promise.all([contextOf(on(id), idOf(s.model), used).catch(() => undefined), breakdownOf(id)]);
+  return { ...(context ? { context: { ...context, ...(fresh ? { compacted: true } : {}), breakdown } } : {}), thread: { id: s.id, title: s.title ?? "", dir: s.location?.directory ?? "", updated: s.time?.updated ?? 0, idle: s.time?.idle ?? 0, busy: running.has(s.id), archived: !!s.time?.archived, model: idOf(s.model),
     ...(scene ? { scene } : {}), ...(homes.get(s.id) === HIDDEN ? { hidden: true } : homes.get(s.id) ? { machine: homes.get(s.id) } : {}) }, messages };
 }
 
@@ -553,7 +555,7 @@ export async function turn(t: Turn, push: (d: object) => void, signal: AbortSign
       else if (type === "session.tool.failed") { if (!declined.has(d.id)) tool(d.id, "failed", { result: `Error: ${d.error?.message ?? (textOf(d.content) || "the tool failed")}`, ms: ms(d.id) }); }
       else if (type === "session.step.ended" && d.tokens) {
         push({ usage: { prompt_tokens: (d.tokens.input ?? 0) + (d.tokens.cache?.read ?? 0), completion_tokens: d.tokens.output ?? 0, prompt_tokens_details: { cached_tokens: d.tokens.cache?.read ?? 0 } } });
-        measured.push(contextOf(to, model, spent(d.tokens)).then((c) => { if (c) push({ context: c }); }, () => {}));
+        measured.push(Promise.all([contextOf(to, model, spent(d.tokens)), breakdownOf(id)]).then(([c, breakdown]) => { if (c) push({ context: { ...c, breakdown } }); }, () => {}));
       }
       else if (type === "session.compaction.started") push({ waiting: "Compacting the context" });
       else if (type === "session.compaction.ended") { push({ compacted: { summary: d.text ?? "", recent: "", first: false } }); measured.push(contextOf(to, model).then((c) => { if (c) push({ context: { ...c, compacted: true } }); }, () => {})); }
