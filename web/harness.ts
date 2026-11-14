@@ -323,7 +323,7 @@ const textOf = (content: any) => (Array.isArray(content) ? content.map((p: any) 
 const titled = (name: string) => name.replace(/[_-]+/g, " ").replace(/^./, (c) => c.toUpperCase());
 
 export async function threads(): Promise<Thread[]> {
-  return (await Promise.all([...(host ? [threadsOf(host)] : []), ...[...away.values()].map((h) => threadsOf(h).catch(() => []))])).flat();
+  return (await Promise.all([...(host ? [threadsOf(host)] : []), ...others().map((h) => threadsOf(h).catch(() => []))])).flat();
 }
 async function threadsOf(h: Host): Promise<Thread[]> {
   const out: Thread[] = [];

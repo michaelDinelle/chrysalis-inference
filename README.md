@@ -140,14 +140,14 @@ docker run -d --device /dev/kfd --device /dev/dri -p 127.0.0.1:8080:8080 -v chry
   the left and right arrow keys do the same, and on a touch screen a drag across the reply does. Every version is kept,
   and going between them is instant. In an OpenCode thread a new version asks OpenCode again, the versions are kept in
   the tab, and the one on screen becomes the reply OpenCode holds.
-- Incognito: the ghost button in the top bar opens an incognito chat. It lives beside the other chats and is listed
-  with them, marked with a ghost; while it is the open chat, a white outline and an Incognito tab are drawn over the
-  page, moving nothing. A second OpenCode runs for incognito threads on a store in memory (`/dev/shm`), with its
-  tools, and the first is never stopped. Nothing of an incognito chat is written to disk: the page keeps it out of the
-  browser's storage, its requests don't show in the terminal, and while one runs the model server cannot write its
-  prompt cache. Deleting the last incognito thread, `incognito end` in the terminal, or stopping Chrysalis deletes
-  the store. It needs Linux; what a tool writes into your folders is still written, and the model server's memory of
-  the chat goes as its cache turns over.
+- Incognito: the ghost button in the top bar opens an incognito chat, and pressing it again, starting a new chat,
+  opening another one or reloading deletes it at once. It is in no list, and while it is open a white outline and an
+  Incognito tab are drawn over the page, moving nothing. It keeps OpenCode's tools: a second OpenCode runs for it on a
+  store in memory (`/dev/shm`) and the first is never stopped. Nothing of it is written to disk: the page keeps it out
+  of the browser's storage, its requests don't show in the terminal, and while one runs the model server cannot write
+  its prompt cache. `incognito end` in the terminal or stopping Chrysalis deletes whatever is left. It needs Linux;
+  what a tool writes into your folders is still written, and the model server's memory of the chat goes as its cache
+  turns over.
 - Settings has a system prompt: it goes with every chat, after whoever the chat is with. In a thread it goes in the one
   instruction Chrysalis gives OpenCode, beside OpenCode's own prompt.
 - Artifacts render as they are written. Hovering highlights a part. Clicking attaches it to the next message. The paint

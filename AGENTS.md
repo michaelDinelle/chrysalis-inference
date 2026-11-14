@@ -37,8 +37,8 @@ README.md shows what Chrysalis is. This file is how to change it.
   (`memory`), and routes each thread to the OpenCode that holds it. The model server always gets CHRYSALIS_SNAPSHOTS
   and TMPDIR in that folder: its snapshot folders are links (web/veil.ts `point`) that web/server.ts points at
   read-only folders while an incognito request runs (`veiled`), because chrysalis/cache.py writes each pinned prompt
-  snapshot (the tools and the system prompt, tokens and all) to disk. The page marks such a chat `incognito` and keeps
-  it and its files out of the browser's storage. Anything new that writes a chat to disk has to be closed there too.
+  snapshot (the tools and the system prompt, tokens and all) to disk. The page marks such a chat `incognito`, lists it nowhere, keeps
+  it and its files out of the browser's storage, and deletes it the moment it is left (`leave` in web/app.ts). Anything new that writes a chat to disk has to be closed there too.
 - tests/<backend>/ hold kernel checks; tests/*.py check any backend through the C API.
 - A new backend: engine/<name>/build.mk building build/libchrysalis and build/libchrysalis_fn, with `kernels` and
   `kernels_fn`, its model checks in BACKEND_TESTS and BACKEND_TESTS_FN (the builds they need in TEST_BUILDS and

@@ -308,7 +308,7 @@ function castOf(c: Conversation): { members: Person[]; group?: Group } {
   const id = folderOf(c), group = groups.get(id);
   return group ? { members: membersOf(group), group } : id ? { members: [people.get(id)!] } : { members: [] };
 }
-const chatsOf = (id: string) => [...Object.values(chats), ...stubs()].filter((s) => whoOf(s) === id).sort((a, b) => b.updated - a.updated);
+const chatsOf = (id: string) => [...Object.values(chats), ...stubs()].filter((s) => !s.incognito && whoOf(s) === id).sort((a, b) => b.updated - a.updated);
 const hue = (s: string) => [...s].reduce((a, ch) => (a * 31 + ch.charCodeAt(0)) % 360, 7);
 const tinted = (h: number) => {
   const a = 0.55 * Math.min(0.42, 0.58), f = (n: number) => Math.round(255 * (0.42 - a * Math.max(-1, Math.min((n + h / 30) % 12 - 3, 9 - (n + h / 30) % 12, 1)))).toString(16).padStart(2, "0");
@@ -712,9 +712,9 @@ async function loadThreads() {
     mark({ id: STUB + t.id, thread: { dir: t.dir, id: t.id, ...(t.machine ? { machine: t.machine } : {}) } } as Conversation, "done");
   const now = (c: Conversation) => (c.thread?.id ? harness.threads?.find((x) => x.id === c.thread!.id) : undefined);
   if (harness.state === "on" && harness.threads) {
-    const gone = Object.values(chats).filter((c) => c.thread?.id && !now(c) && !runs.get(c.id) && c.id !== conv.id);
+    const gone = Object.values(chats).filter((c) => c.thread?.id && !c.incognito && !now(c) && !runs.get(c.id) && c.id !== conv.id);
     for (const c of gone) delete chats[c.id];
-    if (conv.thread?.id && !now(conv) && !runs.get(conv.id)) { delete chats[conv.id]; newChat(); }
+    if (conv.thread?.id && !conv.incognito && !now(conv) && !runs.get(conv.id)) { delete chats[conv.id]; newChat(); }
   }
   for (const c of new Set([...Object.values(chats), conv])) {
     const t = c.thread?.id ? harness.threads?.find((x) => x.id === c.thread!.id) : undefined;
@@ -4050,7 +4050,7 @@ function putAway(c: Conversation, on: boolean, quiet = false) {
 }
 let sorting = false, listStale = false, sideQuery = "", sideAt = 0;
 const fold = (t: string) => t.normalize("NFKD").replace(/[\u0300-\u036f]/g, "").toLowerCase().trim();
-const everyChat = () => [...new Map([...Object.values(chats), ...stubs()].filter((c) => c.messages.length || c.thread?.id).map((c) => [keyOf(c), c])).values()];
+const everyChat = () => [...new Map([...Object.values(chats), ...stubs()].filter((c) => !c.incognito && (c.messages.length || c.thread?.id)).map((c) => [keyOf(c), c])).values()];
 const scopeOf = () => {
   const at = pref("scope", "");
   return at && (at === CHRYSALIS || people.has(at) || groups.has(at) || dirs().includes(at.slice(DIR.length))) ? at : "";
@@ -4410,7 +4410,6 @@ function menuOn(el: HTMLElement, items: () => MenuItem[]) {
 let renaming = "";
 function convRow(s: Conversation, settled = false, faced = false) {
   const a = h("a", `conv${s.id === conv.id ? " active" : ""}${settled ? "" : " card"}`), put = h("button", "conv-settle"), title = h("span", "conv-title", s.title);
-  if (s.incognito) title.insertAdjacentHTML("afterbegin", icon("incognito"));
   put.type = "button";
   put.title = put.ariaLabel = settled ? "Make it active again" : "Settle: put it away";
   put.innerHTML = `${icon(settled ? "retry" : "check")}${settled ? "Un-settle" : "Settle"}`;
@@ -4860,6 +4859,7 @@ function take(run: Run, ev: any) {
     for (const e of choice.logprobs.content ?? []) td.content.push(tok(e));
   }
   if (ev.stopped) m.stopped = true;
+  if (ev.thread && run.gone && run.conv.incognito) forgetThread(ev.thread);
   if (ev.thread && run.conv.thread && run.conv.thread.id !== ev.thread) { run.conv.thread.id = ev.thread; save(run.conv); }
   if (ev.idle && run.conv.thread) run.conv.thread.at = ev.idle;
   if (ev.context && run.conv.thread) { run.conv.thread.context = ev.context; if (run.conv === conv) renderMeter(); }
@@ -5882,6 +5882,7 @@ async function draft() {
 function openConversation(id: string, reveal = true) {
   closeVoice();
   stopReading();
+  if (id !== conv.id) leave();
   conv = runs.get(id)?.conv ?? (chats[id] ? structuredClone(chats[id]) : blank());
   const sid = conv.thread?.id ?? (id.startsWith(STUB) ? id.slice(STUB.length) : undefined);
   if (sid) showThread(sid);
@@ -5894,8 +5895,17 @@ function openConversation(id: string, reveal = true) {
 }
 
 const hiddenThread = () => ({ dir: harness.home!, hidden: true as const });
+const forgetThread = (id: string) => void fetch(`/api/threads/${id}`, { method: "DELETE", keepalive: true }).catch(() => {});
+function leave() {
+  const c = conv, run = runs.get(c.id);
+  if (!c.incognito) return;
+  if (run) { run.gone = true; stopRun(run); }
+  delete chats[c.id];
+  if (c.thread?.id) forgetThread(c.thread.id);
+}
+addEventListener("pagehide", leave);
 function incognito() {
-  if (conv.incognito && !conv.messages.length) return newChat();
+  if (conv.incognito) return newChat();
   closeVoice();
   stopReading();
   conv = { ...blank(), named: true, incognito: true };
@@ -5908,6 +5918,7 @@ function incognito() {
 function newChat(who = "") {
   closeVoice();
   stopReading();
+  leave();
   conv = blank();
   unfold(who || CHRYSALIS);
   if (who.startsWith(DIR)) conv.thread = inDir(who.slice(DIR.length));
@@ -6498,7 +6509,7 @@ function buildControls() {
     e.preventDefault();
   });
   $("incognito").innerHTML = icon("incognito");
-  $("incognito").title = $("incognito").ariaLabel = "Incognito chat: kept in memory only, in OpenCode too";
+  $("incognito").title = $("incognito").ariaLabel = "Incognito chat: kept in memory only, in OpenCode too, and gone when you leave it";
   $("incognito").addEventListener("click", incognito);
   $("model-btn").addEventListener("click", () => setModelsOpen(!modelsOpen));
   $("machine-btn").addEventListener("click", () => chooseMachine($("machine-btn")));

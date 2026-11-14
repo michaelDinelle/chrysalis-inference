@@ -154,7 +154,6 @@ html[data-incognito] body::before { content: "Incognito"; position: fixed; top: 
   color: #161214; font: 600 11px/16px var(--sans); letter-spacing: 0.01em; pointer-events: none;
   background: #f2eeee url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='%23161214'%3E%3Cpath fill-rule='evenodd' d='M12 2.5a7.5 7.5 0 0 0-7.5 7.5v11.5l2.8-2.6 2.4 2.6 2.3-2.6 2.3 2.6 2.4-2.6 2.8 2.6V10A7.5 7.5 0 0 0 12 2.5zM9 8.6a1.4 1.4 0 1 0 0 2.8 1.4 1.4 0 0 0 0-2.8zm6 0a1.4 1.4 0 1 0 0 2.8 1.4 1.4 0 0 0 0-2.8z'/%3E%3C/svg%3E") 11px center / 12px no-repeat; }
 html[data-incognito] .incog-btn, html[data-incognito] .incog-btn:hover { background: #f2eeee; color: #161214; }
-.conv-title > .i { width: 13px; height: 13px; margin-right: 6px; vertical-align: -2px; }
 .act:hover { background: var(--hover); color: var(--text); }
 .act.done { color: var(--ok); }
 .act .i { width: 15px; height: 15px; }
