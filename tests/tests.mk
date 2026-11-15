@@ -20,6 +20,7 @@ test: test_web build/libchrysalis.$(LIB) kernels build/test_sampler $(TEST_BUILD
 	$(PY) tests/test_chat.py
 	$(PY) tests/test_cache.py
 	$(PY) tests/test_documents.py
+	$(PY) tests/test_video.py
 	$(BACKEND_TESTS)
 
 test_fn: kernels_fn

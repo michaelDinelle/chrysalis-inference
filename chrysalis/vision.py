@@ -2,6 +2,8 @@ import base64
 import hashlib
 import io
 import math
+import struct
+import time
 
 import numpy as np
 
@@ -106,32 +108,92 @@ class VideoError(ImageError):
     pass
 
 
-def video_info(path):
-    import json
-    import subprocess
+def video_info(data):
+    import av
+    deadline = time.monotonic() + 120
     try:
-        out = subprocess.run(["ffprobe", "-v", "error", "-select_streams", "v:0", "-count_packets", "-show_entries",
-                              "stream=width,height,avg_frame_rate,r_frame_rate,nb_read_packets:stream_side_data=rotation",
-                              "-of", "json", path], capture_output=True, check=True, timeout=120).stdout
-    except FileNotFoundError:
-        raise VideoError("Chrysalis needs ffmpeg (ffprobe) to read videos") from None
-    except (subprocess.CalledProcessError, subprocess.TimeoutExpired):
+        with av.open(io.BytesIO(data)) as c:
+            if not c.streams.video:
+                raise VideoError("the file has no video stream")
+            st = c.streams.video[0]
+            fps = float(st.average_rate or 0) or float(st.base_rate or 0)
+            frames, turns = 0, None
+            for packet in c.demux(st):
+                if time.monotonic() > deadline:
+                    raise VideoError("cannot read the video")
+                frames += packet.size > 0 or packet.dts is not None
+                if turns is None:
+                    turns = next((upright(f) for f in decoded(packet)), None)
+            h, w = st.codec_context.height, st.codec_context.width
+    except av.FFmpegError:
         raise VideoError("cannot read the video") from None
-    streams = json.loads(out).get("streams") or []
-    if not streams:
-        raise VideoError("the file has no video stream")
-    st = streams[0]
-
-    def rate(r):
-        n, _, d = str(r or "0/1").partition("/")
-        return float(n) / float(d or 1) if float(d or 1) else 0.0
-    fps = rate(st.get("avg_frame_rate")) or rate(st.get("r_frame_rate"))
-    frames = int(st.get("nb_read_packets") or 0)
     if frames < 1 or fps <= 0:
         raise VideoError("cannot tell the video's frames or frame rate")
-    turned = any(abs(int(d.get("rotation", 0))) in (90, 270) for d in st.get("side_data_list") or [])
-    h, w = int(st["height"]), int(st["width"])
+    turned = bool(turns) and turns[0][0] == "transpose"
     return frames, fps, (w, h) if turned else (h, w)
+
+
+def decoded(packet):
+    import av
+    try:
+        return packet.decode()
+    except av.FFmpegError:
+        return []
+
+
+def upright(frame):
+    import av
+    side = frame.side_data.get(av.sidedata.sidedata.Type.DISPLAYMATRIX)
+    if side is None:
+        return []
+    m = struct.unpack("9i", bytes(side))
+    sx, sy = math.hypot(m[0], m[3]) / 65536, math.hypot(m[1], m[4]) / 65536
+    if not sx or not sy:
+        return []
+    turn = math.degrees(math.atan2(m[1] / 65536 / sy, m[0] / 65536 / sx))
+    theta = math.copysign(math.floor(abs(turn) + 0.5), turn)
+    theta -= 360 * math.floor(theta / 360 + 0.9 / 360)
+    if abs(theta - 90) < 1:
+        return [("transpose", "cclock_flip" if m[3] > 0 else "clock")]
+    if abs(theta - 180) < 1:
+        return [("hflip", None)] * (m[0] < 0) + [("vflip", None)] * (m[4] < 0)
+    if abs(theta - 270) < 1:
+        return [("transpose", "clock_flip" if m[3] < 0 else "cclock")]
+    if abs(theta) > 1:
+        return [("rotate", f"{theta:f}*PI/180")]
+    return [("vflip", None)] * (m[4] < 0)
+
+
+def video_frames(data, keep=None):
+    import av
+    import av.filter
+    deadline, graphs, n = time.monotonic() + 600, {}, 0
+    try:
+        with av.open(io.BytesIO(data)) as c:
+            st = c.streams.video[0]
+            st.thread_type = "AUTO"
+            for packet in c.demux(st):
+                if time.monotonic() > deadline:
+                    raise VideoError("cannot decode the video")
+                for frame in decoded(packet):
+                    if keep is None or n in keep:
+                        turns = upright(frame)
+                        key = (frame.width, frame.height, frame.format.name, tuple(turns))
+                        if key not in graphs:
+                            g = av.filter.Graph()
+                            node = g.add_buffer(width=frame.width, height=frame.height, format=frame.format, time_base=st.time_base)
+                            for name, arg in turns + [("format", "rgb24")]:
+                                nxt = g.add(name, arg)
+                                node.link_to(nxt)
+                                node = nxt
+                            node.link_to(g.add("buffersink"))
+                            g.configure()
+                            graphs[key] = g
+                        graphs[key].push(frame)
+                        yield graphs[key].pull().to_ndarray()
+                    n += 1
+    except av.FFmpegError:
+        raise VideoError("cannot decode the video") from None
 
 
 def video_indices(frames, fps, rate=VIDEO_FPS):
@@ -166,12 +228,8 @@ def pair_times(indices, fps):
 class Video:
 
     def __init__(self, data, rate=VIDEO_FPS):
-        import tempfile
         self.data = data
-        with tempfile.NamedTemporaryFile(prefix="chrysalis-video-") as f:
-            f.write(data)
-            f.flush()
-            total, self.fps, self.shown = video_info(f.name)
+        total, self.fps, self.shown = video_info(data)
         self.indices = video_indices(total, self.fps, rate)
         self.size = video_size(len(self.indices), *self.shown)
         self.times = pair_times(self.indices, self.fps)
@@ -181,27 +239,14 @@ class Video:
         return self.size[0] // PATCH, self.size[1] // PATCH
 
     def frames(self):
-        import subprocess
-        import tempfile
         from PIL import Image
-        with tempfile.NamedTemporaryFile(prefix="chrysalis-video-") as f:
-            f.write(self.data)
-            f.flush()
-            pick = "+".join(f"eq(n,{i})" for i in self.indices)
-            try:
-                raw = subprocess.run(["ffmpeg", "-v", "error", "-i", f.name, "-vf", f"select='{pick}'", "-fps_mode", "passthrough",
-                                      "-f", "rawvideo", "-pix_fmt", "rgb24", "-"], capture_output=True, check=True, timeout=600).stdout
-            except (subprocess.CalledProcessError, subprocess.TimeoutExpired):
-                raise VideoError("cannot decode the video") from None
-        h, w = self.shown
-        n = len(raw) // (w * h * 3)
-        if n != len(self.indices) or n * w * h * 3 != len(raw):
-            raise VideoError(f"the video decoded to {len(raw) / (w * h * 3):g} of the {len(self.indices)} frames Chrysalis took")
-        out = np.empty((n, self.size[0], self.size[1], 3), np.uint8)
-        frames = np.frombuffer(raw, np.uint8).reshape(n, h, w, 3)
-        for i in range(n):
-            img = Image.fromarray(frames[i])
-            out[i] = np.asarray(img if img.size == (self.size[1], self.size[0]) else img.resize((self.size[1], self.size[0]), Image.Resampling.BICUBIC))
+        out, n = np.empty((len(self.indices), self.size[0], self.size[1], 3), np.uint8), 0
+        for frame in video_frames(self.data, set(self.indices.tolist())):
+            img = Image.fromarray(frame)
+            out[n] = np.asarray(img if img.size == (self.size[1], self.size[0]) else img.resize((self.size[1], self.size[0]), Image.Resampling.BICUBIC))
+            n += 1
+        if n != len(self.indices):
+            raise VideoError(f"the video decoded to {n:g} of the {len(self.indices)} frames Chrysalis took")
         return out
 
 

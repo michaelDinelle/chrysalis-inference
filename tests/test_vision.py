@@ -1,13 +1,14 @@
 import base64, hashlib, io, os, subprocess, sys
 import numpy as np
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-from PIL import Image, ImageDraw, ImageFont
+from PIL import Image, ImageDraw
 from chrysalis import vision
 from chrysalis.chat import Renderer, Tokens
 from chrysalis.engine import IMG_BASE, IMG_ROWS, Engine
 from chrysalis.models import MODELS
 from chrysalis.server import Pictures
 from chrysalis.sleep import vram_used, wait_vram_freed
+from video_fixture import film
 
 USE = sys.argv[sys.argv.index("--use") + 1] if "--use" in sys.argv else "qwen3.8-27b"
 FN = USE == "qwen3.8-flash-next"
@@ -202,20 +203,8 @@ stats("prefill split inside it, then decode", pairs, MAX_KL["mixed"])
 def clip():
     path = f"{OUT}/clip.mp4"
     if fresh or not os.path.exists(path):
-        enc = subprocess.Popen(["ffmpeg", "-v", "error", "-y", "-f", "rawvideo", "-pix_fmt", "rgb24", "-s", "640x360", "-r", "10",
-                                "-i", "-", "-c:v", "libx264", "-pix_fmt", "yuv420p", path], stdin=subprocess.PIPE)
-        font = ImageFont.load_default(size=48)
-        for i in range(40):
-            img = Image.new("RGB", (640, 360), "white")
-            d = ImageDraw.Draw(img)
-            if i < 20:
-                d.ellipse([200 + 4 * i, 100, 320 + 4 * i, 220], fill="red")
-            else:
-                d.rectangle([100, 120, 220, 240], fill="blue")
-                d.text((300, 150), "CHRYSALIS 58", fill="black", font=font)
-            enc.stdin.write(img.tobytes())
-        enc.stdin.close()
-        enc.wait()
+        with open(path, "wb") as f:
+            f.write(film())
     return path
 
 
@@ -225,9 +214,8 @@ key = hashlib.sha1(data).hexdigest()[:12]
 
 
 def every_frame():
-    total, fps, (vh, vw) = vision.video_info(path)
-    raw = subprocess.run(["ffmpeg", "-v", "error", "-i", path, "-f", "rawvideo", "-pix_fmt", "rgb24", "-"], capture_output=True, check=True).stdout
-    np.savez(f"{OUT}/{key}.frames.npz", frames=np.frombuffer(raw, np.uint8).reshape(-1, vh, vw, 3), fps=fps)
+    total, fps, _ = vision.video_info(data)
+    np.savez(f"{OUT}/{key}.frames.npz", frames=np.stack(list(vision.video_frames(data))), fps=fps)
     subprocess.run([REF, "tests/vision_ref.py", "video", f"{OUT}/{key}.frames.npz", f"{OUT}/{key}.video.npz"], check=True)
 
 
