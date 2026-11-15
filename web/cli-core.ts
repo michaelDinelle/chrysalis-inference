@@ -321,7 +321,7 @@ function sweep() {
   for (const old of existsSync(SHM) ? readdirSync(SHM) : []) {
     const pid = old.startsWith(RUN) ? Number(old.slice(RUN.length).split("-")[0]) : 0;
     if (!pid) continue;
-    try { process.kill(pid, 0); } catch { wipe(`${SHM}/${old}`); }
+    try { process.kill(pid, 0); } catch (e) { if ((e as { code?: string }).code !== "EPERM") wipe(`${SHM}/${old}`); }
   }
 }
 function memory() {
