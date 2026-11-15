@@ -83,7 +83,9 @@ stopped; bench/hill_ready.py refuses to start while anything else holds the GPU 
 is a reward too: a gate takes minutes, deep context is restored from snapshots primed once per machine, and the bench
 only gets faster. Every machine with a record (the RX 7900 here and the M4 Max on studio) judges each change: run
 `.hill/hill gate` there and append its new .hill/ledger.jsonl lines here before committing. The RTX 5070 rented on
-vast.ai was destroyed on 2026-11-11: its verdicts stay in the ledger, and it judges nothing more. The hook (`git config core.hooksPath .githooks`) holds every commit to that.
+vast.ai was destroyed on 2026-11-11: its verdicts stay in the ledger, and it judges nothing more. The RTX 3090 rented
+there (with a Xeon W-2133) holds a record from 2026-11-15 and judges every change to engine/cuda/ for as long as it is
+rented. The hook (`git config core.hooksPath .githooks`) holds every commit to that.
 
 ## Comments
 
