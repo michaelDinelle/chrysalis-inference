@@ -74,7 +74,7 @@ void Engine::calibrate() {
     if (nw) cal_cpu_bw = nw * slice / best;
     const ColdLayer *c0 = nullptr;
     for (const ColdLayer &c : cold) if (c.n) { c0 = &c; break; }
-    if (c0 && vnni_supported() && vnni_formats(*c0)) {
+    if (c0 && exact_supported() && exact_formats(*c0)) {
         const int n = 16;
         std::vector<int8_t> xq((size_t)n * D, 1); std::vector<float> xs((size_t)n * (D / 32), 0.01f), w(n, 0.1f);
         std::vector<int32_t> xsum((size_t)n * (D / 16), 16);
@@ -87,10 +87,10 @@ void Engine::calibrate() {
             std::vector<std::thread> th;
             const double t0 = now();
             for (int wk = 0; wk < n_workers; wk++) th.emplace_back([&, wk] {
-                VnniScratch scr;
+                ExactScratch scr;
                 std::vector<uint16_t *> o(n);
                 for (int i = 0; i < n; i++) o[i] = outs[wk].data() + (size_t)i * D;
-                for (int k = 0; k < per; k++) expert_vnni(*c0, (wk * per + k) % c0->n, n, pq.data(), ps.data(), pc.data(), w.data(), o.data(), scr);
+                for (int k = 0; k < per; k++) expert_exact(*c0, (wk * per + k) % c0->n, n, pq.data(), ps.data(), pc.data(), w.data(), o.data(), scr);
             });
             for (auto &t : th) t.join();
             tb = std::min(tb, now() - t0);

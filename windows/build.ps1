@@ -31,7 +31,7 @@ $h = "engine\hip"
 $b27 = @("$h\27b\relayout.hip", "$h\27b\quant.hip", "$h\27b\ops.hip", "$h\gdn.hip", "$h\27b\attn.hip", "$h\vision.hip", "$h\gpu.hip", "$h\27b\model.cpp", "$h\27b\load.cpp", "$h\27b\api.cpp")
 $fn = @("$h\flash-next\relayout.hip", "$h\flash-next\quant.hip", "$h\flash-next\ops.hip", "$h\gdn.hip", "$h\flash-next\attn.hip", "$h\flash-next\moe.hip", "$h\flash-next\ple.hip",
         "$h\vision.hip", "$h\gpu.hip", "$h\flash-next\model.cpp", "$h\flash-next\load.cpp", "$h\flash-next\experts.cpp", "$h\flash-next\api.cpp") +
-      (Get-ChildItem "$h\flash-next\cpu_*.cpp" | ForEach-Object { "$h\flash-next\" + $_.Name })
+      (Get-ChildItem "$h\flash-next\cpu_*.cpp" | ForEach-Object { "$h\flash-next\" + $_.Name }) + @("engine\cpu_exact.cpp")
 $jobs = @(
     @{ Name = "libchrysalis.dll"; Args = $flags + @("-I$h\27b") + $b27 + @("-shared", "-o", "$out\libchrysalis.dll") + $libs },
     @{ Name = "libchrysalis_fn.dll"; Args = $flags + @("-I$h\flash-next", "-I$Llama\ggml\include") + $fn + @("-shared", "-o", "$out\libchrysalis_fn.dll") + $libs + @("-L$($ggmlLib.DirectoryName)", "-lggml-cpu", "-lggml-base") },

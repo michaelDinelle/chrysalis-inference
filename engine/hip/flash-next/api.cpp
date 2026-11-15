@@ -107,7 +107,7 @@ double chrysalis_tune(const char *key, double value) {
     if (k == "gfrac") { old = E->gfrac; if (E->cold_gpu) E->gfrac = (float)value; E->gfrac_pinned = true; }
     if (k == "xfrac") { old = E->xfrac; E->xfrac = E->cpu.can_emulate() ? (float)value : 1.0f; E->xfrac_pinned = true; }
     if (k == "split") { old = E->split; E->split = (int)value; }
-    if (k == "vnni") old = E->cpu.use_vnni((int)value);
+    if (k == "exact") old = E->cpu.use_exact((int)value);
     if (k == "cpu_bias") { old = E->cpu_bias[2]; if (value > 0) std::fill(E->cpu_bias, E->cpu_bias + 3, value); }
     if (k == "lookahead") { old = E->la_on; E->la_on = value != 0; }
     if (k == "experts") { old = E->xc.on; E->xc.on = value != 0; }

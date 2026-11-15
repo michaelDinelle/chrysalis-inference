@@ -17,7 +17,9 @@ README.md shows what Chrysalis is. This file is how to change it.
 
 - engine/api.h declares the C API every engine implements, the chrysalis_* functions chrysalis/engine.py calls;
   engine/gguf.h, sampler.h and lookup.h are the host code every backend shares: the GGUF reader, the sampler that
-  matches llama.cpp's, and prompt lookup.
+  matches llama.cpp's, and prompt lookup. engine/cpu_exact.cpp is the x86 CPU expert kernels of the AMD and NVIDIA
+  Flash-Next engines: cpu_exact_isa.h written once, compiled for AVX-512 VNNI, AVX-VNNI, AVX-512 and AVX2 with the
+  same bits, the fastest the CPU has picked at load (exact_use_path forces one).
 - engine/<backend>/ (hip for the RX 7900, cuda for NVIDIA, metal for Apple Silicon) has a build.mk and one engine per
   model, 27b/ and flash-next/, each a shared library that includes engine/api.h. Every backend reads the same model files.
 - A HIP engine has at most three streams of its own. ROCm gives a process four hardware queues and hipBLASLt's setup
@@ -97,7 +99,8 @@ None: no comments or docstrings anywhere in the repo, in any language, including
   `data/venv/bin/python tests/test_cache.py`,
   `data/venv/bin/python tests/test_lanes.py` (requests in flight, sub-agents beside a session's title),
   `data/venv/bin/python tests/test_chat.py`, `data/venv/bin/python tests/test_documents.py` (which PDF pages are
-  pictured), `make build/test_cpujob_fn && build/test_cpujob_fn`, `make test_voice` (the voice service: its features against
+  pictured), `make build/test_cpujob_fn && build/test_cpujob_fn`, `make build/test_cpu_exact && build/test_cpu_exact` (every
+  CPU expert path this CPU has against a scalar reference and each other, to the bit), `make test_voice` (the voice service: its features against
   transformers', turns, echo and barge-in over its WebSocket), `make test_web` (the web UI's sampler against
   the engine's, its server against a fake Chrysalis and a fake OpenCode, the terminal against a fake model server, incognito against a fake OpenCode binary with a store of its own, the page in headless Chromium, and Firefox past and trusting the network's
   certificate; certutil makes their trust: the files side by side, as many as the free memory holds, sharing one

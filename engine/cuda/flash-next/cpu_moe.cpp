@@ -42,9 +42,9 @@ void CpuMoe::start(MoeShared *shared, MoeShared *pred, const std::vector<ColdLay
     seen = load_acq(&sh->go);
     jstart = jgen.load();
     scr = std::vector<Scratch>(n);
-    vnni = vnni_supported();
-    for (const ColdLayer &c : L) if (c.n && !vnni_formats(c)) vnni = false;
-    vnni_ok = vnni;
+    exact = exact_supported();
+    for (const ColdLayer &c : L) if (c.n && !exact_formats(c)) exact = false;
+    exact_ok = exact;
     dxq.resize((size_t)MOE_MAX_T * D_); dxs.resize(MOE_MAX_T * (D_ / 32)); dxsum.resize(MOE_MAX_T * (D_ / 16));
     ds16.resize(MOE_MAX_T * (D_ / 16)); df16.resize(MOE_MAX_T * (D_ / 16)); dxf.resize(MOE_MAX_T * (D_ / 32));
     dhq.resize((size_t)MOE_MAX_T * MOE_MAX_E * FE_); dhs.resize(MOE_MAX_T * MOE_MAX_E * (FE_ / 32)); dhc.resize(MOE_MAX_T * MOE_MAX_E * (FE_ / 32));
@@ -88,7 +88,7 @@ void CpuMoe::barrier() {
 void CpuMoe::submit(const MoeJob &j) {
     job = j;
     for (int g = 0; g < (dot_same ? 1 : 3); g++) if (pxq[g].size() < xq_row[g] * j.T) pxq[g].resize(xq_row[g] * j.T);
-    if (vnni && vxq.size() < (size_t)j.T * D_) { vxq.resize((size_t)j.T * D_); vxs.resize((size_t)j.T * (D_ / 32)); vxsum.resize((size_t)j.T * (D_ / 16)); }
+    if (exact && exq.size() < (size_t)j.T * D_) { exq.resize((size_t)j.T * D_); exs.resize((size_t)j.T * (D_ / 32)); exsum.resize((size_t)j.T * (D_ / 16)); }
     jtok.store(0, std::memory_order_relaxed); jexp.store(0, std::memory_order_relaxed); jfin.store(0, std::memory_order_relaxed);
     jgen.fetch_add(1, std::memory_order_release);
     wake.fetch_add(1, std::memory_order_release);
@@ -109,22 +109,22 @@ void CpuMoe::prefill_work(int id) {
         ggml_cpu_fp16_to_fp32((const ggml_fp16_t *)J.x + (size_t)t * D_, x, D_);
         for (int g = 0; g < (dot_same ? 1 : 3); g++)
             ggml_get_type_traits_cpu((ggml_type)dot_gu[g])->from_float(x, pxq[g].data() + xq_row[g] * t, D_);
-        if (vnni) vnni_quant_x(x, vxq.data() + (size_t)t * D_, vxs.data() + (size_t)t * (D_ / 32), vxsum.data() + (size_t)t * (D_ / 16));
+        if (exact) exact_quant_x(x, exq.data() + (size_t)t * D_, exs.data() + (size_t)t * (D_ / 32), exsum.data() + (size_t)t * (D_ / 16));
     }
     barrier();
     Scratch &s = scr[id];
     for (int e; (e = jexp.fetch_add(1, std::memory_order_relaxed)) < J.n_exp;) {
         const int p0 = J.first[e], np = J.first[e + 1] - p0, slot = J.slot[e];
-        if (vnni && np >= VNNI_MIN_TOKENS) {
+        if (exact && np >= EXACT_MIN_TOKENS) {
             std::vector<const int8_t *> xq(np); std::vector<const float *> xs(np); std::vector<const int32_t *> xsum(np);
             std::vector<uint16_t *> out(np);
             for (int i = 0; i < np; i++) {
                 const int t = J.tok[p0 + i];
-                xq[i] = vxq.data() + (size_t)t * D_; xs[i] = vxs.data() + (size_t)t * (D_ / 32);
-                xsum[i] = vxsum.data() + (size_t)t * (D_ / 16);
+                xq[i] = exq.data() + (size_t)t * D_; xs[i] = exs.data() + (size_t)t * (D_ / 32);
+                xsum[i] = exsum.data() + (size_t)t * (D_ / 16);
                 out[i] = J.out + (size_t)(p0 + i) * D_;
             }
-            expert_vnni(c, slot, np, xq.data(), xs.data(), xsum.data(), J.w + p0, out.data(), s.v);
+            expert_exact(c, slot, np, xq.data(), xs.data(), xsum.data(), J.w + p0, out.data(), s.v);
             continue;
         }
         if (s.gu.size() < (size_t)np * 2 * FE_) { s.gu.resize((size_t)np * 2 * FE_); s.y.resize((size_t)np * D_); s.hq.resize(hq_row * np); }
@@ -225,15 +225,15 @@ void CpuMoe::worker(int id) {
                                                 ggml_get_type_traits_cpu((ggml_type)(c.gate[1] ? c.type_gu[1] : c.type_gu[0])),
                                                 ggml_get_type_traits_cpu((ggml_type)(c.gate[2] ? c.type_gu[2] : c.type_gu[0]))};
         const auto *tr_dn = ggml_get_type_traits_cpu((ggml_type)c.type_dn);
-        const bool vx = vnni;
+        const bool vx = exact;
         if (np + ne > 0) {
             for (int t = id; t < T && ne; t += n) emu_quant_x(sh->x + (size_t)t * D_, ea[t]);
             for (int t = id; t < T && np; t += n) {
                 if (vx) {
                     int32_t *xsum = dxsum.data() + t * (D_ / 16);
-                    vnni_quant_x(sh->x + (size_t)t * D_, dxq.data() + (size_t)t * D_, dxs.data() + t * (D_ / 32), xsum);
-                    vnni_act1(dxs.data() + t * (D_ / 32), xsum, ds16.data() + t * (D_ / 16), df16.data() + t * (D_ / 16));
-                    vnni_act_x(xsum, dxf.data() + t * (D_ / 32));
+                    exact_quant_x(sh->x + (size_t)t * D_, dxq.data() + (size_t)t * D_, dxs.data() + t * (D_ / 32), xsum);
+                    exact_act1(dxs.data() + t * (D_ / 32), xsum, ds16.data() + t * (D_ / 16), df16.data() + t * (D_ / 16));
+                    exact_act_x(xsum, dxf.data() + t * (D_ / 32));
                 } else {
                     for (int g = 0; g < (dot_same ? 1 : 3); g++)
                         ggml_get_type_traits_cpu((ggml_type)dot_gu[g])->from_float(sh->x + (size_t)t * D_, xq[g].data() + xq_row[g] * t, D_);
@@ -249,7 +249,7 @@ void CpuMoe::worker(int id) {
                     for (int m = ufirst[u]; m < ufirst[u + 1]; m++) {
                         const int p = umem[m], t = pick[p] / MOE_MAX_E;
                         float o[2];
-                        vnni_dot_gu2(r0, r1, dxq.data() + (size_t)t * D_, dxs.data() + t * (D_ / 32), dxf.data() + t * (D_ / 32), o);
+                        exact_dot_gu2(r0, r1, dxq.data() + (size_t)t * D_, dxs.data() + t * (D_ / 32), dxf.data() + t * (D_ / 32), o);
                         gu[(size_t)p * 2 * FE_ + k] = o[0];
                         gu[(size_t)p * 2 * FE_ + k + 1] = o[1];
                     }
@@ -266,7 +266,7 @@ void CpuMoe::worker(int id) {
                 for (int m = ufirst[u]; m < ufirst[u + 1]; m++) {
                     const int p = umem[m], t = pick[p] / MOE_MAX_E;
                     if (vx)
-                        gu[(size_t)p * 2 * FE_ + k] = vnni_dot_gu1(row, c.type_gu[g], dxq.data() + (size_t)t * D_, dxs.data() + t * (D_ / 32),
+                        gu[(size_t)p * 2 * FE_ + k] = exact_dot_gu1(row, c.type_gu[g], dxq.data() + (size_t)t * D_, dxs.data() + t * (D_ / 32),
                                                                    dxsum.data() + t * (D_ / 16), ds16.data() + t * (D_ / 16),
                                                                    df16.data() + t * (D_ / 16), scr[id].v);
                     else tr_gu[g]->vec_dot(D_, &gu[(size_t)p * 2 * FE_ + k], 0, row, 0, xq[gx].data() + xq_row[gx] * t, 0, 1);
@@ -278,7 +278,7 @@ void CpuMoe::worker(int id) {
                 float h[FE_];
                 const float *g2 = &gu[(size_t)p * 2 * FE_];
                 for (int i = 0; i < FE_; i++) { const float a = g2[i]; h[i] = a / (1.0f + expf(-a)) * g2[FE_ + i]; }
-                if (vx) vnni_quant_h(h, dhq.data() + (size_t)p * FE_, dhs.data() + p * (FE_ / 32), dhc.data() + p * (FE_ / 32));
+                if (vx) exact_quant_h(h, dhq.data() + (size_t)p * FE_, dhs.data() + p * (FE_ / 32), dhc.data() + p * (FE_ / 32));
                 else ggml_get_type_traits_cpu(tr_dn->vec_dot_type)->from_float(h, hq.data() + hq_row * p, FE_);
             }
             barrier();
@@ -288,7 +288,7 @@ void CpuMoe::worker(int id) {
             for (int p = 0; p < np; p++) {
                 const int j = pick[p], slot = sh->slot[j];
                 float v;
-                if (vx) v = vnni_dot_dn1(c.dn_row(slot, r), dhq.data() + (size_t)p * FE_, dhs.data() + p * (FE_ / 32), dhc.data() + p * (FE_ / 32));
+                if (vx) v = exact_dot_dn1(c.dn_row(slot, r), dhq.data() + (size_t)p * FE_, dhs.data() + p * (FE_ / 32), dhc.data() + p * (FE_ / 32));
                 else tr_dn->vec_dot(FE_, &v, 0, c.dn_row(slot, r), 0, hq.data() + hq_row * p, 0, 1);
                 acc[j / MOE_MAX_E] += sh->w[j] * v;
             }
