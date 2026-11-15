@@ -17,6 +17,16 @@ struct H {
         return _mm256_add_epi32(acc, _mm256_madd_epi16(_mm256_maddubs_epi16(w, x), _mm256_set1_epi16(1)));
 #endif
     }
+#if !EXACT_DOT
+    TGT static __m256i dot_signed(__m256i ws, __m256i x, __m256i xa) {
+        return _mm256_madd_epi16(_mm256_maddubs_epi16(xa, _mm256_sign_epi8(ws, x)), _mm256_set1_epi16(1));
+    }
+    TGT static __m256i dot4_3bit(__m256i w0, __m256i x0, __m256i w1, __m256i x1, __m256i w2, __m256i x2, __m256i w3, __m256i x3) {
+        const __m256i a = _mm256_add_epi16(_mm256_maddubs_epi16(w0, x0), _mm256_maddubs_epi16(w1, x1));
+        const __m256i b = _mm256_add_epi16(_mm256_maddubs_epi16(w2, x2), _mm256_maddubs_epi16(w3, x3));
+        return _mm256_madd_epi16(_mm256_add_epi16(a, b), _mm256_set1_epi16(1));
+    }
+#endif
 };
 
 #if EXACT_WIDE
@@ -57,6 +67,17 @@ struct V {
         return _mm512_add_epi32(acc, _mm512_madd_epi16(_mm512_maddubs_epi16(w, x), _mm512_set1_epi16(1)));
 #endif
     }
+#if !EXACT_DOT
+    TGT static i dot_signed(i ws, i x, i xa) {
+        const i s = _mm512_mask_sub_epi8(ws, _mm512_movepi8_mask(x), _mm512_setzero_si512(), ws);
+        return _mm512_madd_epi16(_mm512_maddubs_epi16(xa, s), _mm512_set1_epi16(1));
+    }
+    TGT static i dot4_3bit(i w0, i x0, i w1, i x1, i w2, i x2, i w3, i x3) {
+        const i a = _mm512_add_epi16(_mm512_maddubs_epi16(w0, x0), _mm512_maddubs_epi16(w1, x1));
+        const i b = _mm512_add_epi16(_mm512_maddubs_epi16(w2, x2), _mm512_maddubs_epi16(w3, x3));
+        return _mm512_madd_epi16(_mm512_add_epi16(a, b), _mm512_set1_epi16(1));
+    }
+#endif
     TGT static i pairs(i a, i b) {
         const i ev = _mm512_set_epi32(30, 28, 26, 24, 22, 20, 18, 16, 14, 12, 10, 8, 6, 4, 2, 0), od = _mm512_add_epi32(ev, _mm512_set1_epi32(1));
         return _mm512_add_epi32(_mm512_permutex2var_epi32(a, ev, b), _mm512_permutex2var_epi32(a, od, b));
@@ -124,6 +145,12 @@ struct V {
     TGT static i srl16(i x, int lo, int hi) { return {_mm256_srli_epi16(x.a, lo), _mm256_srli_epi16(x.b, hi)}; }
     TGT static i dot(i acc, i w, i x) { return {H::dot(acc.a, w.a, x.a), H::dot(acc.b, w.b, x.b)}; }
     TGT static i dot_small(i acc, i w, i x) { return {H::dot_small(acc.a, w.a, x.a), H::dot_small(acc.b, w.b, x.b)}; }
+#if !EXACT_DOT
+    TGT static i dot_signed(i ws, i x, i xa) { return {H::dot_signed(ws.a, x.a, xa.a), H::dot_signed(ws.b, x.b, xa.b)}; }
+    TGT static i dot4_3bit(i w0, i x0, i w1, i x1, i w2, i x2, i w3, i x3) {
+        return {H::dot4_3bit(w0.a, x0.a, w1.a, x1.a, w2.a, x2.a, w3.a, x3.a), H::dot4_3bit(w0.b, x0.b, w1.b, x1.b, w2.b, x2.b, w3.b, x3.b)};
+    }
+#endif
     TGT static __m256i pair8(__m256i x, __m256i y) { return _mm256_permute4x64_epi64(_mm256_hadd_epi32(x, y), 0xD8); }
     TGT static i pairs(i x, i y) { return {pair8(x.a, x.b), pair8(y.a, y.b)}; }
     TGT static int isum(i x) {
@@ -308,6 +335,16 @@ template <> struct Lanes<16> {
     TGT static F offs16(float b0, const float *xf0, float b1, const float *xf1, F a) {
         return V::fnma(V::fset1(b1), V::fload_a(xf1), V::fnma(V::fset1(b0), V::fload_a(xf0), a));
     }
+#if !EXACT_DOT
+    TGT static I dps(I s, int32_t ws, const uint32_t *x, const uint32_t *xa) { return V::add(s, V::dot_signed(V::set1(ws), V::load_a(x), V::load_a(xa))); }
+    TGT static I dp4(const int32_t *w, const uint32_t *x) {
+        return V::dot4_3bit(V::set1(w[0]), V::load_a(x), V::set1(w[1]), V::load_a(x + 16), V::set1(w[2]), V::load_a(x + 32), V::set1(w[3]), V::load_a(x + 48));
+    }
+    TGT static F block_s(I s0, I s1, const int32_t *xb, const int32_t *xc, float ws, const float *xs, F a) {
+        const F v = V::cvt(V::sub(V::add(V::add(s0, s1), V::load_a(xb)), V::load_a(xc)));
+        return V::fma(v, V::fmul(V::fset1(ws), V::fload_a(xs)), a);
+    }
+#endif
 };
 template <> struct Lanes<8> {
     using I = __m256i; using F = __m256;
@@ -327,8 +364,21 @@ template <> struct Lanes<8> {
     TGT static F offs16(float b0, const float *xf0, float b1, const float *xf1, F a) {
         return _mm256_fnmadd_ps(_mm256_set1_ps(b1), _mm256_load_ps(xf1), _mm256_fnmadd_ps(_mm256_set1_ps(b0), _mm256_load_ps(xf0), a));
     }
+#if !EXACT_DOT
+    TGT static __m256i ld(const uint32_t *p) { return _mm256_load_si256((const __m256i *)p); }
+    TGT static I dps(I s, int32_t ws, const uint32_t *x, const uint32_t *xa) { return _mm256_add_epi32(s, H::dot_signed(_mm256_set1_epi32(ws), ld(x), ld(xa))); }
+    TGT static I dp4(const int32_t *w, const uint32_t *x) {
+        return H::dot4_3bit(_mm256_set1_epi32(w[0]), ld(x), _mm256_set1_epi32(w[1]), ld(x + 8), _mm256_set1_epi32(w[2]), ld(x + 16), _mm256_set1_epi32(w[3]), ld(x + 24));
+    }
+    TGT static F block_s(I s0, I s1, const int32_t *xb, const int32_t *xc, float ws, const float *xs, F a) {
+        const F v = _mm256_cvtepi32_ps(_mm256_sub_epi32(_mm256_add_epi32(_mm256_add_epi32(s0, s1), _mm256_load_si256((const __m256i *)xb)),
+                                                        _mm256_load_si256((const __m256i *)xc)));
+        return _mm256_fmadd_ps(v, _mm256_mul_ps(_mm256_set1_ps(ws), _mm256_load_ps(xs)), a);
+    }
+#endif
 };
 
+#if EXACT_DOT
 template <int L>
 TGT inline void row_dot(const uint8_t *w, const float *ws, int nb, const uint32_t *xi, const float *xs, const int32_t *xc, float *out) {
     using P = Lanes<L>;
@@ -369,6 +419,62 @@ TGT inline void row_dot16(const uint8_t *w, const float *wa, const float *wb, in
     }
     P::store(out, a0, a1);
 }
+#else
+template <int L>
+TGT inline void row_dot(const uint8_t *w, const float *ws, int nb, const uint32_t *xi, const uint32_t *xa, const int32_t *xb, const float *xs,
+                        const int32_t *xc, float *out) {
+    using P = Lanes<L>;
+    typename P::F a0 = P::fzero(), a1 = P::fzero();
+    const int32_t *wd = (const int32_t *)w;
+    constexpr int32_t F = (int32_t)0x80808080u;
+    for (int b = 0; b < nb; b += 2) {
+#pragma unroll
+        for (int u = 0; u < 2; u++) {
+            const int bb = b + u;
+            const uint32_t *x = xi + bb * 8 * L, *a = xa + bb * 8 * L;
+            const int32_t *wb = wd + bb * 8;
+            typename P::I s0 = P::dps(P::zero(), wb[0] ^ F, x, a), s1 = P::dps(P::zero(), wb[1] ^ F, x + L, a + L);
+            s0 = P::dps(s0, wb[2] ^ F, x + 2 * L, a + 2 * L); s1 = P::dps(s1, wb[3] ^ F, x + 3 * L, a + 3 * L);
+            s0 = P::dps(s0, wb[4] ^ F, x + 4 * L, a + 4 * L); s1 = P::dps(s1, wb[5] ^ F, x + 5 * L, a + 5 * L);
+            s0 = P::dps(s0, wb[6] ^ F, x + 6 * L, a + 6 * L); s1 = P::dps(s1, wb[7] ^ F, x + 7 * L, a + 7 * L);
+            if (u == 0) a0 = P::block_s(s0, s1, xb + bb * L, xc + bb * L, ws[bb], xs + bb * L, a0);
+            else a1 = P::block_s(s0, s1, xb + bb * L, xc + bb * L, ws[bb], xs + bb * L, a1);
+        }
+    }
+    P::store(out, a0, a1);
+}
+
+template <int L>
+TGT inline void row_dot16(const uint8_t *w, const float *wa, const float *wb, int nb, const uint32_t *xi, const float *xs, const float *xf,
+                          float *out) {
+    using P = Lanes<L>;
+    typename P::F a0 = P::fzero(), a1 = P::fzero();
+    const int32_t *wd = (const int32_t *)w;
+    for (int b = 0; b < nb; b++) {
+        const uint32_t *x = xi + b * 8 * L;
+        const int32_t *wq = wd + b * 8;
+        const typename P::I s0 = P::dp4(wq, x), s1 = P::dp4(wq + 4, x + 4 * L);
+        a0 = P::block16(s0, s1, wa[2 * b], wa[2 * b + 1], xs + b * L, a0);
+        a1 = P::offs16(wb[2 * b], xf + 2 * b * L, wb[2 * b + 1], xf + (2 * b + 1) * L, a1);
+    }
+    P::store(out, a0, a1);
+}
+
+template <int L>
+TGT void abs_sums(const uint32_t *xi, int nb, uint32_t *xa, int32_t *xb) {
+    for (int i = 0; i < nb * 8 * L; i += 8)
+        _mm256_store_si256((__m256i *)(xa + i), _mm256_abs_epi8(_mm256_load_si256((const __m256i *)(xi + i))));
+    for (int b = 0; b < nb; b++)
+        for (int j = 0; j < L; j++) {
+            int s = 0;
+            for (int k = 0; k < 8; k++) {
+                const uint32_t d = xi[(b * 8 + k) * L + j];
+                for (int e = 0; e < 4; e++) s += (int8_t)(uint8_t)(d >> 8 * e);
+            }
+            xb[b * L + j] = 128 * s;
+        }
+}
+#endif
 
 template <int L>
 TGT void group(const ColdLayer &c, int slot, int ng, const int8_t *const *xq, const float *const *xs, const int32_t *const *xsum,
@@ -384,9 +490,16 @@ TGT void group(const ColdLayer &c, int slot, int ng, const int8_t *const *xq, co
         for (int k = 0; k < 8; k++)
             for (int j = 0; j < L; j++) S.xi[(b * 8 + k) * L + j] = j < ng ? *(const uint32_t *)(xq[j] + b * 32 + 4 * k) : 0u;
     }
+#if !EXACT_DOT
+    if (fmt == 23) abs_sums<L>(S.xi, NB_GU, S.xa, S.xb);
+#endif
     alignas(64) float g[16], u[16];
     auto dot_row = [&](const uint8_t *row, float *o) {
+#if EXACT_DOT
         if (fmt == 23) { decode_iq4xs(row, D_, S.w, S.ws); row_dot<L>(S.w, S.ws, NB_GU, S.xi, S.xs, S.xc, o); }
+#else
+        if (fmt == 23) { decode_iq4xs(row, D_, S.w, S.ws); row_dot<L>(S.w, S.ws, NB_GU, S.xi, S.xa, S.xb, S.xs, S.xc, o); }
+#endif
         else {
             if (fmt == 11) decode_q3k(row, D_, S.w, S.wa, S.wb);
             else decode_q2k(row, D_, S.w, S.wa, S.wb);
@@ -419,9 +532,16 @@ TGT void group(const ColdLayer &c, int slot, int ng, const int8_t *const *xq, co
             }
         for (int j = 0; j < L; j++) S.hc[b * L + j] = 128 * sum[j];
     }
+#if !EXACT_DOT
+    abs_sums<L>(S.hi, NB_DN, S.ha, S.hb);
+#endif
     for (int r = 0; r < D_; r++) {
         decode_iq4nl(c.dn_row(slot, r), FE_, S.w, S.ws);
+#if EXACT_DOT
         row_dot<L>(S.w, S.ws, NB_DN, S.hi, S.hs, S.hc, S.y + (size_t)r * L);
+#else
+        row_dot<L>(S.w, S.ws, NB_DN, S.hi, S.ha, S.hb, S.hs, S.hc, S.y + (size_t)r * L);
+#endif
     }
     alignas(64) float col[16];
     for (int j = 0; j < ng; j++) {

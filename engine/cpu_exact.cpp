@@ -134,8 +134,10 @@ void ExactScratch::reserve() {
     xf = (float *)get(NB_GU * 2 * 16 * 4);
     h = (float *)get(FE_ * 16 * 4); hi = (uint32_t *)get(NB_DN * 8 * 16 * 4); hs = (float *)get(NB_DN * 16 * 4); hc = (int32_t *)get(NB_DN * 16 * 4);
     y = (float *)get((size_t)D_ * 16 * 4);
+    xa = (uint32_t *)get(NB_GU * 8 * 16 * 4); xb = (int32_t *)get(NB_GU * 16 * 4);
+    ha = (uint32_t *)get(NB_DN * 8 * 16 * 4); hb = (int32_t *)get(NB_DN * 16 * 4);
 }
 ExactScratch::~ExactScratch() {
     for (void *p : {(void *)w, (void *)ws, (void *)wa, (void *)wb, (void *)xi, (void *)xs, (void *)xc, (void *)xf, (void *)h, (void *)hi,
-                    (void *)hs, (void *)hc, (void *)y}) os::aligned_free(p);
+                    (void *)hs, (void *)hc, (void *)y, (void *)xa, (void *)xb, (void *)ha, (void *)hb}) os::aligned_free(p);
 }

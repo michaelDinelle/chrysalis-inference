@@ -33,6 +33,7 @@ struct ExactScratch {
     float *xf = nullptr;
     float *h = nullptr; uint32_t *hi = nullptr; float *hs = nullptr; int32_t *hc = nullptr;
     float *y = nullptr;
+    uint32_t *xa = nullptr, *ha = nullptr; int32_t *xb = nullptr, *hb = nullptr;
     void reserve();
     ~ExactScratch();
 };
