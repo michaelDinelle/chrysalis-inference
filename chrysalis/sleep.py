@@ -70,6 +70,8 @@ class SleepGuard:
         self.slept = False
 
     def start(self):
+        if sys.platform == "win32":
+            return False
         if not (shutil.which("systemd-inhibit") and shutil.which("gdbus")):
             print("chrysalis: no systemd-inhibit or gdbus: the GPU is not freed before the machine sleeps", file=self.log, flush=True)
             return False

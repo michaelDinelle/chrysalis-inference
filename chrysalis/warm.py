@@ -1,4 +1,6 @@
+import ctypes
 import os
+import sys
 import threading
 import time
 
@@ -6,7 +8,21 @@ RESERVE = 10 << 30
 PIECE = 64 << 20
 
 
+class _MemoryStatus(ctypes.Structure):
+    _fields_ = [("length", ctypes.c_ulong), ("load", ctypes.c_ulong), ("total", ctypes.c_ulonglong), ("avail", ctypes.c_ulonglong),
+                ("page_total", ctypes.c_ulonglong), ("page_avail", ctypes.c_ulonglong), ("virtual_total", ctypes.c_ulonglong),
+                ("virtual_avail", ctypes.c_ulonglong), ("extended", ctypes.c_ulonglong)]
+
+
 def mem_free():
+    if sys.platform == "win32":
+        status = _MemoryStatus(length=ctypes.sizeof(_MemoryStatus))
+        return status.avail if ctypes.windll.kernel32.GlobalMemoryStatusEx(ctypes.byref(status)) else 0
+    if sys.platform == "darwin":
+        libc, pages, size = ctypes.CDLL(None), ctypes.c_uint(0), ctypes.c_size_t(4)
+        if libc.sysctlbyname(b"vm.page_free_count", ctypes.byref(pages), ctypes.byref(size), None, 0) != 0:
+            return 0
+        return pages.value * os.sysconf("SC_PAGE_SIZE")
     with open("/proc/meminfo") as f:
         for line in f:
             if line.startswith("MemFree:"):
