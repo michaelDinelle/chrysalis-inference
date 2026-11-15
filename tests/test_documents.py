@@ -1,16 +1,19 @@
 import base64
+import hashlib
 import io
+import json
 import os
 import sys
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, ROOT)
 
+import numpy as np
 from PIL import Image
 
 from chrysalis import apis, documents
 from chrysalis.documents import DocumentError, Documents
-from pdf_fixture import pdf
+from pdf_fixture import parity, pdf
 
 failed = 0
 
@@ -92,6 +95,57 @@ for bad in (-1, 2.5, "all", True):
         check(f"page_pictures {bad!r} refused", False)
     except DocumentError:
         check(f"page_pictures {bad!r} refused", True)
+
+
+def blocks(img):
+    a = np.asarray(img.convert("RGB"), np.float64)
+    ys, xs = np.linspace(0, a.shape[0], 9).astype(int), np.linspace(0, a.shape[1], 9).astype(int)
+    return np.array([[a[ys[i]:ys[i + 1], xs[j]:xs[j + 1]].reshape(-1, 3).mean(0) for j in range(8)] for i in range(8)])
+
+
+def read(data, pictures):
+    try:
+        parts = documents.pdf_parts(data, "fixture.pdf", pictures)
+    except DocumentError as e:
+        return {"error": str(e)}
+    pages = []
+    for p in parts:
+        if p["type"] == "text" and p["text"].startswith("<page number="):
+            pages.append({"picture": None, "text": None})
+        elif p["type"] == "image_url":
+            pages[-1]["picture"] = Image.open(io.BytesIO(base64.b64decode(p["image_url"]["url"].split(",", 1)[1])))
+        elif pages and p["text"].endswith("</page>\n"):
+            pages[-1]["text"] = p["text"][:-len("\n</page>\n")].strip()
+    return {"pages": pages}
+
+
+BLOCK_STEPS = 8
+poppler = json.load(open(os.path.join(ROOT, "tests", "media", "poppler.json")))
+for name, data in parity().items():
+    check(f"{name}: the PDF poppler read", hashlib.sha256(data).hexdigest() == poppler[name]["sha256"])
+    for mode in ("pictures", "no pictures"):
+        if mode not in poppler[name]:
+            continue
+        was, got = poppler[name][mode], read(data, mode == "pictures")
+        what = f"{name}, {mode}"
+        if "error" in was:
+            said = got.get("error", "")
+            check(f"{what}: refused as poppler refused it", said.startswith("cannot read the PDF: ") if was["error"].startswith("cannot read the PDF: ")
+                  else said == was["error"], f"{said!r}, poppler: {was['error'][:60]!r}")
+            check(f"{what}: a password named only where poppler named one", ("password" in said) == ("password" in was["error"]), repr(said))
+            continue
+        pages = got.get("pages", [])
+        shape = [(p["picture"]["size"] if p["picture"] else None) for p in was["pages"]]
+        check(f"{what}: its pages, which are pictured and at what size", [list(p["picture"].size) if p["picture"] else None for p in pages] == shape,
+              got.get("error", ""))
+        same = [i + 1 for i, p in enumerate(pages) if i < len(was["pages"]) and p["text"].split() == was["pages"][i]["text"].split()]
+        check(f"{what}: every page's words, in poppler's order", len(same) == len(was["pages"]) == len(pages),
+              f"{len(same)} of {len(was['pages'])} pages")
+        steps = [float(np.abs(blocks(p["picture"]) - np.array(was["pages"][i]["picture"]["thumb"])).max())
+                 for i, p in enumerate(pages) if p["picture"] and i < len(was["pages"]) and was["pages"][i]["picture"]
+                 and list(p["picture"].size) == was["pages"][i]["picture"]["size"]]
+        check(f"{what}: each picture within {BLOCK_STEPS} steps of poppler's in every eighth", len(steps) == sum(s is not None for s in shape)
+              and max(steps, default=0) <= BLOCK_STEPS, f"{len(steps)} pictures, largest {max(steps, default=0):.2f} steps")
 
 print("all ok" if not failed else f"{failed} failed")
 sys.exit(1 if failed else 0)
