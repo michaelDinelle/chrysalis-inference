@@ -8,7 +8,7 @@ import sys
 import time
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-from hill_lib import DOCS, SNAPS, Server, primed
+from hill_lib import DOCS, Server, primed, snaps
 from measure import MAC, PY, ROOT, WORK, tree_supports
 from chrysalis.engine import LT_CACHE
 
@@ -16,7 +16,7 @@ if not tree_supports(ROOT):
     sys.exit(0)
 
 for name in ("fn", "27b"):
-    folder = os.path.join(SNAPS, name)
+    folder = snaps(name)
     mark = os.path.join(folder, "primed-" + hashlib.sha256(repr(sorted(DOCS.items())).encode()).hexdigest()[:16])
     if os.path.exists(mark):
         continue

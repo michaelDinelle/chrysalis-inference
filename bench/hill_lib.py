@@ -14,10 +14,16 @@ import time
 import urllib.request
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-from measure import BENCH, MAC, MACHINE_BACKEND, NVML, PY, RECORDS, ROOT, WORK, drop_cache, free_bytes, free_port, http, peak_footprint, scope, \
+from measure import BENCH, MAC, MACHINE_BACKEND, MODELS, NVML, PY, RECORDS, ROOT, WORK, drop_cache, free_bytes, free_port, http, peak_footprint, scope, \
     server_pid, strata
 
 SNAPS = os.path.join(ROOT, "data/cache/bench-snapshots")
+
+
+def snaps(name):
+    path = os.path.join(ROOT, MODELS[BENCH[name]["use"]]["path"])
+    return os.path.join(SNAPS, name, f"{os.path.basename(path)}-{os.stat(path).st_size}")
+
 RIVALS = json.load(open(os.path.join(os.path.dirname(os.path.abspath(__file__)), "rivals.json")))
 DOCS = {"16k": (RECORDS(1, 841), RECORDS(841, 895)), "100k": (RECORDS(1, 5201), RECORDS(5201, 5255))}
 QUESTION = "\n\nThese records were added since. Which ID is the last one now? Then describe how the records are laid out."
@@ -136,7 +142,7 @@ class Server:
         os.makedirs(WORK, exist_ok=True)
         self.before = unused_gb() if MAC else None
         port, self.snap, self.log = free_port(), tempfile.mkdtemp(prefix=f"snap-{name}-", dir=WORK), os.path.join(WORK, f"server-{name}.log")
-        env = [f"CHRYSALIS_SNAPSHOTS={self.snap}", f"CHRYSALIS_BENCH_SNAPS={os.path.join(SNAPS, name)}", *env, *(f"{k}={v}" for k, v in b["env"].items())]
+        env = [f"CHRYSALIS_SNAPSHOTS={self.snap}", f"CHRYSALIS_BENCH_SNAPS={snaps(name)}", *env, *(f"{k}={v}" for k, v in b["env"].items())]
         if MAC:
             env.append(f"CHRYSALIS_FN_STATS={os.path.join(self.snap, 'experts.bin')}")
         wrap = scope()

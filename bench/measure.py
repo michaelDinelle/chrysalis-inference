@@ -33,20 +33,20 @@ MACHINE_BACKEND = "metal" if MAC else "cuda" if os.path.exists("/dev/nvidiactl")
 
 def tree_supports(tree):
     return os.path.exists(os.path.join(tree, "engine", MACHINE_BACKEND, "build.mk"))
-FN_FILES = ["data/models/qwen3.8-flash-next/qwen3.8-flash-next.gguf", "data/models/qwen3.8-flash-next/src/Q8_0/Qwen3.8-Flash-Next-Q8_0-00003-of-00006.gguf",
+FN_FILES = [MODELS["qwen3.8-flash-next"]["path"], "data/models/qwen3.8-flash-next/src/Q8_0/Qwen3.8-Flash-Next-Q8_0-00003-of-00006.gguf",
             "data/models/tokenizer.json"]
 ON = {
     "hip": {"fn": dict(env={"CHRYSALIS_FN_SPILL_GB": "1"}, tune=[("spill_spare", 0)],
                        files=FN_FILES + ["data/llama.cpp/build/bin/libggml-cpu.so", "data/llama.cpp/build/bin/libggml-base.so",
                                          "data/cache/hipblaslt.txt", "data/cache/flash-next-calibration.txt"]),
-            "27b": dict(env={}, tune=[], files=["data/models/qwen3.8-27b/qwen3.8-27b.gguf", "data/models/tokenizer.json", "data/cache/hipblaslt.txt"])},
+            "27b": dict(env={}, tune=[], files=[MODELS["qwen3.8-27b"]["path"], "data/models/tokenizer.json", "data/cache/hipblaslt.txt"])},
     "metal": {"fn": dict(env={"CHRYSALIS_FN_CACHE_GB": "16", "CHRYSALIS_FN_CTX": "131072"}, tune=[], files=FN_FILES),
-              "27b": dict(env={}, tune=[], files=["data/models/qwen3.8-27b/qwen3.8-27b.gguf", "data/models/tokenizer.json"])},
+              "27b": dict(env={}, tune=[], files=[MODELS["qwen3.8-27b"]["path"], "data/models/tokenizer.json"])},
     "cuda": {"fn": dict(env={"CHRYSALIS_FN_CTX": "131072"}, tune=[],
                         files=FN_FILES + ["data/llama.cpp/build/bin/libggml-cpu.so", "data/llama.cpp/build/bin/libggml-base.so",
                                           "data/cache/cublaslt.txt", "data/cache/flash-next-calibration.txt"]),
              "27b": dict(env={"CHRYSALIS_CTX": "131072"}, tune=[],
-                         files=["data/models/qwen3.8-27b/qwen3.8-27b.gguf", "data/models/tokenizer.json", "data/cache/cublaslt.txt"])},
+                         files=[MODELS["qwen3.8-27b"]["path"], "data/models/tokenizer.json", "data/cache/cublaslt.txt"])},
 }
 DIRS = {"fn": "flash-next", "27b": "27b"}
 
