@@ -2,7 +2,7 @@
 
 <h1 align="center">Chrysalis</h1>
 
-<p align="center">A local inference engine, API server and web chat for Qwen3.8-27B and Qwen3.8-Flash-Next on an AMD Radeon RX 7900 XTX, an NVIDIA GeForce RTX or a Mac with Apple Silicon.</p>
+<p align="center">A local inference engine, API server and web chat for Qwen3.8-27B and Qwen3.8-Flash-Next on an AMD Radeon RX 7900 XTX under Windows or Linux, an NVIDIA GeForce RTX under Linux or a Mac with Apple Silicon.</p>
 
 <p align="center">
   <a href="LICENSE"><img alt="MIT license" src="https://img.shields.io/badge/license-MIT-e24d85"></a>
@@ -96,9 +96,16 @@ cd chrysalis-inference
 ./chrysalis.sh
 ```
 
-**Windows**
+**Windows 11 with an RX 7900 XTX, XT or GRE**
 
-Run `wsl --install` as an administrator, then double-click [chrysalis.wsl](https://github.com/michaelDinelle/chrysalis-inference/releases/latest/download/chrysalis.wsl).
+1. Install [AMD's driver](https://www.amd.com/en/support/download/drivers.html) if the card has none.
+2. Download [Chrysalis-windows-x64.zip](https://github.com/michaelDinelle/chrysalis-inference/releases/latest/download/Chrysalis-windows-x64.zip) and unzip it.
+3. Double-click `Chrysalis.exe` in the folder.
+
+<p align="center"><img src="media/windows-folder.png" width="760" alt="The unzipped Chrysalis folder in Windows Explorer, with Chrysalis.exe"></p>
+<p align="center"><img src="media/windows-run.png" width="760" alt="Chrysalis running in a window on Windows 11 with the model ready, and the chat open in the browser"></p>
+
+<sub>Windows asks once whether to run a program it does not know: More info, then Run anyway. The chat opens in the browser when the model is ready.</sub>
 
 **Docker**
 
@@ -129,8 +136,9 @@ docker run -d --device /dev/kfd --device /dev/dri -p 127.0.0.1:8080:8080 -v chry
 - Mac: the first `./chrysalis.sh` in a clone gets Python and Bun and builds the Metal engines with Xcode's Metal compiler.
   The release, `chrysalis-macos-arm64.tar.gz`, is a laptop's chat alone, and `chrysalis/Chrysalis.app` opens it in Terminal.
 - NVIDIA: needs Linux with NVIDIA's driver and CUDA toolkit. The first `./chrysalis.sh` in a clone builds the CUDA engines.
-- Windows: Chrysalis is in the Start menu after the install, and closing its window stops it.
-  `wsl -d Chrysalis --cd ~ -- chrysalis/chrysalis.sh --host 0.0.0.0` in PowerShell puts it on the network.
+- Windows: Chrysalis runs natively, with no WSL: the folder holds the engines, a Python of its own and the web chat,
+  and needs only AMD's driver. Closing its window stops it. `Chrysalis.exe --host 0.0.0.0` in a terminal puts it on the
+  network, and takes what `chrysalis.sh` takes. It runs on an RX 7900 there; NVIDIA cards are Linux only for now.
 - Docker is the API alone, at `http://localhost:8080/v1`.
 
 **Features**
@@ -142,11 +150,11 @@ docker run -d --device /dev/kfd --device /dev/dri -p 127.0.0.1:8080:8080 -v chry
   the tab, and the one on screen becomes the reply OpenCode holds.
 - Incognito: the ghost button in the top bar opens an incognito chat, and pressing it again, starting a new chat,
   opening another one or reloading deletes it at once. It is in no list, and while it is open a white outline and an
-  Incognito tab are drawn over the page, moving nothing. It keeps OpenCode's tools: a second OpenCode runs for it on a
-  store in memory (`/dev/shm`) and the first is never stopped. Nothing of it is written to disk: the page keeps it out
-  of the browser's storage, its requests don't show in the terminal, and while one runs the model server cannot write
-  its prompt cache. `incognito end` in the terminal or stopping Chrysalis deletes whatever is left. It needs Linux;
-  what a tool writes into your folders is still written, and the model server's memory of the chat goes as its cache
+  Incognito tab are drawn over the page, moving nothing. It keeps OpenCode's tools: a second OpenCode runs for it with
+  its database in memory and the first is never stopped. Nothing of it is written to disk: the page keeps it out
+  of the browser's storage, its requests don't show in the terminal, and the model server keeps what it caches of an
+  incognito request in RAM only. `incognito end` in the terminal or stopping Chrysalis deletes whatever is left. It works
+  on Windows, macOS and Linux; what a tool writes into your folders is still written, and the model server's memory of the chat goes as its cache
   turns over.
 - Settings has a system prompt: it goes with every chat, after whoever the chat is with. In a thread it goes in the one
   instruction Chrysalis gives OpenCode, beside OpenCode's own prompt.
@@ -181,7 +189,7 @@ docker run -d --device /dev/kfd --device /dev/dri -p 127.0.0.1:8080:8080 -v chry
 
 **OpenCode on another computer**
 
-- With no browser there, as over SSH, `opencode` typed in Chrysalis's terminal prints the same line. On Windows the line runs in WSL.
+- With no browser there, as over SSH, `opencode` typed in Chrysalis's terminal prints the same line. 
 - If OpenCode is open, the line asks to close it first. The line adds both models to OpenCode's favorites.
 - Run on: the line also leaves a small helper on that computer (a launchd job on a Mac, a systemd user service on
   Linux) that starts its own OpenCode on Chrysalis's models alone and holds one outgoing HTTPS connection to Chrysalis,
