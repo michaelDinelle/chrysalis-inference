@@ -238,7 +238,7 @@ docker run -d --device /dev/kfd --device /dev/dri -p 127.0.0.1:8080:8080 -v chry
 - **Machines**: an RX 7900 XTX (24 GB) with a Ryzen 7 7800X3D and 64 GB of DDR5 on Linux, and an M4 Max Mac Studio with
   36 GB on macOS 27.2. One engine ran at a time, and one client timed every request.
 - **Chrysalis**: its own file, 3.8 bits per expert weight, 63 GB plus a 54 GB lookup table read from disk.
-- **Strata**: IQ3_S (3.3 bits) and Q2_0 (2.3 bits). 0.2.6 on the RX 7900 with its RX 7900 switches on. Strata doesn't run
+- **Strata**: IQ3_S (3.3 bits) and Q2_0 (2.3 bits). 0.2.13 on the RX 7900 with its RX 7900 switches on. Strata doesn't run
   on a Mac.
 - **Prompts**: short, 4K and 16K are Strata's standard benchmark, run through its own client code with 512-token answers.
   100K is the same kind of records at 98,878 tokens. The follow-up adds about 1,100 tokens to that chat.
@@ -251,19 +251,19 @@ docker run -d --device /dev/kfd --device /dev/dri -p 127.0.0.1:8080:8080 -v chry
 
 | | Chrysalis 7900 XTX (ROCm) | Strata IQ3_S 7900 XTX (ROCm) | Strata Q2_0 7900 XTX (ROCm) |
 | --- | ---: | ---: | ---: |
-| First token, short prompt | 0.24 s | 0.67 s | 0.37 s |
-| First token, 4K prompt | 1.8 s | 3.4 s | 3.0 s |
-| First token, 16K prompt | 5.9 s | 10.7 s | 9.8 s |
-| First token, 100K prompt | 37.7 s | 66.1 s | 60.9 s |
-| First token, follow-up in the 100K chat | 1.1 s | 2.1 s | 1.9 s |
-| Writing, short prompt | 91.8 tok/s | 72.4 tok/s | 110.0 tok/s |
-| Writing, 4K prompt | 91.2 tok/s | 67.6 tok/s | 94.8 tok/s |
-| Writing, 16K prompt | 86.2 tok/s | 72.5 tok/s | 96.3 tok/s |
-| Writing, 100K prompt | 82.3 tok/s | 66.5 tok/s | 82.2 tok/s |
-| Writing, follow-up in the 100K chat | 89.6 tok/s | 71.7 tok/s | 96.6 tok/s |
+| First token, short prompt | 0.24 s | 0.75 s | 0.37 s |
+| First token, 4K prompt | 1.8 s | 3.5 s | 3.0 s |
+| First token, 16K prompt | 5.9 s | 11.1 s | 10.2 s |
+| First token, 100K prompt | 37.7 s | 68.4 s | 63.2 s |
+| First token, follow-up in the 100K chat | 1.1 s | 2.1 s | 2.1 s |
+| Writing, short prompt | 91.8 tok/s | 72.5 tok/s | 104.2 tok/s |
+| Writing, 4K prompt | 91.2 tok/s | 69.4 tok/s | 96.0 tok/s |
+| Writing, 16K prompt | 86.2 tok/s | 76.7 tok/s | 93.7 tok/s |
+| Writing, 100K prompt | 82.3 tok/s | 67.8 tok/s | 85.0 tok/s |
+| Writing, follow-up in the 100K chat | 89.6 tok/s | 73.0 tok/s | 101.5 tok/s |
 | Error vs Q8_0, mean KL over 1,082 tokens | 0.0339 | 0.0550 | 0.187 |
-| Load time, to a first answer | 14.8 s | 21.6 s | 16.2 s |
-| Peak memory | 54.2 GB | 55.3 GB | 45.1 GB |
+| Load time, to a first answer | 14.8 s | 20.6 s | 16.4 s |
+| Peak memory | 54.2 GB | 55.2 GB | 45.1 GB |
 
 **Qwen3.8-Flash-Next, M4 Max**
 
