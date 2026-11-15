@@ -75,6 +75,20 @@ def load_async(*args, **kw):
     return future
 
 
+def pick_gpu():
+    if BACKEND != "hip" or any(k in os.environ for k in ("HIP_VISIBLE_DEVICES", "ROCR_VISIBLE_DEVICES", "CUDA_VISIBLE_DEVICES")):
+        return
+    import subprocess
+    try:
+        out = subprocess.run([os.path.join(ROOT, "build", "gpu.exe" if os.name == "nt" else "gpu")], capture_output=True, text=True)
+    except OSError:
+        return
+    for line in out.stdout.splitlines() if out.returncode == 0 else ():
+        key, eq, value = line.partition("=")
+        if eq and key.isupper():
+            os.environ[key] = value
+
+
 class Engine:
 
     def __init__(self, model, max_seqs=4, umax=2048, reserve_mb=256, lib=os.path.join(ROOT, "build", "libchrysalis" + LIB), warmup=True):
@@ -82,6 +96,7 @@ class Engine:
             for folder in (os.path.dirname(os.path.abspath(lib)), *(os.path.join(os.environ[k], "bin") for k in ("HIP_PATH", "CUDA_PATH") if os.environ.get(k))):
                 if os.path.isdir(folder):
                     os.add_dll_directory(folder)
+        pick_gpu()
         self.lib = L = C.CDLL(lib)
         L.chrysalis_init.restype = C.c_int
         L.chrysalis_init.argtypes = [C.c_char_p, C.c_int, C.c_int, C.c_longlong]
