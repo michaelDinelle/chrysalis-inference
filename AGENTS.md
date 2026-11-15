@@ -20,6 +20,14 @@ README.md shows what Chrysalis is. This file is how to change it.
   matches llama.cpp's, and prompt lookup. engine/cpu_exact.cpp is the x86 CPU expert kernels of the AMD and NVIDIA
   Flash-Next engines: cpu_exact_isa.h written once, compiled for AVX-512 VNNI, AVX-VNNI, AVX-512 and AVX2 with the
   same bits, the fastest the CPU has picked at load (exact_use_path forces one).
+- engine/os.h is everything the AMD and NVIDIA engines ask of the operating system (files, memory, threads, how much
+  VRAM the system grants: Windows' budget, and on Linux what other programs hold on the card), for Linux, macOS and
+  Windows; engine/cpu_exact.{h,cpp} and cpu_exact_isa.h are Flash-Next's exact CPU expert code, one source compiled for
+  AVX-512 VNNI, AVX-VNNI, AVX-512 and AVX2 and picked when the library loads.
+- On Windows the HIP SDK's compiler is older than Linux's: a result exchanged between lanes (lane_xor, a ballot) must be
+  used by every lane, or it can be moved into a branch only some lanes run (the 27B wrote NaN after 130 tokens from
+  this; tests/hip/test_attn.hip checks each row's maximum). A stream that only the GPU waits on is submitted with
+  `submit` after its work is queued, and nothing passes a C file descriptor into an engine: Windows takes handles.
 - engine/<backend>/ (hip for the RX 7900, cuda for NVIDIA, metal for Apple Silicon) has a build.mk and one engine per
   model, 27b/ and flash-next/, each a shared library that includes engine/api.h. Every backend reads the same model files.
 - A HIP engine has at most three streams of its own. ROCm gives a process four hardware queues and hipBLASLt's setup
@@ -29,18 +37,22 @@ README.md shows what Chrysalis is. This file is how to change it.
   takes ("Selected queue", with its refCount); a fifth queue costs the KV cache VRAM and decode about 2%.
 - chrysalis/models.py picks the backend from the platform (CHRYSALIS_BACKEND overrides it), with each backend's own
   settings in ON; bench/measure.py does the same for the bench.
-- chrysalis.sh sets a machine up and hands its terminal to web/cli.ts, which runs the model server and web/server.ts,
+- chrysalis.sh sets a machine up (Python, Bun, the CUDA and Metal builds) and hands everything else to web/launch.ts, the
+  launcher written once for every system (Chrysalis.exe on Windows is that file compiled; windows/build.ps1 and
+  windows/package.ps1 build the engines and the folder there), which hands its terminal to web/cli.ts, which runs the model server and web/server.ts,
   shows each request as it finishes and takes commands: web/cli-core.ts is the servers, the state and the commands,
   web/cli-ui.tsx draws it with Ink (the switches, the status line, the prompt), and without a terminal it is plain
   lines. The web server tells it who asks and what to ask over Bun's IPC. It shows the servers' own output only after `verbose`, and keeps
   nothing: no log, no history file.
-- An incognito chat is a kind of chat, not a mode. web/harness.ts runs a second OpenCode for incognito threads
-  (`hidden`, host id "incognito") on a store under the folder in /dev/shm that web/cli-core.ts makes for the run
-  (`memory`), and routes each thread to the OpenCode that holds it. The model server always gets CHRYSALIS_SNAPSHOTS
-  and TMPDIR in that folder: its snapshot folders are links (web/veil.ts `point`) that web/server.ts points at
-  read-only folders while an incognito request runs (`veiled`), because chrysalis/cache.py writes each pinned prompt
-  snapshot (the tools and the system prompt, tokens and all) to disk. The page marks such a chat `incognito`, lists it nowhere, keeps
-  it and its files out of the browser's storage, and deletes it the moment it is left (`leave` in web/app.ts). Anything new that writes a chat to disk has to be closed there too.
+- An incognito chat is a kind of chat, not a mode, and works the same on every system. web/harness.ts runs a second
+  OpenCode for incognito threads (`hidden`, host id "incognito") with its database in memory (OPENCODE_DB=:memory:) and
+  routes each thread to the OpenCode that holds it. Every request of an incognito chat reaches the model server marked
+  X-Chrysalis-Unkept, so chrysalis/cache.py keeps that request's prompt snapshots (the tools and the system prompt,
+  tokens and all) in RAM only and saves no expert pool while one runs. The incognito OpenCode's other files go in a
+  folder of its own (in /dev/shm where there is one, the temporary folder elsewhere), deleted when the chats end. The
+  page marks such a chat `incognito`, lists it nowhere, keeps it and its files out of the browser's storage, and
+  deletes it the moment it is left (`leave` in web/app.ts). Anything new that writes a chat to disk has to be closed
+  there too.
 - The context ring in the message box opens OpenCode's own numbers for a thread and its context breakdown
   (web/breakdown.ts is OpenCode's estimate, ported; the notice is web/THIRD-PARTY.md), which web/harness.ts runs over
   the messages OpenCode's `/api/session/:id/context` returns. The page adds nothing OpenCode does not hold. Every
