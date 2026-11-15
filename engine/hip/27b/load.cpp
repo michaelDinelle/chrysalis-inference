@@ -252,8 +252,7 @@ void Engine::load(const std::string &path, int max_seqs, size_t reserve_bytes) {
         for (size_t b : slab_bytes) weight_bytes += b;
         alloc_buffers(max_seqs);
         CK(hipMalloc(&lt_ws, lt_ws_size));
-        size_t free_b, total_b;
-        CK(hipMemGetInfo(&free_b, &total_b));
+        const size_t free_b = gpu_free();
         for (size_t left = (free_b - std::min(free_b, reserve_bytes)) / KV_PAGE; left;) {
             const size_t pages = std::min(left, (size_t)(SLAB / KV_PAGE));
             uint8_t *kv;
@@ -313,8 +312,7 @@ void Engine::load(const std::string &path, int max_seqs, size_t reserve_bytes) {
 
     vram.join();
     if (prop.isLargeBar) {
-        size_t free_b, total_b;
-        CK(hipMemGetInfo(&free_b, &total_b));
+        const size_t free_b = gpu_free();
         const size_t bytes = (free_b - std::min(free_b, reserve_bytes)) / KV_PAGE * KV_PAGE;
         uint8_t *kv;
         if (bytes && hipMalloc(&kv, bytes) == hipSuccess) add_kv_memory(kv, bytes);

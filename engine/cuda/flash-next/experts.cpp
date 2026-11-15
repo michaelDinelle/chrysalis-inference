@@ -276,6 +276,7 @@ void Engine::experts_loader() {
         Experts::Load &ld = x.loads[job.what];
         if (ld.out >= 0) {
             const HotCopy hc = hot_copy(cold[ld.out / NE], x.home[ld.out]);
+            for (int m = 0; m < 3; m++) if (!os::commit(hc.mirror[m], hc.n[m])) FAIL("no memory to read an expert back from the model file");
             file_read3(hc.mirror, hc.file, hc.n);
         }
         const int l = ld.key / NE, h = x.home[ld.key];
@@ -284,7 +285,7 @@ void Engine::experts_loader() {
         const uint8_t *src[3] = {c.gu_row(false, h, 0), c.gu_row(true, h, 0), c.dn_row(h, 0)};
         const size_t len[3] = {gu, gu, dn};
         CK(cudaStreamWaitEvent(x.xst, ld.done, 0));
-        if (c.grp(h) == 2) {
+        if (c.grp(h) == 2 || !cold_gpu) {
             CK(cudaEventSynchronize(ld.copied));
             size_t at = 0;
             for (int m = 0; m < 3; m++) { memcpy(ld.bounce + at, src[m], len[m]); at += len[m]; }

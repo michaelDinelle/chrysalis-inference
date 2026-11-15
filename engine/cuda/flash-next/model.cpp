@@ -659,7 +659,7 @@ void Engine::moe_back(const Layer &w, int layer, int T) {
         const size_t gsz = (size_t)FE * cl->row_gu[fg], dsz = (size_t)D * cl->row_dn;
         CK(cudaStreamWaitEvent(cst, raw_free[k], 0));
         uint8_t *r = b.raw[k];
-        if (fg == 2) CK(cudaEventSynchronize(raw_ready[k]));
+        if (fg == 2 || !cold_gpu) CK(cudaEventSynchronize(raw_ready[k]));
         for (int c = 0; c < ng;) {
             const int s0 = cslot(gpu_cold[G.i0 + c]);
             int run_n = 1;
@@ -667,12 +667,12 @@ void Engine::moe_back(const Layer &w, int layer, int T) {
             const uint8_t *src[3] = {cl->gu_row(false, s0, 0), cl->gu_row(true, s0, 0), cl->dn_row(s0, 0)};
             const size_t at[3] = {c * gsz, stage_gu + c * gsz, 2 * stage_gu + c * dsz}, len[3] = {run_n * gsz, run_n * gsz, run_n * dsz};
             for (int m = 0; m < 3; m++) {
-                if (fg == 2) memcpy(b.bounce[k] + at[m], src[m], len[m]);
+                if (fg == 2 || !cold_gpu) memcpy(b.bounce[k] + at[m], src[m], len[m]);
                 else CK(cudaMemcpyAsync(r + at[m], src[m], len[m], cudaMemcpyHostToDevice, cst));
             }
             c += run_n;
         }
-        if (fg == 2) {
+        if (fg == 2 || !cold_gpu) {
             CK(cudaMemcpyAsync(r, b.bounce[k], ng * gsz, cudaMemcpyHostToDevice, cst));
             CK(cudaMemcpyAsync(r + stage_gu, b.bounce[k] + stage_gu, ng * gsz, cudaMemcpyHostToDevice, cst));
             CK(cudaMemcpyAsync(r + 2 * stage_gu, b.bounce[k] + 2 * stage_gu, ng * dsz, cudaMemcpyHostToDevice, cst));

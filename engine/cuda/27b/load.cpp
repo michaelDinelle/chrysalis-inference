@@ -1,4 +1,5 @@
 #include "model.h"
+#include "../gpu.h"
 #include "../../gguf.h"
 #include <algorithm>
 #include <atomic>
@@ -146,8 +147,7 @@ void Engine::load(const std::string &path, int max_seqs, size_t reserve_bytes) {
     CK(cudaSetDevice(0));
     CK(cudaFree(nullptr));
     const double t_gpu = now();
-    size_t vram_free = 0, vram_total = 0;
-    CK(cudaMemGetInfo(&vram_free, &vram_total));
+    const size_t vram_free = gpu_free();
     std::vector<size_t> slab_bytes;
     std::vector<const QTensor *> abs_made;
     std::vector<size_t> layer_bytes(NL + 1, 0);
@@ -302,8 +302,7 @@ void Engine::load(const std::string &path, int max_seqs, size_t reserve_bytes) {
                 CK(cudaEventCreateWithFlags(&stage_used[k], cudaEventDisableTiming));
             }
         CK(cudaMalloc(&lt_ws, lt_ws_size));
-        size_t free_b, total_b;
-        CK(cudaMemGetInfo(&free_b, &total_b));
+        const size_t free_b = gpu_free();
         for (size_t left = (free_b - std::min(free_b, reserve_bytes)) / KV_PAGE; left;) {
             const size_t pages = std::min(left, (size_t)(SLAB / KV_PAGE));
             uint8_t *kv;

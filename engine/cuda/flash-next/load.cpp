@@ -1,4 +1,5 @@
 #include "model.h"
+#include "../gpu.h"
 #include <stdexcept>
 #include "../../gguf.h"
 #include <algorithm>
@@ -548,8 +549,7 @@ void Engine::load(const std::string &path, int max_seqs, size_t reserve_bytes) {
     alloc_buffers(max_seqs);
     int spilled_at_load = 0;
     {
-        size_t free_b = 0, total_b = 0;
-        CK(cudaMemGetInfo(&free_b, &total_b));
+        const size_t free_b = gpu_free();
         auto pool_bytes = [](int n) {
             Arena dry; dry.cap = SIZE_MAX;
             make_qtensor(dry, IQ4_XS, n * FE, D); make_qtensor(dry, IQ4_XS, n * FE, D); make_qtensor(dry, IQ4_NL, n * D, FE);
@@ -647,8 +647,7 @@ void Engine::load(const std::string &path, int max_seqs, size_t reserve_bytes) {
     }
     experts_init();
     xc.spilled = spilled_at_load;
-    size_t free_b, total_b;
-    CK(cudaMemGetInfo(&free_b, &total_b));
+    const size_t free_b = gpu_free();
     const size_t want = free_b > reserve_bytes ? free_b - reserve_bytes : 0;
     const size_t max_pages = ((size_t)max_ctx * 3 / 2 + PAGE - 1) / PAGE;
     n_pages = (int)std::min(max_pages, want / KV_PAGE);

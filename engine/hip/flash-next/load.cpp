@@ -562,8 +562,7 @@ void Engine::load(const std::string &path, int max_seqs, size_t reserve_bytes) {
     }
     alloc_buffers(max_seqs);
     experts_init();
-    size_t free_b, total_b;
-    CK(hipMemGetInfo(&free_b, &total_b));
+    const size_t free_b = gpu_free();
     const size_t want = free_b > reserve_bytes ? free_b - reserve_bytes : 0;
     const size_t max_pages = ((size_t)max_ctx * 3 / 2 + PAGE - 1) / PAGE;
     n_pages = (int)std::min(max_pages, want / KV_PAGE);

@@ -661,7 +661,7 @@ void Engine::moe_back(const Layer &w, int layer, int T) {
         const size_t gsz = (size_t)FE * cl->row_gu[fg], dsz = (size_t)D * cl->row_dn;
         CK(hipStreamWaitEvent(cst, raw_free[k], 0));
         uint8_t *r = b.raw[k];
-        if (fg == 2) CK(hipEventSynchronize(raw_ready[k]));
+        if (fg == 2 || !cold_gpu) CK(hipEventSynchronize(raw_ready[k]));
         for (int c = 0; c < ng;) {
             const int s0 = cslot(gpu_cold[G.i0 + c]);
             int run_n = 1;
@@ -669,12 +669,12 @@ void Engine::moe_back(const Layer &w, int layer, int T) {
             const uint8_t *src[3] = {cl->gu_row(false, s0, 0), cl->gu_row(true, s0, 0), cl->dn_row(s0, 0)};
             const size_t at[3] = {c * gsz, stage_gu + c * gsz, 2 * stage_gu + c * dsz}, len[3] = {run_n * gsz, run_n * gsz, run_n * dsz};
             for (int m = 0; m < 3; m++) {
-                if (fg == 2) memcpy(b.bounce[k] + at[m], src[m], len[m]);
+                if (fg == 2 || !cold_gpu) memcpy(b.bounce[k] + at[m], src[m], len[m]);
                 else CK(hipMemcpyAsync(r + at[m], src[m], len[m], hipMemcpyHostToDevice, cst));
             }
             c += run_n;
         }
-        if (fg == 2) {
+        if (fg == 2 || !cold_gpu) {
             CK(hipMemcpyAsync(r, b.bounce[k], ng * gsz, hipMemcpyHostToDevice, cst));
             CK(hipMemcpyAsync(r + stage_gu, b.bounce[k] + stage_gu, ng * gsz, hipMemcpyHostToDevice, cst));
             CK(hipMemcpyAsync(r + 2 * stage_gu, b.bounce[k] + 2 * stage_gu, ng * dsz, hipMemcpyHostToDevice, cst));
@@ -799,6 +799,7 @@ void Engine::lookahead_flags(const Layer &w, int layer, int T, const float *res,
                      qoff(b.xn_q, (size_t)4 * HCD), 1, lst, la.counter + 16, g, t0 + 4 >= T ? 2 : 0);
     router_route_dec(w.router, w.sg_w, la.mx, T, la.logits, la.sg, w.slot_of, cold[layer].n, la.ids, la.wts, la.hot, d_sh_pred, gfrac,
                      layer, gen + 1, la.counter, lst, nullptr, starts, xfrac, false);
+    submit(lst);
     la_pend = g;
 }
 void Engine::forward(Seq &s, const int *tokens, int T, bool verify, const int *pos3, bool img) {

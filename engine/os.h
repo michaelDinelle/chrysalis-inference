@@ -19,7 +19,14 @@
 #include <io.h>
 #include <malloc.h>
 #include <psapi.h>
+#include <dxgi1_4.h>
+#undef small
+#undef hyper
+#undef interface
+#undef near
+#undef far
 #pragma comment(lib, "advapi32")
+#pragma comment(lib, "dxgi")
 #else
 #include <fcntl.h>
 #include <sys/mman.h>
@@ -69,7 +76,7 @@ inline void *reserve(size_t bytes) { return VirtualAlloc(nullptr, bytes, MEM_RES
 inline bool commit(void *p, size_t bytes) { return VirtualAlloc(p, bytes, MEM_COMMIT, PAGE_READWRITE) != nullptr; }
 inline void *anon(size_t bytes) { return VirtualAlloc(nullptr, bytes, MEM_RESERVE | MEM_COMMIT, PAGE_READWRITE); }
 inline void release(void *p, size_t) { if (p) VirtualFree(p, 0, MEM_RELEASE); }
-inline void drop(void *p, size_t bytes) { if (bytes) DiscardVirtualMemory(p, bytes); }
+inline void drop(void *p, size_t bytes) { if (bytes) VirtualFree(p, bytes, MEM_DECOMMIT); }
 inline void drop_mapped(void *p, size_t bytes) { if (bytes) VirtualUnlock(p, bytes); }
 inline void want(void *p, size_t bytes) {
     WIN32_MEMORY_RANGE_ENTRY r{p, bytes};
@@ -93,6 +100,32 @@ inline double ram_available() {
 inline double ram_held() {
     PROCESS_MEMORY_COUNTERS_EX c{};
     return GetProcessMemoryInfo(GetCurrentProcess(), (PROCESS_MEMORY_COUNTERS *)&c, sizeof c) ? (double)c.PrivateUsage : 0;
+}
+inline uint64_t vram_grant(unsigned vendor, const char *gpu, uint64_t free_bytes) {
+    IDXGIFactory4 *f = nullptr;
+    if (FAILED(CreateDXGIFactory1(__uuidof(IDXGIFactory4), (void **)&f))) return free_bytes;
+    wchar_t name[128] = {};
+    MultiByteToWideChar(CP_UTF8, 0, gpu, -1, name, 127);
+    uint64_t named = free_bytes, made = free_bytes;
+    bool found = false;
+    IDXGIAdapter1 *a = nullptr;
+    for (UINT i = 0; f->EnumAdapters1(i, &a) != DXGI_ERROR_NOT_FOUND; i++) {
+        DXGI_ADAPTER_DESC1 d{};
+        IDXGIAdapter3 *a3 = nullptr;
+        DXGI_QUERY_VIDEO_MEMORY_INFO m{};
+        if (SUCCEEDED(a->GetDesc1(&d)) && d.VendorId == vendor && !(d.Flags & DXGI_ADAPTER_FLAG_SOFTWARE) &&
+            SUCCEEDED(a->QueryInterface(__uuidof(IDXGIAdapter3), (void **)&a3))) {
+            if (SUCCEEDED(a3->QueryVideoMemoryInfo(0, DXGI_MEMORY_SEGMENT_GROUP_LOCAL, &m))) {
+                const uint64_t left = m.Budget > m.CurrentUsage ? m.Budget - m.CurrentUsage : 0;
+                made = left < made ? left : made;
+                if (!wcscmp(d.Description, name)) { found = true; named = left < named ? left : named; }
+            }
+            a3->Release();
+        }
+        a->Release();
+    }
+    f->Release();
+    return found ? named : made;
 }
 inline int sibling(int cpu) {
     DWORD bytes = 0;
@@ -260,6 +293,7 @@ inline int sibling(int) { return -1; }
 inline std::string cpu_name() { return {}; }
 inline std::vector<int> cores() { return {}; }
 #endif
+inline uint64_t vram_grant(unsigned, const char *, uint64_t free_bytes) { return free_bytes; }
 inline File from_fd(int fd) { return File(fd); }
 inline size_t missing(const void *p, size_t bytes) {
     const size_t pages = (bytes + 4095) / 4096;

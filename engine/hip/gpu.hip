@@ -1,5 +1,6 @@
 #include <hip/hip_runtime.h>
 #include "gpu.h"
+#include "../os.h"
 
 constexpr unsigned PROBE = 64, STEP = 40503u;
 
@@ -15,3 +16,22 @@ bool gpu_runs() {
     for (unsigned i = 0; ok && i < PROBE; i++) ok = h[i] == STEP * (i + 1);
     return ok;
 }
+
+size_t gpu_free() {
+    size_t free_b = 0, total_b = 0;
+    int dev = 0;
+    hipDeviceProp_t p{};
+    if (hipMemGetInfo(&free_b, &total_b) != hipSuccess || hipGetDevice(&dev) != hipSuccess || hipGetDeviceProperties(&p, dev) != hipSuccess) return 0;
+    return (size_t)os::vram_grant(0x1002, p.name, free_b);
+}
+
+#ifdef _WIN32
+extern "C" BOOL WINAPI DllMain(HINSTANCE, DWORD why, LPVOID ending) {
+    if (why == DLL_PROCESS_DETACH && ending) {
+        DWORD code = 0;
+        if (!GetExitCodeProcess(GetCurrentProcess(), &code) || code == STILL_ACTIVE) code = 0;
+        TerminateProcess(GetCurrentProcess(), code);
+    }
+    return TRUE;
+}
+#endif
