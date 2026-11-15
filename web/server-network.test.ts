@@ -9,7 +9,7 @@ import { harness, RUN, TLS, announcement, ask, base, chrysalisAborted, fake, jso
 
 harness();
 
-test("on the network (CHRYSALIS_HOST 0.0.0.0): each address gets HTTPS whose certificate the server's own authority signs, and no plain HTTP, while this machine gets plain HTTP; that authority vouches for nothing public; a device without a key gets the connect page and the authority as its system takes it, and none of the chat's files; the trust check has a certificate of its own from the same authority", async () => {
+test("on the network (CHRYSALIS_HOST 0.0.0.0), with no program to run but itself: each address gets HTTPS whose certificate the server's own authority signs, and no plain HTTP, while this machine gets plain HTTP; that authority vouches for nothing public; a device without a key gets the connect page and the authority as its system takes it, and none of the chat's files; the trust check has a certificate of its own from the same authority", async () => {
   const { proc, dir, ips, urls, checks } = await onNetwork();
   try {
     const port = new URL(urls[0]).port;

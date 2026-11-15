@@ -1,14 +1,19 @@
-import { chmodSync, copyFileSync, existsSync, mkdirSync, mkdtempSync, readdirSync, rmSync } from "node:fs";
+import { existsSync, mkdtempSync, readdirSync, readFileSync, rmSync } from "node:fs";
 import type { Subprocess } from "bun";
 import { clean, fold, paint, plain } from "./terminal";
+import { utcOffset } from "./clock";
+import { letIn } from "./firewall";
 import { gpuEnv } from "./gpu";
-import { MODELS, point } from "./veil";
+import { getCommand, memoryRoot, MODELS, ourScript, ROOT, serverCommand, serverEnv, stopTree } from "./platform";
+import { qrText } from "./qr";
+import { tlsPath } from "./tls";
+
 
 const { bold, dim, green, yellow, red, gray } = paint;
-const ROOT = `${import.meta.dir}/..`, SH = `${ROOT}/chrysalis.sh`;
 const API = process.env.CHRYSALIS_URL ?? "http://127.0.0.1:8080", PORT = process.env.PORT ?? "8081";
 const WEB_FILE = existsSync(`${import.meta.dir}/server.js`) ? "server.js" : "server.ts";
-const ENGINE_CMD: string[] = process.env.CHRYSALIS_ENGINE_CMD ? JSON.parse(process.env.CHRYSALIS_ENGINE_CMD) : [SH, "serve"];
+const chosen = () => { try { return readFileSync(`${tlsPath()}/model`, "utf8").trim() || undefined; } catch { return undefined; } };
+const engineCmd = (): string[] => (process.env.CHRYSALIS_ENGINE_CMD ? JSON.parse(process.env.CHRYSALIS_ENGINE_CMD) : serverCommand(chosen()));
 export const MODES = ["local", "network", "insecure"] as const;
 export type Mode = (typeof MODES)[number];
 export { MODELS };
@@ -55,10 +60,7 @@ const count = (x: number | string) => Number(x).toLocaleString("en-US");
 let zone = { hour: -1, ms: 0 };
 function stamp() {
   const now = new Date();
-  if (now.getUTCHours() !== zone.hour) {
-    const z = Bun.spawnSync(["date", "+%z"], { stdout: "pipe", stderr: "ignore" }).stdout.toString().trim();
-    zone = { hour: now.getUTCHours(), ms: /^[+-]\d{4}$/.test(z) ? (z[0] === "-" ? -1 : 1) * (Number(z.slice(1, 3)) * 60 + Number(z.slice(3))) * 60_000 : -now.getTimezoneOffset() * 60_000 };
-  }
+  if (now.getUTCHours() !== zone.hour) zone = { hour: now.getUTCHours(), ms: utcOffset(now.getTime()) };
   return gray(new Date(now.getTime() + zone.ms).toISOString().slice(11, 19));
 }
 
@@ -72,7 +74,11 @@ class Service {
   constructor(readonly name: string, private spawn: () => Proc, private line: (l: string) => boolean, private began: () => void) {}
 
   start() {
-    const t0 = Date.now(), proc = this.spawn();
+    const t0 = Date.now();
+    let proc: Proc;
+    try { proc = this.spawn(); } catch (e) {
+      return note(red(`the ${this.name} could not start: ${e instanceof Error ? e.message : String(e)} · restart tries again`));
+    }
     this.proc = proc;
     this.asked = false;
     this.tail = [];
@@ -121,7 +127,7 @@ class Service {
     this.asked = true;
     const proc = this.proc;
     if (!proc) return;
-    proc.kill();
+    stopTree(proc);
     await proc.exited;
   }
 
@@ -180,19 +186,24 @@ function engineLine(l: string): boolean {
 
 
 let engineSvc: Service, webSvc: Service;
-engineSvc = new Service("model server", () => Bun.spawn(scoped(ENGINE_CMD), { stdin: "ignore", stdout: "pipe", stderr: "pipe",
-  env: { ...process.env, ...gpuEnv(), ...(run ? { CHRYSALIS_SNAPSHOTS: `${run}/snapshots`, TMPDIR: `${run}/tmp` } : {}) } }), (l) => { const took = engineLine(l); sync(); return took; },
+function engineSpawn() {
+  const env = { ...process.env, ...serverEnv() };
+  return Bun.spawn(scoped(engineCmd()), { cwd: ROOT, stdin: "ignore", stdout: "pipe", stderr: "pipe",
+    env: { ...env, ...gpuEnv(env), ...(run ? { TMPDIR: run } : {}) } });
+}
+engineSvc = new Service("model server", engineSpawn, (l) => { const took = engineLine(l); sync(); return took; },
   () => Object.assign(engine, { state: "down", since: Date.now(), progress: 0, writing: 0 }));
-webSvc = new Service("web chat", () => Bun.spawn(scoped([process.execPath, WEB_FILE]), {
+const web = ourScript(WEB_FILE);
+webSvc = new Service("web chat", () => Bun.spawn(scoped(web.cmd), {
   cwd: import.meta.dir, stdin: "ignore", stdout: "pipe", stderr: "pipe",
-  env: { ...process.env, NODE_ENV: "production", PORT, CHRYSALIS_HOST: state.mode === "local" ? "127.0.0.1" : "0.0.0.0", CHRYSALIS_INSECURE: state.mode === "insecure" ? "1" : "", CHRYSALIS_MEMORY: run ?? "", CHRYSALIS_KEPT: KEPT },
+  env: { ...process.env, ...web.env, NODE_ENV: "production", PORT, CHRYSALIS_ENGINE_HERE: HAS_MODEL ? "1" : "0", CHRYSALIS_HOST: state.mode === "local" ? "127.0.0.1" : "0.0.0.0", CHRYSALIS_INSECURE: state.mode === "insecure" ? "1" : "" },
   ipc: heard,
 }), () => false, () => { state.web = undefined; state.questions = []; state.veiled = 0; hidden(false); });
 
 let scope: boolean | undefined;
 function scoped(cmd: string[]) {
   if (process.env.CHRYSALIS_ENGINE_CMD) return cmd;
-  try { scope ??= Bun.spawnSync(["systemd-run", "--user", "--scope", "-q", "true"], { stdout: "ignore", stderr: "ignore" }).exitCode === 0; } catch { scope = false; }
+  scope ??= !!Bun.which("systemd-run") && Bun.spawnSync(["systemd-run", "--user", "--scope", "-q", "true"], { stdout: "ignore", stderr: "ignore" }).exitCode === 0;
   return scope ? ["systemd-run", "--user", "--scope", "-q", "-p", "MemorySwapMax=0", ...cmd] : cmd;
 }
 
@@ -279,7 +290,7 @@ const NO_WEB = "the web chat is not running: restart starts it";
 
 export async function setMode(to: Mode) {
   if (to === state.mode) return;
-  if (to !== "local" && ui.live) await ui.suspend(() => Bun.spawn([SH, "firewall", to], { stdio: ["inherit", "inherit", "inherit"] }).exited);
+  if (to !== "local" && ui.live) await ui.suspend(() => letIn(to));
   state.mode = to;
   await webSvc.restart();
 }
@@ -302,34 +313,22 @@ export function setVerbose(on: boolean) {
   note(on ? "verbose is on: what the servers and voice print shows here too, for this run" : "verbose is off: requests only");
 }
 
-const SHM = "/dev/shm", RUN = "chrysalis-run-", KEPT = process.env.CHRYSALIS_SNAPSHOTS || `${ROOT}/data/cache`;
+const SHM = memoryRoot(), RUN = "chrysalis-run-";
 let run: string | undefined;
 const cores = new Map<number, string>();
-function wipe(dir: string) {
-  Bun.spawnSync(["chmod", "-R", "u+w", dir], { stdout: "ignore", stderr: "ignore" });
-  rmSync(dir, { recursive: true, force: true, maxRetries: 3 });
-}
+const wipe = (dir: string) => rmSync(dir, { recursive: true, force: true, maxRetries: 3 });
 function sweep() {
   for (const old of existsSync(SHM) ? readdirSync(SHM) : []) {
     const pid = old.startsWith(RUN) ? Number(old.slice(RUN.length).split("-")[0]) : 0;
     if (!pid) continue;
-    try { process.kill(pid, 0); } catch { wipe(`${SHM}/${old}`); }
+    try { process.kill(pid, 0); } catch (e) { if ((e as { code?: string }).code !== "EPERM") wipe(`${SHM}/${old}`); }
   }
 }
 function memory() {
-  if (!existsSync(SHM)) return;
-  run = mkdtempSync(`${SHM}/${RUN}${process.pid}-`);
-  mkdirSync(`${run}/tmp`);
-  mkdirSync(`${run}/snapshots`);
-  for (const model of MODELS) {
-    mkdirSync(`${run}/none/${model}`, { recursive: true });
-    if (existsSync(`${KEPT}/${model}/pool.bin`)) copyFileSync(`${KEPT}/${model}/pool.bin`, `${run}/none/${model}/pool.bin`);
-    chmodSync(`${run}/none/${model}`, 0o555);
-  }
-  point(run, KEPT, false);
+  try { run = mkdtempSync(`${SHM}/${RUN}${process.pid}-`); } catch { run = undefined; }
 }
 function dumps(proc: { pid: number } | undefined, off: boolean) {
-  if (!proc || process.env.CHRYSALIS_ENGINE_CMD) return;
+  if (!proc || process.env.CHRYSALIS_ENGINE_CMD || !Bun.which("prlimit")) return;
   const limit = (...more: string[]) => { try { return Bun.spawnSync(["prlimit", "--pid", String(proc.pid), ...more], { stdout: "pipe", stderr: "ignore" }).stdout.toString().trim(); } catch { return ""; } };
   if (off) {
     if (!cores.has(proc.pid)) cores.set(proc.pid, limit("--core", "--raw", "--noheadings", "-o", "SOFT"));
@@ -355,21 +354,12 @@ export async function restart(part: string) {
   if (part !== "model") await webSvc.restart();
 }
 
-function scan(url: string): string | undefined {
-  try {
-    const code = Bun.spawnSync(["qrencode", "-t", "ANSIUTF8", "-m", "2", url], { stdout: "pipe", stderr: "ignore" });
-    return code.exitCode === 0 ? code.stdout.toString().trimEnd().split("\n").map((l) => `  ${l}`).join("\n") : undefined;
-  } catch {
-    return undefined;
-  }
-}
+const scan = (url: string) => qrText(url).split("\n").map((l) => `  ${l}`).join("\n");
 
 export function qr() {
   const url = state.web?.network[0];
   if (!url) return note(`a code is for other devices${SEP}${dim("network or insecure puts Chrysalis on your network")}`);
-  const code = scan(url);
-  if (!code) return note(`qrencode is not installed${SEP}${url}`);
-  ui.log(code);
+  ui.log(scan(url));
   note(dim(url));
 }
 
@@ -445,7 +435,7 @@ export function quit() {
   if (quitting) return;
   quitting = true;
   ui.close();
-  for (const p of [getting, engineSvc.proc, webSvc.proc]) p?.kill();
+  for (const p of [getting, engineSvc.proc, webSvc.proc]) if (p) stopTree(p);
   if (run) wipe(run);
   process.exit(0);
 }
@@ -459,8 +449,10 @@ export function start() {
   ui.log("");
   note(bold("Chrysalis Inference"));
   if (flag("--get")) {
-    getting = Bun.spawn([SH, "get", flag("--get")!], { stdin: "ignore", stdout: "ignore", stderr: "ignore" });
-    note(dim(`${flag("--get")} is downloading in the background: model has it once it is here`));
+    try {
+      getting = Bun.spawn(getCommand(flag("--get")!), { cwd: ROOT, stdin: "ignore", stdout: "ignore", stderr: "ignore", env: { ...process.env, ...serverEnv() } });
+      note(dim(`${flag("--get")} is downloading in the background: model has it once it is here`));
+    } catch (e) { note(red(`${flag("--get")} could not be downloaded: ${e instanceof Error ? e.message : String(e)}`)); }
   }
   if (HAS_MODEL) engineSvc.start();
   else note(dim("No GPU Chrysalis runs on here: the web chat uses Chrysalis on another computer on your network."));

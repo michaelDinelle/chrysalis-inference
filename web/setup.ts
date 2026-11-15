@@ -279,7 +279,7 @@ async function check() {
     asking = false;
     setUp(false);
     $("sub").innerHTML = "This device cannot reach Chrysalis's trust check (port " + new URL(CHECK).port + "). On the computer running Chrysalis, "
-      + "<code>chrysalis.sh --host 0.0.0.0</code> lets it through the firewall.";
+      + "typing <code>network</code> in Chrysalis's terminal lets it through the firewall.";
     say("Cannot reach this computer", "bad");
     timer = setTimeout(check, 1500);
     return;

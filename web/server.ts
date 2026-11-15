@@ -7,7 +7,8 @@ import { Devices, keyCookie } from "./devices";
 import { advertise, answerName, Link } from "./link";
 import { opencodeLine, opencodeManifest, opencodeScript } from "./opencode";
 import { tunnel } from "./machines";
-import { point } from "./veil";
+import { MODELS, python } from "./platform";
+import { qrSvg as qrCode } from "./qr";
 import { appleProfile, connectPage, deviceScript, TRUSTED_GIF } from "./setup";
 import * as harness from "./harness";
 import { fingerprint, lanAddresses, netName, routeAddress, tlsDir, webTls } from "./tls";
@@ -65,7 +66,7 @@ const arrived = (req: Request, srv: Srv) => {
 const json = (handler: (req: Request, srv: Srv) => Response | Promise<Response>) => (req: Request, srv: Srv) =>
   (req.headers.get("content-type") ?? "").startsWith("application/json") ? handler(req, srv) : new Response("JSON only", { status: 415 });
 
-const MODELS = ["qwen3.8-27b", "qwen3.8-flash-next"], MODEL_FILE = `${tlsDir()}/model`, OPENCODE_OFF = `${tlsDir()}/opencode-off`, OPENCODE_OUTSIDE = `${tlsDir()}/opencode-outside`;
+const MODEL_FILE = `${tlsDir()}/model`, OPENCODE_OFF = `${tlsDir()}/opencode-off`, OPENCODE_OUTSIDE = `${tlsDir()}/opencode-outside`;
 harness.allowOutside(existsSync(OPENCODE_OUTSIDE));
 async function pickModel(req: Request): Promise<string | undefined> {
   const model = (await req.json().catch(() => ({})))?.model;
@@ -87,6 +88,7 @@ interface Job {
   asks: Map<string, (d: harness.Answer) => void>;
   thread?: string;
   t0: number; tFirst?: number; tAnswer?: number; tLast?: number;
+  unkept?: boolean;
   gen: number;
 }
 const jobs = new Map<string, Job>(), turns = new Map<string, Job>();
@@ -98,7 +100,7 @@ const FIRST_ONLY = ["continue_final_message", "chrysalis_original", "chrysalis_a
 
 function startJob(body: string, over?: () => void): Job {
   const job: Job = { id: crypto.randomUUID(), events: [], folds: [], folded: 0, done: false, ctrl: new AbortController(), waiters: new Set(), asks: new Map(),
-    t0: Date.now(), gen: 0 };
+    t0: Date.now(), gen: 0, unkept: !!over };
   jobs.set(job.id, job);
   const push = (data: string | object) => {
     if (typeof data !== "string" && (data as any).round) fold(job);
@@ -210,7 +212,7 @@ const tooLong = (e: unknown) => e instanceof Refused && (e.code === "context_len
 const passing = (e: unknown) => e instanceof ChrysalisDown || e instanceof ChrysalisBroke || (e instanceof Refused && (e.status >= 500 || e.status === 429 || e.status === 408));
 async function round(job: Job, body: object, push: (d: string | object) => void, signal = job.ctrl.signal, timed = true): Promise<Out> {
   const r = await fetch(`${backends.url}/chat/completions`, {
-    method: "POST", body: JSON.stringify(body), headers: backends.headers(), signal,
+    method: "POST", body: JSON.stringify(body), headers: { ...backends.headers(), ...(job.unkept ? UNKEPT : {}) }, signal,
   }).catch((e) => { throw signal.aborted ? e : new ChrysalisDown(); });
   if (!r.ok || !r.body) throw await refusal(r);
   const out: Out = { content: "", reasoning: "", calls: [] };
@@ -493,7 +495,7 @@ const SANDBOX_CSP = "default-src 'none'; script-src 'unsafe-inline' 'unsafe-eval
   "font-src data:; media-src data: blob:; form-action 'none'; base-uri 'none'; frame-ancestors 'self'; sandbox allow-scripts allow-modals allow-pointer-lock allow-orientation-lock";
 
 const ROOT = `${import.meta.dir}/..`;
-const VOICE_CMD: string[] = process.env.CHRYSALIS_VOICE_CMD ? JSON.parse(process.env.CHRYSALIS_VOICE_CMD) : [`${ROOT}/data/venv/bin/python`, "-m", "chrysalis.voice"];
+const VOICE_CMD: string[] = process.env.CHRYSALIS_VOICE_CMD ? JSON.parse(process.env.CHRYSALIS_VOICE_CMD) : [python(), "-m", "chrysalis.voice"];
 const VOICE_IDLE_MS = Number(process.env.CHRYSALIS_VOICE_IDLE_MS ?? 60_000);
 interface VoiceSocket { up?: WebSocket; queue: (string | Buffer<ArrayBuffer>)[]; closed: boolean; machine?: { id: string; name: string; home?: string; kind?: string; line: ReturnType<typeof tunnel> } }
 const attached = new Map<string, { close(): void }>();
@@ -590,7 +592,7 @@ const serve = (hostname: string, port: number) => Bun.serve<VoiceSocket>({
       const [, to, path] = /^\/via\/([\w-]+)(\/.*)?$/.exec(rest) ?? [];
       if (to && !harness.outsideAllowed()) return Response.json({ error: { message: "OpenCode here is kept to Chrysalis's models" } }, { status: 403 });
       if (to) return tunedProxy(req, srv, `${Buffer.from(to, "base64url").toString().replace(/\/+$/, "")}${path ?? ""}`);
-      if (rest.startsWith("/hidden/v1/")) return veiled(() => tunedProxy(req, srv, `${CHRYSALIS}${rest.slice("/hidden".length)}`));
+      if (rest.startsWith("/hidden/v1/")) return veiled(() => tunedProxy(req, srv, `${CHRYSALIS}${rest.slice("/hidden".length)}`, UNKEPT));
       return rest.startsWith("/v1/") ? tunedProxy(req, srv, `${CHRYSALIS}${rest}`) : new Response("not found", { status: 404 });
     },
     "/v1/*": open((req, srv) => OPEN || devices.find(req)?.device.kind === "computer" ? proxy(req, srv)
@@ -674,7 +676,6 @@ img.src = ${JSON.stringify(checkUrl(req))} + "?t=" + Date.now();
         const body = await req.text(), sent = (() => { try { return JSON.parse(body); } catch { return undefined; } })();
         if (sent?.chrysalis_thread && OPEN && fromNetwork(req, srv)) return Response.json({ error: { message: KEPT_HERE } }, { status: 403 });
         const hidden = !!sent?.chrysalis_incognito, asked = hidden ? JSON.stringify({ ...sent, chrysalis_incognito: undefined }) : body;
-        if (hidden && !MEMORY) return NO_MEMORY();
         if (!hidden) arrived(req, srv);
         if (sent?.stream) {
           if (hidden) veil();
@@ -683,7 +684,7 @@ img.src = ${JSON.stringify(checkUrl(req))} + "?t=" + Date.now();
         const plain = async () => {
           try {
             const r = await fetch(`${backends.url}/chat/completions`, {
-              method: "POST", body: backends.isChrysalis ? asked : JSON.stringify(standard(JSON.parse(asked))), headers: backends.headers(), signal: req.signal,
+              method: "POST", body: backends.isChrysalis ? asked : JSON.stringify(standard(JSON.parse(asked))), headers: { ...backends.headers(), ...(hidden ? UNKEPT : {}) }, signal: req.signal,
             });
             return new Response(r.body, { status: r.status, headers: { "Content-Type": r.headers.get("Content-Type") ?? "application/json" } });
           } catch {
@@ -1085,7 +1086,7 @@ if (process.send) {
   }, 1000);
 }
 const declined = new Set<string>();
-if (Bun.spawnSync([`${import.meta.dir}/../chrysalis.sh`, "gpu"]).exitCode !== 0) setInterval(() => {
+if (process.env.CHRYSALIS_ENGINE_HERE === "0") setInterval(() => {
   const s = link.state(), to = s.found.find((f) => !declined.has(f.fp));
   if (!s.linked && !link.pairing && to) void link.pair(to.fp, MACHINE).then(() => {
     if (!link.pairing && !link.state().linked) declined.add(to.fp);
@@ -1133,19 +1134,17 @@ async function tuned(req: Request, body: string | undefined): Promise<string | u
   const { max_tokens, ...rest } = want, cap = "max_completion_tokens" in sent ? "max_completion_tokens" : "max_tokens";
   return JSON.stringify({ ...sent, ...rest, ...(max_tokens ? { [cap]: max_tokens } : {}) });
 }
-const MEMORY = process.env.CHRYSALIS_MEMORY, KEPT = process.env.CHRYSALIS_KEPT ?? "";
+const UNKEPT = { "X-Chrysalis-Unkept": "1" };
 let veils = 0;
 function unveil() {
-  if (--veils === 0) point(MEMORY!, KEPT, false);
+  veils--;
   tell({ veiled: veils });
 }
-const NO_MEMORY = () => Response.json({ error: { message: "Incognito keeps everything in memory, which needs Chrysalis started from its terminal on Linux" } }, { status: 409 });
 function veil() {
-  if (veils++ === 0) point(MEMORY!, KEPT, true);
+  veils++;
   tell({ veiled: veils });
 }
 async function veiled(answer: () => Response | Promise<Response>): Promise<Response> {
-  if (!MEMORY) return NO_MEMORY();
   veil();
   let r: Response;
   try { r = await answer(); } catch (e) { unveil(); throw e; }
@@ -1172,10 +1171,11 @@ async function outsideNow(on: boolean): Promise<Response> {
   try { await harness.ensure(CHRYSALIS); } catch (e) { return Response.json({ error: { message: (e as Error).message } }, { status: 502 }); }
   return new Response(null, { status: 204 });
 }
-async function tunedProxy(req: Request, srv: Srv, to: string): Promise<Response> {
+async function tunedProxy(req: Request, srv: Srv, to: string, more: Record<string, string> = {}): Promise<Response> {
   srv.timeout(req, 0);
   const url = new URL(req.url), headers = new Headers(req.headers);
   for (const h of ["host", "connection", "content-length"]) headers.delete(h);
+  for (const [k, v] of Object.entries(more)) headers.set(k, v);
   const body = await tuned(req, req.method === "GET" || req.method === "HEAD" ? undefined : await req.text());
   try {
     const r = await fetch(`${to}${url.search}`, { method: req.method, headers, signal: req.signal, body });
@@ -1206,14 +1206,8 @@ async function connectUrls(): Promise<string[]> {
   return lanAddresses().sort((a, b) => Number(b === first) - Number(a === first)).map((ip) => `${OPEN ? "http" : "https"}://${ip}:${server.port}/`);
 }
 
-const qrs = new Map<string, string | undefined>();
-function qrSvg(url: string): string | undefined {
-  if (qrs.has(url)) return qrs.get(url);
-  try {
-    const r = Bun.spawnSync(["qrencode", "-t", "SVG", "-m", "2", "-o", "-", url], { stdout: "pipe", stderr: "ignore" });
-    qrs.set(url, r.exitCode === 0 ? r.stdout.toString() : undefined);
-    return qrs.get(url);
-  } catch {
-    return undefined;
-  }
+const qrs = new Map<string, string>();
+function qrSvg(url: string): string {
+  if (!qrs.has(url)) qrs.set(url, qrCode(url));
+  return qrs.get(url)!;
 }

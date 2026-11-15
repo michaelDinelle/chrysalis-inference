@@ -1,7 +1,8 @@
-import { existsSync, mkdtempSync, readdirSync, rmSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readdirSync, rmSync } from "node:fs";
 import { homedir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { sessionContextBreakdown, type SessionContextBreakdownSegment } from "./breakdown";
+import { keep, memoryRoot, noCores, release, type Kept } from "./platform";
 
 export type Decision = "once" | "always" | "deny";
 export interface Scene { cast: string[]; cards?: object[]; group?: string; scenario?: string; name?: string; greeting?: string; greeter?: string }
@@ -73,17 +74,16 @@ async function commandsOn(h: Host | undefined, dir: string): Promise<{ name: str
   }
 }
 export const commands = (dir: string, machine?: string) => commandsOn(of(machine), dir);
-export const INSTALL = "curl -fsSL https://opencode.ai/v2/install | bash";
+export const INSTALL = process.platform === "win32" ? "npm install -g @opencode/cli" : "curl -fsSL https://opencode.ai/v2/install | bash";
 const SOURCE = name, PERSONA = "character", OURS = "chrysalis";
 const sceneOf = (s: any): Scene | undefined => (Array.isArray(s?.metadata?.[OURS]?.cast) ? s.metadata[OURS] : undefined);
-const WITH_US = '"$@" & c=$!; trap "kill $c" TERM INT; (while kill -0 "$CHRYSALIS_WEB_PID" 2>/dev/null; do sleep 1; done; kill $c 2>/dev/null) & w=$!; wait $c; wait $c 2>/dev/null; kill $w 2>/dev/null';
 const SKIPPED = "The user chose not to answer.", OLDEST = [2, 2, 4];
 const THINKING = ["none", "low", "medium"].map((id) => ({ id, body: { reasoning_effort: id } }));
 
-const binary = () => process.env.CHRYSALIS_OPENCODE ?? Bun.which("opencode") ?? [`${homedir()}/.opencode/bin/opencode`].find((p) => existsSync(p));
+const binary = () => process.env.CHRYSALIS_OPENCODE ?? Bun.which("opencode") ?? [`${homedir()}/.opencode/bin/opencode`, `${homedir()}/.opencode/bin/opencode.exe`].find((p) => existsSync(p));
 export type Send = (path: string, init: { method: string; headers: Record<string, string>; body?: string; signal?: AbortSignal }) => Promise<Response>;
 export interface Machine { id: string; name: string; home: string; kind: string }
-interface Host { id: string; url: string; auth: string; version: string; proc?: Bun.Subprocess; send?: Send; machine?: Machine; store?: string }
+interface Host { id: string; url: string; auth: string; version: string; proc?: Kept; send?: Send; machine?: Machine; store?: string }
 let host: Host | undefined, starting: Promise<void> | undefined;
 const away = new Map<string, Host>(), homes = new Map<string, string>();
 const gone = (): never => { throw new Error("That computer is not connected to Chrysalis"); };
@@ -117,15 +117,14 @@ export const outsideAllowed = () => outside;
 const local = (model: string) => model.startsWith("chrysalis/");
 let woken: (session: string) => void = () => {};
 export const onWake = (fn: (session: string) => void) => { woken = fn; };
-process.on("exit", () => host?.proc?.kill());
+process.on("exit", () => release(host?.proc));
 
-const MEMORY = process.env.CHRYSALIS_MEMORY || undefined;
 let scope: boolean | undefined, ours = "", veil: Promise<Host> | undefined, veiled: (on: boolean) => void = () => {};
 export const onHidden = (fn: (on: boolean) => void) => { veiled = fn; };
 export const hiddenOn = () => away.has(HIDDEN);
 export const hiddenAt = (session: string) => homes.get(session) === HIDDEN;
 function unswapped(cmd: string[]) {
-  try { scope ??= Bun.spawnSync(["systemd-run", "--user", "--scope", "-q", "true"], { stdout: "ignore", stderr: "ignore" }).exitCode === 0; } catch { scope = false; }
+  scope ??= !!Bun.which("systemd-run") && Bun.spawnSync(["systemd-run", "--user", "--scope", "-q", "true"], { stdout: "ignore", stderr: "ignore" }).exitCode === 0;
   return scope ? ["systemd-run", "--user", "--scope", "-q", "-p", "MemorySwapMax=0", ...cmd] : cmd;
 }
 
@@ -166,11 +165,11 @@ async function launch(chrysalis: string, store?: string): Promise<Host> {
       if (model) ((others[provider].models ??= {})[model] = { settings: { baseURL: via(base) } });
       else others[provider].settings = { baseURL: via(base) };
     }
-    const cmd = ["sh", "-c", store ? `ulimit -c 0; ${WITH_US}` : WITH_US, "sh", bin, "serve", "--hostname", "127.0.0.1", "--port", String(port)];
-    const proc = Bun.spawn(store ? unswapped(cmd) : cmd, { stdin: "ignore", stdout: "ignore", stderr: "ignore",
-      env: { ...env, ...(store ? { XDG_DATA_HOME: `${store}/data`, XDG_STATE_HOME: `${store}/state`, TMPDIR: `${store}/tmp` } : {}), CHRYSALIS_WEB_PID: String(process.pid), OPENCODE_PASSWORD: password,
+    const cmd = [bin, "serve", "--hostname", "127.0.0.1", "--port", String(port)];
+    const proc = keep(store ? unswapped(noCores(cmd)) : cmd, {
+      ...env, ...(store ? { OPENCODE_DB: ":memory:", XDG_DATA_HOME: `${store}/data`, XDG_STATE_HOME: `${store}/state`, TMPDIR: `${store}/tmp`, TEMP: `${store}/tmp`, TMP: `${store}/tmp` } : {}), OPENCODE_PASSWORD: password,
         OPENCODE_CONFIG_CONTENT: JSON.stringify({ ...(outside && !store ? {} : { enabled_providers: ["chrysalis"] }), providers: { ...others, chrysalis: { name: "Chrysalis",
-          package: "@opencode/ai/providers/openai-compatible", settings: { baseURL: `${modelUrl}${store ? "/hidden" : ""}/v1`, apiKey: "chrysalis" }, models } } }) } });
+          package: "@opencode/ai/providers/openai-compatible", settings: { baseURL: `${modelUrl}${store ? "/hidden" : ""}/v1`, apiKey: "chrysalis" }, models } } }) });
     const at = await reach(`http://127.0.0.1:${port}`, password, proc, Object.keys(models).length > 0);
     if (store) return { ...at, id: HIDDEN };
     const [providers, all] = await Promise.all([call("GET", "/api/provider", undefined, at), call("GET", "/api/model", undefined, at)]);
@@ -182,7 +181,7 @@ async function launch(chrysalis: string, store?: string): Promise<Host> {
       if (m.providerID !== "chrysalis" && /^https?:/.test(base ?? "") && !reached(base) && base !== bases.get(m.providerID)) { routes.set(`${m.providerID}\0${m.id}`, base); more = true; }
     }
     if (!more) return at;
-    proc.kill();
+    release(proc);
     await proc.exited;
   }
 }
@@ -198,9 +197,11 @@ export function ensure(chrysalis: string): Promise<void> {
 }
 function hidden(): Promise<Host> {
   return (veil ??= (async () => {
-    if (!MEMORY) throw new Error("Incognito keeps OpenCode in memory, which needs Chrysalis started from its terminal on Linux");
-    if (process.env.CHRYSALIS_OPENCODE_URL) throw new Error("Incognito needs Chrysalis to start OpenCode itself, on a store in memory");
-    const store = mkdtempSync(`${MEMORY}/opencode-`), at = { ...(await launch(ours, store)), store };
+    if (process.env.CHRYSALIS_OPENCODE_URL) throw new Error("Incognito needs Chrysalis to start OpenCode itself, with its store in memory");
+    const store = mkdtempSync(`${memoryRoot()}/chrysalis-run-${process.pid}-opencode-`);
+    mkdirSync(`${store}/tmp`);
+    let at: Host;
+    try { at = { ...(await launch(ours, store)), store }; } catch (e) { rmSync(store, { recursive: true, force: true }); throw e; }
     void at.proc!.exited.then(() => { if (away.get(HIDDEN) === at) void forget(); });
     away.set(HIDDEN, at);
     veiled(true);
@@ -213,30 +214,34 @@ export async function forget() {
   veil = undefined;
   if (!at) return;
   away.delete(HIDDEN);
-  at.proc?.kill();
+  release(at.proc);
   lost(at);
   await at.proc?.exited;
   if (at.store) rmSync(at.store, { recursive: true, force: true, maxRetries: 3 });
   veiled(false);
 }
-process.on("exit", () => away.get(HIDDEN)?.proc?.kill());
+process.on("exit", () => {
+  const at = away.get(HIDDEN);
+  release(at?.proc);
+  if (at?.store) rmSync(at.store, { recursive: true, force: true, maxRetries: 3 });
+});
 
 const tooOld = (version: string) => {
   const has = String(version).split(".").map(Number), short = OLDEST.findIndex((n, k) => has[k] !== n);
   return short >= 0 && !(has[short] > OLDEST[short]);
 };
-async function reach(url: string, password: string, proc?: Bun.Subprocess, local = false): Promise<Host> {
+async function reach(url: string, password: string, proc?: Kept, local = false): Promise<Host> {
     const auth = `Basic ${Buffer.from(`opencode:${password}`, "utf8").toString("base64")}`;
     for (const deadline = Date.now() + 30_000; ; await Bun.sleep(150)) {
       const info = await fetch(`${url}/api/info`, { headers: { authorization: auth }, signal: AbortSignal.timeout(2000) }).then((r) => (r.ok ? r.json() : r.status === 401 ? 401 : null), () => null);
-      if (info === 401) { proc?.kill(); throw new Error("OpenCode refused the password"); }
+      if (info === 401) { release(proc); throw new Error("OpenCode refused the password"); }
       if (info?.version) {
-        if (tooOld(info.version)) { proc?.kill(); throw new Error(`OpenCode ${OLDEST.join(".")} or newer is needed and this is ${info.version}: run opencode upgrade on this computer`); }
+        if (tooOld(info.version)) { release(proc); throw new Error(`OpenCode ${OLDEST.join(".")} or newer is needed and this is ${info.version}: run opencode upgrade on this computer`); }
         const listed = !proc || !local || await fetch(`${url}/api/model`, { headers: { authorization: auth } }).then((r) => r.json())
           .then((j) => (j.data ?? []).some((m: any) => m.providerID === "chrysalis"), () => false);
         if (listed) return { id: "", url, auth, version: info.version, proc };
       }
-      if (Date.now() > deadline || (proc && proc.exitCode !== null)) { proc?.kill(); throw new Error("OpenCode did not start"); }
+      if (Date.now() > deadline || (proc && proc.exitCode !== null)) { release(proc); throw new Error("OpenCode did not start"); }
     }
 }
 
@@ -244,7 +249,7 @@ export function stop(): Promise<unknown> {
   const was = host;
   host = undefined;
   starting = undefined;
-  was?.proc?.kill();
+  release(was?.proc);
   if (was) lost(was);
   return was?.proc?.exited ?? Promise.resolve();
 }

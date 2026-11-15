@@ -4,10 +4,11 @@ interface Session { id: string; title: string; dir: string; created: number; upd
 
 const PAGE = '<!doctype html>\n<html><head><title>Counter</title></head>\n<body>\n<h1 id="title">Clicks</h1>\n<button id="inc">Add</button>\n</body></html>\n';
 
-export function fakeOpenCode(secret: string, port = 0, store?: string) {
+export function fakeOpenCode(secret: string, port = 0, store?: string, model?: string) {
   let cards = 0;
-  const keep = () => { if (store) { mkdirSync(dirname(store), { recursive: true }); writeFileSync(store, JSON.stringify([...sessions.values()])); } };
-  const sessions = new Map<string, Session>(store && existsSync(store) ? (JSON.parse(readFileSync(store, "utf8")) as Session[]).map((s) => [s.id, s]) : []), listeners = new Set<(line: string) => void>(), asks = new Map<string, (reply: string, at: string) => void>();
+  const kept = store && store !== ":memory:" ? store : undefined;
+  const keep = () => { if (kept) { mkdirSync(dirname(kept), { recursive: true }); writeFileSync(kept, JSON.stringify([...sessions.values()])); } };
+  const sessions = new Map<string, Session>(kept && existsSync(kept) ? (JSON.parse(readFileSync(kept, "utf8")) as Session[]).map((s) => [s.id, s]) : []), listeners = new Set<(line: string) => void>(), asks = new Map<string, (reply: string, at: string) => void>();
   const stops = new Map<string, { now: boolean }>(), staged = new Map<string, string>();
   const log: { prompts: { session: string; text: string; persona?: string; model?: object; agent?: string; command?: string; meta?: any; files?: { uri: string; name?: string }[] }[]; replies: string[]; interrupts: number; answers: (object | string)[] } =
     { prompts: [], replies: [], interrupts: 0, answers: [] };
@@ -110,7 +111,9 @@ export function fakeOpenCode(secret: string, port = 0, store?: string) {
       keep();
     };
     if (stopped.now) { end("interrupted"); return emit("session.execution.interrupted", { sessionID, reason: "user" }); }
-    const two = `msg_${++ids}`, answer = `${lead}${allowed ? "The file says hello and honey." : "I did not read it."}${chosen}${text === "draw a card" ? ` Card ${++cards}.` : ""} You asked: ${text}`;
+    const heard = model && text.startsWith("probe ") ? ` The model said: ${(await fetch(`${model}/chat/completions`, { method: "POST", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ model: "qwen3.8-27b", messages: [{ role: "user", content: text }] }) }).then((r) => r.json(), () => null))?.choices?.[0]?.message?.content}.` : "";
+    const two = `msg_${++ids}`, answer = `${lead}${allowed ? "The file says hello and honey." : "I did not read it."}${chosen}${text === "draw a card" ? ` Card ${++cards}.` : ""}${heard} You asked: ${text}`;
     emit("session.step.started", { sessionID, assistantMessageID: two });
     for (let k = 0; k < answer.length; k += 12) emit("session.text.delta", { sessionID, assistantMessageID: two, delta: answer.slice(k, k + 12) });
     emit("session.step.ended", { sessionID, assistantMessageID: two, finish: "stop", tokens: { input: 40, output: 20, cache: { read: 100 } } });

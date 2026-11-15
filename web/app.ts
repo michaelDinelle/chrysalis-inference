@@ -936,7 +936,7 @@ async function paintOcPop() {
       line.id = "oc-locked";
       line.innerHTML = icon("lock");
       line.append(h("span", "", "Chrysalis only"), h("span", "oc-set", `set on ${host}`));
-      line.title = `Other models can be allowed only on ${host}: this switch in its own browser, or chrysalis.sh opencode outside in a terminal there`;
+      line.title = `Other models can be allowed only on ${host}: this switch in its own browser, or the OpenCode switch in Chrysalis's terminal there`;
       models.push(line);
     }
     note.append(only ? "Nothing leaves your computers." : "Other models are allowed. A thread on one sends it your prompts and files.");
@@ -3848,7 +3848,7 @@ async function renderConnect() {
   }
   if (status.here ? !p.lan : !oc?.line) {
     const note = h("p", "set-note");
-    note.append("Chrysalis is on this computer only. Run ", h("code", "", "chrysalis.sh --host 0.0.0.0"), " in a terminal to let other devices on this network in.");
+    note.append("Chrysalis is on this computer only. Type ", h("code", "", "network"), " in Chrysalis's terminal to let other devices on this network in.");
     box.dataset.key = "";
     return void box.replaceChildren(note);
   }
@@ -3899,16 +3899,12 @@ async function renderConnect() {
   }
   done.append(`${joined} is connected.`);
   const row = h("div", "dev-row"), text = h("div", "dev-text"), other = h("p");
-  if (p.qr) {
-    const qr = h("img", "dev-qr");
-    qr.src = `data:image/svg+xml;base64,${btoa(p.qr)}`;
-    qr.alt = "QR code of Chrysalis's address on this network";
-    row.append(qr);
-  }
-  other.append(p.qr ? "No camera? On the device, open " : "On the device, open ", h("code", "dev-url", p.connect[0].replace(/\/$/, "")), ".");
-  text.append(h("p", "dev-lead", `${p.qr ? "Scan this with your phone." : "The device connects there."} Go on past its one warning that the connection is not private, then allow the code it shows.`),
-    other,
-    ...(p.qr ? [] : [h("p", "set-note", "With qrencode installed, a QR code shows here for phones to scan.")]));
+  const qr = h("img", "dev-qr");
+  qr.src = `data:image/svg+xml;base64,${btoa(p.qr)}`;
+  qr.alt = "QR code of Chrysalis's address on this network";
+  row.append(qr);
+  other.append("No camera? On the device, open ", h("code", "dev-url", p.connect[0].replace(/\/$/, "")), ".");
+  text.append(h("p", "dev-lead", "Scan this with your phone. Go on past its one warning that the connection is not private, then allow the code it shows."), other);
   row.append(text);
   const devs = h("div", "dev-list"), browsers = list.filter((d) => d.kind !== "computer");
   devs.append(h("div", "set-title", "Let in"));

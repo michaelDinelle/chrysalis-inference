@@ -182,7 +182,7 @@ class Cache:
         self.entries.append(Entry(snap, tokens, pinned, logits))
         self.trim()
 
-    def checkpoint(self, slot, pinned=False, logits=False):
+    def checkpoint(self, slot, pinned=False, logits=False, kept=True):
         if not len(slot.tokens):
             return
         for en in self.entries:
@@ -193,11 +193,11 @@ class Cache:
                     self.e.free_snapshot(en.snap)
                     break
                 en.pinned, en.used = en.pinned or pinned, time.time()
-                if pinned and self.disk:
+                if pinned and kept and self.disk:
                     self.disk.save(self.e, en.snap, en.tokens)
                 return
         self.add(self.e.snapshot(slot.sid), slot.tokens.copy(), pinned, logits)
-        if pinned and self.disk:
+        if pinned and kept and self.disk:
             self.disk.save(self.e, self.entries[-1].snap, self.entries[-1].tokens)
 
     def trim(self, need_tokens=0):

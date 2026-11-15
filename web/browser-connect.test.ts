@@ -52,7 +52,7 @@ test("past the chat's warning on the network, a device gets the connect page and
     await page.reload({ waitUntil: "domcontentloaded" });
     await page.waitForFunction(() => /Cannot reach/.test(document.getElementById("status")!.textContent!), { timeout: 10_000 });
     expect([await page.$eval("#status", (e) => (e as HTMLElement).hidden), await page.$eval("#sub", (e) => e.textContent)])
-      .toEqual([false, expect.stringContaining("chrysalis.sh --host 0.0.0.0")]);
+      .toEqual([false, expect.stringContaining("typing network in Chrysalis's terminal")]);
     await page.close();
     expect(await lan.waiting()).toEqual([]);
   } finally {

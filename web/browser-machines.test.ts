@@ -36,7 +36,7 @@ test("another computer let in runs its own OpenCode from this page: it is under 
     expect(await page.$$eval("#row-menu > *", (x) => x.map((e) => e.textContent))).toEqual(["Run on", name, name, "Add another computer"]);
     await page.evaluate(() => document.querySelectorAll<HTMLElement>("#row-menu button")[2].click());
     await page.waitForSelector("#connect-view[open] .set-note");
-    expect([await page.$eval("#connect-title", (e) => e.textContent), await page.$eval("#connect-view .set-note code", (e) => e.textContent)]).toEqual(["Add a computer", "chrysalis.sh --host 0.0.0.0"]);
+    expect([await page.$eval("#connect-title", (e) => e.textContent), await page.$eval("#connect-view .set-note code", (e) => e.textContent)]).toEqual(["Add a computer", "network"]);
     await page.click("#connect-close");
     await page.click("#machine-btn");
     await page.evaluate(() => document.querySelectorAll<HTMLElement>("#row-menu button")[1].click());
