@@ -154,7 +154,9 @@ docker run -d --device /dev/kfd --device /dev/dri -p 127.0.0.1:8080:8080 -v chry
   its database in memory and the first is never stopped. Nothing of it is written to disk: the page keeps it out
   of the browser's storage, its requests don't show in the terminal, and the model server keeps what it caches of an
   incognito request in RAM only. `incognito end` in the terminal or stopping Chrysalis deletes whatever is left. It works
-  on Windows, macOS and Linux; what a tool writes into your folders is still written, and the model server's memory of the chat goes as its cache
+  on Windows, macOS and Linux. On Linux OpenCode's own log, the output of the commands its tools run and its undo
+  snapshots stay in memory too; on Windows and macOS, which have no folder in memory, those are in the temporary folder
+  until the chat ends. What a tool writes into your folders is still written, and the model server's memory of the chat goes as its cache
   turns over.
 - Settings has a system prompt: it goes with every chat, after whoever the chat is with. In a thread it goes in the one
   instruction Chrysalis gives OpenCode, beside OpenCode's own prompt.
