@@ -420,23 +420,10 @@ if srv.pictures:
         {"type": "input_file", "file_data": "data:application/pdf;base64," + doc, "filename": "vault.pdf"}, {"type": "input_text", "text": q}]}])
     check("Responses: a PDF file", "4217" in rr.output_text and "9314" in rr.output_text, repr(rr.output_text[:60]))
 
-    import subprocess
-    enc = subprocess.Popen(["ffmpeg", "-v", "error", "-f", "rawvideo", "-pix_fmt", "rgb24", "-s", "640x360", "-r", "10", "-i", "-",
-                            "-c:v", "libx264", "-pix_fmt", "yuv420p", "-f", "mp4", "-movflags", "frag_keyframe+empty_moov", "-"],
-                           stdin=subprocess.PIPE, stdout=subprocess.PIPE)
-    font, frames = ImageFont.load_default(size=48), []
-    for i in range(40):
-        img = Image.new("RGB", (640, 360), "white")
-        d = ImageDraw.Draw(img)
-        if i < 20:
-            d.ellipse([200 + 4 * i, 100, 320 + 4 * i, 220], fill="red")
-        else:
-            d.rectangle([100, 120, 220, 240], fill="blue")
-            d.text((300, 150), "CHRYSALIS 58", fill="black", font=font)
-        frames.append(img.tobytes())
-    film, _ = enc.communicate(b"".join(frames))
+    from video_fixture import film
+    clip = film()
     r = oai.chat.completions.create(model=MODEL, max_tokens=80, extra_body={"enable_thinking": False}, messages=[{"role": "user", "content": [
-        {"type": "video_url", "video_url": {"url": "data:video/mp4;base64," + base64.b64encode(film).decode()}},
+        {"type": "video_url", "video_url": {"url": "data:video/mp4;base64," + base64.b64encode(clip).decode()}},
         {"type": "text", "text": "This video shows a shape, then another shape with some text. What color is the first shape, and "
                                  "what does the text say? One short sentence."}]}])
     said = r.choices[0].message.content or ""
