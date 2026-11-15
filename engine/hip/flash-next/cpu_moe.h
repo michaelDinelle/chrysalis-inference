@@ -1,4 +1,5 @@
 #pragma once
+#include "../../cpu_exact.h"
 #include <atomic>
 #include <cstddef>
 #include <cstdint>
@@ -7,7 +8,7 @@
 
 constexpr int MOE_MAX_T = 8;
 constexpr int MOE_MAX_E = 10;
-constexpr int VNNI_MIN_TOKENS = 3;
+constexpr int EXACT_MIN_TOKENS = 3;
 
 struct MoeShared {
     alignas(64) uint32_t go;
@@ -28,31 +29,6 @@ struct MoeEmu {
     float hd[MOE_MAX_T * MOE_MAX_E][20];
 };
 
-struct EmuAct {
-    alignas(64) int8_t q[2560];
-    alignas(64) float d[80];
-    alignas(64) int32_t s16[160];
-    alignas(64) int32_t c32[80];
-};
-
-struct ColdLayer {
-    const uint8_t *gate[3] = {}, *up[3] = {}, *down = nullptr, *down2 = nullptr;
-    const uint8_t *file_gate = nullptr, *file_up = nullptr, *file_down2 = nullptr;
-    int type_gu[3] = {-1, -1, -1}, type_dn = -1;
-    size_t row_gu[3] = {}, row_dn = 0;
-    int n0 = 0, n = 0, n2 = 0;
-    int grp(int s) const { return s < n0 ? 0 : s < n ? 1 : 2; }
-    int idx(int s) const { return s < n0 ? s : s < n ? s - n0 : s - n; }
-    const uint8_t *gu_row(bool is_up, int s, int r) const {
-        const int g = grp(s);
-        return (is_up ? up[g] : gate[g]) + ((size_t)idx(s) * 640 + r) * row_gu[g];
-    }
-    const uint8_t *dn_row(int s, int r) const {
-        return s < n ? down + ((size_t)s * 2560 + r) * row_dn : down2 + ((size_t)(s - n) * 2560 + r) * row_dn;
-    }
-    size_t bytes(int s) const { return 2 * 640 * row_gu[grp(s)] + 2560 * row_dn; }
-};
-
 struct MoeJob {
     int layer = 0, T = 0, n_exp = 0;
     const uint16_t *x = nullptr;
@@ -63,39 +39,16 @@ struct MoeJob {
     uint16_t *out = nullptr;
 };
 
-struct VnniScratch {
-    uint8_t *w = nullptr; float *ws = nullptr, *wa = nullptr, *wb = nullptr;
-    uint32_t *xi = nullptr; float *xs = nullptr; int32_t *xc = nullptr;
-    float *xf = nullptr;
-    float *h = nullptr; uint32_t *hi = nullptr; float *hs = nullptr; int32_t *hc = nullptr;
-    float *y = nullptr;
-    void reserve();
-    ~VnniScratch();
-};
-bool vnni_supported();
-bool vnni_formats(const ColdLayer &c);
-void vnni_quant_x(const float *x, int8_t *q, float *s, int32_t *sum);
-void expert_vnni(const ColdLayer &c, int slot, int n, const int8_t *const *xq, const float *const *xs, const int32_t *const *xsum,
-                 const float *w, uint16_t *const *out, VnniScratch &S);
-void vnni_act1(const float *xs, const int32_t *xsum, float *s16, float *f16);
-float vnni_dot_gu1(const uint8_t *row, int type, const int8_t *xq, const float *xs, const int32_t *xsum, const float *s16,
-                   const float *f16, VnniScratch &S);
-void vnni_quant_h(const float *h, int8_t *q, float *s, float *c);
-float vnni_dot_dn1(const uint8_t *row, const int8_t *hq, const float *hs, const float *hc);
-void emu_quant_x(const float *x, EmuAct &a);
-float emu_gu_row(const uint8_t *row, int type, const EmuAct &a, VnniScratch &S);
-float emu_dn_row(const uint8_t *row, const int8_t *hq, const float *hd, const int32_t *hc, VnniScratch &S);
-
 class CpuMoe {
 public:
     void start(MoeShared *shared, MoeShared *pred, const std::vector<ColdLayer> &layers, int threads, MoeEmu *emu = nullptr);
-    bool can_emulate() const { return me && vnni_ok; }
+    bool can_emulate() const { return me && exact_ok; }
     void stop();
     void arm();
     void disarm();
     void submit(const MoeJob &job);
     void wait();
-    bool use_vnni(int on) { const bool was = vnni; vnni = on && vnni_ok; return was; }
+    bool use_exact(int on) { const bool was = exact; exact = on && exact_ok; return was; }
     ~CpuMoe() { stop(); }
 
 private:
@@ -129,8 +82,8 @@ private:
 
     std::atomic<int> jtok{0}, jexp{0}, jfin{0};
     std::vector<uint8_t> pxq[3];
-    std::vector<int8_t> vxq; std::vector<float> vxs; std::vector<int32_t> vxsum;
-    bool vnni = false, vnni_ok = false;
-    struct Scratch { std::vector<float> gu, y; std::vector<uint8_t> hq; VnniScratch v; };
+    std::vector<int8_t> exq; std::vector<float> exs; std::vector<int32_t> exsum;
+    bool exact = false, exact_ok = false;
+    struct Scratch { std::vector<float> gu, y; std::vector<uint8_t> hq; ExactScratch v; };
     std::vector<Scratch> scr;
 };

@@ -288,7 +288,7 @@ int main() {
             std::vector<float> res[3];
             int n_emu = 0, n_emu_g1 = 0, n_gpu = 0;
             const float xfracs[3] = {1.0f, 0.0f, 0.5f};
-            for (int run = 0; run < 3; run++) {
+            for (int run = 0; run < 3 && ecpu.can_emulate(); run++) {
                 gen++;
                 CK(hipMemset(dres, 0, (size_t)T * HC * D * 4)); CK(hipMemset(dy, 0, (size_t)90 * D * 4));
                 router_route_dec(dw, dwsg, dx, T, dlg, dsg, dslot, NC_, dids, dwts, dhot, ds, 0.5f, 0, gen, dcnt, st, nullptr, 1, xfracs[run]);

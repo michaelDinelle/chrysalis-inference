@@ -44,7 +44,7 @@ int main() {
     std::normal_distribution<float> nd(0.f, 1.f);
     int fails = 0;
     MoeShared *sh = new MoeShared{};
-    static_assert(VNNI_MIN_TOKENS >= 3 && VNNI_MIN_TOKENS <= 24, "the picks give both paths experts in both groups");
+    static_assert(EXACT_MIN_TOKENS >= 3 && EXACT_MIN_TOKENS <= 24, "the picks give both paths experts in both groups");
     const int NC = 8, NC0 = 5, T = 24;
     std::vector<int> third = {0, 1, 1, 2, 2, 2, 5};
     third.insert(third.end(), 7, 3);
@@ -80,14 +80,14 @@ int main() {
         cl.down = rd.data(); cl.type_dn = GGML_TYPE_IQ4_NL; cl.row_dn = ggml_row_size(GGML_TYPE_IQ4_NL, FE);
         cl.n0 = NC0; cl.n = NC;
         CpuMoe cpu; cpu.start(sh, nullptr, {cl}, 8); cpu.arm();
-        const bool vnni = cpu.use_vnni(1);
+        const bool exact = cpu.use_exact(1);
         std::vector<float> x((size_t)T * D);
         for (auto &v : x) v = nd(rng);
         Job J = make_job(picks, NC, rng, x);
         cpu.submit(J.j); cpu.wait();
         double num[2][2] = {}, den[2][2] = {};
         for (int e = 0; e < J.j.n_exp; e++) {
-            const int s = J.slot[e], path = vnni && J.first[e + 1] - J.first[e] >= VNNI_MIN_TOKENS, grp = s >= NC0;
+            const int s = J.slot[e], path = exact && J.first[e + 1] - J.first[e] >= EXACT_MIN_TOKENS, grp = s >= NC0;
             for (int p = J.first[e]; p < J.first[e + 1]; p++) {
                 const float *xt = &x[(size_t)J.tok[p] * D];
                 std::vector<double> h(FE);
@@ -108,17 +108,31 @@ int main() {
         for (int path = 0; path < 2; path++)
             for (int grp = 0; grp < 2; grp++) {
                 char what[96];
-                snprintf(what, sizeof what, "CPU prefill job, %s, %s path, group %d", f.name, path ? "VNNI" : "ggml", grp);
+                snprintf(what, sizeof what, "CPU prefill job, %s, %s path, group %d", f.name, path ? "exact" : "ggml", grp);
                 if (den[path][grp] == 0) {
-                    const bool expected = !path || vnni;
-                    printf("%-48s %s\n", what, expected ? "no expert took it  FAIL" : "not run: no AVX-512 VNNI on this CPU");
-                    fails += expected;
+                    printf("%-48s no expert took it  FAIL\n", what);
+                    fails++;
                     continue;
                 }
                 const double r = sqrt(num[path][grp] / den[path][grp]);
                 printf("%-48s rel diff %.2e %s\n", what, r, r < 2e-2 ? "ok" : "FAIL");
                 fails += r >= 2e-2;
             }
+        const std::vector<uint16_t> first = J.out;
+        const int was = exact_path();
+        int paths = 0, differ = 0;
+        for (int p = 0; p < EXACT_PATHS; p++) {
+            if (!exact_use_path(p)) continue;
+            paths++;
+            std::fill(J.out.begin(), J.out.end(), 0);
+            cpu.submit(J.j); cpu.wait();
+            differ += J.out != first;
+        }
+        exact_use_path(was);
+        const bool same = exact && paths > 0 && differ == 0;
+        printf("CPU prefill job, %s, on each of the %d exact paths this CPU has: %s %s\n", f.name, paths,
+               differ ? "outputs differ" : "the same to the bit", same ? "ok" : "FAIL");
+        fails += !same;
         cpu.disarm(); cpu.stop();
     }
     printf(fails ? "%d FAILED\n" : "all ok\n", fails);

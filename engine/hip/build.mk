@@ -30,7 +30,7 @@ build/test_quant build/test_attn build/test_gdn build/test_vision: build/%: test
 
 FN_SRC := $(H)/flash-next/relayout.hip $(H)/flash-next/quant.hip $(H)/flash-next/ops.hip $(H)/gdn.hip $(H)/flash-next/attn.hip \
           $(H)/flash-next/moe.hip $(H)/flash-next/ple.hip $(H)/vision.hip $(H)/gpu.hip $(H)/flash-next/model.cpp $(H)/flash-next/load.cpp \
-          $(H)/flash-next/experts.cpp $(H)/flash-next/api.cpp $(H)/flash-next/cpu_moe.cpp $(H)/flash-next/cpu_vnni.cpp
+          $(H)/flash-next/experts.cpp $(H)/flash-next/api.cpp $(H)/flash-next/cpu_moe.cpp engine/cpu_exact.cpp
 FN_LIBS := $(LIBS) -L$(GGML)/build/bin -lggml-cpu -lggml-base -Wl,-rpath,$(GGML)/build/bin
 
 FN_OBJ := $(FN_SRC:%=build/ofn/%.o)
@@ -42,22 +42,27 @@ build/libchrysalis_fn.so: $(FN_OBJ)
 	$(HIPCC) $(FLAGS) -shared -s -o $@ $(FN_OBJ) $(FN_LIBS)
 
 FN_KERN := $(filter-out $(H)/flash-next/model.cpp $(H)/flash-next/load.cpp $(H)/flash-next/experts.cpp $(H)/flash-next/api.cpp,$(FN_SRC))
-build/test_%_fn: tests/hip/test_%_fn.cpp $(FN_KERN) $(wildcard $(H)/flash-next/*.h)
+build/test_%_fn: tests/hip/test_%_fn.cpp $(FN_KERN) $(wildcard engine/*.h $(H)/flash-next/*.h)
 	@mkdir -p build
 	$(HIPCC) $(FLAGS) -I$(H)/flash-next -I$(GGML)/ggml/include -x hip -o $@ $< $(FN_KERN) $(FN_LIBS)
 
-build/test_linear_fn: tests/hip/test_linear_fn.cpp $(FN_SRC) $(wildcard $(H)/flash-next/*.h)
+build/test_linear_fn: tests/hip/test_linear_fn.cpp $(FN_SRC) $(wildcard engine/*.h $(H)/flash-next/*.h)
 	@mkdir -p build
 	$(HIPCC) $(FLAGS) -I$(H)/flash-next -I$(GGML)/ggml/include -x hip -o $@ $< $(filter-out $(H)/flash-next/api.cpp,$(FN_SRC)) $(FN_LIBS)
 
 build/test_gdn_fn: tests/hip/test_gdn.hip
 
+build/test_cpu_exact: tests/test_cpu_exact.cpp engine/cpu_exact.cpp $(wildcard engine/*.h)
+	@mkdir -p build
+	$(HIPCC) $(FLAGS) -I$(GGML)/ggml/include -x hip -o $@ $< engine/cpu_exact.cpp -L$(GGML)/build/bin -lggml-base -Wl,-rpath,$(GGML)/build/bin
+
 kernels: build/test_quant build/test_attn build/test_gdn
 	./build/test_quant data/models/qwen3.8-27b/qwen3.8-27b.gguf && ./build/test_attn && ./build/test_gdn
 
-kernels_fn: build/test_quant_fn build/test_attn_fn build/test_gdn_fn build/test_mix_fn build/test_moe_fn build/test_cpujob_fn build/test_linear_fn
+kernels_fn: build/test_quant_fn build/test_attn_fn build/test_gdn_fn build/test_mix_fn build/test_moe_fn build/test_cpujob_fn build/test_linear_fn \
+            build/test_cpu_exact
 	./build/test_quant_fn && ./build/test_attn_fn && ./build/test_gdn_fn && ./build/test_mix_fn && ./build/test_moe_fn && \
-	./build/test_cpujob_fn && ./build/test_linear_fn
+	./build/test_cpujob_fn && ./build/test_linear_fn && ./build/test_cpu_exact
 
 TEST_BUILDS := build/llama_params build/ref_logits build/ref_logits_mm
 define BACKEND_TESTS
