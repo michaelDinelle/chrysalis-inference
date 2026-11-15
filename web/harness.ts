@@ -2,7 +2,7 @@ import { existsSync, mkdirSync, mkdtempSync, readdirSync, rmSync } from "node:fs
 import { homedir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { sessionContextBreakdown, type SessionContextBreakdownSegment } from "./breakdown";
-import { keep, memoryRoot, noCores, release, type Kept } from "./platform";
+import { keep, noCores, ramDrop, ramRoot, release, type Kept } from "./platform";
 
 export type Decision = "once" | "always" | "deny";
 export interface Scene { cast: string[]; cards?: object[]; group?: string; scenario?: string; name?: string; greeting?: string; greeter?: string }
@@ -195,13 +195,14 @@ export function ensure(chrysalis: string): Promise<void> {
     void watch(at);
   })().catch((e) => { starting = undefined; throw e; }));
 }
+const wipe = (store: string) => { if (!ramDrop()) rmSync(store, { recursive: true, force: true, maxRetries: 3 }); };
 function hidden(): Promise<Host> {
   return (veil ??= (async () => {
     if (process.env.CHRYSALIS_OPENCODE_URL) throw new Error("Incognito needs Chrysalis to start OpenCode itself, with its store in memory");
-    const store = mkdtempSync(`${memoryRoot()}/chrysalis-run-${process.pid}-opencode-`);
+    const store = mkdtempSync(`${ramRoot()}/chrysalis-run-${process.pid}-opencode-`);
     mkdirSync(`${store}/tmp`);
     let at: Host;
-    try { at = { ...(await launch(ours, store)), store }; } catch (e) { rmSync(store, { recursive: true, force: true }); throw e; }
+    try { at = { ...(await launch(ours, store)), store }; } catch (e) { wipe(store); throw e; }
     void at.proc!.exited.then(() => { if (away.get(HIDDEN) === at) void forget(); });
     away.set(HIDDEN, at);
     veiled(true);
@@ -217,13 +218,13 @@ export async function forget() {
   release(at.proc);
   lost(at);
   await at.proc?.exited;
-  if (at.store) rmSync(at.store, { recursive: true, force: true, maxRetries: 3 });
+  if (at.store) wipe(at.store);
   veiled(false);
 }
 process.on("exit", () => {
   const at = away.get(HIDDEN);
   release(at?.proc);
-  if (at?.store) rmSync(at.store, { recursive: true, force: true, maxRetries: 3 });
+  if (at?.store) wipe(at.store);
 });
 
 const tooOld = (version: string) => {

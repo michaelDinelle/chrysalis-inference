@@ -1,4 +1,4 @@
-import { existsSync, readFileSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, realpathSync, rmdirSync } from "node:fs";
 import { tmpdir, totalmem } from "node:os";
 import { join } from "node:path";
 
@@ -66,6 +66,59 @@ export const release = (proc?: Kept) => { try { proc?.stdin.end(); } catch {  } 
 export const noCores = (cmd: string[]) => (Bun.which("prlimit") ? ["prlimit", "--core=0", ...cmd] : cmd);
 
 export const memoryRoot = (m: Machine = here()) => (m.platform === "linux" && m.exists("/dev/shm") ? "/dev/shm" : tmpdir());
+
+const quiet = (cmd: string[]) => { const r = Bun.spawnSync(cmd, { stdin: "ignore", stdout: "pipe", stderr: "ignore" }); return r.exitCode === 0 ? r.stdout.toString() : undefined; };
+const RAM = "chrysalis-ram-", RAM_MB = 1024;
+let ram: { root: string; drop: () => void } | undefined;
+
+function macRam() {
+  const eject = (dev: string, at: string) => { quiet(["umount", "-f", at]); quiet(["hdiutil", "detach", "-force", dev]); try { rmdirSync(at); } catch {  } };
+  for (const [, dev, at, pid] of (quiet(["mount"]) ?? "").matchAll(new RegExp(`^(/dev/disk\\d+) on (.*/${RAM}(\\d+)) \\(`, "gm"))) {
+    try { process.kill(Number(pid), 0); } catch (e) { if ((e as { code?: string }).code !== "EPERM") eject(dev, at); }
+  }
+  const dev = quiet(["hdiutil", "attach", "-nomount", `ram://${RAM_MB * 2048}`])?.trim().split(/\s/)[0], at = join(realpathSync(tmpdir()), `${RAM}${process.pid}`);
+  if (!dev) throw new Error("Incognito keeps its files in memory only, and macOS made no RAM disk for them");
+  mkdirSync(at, { recursive: true });
+  if (quiet(["newfs_hfs", "-M", "700", dev]) === undefined || quiet(["mount", "-t", "hfs", "-o", "nobrowse,noatime,nosuid", dev, at]) === undefined) {
+    eject(dev, at);
+    throw new Error("Incognito keeps its files in memory only, and macOS did not mount its RAM disk");
+  }
+  return { root: at, drop: () => eject(dev, at) };
+}
+
+function winRam() {
+  const fsp = join(process.env["ProgramFiles(x86)"] ?? "C:\\Program Files (x86)", "WinFsp", "bin"), has = () => existsSync(join(fsp, "winfsp-x64.dll"));
+  const ps = (script: string) => quiet(["powershell", "-NoProfile", "-NonInteractive", "-Command", script]);
+  if (!has()) {
+    console.log("Incognito keeps its files in memory only: Windows asks once to add the RAM drive they live on (WinFsp - Windows File System Proxy, Copyright (C) Bill Zissimopoulos, https://github.com/winfsp/winfsp)");
+    ps(`Start-Process msiexec -Verb RunAs -Wait -ArgumentList '/i', '"${join(ROOT, "build", "winfsp.msi")}"', '/qn', '/norestart'`);
+    if (!has()) throw new Error("Incognito keeps its files in memory only, and Windows did not add WinFsp, the RAM drive they live on");
+  }
+  const mine = `Get-CimInstance Win32_Process -Filter "name='ramdrive.exe'" | ForEach-Object { "$($_.ProcessId) $($_.CommandLine)" }`;
+  for (const [, drive, owner] of (ps(mine) ?? "").matchAll(/^(\d+) .*\\chrysalis\\ram(\d+)\s*$/gm)) {
+    try { process.kill(Number(owner), 0); } catch { try { process.kill(Number(drive)); } catch {  } }
+  }
+  const share = `\\chrysalis\\ram${process.pid}`, at = `\\${share}`;
+  const drive = keep([join(ROOT, "build", "ramdrive.exe"), "-i", "-F", "NTFS", "-n", "1048576", "-s", String(2 ** 31), "-u", share],
+    { ...process.env, ...before(process.env, "PATH", [fsp], ";") });
+  for (let tries = 0; !existsSync(at) && drive.exitCode === null && tries < 200; tries++) Bun.sleepSync(50);
+  if (!existsSync(at)) { release(drive); throw new Error("Incognito keeps its files in memory only, and its RAM drive did not start"); }
+  return { root: at, drop: () => release(drive) };
+}
+
+export function ramRoot(m: Machine = here()) {
+  if (m.platform === "linux") {
+    if (!m.exists("/dev/shm")) throw new Error("Incognito keeps its files in memory only, and this system has no /dev/shm");
+    return "/dev/shm";
+  }
+  return (ram ??= m.platform === "darwin" ? macRam() : winRam()).root;
+}
+export function ramDrop() {
+  const had = !!ram;
+  ram?.drop();
+  ram = undefined;
+  return had;
+}
 
 export async function utf8Console(m: Machine = here()) {
   if (m.platform !== "win32") return;

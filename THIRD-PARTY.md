@@ -12,5 +12,9 @@ license, with the license texts in the package folders they come in:
 - On Linux, the parts of AMD's ROCm the engines load (MIT and others, as ROCm states); on Windows, hipBLASLt and its
   kernels from AMD's HIP SDK (MIT).
 - Bun (MIT), which runs the terminal and the web chat, and the packages in web/package.json.
+- On Windows, WinFsp - Windows File System Proxy, Copyright (C) Bill Zissimopoulos (https://github.com/winfsp/winfsp),
+  as its unmodified installer (GPLv3 with its exception for free software), and `build/ramdrive.exe`, WinFsp's own
+  in-memory file system sample built unchanged from that release (GPLv3; its source is `samples/memfs` in WinFsp 2.1).
+  Incognito chats keep OpenCode's files on it, so they are only ever in memory.
 
 web/THIRD-PARTY.md lists the code in web/ that is ported from other projects.

@@ -49,7 +49,9 @@ README.md shows what Chrysalis is. This file is how to change it.
   routes each thread to the OpenCode that holds it. Every request of an incognito chat reaches the model server marked
   X-Chrysalis-Unkept, so chrysalis/cache.py keeps that request's prompt snapshots (the tools and the system prompt,
   tokens and all) in RAM only and saves no expert pool while one runs. The incognito OpenCode's other files go in a
-  folder of its own (in /dev/shm where there is one, the temporary folder elsewhere), deleted when the chats end. The
+  folder of its own on a drive that is only ever memory (`ramRoot` in web/platform.ts: /dev/shm on Linux, a RAM disk
+  mounted with hdiutil on macOS, WinFsp's in-memory file system on Windows, build/ramdrive.exe, installed at the first
+  incognito chat), gone when the chats end. Nothing of an incognito chat may be written anywhere else. The
   page marks such a chat `incognito`, lists it nowhere, keeps it and its files out of the browser's storage, and
   deletes it the moment it is left (`leave` in web/app.ts). Anything new that writes a chat to disk has to be closed
   there too.

@@ -154,10 +154,12 @@ docker run -d --device /dev/kfd --device /dev/dri -p 127.0.0.1:8080:8080 -v chry
   its database in memory and the first is never stopped. Nothing of it is written to disk: the page keeps it out
   of the browser's storage, its requests don't show in the terminal, and the model server keeps what it caches of an
   incognito request in RAM only. `incognito end` in the terminal or stopping Chrysalis deletes whatever is left. It works
-  on Windows, macOS and Linux. On Linux OpenCode's own log, the output of the commands its tools run and its undo
-  snapshots stay in memory too; on Windows and macOS, which have no folder in memory, those are in the temporary folder
-  until the chat ends. What a tool writes into your folders is still written, and the model server's memory of the chat goes as its cache
-  turns over.
+  on Windows, macOS and Linux, and on each of them OpenCode's own log, the output of the commands its tools run and
+  its undo snapshots are on a drive that exists only in memory: `/dev/shm` on Linux, a RAM disk on macOS, and on
+  Windows a RAM drive from [WinFsp](https://github.com/winfsp/winfsp) (WinFsp - Windows File System Proxy, Copyright (C)
+  Bill Zissimopoulos), which Windows asks once to install. If the computer loses power, nothing of the chat is on its
+  disk. What a tool writes into your folders is still written, memory the system swaps out goes where its swap goes,
+  and the model server's memory of the chat goes as its cache turns over.
 - Settings has a system prompt: it goes with every chat, after whoever the chat is with. In a thread it goes in the one
   instruction Chrysalis gives OpenCode, beside OpenCode's own prompt.
 - Artifacts render as they are written. Hovering highlights a part. Clicking attaches it to the next message. The paint

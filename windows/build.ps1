@@ -51,6 +51,13 @@ foreach ($r in $running) {
         Get-Content $r.Log | Select-String "error" | Select-Object -First 20 | ForEach-Object { "  " + $_.Line }
     } else { "{0} {1:N0} bytes" -f $r.Name, (Get-Item $file).Length }
 }
+$fsp = Join-Path ${env:ProgramFiles(x86)} "WinFsp"
+if (-not (Test-Path "$fsp\samples\memfs\memfs.cpp")) { throw "WinFsp with its developer files is needed to build incognito's RAM drive: msiexec /i winfsp.msi ADDLOCAL=ALL" }
+Push-Location $out
+cl /nologo /O2 /EHsc /DNDEBUG /DUNICODE /D_UNICODE "/I$fsp\inc" "$fsp\samples\memfs\memfs.cpp" "$fsp\samples\memfs\memfs-main.c" /Fe:ramdrive.exe /link "$fsp\lib\winfsp-x64.lib" /DELAYLOAD:winfsp-x64.dll delayimp.lib advapi32.lib | Out-Null
+Pop-Location
+if (-not (Test-Path "$out\ramdrive.exe")) { $failed++; "ramdrive.exe failed" }
+Remove-Item "$out\memfs.obj", "$out\memfs-main.obj" -ErrorAction SilentlyContinue
 Copy-Item (Join-Path $Sdk "bin\hipblaslt.dll") $out -Force
 $kernels = Join-Path $out "hipblaslt\library"
 New-Item -ItemType Directory -Force $kernels | Out-Null
