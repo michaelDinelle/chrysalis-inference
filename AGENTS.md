@@ -97,8 +97,9 @@ None: no comments or docstrings anywhere in the repo, in any language, including
   `data/venv/bin/python tests/test_cache.py`,
   `data/venv/bin/python tests/test_lanes.py` (requests in flight, sub-agents beside a session's title),
   `data/venv/bin/python tests/test_chat.py`, `data/venv/bin/python tests/test_documents.py` (which PDF pages are
-  pictured), `make build/test_cpujob_fn && build/test_cpujob_fn`, `make test_voice` (the voice service: its features against
-  transformers', turns, echo and barge-in over its WebSocket), `make test_web` (the web UI's sampler against
+  pictured, and what pdfium reads against what poppler read), `data/venv/bin/python tests/test_video.py` (the frames picked
+  from videos and their pixels, against what ffmpeg gave), `make build/test_cpujob_fn && build/test_cpujob_fn`,
+  `make test_voice` (the voice service: its features against transformers', turns, echo and barge-in over its WebSocket), `make test_web` (the web UI's sampler against
   the engine's, its server against a fake Chrysalis and a fake OpenCode, the terminal against a fake model server, incognito against a fake OpenCode binary with a store of its own, the page in headless Chromium, and Firefox past and trusting the network's
   certificate; certutil makes their trust: the files side by side, as many as the free memory holds, sharing one
   Chromium). `cd web && bun tests.ts ./<file>.test.ts` runs some of them.
@@ -113,8 +114,8 @@ None: no comments or docstrings anywhere in the repo, in any language, including
   logits, pictures and videos).
 - On a Mac with Apple Silicon and 32 GB or more, the same targets build and check the Metal engines: `make kernels`,
   `make kernels_fn`, `make test` and `make test_fn_model`. Their references come from data/llama.cpp at the commit Linux
-  pins, built with Metal (`cmake -B build && cmake --build build --target llama ggml ggml-base`), and the PDF checks
-  need poppler (`brew install poppler`). The Metal engines have no vision tower yet, so their tests leave pictures out.
+  pins, built with Metal (`cmake -B build && cmake --build build --target llama ggml ggml-base`). The Metal engines have
+  no vision tower yet, so their tests leave pictures out.
 - On an NVIDIA GPU, the same targets build and check the CUDA engines (nvcc from /usr/local/cuda, the native architecture
   unless ARCH is set): `make kernels`, `make kernels_fn`, `make test` and `make test_fn_model`, with data/llama.cpp built
   for CUDA (`cmake -B build -DGGML_CUDA=ON -DBUILD_SHARED_LIBS=ON && cmake --build build`). On a card too small for a
