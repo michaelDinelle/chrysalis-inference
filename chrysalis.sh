@@ -2,15 +2,11 @@
 set -e
 ROOT="$(dirname "$(readlink -f "$0")")"
 PY="$ROOT/data/venv/bin/python"
-API=http://127.0.0.1:8080
-WEB_URL=http://127.0.0.1:8081
-TLS_DIR="${CHRYSALIS_TLS_DIR:-$HOME/.config/chrysalis/tls}"
-here() { curl -s --connect-timeout 1 "$@"; }
 MAC=; [ "$(uname)" = Darwin ] && MAC=1
 APP="$ROOT/Chrysalis.app"
 BUN="$ROOT/bin/bun"; [ -n "$MAC" ] && BUN="$APP/Contents/MacOS/Chrysalis"; [ -x "$BUN" ] || BUN=bun
 export BUN_BE_BUN=1
-get() { (cd "$ROOT" && "$PY" -m chrysalis get "$@"); }
+launch() { exec "$BUN" "$ROOT/web/launch.ts" "$@"; }
 PKGS=(numpy tokenizers pillow llguidance "huggingface_hub[hf_xet]" onnxruntime==1.31.0 sherpa-onnx==1.13.8 kokoro-onnx==0.4.7 websockets==17.2)
 fetch() {
     curl -fsSL -o "$3" "$1" && [ "$( (sha256sum "$3" 2>/dev/null || shasum -a 256 "$3") | cut -d' ' -f1)" = "$2" ]
@@ -51,7 +47,6 @@ setup() {
     fi
 }
 mem_gb() { if [ -n "$MAC" ]; then echo $(( $(sysctl -n hw.memsize) >> 30 )); else awk '/^MemTotal/ { printf "%d", $2 / 1048576 }' /proc/meminfo; fi; }
-roomy() { (( $(mem_gb) >= 58 )); }
 apple() { [ -n "$MAC" ] && [ "$(uname -m)" = arm64 ] && (( $(mem_gb) >= 30 )); }
 nvidia() { [ -z "$MAC" ] && [ -e /dev/nvidiactl ] && [ -f "$ROOT/Makefile" ]; }
 LLAMA_REV=9c2e0e491
@@ -80,112 +75,6 @@ build() {
     echo "building Chrysalis's Metal engines (once, about a minute)"
     make -C "$ROOT" -s engines >/dev/null 2>&1 || echo "  that failed: 'xcodebuild -downloadComponent MetalToolchain' gets Metal's compiler"
 }
-has_gpu() {
-    if [ -n "$MAC" ]; then apple && [ -f "$ROOT/build/libchrysalis.dylib" ]; return; fi
-    nvidia && [ -f "$ROOT/build/libchrysalis.so" ] && [ -f "$ROOT/build/libchrysalis_fn.so" ] && return 0
-    [ -e /dev/kfd ] && grep -qs "gfx_target_version 110000" /sys/class/kfd/kfd/topology/nodes/*/properties && return 0
-    [ -e /dev/dxg ] && [ -x "$PY" ] || return 1
-    LD_LIBRARY_PATH="$ROOT/data/rocm/lib:$ROOT/data/rocm/lib/rocm_sysdeps/lib" HSA_ENABLE_DXG_DETECTION=1 "$PY" -Ic '
-import ctypes, sys
-hip = ctypes.CDLL("libamdhip64.so.7")
-n, arch = ctypes.c_int(), ctypes.create_string_buffer(256)
-hip.hipGetDeviceCount(ctypes.byref(n))
-for d in range(n.value):
-    if hip.hipDeviceGetName(arch, 256, d) == 0 and (b"7900" in arch.value or b"W7800" in arch.value): sys.exit(0)
-sys.exit(1)' 2>/dev/null
-}
-
-usage() {
-    cat <<EOF
-usage: chrysalis.sh [--host 0.0.0.0 | --insecure] [--model <model>]
-
-  Runs Chrysalis in this terminal: the model and the web chat, each request as it finishes, and the questions when a
-  phone or computer wants in. Type help there for what it takes: local, network and insecure move it without stopping,
-  verbose shows what the servers print. Ctrl+C stops it. Nothing it shows is written to disk.
-  Requests pick the model (qwen3.8-27b or qwen3.8-flash-next); Chrysalis switches between them.
-  --host 0.0.0.0: on the local network too, encrypted, for the phones and computers let in: a QR code connects a
-  phone, and Chrysalis on another computer finds this one and uses its GPU
-  --insecure: on the local network over plain HTTP, as llama.cpp serves: no certificates and nobody to let in, the
-  chat on port 8081 and the API on 8080. Anyone on the network can use it and read what is sent, and other devices
-  get no voice mode and no OpenCode
-  --model qwen3.8-27b or qwen3.8-flash-next: start with that model and ask nothing
-
-  chrysalis.sh get <model>   download a model's files now (Chrysalis gets the one it loads by itself)
-  chrysalis.sh opencode      say whether OpenCode here is kept to Chrysalis's models (it is, until you change it)
-  chrysalis.sh opencode outside   allow models outside this computer, after a warning; takes effect at once
-  chrysalis.sh opencode only      keep OpenCode here to Chrysalis's models again
-EOF
-}
-
-opencode_models() {
-    local flag="$TLS_DIR/opencode-outside" up= answer
-    here -f -o /dev/null "$WEB_URL/" && up=1
-    case "${1:-}" in
-      "")   if { [ -n "$up" ] && here "$WEB_URL/api/threads" | grep -q '"outside":true'; } || { [ -z "$up" ] && [ -f "$flag" ]; }; then
-                echo "Models outside this computer are allowed: a thread on one sends that company your prompts, your files and what its tools read."
-                echo "chrysalis.sh opencode only keeps OpenCode here to Chrysalis's models again."
-            else
-                echo "Chrysalis only: OpenCode here runs on this computer's own models, and nothing is sent anywhere else."
-                echo "chrysalis.sh opencode outside allows the others."
-            fi ;;
-      only) if [ -n "$up" ]; then here -f -X DELETE "$WEB_URL/api/threads/outside" >/dev/null || { echo "Chrysalis did not take that" >&2; exit 1; }
-            else rm -f "$flag"; fi
-            echo "Chrysalis only: OpenCode here is kept to this computer's own models." ;;
-      outside)
-            [ -t 0 ] || { echo "run this in a terminal: it asks before it allows models outside this computer" >&2; exit 1; }
-            echo "Models outside this computer"
-            echo "A thread on one of these models sends that company your prompts, your files and whatever its tools read"
-            echo "on this computer. Chrysalis cannot take any of it back. Threads on Chrysalis's own models stay here as before."
-            read -r -p "Allow them? [y/N] " answer
-            case "$answer" in y|Y|yes) ;; *) echo "Kept to Chrysalis only."; exit 0 ;; esac
-            if [ -n "$up" ]; then here -f -X POST -H 'Content-Type: application/json' -d '{}' "$WEB_URL/api/threads/outside" >/dev/null || { echo "Chrysalis did not take that" >&2; exit 1; }
-            else mkdir -p "$TLS_DIR" && : > "$flag"; fi
-            echo "Allowed. chrysalis.sh opencode only takes it back." ;;
-      *)    usage; exit 1 ;;
-    esac
-}
-
-pick() {
-    local ids=(qwen3.8-27b) names=(Qwen3.8-27B) notes=("Quickest replies · 4 s to load") at=0 n i key last
-    if roomy; then ids+=(qwen3.8-flash-next) names+=(Qwen3.8-Flash-Next) notes+=("Fast at any length · 20 s to load"); fi
-    n=${#ids[@]}
-    (( n > 1 )) && [ -t 0 ] && [ -t 1 ] || return 0
-    last=$(cat "$TLS_DIR/model" 2>/dev/null || true)
-    for i in "${!ids[@]}"; do
-        [ "${ids[i]}" != "$last" ] || at=$i
-        get --check "${ids[i]}" || notes[i]+=" · downloads first"
-    done
-    printf '\e[?25l  \e[1mWhich model?\e[0m\n'
-    while :; do
-        for i in "${!ids[@]}"; do
-            if (( i == at )); then printf '\r\e[K  \e[35m●\e[0m \e[1m%-19s\e[0m %s\n' "${names[i]}" "${notes[i]}"
-            else printf '\r\e[K  \e[2m○ %-19s %s\e[0m\n' "${names[i]}" "${notes[i]}"; fi
-        done
-        printf '\r\e[K  \e[2m↑↓ to choose · Enter to start\e[0m'
-        IFS= read -rsn1 key
-        if [ "$key" = $'\e' ]; then read -rsn2 -t 0.05 key || true; fi
-        case $key in
-            "[A"|k) at=$(( (at + n - 1) % n )) ;;
-            "[B"|j) at=$(( (at + 1) % n )) ;;
-            [1-9]) if (( key <= n )); then at=$((key - 1)); break; fi ;;
-            "") break ;;
-        esac
-        printf '\r\e[%dA' "$n"
-    done
-    printf '\r\e[%dA\e[J\e[?25h' $((n + 1))
-    mkdir -p "$TLS_DIR" && printf %s "${ids[at]}" > "$TLS_DIR/model"
-}
-
-lan_ip() {
-    if [ -n "$MAC" ]; then ipconfig getifaddr "$(route -n get default 2>/dev/null | awk '/interface:/ { print $2 }')"; return; fi
-    ip -4 route get 1.1.1.1 2>/dev/null | awk '{ for (i = 1; i < NF; i++) if ($i == "src") { print $(i + 1); exit } }'
-}
-lan_subnet() {
-    local dev
-    dev=$(ip -4 route show default | awk '{ for (i = 1; i < NF; i++) if ($i == "dev") { print $(i + 1); exit } }')
-    ip -4 route show dev "$dev" scope link proto kernel | awk 'NR == 1 { print $1 }'
-}
-
 WIN=; [ -z "${WSL_DISTRO_NAME:-}" ] || WIN=$(wslpath 'C:\Windows')
 win() {
     "$WIN/System32/WindowsPowerShell/v1.0/powershell.exe" -NoProfile -NonInteractive \
@@ -225,41 +114,6 @@ EOF
     fi
 }
 
-UFW_NOTE=~/.config/chrysalis/ufw
-blocked() {
-    systemctl is-active -q ufw 2>/dev/null || return 1
-    local net ports='808[01]'; net=$(lan_subnet)
-    [ "${1:-}" != insecure ] || ports=8080
-    { ! grep -qsE "allow tcp $ports:8083 0.0.0.0/0 any $net in" /etc/ufw/user.rules || ! grep -qsF "allow udp 5353 0.0.0.0/0 any $net in" /etc/ufw/user.rules; } &&
-        ! grep -qsE "^$net $ports:8083 5353\$" "$UFW_NOTE"
-}
-let_in() {
-    local from=8081 rule=Chrysalis script
-    [ "${1:-}" != insecure ] || { from=8080; rule=ChrysalisOpen; }
-    if [ -n "$WIN" ]; then
-        [ -n "$(win "Get-NetFirewallHyperVRule -Name $rule -ErrorAction SilentlyContinue | ForEach-Object Name")" ] && return 0
-        echo "Windows keeps other devices out: letting the private networks reach Chrysalis (TCP $from-8083) asks Windows for an administrator, once"
-        script="$(cat <<'EOF'
-$rule = "New-NetFirewallHyperVRule -Name @RULE@ -DisplayName 'Chrysalis Inference' -Direction Inbound -Action Allow -VMCreatorId '{40E0AC32-46A5-438A-A0B2-2B479E8F2E90}' -Protocol TCP -LocalPorts @FROM@-8083 -RemoteAddresses 10.0.0.0/8, 172.16.0.0/12, 192.168.0.0/16, 100.64.0.0/10, 169.254.0.0/16"
-$enc = [Convert]::ToBase64String([Text.Encoding]::Unicode.GetBytes($rule))
-Start-Process powershell -Verb RunAs -Wait -WindowStyle Hidden -ArgumentList '-NoProfile', '-EncodedCommand', $enc
-EOF
-)"
-        script=${script//@RULE@/$rule}
-        win "${script//@FROM@/$from}"
-        return 0
-    fi
-    blocked "${1:-}" || return 0
-    local net; net=$(lan_subnet)
-    echo "ufw keeps other devices out: letting $net reach Chrysalis (TCP $from-8083, mDNS) takes your password, once"
-    if [ -t 0 ] && sudo sh -c "ufw allow from $net to any port $from:8083 proto tcp comment 'Chrysalis Inference' &&
-            ufw allow from $net to any port 5353 proto udp comment 'Chrysalis Inference: found on the network'" >/dev/null; then
-        mkdir -p "${UFW_NOTE%/*}" && echo "$net $from:8083 5353" >> "$UFW_NOTE"
-    else
-        echo "  not changed: Chrysalis started in a terminal asks for the password"
-    fi
-}
-
 release() {
     set -uo pipefail
     local VER="${1:-$(git -C "$ROOT" describe --tags --always)}" OUT=dist/chrysalis R=data/rocm/lib
@@ -267,7 +121,7 @@ release() {
     rm -rf dist && mkdir -p "$OUT"/{bin,data/rocm/lib/rocm_sysdeps/lib,data/rocm/lib/llvm/lib,data/rocm/lib/hipblaslt/library,data/models/qwen3.8-27b,data/models/qwen3.8-flash-next,web} dist/native
     docker run --rm -e OWNER="$(id -u):$(id -g)" -v "$PWD:/src:ro" -v "$PWD/dist/native:/out" quay.io/pypa/manylinux_2_28_x86_64 bash /src/chrysalis.sh native
     cp -r dist/native/build dist/native/ggml "$OUT/"
-    LD_LIBRARY_PATH="$PWD/$R:$PWD/$R/rocm_sysdeps/lib:$PWD/dist/native/ggml/avx2" ldd "$OUT"/build/*.so |
+    LD_LIBRARY_PATH="$PWD/$R:$PWD/$R/rocm_sysdeps/lib:$PWD/dist/native/ggml/avx2" ldd "$OUT"/build/*.so "$OUT/build/gpu" |
         awk -v r="$PWD/$R/" 'index($3, r) == 1 { print $3 }' | sort -u | while read -r f; do
         cp -L "$f" "$OUT/data/rocm/lib/${f#"$PWD/$R/"}"
     done
@@ -287,6 +141,7 @@ release() {
         ! -name '*.test.ts' ! -name '*.check.ts' ! -name 'fake-*' ! -name 'bench-*' -exec cp {} "$OUT/web/" \;
     (cd web && bun install --frozen-lockfile >/dev/null)
     bun build web/server.ts web/cli.ts --target=bun --production --external react-devtools-core --outdir "$OUT/web" >/dev/null
+    bun build --compile --target=bun-windows-x64 web/launch.ts --outfile dist/Chrysalis.exe >/dev/null
     for p in mermaid/dist/mermaid.esm.min.mjs mermaid/dist/chunks/mermaid.esm.min aframe/dist/aframe-v1.8.0.min.js three/package.json three/build three/examples/jsm; do
         mkdir -p "$OUT/web/node_modules/${p%/*}" && cp -r "web/node_modules/$p" "$OUT/web/node_modules/$p"
     done
@@ -362,58 +217,22 @@ native() {
     $ROCM/bin/hipcc "${FLAGS[@]}" -I$H/27b -x hip -shared -o /out/build/libchrysalis.so "${SRC[@]}" "${LIBS[@]}" & a=$!
     $ROCM/bin/hipcc "${FLAGS[@]}" -I$H/flash-next -I$W/llama.cpp/ggml/include -x hip -shared -o /out/build/libchrysalis_fn.so "${FN_SRC[@]}" "${LIBS[@]}" \
         -L/out/ggml/avx2 -lggml-cpu -lggml-base & b=$!
-    wait $a && wait $b
+    $ROCM/bin/hipcc "${FLAGS[@]}" -s -o /out/build/gpu $H/gpu_pick.hip $H/gpu.hip "${LIBS[@]}" & l=$!
+    wait $a && wait $b && wait $l
     chown -R "$OWNER" /out
 }
 
 case "${1:-}" in
   ""|--host|--insecure|--model)
-            mode=local first=
-            while [ $# -gt 0 ]; do
-                case "$1:${2:-}" in
-                    --host:0.0.0.0) mode=network; shift 2 ;;
-                    --host:127.0.0.1) shift 2 ;;
-                    --insecure:*) mode=insecure; shift ;;
-                    --model:qwen3.8-27b|--model:qwen3.8-flash-next) first=$2; shift 2 ;;
-                    *) usage; exit 1 ;;
-                esac
-            done
-            if here -f -o /dev/null "$WEB_URL/"; then echo "Chrysalis is running already, in another terminal (Ctrl+C there stops it)"; exit 1; fi
             wsl_ready
-            if [ $mode != local ]; then let_in $mode; fi
             if [ -n "$MAC" ]; then
                 codesign -v "$APP" 2>/dev/null || codesign --force -s - "$APP" 2>/dev/null
             fi
-            trap '[ ! -t 1 ] || printf "\e[?25h"' EXIT
             setup
             build
-            cli=cli.ts; [ -f "$ROOT/web/cli.js" ] && cli=cli.js
-            [ -f "$ROOT/web/cli.js" ] || [ -d "$ROOT/web/node_modules/ink" ] || (cd "$ROOT/web" && "$BUN" install --frozen-lockfile >/dev/null)
-            run=("$BUN" "$ROOT/web/$cli" --mode $mode)
-            if has_gpu; then
-                if [ -n "$first" ]; then mkdir -p "$TLS_DIR" && printf %s "$first" > "$TLS_DIR/model"; else pick; fi
-                model=$(cat "$TLS_DIR/model" 2>/dev/null || true)
-                get ${model:+"$model"}
-                if roomy && ! get --check qwen3.8-flash-next; then run+=(--get qwen3.8-flash-next); fi
-            else
-                run+=(--no-model)
-            fi
-            exec "${run[@]}" ;;
-  firewall) let_in "${2:-}" ;;
-  gpu)      has_gpu ;;
-  opencode) opencode_models "${2:-}" ;;
-  get)      setup; get "${@:2}" ;;
-  serve)    if [ -z "$MAC" ]; then
-                ggml="$ROOT/ggml/avx2"; grep -qw avx512_vnni /proc/cpuinfo && ggml="$ROOT/ggml/avx512"
-                export LD_LIBRARY_PATH="$ROOT/data/rocm/lib:$ROOT/data/rocm/lib/rocm_sysdeps/lib:$ggml${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
-                [ -e /dev/dxg ] && export HSA_ENABLE_DXG_DETECTION=1
-                if [ -z "${HIP_VISIBLE_DEVICES+x}${ROCR_VISIBLE_DEVICES+x}" ] && [ -x "$ROOT/build/gpu" ]; then g=$("$ROOT/build/gpu") && export "$g"; fi
-            fi
-            m=$(cat "$TLS_DIR/model" 2>/dev/null || true)
-            cd "$ROOT" && exec "$PY" -m chrysalis serve --host 127.0.0.1 ${m:+--use "$m"} "${@:2}" ;;
-  stats)    here "$API/chrysalis/stats" ;;
+            launch "$@" ;;
+  get)      setup; launch "$@" ;;
   release)  release "${@:2}" ;;
   native)   native ;;
-  help|-h|--help) usage ;;
-  *)        usage; exit 1 ;;
+  *)        launch "$@" ;;
 esac

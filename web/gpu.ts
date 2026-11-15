@@ -19,11 +19,13 @@ export function gpuEnv(env: Record<string, string | undefined> = process.env, pi
   return pick(env, picker) ?? {};
 }
 
-export function gpuHere(m: Machine = here(), root = ROOT, picker = exe(join(root, "build", "gpu"), m)): boolean {
-  if (m.platform === "darwin") return m.arch === "arm64" && m.memory >= 30 * 2 ** 30 && m.exists(library("libchrysalis", m, root));
+export function gpuFound(m: Machine = here(), root = ROOT, picker = exe(join(root, "build", "gpu"), m)): { here: boolean; env: Record<string, string> } {
+  if (m.platform === "darwin") return { here: m.arch === "arm64" && m.memory >= 30 * 2 ** 30 && m.exists(library("libchrysalis", m, root)), env: {} };
   const nvidia = m.platform === "win32" ? join(m.env.SystemRoot ?? m.env.SYSTEMROOT ?? "C:\\Windows", "System32", "nvcuda.dll") : "/dev/nvidiactl";
-  if (m.exists(nvidia) && m.exists(library("libchrysalis", m, root)) && m.exists(library("libchrysalis_fn", m, root))) return true;
-  return pick({ ...m.env, ...serverEnv(m, root) }, picker) !== undefined;
+  if (m.exists(nvidia) && m.exists(library("libchrysalis", m, root)) && m.exists(library("libchrysalis_fn", m, root))) return { here: true, env: {} };
+  const found = pick({ ...m.env, ...serverEnv(m, root) }, picker);
+  return { here: found !== undefined, env: CHOSEN.some((k) => m.env[k] !== undefined) ? {} : found ?? {} };
 }
+export const gpuHere = (m: Machine = here(), root = ROOT, picker = exe(join(root, "build", "gpu"), m)) => gpuFound(m, root, picker).here;
 
 if (import.meta.main) for (const [k, v] of Object.entries(gpuEnv())) console.log(`${k}=${v}`);
