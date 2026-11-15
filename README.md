@@ -74,7 +74,27 @@ Start Chrysalis with `chrysalis.sh --host 0.0.0.0`. The other computer needs [Op
 
 ## Run it
 
+Every system ends the same way: the terminal shows the chat's address and the model, and the chat opens at
+`http://localhost:8081`. The first start downloads 16 GB for the 27B or 117 GB for Flash-Next from
+[Hugging Face](https://huggingface.co/michaelDinelle/chrysalis).
+
+**Windows 11 with an RX 7900 XTX, XT or GRE**
+
+1. Driver: install [AMD Software: Adrenalin Edition](https://www.amd.com/en/support/download/drivers.html) if the card
+   has none (Device Manager, Display adapters, shows "AMD Radeon RX 7900" when it does).
+2. Download [Chrysalis-windows-x64.zip](https://github.com/michaelDinelle/chrysalis-inference/releases/latest/download/Chrysalis-windows-x64.zip),
+   right-click it and choose Extract All.
+3. Double-click `Chrysalis.exe` in the folder. Windows asks once whether to run a program it does not know: More info,
+   then Run anyway.
+
+<p align="center"><img src="media/windows-folder.png" width="760" alt="The unzipped Chrysalis folder in Windows Explorer, with Chrysalis.exe"></p>
+<p align="center"><img src="media/windows-run.png" width="760" alt="Chrysalis running in a window on Windows 11 with the model ready, and the chat open in the browser"></p>
+
 **Linux with an RX 7900 XTX, XT or GRE**
+
+1. Driver: none to install. The card runs on the `amdgpu` driver every current distribution ships (`lspci -k` shows
+   "Kernel driver in use: amdgpu"), and Chrysalis brings its own ROCm.
+2. Download and unpack, then start it:
 
 ```sh
 curl -fsSL https://github.com/michaelDinelle/chrysalis-inference/releases/latest/download/chrysalis-linux-x86_64.tar.gz | tar -xz
@@ -86,9 +106,18 @@ chrysalis/chrysalis.sh
 
 <sub>Tab opens the switches: who reaches Chrysalis, the model, and what the terminal shows.</sub>
 
-<sub>The first start downloads 16 GB for the 27B or 117 GB for Flash-Next from [Hugging Face](https://huggingface.co/michaelDinelle/chrysalis).</sub>
+**Linux with an RTX 30 series or newer** (as run on Ubuntu 22.04)
 
-**Mac with Apple Silicon and 32 GB or more, or Linux with an RTX 30 series or newer**
+1. Driver: `sudo apt install nvidia-driver-580`, then restart. `nvidia-smi` lists the card when it is in.
+2. CUDA toolkit and build tools:
+
+```sh
+wget https://developer.download.nvidia.com/compute/cuda/repos/ubuntu2204/x86_64/cuda-keyring_1.1-1_all.deb
+sudo dpkg -i cuda-keyring_1.1-1_all.deb && sudo apt update
+sudo apt install cuda-toolkit-13-0 build-essential cmake git unzip
+```
+
+3. Get Chrysalis and start it. The first start builds the engines for the card, a few minutes:
 
 ```sh
 git clone https://github.com/michaelDinelle/chrysalis-inference
@@ -96,16 +125,17 @@ cd chrysalis-inference
 ./chrysalis.sh
 ```
 
-**Windows 11 with an RX 7900 XTX, XT or GRE**
+**Mac with Apple Silicon and 32 GB or more**
 
-1. Install [AMD's driver](https://www.amd.com/en/support/download/drivers.html) if the card has none.
-2. Download [Chrysalis-windows-x64.zip](https://github.com/michaelDinelle/chrysalis-inference/releases/latest/download/Chrysalis-windows-x64.zip) and unzip it.
-3. Double-click `Chrysalis.exe` in the folder.
+1. Driver: none. Apple's command line tools build the engines: `xcode-select --install`, and if the first start says
+   Metal's compiler is missing, `xcodebuild -downloadComponent MetalToolchain`.
+2. Get Chrysalis and start it:
 
-<p align="center"><img src="media/windows-folder.png" width="760" alt="The unzipped Chrysalis folder in Windows Explorer, with Chrysalis.exe"></p>
-<p align="center"><img src="media/windows-run.png" width="760" alt="Chrysalis running in a window on Windows 11 with the model ready, and the chat open in the browser"></p>
-
-<sub>Windows asks once whether to run a program it does not know: More info, then Run anyway. The chat opens in the browser when the model is ready.</sub>
+```sh
+git clone https://github.com/michaelDinelle/chrysalis-inference
+cd chrysalis-inference
+./chrysalis.sh
+```
 
 **Docker**
 
