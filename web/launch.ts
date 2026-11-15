@@ -102,7 +102,7 @@ async function start(args: string[], m: Machine, gpus: Found) {
   const found = gpus(), gpu = found.here;
   const p = plan({ gpu, roomy: Math.floor(m.memory / 2 ** 30) >= ROOMY_GB, asks: !!process.stdin.isTTY && !!process.stdout.isTTY, last, first: asked.model, missing });
   const run = [...ourScript(existsSync(join(import.meta.dir, "cli.js")) ? join(import.meta.dir, "cli.js") : join(import.meta.dir, "cli.ts")).cmd, "--mode", asked.mode];
-  if (!existsSync(join(import.meta.dir, "cli.js")) && !existsSync(join(import.meta.dir, "node_modules", "ink")))
+  if (!existsSync(join(import.meta.dir, "cli.js")))
     await wait([process.execPath, "install", "--frozen-lockfile"], { cwd: import.meta.dir, env: { ...process.env, BUN_BE_BUN: "1" }, quiet: true });
   if (p.model) {
     const model = p.ask ? await choose(p, missing) : p.model;
