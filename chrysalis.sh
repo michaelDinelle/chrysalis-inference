@@ -36,6 +36,10 @@ setup() {
         fi
         rm -rf "$T"
     fi
+    if [ -x "$PY" ] && ! "$PY" -c "import pypdfium2, av" 2>/dev/null; then
+        echo "getting the packages this version of Chrysalis added (once)"
+        "$PY" -m pip install -q --break-system-packages "${PKGS[@]}" 2>/dev/null || echo "  that failed: start Chrysalis again to try again"
+    fi
     if [ "$BUN" = bun ] && ! command -v bun >/dev/null; then
         local arch=linux-x64 sum=3e730528d89775f03f87f05c06787c4df4099d0a37f3f252e7b829cb23816e18
         [ -z "$MAC" ] || { arch=darwin-aarch64; sum=80afd4c069b46a6fa8f3ec520bebc750a7843e4a8d5b9583d29ad436c00a3403; }
