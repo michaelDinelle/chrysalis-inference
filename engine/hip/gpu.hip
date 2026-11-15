@@ -6,8 +6,14 @@ constexpr unsigned PROBE = 64, STEP = 40503u;
 
 __global__ void k_gpu_runs(unsigned *out) { out[threadIdx.x] = STEP * (threadIdx.x + 1); }
 
+static uint64_t others = 0;
+
 bool gpu_runs() {
     unsigned *d = nullptr, h[PROBE] = {};
+    int dev = 0;
+    hipDeviceProp_t p{};
+    uint64_t total = 0, used = 0;
+    if (hipGetDevice(&dev) == hipSuccess && hipGetDeviceProperties(&p, dev) == hipSuccess && os::vram_now(p.pciDomainID, p.pciBusID, p.pciDeviceID, &total, &used)) others = used;
     if (hipMalloc(&d, sizeof h) != hipSuccess) return false;
     bool ok = hipMemset(d, 0, sizeof h) == hipSuccess;
     hipLaunchKernelGGL(k_gpu_runs, dim3(1), dim3(PROBE), 0, 0, d);
@@ -22,7 +28,7 @@ size_t gpu_free() {
     int dev = 0;
     hipDeviceProp_t p{};
     if (hipMemGetInfo(&free_b, &total_b) != hipSuccess || hipGetDevice(&dev) != hipSuccess || hipGetDeviceProperties(&p, dev) != hipSuccess) return 0;
-    return (size_t)os::vram_grant(0x1002, p.name, free_b);
+    return (size_t)os::vram_grant(0x1002, p.name, p.pciDomainID, p.pciBusID, p.pciDeviceID, free_b, others);
 }
 
 #ifdef _WIN32

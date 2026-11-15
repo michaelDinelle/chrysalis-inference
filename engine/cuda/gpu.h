@@ -7,5 +7,5 @@ inline size_t gpu_free() {
     int dev = 0;
     cudaDeviceProp p{};
     if (cudaMemGetInfo(&free_b, &total_b) != cudaSuccess || cudaGetDevice(&dev) != cudaSuccess || cudaGetDeviceProperties(&p, dev) != cudaSuccess) return 0;
-    return (size_t)os::vram_grant(0x10DE, p.name, free_b);
+    return (size_t)os::vram_grant(0x10DE, p.name, p.pciDomainID, p.pciBusID, p.pciDeviceID, free_b, 0);
 }

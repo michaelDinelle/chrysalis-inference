@@ -41,6 +41,7 @@
 namespace os {
 
 enum class File : intptr_t {};
+constexpr uint64_t VRAM_IDLE = 64ull << 20, VRAM_DESKTOP = 1ull << 30;
 constexpr File NO_FILE = File(-1);
 
 #ifdef _WIN32
@@ -101,7 +102,8 @@ inline double ram_held() {
     PROCESS_MEMORY_COUNTERS_EX c{};
     return GetProcessMemoryInfo(GetCurrentProcess(), (PROCESS_MEMORY_COUNTERS *)&c, sizeof c) ? (double)c.PrivateUsage : 0;
 }
-inline uint64_t vram_grant(unsigned vendor, const char *gpu, uint64_t free_bytes) {
+inline bool vram_now(int, int, int, uint64_t *, uint64_t *) { return false; }
+inline uint64_t vram_grant(unsigned vendor, const char *gpu, int, int, int, uint64_t free_bytes, uint64_t) {
     IDXGIFactory4 *f = nullptr;
     if (FAILED(CreateDXGIFactory1(__uuidof(IDXGIFactory4), (void **)&f))) return free_bytes;
     wchar_t name[128] = {};
@@ -293,7 +295,34 @@ inline int sibling(int) { return -1; }
 inline std::string cpu_name() { return {}; }
 inline std::vector<int> cores() { return {}; }
 #endif
-inline uint64_t vram_grant(unsigned, const char *, uint64_t free_bytes) { return free_bytes; }
+inline bool vram_now(int domain, int bus, int dev, uint64_t *total, uint64_t *used) {
+#if defined(__linux__)
+    char path[128];
+    uint64_t *const out[2] = {total, used};
+    const char *const name[2] = {"mem_info_vram_total", "mem_info_vram_used"};
+    for (int i = 0; i < 2; i++) {
+        snprintf(path, sizeof path, "/sys/bus/pci/devices/%04x:%02x:%02x.0/%s", domain, bus, dev, name[i]);
+        FILE *f = fopen(path, "r");
+        if (!f) return false;
+        unsigned long long v = 0;
+        const bool ok = fscanf(f, "%llu", &v) == 1;
+        fclose(f);
+        if (!ok) return false;
+        *out[i] = v;
+    }
+    return true;
+#else
+    (void)domain; (void)bus; (void)dev; (void)total; (void)used;
+    return false;
+#endif
+}
+inline uint64_t vram_grant(unsigned, const char *, int domain, int bus, int dev, uint64_t free_bytes, uint64_t others) {
+    uint64_t total = 0, used = 0;
+    if (others <= VRAM_IDLE || !vram_now(domain, bus, dev, &total, &used)) return free_bytes;
+    const uint64_t left = total > used ? total - used : 0, most = left < free_bytes ? left : free_bytes;
+    const uint64_t room = others > VRAM_DESKTOP ? others : VRAM_DESKTOP;
+    return most > room ? most - room : 0;
+}
 inline File from_fd(int fd) { return File(fd); }
 inline size_t missing(const void *p, size_t bytes) {
     const size_t pages = (bytes + 4095) / 4096;
