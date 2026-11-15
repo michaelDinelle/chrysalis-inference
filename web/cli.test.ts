@@ -1,6 +1,8 @@
 import { expect, test } from "bun:test";
 import { chmodSync, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
+import { dirname } from "node:path";
+import { memoryRoot } from "./platform";
 import { plain } from "./terminal";
 import { lanAddresses } from "./tls";
 
@@ -50,7 +52,7 @@ const painted = (svg: string) => {
 };
 const files = (dir: string): string[] => readdirSync(dir, { withFileTypes: true }).flatMap((f) => (f.isDirectory() ? files(`${dir}/${f.name}`) : f.isFile() ? [`${dir}/${f.name}`] : []));
 
-test("the terminal shows each request to the model as it finishes, by its sizes and speeds and never its words, and nothing else the servers print until verbose is typed; none of it reaches a file; a request from an incognito chat stays off the terminal, and while it runs the model server cannot write its prompt cache, which the next ordinary request writes again", async () => {
+test("the terminal shows each request to the model as it finishes, by its sizes and speeds and never its words, and nothing else the servers print until verbose is typed; none of it reaches a file; a request from an incognito chat stays off the terminal and tells the model server to keep it out of its prompt cache on disk, which the next ordinary request writes again", async () => {
   const c = chrysalis();
   try {
     await c.shown("qwen3.8-flash-next ready in");
@@ -88,7 +90,7 @@ test("the terminal shows each request to the model as it finishes, by its sizes 
 
     const asked = async (words: string, more: object = {}) => (await (await fetch(`${c.here}/api/chat`, { method: "POST", headers: json, body: JSON.stringify({ messages: [{ role: "user", content: words }], ...more }) })).json()).choices[0].message.content;
     at = c.mark();
-    expect(await asked("probe hidden", { chrysalis_incognito: true })).toBe("refused");
+    expect(await asked("probe hidden", { chrysalis_incognito: true })).toBe("unkept");
     await fetch(`${c.engine}/chrysalis/load`, { method: "POST", body: JSON.stringify({ model: "qwen3.8-flash-next" }) });
     await c.shown("qwen3.8-flash-next ready in", at);
     expect(c.out(at)).not.toContain("tokens read");
@@ -193,20 +195,23 @@ test("in a terminal on the network, the code a phone scans shows first, above th
 }, 60_000);
 
 const holding = (dir: string, text: string) => (existsSync(dir) ? files(dir) : []).filter((f) => statSync(f).size < 1 << 20 && readFileSync(f, "latin1").includes(text));
-test("an incognito thread runs on a second OpenCode with a store in memory, with its tools, beside the first, which is never stopped: it is in no list, nothing of it is under the home folder, and the ordinary store is untouched; deleting it, incognito end in the terminal, or stopping Chrysalis deletes that store", async () => {
-  const bin = `${tmpdir()}/chrysalis-cli-opencode-${process.pid}`;
+test("an incognito thread runs on a second OpenCode that keeps its database in memory, with its tools, beside the first, which is never stopped: it is in no list and in no file, the model server is told to keep its requests out of the prompt cache on disk, and the ordinary store and cache are untouched; deleting it, incognito end in the terminal, or stopping Chrysalis ends that OpenCode and deletes its folder", async () => {
+  const bin = `${tmpdir()}/chrysalis-cli-opencode-${process.pid}`, pids = `${tmpdir()}/chrysalis-cli-opencode-${process.pid}.pids`;
   writeFileSync(bin, `#!/bin/sh\nexec ${process.execPath} ${import.meta.dir}/fake-opencode-bin.ts "$@"\n`);
   chmodSync(bin, 0o755);
-  const c = chrysalis({ env: { CHRYSALIS_OPENCODE: bin } }), work = `${c.dir}/work`;
+  const c = chrysalis({ env: { CHRYSALIS_OPENCODE: bin, FAKE_OPENCODE_PIDS: pids } }), work = `${c.dir}/work`, root = memoryRoot();
   mkdirSync(work);
-  const held = () => readdirSync("/dev/shm").filter((d) => d.startsWith(`chrysalis-run-${c.proc.pid}-`)).map((d) => `/dev/shm/${d}`);
-  const stores = () => held().flatMap((d) => readdirSync(d).filter((x) => x.startsWith("opencode-")).map((x) => `${d}/${x}`));
+  const started = () => (existsSync(pids) ? readFileSync(pids, "utf8").trim().split("\n") : []).map((l) => { const [pid, db, data] = l.split(" "); return { pid: Number(pid), db, data }; });
+  const up = (pid: number) => { try { process.kill(pid, 0); return true; } catch { return false; } };
+  const stores = () => started().filter((o) => o.db === ":memory:" && up(o.pid) && existsSync(dirname(o.data))).map((o) => dirname(o.data));
+  const held = () => readdirSync(root).filter((d) => d.startsWith(`chrysalis-run-${c.proc.pid}-`)).map((d) => `${root}/${d}`);
+  const anywhere = (text: string) => [c.dir, ...held(), ...started().map((o) => dirname(o.data))].flatMap((d) => holding(d, text));
   const until = async (ok: () => unknown) => { for (const end = Date.now() + 15_000; Date.now() < end; await Bun.sleep(50)) if (await Promise.resolve().then(ok).catch(() => false)) return true; return false; };
   const connect = () => until(async () => (await fetch(`${c.here}/api/threads`, { method: "POST" })).status === 200);
   const listed = async () => ((await (await fetch(`${c.here}/api/threads`)).json()).threads ?? []).map((t: any) => t.title).sort();
   const say = async (text: string, hidden = false) => {
     const r = await fetch(`${c.here}/api/chat`, { method: "POST", headers: json, body: JSON.stringify({ stream: true, chrysalis_thread: { dir: work, text, title: text, model: "chrysalis/qwen3.8-27b", ...(hidden ? { hidden: true } : {}) } }) }), sent = await r.text();
-    return [r.status, sent.includes('"error"'), sent.trimEnd().endsWith("[DONE]"), /"thread":"([^"]+)"/.exec(sent)?.[1] ?? ""] as const;
+    return [r.status, sent.includes('"error"'), sent.trimEnd().endsWith("[DONE]"), /"thread":"([^"]+)"/.exec(sent)?.[1] ?? "", sent] as const;
   };
   const engine = async () => (await (await fetch(`${c.engine}/chrysalis/env`)).json()).pid;
   try {
@@ -214,40 +219,50 @@ test("an incognito thread runs on a second OpenCode with a store in memory, with
     const model = await engine();
     expect(await connect()).toBe(true);
     expect((await say("an ordinary errand")).slice(0, 3)).toEqual([200, false, true]);
-    expect([await listed(), stores()]).toEqual([["an ordinary errand"], []]);
+    expect([await listed(), stores(), started().map((o) => o.db)]).toEqual([["an ordinary errand"], [], ["file"]]);
 
     let at = c.mark();
     const secret = await say("the secret plan", true);
     expect(secret.slice(0, 3)).toEqual([200, false, true]);
     await c.shown("an incognito chat is open", at);
-    expect([await listed(), stores().length, await engine()]).toEqual([["an ordinary errand"], 1, model]);
-    expect(await until(() => holding(stores()[0], "the secret plan").length > 0)).toBe(true);
-    expect([holding(c.dir, "the secret plan"), holding(stores()[0], "an ordinary errand"), holding(c.dir, "an ordinary errand").length > 0]).toEqual([[], [], true]);
+    expect([await listed(), stores().length, await engine(), started().map((o) => o.db)]).toEqual([["an ordinary errand"], 1, model, ["file", ":memory:"]]);
     const read = await (await fetch(`${c.here}/api/threads/${secret[3]}`)).json();
     expect([read.thread.hidden, read.messages[0].content]).toEqual([true, "the secret plan"]);
+    expect([anywhere("the secret plan"), holding(stores()[0], "an ordinary errand"), holding(c.dir, "an ordinary errand").length > 0]).toEqual([[], [], true]);
     expect((await say("an ordinary errand, again")).slice(0, 3)).toEqual([200, false, true]);
     expect(holding(stores()[0], "an ordinary errand, again")).toEqual([]);
+    const [hidden, ordinary] = [await say("probe incognito", true), await say("probe ordinary")];
+    const words = (sent: string) => [...sent.matchAll(/^data: (\{.*\})$/gm)].map((m) => JSON.parse(m[1]).choices?.[0]?.delta?.content ?? "").join("");
+    expect([words(hidden[4]).includes("The model said: unkept."), words(ordinary[4]).includes("The model said: written.")]).toEqual([true, true]);
+    expect(readdirSync(`${c.dir}/cache/qwen3.8-flash-next`)).toEqual(["ordinary.snap"]);
+    expect(anywhere("probe incognito")).toEqual([]);
 
     at = c.mark();
+    const store = stores()[0];
     expect((await fetch(`${c.here}/api/threads/${secret[3]}`, { method: "DELETE" })).status).toBe(204);
+    expect((await fetch(`${c.here}/api/threads/${hidden[3]}`, { method: "DELETE" })).status).toBe(204);
     await c.shown("the incognito chats are gone", at);
-    expect([await listed(), stores(), holding(held()[0], "the secret plan")]).toEqual([["an ordinary errand", "an ordinary errand, again"], [], []]);
+    expect([await listed(), stores(), existsSync(store)]).toEqual([["an ordinary errand", "an ordinary errand, again", "probe ordinary"], [], false]);
 
     at = c.mark();
     expect((await say("a second secret", true)).slice(0, 3)).toEqual([200, false, true]);
     await c.shown("an incognito chat is open", at);
+    const second = stores()[0];
     c.type("incognito end\n");
     await c.shown("the incognito chats are gone", at);
-    expect([(await listed()).length, stores()]).toEqual([2, []]);
+    expect([(await listed()).length, stores(), existsSync(second)]).toEqual([3, [], false]);
 
     expect((await say("a third secret", true)).slice(0, 3)).toEqual([200, false, true]);
-    expect(stores().length).toBe(1);
+    const third = stores()[0];
+    expect(third).toBeTruthy();
     c.proc.kill();
     await c.proc.exited;
-    expect([held(), holding(c.dir, "a third secret")]).toEqual([[], []]);
+    expect(await until(() => !existsSync(third) && !started().some((o) => up(o.pid)))).toBe(true);
+    expect([held(), anywhere("a third secret")]).toEqual([[], []]);
   } finally {
     await c.stop();
     rmSync(bin, { force: true });
+    rmSync(pids, { force: true });
   }
 }, 90_000);
 
@@ -256,11 +271,10 @@ test("OpenCode, the ordinary one and the incognito one, ends with the web server
   writeFileSync(bin, `#!/bin/sh\nexec ${process.execPath} ${import.meta.dir}/fake-opencode-bin.ts "$@"\n`);
   chmodSync(bin, 0o755);
   mkdirSync(work);
-  mkdirSync(`${dir}/memory`);
   const proc = Bun.spawn([process.execPath, "server.ts"], { cwd: import.meta.dir, stdout: "pipe", stderr: "inherit",
     env: { ...process.env, PORT: "0", CHRYSALIS_URL: `http://127.0.0.1:${freePort()}`, CHRYSALIS_HOST: "127.0.0.1", NODE_ENV: "production", CHRYSALIS_TLS_DIR: `${dir}/tls`, HOME: dir,
-      XDG_DATA_HOME: `${dir}/share`, XDG_STATE_HOME: `${dir}/state`, CHRYSALIS_OPENCODE: bin, FAKE_OPENCODE_PIDS: pids, CHRYSALIS_MEMORY: `${dir}/memory` } });
-  const alive = () => (existsSync(pids) ? readFileSync(pids, "utf8").trim().split("\n").map(Number) : []).filter((pid) => { try { process.kill(pid, 0); return true; } catch { return false; } });
+      XDG_DATA_HOME: `${dir}/share`, XDG_STATE_HOME: `${dir}/state`, CHRYSALIS_OPENCODE: bin, FAKE_OPENCODE_PIDS: pids } });
+  const alive = () => (existsSync(pids) ? readFileSync(pids, "utf8").trim().split("\n").map((l) => Number(l.split(" ")[0])) : []).filter((pid) => { try { process.kill(pid, 0); return true; } catch { return false; } });
   try {
     const reader = proc.stdout.getReader(), dec = new TextDecoder();
     let out = "";

@@ -3,6 +3,7 @@ import { tmpdir, totalmem } from "node:os";
 import { join } from "node:path";
 
 export const ROOT = join(import.meta.dir, "..");
+export const MODELS = ["qwen3.8-27b", "qwen3.8-flash-next"];
 
 export interface Machine {
   platform: NodeJS.Platform;

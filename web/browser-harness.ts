@@ -118,7 +118,7 @@ export const png = (() => {
 export const SUMMARY = "## Objective\n- keep chatting\n\n## Findings\n- the word is lighthouse\n\n## Next Move\n1. answer the next message";
 export const CONTEXT_FULL = () => Response.json({ error: { message: "the request (300000 tokens) exceeds the available context size (262144 tokens), try increasing it", type: "invalid_request_error", code: "context_length_exceeded" } }, { status: 400 });
 export let lastStream: any = null, probes = 0, chrysalisStopped = 0, loading: Promise<void> | null = null;
-export const streams: any[] = [], streamAt: number[] = [], checks: any[] = [];
+export const streams: any[] = [], streamAt: number[] = [], checks: any[] = [], unkept: boolean[] = [];
 export const fakes = { memoryRefusals: 0, naps: 0, loaded: "qwen3.8-27b", hurry: false };
 export let fake: ReturnType<typeof Bun.serve>;
 const serveFake = () => Bun.serve({
@@ -145,6 +145,7 @@ const serveFake = () => Bun.serve({
     if (!body.stream) return Response.json({ choices: [{ message: { content: "A title" } }] });
     lastStream = body;
     streams.push(body);
+    unkept.push(req.headers.get("x-chrysalis-unkept") === "1");
     streamAt.push(Date.now());
     req.signal.addEventListener("abort", () => chrysalisStopped++);
     const at = body.messages.findLastIndex((m: any) => m.role === "user"), last = body.messages[at];
@@ -186,19 +187,17 @@ export let web: Bun.Subprocess<"ignore", "pipe", "inherit">, base = "", browser:
 export const dir = mkdtempSync(`${RUN}/web-`), LOG = `${dir}/mcp.log`, VOICE_LOG = `${dir}/voice.log`;
 const PAGE = REPLIES.page, LEAVING = REPLIES["leaving now"];
 export const opencode = fakeOpenCode("test-secret");
-export const memory = `${RUN}/memory`, kept = `${RUN}/kept`;
 export const home = mkdtempSync(`${RUN}/home-`);
 async function start() {
   const tls = mkdtempSync(`${RUN}/tls-`);
   writeFileSync(`${tls}/opencode-off`, "");
-  mkdirSync(`${memory}/snapshots`, { recursive: true });
   fake = serveFake();
   web = Bun.spawn([process.execPath, "server.ts"], {
     cwd: import.meta.dir, stdout: "pipe", stderr: "inherit",
     env: { ...process.env, PORT: "0", CHRYSALIS_URL: `http://127.0.0.1:${fake.port}`, CHRYSALIS_HOST: "127.0.0.1", NODE_ENV: "production",
       CHRYSALIS_OPENCODE_URL: `http://127.0.0.1:${opencode.server.port}`, CHRYSALIS_OPENCODE_PASSWORD: "test-secret",
       CHRYSALIS_VOICE_CMD: JSON.stringify([process.execPath, `${import.meta.dir}/fake-voice.ts`]), FAKE_VOICE_LOG: VOICE_LOG, CHRYSALIS_VOICE_IDLE_MS: "1500",
-      CHRYSALIS_TLS_DIR: tls, CHRYSALIS_CHECK_PORT: "0", CHRYSALIS_RETRY_MS: "400", HOME: home, CHRYSALIS_MEMORY: memory, CHRYSALIS_KEPT: kept },
+      CHRYSALIS_TLS_DIR: tls, CHRYSALIS_CHECK_PORT: "0", CHRYSALIS_RETRY_MS: "400", HOME: home },
   });
   const reader = web.stdout.getReader(), dec = new TextDecoder();
   let out = "";

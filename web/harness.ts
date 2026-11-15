@@ -1,8 +1,8 @@
-import { existsSync, mkdtempSync, readdirSync, rmSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readdirSync, rmSync } from "node:fs";
 import { homedir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { sessionContextBreakdown, type SessionContextBreakdownSegment } from "./breakdown";
-import { keep, noCores, release, type Kept } from "./platform";
+import { keep, memoryRoot, noCores, release, type Kept } from "./platform";
 
 export type Decision = "once" | "always" | "deny";
 export interface Scene { cast: string[]; cards?: object[]; group?: string; scenario?: string; name?: string; greeting?: string; greeter?: string }
@@ -119,7 +119,6 @@ let woken: (session: string) => void = () => {};
 export const onWake = (fn: (session: string) => void) => { woken = fn; };
 process.on("exit", () => release(host?.proc));
 
-const MEMORY = process.env.CHRYSALIS_MEMORY || undefined;
 let scope: boolean | undefined, ours = "", veil: Promise<Host> | undefined, veiled: (on: boolean) => void = () => {};
 export const onHidden = (fn: (on: boolean) => void) => { veiled = fn; };
 export const hiddenOn = () => away.has(HIDDEN);
@@ -168,7 +167,7 @@ async function launch(chrysalis: string, store?: string): Promise<Host> {
     }
     const cmd = [bin, "serve", "--hostname", "127.0.0.1", "--port", String(port)];
     const proc = keep(store ? unswapped(noCores(cmd)) : cmd, {
-      ...env, ...(store ? { XDG_DATA_HOME: `${store}/data`, XDG_STATE_HOME: `${store}/state`, TMPDIR: `${store}/tmp` } : {}), OPENCODE_PASSWORD: password,
+      ...env, ...(store ? { OPENCODE_DB: ":memory:", XDG_DATA_HOME: `${store}/data`, XDG_STATE_HOME: `${store}/state`, TMPDIR: `${store}/tmp`, TEMP: `${store}/tmp`, TMP: `${store}/tmp` } : {}), OPENCODE_PASSWORD: password,
         OPENCODE_CONFIG_CONTENT: JSON.stringify({ ...(outside && !store ? {} : { enabled_providers: ["chrysalis"] }), providers: { ...others, chrysalis: { name: "Chrysalis",
           package: "@opencode/ai/providers/openai-compatible", settings: { baseURL: `${modelUrl}${store ? "/hidden" : ""}/v1`, apiKey: "chrysalis" }, models } } }) });
     const at = await reach(`http://127.0.0.1:${port}`, password, proc, Object.keys(models).length > 0);
@@ -198,9 +197,11 @@ export function ensure(chrysalis: string): Promise<void> {
 }
 function hidden(): Promise<Host> {
   return (veil ??= (async () => {
-    if (!MEMORY) throw new Error("Incognito keeps OpenCode in memory, which needs Chrysalis started from its terminal on Linux");
-    if (process.env.CHRYSALIS_OPENCODE_URL) throw new Error("Incognito needs Chrysalis to start OpenCode itself, on a store in memory");
-    const store = mkdtempSync(`${MEMORY}/opencode-`), at = { ...(await launch(ours, store)), store };
+    if (process.env.CHRYSALIS_OPENCODE_URL) throw new Error("Incognito needs Chrysalis to start OpenCode itself, with its store in memory");
+    const store = mkdtempSync(`${memoryRoot()}/chrysalis-run-${process.pid}-opencode-`);
+    mkdirSync(`${store}/tmp`);
+    let at: Host;
+    try { at = { ...(await launch(ours, store)), store }; } catch (e) { rmSync(store, { recursive: true, force: true }); throw e; }
     void at.proc!.exited.then(() => { if (away.get(HIDDEN) === at) void forget(); });
     away.set(HIDDEN, at);
     veiled(true);
@@ -219,7 +220,11 @@ export async function forget() {
   if (at.store) rmSync(at.store, { recursive: true, force: true, maxRetries: 3 });
   veiled(false);
 }
-process.on("exit", () => release(away.get(HIDDEN)?.proc));
+process.on("exit", () => {
+  const at = away.get(HIDDEN);
+  release(at?.proc);
+  if (at?.store) rmSync(at.store, { recursive: true, force: true, maxRetries: 3 });
+});
 
 const tooOld = (version: string) => {
   const has = String(version).split(".").map(Number), short = OLDEST.findIndex((n, k) => has[k] !== n);

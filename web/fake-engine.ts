@@ -29,7 +29,8 @@ Bun.serve({
       writing--;
       if (secret.startsWith("probe ")) {
         let wrote = "written";
-        try { (await import("node:fs")).writeFileSync(`${process.env.CHRYSALIS_SNAPSHOTS}/${model}/${secret.slice(6)}.snap`, "x"); } catch { wrote = "refused"; }
+        if (req.headers.get("x-chrysalis-unkept") === "1") wrote = "unkept";
+        else try { const fs = await import("node:fs"); fs.mkdirSync(`${process.env.CHRYSALIS_SNAPSHOTS}/${model}`, { recursive: true }); fs.writeFileSync(`${process.env.CHRYSALIS_SNAPSHOTS}/${model}/${secret.slice(6)}.snap`, "x"); } catch { wrote = "refused"; }
         say("chrysalis: prompt 14982 (cached 14272) ttft 1.08s | gen 1088 42.6 tok/s 1.80/step | stop | slot 1");
         return Response.json({ choices: [{ message: { content: wrote } }] });
       }

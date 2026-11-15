@@ -1,13 +1,13 @@
-import { chmodSync, copyFileSync, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync } from "node:fs";
+import { existsSync, mkdtempSync, readdirSync, readFileSync, rmSync } from "node:fs";
 import type { Subprocess } from "bun";
 import { clean, fold, paint, plain } from "./terminal";
 import { utcOffset } from "./clock";
 import { letIn } from "./firewall";
 import { gpuEnv } from "./gpu";
-import { getCommand, memoryRoot, ourScript, ROOT, serverCommand, serverEnv, stopTree } from "./platform";
+import { getCommand, memoryRoot, MODELS, ourScript, ROOT, serverCommand, serverEnv, stopTree } from "./platform";
 import { qrText } from "./qr";
 import { tlsPath } from "./tls";
-import { MODELS, point } from "./veil";
+
 
 const { bold, dim, green, yellow, red, gray } = paint;
 const API = process.env.CHRYSALIS_URL ?? "http://127.0.0.1:8080", PORT = process.env.PORT ?? "8081";
@@ -189,14 +189,14 @@ let engineSvc: Service, webSvc: Service;
 function engineSpawn() {
   const env = { ...process.env, ...serverEnv() };
   return Bun.spawn(scoped(engineCmd()), { cwd: ROOT, stdin: "ignore", stdout: "pipe", stderr: "pipe",
-    env: { ...env, ...gpuEnv(env), ...(run ? { CHRYSALIS_SNAPSHOTS: `${run}/snapshots`, TMPDIR: `${run}/tmp` } : {}) } });
+    env: { ...env, ...gpuEnv(env), ...(run ? { TMPDIR: run } : {}) } });
 }
 engineSvc = new Service("model server", engineSpawn, (l) => { const took = engineLine(l); sync(); return took; },
   () => Object.assign(engine, { state: "down", since: Date.now(), progress: 0, writing: 0 }));
 const web = ourScript(WEB_FILE);
 webSvc = new Service("web chat", () => Bun.spawn(scoped(web.cmd), {
   cwd: import.meta.dir, stdin: "ignore", stdout: "pipe", stderr: "pipe",
-  env: { ...process.env, ...web.env, NODE_ENV: "production", PORT, CHRYSALIS_ENGINE_HERE: HAS_MODEL ? "1" : "0", CHRYSALIS_HOST: state.mode === "local" ? "127.0.0.1" : "0.0.0.0", CHRYSALIS_INSECURE: state.mode === "insecure" ? "1" : "", CHRYSALIS_MEMORY: run ?? "", CHRYSALIS_KEPT: KEPT },
+  env: { ...process.env, ...web.env, NODE_ENV: "production", PORT, CHRYSALIS_ENGINE_HERE: HAS_MODEL ? "1" : "0", CHRYSALIS_HOST: state.mode === "local" ? "127.0.0.1" : "0.0.0.0", CHRYSALIS_INSECURE: state.mode === "insecure" ? "1" : "" },
   ipc: heard,
 }), () => false, () => { state.web = undefined; state.questions = []; state.veiled = 0; hidden(false); });
 
@@ -313,14 +313,10 @@ export function setVerbose(on: boolean) {
   note(on ? "verbose is on: what the servers and voice print shows here too, for this run" : "verbose is off: requests only");
 }
 
-const SHM = memoryRoot(), RUN = "chrysalis-run-", KEPT = process.env.CHRYSALIS_SNAPSHOTS || `${ROOT}/data/cache`;
+const SHM = memoryRoot(), RUN = "chrysalis-run-";
 let run: string | undefined;
 const cores = new Map<number, string>();
-function wipe(dir: string) {
-  const open = (d: string) => { try { chmodSync(d, 0o700); for (const e of readdirSync(d, { withFileTypes: true })) if (e.isDirectory()) open(`${d}/${e.name}`); } catch {  } };
-  open(dir);
-  rmSync(dir, { recursive: true, force: true, maxRetries: 3 });
-}
+const wipe = (dir: string) => rmSync(dir, { recursive: true, force: true, maxRetries: 3 });
 function sweep() {
   for (const old of existsSync(SHM) ? readdirSync(SHM) : []) {
     const pid = old.startsWith(RUN) ? Number(old.slice(RUN.length).split("-")[0]) : 0;
@@ -329,15 +325,7 @@ function sweep() {
   }
 }
 function memory() {
-  run = mkdtempSync(`${SHM}/${RUN}${process.pid}-`);
-  mkdirSync(`${run}/tmp`);
-  mkdirSync(`${run}/snapshots`);
-  for (const model of MODELS) {
-    mkdirSync(`${run}/none/${model}`, { recursive: true });
-    if (existsSync(`${KEPT}/${model}/pool.bin`)) copyFileSync(`${KEPT}/${model}/pool.bin`, `${run}/none/${model}/pool.bin`);
-    chmodSync(`${run}/none/${model}`, 0o555);
-  }
-  point(run, KEPT, false);
+  try { run = mkdtempSync(`${SHM}/${RUN}${process.pid}-`); } catch { run = undefined; }
 }
 function dumps(proc: { pid: number } | undefined, off: boolean) {
   if (!proc || process.env.CHRYSALIS_ENGINE_CMD || !Bun.which("prlimit")) return;

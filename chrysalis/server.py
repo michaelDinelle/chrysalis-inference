@@ -548,6 +548,7 @@ class Server:
         self.active, self.slots, self.umax = model, slots, umax
         self.loading = None
         self.state_lock = threading.Lock()
+        self.unkept = 0
         self.wake_lock, self.asleep, self.suspended = threading.Lock(), False, False
         self.tok = Tokens(tokenizer_path)
         self.replay = LRU(8192)
@@ -653,7 +654,7 @@ class Server:
         return os.path.join(SNAPSHOT_DIR, name, "pool.bin")
 
     def keep_pool(self, force=False):
-        if not force and time.time() - self.pool_saved < 30:
+        if self.unkept or not force and time.time() - self.pool_saved < 30:
             return
         self.pool_saved = time.time()
         path = self.pool_path(self.active)
@@ -713,7 +714,7 @@ class Server:
             self.lanes.release()
             self.rewarm()
 
-    def chat(self, body):
+    def chat(self, body, kept=True):
         messages = self.read_documents(merge_system(body.get("messages") or []))
         if not any(m.get("role") == "user" for m in messages):
             raise RequestError("the request needs at least one user message")
@@ -787,6 +788,9 @@ class Server:
         arrived = time.time()
         admit(self.lanes, self.gpu, side, arrived)
         held = Held(self.gpu, main=not side, arrived=arrived)
+        if not kept:
+            with self.state_lock:
+                self.unkept += 1
         try:
             want = self.active if side else self.resolve(body.get("model"))
             if want != self.active:
@@ -810,8 +814,11 @@ class Server:
                 prompt += prefix
             yield from self.run(np.array(prompt, np.int32), marks, sp, seed, max_tokens, bool(thinking), schemas, record, side,
                                 cont=cont, top_lp=min(top_lp, 64), aside=aside, stops=stops, seen=seen, answer=answer, held=held,
-                                strict=strict, budget=budget if thinking else None, bias=bias, breakers=breakers)
+                                strict=strict, budget=budget if thinking else None, bias=bias, breakers=breakers, kept=kept)
         finally:
+            if not kept:
+                with self.state_lock:
+                    self.unkept -= 1
             held.drop()
             if held.slot:
                 held.slot.busy = False
@@ -1015,7 +1022,7 @@ class Server:
         return self.engine.free_tokens() >= need
 
     def run(self, prompt, marks, sp, seed, max_tokens, thinking, schemas, record, side=False, cont=None, top_lp=-1, aside=False,
-            stops=(), seen=None, answer=None, held=None, strict=None, budget=None, bias=(), breakers=DRY_BREAKERS):
+            stops=(), seen=None, answer=None, held=None, strict=None, budget=None, bias=(), breakers=DRY_BREAKERS, kept=True):
         t0 = time.time()
         trace = [] if TRACE else None
         slot, cached = self.cache.acquire(prompt[:-1] if answer else prompt)
@@ -1050,7 +1057,7 @@ class Server:
             done = at
             if at < len(prompt) or not side:
                 t = time.time()
-                self.cache.checkpoint(slot, pinned, logits=at == len(prompt))
+                self.cache.checkpoint(slot, pinned, logits=at == len(prompt), kept=kept)
                 if trace is not None:
                     trace.append(("checkpoint", time.time() - t))
         t_prefill = time.time()
@@ -1290,6 +1297,9 @@ def make_handler(state, ready):
         def log_message(self, *args):
             pass
 
+        def kept(self):
+            return self.headers.get("X-Chrysalis-Unkept") != "1"
+
         def send_json(self, code, obj):
             if code >= 400 and state.get("srv"):
                 state["srv"].metrics.add("chrysalis_http_errors_total", status=code)
@@ -1362,7 +1372,7 @@ def make_handler(state, ready):
             if path == "/responses":
                 return self.responses_api(srv, body)
             rid, created, model = "chatcmpl-" + uuid.uuid4().hex[:24], int(time.time()), body.get("model") or srv.active
-            gen = srv.chat(body)
+            gen = srv.chat(body, self.kept())
             try:
                 first = next(gen)
             except RequestError as e:
@@ -1387,7 +1397,7 @@ def make_handler(state, ready):
                 body = apis.messages_body(req)
                 if count:
                     return self.send_json(200, {"input_tokens": srv.count_tokens(body)})
-                gen = srv.chat(body)
+                gen = srv.chat(body, self.kept())
                 first = next(gen)
             except RequestError as e:
                 kind = "overloaded_error" if isinstance(e, Asleep) else "invalid_request_error"
@@ -1420,7 +1430,7 @@ def make_handler(state, ready):
                              "previous_response_not_found")
             try:
                 body = apis.responses_body(req, history)
-                gen = srv.chat(body)
+                gen = srv.chat(body, self.kept())
                 first = next(gen)
             except RequestError as e:
                 return error(e.status, str(e), e.code)
