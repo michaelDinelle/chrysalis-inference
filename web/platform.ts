@@ -1,5 +1,5 @@
 import { existsSync, readFileSync } from "node:fs";
-import { totalmem } from "node:os";
+import { tmpdir, totalmem } from "node:os";
 import { join } from "node:path";
 
 export const ROOT = join(import.meta.dir, "..");
@@ -47,3 +47,15 @@ export const serverCommand = (model?: string, m: Machine = here(), root = ROOT) 
 export const getCommand = (model: string, m: Machine = here(), root = ROOT) => [python(m, root), "-m", "chrysalis", "get", model];
 
 export const ourScript = (file: string) => ({ cmd: [process.execPath, file], env: { BUN_BE_BUN: "1" } });
+
+export const memoryRoot = (m: Machine = here()) => (m.platform === "linux" && m.exists("/dev/shm") ? "/dev/shm" : tmpdir());
+
+export async function utf8Console(m: Machine = here()) {
+  if (m.platform !== "win32") return;
+  try {
+    const { dlopen, FFIType } = await import("bun:ffi");
+    const k = dlopen("kernel32.dll", { SetConsoleOutputCP: { args: [FFIType.u32], returns: FFIType.i32 }, SetConsoleCP: { args: [FFIType.u32], returns: FFIType.i32 } });
+    k.symbols.SetConsoleOutputCP(65001);
+    k.symbols.SetConsoleCP(65001);
+  } catch {  }
+}

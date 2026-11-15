@@ -18,7 +18,8 @@
     "multicast-dns": "7.2.5",
     "parse5": "^8.1.1",
     "react": "^19.3.1",
-    "three": "0.186.1"
+    "three": "0.186.1",
+    "uqr": "0.1.3"
   },
   "devDependencies": {
     "@types/bun": "^1.4.2",

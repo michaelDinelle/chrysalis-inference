@@ -1,9 +1,11 @@
 import { chmodSync, copyFileSync, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync } from "node:fs";
 import type { Subprocess } from "bun";
 import { clean, fold, paint, plain } from "./terminal";
+import { utcOffset } from "./clock";
 import { letIn } from "./firewall";
 import { gpuEnv } from "./gpu";
-import { getCommand, ourScript, ROOT, serverCommand, serverEnv } from "./platform";
+import { getCommand, memoryRoot, ourScript, ROOT, serverCommand, serverEnv } from "./platform";
+import { qrText } from "./qr";
 import { tlsPath } from "./tls";
 import { MODELS, point } from "./veil";
 
@@ -58,10 +60,7 @@ const count = (x: number | string) => Number(x).toLocaleString("en-US");
 let zone = { hour: -1, ms: 0 };
 function stamp() {
   const now = new Date();
-  if (now.getUTCHours() !== zone.hour) {
-    const z = Bun.spawnSync(["date", "+%z"], { stdout: "pipe", stderr: "ignore" }).stdout.toString().trim();
-    zone = { hour: now.getUTCHours(), ms: /^[+-]\d{4}$/.test(z) ? (z[0] === "-" ? -1 : 1) * (Number(z.slice(1, 3)) * 60 + Number(z.slice(3))) * 60_000 : -now.getTimezoneOffset() * 60_000 };
-  }
+  if (now.getUTCHours() !== zone.hour) zone = { hour: now.getUTCHours(), ms: utcOffset(now.getTime()) };
   return gray(new Date(now.getTime() + zone.ms).toISOString().slice(11, 19));
 }
 
@@ -204,7 +203,7 @@ webSvc = new Service("web chat", () => Bun.spawn(scoped(web.cmd), {
 let scope: boolean | undefined;
 function scoped(cmd: string[]) {
   if (process.env.CHRYSALIS_ENGINE_CMD) return cmd;
-  try { scope ??= Bun.spawnSync(["systemd-run", "--user", "--scope", "-q", "true"], { stdout: "ignore", stderr: "ignore" }).exitCode === 0; } catch { scope = false; }
+  scope ??= !!Bun.which("systemd-run") && Bun.spawnSync(["systemd-run", "--user", "--scope", "-q", "true"], { stdout: "ignore", stderr: "ignore" }).exitCode === 0;
   return scope ? ["systemd-run", "--user", "--scope", "-q", "-p", "MemorySwapMax=0", ...cmd] : cmd;
 }
 
@@ -314,11 +313,12 @@ export function setVerbose(on: boolean) {
   note(on ? "verbose is on: what the servers and voice print shows here too, for this run" : "verbose is off: requests only");
 }
 
-const SHM = "/dev/shm", RUN = "chrysalis-run-", KEPT = process.env.CHRYSALIS_SNAPSHOTS || `${ROOT}/data/cache`;
+const SHM = memoryRoot(), RUN = "chrysalis-run-", KEPT = process.env.CHRYSALIS_SNAPSHOTS || `${ROOT}/data/cache`;
 let run: string | undefined;
 const cores = new Map<number, string>();
 function wipe(dir: string) {
-  Bun.spawnSync(["chmod", "-R", "u+w", dir], { stdout: "ignore", stderr: "ignore" });
+  const open = (d: string) => { try { chmodSync(d, 0o700); for (const e of readdirSync(d, { withFileTypes: true })) if (e.isDirectory()) open(`${d}/${e.name}`); } catch {  } };
+  open(dir);
   rmSync(dir, { recursive: true, force: true, maxRetries: 3 });
 }
 function sweep() {
@@ -329,7 +329,6 @@ function sweep() {
   }
 }
 function memory() {
-  if (!existsSync(SHM)) return;
   run = mkdtempSync(`${SHM}/${RUN}${process.pid}-`);
   mkdirSync(`${run}/tmp`);
   mkdirSync(`${run}/snapshots`);
@@ -341,7 +340,7 @@ function memory() {
   point(run, KEPT, false);
 }
 function dumps(proc: { pid: number } | undefined, off: boolean) {
-  if (!proc || process.env.CHRYSALIS_ENGINE_CMD) return;
+  if (!proc || process.env.CHRYSALIS_ENGINE_CMD || !Bun.which("prlimit")) return;
   const limit = (...more: string[]) => { try { return Bun.spawnSync(["prlimit", "--pid", String(proc.pid), ...more], { stdout: "pipe", stderr: "ignore" }).stdout.toString().trim(); } catch { return ""; } };
   if (off) {
     if (!cores.has(proc.pid)) cores.set(proc.pid, limit("--core", "--raw", "--noheadings", "-o", "SOFT"));
@@ -367,21 +366,12 @@ export async function restart(part: string) {
   if (part !== "model") await webSvc.restart();
 }
 
-function scan(url: string): string | undefined {
-  try {
-    const code = Bun.spawnSync(["qrencode", "-t", "ANSIUTF8", "-m", "2", url], { stdout: "pipe", stderr: "ignore" });
-    return code.exitCode === 0 ? code.stdout.toString().trimEnd().split("\n").map((l) => `  ${l}`).join("\n") : undefined;
-  } catch {
-    return undefined;
-  }
-}
+const scan = (url: string) => qrText(url).split("\n").map((l) => `  ${l}`).join("\n");
 
 export function qr() {
   const url = state.web?.network[0];
   if (!url) return note(`a code is for other devices${SEP}${dim("network or insecure puts Chrysalis on your network")}`);
-  const code = scan(url);
-  if (!code) return note(`qrencode is not installed${SEP}${url}`);
-  ui.log(code);
+  ui.log(scan(url));
   note(dim(url));
 }
 

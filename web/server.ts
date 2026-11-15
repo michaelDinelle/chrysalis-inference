@@ -8,6 +8,7 @@ import { advertise, answerName, Link } from "./link";
 import { opencodeLine, opencodeManifest, opencodeScript } from "./opencode";
 import { tunnel } from "./machines";
 import { python } from "./platform";
+import { qrSvg as qrCode } from "./qr";
 import { point } from "./veil";
 import { appleProfile, connectPage, deviceScript, TRUSTED_GIF } from "./setup";
 import * as harness from "./harness";
@@ -1207,14 +1208,8 @@ async function connectUrls(): Promise<string[]> {
   return lanAddresses().sort((a, b) => Number(b === first) - Number(a === first)).map((ip) => `${OPEN ? "http" : "https"}://${ip}:${server.port}/`);
 }
 
-const qrs = new Map<string, string | undefined>();
-function qrSvg(url: string): string | undefined {
-  if (qrs.has(url)) return qrs.get(url);
-  try {
-    const r = Bun.spawnSync(["qrencode", "-t", "SVG", "-m", "2", "-o", "-", url], { stdout: "pipe", stderr: "ignore" });
-    qrs.set(url, r.exitCode === 0 ? r.stdout.toString() : undefined);
-    return qrs.get(url);
-  } catch {
-    return undefined;
-  }
+const qrs = new Map<string, string>();
+function qrSvg(url: string): string {
+  if (!qrs.has(url)) qrs.set(url, qrCode(url));
+  return qrs.get(url)!;
 }

@@ -3899,16 +3899,12 @@ async function renderConnect() {
   }
   done.append(`${joined} is connected.`);
   const row = h("div", "dev-row"), text = h("div", "dev-text"), other = h("p");
-  if (p.qr) {
-    const qr = h("img", "dev-qr");
-    qr.src = `data:image/svg+xml;base64,${btoa(p.qr)}`;
-    qr.alt = "QR code of Chrysalis's address on this network";
-    row.append(qr);
-  }
-  other.append(p.qr ? "No camera? On the device, open " : "On the device, open ", h("code", "dev-url", p.connect[0].replace(/\/$/, "")), ".");
-  text.append(h("p", "dev-lead", `${p.qr ? "Scan this with your phone." : "The device connects there."} Go on past its one warning that the connection is not private, then allow the code it shows.`),
-    other,
-    ...(p.qr ? [] : [h("p", "set-note", "With qrencode installed, a QR code shows here for phones to scan.")]));
+  const qr = h("img", "dev-qr");
+  qr.src = `data:image/svg+xml;base64,${btoa(p.qr)}`;
+  qr.alt = "QR code of Chrysalis's address on this network";
+  row.append(qr);
+  other.append("No camera? On the device, open ", h("code", "dev-url", p.connect[0].replace(/\/$/, "")), ".");
+  text.append(h("p", "dev-lead", "Scan this with your phone. Go on past its one warning that the connection is not private, then allow the code it shows."), other);
   row.append(text);
   const devs = h("div", "dev-list"), browsers = list.filter((d) => d.kind !== "computer");
   devs.append(h("div", "set-title", "Let in"));

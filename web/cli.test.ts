@@ -36,6 +36,18 @@ function chrysalis(o: { pty?: boolean; mode?: string; env?: Record<string, strin
     stop: async () => { proc.kill(); await proc.exited; rmSync(dir, { recursive: true, force: true }); },
   };
 }
+function decoded(rows: boolean[][]) {
+  const dir = mkdtempSync(`${tmpdir()}/chrysalis-qr-`), big = rows.flatMap((r) => Array(4).fill(r.flatMap((on) => Array(4).fill(on ? "1" : "0")).join(" ")));
+  writeFileSync(`${dir}/code.pbm`, `P1\n${big[0].split(" ").length} ${big.length}\n${big.join("\n")}\n`);
+  try { return Bun.spawnSync(["zbarimg", "-q", "--raw", `${dir}/code.pbm`], { stdout: "pipe", stderr: "pipe" }).stdout.toString().trim(); }
+  finally { rmSync(dir, { recursive: true, force: true }); }
+}
+const drawn = (lines: string[]) => lines.flatMap((l) => [[...l.slice(2)].map((c) => c === " " || c === "▄"), [...l.slice(2)].map((c) => c === " " || c === "▀")]);
+const painted = (svg: string) => {
+  const n = Number(/viewBox="0 0 (\d+)/.exec(svg)![1]), rows = Array.from({ length: n }, () => Array(n).fill(false));
+  for (const [, x, y] of svg.matchAll(/M(\d+) (\d+)h1v1h-1z/g)) rows[Number(y)][Number(x)] = true;
+  return rows;
+};
 const files = (dir: string): string[] => readdirSync(dir, { withFileTypes: true }).flatMap((f) => (f.isDirectory() ? files(`${dir}/${f.name}`) : f.isFile() ? [`${dir}/${f.name}`] : []));
 
 test("the terminal shows each request to the model as it finishes, by its sizes and speeds and never its words, and nothing else the servers print until verbose is typed; none of it reaches a file; a request from an incognito chat stays off the terminal, and while it runs the model server cannot write its prompt cache, which the next ordinary request writes again", async () => {
@@ -134,15 +146,15 @@ test("insecure puts the chat and the API on the network over plain HTTP with no 
 }, 60_000);
 
 const UP = "\x1b[A", DOWN = "\x1b[B", RIGHT = "\x1b[C";
-test("in a terminal on the network, the code a phone scans shows first, above the addresses, as qrencode draws that address; every device asking shows above the prompt; one answered on the page leaves, so y lets in the one still asking; Tab opens the switches, where arrows and Enter turn verbose on and unload the model; Tab completes a command, and Ctrl+C stops the model server and the web chat", async () => {
+test("in a terminal on the network, the code a phone scans shows first, above the addresses, and a reader takes that address from it, as from the page's; every device asking shows above the prompt; one answered on the page leaves, so y lets in the one still asking; Tab opens the switches, where arrows and Enter turn verbose on and unload the model; Tab completes a command, and Ctrl+C stops the model server and the web chat", async () => {
   const c = chrysalis({ pty: true, mode: "network" });
   try {
     const net = (await c.shown(/phone\s+(https:\/\/[\d.]+:\d+)/))[1];
-    const code = plain(Bun.spawnSync(["qrencode", "-t", "ANSIUTF8", "-m", "2", net]).stdout.toString()).trimEnd().split("\n").map((l) => `  ${l}`);
-    expect(code.length).toBeGreaterThan(10);
-    const top = c.out().split(/\r?\n/), drawn = top.indexOf(code[0]);
-    expect(top.slice(drawn, drawn + code.length)).toEqual(code);
-    expect(drawn).toBeLessThan(top.findIndex((l) => /^\s+chat\s+http/.test(l)));
+    const top = c.out().split(/\r?\n/), from = top.findIndex((l) => /^  [█▀▄ ]{20,}$/.test(l)), to = top.findIndex((l, i) => i > from && !/^  [█▀▄ ]{20,}$/.test(l));
+    expect([from >= 0, to - from > 10, decoded(drawn(top.slice(from, to)))]).toEqual([true, true, net]);
+    expect(from).toBeLessThan(top.findIndex((l) => /^\s+chat\s+http/.test(l)));
+    const pair = await (await fetch(`${c.here}/api/pair`)).json();
+    expect([pair.connect[0].replace(/\/$/, ""), decoded(painted(pair.qr))]).toEqual([net, `${net}/`]);
     const ask = async (name: string) => (await (await fetch(`${net}/opencode/ask`, { method: "POST", headers: json, body: JSON.stringify({ name }), tls: { rejectUnauthorized: false } })).text()).split(" ");
     const collect = (secret: string) => fetch(`${net}/opencode/ask/${secret}`, { tls: { rejectUnauthorized: false } }).then((r) => r.status);
     const [firstSecret, first] = await ask("first"), [secondSecret, second] = await ask("second");
