@@ -1,4 +1,5 @@
 #include "model.h"
+#include "../gpu.h"
 #include <chrono>
 #include <thread>
 #include <algorithm>
@@ -26,10 +27,10 @@ void Engine::seq_reset(Seq &s) {
     s.hist[0] = s.hist[1] = -1;
     s.look.clear();
     s.rng.seed(std::random_device{}());
-    CK(hipMemsetAsync(s.ssm, 0, ssm_bytes(), st));
-    CK(hipMemsetAsync(s.conv, 0, conv_bytes(), st));
-    CK(hipMemsetAsync(s.ple, 0, ple_bytes(), st));
-    CK(hipMemsetAsync(s.h_last, 0, (size_t)HCD * 4, st));
+    gpu_zero(s.ssm, ssm_bytes(), st);
+    gpu_zero(s.conv, conv_bytes(), st);
+    gpu_zero(s.ple, ple_bytes(), st);
+    gpu_zero(s.h_last, (size_t)HCD * 4, st);
 }
 
 void Engine::seq_free(int id) {
@@ -67,7 +68,7 @@ void Engine::ensure_pages(Seq &s, int n_tokens, int from) {
     if ((int)free_pages.size() < need - dirty + shared) throw std::runtime_error("out of KV pages");
     while ((int)s.pages.size() < need) {
         const int p = page_alloc();
-        CK(hipMemsetAsync(kv_pool + (size_t)p * KV_PAGE, 0, KV_PAGE, st));
+        gpu_zero(kv_pool + (size_t)p * KV_PAGE, KV_PAGE, st);
         s.pages.push_back(p);
     }
     for (int i = from / PAGE; i < dirty && i < need; i++) {
@@ -1033,8 +1034,8 @@ int Engine::image_encode(int slot, const float *patches, int gh, int gw, int fra
     im.n = rows;
     for (hipStream_t s : {st, cst}) if (s) CK(hipStreamSynchronize(s));
     const bool ok = vision.encode(patches, gh, gw, im.rows, barena.base, barena.cap, st, frames);
-    CK(hipMemsetAsync(b.rr_counter, 0, 4, st));
-    CK(hipMemsetAsync(la.counter, 0, 4, st));
+    gpu_zero(b.rr_counter, 4, st);
+    gpu_zero(la.counter, 4, st);
     CK(hipStreamSynchronize(st));
     return ok ? 0 : -1;
 }

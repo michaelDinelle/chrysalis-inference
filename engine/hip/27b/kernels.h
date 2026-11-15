@@ -66,3 +66,4 @@ struct AttnArgs {
 void attn_prep(const float *qg, const float *k, const float *v, const float *qnw, const float *knw, int T, int pos0,
                int rope0, const int *rpos, KVRef kv, int layer, half *Q16, hipStream_t st);
 void attention(AttnArgs a, half *oh, QAct oq, hipStream_t st);
+int decode_split(int nkeys);

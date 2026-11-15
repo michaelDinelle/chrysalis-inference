@@ -59,6 +59,11 @@ struct Ref {
             }
         }
     }
+    double score(const vector<float> &Q, int t, int h, int j) const {
+        double d = 0;
+        for (int i = 0; i < HD; i++) d += Q[((size_t)t * NH + h) * HD + i] * round_f16(K[((size_t)j * NKV + h / 6) * HD + i]);
+        return d;
+    }
     void attend(const vector<float> &Q, const float *qg, int T, int pos0, vector<float> &out) {
         out.assign((size_t)T * NH * HD, 0);
         for (int t = 0; t < T; t++) for (int h = 0; h < NH; h++) {
@@ -97,8 +102,10 @@ int main() {
     CK(hipMemcpy(dqw, qw.data(), HD * 4, hipMemcpyHostToDevice)); CK(hipMemcpy(dkw, kw.data(), HD * 4, hipMemcpyHostToDevice));
     Ref ref; int fails = 0, pos = 0;
     struct Case { int T; const char *name; bool check = true; bool mrope = false; };
-    vector<Case> cases = {{100, "prefill 100"}, {50, "prefill +50"}, {1, "decode"}, {4, "verify 4"}, {8, "verify 8"}, {1, "decode"},
-                          {24, "M-RoPE picture", true, true}, {1, "decode after it"}};
+    vector<Case> cases = {{100, "prefill 100"}, {22, "prefill +22"}};
+    for (int i = 0; i < 12; i++) cases.push_back({1, "decode into a split"});
+    for (Case c : {Case{16, "prefill +16"}, Case{1, "decode"}, Case{4, "verify 4"}, Case{8, "verify 8"}, Case{1, "decode"},
+                   Case{24, "M-RoPE picture", true, true}, Case{1, "decode after it"}}) cases.push_back(c);
     for (int i = 0; i < 16; i++) cases.push_back({2048, "prefill 2048", false});
     for (int t : {1, 2, 3, 4, 8, 5, 1}) cases.push_back({t, "deep decode/verify"});
     cases.push_back({9, "deep append"});
@@ -135,8 +142,19 @@ int main() {
         ref.attend(Q, qg.data(), T, pos, want);
         double e2 = 0, r2 = 0, emax = 0;
         for (size_t i = 0; i < want.size(); i++) { double e = (double)got[i] - want[i]; e2 += e * e; r2 += want[i] * want[i]; emax = fmax(emax, fabs(e)); }
-        const double rel = sqrt(e2 / r2); const bool ok = rel < 5e-3;
-        printf("%-16s T=%-3d pos0=%-3d rel %.2e max %.2e %s\n", c.name, T, pos, rel, emax, ok ? "ok" : "FAIL");
+        double peak = 0;
+        if (T <= 8) {
+            const int len = decode_split(pos + T), ns = (pos + T + len - 1) / len;
+            vector<float> ml((size_t)ns * T * NH * 2); CK(hipMemcpy(ml.data(), pml, ml.size() * 4, hipMemcpyDeviceToHost));
+            for (int sp = 0; sp < ns; sp++) for (int t = 0; t < T; t++) for (int h = 0; h < NH; h++) {
+                double mx = -INFINITY;
+                for (int j = sp * len; j < std::min(pos + t + 1, (sp + 1) * len); j++) mx = fmax(mx, ref.score(Q, t, h, j));
+                const double m = ml[((size_t)sp * T * NH + t * NH + h) * 2];
+                peak = fmax(peak, mx == -INFINITY ? (m == -INFINITY ? 0.0 : 1e9) : fabs(m - mx));
+            }
+        }
+        const double rel = sqrt(e2 / r2); const bool ok = rel < 5e-3 && peak < 0.02;
+        printf("%-16s T=%-3d pos0=%-3d rel %.2e max %.2e row maxima off by %.1e %s\n", c.name, T, pos, rel, emax, peak, ok ? "ok" : "FAIL");
         fails += !ok; pos += T;
         CK(hipFree(dqg)); CK(hipFree(dk)); CK(hipFree(dv)); CK(hipFree(Q16)); CK(hipFree(oh));
     }

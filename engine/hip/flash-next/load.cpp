@@ -703,8 +703,8 @@ void Engine::alloc_buffers(int max_seqs) {
     carve(dry);
     barena.init(dry.used + (1 << 20));
     carve(barena);
-    CK(hipMemsetAsync(b.rr_counter, 0, 4, st));
-    CK(hipMemsetAsync(la.counter, 0, 64 * 4, st));
+    gpu_zero(b.rr_counter, 4, st);
+    gpu_zero(la.counter, 64 * 4, st);
     CK(hipHostMalloc(&b.ple_rows, (size_t)S * PLE_HEADS * 170));
     CK(hipHostMalloc(&b.h_ids, N * 4)); CK(hipHostMalloc(&b.h_wts, N * 4)); CK(hipHostMalloc(&b.h_tok, N * 4));
     CK(hipHostMalloc(&b.h_entw, N * 4)); CK(hipHostMalloc(&b.h_pos, N * 4)); CK(hipHostMalloc(&b.h_btok, N * 4));
@@ -751,7 +751,7 @@ void Engine::warmup() {
     std::fill(xc.fresh.begin(), xc.fresh.end(), 0u);
     std::fill(xc.total.begin(), xc.total.end(), 0ull);
     xc.tokens = 0; xc.counts_pending = false;
-    CK(hipMemsetAsync(xc.d_counts, 0, (size_t)NL * NE * 4, st));
+    gpu_zero(xc.d_counts, (size_t)NL * NE * 4, st);
     if (borrowed) seq_reset(seqs[0]); else seq_free(id);
     snap_warm = true;
     snap_reserve_finish();

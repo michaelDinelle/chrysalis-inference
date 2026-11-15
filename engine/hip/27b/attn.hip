@@ -361,7 +361,7 @@ __global__ __launch_bounds__(256) __attribute__((amdgpu_waves_per_eu(NT == 3 ? 4
                 mx = fmaxf(mx, sc[rt][i]);
             }
             mx = fmaxf(mx, lane_xor<16>(mx));
-            if (hi == 0) rmx[w][rt * 16 + r16] = mx;
+            rmx[w][rt * 16 + r16] = mx;
         }
         __syncthreads();
 #pragma unroll
@@ -408,7 +408,7 @@ __global__ __launch_bounds__(256) __attribute__((amdgpu_waves_per_eu(NT == 3 ? 4
         }
     }
 #pragma unroll
-    for (int rt = 0; rt < NT; rt++) if (hi == 0) rmx[w][rt * 16 + r16] = l[rt];
+    for (int rt = 0; rt < NT; rt++) rmx[w][rt * 16 + r16] = l[rt];
     __syncthreads();
 #pragma unroll
     for (int rt = 0; rt < NT; rt++) {
@@ -472,15 +472,18 @@ __global__ __launch_bounds__(256) void k_attn_combine(const float *part_o, const
     }
 }
 
+int decode_split(int nkeys) {
+    const int nst = (nkeys + DST - 1) / DST, target = std::min(DEC_SPLITS, nst);
+    return (nst + target - 1) / target * DST;
+}
+
 void attention(AttnArgs a, half *oh, QAct oq, hipStream_t st) {
     const int ntiles = (a.T * 6 + 15) / 16;
     const int nkeys = a.pos0 + a.T;
     a.out_h = oh;
     if (a.T <= 8) {
-        const int nst = (nkeys + DST - 1) / DST;
-        const int target = std::min(DEC_SPLITS, nst);
-        if ((nst + target - 1) / target * DST > DEC_PAGES * PAGE) FAIL("attention: %d keys exceed the decode page cache", nkeys);
-        a.split_len = (nst + target - 1) / target * DST;
+        a.split_len = decode_split(nkeys);
+        if (a.split_len > DEC_PAGES * PAGE) FAIL("attention: %d keys exceed the decode page cache", nkeys);
         a.nsplit = (nkeys + a.split_len - 1) / a.split_len;
         a.partial = 1;
         const dim3 grid(a.nsplit, NKV);

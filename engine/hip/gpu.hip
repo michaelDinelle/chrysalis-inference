@@ -23,6 +23,16 @@ bool gpu_runs() {
     return ok;
 }
 
+__global__ void k_zero(uint32_t *p, size_t words, size_t bytes) {
+    for (size_t i = (size_t)blockIdx.x * blockDim.x + threadIdx.x; i < words; i += (size_t)gridDim.x * blockDim.x) p[i] = 0;
+    if (blockIdx.x == 0 && threadIdx.x == 0) for (size_t i = words * 4; i < bytes; i++) ((uint8_t *)p)[i] = 0;
+}
+
+void gpu_zero(void *p, size_t bytes, void *stream) {
+    const size_t words = bytes / 4, blocks = (words + 255) / 256;
+    k_zero<<<(unsigned)(blocks < 1 ? 1 : blocks > 2048 ? 2048 : blocks), 256, 0, (hipStream_t)stream>>>((uint32_t *)p, words, bytes);
+}
+
 size_t gpu_free() {
     size_t free_b = 0, total_b = 0;
     int dev = 0;
