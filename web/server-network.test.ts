@@ -429,7 +429,7 @@ test("a computer with only OpenCode gets in from one pinned line and an approval
   }
 });
 
-test("the page hears Chrysalis is off where its address takes a connection and never answers, as a port no one listens on does in WSL's mirrored networking", async () => {
+test("the page hears Chrysalis is off where its address takes a connection and never answers, as a port a firewall drops does", async () => {
   const mute = Bun.listen({ hostname: "127.0.0.1", port: 0, socket: { data() {} } }), run = mkdtempSync(`${RUN}/run-`);
   const proc = Bun.spawn([process.execPath, "server.ts"], {
     cwd: import.meta.dir, stdout: "pipe", stderr: "inherit",

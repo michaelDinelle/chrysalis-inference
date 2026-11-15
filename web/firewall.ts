@@ -34,20 +34,7 @@ async function ufw(mode: "network" | "insecure") {
   } else console.log("  not changed: Chrysalis started in a terminal asks for the password");
 }
 
-function wsl(mode: "network" | "insecure") {
-  const root = Bun.spawnSync(["wslpath", "C:\\Windows"], { stdout: "pipe", stderr: "ignore" }).stdout.toString().trim();
-  const shell = `${root}/System32/WindowsPowerShell/v1.0/powershell.exe`, rule = mode === "insecure" ? "ChrysalisOpen" : "Chrysalis", from = mode === "insecure" ? 8080 : 8081;
-  const ps = (script: string) => Bun.spawnSync([shell, "-NoProfile", "-NonInteractive", "-EncodedCommand", Buffer.from(script, "utf16le").toString("base64")],
-    { stdin: "ignore", stdout: "pipe", stderr: "ignore" }).stdout.toString().replace(/\r/g, "").trim();
-  if (!root || ps(`Get-NetFirewallHyperVRule -Name ${rule} -ErrorAction SilentlyContinue | ForEach-Object Name`)) return;
-  console.log(`Windows keeps other devices out: letting the private networks reach Chrysalis (TCP ${from}-8083) asks Windows for an administrator, once`);
-  const add = `New-NetFirewallHyperVRule -Name ${rule} -DisplayName 'Chrysalis Inference' -Direction Inbound -Action Allow -VMCreatorId '{40E0AC32-46A5-438A-A0B2-2B479E8F2E90}' ` +
-    `-Protocol TCP -LocalPorts ${from}-8083 -RemoteAddresses 10.0.0.0/8, 172.16.0.0/12, 192.168.0.0/16, 100.64.0.0/10, 169.254.0.0/16`;
-  ps(`$enc = [Convert]::ToBase64String([Text.Encoding]::Unicode.GetBytes("${add}"))\nStart-Process powershell -Verb RunAs -Wait -WindowStyle Hidden -ArgumentList '-NoProfile', '-EncodedCommand', $enc`);
-}
-
 export async function letIn(mode: "network" | "insecure") {
   if (process.platform !== "linux") return;
-  if (process.env.WSL_DISTRO_NAME) return wsl(mode);
   await ufw(mode);
 }

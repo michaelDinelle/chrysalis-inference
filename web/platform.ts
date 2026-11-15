@@ -39,8 +39,7 @@ export function serverEnv(m: Machine = here(), root = ROOT): Record<string, stri
   if (m.platform === "win32") return { ...utf8, ...before(m.env, "PATH", [join(root, "build"), join(root, "build", "runtime")], ";") };
   if (m.platform === "darwin") return utf8;
   const ggml = join(root, "ggml", /\bavx512_vnni\b/.test(m.read("/proc/cpuinfo")) ? "avx512" : "avx2");
-  return { ...utf8, ...before(m.env, "LD_LIBRARY_PATH", [join(root, "data/rocm/lib"), join(root, "data/rocm/lib/rocm_sysdeps/lib"), ggml], ":"),
-    ...(m.exists("/dev/dxg") ? { HSA_ENABLE_DXG_DETECTION: "1" } : {}) };
+  return { ...utf8, ...before(m.env, "LD_LIBRARY_PATH", [join(root, "data/rocm/lib"), join(root, "data/rocm/lib/rocm_sysdeps/lib"), ggml], ":") };
 }
 
 export const serverCommand = (model?: string, m: Machine = here(), root = ROOT) =>

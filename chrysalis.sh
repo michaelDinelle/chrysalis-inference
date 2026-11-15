@@ -79,45 +79,6 @@ build() {
     echo "building Chrysalis's Metal engines (once, about a minute)"
     make -C "$ROOT" -s engines >/dev/null 2>&1 || echo "  that failed: 'xcodebuild -downloadComponent MetalToolchain' gets Metal's compiler"
 }
-WIN=; [ -z "${WSL_DISTRO_NAME:-}" ] || WIN=$(wslpath 'C:\Windows')
-win() {
-    "$WIN/System32/WindowsPowerShell/v1.0/powershell.exe" -NoProfile -NonInteractive \
-        -EncodedCommand "$(printf %s "${1//@DISTRO@/$WSL_DISTRO_NAME}" | iconv -t UTF-16LE | base64 -w0)" 2>/dev/null | tr -d '\r'
-}
-wsl_ready() {
-    [ -n "$WIN" ] || return 0
-    if [ "$(wslinfo --networking-mode 2>/dev/null)" = nat ]; then
-        local cfg add="" gb
-        cfg="$(wslpath "$(win '$env:USERPROFILE')")/.wslconfig"
-        grep -qsiE '^\s*networkingMode\s*=' "$cfg" || add="networkingMode=mirrored"
-        gb=$(awk '/^MemTotal/ { printf "%d", $2 * 2 / 1048576 }' /proc/meminfo)
-        if [ "$gb" -ge 60 ] && ! grep -qsiE '^\s*memory\s*=' "$cfg"; then add="${add:+$add }memory=$((gb - 6))GB"; fi
-        if [ -n "$add" ]; then
-            { [ -f "$cfg" ] && cat "$cfg"; true; } | awk -v add="$add" '
-                { print } tolower($0) ~ /^[ \t]*\[wsl2\][ \t\r]*$/ && !done { n = split(add, a, " "); for (i = 1; i <= n; i++) print a[i]; done = 1 }
-                END { if (!done) { print "[wsl2]"; n = split(add, a, " "); for (i = 1; i <= n; i++) print a[i] } }' > "$cfg.new" && mv "$cfg.new" "$cfg"
-            echo "WSL starts again to take Chrysalis's settings (once): Chrysalis opens again by itself"
-            win "$(cat <<'EOF'
-$l = (Get-ChildItem HKCU:\Software\Microsoft\Windows\CurrentVersion\Lxss | Get-ItemProperty | Where-Object DistributionName -eq '@DISTRO@').ShortcutPath
-$then = @"
-Start-Sleep 2
-& "$env:SystemRoot\System32\wsl.exe" --shutdown
-Start-Process explorer.exe -ArgumentList '"$l"'
-"@
-$enc = [Convert]::ToBase64String([Text.Encoding]::Unicode.GetBytes($then))
-Start-Process -WindowStyle Hidden powershell -ArgumentList '-NoProfile', '-EncodedCommand', $enc
-EOF
-)"
-            exit 1
-        fi
-    fi
-    if [ "$(dpkg-query -W -f='${Status}' hsa-runtime-rocr4wsl-amdgpu 2>/dev/null)" != "install ok installed" ]; then
-        echo "getting AMD's ROCm runtime for WSL (once)"
-        "$WIN/System32/wsl.exe" -d "$WSL_DISTRO_NAME" -u root -- sh -c 'export DEBIAN_FRONTEND=noninteractive; dpkg --configure -a; apt-get update -q && curl -fsSL -o /tmp/amdgpu-install.deb https://repo.radeon.com/amdgpu-install/7.2/ubuntu/noble/amdgpu-install_7.2.70200-1_all.deb &&
-            apt-get install -yq /tmp/amdgpu-install.deb && amdgpu-install -y --usecase=wsl --no-dkms' </dev/null >/dev/null 2>&1 || echo "  that failed: start again to try again"
-    fi
-}
-
 release() {
     set -uo pipefail
     local VER="${1:-$(git -C "$ROOT" describe --tags --always)}" OUT=dist/chrysalis R=data/rocm/lib
@@ -145,24 +106,15 @@ release() {
         ! -name '*.test.ts' ! -name '*.check.ts' ! -name 'fake-*' ! -name 'bench-*' -exec cp {} "$OUT/web/" \;
     (cd web && bun install --frozen-lockfile >/dev/null)
     bun build web/server.ts web/cli.ts --target=bun --production --external react-devtools-core --outdir "$OUT/web" >/dev/null
-    bun build --compile --target=bun-windows-x64 web/launch.ts --outfile dist/Chrysalis.exe >/dev/null
     for p in mermaid/dist/mermaid.esm.min.mjs mermaid/dist/chunks/mermaid.esm.min aframe/dist/aframe-v1.8.0.min.js three/package.json three/build three/examples/jsm; do
         mkdir -p "$OUT/web/node_modules/${p%/*}" && cp -r "web/node_modules/$p" "$OUT/web/node_modules/$p"
     done
     find "$OUT/web/node_modules" -name '*.map' -delete
+    mkdir -p "$OUT/web/node_modules/react-devtools-core" && printf '%s\n' '{ "name": "react-devtools-core", "type": "module", "main": "index.js" }' > "$OUT/web/node_modules/react-devtools-core/package.json" &&
+        printf '%s\n' 'export default { initialize() {}, connectToDevTools() {} };' > "$OUT/web/node_modules/react-devtools-core/index.js"
     cp "$(readlink -f "$(command -v bun)")" "$OUT/bin/bun"
     echo "$VER" > "$OUT/VERSION"
     tar -C dist -czf dist/chrysalis-linux-x86_64.tar.gz chrysalis
-    magick -background none -density 384 web/logo.svg -define icon:auto-resize=256,64,48,32,16 dist/chrysalis.ico
-    printf '%s\n' "FROM ubuntu:24.04" \
-        "RUN apt-get update && apt-get install -y --no-install-recommends systemd systemd-sysv dbus-user-session curl ca-certificates iproute2 openssl && rm -rf /var/lib/apt/lists/*" \
-        "RUN userdel -r ubuntu && useradd -m -u 1000 -s /bin/bash chrysalis && mkdir -p /var/lib/systemd/linger && touch /var/lib/systemd/linger/chrysalis" \
-        "COPY --chown=chrysalis:chrysalis chrysalis /home/chrysalis/chrysalis" \
-        "COPY chrysalis.ico /usr/share/chrysalis/chrysalis.ico" \
-        "RUN printf '[boot]\nsystemd=true\n[user]\ndefault=chrysalis\n' > /etc/wsl.conf && printf '[oobe]\ndefaultUid=1000\ndefaultName=Chrysalis\n[shortcut]\nicon=/usr/share/chrysalis/chrysalis.ico\n[windowsterminal]\nenabled=false\n' > /etc/wsl-distribution.conf" \
-        "RUN printf '%s\n' 'if [ \"\$(ps -o comm= -p \$PPID)\" != login ]; then' '    (until curl -s -o /dev/null http://127.0.0.1:8081/; do sleep 0.5; done; explorer.exe http://localhost:8081) &' '    exec ~/chrysalis/chrysalis.sh' 'fi' >> /home/chrysalis/.bashrc" |
-        docker build -q -t chrysalis-wsl -f - dist >/dev/null
-    local c; c=$(docker create chrysalis-wsl) && docker export "$c" | bsdtar -czf dist/chrysalis.wsl --exclude .dockerenv @- && docker rm "$c" >/dev/null
     local M=dist/macos/chrysalis A=dist/macos/chrysalis/Chrysalis.app/Contents
     rm -rf dist/macos && mkdir -p "$A/MacOS" "$A/Resources" && cp -r chrysalis.sh LICENSE "$OUT/VERSION" "$OUT/web" "$M/"
     curl -fsSL -o "$UV/bun.zip" "https://github.com/oven-sh/bun/releases/download/bun-v$(bun --version)/bun-darwin-aarch64.zip"
@@ -194,7 +146,7 @@ await Bun.write(out, Buffer.concat([h, p]));' "$UV/icon.png" "$A/Resources/chrys
         "VOLUME /models" "EXPOSE 8080" \
         'CMD ["sh", "-c", "cp -r /opt/chrysalis/configs/. /models/ && exec /opt/chrysalis/chrysalis.sh serve --host 0.0.0.0"]' |
         docker build -q -t ghcr.io/michaeldinelle/chrysalis:latest -f - dist >/dev/null
-    du -sh "$OUT" dist/chrysalis-linux-x86_64.tar.gz dist/chrysalis.wsl dist/chrysalis-macos-arm64.tar.gz
+    du -sh "$OUT" dist/chrysalis-linux-x86_64.tar.gz dist/chrysalis-macos-arm64.tar.gz
 }
 
 native() {
@@ -206,21 +158,24 @@ native() {
         cmake -S $W/llama.cpp -B "$b" -DCMAKE_BUILD_TYPE=Release -DGGML_NATIVE=OFF -DLLAMA_BUILD_TOOLS=OFF -DLLAMA_BUILD_EXAMPLES=OFF \
             -DLLAMA_BUILD_TESTS=OFF -DLLAMA_BUILD_SERVER=OFF -DLLAMA_CURL=OFF "${@:2}" >/dev/null
         cmake --build "$b" -j"$(nproc)" --target ggml-cpu ggml-base >/dev/null
-        mkdir -p "/out/ggml/$1" && cp -L "$b"/bin/libggml-cpu.so "$b"/bin/libggml-base.so "/out/ggml/$1/"
+        mkdir -p "/out/ggml/$1" && cp -L "$b"/bin/libggml-cpu.so.0 "$b"/bin/libggml-base.so.0 "/out/ggml/$1/"
     }
     ggml avx2 -DGGML_AVX=ON -DGGML_AVX2=ON -DGGML_FMA=ON -DGGML_F16C=ON -DGGML_BMI2=ON
     ggml avx512 -DGGML_AVX=ON -DGGML_AVX2=ON -DGGML_FMA=ON -DGGML_F16C=ON -DGGML_BMI2=ON -DGGML_AVX512=ON -DGGML_AVX512_VNNI=ON -DGGML_AVX512_BF16=ON -DGGML_AVX512_VBMI=ON
-    local FLAGS=(-O3 -std=c++20 -fPIC --offload-arch=gfx1100 -Wno-unused-result --gcc-toolchain=$GCC)
-    local LIBS=(-L$ROCM/lib -lhipblaslt -pthread -ldl -Wl,--no-undefined)
+    local FLAGS=(-O3 --offload-compress -std=c++20 -fPIC --offload-arch=gfx1100 -Wno-unused-result -ffunction-sections -fdata-sections -fvisibility=hidden
+                 -fvisibility-inlines-hidden --gcc-toolchain=$GCC)
+    local LIBS=(-L$ROCM/lib -lhipblaslt -pthread -ldl -Wl,--no-undefined -Wl,--gc-sections)
     cd "$W"
     local H=engine/hip
-    local SRC=($H/27b/relayout.hip $H/27b/quant.hip $H/27b/ops.hip $H/gdn.hip $H/27b/attn.hip $H/vision.hip $H/27b/model.cpp $H/27b/load.cpp $H/27b/api.cpp)
+    local SRC=($H/27b/relayout.hip $H/27b/quant.hip $H/27b/ops.hip $H/gdn.hip $H/27b/attn.hip $H/vision.hip $H/gpu.hip $H/27b/model.cpp $H/27b/load.cpp $H/27b/api.cpp)
     local FN_SRC=($H/flash-next/relayout.hip $H/flash-next/quant.hip $H/flash-next/ops.hip $H/gdn.hip $H/flash-next/attn.hip $H/flash-next/moe.hip $H/flash-next/ple.hip
-                  $H/vision.hip $H/flash-next/model.cpp $H/flash-next/load.cpp $H/flash-next/experts.cpp $H/flash-next/api.cpp $H/flash-next/cpu_moe.cpp $H/flash-next/cpu_vnni.cpp)
+                  $H/vision.hip $H/gpu.hip $H/flash-next/model.cpp $H/flash-next/load.cpp $H/flash-next/experts.cpp $H/flash-next/api.cpp $H/flash-next/cpu_moe.cpp)
     mkdir -p /out/build
-    $ROCM/bin/hipcc "${FLAGS[@]}" -I$H/27b -x hip -shared -o /out/build/libchrysalis.so "${SRC[@]}" "${LIBS[@]}" & a=$!
-    $ROCM/bin/hipcc "${FLAGS[@]}" -I$H/flash-next -I$W/llama.cpp/ggml/include -x hip -shared -o /out/build/libchrysalis_fn.so "${FN_SRC[@]}" "${LIBS[@]}" \
-        -L/out/ggml/avx2 -lggml-cpu -lggml-base & b=$!
+    $ROCM/lib/llvm/bin/clang++ -O3 -std=c++20 -fPIC -ffunction-sections -fdata-sections -fvisibility=hidden -fvisibility-inlines-hidden --gcc-toolchain=$GCC \
+        -c -o "$W/cpu_exact.o" engine/cpu_exact.cpp || return 1
+    $ROCM/bin/hipcc "${FLAGS[@]}" -I$H/27b -x hip -shared -s -o /out/build/libchrysalis.so "${SRC[@]}" "${LIBS[@]}" & a=$!
+    $ROCM/bin/hipcc "${FLAGS[@]}" -I$H/flash-next -I$W/llama.cpp/ggml/include -shared -s -o /out/build/libchrysalis_fn.so -x hip "${FN_SRC[@]}" -x none "$W/cpu_exact.o" \
+        "${LIBS[@]}" -L$W/ggml-avx2/bin -lggml-cpu -lggml-base & b=$!
     $ROCM/bin/hipcc "${FLAGS[@]}" -s -o /out/build/gpu $H/gpu_pick.hip $H/gpu.hip "${LIBS[@]}" & l=$!
     wait $a && wait $b && wait $l
     chown -R "$OWNER" /out
@@ -228,7 +183,6 @@ native() {
 
 case "${1:-}" in
   ""|--host|--insecure|--model)
-            wsl_ready
             if [ -n "$MAC" ]; then
                 codesign -v "$APP" 2>/dev/null || codesign --force -s - "$APP" 2>/dev/null
             fi

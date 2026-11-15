@@ -25,12 +25,11 @@ test("on Windows the model server finds the engine's DLLs and the GPU runtime be
   expect([env.PYTHONUTF8, "LD_LIBRARY_PATH" in env]).toEqual(["1", false]);
 });
 
-test("on Linux the model server loads the bundled ROCm and the ggml build this CPU runs fastest, ahead of what the system had, and under WSL reaches the GPU through Windows", () => {
-  const vnni = machine("linux", ["/dev/dxg"], { env: { LD_LIBRARY_PATH: "/opt/x" }, read: (p) => (p === "/proc/cpuinfo" ? "flags\t: fpu avx2 avx512f avx512_vnni\n" : "") });
+test("on Linux the model server loads the bundled ROCm and the ggml build this CPU runs fastest, ahead of what the system had", () => {
+  const vnni = machine("linux", [], { env: { LD_LIBRARY_PATH: "/opt/x" }, read: (p) => (p === "/proc/cpuinfo" ? "flags\t: fpu avx2 avx512f avx512_vnni\n" : "") });
   expect(serverEnv(vnni, root).LD_LIBRARY_PATH.split(":")).toEqual([join(root, "data/rocm/lib"), join(root, "data/rocm/lib/rocm_sysdeps/lib"), join(root, "ggml/avx512"), "/opt/x"]);
-  expect(serverEnv(vnni, root).HSA_ENABLE_DXG_DETECTION).toBe("1");
   const plain = serverEnv(machine("linux", [], { read: () => "flags\t: fpu avx2 avx512f avx512vl\n" }), root);
-  expect([plain.LD_LIBRARY_PATH.split(":").at(-1), plain.HSA_ENABLE_DXG_DETECTION]).toEqual([join(root, "ggml/avx2"), undefined]);
+  expect(plain.LD_LIBRARY_PATH.split(":").at(-1)).toBe(join(root, "ggml/avx2"));
   expect(Object.keys(serverEnv(machine("darwin"), root)).sort()).toEqual(["PYTHONIOENCODING", "PYTHONUTF8"]);
 });
 
