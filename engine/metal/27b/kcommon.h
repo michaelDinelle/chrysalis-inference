@@ -6,7 +6,7 @@ using namespace metal;
 constant constexpr int D = 5120, FF = 17408, NH = 24, NKV = 4, HD = 256, ROT = 64;
 constant constexpr int GK = 16, GV = 48, GD = 128, QKV = 2 * GK * GD + GV * GD;
 constant constexpr float EPS = 1e-6f, ROPE_BASE = 1e7f;
-constant constexpr int PAGE = 64;
+constant constexpr int PAGE = 64, IMG_BASE = 1 << 30;
 constant constexpr ulong KV_V = PAGE * HD, KV_KS = 2 * KV_V, KV_VS = KV_KS + PAGE * (HD / 32) * 2;
 constant constexpr ulong KV_HEAD = KV_VS + PAGE * (HD / 32) * 2, KV_LAYER = KV_HEAD * NKV, KV_PAGE = KV_LAYER * 17;
 inline uint k_off(int slot, int dim) { return slot * HD + ((dim >> 1) & 3) * 64 + (dim >> 3) * 2 + (dim & 1); }

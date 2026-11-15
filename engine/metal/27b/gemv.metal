@@ -25,9 +25,14 @@ kernel void embed(constant EmbedA &a [[buffer(0)]], uint2 tg [[threadgroup_posit
     threadgroup_barrier(mem_flags::mem_threadgroup);
     const int t = tg.y, u = tg.x * 32 + tid;
     if (u >= D / 32) return;
+    device float4 *o = (device float4 *)(a.out + (ulong)t * D + u * 32);
+    if (a.img && a.tokens[t] >= IMG_BASE) {
+        device const half4 *r = (device const half4 *)(a.img + (ulong)t * D + u * 32);
+        for (int i = 0; i < 8; i++) o[i] = float4(r[i]);
+        return;
+    }
     float v[32], s0, s1;
     unit_load<T_IQ4_XS>(a.w, (ulong)a.tokens[t] * (D / 32) + u, tab, v, s0, s1);
-    device float4 *o = (device float4 *)(a.out + (ulong)t * D + u * 32);
     for (int i = 0; i < 8; i++) o[i] = float4(v[4 * i], v[4 * i + 1], v[4 * i + 2], v[4 * i + 3]) * s0;
 }
 

@@ -3,6 +3,7 @@
 #include "args.h"
 #include "sampler.h"
 #include "lookup.h"
+#include "../vision.h"
 #include <random>
 #include <string>
 #include <vector>
@@ -67,6 +68,7 @@ struct Engine {
         DP<float> v_raw, v_kn, v_vc, v_ab;
         DP<float> mtp_h, mtp_x, mtp_xn; DP<int> draft;
         DP<int> rpos;
+        DP<half_t> img;
         DP<uint32_t> mask;
     } b{};
     int qrows_max = 0;
@@ -83,6 +85,10 @@ struct Engine {
     struct Snap { bool used = false; int n = 0, pos = 0; std::vector<int> pages; DP<uint8_t> host;
                   std::vector<float> top_v; std::vector<int> top_i; };
     std::vector<Snap> snaps;
+    Vision vision;
+    struct Image { std::vector<half_t> rows; int n = 0; };
+    std::vector<Image> images;
+    int image_encode(int slot, const float *patches, int gh, int gw, int frames = 1);
 
     void load(const std::string &path, int max_seqs, size_t reserve_bytes);
     void warmup();
@@ -106,10 +112,10 @@ struct Engine {
                         int *rows_i = nullptr);
 
     struct Part { Seq *s; int T, off, pos0, rope0; bool rpos; bool verify; };
-    void forward_parts(const Part *p, int np, int T);
-    void forward(Seq &s, int T, bool verify, int rope0, bool rpos = false);
+    void forward_parts(const Part *p, int np, int T, bool img = false);
+    void forward(Seq &s, int T, bool verify, int rope0, bool rpos = false, bool img = false);
     void mtp_forward(Seq &s, int T, int pos0, DP<float> h_prev, DP<int> tokens, int rope0, bool rpos = false);
-    void mtp_catch_up(Seq &s, int T, int pos0, int rope0, bool rpos = false, int off = 0);
+    void mtp_catch_up(Seq &s, int T, int pos0, int rope0, bool rpos = false, int off = 0, bool img = false);
     void lm_head(DP<float> in, int T, int rows);
     void ensure_pages(Seq &s, int n_tokens, int from);
     struct Deferred { Seq *s; int off, n, hrow; };
@@ -129,7 +135,7 @@ struct Engine {
     void topk(DP<float> logits, int T, int n, int ld);
     void argmax(DP<float> logits, int T, int n, int ld, DP<int> out);
     void logit_stats(DP<float> logits, int T, int n, int ld);
-    void embed(DP<int> tokens, int T, DP<float> out);
+    void embed(DP<int> tokens, int T, DP<float> out, bool img = false);
     void attend(const Layer &w, int kvl, const Part &q, bool small);
     void attn_layer(const Layer &w, int kvl, const Part *p, int np, int T, DP<float> x, DP<float> xn, DP<half_t> hh);
     void gdn_layer(const Layer &w, int gl, const Part *p, int np, int T, DP<float> x, DP<float> xn, DP<half_t> hh);

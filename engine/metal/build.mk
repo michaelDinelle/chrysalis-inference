@@ -9,8 +9,9 @@ FW       := -framework Metal -framework Foundation
 GGML_REF := -I$(GGML)/ggml/include -L$(GGML)/build/bin -lggml-base -Wl,-rpath,$(GGML)/build/bin
 
 K27   := $(wildcard $(M27)/*.metal)
-SRC27 := $(M27)/mtl.mm $(M27)/load.mm $(M27)/model.mm $(M27)/api.mm
-H27   := $(wildcard $(M27)/*.h) engine/api.h engine/sampler.h engine/lookup.h engine/gguf.h
+MV    := engine/metal
+SRC27 := $(M27)/mtl.mm $(M27)/load.mm $(M27)/model.mm $(M27)/api.mm $(MV)/vision.mm
+H27   := $(wildcard $(M27)/*.h) $(MV)/vision.h engine/api.h engine/sampler.h engine/lookup.h engine/gguf.h engine/os.h
 F27   := -std=c++20 -O2 -fobjc-arc -I$(M27) -Iengine -Wall -Wno-unused-function -fvisibility=hidden -fvisibility-inlines-hidden
 FW27  := $(FW) -framework MetalPerformanceShaders -framework QuartzCore
 
@@ -18,7 +19,11 @@ build/air/27b/%.air: $(M27)/%.metal $(M27)/kcommon.h $(M27)/args.h
 	@mkdir -p build/air/27b
 	$(METALC) -std=metal3.2 -O3 -Wall -I$(M27) -c $< -o $@
 
-build/chrysalis.metallib: $(patsubst $(M27)/%.metal,build/air/27b/%.air,$(K27))
+build/air/vision.air: $(MV)/vision.metal
+	@mkdir -p build/air
+	$(METALC) -std=metal3.2 -O3 -fno-fast-math -Wall -c $< -o $@
+
+build/chrysalis.metallib: $(patsubst $(M27)/%.metal,build/air/27b/%.air,$(K27)) build/air/vision.air
 	$(METALLIB) $^ -o $@.tmp && mv $@.tmp $@
 
 OBJ := $(SRC27:%=build/o27/%.o)
@@ -79,11 +84,12 @@ kernels: build/test_27b
 kernels_fn: build/test_quant_fn build/test_kern_fn build/pf/test_prefill_fn
 	./build/test_quant_fn $(FN_FILE) && ./build/test_kern_fn && ./build/pf/test_prefill_fn $(FN_FILE) check
 
-TEST_BUILDS := build/ref_logits
+TEST_BUILDS := build/ref_logits build/ref_logits_mm
 define BACKEND_TESTS
 	$(PY) tests/test_snapshot.py
 	$(PY) tests/test_server.py
 	$(PY) tests/compare_ref.py
+	$(PY) tests/test_vision.py
 endef
 
 TEST_BUILDS_FN :=

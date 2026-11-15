@@ -68,5 +68,9 @@ int main(int argc, char **argv) {
     fwrite(logits.data(), 4, logits.size(), o);
     fclose(o);
     fprintf(stderr, "wrote %d x %d logits\n", n, nv);
+    llama_batch_ext_free(b);
+    llama_free(ctx);
+    llama_model_free(model);
+    llama_backend_free();
     return 0;
 }
