@@ -4,10 +4,6 @@
 #include <cstdlib>
 #include <cstring>
 #include <string>
-#include <fcntl.h>
-#include <sys/mman.h>
-#include <sys/stat.h>
-#include <unistd.h>
 
 namespace {
 double now() { return std::chrono::duration<double>(std::chrono::steady_clock::now().time_since_epoch()).count(); }
@@ -31,49 +27,11 @@ HotCopy hot_copy(const ColdLayer &c, int h) {
 }
 }
 
-static double cgroup_available() {
-    std::string path;
-    char line[512];
-    if (FILE *f = fopen("/proc/self/cgroup", "r")) {
-        if (fgets(line, sizeof line, f) && !strncmp(line, "0::", 3)) {
-            line[strcspn(line, "\n")] = 0;
-            path = std::string("/sys/fs/cgroup") + (line + 3);
-        }
-        fclose(f);
-    }
-    for (std::string dir = path; dir.size() >= strlen("/sys/fs/cgroup"); dir = dir.substr(0, dir.find_last_of('/'))) {
-        double limit = -1, used = -1, file = 0, shmem = 0;
-        if (FILE *f = fopen((dir + "/memory.max").c_str(), "r")) {
-            if (fgets(line, sizeof line, f) && strncmp(line, "max", 3)) limit = atof(line);
-            fclose(f);
-        }
-        if (limit < 0) { if (dir == "/sys/fs/cgroup") break; continue; }
-        if (FILE *f = fopen((dir + "/memory.current").c_str(), "r")) { if (fgets(line, sizeof line, f)) used = atof(line); fclose(f); }
-        if (FILE *f = fopen((dir + "/memory.stat").c_str(), "r")) {
-            while (fgets(line, sizeof line, f)) {
-                if (!strncmp(line, "file ", 5)) file = atof(line + 5);
-                else if (!strncmp(line, "shmem ", 6)) shmem = atof(line + 6);
-            }
-            fclose(f);
-        }
-        if (used >= 0) return limit - used + file - shmem;
-        break;
-    }
-    return -1;
-}
-
 static double mem_available(Engine::Experts &x) {
     const auto now = std::chrono::steady_clock::now();
     if (now - x.avail_at < std::chrono::seconds(1)) return x.avail;
     x.avail_at = now;
-    const double cg = cgroup_available();
-    if (cg >= 0) return x.avail = cg;
-    if (FILE *f = fopen("/proc/meminfo", "r")) {
-        char line[128];
-        while (fgets(line, sizeof line, f))
-            if (!strncmp(line, "MemAvailable:", 13)) { x.avail = atof(line + 13) * 1024; break; }
-        fclose(f);
-    }
+    x.avail = os::ram_available();
     return x.avail;
 }
 
@@ -84,16 +42,7 @@ double Engine::ram_free() {
 
 double Engine::mirror_room() { return std::max(0.0, ram_free() - xc.spare - 1e9); }
 
-double Engine::own_anon() const {
-    double anon = 0;
-    if (FILE *f = fopen("/proc/self/status", "r")) {
-        char line[128];
-        while (fgets(line, sizeof line, f))
-            if (!strncmp(line, "RssAnon:", 8)) { anon = atof(line + 8) * 1024; break; }
-        fclose(f);
-    }
-    return anon;
-}
+double Engine::own_anon() const { return os::ram_held(); }
 
 double Engine::experts_ram() const {
     size_t hot_bytes = 0;
@@ -109,13 +58,13 @@ void Engine::experts_budget(double room) {
 }
 
 void Engine::file_read(uint8_t *dst, const uint8_t *src, size_t n) const {
-    const off_t off = (off_t)(src - file_base);
+    const uint64_t off = (uint64_t)(src - file_base);
     for (size_t got = 0; got < n;) {
-        const ssize_t r = pread(file_fd, dst + got, n - got, off + (off_t)got);
+        const int64_t r = os::read_at(file_fd, dst + got, n - got, off + got);
         if (r <= 0) FAIL("reading experts from the model file failed");
         got += (size_t)r;
     }
-    posix_fadvise(file_fd, off, (off_t)n, POSIX_FADV_DONTNEED);
+    os::forget(file_fd, off, n);
 }
 
 void Engine::file_read3(uint8_t *const dst[3], const uint8_t *const src[3], const size_t n[3]) const {
@@ -225,8 +174,7 @@ void Engine::kv_need(int need) {
 constexpr uint64_t POOL_MAGIC = 0x324c4f4f50465243ull;
 
 uint64_t Engine::model_bytes() const {
-    struct stat st_{};
-    return file_fd >= 0 && fstat(file_fd, &st_) == 0 ? (uint64_t)st_.st_size : 0;
+    return os::size(file_fd);
 }
 
 bool Engine::pool_save(const char *path) const {
@@ -321,7 +269,7 @@ void Engine::experts_loader() {
             const HotCopy hc = hot_copy(cold[key / NE], x.home[key]);
             for (int m = 0; m < 3; m++) {
                 const uintptr_t a = ((uintptr_t)hc.mirror[m] + 4095) & ~uintptr_t(4095), b = ((uintptr_t)hc.mirror[m] + hc.n[m]) & ~uintptr_t(4095);
-                if (b > a) madvise((void *)a, b - a, MADV_DONTNEED);
+                if (b > a) os::drop((void *)a, b - a);
             }
             continue;
         }

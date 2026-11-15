@@ -1,8 +1,10 @@
 import os
 import sys
 
-BACKEND = os.environ.get("CHRYSALIS_BACKEND") or ("metal" if sys.platform == "darwin" else "cuda" if os.path.exists("/dev/nvidiactl") else "hip")
-LIB = ".dylib" if BACKEND == "metal" else ".so"
+WINDOWS = sys.platform == "win32"
+NVIDIA = os.path.join(os.environ.get("SystemRoot", ""), "System32", "nvcuda.dll") if WINDOWS else "/dev/nvidiactl"
+BACKEND = os.environ.get("CHRYSALIS_BACKEND") or ("metal" if sys.platform == "darwin" else "cuda" if os.path.exists(NVIDIA) else "hip")
+LIB = ".dylib" if BACKEND == "metal" else ".dll" if WINDOWS else ".so"
 MODELS = {
     "qwen3.8-27b": dict(path="data/models/qwen3.8-27b/qwen3.8-27b.gguf", lib="build/libchrysalis" + LIB, draft=3, lookup=7, chunk=2048, snapshots=40,
                         vision="data/models/qwen3.8-27b/mmproj.gguf", vision_stays=True, pictures=2 << 30, warm=True),

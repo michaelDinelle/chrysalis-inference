@@ -5,8 +5,6 @@
 #include <cmath>
 #include <cstring>
 #include <stdexcept>
-#include <sys/mman.h>
-#include <unistd.h>
 
 static const QAct NO_Q{nullptr, nullptr};
 static QAct qoff(QAct a, size_t elems) { return {a.q + elems, a.d + elems / 32}; }
@@ -88,9 +86,9 @@ void Engine::ensure_pages(Seq &s, int n_tokens, int from) {
 void *Engine::snap_buffer() {
     const size_t n = (state_bytes() + (2 << 20) - 1) & ~size_t((2 << 20) - 1);
     const auto t0 = std::chrono::steady_clock::now();
-    void *p = mmap(nullptr, n, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
-    if (p == MAP_FAILED) FAIL("cannot allocate a snapshot buffer");
-    madvise(p, n, MADV_HUGEPAGE);
+    void *p = os::anon(n);
+    if (!p) FAIL("cannot allocate a snapshot buffer");
+    os::huge(p, n, true);
     memset(p, 0, n);
     const auto t1 = std::chrono::steady_clock::now();
     CK(cudaHostRegister(p, n, cudaHostRegisterDefault));
@@ -119,9 +117,9 @@ void Engine::snap_reserve_start() {
     const int k = snap_target - have;
     if (k <= 0 || snap_pending) return;
     const size_t one = (state_bytes() + (2 << 20) - 1) & ~size_t((2 << 20) - 1), all = one * k;
-    void *p = mmap(nullptr, all, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
-    if (p == MAP_FAILED) FAIL("cannot allocate %d snapshot buffers", k);
-    madvise(p, all, MADV_NOHUGEPAGE);
+    void *p = os::anon(all);
+    if (!p) FAIL("cannot allocate %d snapshot buffers", k);
+    os::huge(p, all, false);
     snap_pending = p; snap_pending_n = k;
     const int nt = std::min(k, 4);
     for (int t = 0; t < nt; t++)
@@ -228,9 +226,10 @@ void Engine::snap_export(int snap, uint8_t *dst) {
 }
 
 int Engine::snap_import(int fd, int64_t off, size_t bytes) {
+    const os::File file = os::from_fd(fd);
     auto get = [&](void *dst, size_t n) {
         for (size_t got = 0; got < n;) {
-            const ssize_t r = pread(fd, (uint8_t *)dst + got, n - got, off + (int64_t)got);
+            const int64_t r = os::read_at(file, (uint8_t *)dst + got, n - got, (uint64_t)(off + (int64_t)got));
             if (r <= 0) return false;
             got += (size_t)r;
         }
@@ -743,7 +742,7 @@ void Engine::ple_prefetch(const size_t *rows, size_t n) const {
     constexpr size_t RB = PLE_DIM / 32 * 34;
     for (size_t i = 0; i < n; i++) {
         const uintptr_t a = (uintptr_t)(ngram + rows[i] * RB), p0 = a & ~uintptr_t(4095), p1 = (a + RB - 1) & ~uintptr_t(4095);
-        madvise((void *)p0, p1 - p0 + 4096, MADV_WILLNEED);
+        os::want((void *)p0, p1 - p0 + 4096);
     }
 }
 

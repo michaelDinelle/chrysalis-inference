@@ -32,7 +32,7 @@ struct Ref {
             for (int i = 0; i < HD; i++) o[i] = y[i];
             for (int i = 0; i < ROT / 2; i++) {
                 const int pos = rpos ? rpos[t * 3 + sec[i]] : pos0 + t;
-                float s, c; sincosf(pos * powf(ROPE_BASE, -2.0f * i / ROT), &s, &c);
+                const float turn = pos * powf(ROPE_BASE, -2.0f * i / ROT), s = sinf(turn), c = cosf(turn);
                 o[i] = y[i] * c - y[i + ROT / 2] * s; o[i + ROT / 2] = y[i + ROT / 2] * c + y[i] * s;
             }
         };

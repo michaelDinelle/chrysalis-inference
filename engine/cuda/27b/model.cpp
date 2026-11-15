@@ -5,7 +5,6 @@
 #include <cstring>
 #include <stdexcept>
 #include <type_traits>
-#include <unistd.h>
 
 
 int Engine::seq_new() {
@@ -170,9 +169,10 @@ void Engine::snap_export(int snap, uint8_t *dst) {
 }
 
 int Engine::snap_import(int fd, int64_t off, size_t bytes) {
+    const os::File file = os::from_fd(fd);
     auto get = [&](void *dst, size_t n) {
         for (size_t got = 0; got < n;) {
-            const ssize_t r = pread(fd, (uint8_t *)dst + got, n - got, off + (int64_t)got);
+            const int64_t r = os::read_at(file, (uint8_t *)dst + got, n - got, (uint64_t)(off + (int64_t)got));
             if (r <= 0) return false;
             got += (size_t)r;
         }

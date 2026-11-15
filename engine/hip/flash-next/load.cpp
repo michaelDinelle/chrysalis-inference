@@ -7,20 +7,16 @@
 #include <set>
 #include <chrono>
 #include <cstring>
-#include <fcntl.h>
-#include <sys/mman.h>
-#include <sys/stat.h>
 #include <thread>
-#include <unistd.h>
 
 namespace {
 double now() { return std::chrono::duration<double>(std::chrono::steady_clock::now().time_since_epoch()).count(); }
 std::atomic<size_t> load_read{0}, load_total{0};
 std::atomic<int> load_phase{0};
 void read_file(const GGUF &g, uint8_t *dst, const uint8_t *src, size_t n) {
-    off_t off = (off_t)(src - g.base);
+    uint64_t off = (uint64_t)(src - g.base);
     while (n) {
-        const ssize_t r = pread(g.fd, dst, std::min<size_t>(n, (size_t)64 << 20), off);
+        const int64_t r = os::read_at(g.fd, dst, std::min<size_t>(n, (size_t)64 << 20), off);
         if (r <= 0) FAIL("reading the model file failed");
         dst += r; off += r; n -= (size_t)r;
         load_read += (size_t)r;
@@ -38,16 +34,8 @@ float load_progress() {
 
 namespace {
 int physical_cores() {
-    std::set<std::string> cores;
-    const unsigned n = std::max(1u, std::thread::hardware_concurrency());
-    for (unsigned c = 0; c < n; c++) {
-        FILE *f = fopen(("/sys/devices/system/cpu/cpu" + std::to_string(c) + "/topology/thread_siblings_list").c_str(), "r");
-        if (!f) continue;
-        char buf[64] = {};
-        if (fgets(buf, sizeof buf, f)) cores.insert(buf);
-        fclose(f);
-    }
-    return cores.empty() ? (int)std::max(1u, n / 2) : (int)cores.size();
+    const size_t n = os::cores().size();
+    return n ? (int)n : (int)std::max(1u, std::max(1u, std::thread::hardware_concurrency()) / 2);
 }
 }
 
@@ -113,7 +101,7 @@ void Engine::calibrate() {
     gfrac = (float)(cal_dma_bw / (cal_dma_bw + cal_cpu_bw));
     std::vector<const ColdLayer *> tier;
     for (const ColdLayer &c : cold) if (c.n2) tier.push_back(&c);
-    if (file_fd >= 0 && !tier.empty()) {
+    if (file_fd != os::NO_FILE && !tier.empty()) {
         const int reps = 8;
         std::vector<uint8_t> scratch(3 * ((size_t)FE * tier[0]->row_gu[2] + (size_t)D * tier[0]->row_dn));
         double spent = 0;
@@ -126,7 +114,7 @@ void Engine::calibrate() {
             uint8_t *dst[3] = {scratch.data(), scratch.data() + n[0], scratch.data() + n[0] + n[1]};
             for (int k = 0; k < 3; k++) {
                 src[k] = fb[k] + (m[k] - mb[k]);
-                posix_fadvise(file_fd, (off_t)(src[k] - file_base), (off_t)n[k], POSIX_FADV_DONTNEED);
+                os::forget(file_fd, (uint64_t)(src[k] - file_base), n[k]);
             }
             const double t0 = now();
             file_read3(dst, src, n);
@@ -144,15 +132,9 @@ double Engine::split_bias(int T) const {
 }
 
 std::string Engine::cal_key() const {
-    std::string cpu;
-    if (FILE *f = fopen("/proc/cpuinfo", "r")) {
-        char line[256];
-        while (fgets(line, sizeof line, f))
-            if (!strncmp(line, "model name", 10) && strchr(line, ':')) { cpu = strchr(line, ':') + 2; break; }
-        fclose(f);
-    }
+    std::string cpu = os::cpu_name();
     cpu.erase(cpu.find_last_not_of(" \n") + 1);
-    const long long ram = (long long)sysconf(_SC_PHYS_PAGES) * sysconf(_SC_PAGESIZE) >> 30;
+    const long long ram = (long long)(os::ram_total() >> 30);
     return lt_tune::device(lt) + " | " + cpu + " | " + std::to_string(n_workers) + " workers | " + std::to_string(ram) + " GiB | " +
            std::to_string(cold_bytes);
 }
@@ -378,9 +360,9 @@ void Engine::load(const std::string &path, int max_seqs, size_t reserve_bytes) {
     }
     std::thread cold_th;
     if (cold_bytes) {
-        cold_mem = (uint8_t *)mmap(nullptr, cold_bytes, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
-        if (cold_mem == MAP_FAILED) FAIL("cannot allocate %.1f GB of system RAM for the experts", cold_bytes / 1e9);
-        madvise(cold_mem, cold_bytes, MADV_HUGEPAGE);
+        cold_mem = (uint8_t *)os::anon(cold_bytes);
+        if (!cold_mem) FAIL("cannot allocate %.1f GB of system RAM for the experts", cold_bytes / 1e9);
+        os::huge(cold_mem, cold_bytes, true);
         cold_th = std::thread([&] {
             for (auto [src, n, off] : copies) {
                 read_file(g, cold_mem + off, src, n);
@@ -489,9 +471,9 @@ void Engine::load(const std::string &path, int max_seqs, size_t reserve_bytes) {
     for (int l = 0; l < NL; l++)
         if (L[l].n_hot) for (const char *t : hot_names) spill_bytes += page_up(get("blk." + std::to_string(l) + "." + t)->nbytes);
     if (spill_bytes) {
-        spill_mem = (uint8_t *)mmap(nullptr, spill_bytes, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS | MAP_NORESERVE, -1, 0);
-        if (spill_mem == MAP_FAILED) FAIL("cannot reserve %.1f GB of address space for the spill mirror", spill_bytes / 1e9);
-        madvise(spill_mem, spill_bytes, MADV_NOHUGEPAGE);
+        spill_mem = (uint8_t *)os::reserve(spill_bytes);
+        if (!spill_mem) FAIL("cannot reserve %.1f GB of address space for the spill mirror", spill_bytes / 1e9);
+        os::huge(spill_mem, spill_bytes, false);
     }
     size_t spill_at = 0;
     for (int l = 0; l < NL; l++) {
@@ -537,15 +519,14 @@ void Engine::load(const std::string &path, int max_seqs, size_t reserve_bytes) {
     if (!ngram_map) {
         std::string f = g.strs["chrysalisfn.ngram_file"];
         if (f.empty()) FAIL("no n-gram table path in %s", path.c_str());
-        if (f[0] != '/') f = path.substr(0, path.find_last_of('/') + 1) + f;
-        const int fd = ::open(f.c_str(), O_RDONLY);
-        if (fd < 0) FAIL("cannot open the n-gram table %s", f.c_str());
-        struct stat sb; fstat(fd, &sb);
-        ngram_map_bytes = sb.st_size;
-        ngram_map = (uint8_t *)mmap(nullptr, ngram_map_bytes, PROT_READ, MAP_SHARED, fd, 0);
-        ::close(fd);
-        if (ngram_map == MAP_FAILED) FAIL("cannot map %s", f.c_str());
-        madvise(ngram_map, ngram_map_bytes, MADV_RANDOM);
+        if (!os::absolute(f)) f = os::folder(path) + f;
+        const os::File fd = os::open_read(f.c_str());
+        if (fd == os::NO_FILE) FAIL("cannot open the n-gram table %s", f.c_str());
+        ngram_map_bytes = os::size(fd);
+        ngram_map = (uint8_t *)os::map(fd, ngram_map_bytes);
+        os::close(fd);
+        if (!ngram_map) FAIL("cannot map %s", f.c_str());
+        os::random(ngram_map, ngram_map_bytes);
         ngram = ngram_map + g.ints["chrysalisfn.ngram_offset"];
         const auto &m = g.arrs["chrysalisfn.ple.layer_multipliers"], &o = g.arrs["chrysalisfn.ple.head_offsets"], &v = g.arrs["chrysalisfn.ple.head_vocab_sizes"];
         if (m.size() < 3 || o.size() < PLE_HEADS || v.size() < PLE_HEADS) FAIL("missing n-gram hash constants");
@@ -780,8 +761,8 @@ void Engine::shutdown() {
     std::vector<void *> own;
     for (Snap &sn : snaps) if (sn.host && !in_region(sn.host)) own.push_back(sn.host);
     for (void *p : snap_spare) if (!in_region(p)) own.push_back(p);
-    for (void *p : own) { (void)hipHostUnregister(p); munmap(p, (state_bytes() + (2 << 20) - 1) & ~size_t((2 << 20) - 1)); }
-    for (auto &r : snap_regions) { (void)hipHostUnregister(r.first); munmap(r.first, r.second); }
+    for (void *p : own) { (void)hipHostUnregister(p); os::release(p, (state_bytes() + (2 << 20) - 1) & ~size_t((2 << 20) - 1)); }
+    for (auto &r : snap_regions) { (void)hipHostUnregister(r.first); os::release(r.first, r.second); }
     snaps.clear(); snap_spare.clear(); snap_regions.clear();
     if (warena.base) (void)hipFree(warena.base);
     if (barena.base) (void)hipFree(barena.base);
@@ -805,9 +786,9 @@ void Engine::shutdown() {
     if (cold_mem) (void)hipHostUnregister(cold_mem);
     (void)hipGetLastError();
     (void)hipStreamDestroy(st); (void)hipStreamDestroy(cst); (void)hipStreamDestroy(lst);
-    if (cold_mem) munmap(cold_mem, cold_bytes);
-    if (spill_mem) munmap(spill_mem, spill_bytes);
-    if (ngram_map) munmap(ngram_map, ngram_map_bytes);
+    os::release(cold_mem, cold_bytes);
+    os::release(spill_mem, spill_bytes);
+    os::unmap(ngram_map, ngram_map_bytes);
     cold_mem = nullptr; spill_mem = nullptr; ngram_map = nullptr; cold_bytes = spill_bytes = 0; d_cold = nullptr;
     cold.clear(); cold_dev.clear();
 }

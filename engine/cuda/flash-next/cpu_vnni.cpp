@@ -1,4 +1,5 @@
 #include "cpu_moe.h"
+#include "../../os.h"
 #include <immintrin.h>
 #include <algorithm>
 #include <cmath>
@@ -229,7 +230,7 @@ VNNI void group(const ColdLayer &c, int slot, int ng, const int8_t *const *xq, c
 
 void VnniScratch::reserve() {
     if (w) return;
-    auto get = [](size_t bytes) { return aligned_alloc(64, (bytes + 63) / 64 * 64); };
+    auto get = [](size_t bytes) { return os::aligned(64, (bytes + 63) / 64 * 64); };
     w = (uint8_t *)get(D_); ws = (float *)get(NB_GU * 4); wa = (float *)get(NB_GU * 2 * 4); wb = (float *)get(NB_GU * 2 * 4);
     xi = (uint32_t *)get(NB_GU * 8 * 16 * 4); xs = (float *)get(NB_GU * 16 * 4); xc = (int32_t *)get(NB_GU * 16 * 4);
     xf = (float *)get(NB_GU * 2 * 16 * 4);
@@ -238,7 +239,7 @@ void VnniScratch::reserve() {
 }
 VnniScratch::~VnniScratch() {
     for (void *p : {(void *)w, (void *)ws, (void *)wa, (void *)wb, (void *)xi, (void *)xs, (void *)xc, (void *)xf, (void *)h, (void *)hi,
-                    (void *)hs, (void *)hc, (void *)y}) free(p);
+                    (void *)hs, (void *)hc, (void *)y}) os::aligned_free(p);
 }
 
 bool vnni_supported() { return __builtin_cpu_supports("avx512vnni") && __builtin_cpu_supports("avx512bw") && __builtin_cpu_supports("bmi2"); }

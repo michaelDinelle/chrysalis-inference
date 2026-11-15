@@ -5,10 +5,7 @@
 #include <chrono>
 #include <cstring>
 #include <emmintrin.h>
-#include <fcntl.h>
-#include <sys/mman.h>
 #include <thread>
-#include <unistd.h>
 
 namespace {
 
@@ -234,24 +231,21 @@ void Engine::load(const std::string &path, int max_seqs, size_t reserve_bytes) {
     const size_t lo = jobs.front().t->data - g.base, hi = jobs.back().t->data - g.base + jobs.back().t->nbytes;
     size_t disk_bytes = 0;
     std::thread prefetch([&] {
-        const int fd = ::open(path.c_str(), O_RDONLY);
-        std::vector<unsigned char> resident(PIECE / 4096 + 2);
-        uint8_t *scratch = (uint8_t *)aligned_alloc(4096, PIECE);
+        const os::File fd = os::open_read(path.c_str());
+        uint8_t *scratch = (uint8_t *)os::aligned(4096, PIECE);
         for (size_t a = lo; a < hi; a += PIECE) {
             const size_t b = std::min(a + PIECE, hi), pa = a & ~size_t(4095), pb = (b + 4095) & ~size_t(4095);
-            size_t missing = 0;
-            if (mincore(g.base + pa, pb - pa, resident.data()) != 0) missing = (pb - pa) / 4096;
-            else for (size_t k = 0; k < (pb - pa) / 4096; k++) missing += !(resident[k] & 1);
+            const size_t missing = os::missing(g.base + pa, pb - pa);
             for (size_t o = a; missing && o < b;) {
-                const ssize_t r = pread(fd, scratch, b - o, o);
+                const int64_t r = os::read_at(fd, scratch, b - o, o);
                 if (r <= 0) break;
                 o += r;
             }
             disk_bytes += missing * 4096;
             publish(prefetched, b);
         }
-        free(scratch);
-        ::close(fd);
+        os::aligned_free(scratch);
+        os::close(fd);
     });
 
     for (int l = first_spill; l < NL; l++) {
@@ -357,7 +351,7 @@ void Engine::load(const std::string &path, int max_seqs, size_t reserve_bytes) {
         load_done += pc.len;
         const uintptr_t a = (uintptr_t)(j.t->data + pc.src) & ~uintptr_t(4095);
         const uintptr_t e = ((uintptr_t)(j.t->data + pc.src + pc.len) + 4095) & ~uintptr_t(4095);
-        madvise((void *)a, e - a, MADV_DONTNEED);
+        os::drop_mapped((void *)a, e - a);
     }
     CK(cudaStreamSynchronize(st));
     const double t_weights = now();
@@ -393,13 +387,13 @@ void Engine::warmup() {
     std::vector<std::thread> th;
     const int nt = 4;
     for (int w = 0; w < nt; w++) th.emplace_back([&, w] {
-        const int fd = ::open(model_path.c_str(), O_RDONLY);
+        const os::File fd = os::open_read(model_path.c_str());
         constexpr size_t CHUNK = 7710;
         std::vector<uint8_t> buf(CHUNK * 136);
         const size_t b0 = nb * w / nt, b1 = nb * (w + 1) / nt;
         for (size_t b = b0; b < b1; b += CHUNK) {
             const size_t m = std::min(CHUNK, b1 - b);
-            if (pread(fd, buf.data(), m * 136, embd_offset + b * 136) != (ssize_t)(m * 136)) FAIL("cannot read the token embeddings");
+            if (os::read_at(fd, buf.data(), m * 136, embd_offset + b * 136) != (int64_t)(m * 136)) FAIL("cannot read the token embeddings");
             for (size_t k = 0; k < m; k++) {
                 const uint8_t *blk = buf.data() + k * 136;
                 memcpy((uint8_t *)embd.d + (b + k) * 2, blk, 2);
@@ -408,7 +402,7 @@ void Engine::warmup() {
                 memcpy(embd.q + (b + k) * 128, blk + 8, 128);
             }
         }
-        ::close(fd);
+        os::close(fd);
     });
     snaps.resize(std::max<size_t>(snaps.size(), 8));
     for (Snap &sn : snaps)

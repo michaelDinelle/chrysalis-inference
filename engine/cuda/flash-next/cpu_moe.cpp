@@ -1,12 +1,11 @@
 #include "cpu_moe.h"
+#include "../../os.h"
 #include "ggml.h"
 #include "ggml-cpu.h"
 #include <immintrin.h>
 #include <cmath>
 #include <cstdio>
 #include <cstring>
-#include <pthread.h>
-#include <sched.h>
 #include <string>
 
 namespace {
@@ -50,23 +49,16 @@ void CpuMoe::start(MoeShared *shared, MoeShared *pred, const std::vector<ColdLay
     ds16.resize(MOE_MAX_T * (D_ / 16)); df16.resize(MOE_MAX_T * (D_ / 16)); dxf.resize(MOE_MAX_T * (D_ / 32));
     dhq.resize((size_t)MOE_MAX_T * MOE_MAX_E * FE_); dhs.resize(MOE_MAX_T * MOE_MAX_E * (FE_ / 32)); dhc.resize(MOE_MAX_T * MOE_MAX_E * (FE_ / 32));
     std::vector<int> core, sib;
-    for (int c = 1; c < CPU_SETSIZE && (int)core.size() < n; c++) {
-        FILE *f = fopen(("/sys/devices/system/cpu/cpu" + std::to_string(c) + "/topology/thread_siblings_list").c_str(), "r");
-        if (!f) continue;
-        int first = -1, second = -1;
-        char sep = 0;
-        if (fscanf(f, "%d%c%d", &first, &sep, &second) >= 1 && first == c) { core.push_back(c); if (sep == ',' && second > c) sib.push_back(second); }
-        fclose(f);
+    for (int c : os::cores()) {
+        if (c < 1 || (int)core.size() >= n) continue;
+        core.push_back(c);
+        const int second = os::sibling(c);
+        if (second > c) sib.push_back(second);
     }
     if (sib.size() == core.size()) { core.insert(core.end(), sib.begin(), sib.end()); n = (int)core.size(); scr = std::vector<Scratch>(n); }
     for (int i = 0; i < n; i++) {
         th.emplace_back(&CpuMoe::worker, this, i);
-        if (i < (int)core.size()) {
-            cpu_set_t set;
-            CPU_ZERO(&set);
-            CPU_SET(core[i], &set);
-            pthread_setaffinity_np(th.back().native_handle(), sizeof set, &set);
-        }
+        if (i < (int)core.size()) os::pin(th.back(), core[i]);
     }
 }
 

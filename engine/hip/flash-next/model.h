@@ -85,7 +85,7 @@ struct Engine {
     int n_slots = 0, n_extra = 0, n_extra_max = 0, extra_pages = 0;
     int *d_slot_of = nullptr;
     uint8_t *d_fmt = nullptr;
-    int file_fd = -1; const uint8_t *file_base = nullptr;
+    os::File file_fd = os::NO_FILE; const uint8_t *file_base = nullptr;
     uint8_t *spill_mem = nullptr; size_t spill_bytes = 0;
     struct Experts {
         bool on = true;

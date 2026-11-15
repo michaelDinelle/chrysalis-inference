@@ -4,10 +4,7 @@
 #include <map>
 #include <string>
 #include <vector>
-#include <fcntl.h>
-#include <sys/mman.h>
-#include <sys/stat.h>
-#include <unistd.h>
+#include "os.h"
 
 struct GGUFTensor {
     int type = -1;
@@ -23,7 +20,7 @@ struct GGUF {
     std::map<std::string, std::vector<int64_t>> arrs;
     uint8_t *base = nullptr;
     size_t size = 0;
-    int fd = -1;
+    os::File fd = os::NO_FILE;
 
     static size_t type_bytes(int type, int64_t n) {
         switch (type) {
@@ -43,11 +40,11 @@ struct GGUF {
     }
 
     bool open(const char *path) {
-        fd = ::open(path, O_RDONLY);
-        if (fd < 0) return false;
-        struct stat st; fstat(fd, &st); size = st.st_size;
-        base = (uint8_t *)mmap(nullptr, size, PROT_READ, MAP_SHARED, fd, 0);
-        if (base == MAP_FAILED || memcmp(base, "GGUF", 4) != 0) return false;
+        fd = os::open_read(path);
+        if (fd == os::NO_FILE) return false;
+        size = os::size(fd);
+        base = (uint8_t *)os::map(fd, size);
+        if (!base || memcmp(base, "GGUF", 4) != 0) return false;
 
         const uint8_t *p = base + 4;
         auto rd = [&](auto &v) { memcpy(&v, p, sizeof(v)); p += sizeof(v); };
@@ -102,10 +99,8 @@ struct GGUF {
 
     void drop(const void *p, size_t n) const {
         const size_t off = (size_t)((const uint8_t *)p - base) & ~size_t(4095);
-        madvise(base + off, n + ((const uint8_t *)p - base - off), MADV_DONTNEED);
-#ifdef POSIX_FADV_DONTNEED
-        posix_fadvise(fd, (off_t)off, (off_t)(n + ((const uint8_t *)p - base - off)), POSIX_FADV_DONTNEED);
-#endif
+        os::drop_mapped(base + off, n + ((const uint8_t *)p - base - off));
+        os::forget(fd, off, n + ((const uint8_t *)p - base - off));
     }
-    ~GGUF() { if (base && base != MAP_FAILED) munmap(base, size); if (fd >= 0) ::close(fd); }
+    ~GGUF() { os::unmap(base, size); os::close(fd); }
 };

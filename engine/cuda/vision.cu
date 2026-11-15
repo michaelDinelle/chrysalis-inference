@@ -1,15 +1,12 @@
 #include "vision.h"
+#include "../os.h"
 #include <cuda_fp16.h>
 #include <algorithm>
 #include <cmath>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
-#include <fcntl.h>
-#include <sys/mman.h>
-#include <sys/stat.h>
 #include <thread>
-#include <unistd.h>
 
 #define VCK(x) do { cudaError_t e_ = (x); if (e_ != cudaSuccess) { \
     fprintf(stderr, "chrysalis vision: CUDA error '%s' at %s:%d\n", cudaGetErrorString(e_), __FILE__, __LINE__); abort(); } } while (0)
@@ -32,14 +29,12 @@ struct File {
     uint8_t *base = nullptr;
     size_t size = 0;
     bool open(const char *path) {
-        const int fd = ::open(path, O_RDONLY);
-        if (fd < 0) return false;
-        struct stat st;
-        fstat(fd, &st);
-        size = st.st_size;
-        base = (uint8_t *)mmap(nullptr, size, PROT_READ, MAP_SHARED, fd, 0);
-        ::close(fd);
-        if (base == MAP_FAILED || memcmp(base, "GGUF", 4) != 0) return false;
+        const os::File fd = os::open_read(path);
+        if (fd == os::NO_FILE) return false;
+        size = os::size(fd);
+        base = (uint8_t *)os::map(fd, size);
+        os::close(fd);
+        if (!base || memcmp(base, "GGUF", 4) != 0) return false;
         const uint8_t *p = base + 4;
         auto rd = [&](auto &v) { memcpy(&v, p, sizeof(v)); p += sizeof(v); };
         auto rs = [&]() { uint64_t n; rd(n); std::string s((const char *)p, n); p += n; return s; };
@@ -86,7 +81,7 @@ struct File {
         if (it->second.type != type) VFAIL("%s has type %d, expected %d", name.c_str(), it->second.type, type);
         return it->second;
     }
-    ~File() { if (base && base != MAP_FAILED) munmap(base, size); }
+    ~File() { os::unmap(base, size); }
 };
 constexpr int GF32 = 0, GBF16 = 30;
 

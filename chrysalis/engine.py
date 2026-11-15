@@ -78,6 +78,10 @@ def load_async(*args, **kw):
 class Engine:
 
     def __init__(self, model, max_seqs=4, umax=2048, reserve_mb=256, lib=os.path.join(ROOT, "build", "libchrysalis" + LIB), warmup=True):
+        if hasattr(os, "add_dll_directory"):
+            for folder in (os.path.dirname(os.path.abspath(lib)), *(os.path.join(os.environ[k], "bin") for k in ("HIP_PATH", "CUDA_PATH") if os.environ.get(k))):
+                if os.path.isdir(folder):
+                    os.add_dll_directory(folder)
         self.lib = L = C.CDLL(lib)
         L.chrysalis_init.restype = C.c_int
         L.chrysalis_init.argtypes = [C.c_char_p, C.c_int, C.c_int, C.c_longlong]
