@@ -762,7 +762,7 @@ __global__ __launch_bounds__(256) void k_idx_hist(const float *score, int pos0, 
 }
 
 void idx_select(const half *q16, int pos0, int G, int nblk, KVRef kv, int layer, float *score, uint32_t *hist, int *sel, hipStream_t st) {
-    gpu_zero(hist, (size_t)G * SEL_BINS * 4, st);
+    CK(hipMemsetAsync(hist, 0, (size_t)G * SEL_BINS * 4, st));
     if (G == 1) k_idx_score2<<<dim3((nblk + 255) / 256, 1), 256, 0, st>>>(q16, pos0, nblk, kv, layer, score, hist);
     else {
         k_idx_score_mm<<<dim3((nblk + 63) / 64, (G + 15) / 16), 128, 0, st>>>(q16, G, pos0, nblk, kv, layer, score);
@@ -897,7 +897,7 @@ __global__ __launch_bounds__(256) __attribute__((amdgpu_waves_per_eu(10))) void 
             }
         }
     }
-    rmx[w][r16] = l;
+    rmx[w][r16] = hi ? lane_xor<16>(l) : l;
     __syncthreads();
     if (!rowvalid) return;
     const size_t row = (size_t)t * NH + g * QPK + r16;

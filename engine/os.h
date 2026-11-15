@@ -28,6 +28,7 @@
 #pragma comment(lib, "advapi32")
 #pragma comment(lib, "dxgi")
 #else
+#include <dirent.h>
 #include <fcntl.h>
 #include <sys/mman.h>
 #include <sys/stat.h>
@@ -103,6 +104,7 @@ inline double ram_held() {
     return GetProcessMemoryInfo(GetCurrentProcess(), (PROCESS_MEMORY_COUNTERS *)&c, sizeof c) ? (double)c.PrivateUsage : 0;
 }
 inline bool vram_now(int, int, int, uint64_t *, uint64_t *) { return false; }
+inline uint64_t vram_others(int, int, int) { return 0; }
 inline uint64_t vram_grant(unsigned vendor, const char *gpu, int, int, int, uint64_t free_bytes, uint64_t) {
     IDXGIFactory4 *f = nullptr;
     if (FAILED(CreateDXGIFactory1(__uuidof(IDXGIFactory4), (void **)&f))) return free_bytes;
@@ -315,6 +317,51 @@ inline bool vram_now(int domain, int bus, int dev, uint64_t *total, uint64_t *us
     (void)domain; (void)bus; (void)dev; (void)total; (void)used;
     return false;
 #endif
+}
+inline uint64_t vram_others(int domain, int bus, int dev) {
+    uint64_t sum = 0;
+#if defined(__linux__)
+    char card[32], path[96], link[64], text[4096];
+    snprintf(card, sizeof card, "drm-pdev:\t%04x:%02x:%02x.0", domain, bus, dev);
+    std::vector<long> seen;
+    DIR *proc = opendir("/proc");
+    if (!proc) return 0;
+    while (const dirent *p = readdir(proc)) {
+        char *end = nullptr;
+        const long pid = strtol(p->d_name, &end, 10);
+        if (*end || pid <= 0 || pid == (long)getpid()) continue;
+        snprintf(path, sizeof path, "/proc/%ld/fd", pid);
+        DIR *fds = opendir(path);
+        if (!fds) continue;
+        while (const dirent *f = readdir(fds)) {
+            snprintf(path, sizeof path, "/proc/%ld/fd/%s", pid, f->d_name);
+            const ssize_t n = readlink(path, link, sizeof link - 1);
+            if (n < 9 || strncmp(link, "/dev/dri/", 9)) continue;
+            snprintf(path, sizeof path, "/proc/%ld/fdinfo/%s", pid, f->d_name);
+            FILE *info = fopen(path, "r");
+            if (!info) continue;
+            const size_t got = fread(text, 1, sizeof text - 1, info);
+            fclose(info);
+            text[got] = 0;
+            const char *id = strstr(text, "drm-client-id:"), *vram = strstr(text, "drm-total-vram:");
+            if (!strstr(text, card) || !id || !vram) continue;
+            const long client = strtol(id + 14, nullptr, 10);
+            bool counted = false;
+            for (long c : seen) counted = counted || c == client;
+            if (counted) continue;
+            seen.push_back(client);
+            char unit[8] = {};
+            unsigned long long v = 0;
+            sscanf(vram + 15, "%llu %7s", &v, unit);
+            sum += v * (unit[0] == 'K' ? 1024ull : unit[0] == 'M' ? 1048576ull : unit[0] == 'G' ? 1073741824ull : 1ull);
+        }
+        closedir(fds);
+    }
+    closedir(proc);
+#else
+    (void)domain; (void)bus; (void)dev;
+#endif
+    return sum;
 }
 inline uint64_t vram_grant(unsigned, const char *, int domain, int bus, int dev, uint64_t free_bytes, uint64_t others) {
     uint64_t total = 0, used = 0;

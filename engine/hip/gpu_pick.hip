@@ -21,11 +21,13 @@ int main() {
         gpus.push_back({bytes, i, p.name});
     }
     std::stable_sort(gpus.begin(), gpus.end(), [](const Gpu &a, const Gpu &b) { return a.bytes > b.bytes; });
-    for (const Gpu &g : gpus)
-        if (hipSetDevice(g.id) == hipSuccess && gpu_runs()) {
+    for (const Gpu &g : gpus) {
+        hipStream_t probe = nullptr;
+        if (hipSetDevice(g.id) == hipSuccess && hipStreamCreate(&probe) == hipSuccess && gpu_runs(probe)) {
             printf("HIP_VISIBLE_DEVICES=%d\n", g.id);
             return 0;
         }
+    }
     fputs("chrysalis: none of this computer's GPUs can run it:", stderr);
     for (const Gpu &g : gpus) fprintf(stderr, " %s (%.0f GB)", g.name.c_str(), g.bytes / 1e9);
     fputc('\n', stderr);

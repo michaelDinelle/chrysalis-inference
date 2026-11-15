@@ -1,6 +1,6 @@
 ROCM  ?= $(CURDIR)/data/rocm
 HIPCC := $(ROCM)/bin/hipcc
-FLAGS := -O3 -std=c++20 -fPIC --offload-arch=gfx1100 -Wno-unused-result -ffunction-sections -fdata-sections -fvisibility=hidden -fvisibility-inlines-hidden
+FLAGS := -O3 --offload-compress -std=c++20 -fPIC --offload-arch=gfx1100 -Wno-unused-result -ffunction-sections -fdata-sections -fvisibility=hidden -fvisibility-inlines-hidden
 H     := engine/hip
 SRC   := $(H)/27b/relayout.hip $(H)/27b/quant.hip $(H)/27b/ops.hip $(H)/gdn.hip $(H)/27b/attn.hip $(H)/vision.hip $(H)/gpu.hip $(H)/27b/model.cpp $(H)/27b/load.cpp \
          $(H)/27b/api.cpp
@@ -34,6 +34,9 @@ FN_SRC := $(H)/flash-next/relayout.hip $(H)/flash-next/quant.hip $(H)/flash-next
 FN_LIBS := $(LIBS) -L$(GGML)/build/bin -lggml-cpu -lggml-base -Wl,-rpath,$(GGML)/build/bin
 
 FN_OBJ := $(FN_SRC:%=build/ofn/%.o)
+build/ofn/engine/cpu_exact.cpp.o: engine/cpu_exact.cpp $(wildcard engine/*.h)
+	@mkdir -p $(@D)
+	$(ROCM)/lib/llvm/bin/clang++ -O3 -std=c++20 -fPIC -ffunction-sections -fdata-sections -fvisibility=hidden -fvisibility-inlines-hidden -c -o $@ $<
 build/ofn/%.o: % $(wildcard engine/*.h $(H)/*.h $(H)/flash-next/*.h)
 	@mkdir -p $(@D)
 	$(HIPCC) $(FLAGS) -I$(H)/flash-next -I$(GGML)/ggml/include -x hip -c -o $@ $<

@@ -408,7 +408,7 @@ __global__ __launch_bounds__(256) __attribute__((amdgpu_waves_per_eu(NT == 3 ? 4
         }
     }
 #pragma unroll
-    for (int rt = 0; rt < NT; rt++) rmx[w][rt * 16 + r16] = l[rt];
+    for (int rt = 0; rt < NT; rt++) rmx[w][rt * 16 + r16] = hi ? lane_xor<16>(l[rt]) : l[rt];
     __syncthreads();
 #pragma unroll
     for (int rt = 0; rt < NT; rt++) {

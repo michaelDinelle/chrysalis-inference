@@ -206,7 +206,6 @@ void Engine::load(const std::string &path, int max_seqs, size_t reserve_bytes) {
     const double t_gpu = now();
     hipDeviceProp_t prop;
     CK(hipGetDeviceProperties(&prop, 0));
-    if (!gpu_runs()) FAIL("%s cannot run this engine", prop.name);
     uint8_t *ring;
     if (prop.isLargeBar) CK(hipExtMallocWithFlags((void **)&ring, RING, hipDeviceMallocFinegrained));
     else CK(hipHostMalloc(&ring, RING));
@@ -317,6 +316,7 @@ void Engine::load(const std::string &path, int max_seqs, size_t reserve_bytes) {
         uint8_t *kv;
         if (bytes && hipMalloc(&kv, bytes) == hipSuccess) add_kv_memory(kv, bytes);
     }
+    if (!gpu_runs(st)) FAIL("%s cannot run this engine", prop.name);
     const double t1 = now();
     fprintf(stderr, "chrysalis: weights %.2f GB, buffers %.2f GB, KV pool %d pages = %d tokens (%.2f GB)\n",
             weight_bytes / 1e9, barena.used / 1e9, n_pages, n_pages * PAGE, (double)n_pages * KV_PAGE / 1e9);

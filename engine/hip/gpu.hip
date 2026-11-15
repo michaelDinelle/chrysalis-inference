@@ -1,36 +1,22 @@
 #include <hip/hip_runtime.h>
 #include "gpu.h"
+#include <cstring>
 #include "../os.h"
 
 constexpr unsigned PROBE = 64, STEP = 40503u;
 
 __global__ void k_gpu_runs(unsigned *out) { out[threadIdx.x] = STEP * (threadIdx.x + 1); }
 
-static uint64_t others = 0;
-
-bool gpu_runs() {
-    unsigned *d = nullptr, h[PROBE] = {};
-    int dev = 0;
-    hipDeviceProp_t p{};
-    uint64_t total = 0, used = 0;
-    if (hipGetDevice(&dev) == hipSuccess && hipGetDeviceProperties(&p, dev) == hipSuccess && os::vram_now(p.pciDomainID, p.pciBusID, p.pciDeviceID, &total, &used)) others = used;
-    if (hipMalloc(&d, sizeof h) != hipSuccess) return false;
-    bool ok = hipMemset(d, 0, sizeof h) == hipSuccess;
-    hipLaunchKernelGGL(k_gpu_runs, dim3(1), dim3(PROBE), 0, 0, d);
-    ok = ok && hipMemcpy(h, d, sizeof h, hipMemcpyDeviceToHost) == hipSuccess;
-    (void)hipFree(d);
+bool gpu_runs(void *stream) {
+    unsigned *h = nullptr, *d = nullptr;
+    if (hipHostMalloc((void **)&h, PROBE * sizeof(unsigned), hipHostMallocMapped) != hipSuccess) return false;
+    memset(h, 0, PROBE * sizeof(unsigned));
+    bool ok = hipHostGetDevicePointer((void **)&d, h, 0) == hipSuccess;
+    if (ok) hipLaunchKernelGGL(k_gpu_runs, dim3(1), dim3(PROBE), 0, (hipStream_t)stream, d);
+    ok = ok && hipStreamSynchronize((hipStream_t)stream) == hipSuccess;
     for (unsigned i = 0; ok && i < PROBE; i++) ok = h[i] == STEP * (i + 1);
+    (void)hipHostFree(h);
     return ok;
-}
-
-__global__ void k_zero(uint32_t *p, size_t words, size_t bytes) {
-    for (size_t i = (size_t)blockIdx.x * blockDim.x + threadIdx.x; i < words; i += (size_t)gridDim.x * blockDim.x) p[i] = 0;
-    if (blockIdx.x == 0 && threadIdx.x == 0) for (size_t i = words * 4; i < bytes; i++) ((uint8_t *)p)[i] = 0;
-}
-
-void gpu_zero(void *p, size_t bytes, void *stream) {
-    const size_t words = bytes / 4, blocks = (words + 255) / 256;
-    k_zero<<<(unsigned)(blocks < 1 ? 1 : blocks > 2048 ? 2048 : blocks), 256, 0, (hipStream_t)stream>>>((uint32_t *)p, words, bytes);
 }
 
 size_t gpu_free() {
@@ -38,7 +24,7 @@ size_t gpu_free() {
     int dev = 0;
     hipDeviceProp_t p{};
     if (hipMemGetInfo(&free_b, &total_b) != hipSuccess || hipGetDevice(&dev) != hipSuccess || hipGetDeviceProperties(&p, dev) != hipSuccess) return 0;
-    return (size_t)os::vram_grant(0x1002, p.name, p.pciDomainID, p.pciBusID, p.pciDeviceID, free_b, others);
+    return (size_t)os::vram_grant(0x1002, p.name, p.pciDomainID, p.pciBusID, p.pciDeviceID, free_b, os::vram_others(p.pciDomainID, p.pciBusID, p.pciDeviceID));
 }
 
 #ifdef _WIN32

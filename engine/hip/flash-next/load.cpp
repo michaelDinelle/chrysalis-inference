@@ -224,7 +224,6 @@ void Engine::load(const std::string &path, int max_seqs, size_t reserve_bytes) {
     CK(hipSetDevice(0));
     hipDeviceProp_t gpu{};
     CK(hipGetDeviceProperties(&gpu, 0));
-    if (!gpu_runs()) FAIL("%s cannot run this engine", gpu.name);
     CK(hipStreamCreateWithFlags(&st, hipStreamNonBlocking));
     CK(hipStreamCreateWithFlags(&cst, hipStreamNonBlocking));
     CK(hipStreamCreateWithFlags(&lst, hipStreamNonBlocking));
@@ -568,6 +567,7 @@ void Engine::load(const std::string &path, int max_seqs, size_t reserve_bytes) {
     n_pages = (int)std::min(max_pages, want / KV_PAGE);
     if (n_pages < 64) FAIL("not enough VRAM left for the KV cache");
     CK(hipMalloc(&kv_pool, (size_t)n_pages * KV_PAGE));
+    if (!gpu_runs(st)) FAIL("%s cannot run this engine", gpu.name);
     load_phase = 1;
     if (cold_bytes && !cal_load()) calibrate();
     if (cold_bytes && !cold_gpu) {
@@ -703,8 +703,8 @@ void Engine::alloc_buffers(int max_seqs) {
     carve(dry);
     barena.init(dry.used + (1 << 20));
     carve(barena);
-    gpu_zero(b.rr_counter, 4, st);
-    gpu_zero(la.counter, 64 * 4, st);
+    CK(hipMemsetAsync(b.rr_counter, 0, 4, st));
+    CK(hipMemsetAsync(la.counter, 0, 64 * 4, st));
     CK(hipHostMalloc(&b.ple_rows, (size_t)S * PLE_HEADS * 170));
     CK(hipHostMalloc(&b.h_ids, N * 4)); CK(hipHostMalloc(&b.h_wts, N * 4)); CK(hipHostMalloc(&b.h_tok, N * 4));
     CK(hipHostMalloc(&b.h_entw, N * 4)); CK(hipHostMalloc(&b.h_pos, N * 4)); CK(hipHostMalloc(&b.h_btok, N * 4));
@@ -751,7 +751,7 @@ void Engine::warmup() {
     std::fill(xc.fresh.begin(), xc.fresh.end(), 0u);
     std::fill(xc.total.begin(), xc.total.end(), 0ull);
     xc.tokens = 0; xc.counts_pending = false;
-    gpu_zero(xc.d_counts, (size_t)NL * NE * 4, st);
+    CK(hipMemsetAsync(xc.d_counts, 0, (size_t)NL * NE * 4, st));
     if (borrowed) seq_reset(seqs[0]); else seq_free(id);
     snap_warm = true;
     snap_reserve_finish();

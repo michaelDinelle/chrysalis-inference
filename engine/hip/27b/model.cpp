@@ -29,9 +29,9 @@ void Engine::seq_reset(Seq &s) {
     s.n = 0; s.pos = 0; s.pending = -1; s.pages.clear(); s.seen.clear(); s.top_v.clear(); s.top_i.clear();
     s.look.clear();
     s.rng.seed(std::random_device{}());
-    gpu_zero(s.ssm, (size_t)48 * GV * GD * GD * 4, st);
-    gpu_zero(s.conv, (size_t)48 * QKV * 3 * 4, st);
-    gpu_zero(s.h_last, D * 4, st);
+    CK(hipMemsetAsync(s.ssm, 0, (size_t)48 * GV * GD * GD * 4, st));
+    CK(hipMemsetAsync(s.conv, 0, (size_t)48 * QKV * 3 * 4, st));
+    CK(hipMemsetAsync(s.h_last, 0, D * 4, st));
 }
 
 void Engine::seq_free(int id) {
@@ -68,7 +68,7 @@ void Engine::ensure_pages(Seq &s, int n_tokens, int from) {
     if ((int)free_pages.size() < need - dirty + shared) throw std::runtime_error("out of KV pages");
     while ((int)s.pages.size() < need) {
         const int p = page_alloc();
-        gpu_zero(kv_pool + (size_t)p * KV_PAGE, KV_PAGE, st);
+        CK(hipMemsetAsync(kv_pool + (size_t)p * KV_PAGE, 0, KV_PAGE, st));
         s.pages.push_back(p);
     }
     for (int i = from / PAGE; i < dirty && i < need; i++) {

@@ -81,7 +81,7 @@ void Engine::experts_init() {
     x.spilled = 0;
     x.spill_cap = gb && hot_bytes ? std::min(hot, (int)(atof(gb) * 1e9 / (double)hot_bytes)) : hot;
     CK(hipMalloc(&x.d_counts, keys * 4));
-    gpu_zero(x.d_counts, keys * 4, st);
+    CK(hipMemsetAsync(x.d_counts, 0, keys * 4, st));
     CK(hipHostMalloc(&x.h_counts, keys * 4));
     CK(hipEventCreateWithFlags(&x.counted, hipEventDisableTiming));
     for (Experts::Load &ld : x.loads) {
@@ -286,7 +286,7 @@ void Engine::experts_place(int T) {
     const size_t keys = (size_t)NL * NE;
     if (!x.counts_pending) {
         CK(hipMemcpyAsync(x.h_counts, x.d_counts, keys * 4, hipMemcpyDeviceToHost, st));
-        gpu_zero(x.d_counts, keys * 4, st);
+        CK(hipMemsetAsync(x.d_counts, 0, keys * 4, st));
         CK(hipEventRecord(x.counted, st));
         x.counts_pending = true;
     }
