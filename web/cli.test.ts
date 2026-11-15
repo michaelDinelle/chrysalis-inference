@@ -250,3 +250,37 @@ test("an incognito thread runs on a second OpenCode with a store in memory, with
     rmSync(bin, { force: true });
   }
 }, 90_000);
+
+test("OpenCode, the ordinary one and the incognito one, ends with the web server that started it, even when the web server is killed outright", async () => {
+  const dir = mkdtempSync(`${tmpdir()}/chrysalis-kept-`), bin = `${dir}/opencode`, pids = `${dir}/pids`, work = `${dir}/work`;
+  writeFileSync(bin, `#!/bin/sh\nexec ${process.execPath} ${import.meta.dir}/fake-opencode-bin.ts "$@"\n`);
+  chmodSync(bin, 0o755);
+  mkdirSync(work);
+  mkdirSync(`${dir}/memory`);
+  const proc = Bun.spawn([process.execPath, "server.ts"], { cwd: import.meta.dir, stdout: "pipe", stderr: "inherit",
+    env: { ...process.env, PORT: "0", CHRYSALIS_URL: `http://127.0.0.1:${freePort()}`, CHRYSALIS_HOST: "127.0.0.1", NODE_ENV: "production", CHRYSALIS_TLS_DIR: `${dir}/tls`, HOME: dir,
+      XDG_DATA_HOME: `${dir}/share`, XDG_STATE_HOME: `${dir}/state`, CHRYSALIS_OPENCODE: bin, FAKE_OPENCODE_PIDS: pids, CHRYSALIS_MEMORY: `${dir}/memory` } });
+  const alive = () => (existsSync(pids) ? readFileSync(pids, "utf8").trim().split("\n").map(Number) : []).filter((pid) => { try { process.kill(pid, 0); return true; } catch { return false; } });
+  try {
+    const reader = proc.stdout.getReader(), dec = new TextDecoder();
+    let out = "";
+    while (!/chrysalis web: \S+/.test(out)) {
+      const { value, done } = await reader.read();
+      if (done) throw new Error(`server.ts exited: ${out}`);
+      out += dec.decode(value);
+    }
+    const here = /chrysalis web: (\S+)/.exec(out)![1].replace(/\/$/, "");
+    expect((await fetch(`${here}/api/threads`, { method: "POST" })).status).toBe(200);
+    const hidden = await fetch(`${here}/api/chat`, { method: "POST", headers: json, body: JSON.stringify({ stream: true, chrysalis_thread: { dir: work, text: "a secret", title: "a secret", model: "chrysalis/qwen3.8-27b", hidden: true } }) });
+    expect([hidden.status, (await hidden.text()).trimEnd().endsWith("[DONE]")]).toEqual([200, true]);
+    expect(alive().length).toBe(2);
+    proc.kill("SIGKILL");
+    await proc.exited;
+    for (const end = Date.now() + 15_000; alive().length && Date.now() < end; ) await Bun.sleep(50);
+    expect(alive()).toEqual([]);
+  } finally {
+    proc.kill();
+    for (const pid of alive()) process.kill(pid);
+    rmSync(dir, { recursive: true, force: true });
+  }
+}, 60_000);

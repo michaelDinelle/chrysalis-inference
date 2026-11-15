@@ -4,7 +4,7 @@ import { clean, fold, paint, plain } from "./terminal";
 import { utcOffset } from "./clock";
 import { letIn } from "./firewall";
 import { gpuEnv } from "./gpu";
-import { getCommand, memoryRoot, ourScript, ROOT, serverCommand, serverEnv } from "./platform";
+import { getCommand, memoryRoot, ourScript, ROOT, serverCommand, serverEnv, stopTree } from "./platform";
 import { qrText } from "./qr";
 import { tlsPath } from "./tls";
 import { MODELS, point } from "./veil";
@@ -127,7 +127,7 @@ class Service {
     this.asked = true;
     const proc = this.proc;
     if (!proc) return;
-    proc.kill();
+    stopTree(proc);
     await proc.exited;
   }
 
@@ -447,7 +447,7 @@ export function quit() {
   if (quitting) return;
   quitting = true;
   ui.close();
-  for (const p of [getting, engineSvc.proc, webSvc.proc]) p?.kill();
+  for (const p of [getting, engineSvc.proc, webSvc.proc]) if (p) stopTree(p);
   if (run) wipe(run);
   process.exit(0);
 }

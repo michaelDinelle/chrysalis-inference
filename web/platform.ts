@@ -48,6 +48,23 @@ export const getCommand = (model: string, m: Machine = here(), root = ROOT) => [
 
 export const ourScript = (file: string) => ({ cmd: [process.execPath, file], env: { BUN_BE_BUN: "1" } });
 
+export function stopTree(proc: { pid: number; kill: () => void; exitCode: number | null }, m: Machine = here()) {
+  if (proc.exitCode !== null) return;
+  if (m.platform === "win32") {
+    try { if (Bun.spawnSync(["taskkill", "/T", "/F", "/PID", String(proc.pid)], { stdout: "ignore", stderr: "ignore" }).exitCode === 0) return; } catch {  }
+  }
+  proc.kill();
+}
+
+const GUARD = join(import.meta.dir, "guard.ts");
+export type Kept = Bun.Subprocess<"pipe", "ignore", "ignore">;
+export function keep(cmd: string[], env: Record<string, string | undefined>): Kept {
+  const guard = ourScript(GUARD);
+  return Bun.spawn([...guard.cmd, ...cmd], { stdin: "pipe", stdout: "ignore", stderr: "ignore", env: { ...env, ...guard.env } });
+}
+export const release = (proc?: Kept) => { try { proc?.stdin.end(); } catch {  } };
+export const noCores = (cmd: string[]) => (Bun.which("prlimit") ? ["prlimit", "--core=0", ...cmd] : cmd);
+
 export const memoryRoot = (m: Machine = here()) => (m.platform === "linux" && m.exists("/dev/shm") ? "/dev/shm" : tmpdir());
 
 export async function utf8Console(m: Machine = here()) {
