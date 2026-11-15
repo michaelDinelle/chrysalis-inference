@@ -129,8 +129,8 @@ void Engine::argmax(DP<float> logits, int T, int n, int ld, DP<int> out) {
     m.run(m.pipeline("argmax"), a, T, 1, 1, 1024);
 }
 
-void Engine::embed(DP<int> tokens, int T, DP<float> out) {
-    EmbedA a{wargs(embd), tokens.g, out.g, T};
+void Engine::embed(DP<int> tokens, int T, DP<float> out, bool img) {
+    EmbedA a{wargs(embd), tokens.g, out.g, img ? b.img.g : 0, T};
     m.run(m.pipeline("embed"), a, cdiv(D / 32, 32), T, 1, 32);
 }
 
@@ -456,10 +456,10 @@ void Engine::ffn_layer(const Layer &w, int T, DP<float> x, DP<float> xn, DP<half
     if (next && (T > 1 || nf)) rmsnorm(x, next, T, D, D, D, nf ? nf : small ? xn : DP<float>{}, hh);
 }
 
-void Engine::forward_parts(const Part *p, int np, int T) {
+void Engine::forward_parts(const Part *p, int np, int T, bool img) {
     for (int i = 0; i < np; i++) ensure_pages(*p[i].s, p[i].s->n + p[i].T, p[i].s->n);
     const bool small = T <= 8;
-    embed(b.tokens, T, b.x);
+    embed(b.tokens, T, b.x, img);
     if (T > 1) rmsnorm(b.x, L[0].attn_norm, T, D, D, D, small ? b.xn : DP<float>{}, b.hh);
     for (int l = 0, gl = 0; l < NL; l++) {
         if (is_attn_layer(l)) attn_layer(L[l], l / 4, p, np, T, b.x, b.xn, b.hh);
@@ -475,9 +475,9 @@ void Engine::forward_parts(const Part *p, int np, int T) {
         }
 }
 
-void Engine::forward(Seq &s, int T, bool verify, int rope0, bool rpos) {
+void Engine::forward(Seq &s, int T, bool verify, int rope0, bool rpos, bool img) {
     const Part p{&s, T, 0, s.n, rope0, rpos, verify};
-    forward_parts(&p, 1, T);
+    forward_parts(&p, 1, T, img);
 }
 
 void Engine::mtp_forward(Seq &s, int T, int pos0, DP<float> h_prev, DP<int> tokens, int rope0, bool rpos) {
@@ -492,12 +492,12 @@ void Engine::mtp_forward(Seq &s, int T, int pos0, DP<float> h_prev, DP<int> toke
     ffn_layer(M, T, b.mtp_x, b.xn, b.hh, head_norm, b.mtp_x);
 }
 
-void Engine::mtp_catch_up(Seq &s, int T, int pos0, int rope0, bool rpos, int off) {
+void Engine::mtp_catch_up(Seq &s, int T, int pos0, int rope0, bool rpos, int off, bool img) {
     copy(b.mtp_h.as<uint8_t>(), s.h_last.as<uint8_t>(), D * 4);
     m.par();
     if (T > 1) copy((b.mtp_h + D).as<uint8_t>(), (b.hfin + (size_t)off * D).as<uint8_t>(), (size_t)(T - 1) * D * 4);
     m.par();
-    embed(b.tokens + off, T, b.x);
+    embed(b.tokens + off, T, b.x, img);
     const bool small = T <= 8;
     if (small) {
         rmsnorm(b.x, enorm, T, D, D, 2 * D, b.mtp_xn, b.hh);
@@ -531,19 +531,36 @@ void Engine::lm_head(DP<float> in, int T, int rows) {
 void Engine::prefill(int id, const int *tokens, const int *pos3, int n) {
     flush();
     Seq &s = seqs.at(id);
-    for (int i = 0; i < n; i++)
-        if (tokens[i] >= IMG_BASE) throw std::invalid_argument("an image token: pictures are not supported by this engine");
-        else if (tokens[i] < 0 || tokens[i] >= VOCAB) throw std::invalid_argument("token id out of range");
+    bool any_img = false;
+    for (int i = 0; i < n; i++) {
+        const int t = tokens[i];
+        if (t >= IMG_BASE) {
+            const int pic = (t - IMG_BASE) / IMG_ROWS, row = (t - IMG_BASE) % IMG_ROWS;
+            if (pic >= (int)images.size() || images[pic].rows.empty() || row >= images[pic].n)
+                throw std::invalid_argument("an image token names a picture that is not encoded");
+            any_img = true;
+        } else if (t < 0 || t >= VOCAB) {
+            throw std::invalid_argument("token id out of range");
+        }
+    }
     if (free_page_count() * PAGE < (s.n + n + PAGE - 1) / PAGE * PAGE - (int)s.pages.size() * PAGE)
         throw std::runtime_error("out of KV pages");
+    if (any_img && !b.img) b.img = m.alloc((size_t)umax * D * 2, "picture rows").as<half_t>();
     s.pending = -1;
     for (int done = 0; done < n;) {
         const int T = std::min(umax, n - done);
         std::copy(tokens + done, tokens + done + T, b.tokens.h);
         if (pos3) std::copy(pos3 + (size_t)done * 3, pos3 + (size_t)(done + T) * 3, b.rpos.h);
+        bool img = false;
+        for (int i = 0; any_img && i < T; i++) {
+            const int t = tokens[done + i] - IMG_BASE;
+            if (t < 0) continue;
+            memcpy(b.img.h + (size_t)i * D, images[t / IMG_ROWS].rows.data() + (size_t)(t % IMG_ROWS) * D, (size_t)D * 2);
+            img = true;
+        }
         const int rope0 = s.pos;
-        forward(s, T, false, rope0, pos3);
-        mtp_catch_up(s, T, s.n, rope0, pos3);
+        forward(s, T, false, rope0, pos3, img);
+        mtp_catch_up(s, T, s.n, rope0, pos3, 0, img);
         if (done + T == n) {
             lm_head(b.hfin + (size_t)(T - 1) * D, 1, VOCAB);
             topk(b.logits, 1, VOCAB, VOCAB);
@@ -568,6 +585,18 @@ void Engine::prefill(int id, const int *tokens, const int *pos3, int n) {
             s.pos += T;
         done += T;
     }
+}
+
+int Engine::image_encode(int slot, const float *patches, int gh, int gw, int frames) {
+    const int rows = gh * gw / 4;
+    if (slot < 0 || slot >= (INT32_MAX - IMG_BASE) / IMG_ROWS || rows > IMG_ROWS) return -1;
+    if ((int)images.size() <= slot) images.resize(slot + 1);
+    Image &im = images[slot];
+    im.rows.resize((size_t)rows * D);
+    im.n = rows;
+    if (vision.encode(patches, gh, gw, frames, (uint16_t *)im.rows.data())) return 0;
+    im = {};
+    return -1;
 }
 
 static void keep_row(const float *v, const int *i, float *rows_v, int *rows_i, int at) {

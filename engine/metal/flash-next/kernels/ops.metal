@@ -1,7 +1,7 @@
 #include "quant.h"
 
 constant float EPS = 1e-6f;
-constant int D = 2560, HC = 4, HCD = 10240, HCR = 320;
+constant int D = 2560, HC = 4, HCD = 10240, HCR = 320, IMG_BASE = 1 << 30;
 
 inline float sigm(float x) { return 1.f / (1.f + exp(-x)); }
 inline float silu(float x) { return x / (1.f + exp(-x)); }
@@ -18,13 +18,16 @@ inline float tg_sum256(float v, threadgroup float *red, uint tid) {
 
 template <int F>
 kernel void embed(device const int *tok [[buffer(0)]], device const uchar *W [[buffer(1)]], constant uint &rb [[buffer(2)]],
-                  device float *res [[buffer(3)]], uint t [[threadgroup_position_in_grid]], uint u [[thread_index_in_threadgroup]]) {
+                  device float *res [[buffer(3)]], device const half *img [[buffer(4)]], uint t [[threadgroup_position_in_grid]],
+                  uint u [[thread_index_in_threadgroup]]) {
     float w[32];
-    deq32<F>(W + (size_t)tok[t] * rb, u, w);
+    if (tok[t] >= IMG_BASE) for (int i = 0; i < 32; i++) w[i] = float(img[(size_t)t * D + u * 32 + i]);
+    else deq32<F>(W + (size_t)tok[t] * rb, u, w);
     for (int c = 0; c < HC; c++)
         for (int i = 0; i < 32; i++) res[(size_t)t * HCD + c * D + u * 32 + i] = w[i];
 }
-template [[host_name("embed_q8_0")]] kernel void embed<T_Q8_0>(device const int *, device const uchar *, constant uint &, device float *, uint, uint);
+template [[host_name("embed_q8_0")]] kernel void embed<T_Q8_0>(device const int *, device const uchar *, constant uint &, device float *,
+                                                                device const half *, uint, uint);
 
 kernel void hc_norm(device const float *res [[buffer(0)]], device const float *gamma [[buffer(1)]], device float *xn [[buffer(2)]],
                     device half *xh [[buffer(3)]], constant uint &mode [[buffer(4)]], uint2 g [[threadgroup_position_in_grid]],

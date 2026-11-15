@@ -25,7 +25,7 @@ struct GemvA {
 
 struct DeqA { WArgs w; PTR(half) out; int rows, cols; };
 
-struct EmbedA { WArgs w; PTR(const int) tokens; PTR(float) out; int T; };
+struct EmbedA { WArgs w; PTR(const int) tokens; PTR(float) out; PTR(const half) img; int T; };
 
 struct NormA {
     PTR(const float) x; PTR(const float) w; PTR(float) of; PTR(half) oh;

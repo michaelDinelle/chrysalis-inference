@@ -11,7 +11,14 @@ struct KVArgs {
     uint pos0;
     uint layer;
     uint nsplit;
+    int rope0;
+    int rpos;
+    int tail[3];
 };
+
+inline int3 rope_at(constant KVArgs &a, device const int *rp, uint t) {
+    return a.rpos ? int3(rp[3 * t], rp[3 * t + 1], rp[3 * t + 2]) : int3(a.rope0 + (int)t);
+}
 
 inline device half *kv_k(device uchar *kv, device const int *pages, uint layer, uint head, uint cell) {
     return (device half *)(kv + (size_t)pages[cell / PAGE] * KV_PAGE + layer * KV_LAYER + ((size_t)head * PAGE + cell % PAGE) * HD * 2);
@@ -30,12 +37,13 @@ inline float tg_sum(float v, threadgroup float *red, uint tid, uint nsg) {
     return s;
 }
 
-inline float norm_rope(float x, device const float *w, uint pos, uint n, threadgroup float *red, threadgroup float *buf, uint i) {
+inline float norm_rope(float x, device const float *w, int3 at, uint n, threadgroup float *red, threadgroup float *buf, uint i) {
     x *= rsqrt(tg_sum(x * x, red, i, n / 32) / n + EPS) * w[i];
     if (i < 64) buf[i] = x;
     threadgroup_barrier(mem_flags::mem_threadgroup);
     if (i < 64) {
         const uint f = i % 32;
+        const int pos = f % 3 == 1 ? at.y : f % 3 == 2 && f < 30 ? at.z : at.x;
         const float th = float(pos) * pow(ROPE_BASE, -float(f) / 32.f);
         const float s = precise::sin(th), c = precise::cos(th);
         x = i < 32 ? x * c - buf[i + 32] * s : x * c + buf[i - 32] * s;
@@ -47,15 +55,15 @@ inline float norm_rope(float x, device const float *w, uint pos, uint n, threadg
 kernel void attn_prep(constant KVArgs &a [[buffer(0)]], device const float *qg [[buffer(1)]], device const float *kin [[buffer(2)]],
                       device const float *vin [[buffer(3)]], device const float *qnw [[buffer(4)]], device const float *knw [[buffer(5)]],
                       device uchar *kv [[buffer(6)]], device const int *pages [[buffer(7)]], device float *Q [[buffer(8)]],
-                      uint2 g [[threadgroup_position_in_grid]], uint i [[thread_index_in_threadgroup]]) {
+                      device const int *rp [[buffer(9)]], uint2 g [[threadgroup_position_in_grid]], uint i [[thread_index_in_threadgroup]]) {
     threadgroup float red[8], buf[64];
     const uint job = g.x, t = g.y, cell = a.pos0 + t;
     if (job < (uint)NH) {
-        const float x = norm_rope(qg[((size_t)t * NH + job) * 2 * HD + i], qnw, cell, HD, red, buf, i);
+        const float x = norm_rope(qg[((size_t)t * NH + job) * 2 * HD + i], qnw, rope_at(a, rp, t), HD, red, buf, i);
         Q[((size_t)t * NH + job) * HD + i] = x * 0.0625f;
     } else if (job < (uint)(NH + NKV)) {
         const uint head = job - NH;
-        const float x = norm_rope(kin[((size_t)t * NKV + head) * HD + i], knw, cell, HD, red, buf, i);
+        const float x = norm_rope(kin[((size_t)t * NKV + head) * HD + i], knw, rope_at(a, rp, t), HD, red, buf, i);
         kv_k(kv, pages, a.layer, head, cell)[i] = half(x);
     } else {
         const uint head = job - NH - NKV;
@@ -64,15 +72,16 @@ kernel void attn_prep(constant KVArgs &a [[buffer(0)]], device const float *qg [
 }
 
 kernel void idx_qprep(constant KVArgs &a [[buffer(0)]], device const float *qraw [[buffer(1)]], device const float *qnw [[buffer(2)]],
-                      device float *Qi [[buffer(3)]], uint2 g [[threadgroup_position_in_grid]], uint i [[thread_index_in_threadgroup]]) {
+                      device float *Qi [[buffer(3)]], device const int *rp [[buffer(4)]], uint2 g [[threadgroup_position_in_grid]],
+                      uint i [[thread_index_in_threadgroup]]) {
     threadgroup float red[4], buf[64];
     const size_t o = ((size_t)g.y * IDX_H + g.x) * IDX_D + i;
-    Qi[o] = norm_rope(qraw[o], qnw, a.pos0 + g.y, IDX_D, red, buf, i);
+    Qi[o] = norm_rope(qraw[o], qnw, rope_at(a, rp, g.y), IDX_D, red, buf, i);
 }
 
 kernel void idx_pool(constant KVArgs &a [[buffer(0)]], device const float *kraw [[buffer(1)]], device const half *tail [[buffer(2)]],
                      device const float *knw [[buffer(3)]], device uchar *kv [[buffer(4)]], device const int *pages [[buffer(5)]],
-                     uint gb [[threadgroup_position_in_grid]], uint i [[thread_index_in_threadgroup]]) {
+                     device const int *rp [[buffer(6)]], uint gb [[threadgroup_position_in_grid]], uint i [[thread_index_in_threadgroup]]) {
     threadgroup float red[4], buf[64];
     const uint b = a.pos0 / KPOOL + gb;
     float x = 0;
@@ -80,7 +89,8 @@ kernel void idx_pool(constant KVArgs &a [[buffer(0)]], device const float *kraw 
         const uint cell = b * KPOOL + c;
         x += cell < a.pos0 ? float(tail[(cell % KPOOL) * IDX_D + i]) : kraw[(size_t)(cell - a.pos0) * IDX_D + i];
     }
-    x = norm_rope(x * 0.25f, knw, b * KPOOL, IDX_D, red, buf, i);
+    const uint first = b * KPOOL;
+    x = norm_rope(x * 0.25f, knw, first < a.pos0 ? int3(a.tail[0], a.tail[1], a.tail[2]) : rope_at(a, rp, first - a.pos0), IDX_D, red, buf, i);
     kv_pool(kv, pages, a.layer, b)[i] = half(x);
 }
 

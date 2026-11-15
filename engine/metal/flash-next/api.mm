@@ -14,7 +14,12 @@ static Engine *E = nullptr;
 extern std::atomic<float> g_progress;
 
 struct SnapHeader { char magic[8]; uint64_t kv_page, state; int32_t n, hist[2], n_top, n_pages; };
-static const char SNAP_MAGIC[8] = {'K', 'I', 'L', 'N', 'M', 'F', 'N', '1'};
+struct SnapPos { int32_t pos, tail[3]; };
+static const char SNAP_MAGIC[8] = {'K', 'I', 'L', 'N', 'M', 'F', 'N', '1'}, SNAP_MAGIC_POS[8] = {'K', 'I', 'L', 'N', 'M', 'F', 'N', '2'};
+static bool text_only(const Engine::Snap &sn) {
+    const int blk = sn.n / KPOOL * KPOOL;
+    return sn.pos == sn.n && (sn.n % KPOOL == 0 || (sn.tail_pos.t == blk && sn.tail_pos.h == blk && sn.tail_pos.w == blk));
+}
 
 extern "C" {
 
@@ -116,7 +121,7 @@ int chrysalis_snap_free(int snap) { try { E->snap_free(snap); return 0; } catch 
 int64_t chrysalis_snap_bytes(int snap) {
     try {
         const Engine::Snap &sn = E->snaps.at(snap);
-        return (int64_t)(sizeof(SnapHeader) + sn.top_v.size() * 8 + state_bytes() + sn.pages.size() * KV_PAGE);
+        return (int64_t)(sizeof(SnapHeader) + (text_only(sn) ? 0 : sizeof(SnapPos)) + sn.top_v.size() * 8 + state_bytes() + sn.pages.size() * KV_PAGE);
     } catch (const std::exception &) { return -1; }
 }
 int chrysalis_snap_export(int snap, void *dst) {
@@ -126,11 +131,16 @@ int chrysalis_snap_export(int snap, void *dst) {
             const Engine::Snap &sn = E->snaps.at(snap);
             if (!sn.used) return -1;
             SnapHeader h;
-            memcpy(h.magic, SNAP_MAGIC, 8);
+            const bool plain = text_only(sn);
+            memcpy(h.magic, plain ? SNAP_MAGIC : SNAP_MAGIC_POS, 8);
             h.kv_page = KV_PAGE; h.state = state_bytes(); h.n = sn.n; h.hist[0] = sn.hist[0]; h.hist[1] = sn.hist[1];
             h.n_top = (int32_t)sn.top_v.size(); h.n_pages = (int32_t)sn.pages.size();
             uint8_t *p = (uint8_t *)dst;
             memcpy(p, &h, sizeof h); p += sizeof h;
+            if (!plain) {
+                const SnapPos sp{sn.pos, {sn.tail_pos.t, sn.tail_pos.h, sn.tail_pos.w}};
+                memcpy(p, &sp, sizeof sp); p += sizeof sp;
+            }
             memcpy(p, sn.top_v.data(), (size_t)h.n_top * 4); p += (size_t)h.n_top * 4;
             memcpy(p, sn.top_i.data(), (size_t)h.n_top * 4); p += (size_t)h.n_top * 4;
             memcpy(p, sn.state.data(), h.state); p += h.state;
@@ -154,8 +164,13 @@ int chrysalis_snap_import(int64_t file, int64_t offset, int64_t bytes) {
         };
         SnapHeader h;
         if (bytes < (int64_t)sizeof h || !get(&h, sizeof h)) return -1;
-        if (memcmp(h.magic, SNAP_MAGIC, 8) || h.kv_page != KV_PAGE || h.state != state_bytes() || h.n <= 0 || h.n_top < 0 ||
-            h.n_pages != (h.n + PAGE - 1) / PAGE || (size_t)bytes != sizeof h + (size_t)h.n_top * 8 + h.state + (size_t)h.n_pages * KV_PAGE)
+        const bool plain = !memcmp(h.magic, SNAP_MAGIC, 8);
+        const int blk = h.n / KPOOL * KPOOL;
+        SnapPos sp{h.n, {blk, blk, blk}};
+        if ((!plain && memcmp(h.magic, SNAP_MAGIC_POS, 8)) || (!plain && !get(&sp, sizeof sp)))
+            return -1;
+        if (h.kv_page != KV_PAGE || h.state != state_bytes() || h.n <= 0 || h.n_top < 0 || h.n_pages != (h.n + PAGE - 1) / PAGE ||
+            (size_t)bytes != sizeof h + (plain ? 0 : sizeof sp) + (size_t)h.n_top * 8 + h.state + (size_t)h.n_pages * KV_PAGE)
             return -1;
         if ((int)E->free_pages.size() < h.n_pages) return -2;
         size_t si = 0;
@@ -176,7 +191,7 @@ int chrysalis_snap_import(int64_t file, int64_t offset, int64_t bytes) {
             sn.pages.clear();
             return -1;
         }
-        sn.n = h.n; sn.hist[0] = h.hist[0]; sn.hist[1] = h.hist[1];
+        sn.n = h.n; sn.pos = sp.pos; sn.tail_pos = {sp.tail[0], sp.tail[1], sp.tail[2]}; sn.hist[0] = h.hist[0]; sn.hist[1] = h.hist[1];
         sn.used = true;
         return (int)si;
     }
@@ -184,15 +199,26 @@ int chrysalis_snap_import(int64_t file, int64_t offset, int64_t bytes) {
 void chrysalis_sync() {}
 int chrysalis_prefill_pos(int id, const int *tokens, const int *pos3, int n) {
     @autoreleasepool {
-        for (int i = 0; i < n; i++) if (tokens[i] >= IMG_BASE) return -2;
-        (void)pos3;
         interactive();
-        try { E->prefill(id, tokens, n); return 0; }
+        try { E->prefill(id, tokens, pos3, n); return 0; }
         catch (const std::invalid_argument &) { return -2; }
         catch (const std::exception &) { return -1; }
     }
 }
 int chrysalis_prefill(int id, const int *tokens, int n) { return chrysalis_prefill_pos(id, tokens, nullptr, n); }
+void chrysalis_vision_open(const char *path) { @autoreleasepool { E->vision.open(path, D, (__bridge void *)E->m.dev, (__bridge void *)E->m.lib); } }
+void chrysalis_vision_release() { @autoreleasepool { E->vision.release(); } }
+int chrysalis_image_encode(int slot, const float *patches, int gh, int gw) { @autoreleasepool { return E->image_encode(slot, patches, gh, gw); } }
+int chrysalis_video_encode(int slot, const float *patches, int gh, int gw) { @autoreleasepool { return E->image_encode(slot, patches, gh, gw, 2); } }
+void chrysalis_image_free(int slot) {
+    if (slot >= 0 && slot < (int)E->images.size()) E->images[slot] = {};
+}
+int chrysalis_image_read(int slot, float *out) {
+    if (slot < 0 || slot >= (int)E->images.size() || E->images[slot].rows.empty()) return -1;
+    const Engine::Image &im = E->images[slot];
+    for (size_t i = 0; i < im.rows.size(); i++) out[i] = (float)im.rows[i];
+    return im.n;
+}
 int chrysalis_generate(int id, const Sampling *sp, int *out, int max_out, float *rows_v, int *rows_i) {
     @autoreleasepool {
         interactive();

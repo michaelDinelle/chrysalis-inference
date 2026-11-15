@@ -94,6 +94,19 @@ int chrysalis_prefill_pos(int id, const int *tokens, const int *pos3, int n) {
     }
 }
 int chrysalis_prefill(int id, const int *tokens, int n) { return chrysalis_prefill_pos(id, tokens, nullptr, n); }
+void chrysalis_vision_open(const char *path) { @autoreleasepool { E->vision.open(path, D, E->m.dev, E->m.lib); } }
+void chrysalis_vision_release() { @autoreleasepool { E->vision.release(); } }
+int chrysalis_image_encode(int slot, const float *patches, int gh, int gw) { @autoreleasepool { return E->image_encode(slot, patches, gh, gw); } }
+int chrysalis_video_encode(int slot, const float *patches, int gh, int gw) { @autoreleasepool { return E->image_encode(slot, patches, gh, gw, 2); } }
+void chrysalis_image_free(int slot) {
+    if (slot >= 0 && slot < (int)E->images.size()) E->images[slot] = {};
+}
+int chrysalis_image_read(int slot, float *out) {
+    if (slot < 0 || slot >= (int)E->images.size() || E->images[slot].rows.empty()) return -1;
+    const Engine::Image &im = E->images[slot];
+    for (size_t i = 0; i < im.rows.size(); i++) out[i] = (float)im.rows[i];
+    return im.n;
+}
 int chrysalis_generate(int id, const Sampling *sp, int *out, int max_out, float *rows_v, int *rows_i) {
     @autoreleasepool {
         try { return E->generate(id, *sp, out, max_out, rows_v, rows_i); } catch (const std::exception &) { return -1; }
