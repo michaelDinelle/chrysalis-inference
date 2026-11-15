@@ -180,8 +180,14 @@ struct Engine {
     struct { float *lo, *inv, *mx, *logits, *sg, *wts; half *hh; QAct hq; int *ids, *hot; unsigned *counter; } la{};
     bool la_on = getenv("CHRYSALIS_FN_NO_LOOKAHEAD") == nullptr;
     void lookahead_flags(const Layer &w, int layer, int T, const float *res, unsigned starts = 1);
+    unsigned *la_lost = nullptr, *d_la_lost = nullptr;
     void la_sync() {
-        if (la_pend) { wait_flag(la.counter + 17, la_pend, st); la_pend = 0; }
+        if (la_pend) { wait_flag(la.counter + 17, la_pend, d_la_lost, st); la_pend = 0; }
+    }
+    void la_check() {
+        if (!la_on || !la_lost || !*la_lost) return;
+        la_on = false;
+        fprintf(stderr, "chrysalis-fn: the expert lookahead and the main pass did not meet on this GPU: the lookahead is off\n");
     }
     hipEvent_t staged, copied, topk_ready;
     hipEvent_t front_ready, front_copied;
@@ -233,6 +239,7 @@ struct Engine {
     std::vector<int> j_slot, j_first, j_tok;
     std::vector<float> j_w;
     uint8_t *d_cold = nullptr;
+    bool cold_gpu = false;
     hipEvent_t raw_free[NSLOT], raw_ready[NSLOT];
     uint8_t *kv_pool = nullptr;
     int n_pages = 0;

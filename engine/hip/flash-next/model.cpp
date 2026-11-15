@@ -91,7 +91,8 @@ void *Engine::snap_buffer() {
     os::huge(p, n, true);
     memset(p, 0, n);
     const auto t1 = std::chrono::steady_clock::now();
-    CK(hipHostRegister(p, n, hipHostRegisterDefault));
+    (void)hipHostRegister(p, n, hipHostRegisterDefault);
+    (void)hipGetLastError();
     const auto t2 = std::chrono::steady_clock::now();
     if (getenv("CHRYSALIS_TRACE"))
         fprintf(stderr, "chrysalis-fn: snapshot buffer %zu MB: fault-in %.0f ms, register %.0f ms\n", n >> 20,
@@ -133,7 +134,8 @@ void Engine::snap_reserve_finish() {
     if (!snap_pending) return;
     const size_t one = (state_bytes() + (2 << 20) - 1) & ~size_t((2 << 20) - 1), all = one * snap_pending_n;
     const auto t1 = std::chrono::steady_clock::now();
-    CK(hipHostRegister(snap_pending, all, hipHostRegisterDefault));
+    (void)hipHostRegister(snap_pending, all, hipHostRegisterDefault);
+    (void)hipGetLastError();
     const auto t2 = std::chrono::steady_clock::now();
     for (int i = 0; i < snap_pending_n; i++) snap_spare.push_back((char *)snap_pending + (size_t)i * one);
     snap_regions.push_back({snap_pending, all});
@@ -790,7 +792,7 @@ static Pos3 cell_pos(const Seq &s, int p0, const int *pos3, int cell) {
 
 void Engine::lookahead_flags(const Layer &w, int layer, int T, const float *res, unsigned starts) {
     const unsigned g = ++la_gen;
-    wait_flag(la.counter + 16, g, lst);
+    wait_flag(la.counter + 16, g, d_la_lost, lst);
     for (int t0 = 0; t0 < T; t0 += 4)
         hc_mix_fused(res + (size_t)t0 * HCD, w.hcf.norm, w.hcf.down, w.hcf.up, nullptr, std::min(4, T - t0), la.lo + (size_t)t0 * HCR,
                      nullptr, HC, la.inv + t0 * HC, la.mx + (size_t)t0 * D, la.hh + (size_t)t0 * D, qoff(la.hq, (size_t)t0 * D),
@@ -1098,6 +1100,7 @@ int Engine::verify(Seq &s, const Sampling &sp, const std::vector<int> &drafts, b
     mtp_catch_up(s, T, q, k > 0);
     CK(hipEventSynchronize(topk_ready));
     cpu.disarm();
+    la_check();
     const float *tv = b.h_topv;
     const int *ti = b.h_topi;
 
@@ -1259,6 +1262,7 @@ void Engine::generate_batch(int n, const int *ids, const Sampling *sps, int *out
     for (const Part &p : parts) mtp_catch_up(*p.s, p.T, p.s->n, p.verify, nullptr, false, p.off);
     CK(hipEventSynchronize(topk_ready));
     cpu.disarm();
+    la_check();
     const float *tv = b.h_topv;
     const int *ti = b.h_topi;
     for (size_t j = 0; j < parts.size(); j++) {

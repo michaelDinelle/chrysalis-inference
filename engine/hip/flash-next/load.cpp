@@ -460,10 +460,10 @@ void Engine::load(const std::string &path, int max_seqs, size_t reserve_bytes) {
     if (cold_th.joinable()) cold_th.join();
     cold_dev.assign(NL, ColdDec{});
     if (cold_bytes) {
-        CK(hipHostRegister(cold_mem, cold_bytes, hipHostRegisterMapped));
-        void *dp;
-        CK(hipHostGetDevicePointer(&dp, cold_mem, 0));
-        d_cold = (uint8_t *)dp;
+        void *dp = nullptr;
+        cold_gpu = hipHostRegister(cold_mem, cold_bytes, hipHostRegisterMapped) == hipSuccess && hipHostGetDevicePointer(&dp, cold_mem, 0) == hipSuccess;
+        (void)hipGetLastError();
+        d_cold = cold_gpu ? (uint8_t *)dp : nullptr;
     }
     const char *hot_names[3] = {"ffn_gate_hot.weight", "ffn_up_hot.weight", "ffn_down_hot.weight"};
     auto page_up = [](size_t n) { return (n + 4095) & ~size_t(4095); };
@@ -553,6 +553,13 @@ void Engine::load(const std::string &path, int max_seqs, size_t reserve_bytes) {
     }
     hipblasLtCreate(&lt);
     CK(hipMalloc(&lt_ws, lt_ws_size));
+    {
+        void *p, *dp;
+        CK(hipHostMalloc(&p, 64, hipHostMallocMapped));
+        memset(p, 0, 64);
+        CK(hipHostGetDevicePointer(&dp, p, 0));
+        la_lost = (unsigned *)p; d_la_lost = (unsigned *)dp;
+    }
     alloc_buffers(max_seqs);
     experts_init();
     size_t free_b, total_b;
@@ -564,6 +571,11 @@ void Engine::load(const std::string &path, int max_seqs, size_t reserve_bytes) {
     CK(hipMalloc(&kv_pool, (size_t)n_pages * KV_PAGE));
     load_phase = 1;
     if (cold_bytes && !cal_load()) calibrate();
+    if (cold_bytes && !cold_gpu) {
+        gfrac = 0;
+        gfrac_pinned = true;
+        fprintf(stderr, "chrysalis-fn: this system lets the GPU read less than the %.1f GB of experts kept in RAM: the CPU runs them all\n", cold_bytes / 1e9);
+    }
     if (cold_bytes && cpu.can_emulate() && !xfrac_pinned) {
         const ColdLayer *c0 = nullptr;
         for (const ColdLayer &c : cold) if (c.n) { c0 = &c; break; }
@@ -773,6 +785,8 @@ void Engine::shutdown() {
         if (p) (void)hipHostFree(p);
     if (embd.q) { void *h = nullptr; (void)hipHostGetDevicePointer(&h, embd.q, 0); }
     if (embd_host) (void)hipHostFree(embd_host);
+    if (la_lost) (void)hipHostFree(la_lost);
+    la_lost = d_la_lost = nullptr;
     embd_host = nullptr; embd.q = nullptr; sh = d_sh = nullptr; sh_pred = d_sh_pred = nullptr; me = d_me = nullptr;
     if (stage_state) (void)hipFree(stage_state);
     if (d_mask) (void)hipFree(d_mask);
@@ -783,12 +797,12 @@ void Engine::shutdown() {
     lt = nullptr; lt_ws = nullptr; stage_state = nullptr; kv_pool = nullptr;
     lt_plans.clear();
     free_pages.clear(); page_ref.clear();
-    if (cold_mem) (void)hipHostUnregister(cold_mem);
+    if (cold_mem && cold_gpu) (void)hipHostUnregister(cold_mem);
     (void)hipGetLastError();
     (void)hipStreamDestroy(st); (void)hipStreamDestroy(cst); (void)hipStreamDestroy(lst);
     os::release(cold_mem, cold_bytes);
     os::release(spill_mem, spill_bytes);
     os::unmap(ngram_map, ngram_map_bytes);
-    cold_mem = nullptr; spill_mem = nullptr; ngram_map = nullptr; cold_bytes = spill_bytes = 0; d_cold = nullptr;
+    cold_mem = nullptr; spill_mem = nullptr; ngram_map = nullptr; cold_bytes = spill_bytes = 0; d_cold = nullptr; cold_gpu = false;
     cold.clear(); cold_dev.clear();
 }

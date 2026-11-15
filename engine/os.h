@@ -19,6 +19,7 @@
 #include <io.h>
 #include <malloc.h>
 #include <psapi.h>
+#pragma comment(lib, "advapi32")
 #else
 #include <fcntl.h>
 #include <sys/mman.h>

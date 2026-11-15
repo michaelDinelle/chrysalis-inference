@@ -445,10 +445,10 @@ void Engine::load(const std::string &path, int max_seqs, size_t reserve_bytes) {
     if (cold_th.joinable()) cold_th.join();
     cold_dev.assign(NL, ColdDec{});
     if (cold_bytes) {
-        CK(cudaHostRegister(cold_mem, cold_bytes, cudaHostRegisterMapped));
-        void *dp;
-        CK(cudaHostGetDevicePointer(&dp, cold_mem, 0));
-        d_cold = (uint8_t *)dp;
+        void *dp = nullptr;
+        cold_gpu = cudaHostRegister(cold_mem, cold_bytes, cudaHostRegisterMapped) == cudaSuccess && cudaHostGetDevicePointer(&dp, cold_mem, 0) == cudaSuccess;
+        (void)cudaGetLastError();
+        d_cold = cold_gpu ? (uint8_t *)dp : nullptr;
     }
     const char *hot_names[3] = {"ffn_gate_hot.weight", "ffn_up_hot.weight", "ffn_down_hot.weight"};
     auto page_up = [](size_t n) { return (n + 4095) & ~size_t(4095); };
@@ -538,6 +538,13 @@ void Engine::load(const std::string &path, int max_seqs, size_t reserve_bytes) {
     }
     cublasLtCreate(&lt);
     zalloc(&lt_ws, lt_ws_size);
+    {
+        void *p, *dp;
+        CK(cudaHostAlloc(&p, 64, cudaHostAllocMapped));
+        memset(p, 0, 64);
+        CK(cudaHostGetDevicePointer(&dp, p, 0));
+        la_lost = (unsigned *)p; d_la_lost = (unsigned *)dp;
+    }
     alloc_buffers(max_seqs);
     int spilled_at_load = 0;
     {
@@ -649,6 +656,11 @@ void Engine::load(const std::string &path, int max_seqs, size_t reserve_bytes) {
     zalloc(&kv_pool, (size_t)n_pages * KV_PAGE);
     load_phase = 1;
     if (cold_bytes && !cal_load()) calibrate();
+    if (cold_bytes && !cold_gpu) {
+        gfrac = 0;
+        gfrac_pinned = true;
+        fprintf(stderr, "chrysalis-fn: this system lets the GPU read less than the %.1f GB of experts kept in RAM: the CPU runs them all\n", cold_bytes / 1e9);
+    }
     if (cold_bytes && cpu.can_emulate() && !xfrac_pinned) {
         const ColdLayer *c0 = nullptr;
         for (const ColdLayer &c : cold) if (c.n) { c0 = &c; break; }
@@ -859,6 +871,8 @@ void Engine::shutdown() {
         if (p) (void)cudaFreeHost(p);
     if (embd.q) { void *h = nullptr; (void)cudaHostGetDevicePointer(&h, embd.q, 0); }
     if (embd_host) (void)cudaFreeHost(embd_host);
+    if (la_lost) (void)cudaFreeHost(la_lost);
+    la_lost = d_la_lost = nullptr;
     embd_host = nullptr; embd.q = nullptr; sh = d_sh = nullptr; sh_pred = d_sh_pred = nullptr; me = d_me = nullptr;
     if (stage_state) (void)cudaFree(stage_state);
     if (d_mask) (void)cudaFree(d_mask);
@@ -869,12 +883,12 @@ void Engine::shutdown() {
     lt = nullptr; lt_ws = nullptr; stage_state = nullptr; kv_pool = nullptr;
     lt_plans.clear();
     free_pages.clear(); page_ref.clear();
-    if (cold_mem) (void)cudaHostUnregister(cold_mem);
+    if (cold_mem && cold_gpu) (void)cudaHostUnregister(cold_mem);
     (void)cudaGetLastError();
     (void)cudaStreamDestroy(st); (void)cudaStreamDestroy(cst); (void)cudaStreamDestroy(lst);
     os::release(cold_mem, cold_bytes);
     os::release(spill_mem, spill_bytes);
     os::unmap(ngram_map, ngram_map_bytes);
-    cold_mem = nullptr; spill_mem = nullptr; ngram_map = nullptr; cold_bytes = spill_bytes = 0; d_cold = nullptr;
+    cold_mem = nullptr; spill_mem = nullptr; ngram_map = nullptr; cold_bytes = spill_bytes = 0; d_cold = nullptr; cold_gpu = false;
     cold.clear(); cold_dev.clear();
 }
