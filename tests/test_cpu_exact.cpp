@@ -491,7 +491,7 @@ int main() {
                 want_gu[t].push_back(ref_gu(row, types[t], acts[a]));
                 want_emu[t].push_back(ref_emu_gu(row, types[t], eacts[a]));
             }
-    struct DnIn { float hs[NH], hc[NH]; int32_t hci[NH]; const int8_t *hq; };
+    struct DnIn { float hs[NH], hc[NH]; int32_t hci[NH], hb[FE / 4]; const int8_t *hq; };
     std::vector<DnIn> dn_in;
     std::vector<float> want_dn, want_edn;
     for (int r = 0; r < R; r++)
@@ -505,6 +505,7 @@ int main() {
                 in.hc[b] = 128.0f * in.hs[b] * (float)s;
                 in.hci[b] = 128 * s;
             }
+            for (int l = 0; l < FE / 4; l++) in.hb[l] = 128 * (in.hq[4 * l] + in.hq[4 * l + 1] + in.hq[4 * l + 2] + in.hq[4 * l + 3]);
             const uint8_t *row = dn_rows.data() + row_bytes(IQ4NL, FE) * r;
             want_dn.push_back(ref_dn(row, in.hq, in.hs, in.hc));
             want_edn.push_back(ref_emu_dn(row, in.hq, in.hs, in.hci));
@@ -533,8 +534,10 @@ int main() {
             exact_quant_x(x, q, s, sum);
             tq.add(same(q, qref[k].q, D) && same(s, qref[k].s, sizeof s) && same(sum, qref[k].sum, sizeof sum));
             h = mix(mix(mix(h, q, D), s, sizeof s), sum, sizeof sum);
-            exact_quant_h(x, q, s, c);
-            th.add(same(q, qref[k].hq, FE) && same(s, qref[k].hs, NH * 4) && same(c, qref[k].hc, sizeof c));
+            int32_t b4[FE / 4], b4ref[FE / 4];
+            exact_quant_h(x, q, s, c, b4);
+            for (int l = 0; l < FE / 4; l++) b4ref[l] = 128 * (qref[k].hq[4 * l] + qref[k].hq[4 * l + 1] + qref[k].hq[4 * l + 2] + qref[k].hq[4 * l + 3]);
+            th.add(same(q, qref[k].hq, FE) && same(s, qref[k].hs, NH * 4) && same(c, qref[k].hc, sizeof c) && same(b4, b4ref, sizeof b4));
             h = mix(mix(mix(h, q, FE), s, NH * 4), c, sizeof c);
             EmuAct e;
             emu_quant_x(x, e);
@@ -578,7 +581,7 @@ int main() {
                 for (int a = 0; a < A; a++) {
                     const DnIn &in = dn_in[r * A + a];
                     const uint8_t *row = dn_rows.data() + row_bytes(IQ4NL, FE) * r;
-                    const float got = exact_dot_dn1(row, in.hq, in.hs, in.hc), e = emu_dn_row(row, in.hq, in.hs, in.hci, S);
+                    const float got = exact_dot_dn1(row, in.hq, in.hs, in.hc, in.hb), e = emu_dn_row(row, in.hq, in.hs, in.hci, S);
                     tn.add(same(&got, &want_dn[r * A + a], 4));
                     tm.add(same(&e, &want_edn[r * A + a], 4));
                     h = mix(mix(h, &got, 4), &e, 4);

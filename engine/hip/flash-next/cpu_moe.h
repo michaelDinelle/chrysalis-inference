@@ -71,7 +71,7 @@ private:
     std::vector<float> gu;
     std::vector<uint8_t> xq[3];
     std::vector<uint8_t> hq;
-    std::vector<int8_t> dxq, dhq; std::vector<float> dxs, ds16, df16, dhs, dhc; std::vector<int32_t> dxsum;
+    std::vector<int8_t> dxq, dhq; std::vector<float> dxs, ds16, df16, dhs, dhc; std::vector<int32_t> dxsum, dhb;
     size_t xq_row[3] = {}, hq_row = 0;
     int dot_gu[3] = {-1, -1, -1};
     bool dot_same = true;

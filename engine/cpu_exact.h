@@ -47,8 +47,8 @@ struct ExactKernels {
     float (*dot_gu1)(const uint8_t *row, int type, const int8_t *xq, const float *xs, const int32_t *xsum, const float *s16,
                      const float *f16, ExactScratch &S);
     void (*dot_gu2)(const uint8_t *r0, const uint8_t *r1, const int8_t *xq, const float *xs, const float *xf, float *out);
-    void (*quant_h)(const float *h, int8_t *q, float *s, float *c);
-    float (*dot_dn1)(const uint8_t *row, const int8_t *hq, const float *hs, const float *hc);
+    void (*quant_h)(const float *h, int8_t *q, float *s, float *c, int32_t *b4);
+    float (*dot_dn1)(const uint8_t *row, const int8_t *hq, const float *hs, const float *hc, const int32_t *hb);
     void (*emu_quant_x)(const float *x, EmuAct &a);
     float (*emu_gu_row)(const uint8_t *row, int type, const EmuAct &a, ExactScratch &S);
     float (*emu_dn_row)(const uint8_t *row, const int8_t *hq, const float *hd, const int32_t *hc, ExactScratch &S);
@@ -76,9 +76,9 @@ inline float exact_dot_gu1(const uint8_t *row, int type, const int8_t *xq, const
 inline void exact_dot_gu2(const uint8_t *r0, const uint8_t *r1, const int8_t *xq, const float *xs, const float *xf, float *out) {
     exact_kernels->dot_gu2(r0, r1, xq, xs, xf, out);
 }
-inline void exact_quant_h(const float *h, int8_t *q, float *s, float *c) { exact_kernels->quant_h(h, q, s, c); }
-inline float exact_dot_dn1(const uint8_t *row, const int8_t *hq, const float *hs, const float *hc) {
-    return exact_kernels->dot_dn1(row, hq, hs, hc);
+inline void exact_quant_h(const float *h, int8_t *q, float *s, float *c, int32_t *b4) { exact_kernels->quant_h(h, q, s, c, b4); }
+inline float exact_dot_dn1(const uint8_t *row, const int8_t *hq, const float *hs, const float *hc, const int32_t *hb) {
+    return exact_kernels->dot_dn1(row, hq, hs, hc, hb);
 }
 inline void emu_quant_x(const float *x, EmuAct &a) { exact_kernels->emu_quant_x(x, a); }
 inline float emu_gu_row(const uint8_t *row, int type, const EmuAct &a, ExactScratch &S) { return exact_kernels->emu_gu_row(row, type, a, S); }

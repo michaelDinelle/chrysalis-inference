@@ -47,7 +47,7 @@ void CpuMoe::start(MoeShared *shared, MoeShared *pred, const std::vector<ColdLay
     exact_ok = exact;
     dxq.resize((size_t)MOE_MAX_T * D_); dxs.resize(MOE_MAX_T * (D_ / 32)); dxsum.resize(MOE_MAX_T * (D_ / 16));
     ds16.resize(MOE_MAX_T * (D_ / 16)); df16.resize(MOE_MAX_T * (D_ / 16)); dxf.resize(MOE_MAX_T * (D_ / 32));
-    dhq.resize((size_t)MOE_MAX_T * MOE_MAX_E * FE_); dhs.resize(MOE_MAX_T * MOE_MAX_E * (FE_ / 32)); dhc.resize(MOE_MAX_T * MOE_MAX_E * (FE_ / 32));
+    dhq.resize((size_t)MOE_MAX_T * MOE_MAX_E * FE_); dhs.resize(MOE_MAX_T * MOE_MAX_E * (FE_ / 32)); dhc.resize(MOE_MAX_T * MOE_MAX_E * (FE_ / 32)); dhb.resize(MOE_MAX_T * MOE_MAX_E * (FE_ / 4));
     std::vector<int> core, sib;
     for (int c : os::cores()) {
         if (c < 1 || (int)core.size() >= n) continue;
@@ -278,7 +278,7 @@ void CpuMoe::worker(int id) {
                 float h[FE_];
                 const float *g2 = &gu[(size_t)p * 2 * FE_];
                 for (int i = 0; i < FE_; i++) { const float a = g2[i]; h[i] = a / (1.0f + expf(-a)) * g2[FE_ + i]; }
-                if (vx) exact_quant_h(h, dhq.data() + (size_t)p * FE_, dhs.data() + p * (FE_ / 32), dhc.data() + p * (FE_ / 32));
+                if (vx) exact_quant_h(h, dhq.data() + (size_t)p * FE_, dhs.data() + p * (FE_ / 32), dhc.data() + p * (FE_ / 32), dhb.data() + p * (FE_ / 4));
                 else ggml_get_type_traits_cpu(tr_dn->vec_dot_type)->from_float(h, hq.data() + hq_row * p, FE_);
             }
             barrier();
@@ -288,7 +288,7 @@ void CpuMoe::worker(int id) {
             for (int p = 0; p < np; p++) {
                 const int j = pick[p], slot = sh->slot[j];
                 float v;
-                if (vx) v = exact_dot_dn1(c.dn_row(slot, r), dhq.data() + (size_t)p * FE_, dhs.data() + p * (FE_ / 32), dhc.data() + p * (FE_ / 32));
+                if (vx) v = exact_dot_dn1(c.dn_row(slot, r), dhq.data() + (size_t)p * FE_, dhs.data() + p * (FE_ / 32), dhc.data() + p * (FE_ / 32), dhb.data() + p * (FE_ / 4));
                 else tr_dn->vec_dot(FE_, &v, 0, c.dn_row(slot, r), 0, hq.data() + hq_row * p, 0, 1);
                 acc[j / MOE_MAX_E] += sh->w[j] * v;
             }

@@ -579,6 +579,13 @@ TGT void quant_x(const float *x, int8_t *q, float *s, int32_t *sum) {
     }
 }
 
+#if EXACT_WIDE
+TGT inline __m512i two_bits() {
+    return _mm512_inserti64x4(_mm512_broadcast_i32x4(_mm_setr_epi8(0, 1, 2, 3, 0, 1, 2, 3, 0, 1, 2, 3, 0, 1, 2, 3)),
+                              _mm256_broadcastsi128_si256(_mm_setr_epi8(0, 0, 0, 0, 1, 1, 1, 1, 2, 2, 2, 2, 3, 3, 3, 3)), 1);
+}
+#endif
+
 TGT float dot1_q3k(const uint8_t *row, const int8_t *xq, const float *s16, const float *f16) {
     const V::i m3 = V::set8(3), one = V::set8(1);
     V::f acc = V::fzero(), cor = V::fzero();
@@ -588,15 +595,26 @@ TGT float dot1_q3k(const uint8_t *row, const int8_t *xq, const float *s16, const
         const V::f cs = V::fmul(av, V::fload(s16 + sb * 16));
         cor = V::fma(av, V::fload(f16 + sb * 16), cor);
         const V::i hm = V::bcast256(blk);
+        _mm_prefetch((const char *)blk + 2200, _MM_HINT_T0);
+        _mm_prefetch((const char *)blk + 2264, _MM_HINT_T0);
 #pragma unroll
         for (int n = 0; n < 2; n++) {
             const V::i q = V::bcast256(blk + 32 + 32 * n);
+#if EXACT_WIDE
+            const __m512i nib[2] = {_mm512_and_si512(q, _mm512_set1_epi8(0x0f)), _mm512_and_si512(_mm512_srli_epi16(q, 4), _mm512_set1_epi8(0x0f))};
+#endif
 #pragma unroll
             for (int kk = 0; kk < 2; kk++) {
                 const int k = 2 * n + kk;
+#if EXACT_WIDE
+                const __m512i bit = _mm512_inserti64x4(_mm512_set1_epi8((char)(1 << (2 * k))), _mm256_set1_epi8((char)(1 << (2 * k + 1))), 1);
+                const __m512i lo = _mm512_shuffle_epi8(two_bits(), nib[kk]);
+                const V::i w = _mm512_mask_add_epi8(lo, _mm512_test_epi8_mask(hm, bit), lo, _mm512_set1_epi8(4));
+#else
                 const V::i lo = V::and_(V::srl16(q, 4 * kk, 4 * kk + 2), m3);
                 const V::i hb = V::and_(V::srl16(hm, 2 * k, 2 * k + 1), one);
                 const V::i w = V::or_(lo, V::sll16(hb, 2));
+#endif
                 const V::i sdot = V::dot_small(V::zero(), w, V::load(xq + sb * 256 + 64 * k));
                 acc = V::fma(V::cvt(sdot), V::quads(cs, k), acc);
             }
@@ -610,6 +628,8 @@ TGT float dot1_q2k(const uint8_t *row, const int8_t *xq, const float *s16, const
     V::f acc = V::fzero(), cor = V::fzero();
     for (int sb = 0; sb < D_ / 256; sb++) {
         const uint8_t *blk = row + sb * 84;
+        _mm_prefetch((const char *)blk + 1680, _MM_HINT_T0);
+        _mm_prefetch((const char *)blk + 1744, _MM_HINT_T0);
         const V::i sv = V::u8x16(_mm_loadu_si128((const __m128i *)blk));
         const V::f av = V::fmul(V::fset1(_cvtsh_ss(*(const uint16_t *)(blk + 80))), V::cvt(V::and_(sv, V::set1(15))));
         const V::f bv = V::fmul(V::fset1(_cvtsh_ss(*(const uint16_t *)(blk + 82))), V::cvt(V::srl32(sv, 4)));
@@ -621,7 +641,11 @@ TGT float dot1_q2k(const uint8_t *row, const int8_t *xq, const float *s16, const
 #pragma unroll
             for (int kk = 0; kk < 2; kk++) {
                 const int k = 2 * n + kk;
+#if EXACT_WIDE
+                const V::i w = _mm512_shuffle_epi8(two_bits(), _mm512_and_si512(kk ? _mm512_srli_epi16(q, 4) : q, _mm512_set1_epi8(0x0f)));
+#else
                 const V::i w = V::and_(V::srl16(q, 4 * kk, 4 * kk + 2), m3);
+#endif
                 const V::i sdot = V::dot_small(V::zero(), w, V::load(xq + sb * 256 + 64 * k));
                 acc = V::fma(V::cvt(sdot), V::quads(cs, k), acc);
             }
@@ -696,7 +720,7 @@ void dot_gu2(const uint8_t *r0, const uint8_t *r1, const int8_t *xq, const float
     dotn_iq4xs<2>(rows, xq, xs, xf, out);
 }
 
-TGT void quant_h(const float *h, int8_t *q, float *s, float *c) {
+TGT void quant_h(const float *h, int8_t *q, float *s, float *c, int32_t *b4) {
     for (int b = 0; b < NB_DN; b++) {
         const V::f v0 = V::fload(h + b * 32), v1 = V::fload(h + b * 32 + 16);
         const float m = std::max(V::hmax(V::absf(v0)), V::hmax(V::absf(v1)));
@@ -708,9 +732,54 @@ TGT void quant_h(const float *h, int8_t *q, float *s, float *c) {
         s[b] = d;
         c[b] = 128.0f * d * (float)(V::isum(q0) + V::isum(q1));
     }
+    const __m256i one = _mm256_set1_epi8(1), k128 = _mm256_set1_epi16(128);
+    for (int i = 0; i < FE_ / 32; i++)
+        _mm256_storeu_si256((__m256i *)(b4 + 8 * i), _mm256_madd_epi16(_mm256_maddubs_epi16(one, _mm256_loadu_si256((const __m256i *)(q + 32 * i))), k128));
 }
 
-TGT float dot_dn1(const uint8_t *row, const int8_t *hq, const float *hs, const float *hc) {
+TGT float dot_dn1(const uint8_t *row, const int8_t *hq, const float *hs, const float *hc, const int32_t *hb) {
+#if EXACT_WIDE
+    const __m512i pick = _mm512_castsi256_si512(_mm256_setr_epi16(0, 9, 18, 27, 36, 45, 54, 63, 0, 0, 0, 0, 0, 0, 0, 0));
+    const __m128i w0 = _mm512_castsi512_si128(_mm512_permutex2var_epi16(_mm512_loadu_si512(row), pick, _mm512_loadu_si512(row + 64)));
+    const __m128i w1 = _mm512_castsi512_si128(_mm512_permutex2var_epi16(_mm512_loadu_si512(row + 144), pick, _mm512_loadu_si512(row + 208)));
+    const __m128i w2 = _mm512_castsi512_si128(_mm512_permutexvar_epi16(pick, _mm512_loadu_si512(row + 288)));
+    const __m512 wa = _mm512_cvtph_ps(_mm256_inserti128_si256(_mm256_castsi128_si256(w0), w1, 1));
+    const __m128 wb = _mm_cvtph_ps(w2);
+    alignas(64) float sc[32], cc[32];
+    _mm512_store_ps(sc, _mm512_mul_ps(wa, _mm512_loadu_ps(hs)));
+    _mm_store_ps(sc + 16, _mm_mul_ps(wb, _mm_loadu_ps(hs + 16)));
+    const __m512 ca = _mm512_loadu_ps(hc);
+    const __m128 cb = _mm_loadu_ps(hc + 16);
+    _mm512_store_ps(cc, _mm512_fmadd_ps(wa, ca, _mm512_movehdup_ps(_mm512_mul_ps(wa, ca))));
+    _mm_store_ps(cc + 16, _mm_fmadd_ps(wb, cb, _mm_movehdup_ps(_mm_mul_ps(wb, cb))));
+    const __m512i m4 = _mm512_set1_epi8(0x0f), sh = _mm512_setr_epi64(0, 0, 4, 4, 0, 0, 4, 4);
+#if EXACT_DOT
+    const __m512i tbl = _mm512_broadcast_i32x4(_mm_load_si128((const __m128i *)KV128));
+#else
+    const __m512i tbl = _mm512_xor_si512(_mm512_broadcast_i32x4(_mm_load_si128((const __m128i *)KV128)), _mm512_set1_epi8((char)0x80));
+#endif
+    V::f acc = V::fzero();
+    float cor = 0;
+#pragma unroll 2
+    for (int b = 0; b < NB_DN; b += 2) {
+        const uint8_t *b0 = row + 18 * b;
+        const __m512i two = _mm512_castsi256_si512(_mm256_inserti128_si256(_mm256_castsi128_si256(_mm_loadu_si128((const __m128i *)(b0 + 2))),
+                                                                              _mm_loadu_si128((const __m128i *)(b0 + 20)), 1));
+        const __m512i w = _mm512_shuffle_epi8(tbl, _mm512_and_si512(_mm512_srlv_epi64(_mm512_shuffle_i32x4(two, two, 0x50), sh), m4));
+        const __m512i x = _mm512_loadu_si512(hq + 32 * b);
+#if EXACT_DOT
+        const V::i sdot = V::dot(V::zero(), w, x);
+#else
+        const __m512i ws = _mm512_mask_sub_epi8(w, _mm512_movepi8_mask(x), _mm512_setzero_si512(), w);
+        const V::i sdot = _mm512_add_epi32(_mm512_madd_epi16(_mm512_maddubs_epi16(_mm512_abs_epi8(x), ws), _mm512_set1_epi16(1)),
+                                           _mm512_loadu_si512(hb + 8 * b));
+#endif
+        acc = V::fma(V::cvt(sdot), V::halves(sc[b], sc[b + 1]), acc);
+        cor = cor + cc[b];
+    }
+    return V::fsum(acc) - cor;
+#else
+    (void)hb;
     const __m256i tbl = _mm256_broadcastsi128_si256(_mm_load_si128((const __m128i *)KV128)), m4 = _mm256_set1_epi8(0x0f);
     V::f acc = V::fzero();
     float cor = 0;
@@ -728,6 +797,7 @@ TGT float dot_dn1(const uint8_t *row, const int8_t *hq, const float *hs, const f
         cor += w0 * hc[b] + w1 * hc[b + 1];
     }
     return V::fsum(acc) - cor;
+#endif
 }
 
 template <bool BIG>

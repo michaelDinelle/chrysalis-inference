@@ -31,16 +31,6 @@ namespace avxvnni {
 #undef TGT
 }
 
-namespace vnni256 {
-#define TGT __attribute__((target("avx512f,avx512vl,avx512vnni,f16c,avx2,fma,bmi2")))
-#define EXACT_WIDE 0
-#define EXACT_DOT 1
-#include "cpu_exact_isa.h"
-#undef EXACT_DOT
-#undef EXACT_WIDE
-#undef TGT
-}
-
 namespace avx512 {
 #define TGT __attribute__((target("avx512f,avx512bw,avx512vl,f16c,avx2,fma,bmi2")))
 #define EXACT_WIDE 1
@@ -71,7 +61,7 @@ bool cpu_has(int path) {
     const bool zv = z && __builtin_cpu_supports("avx512vnni");
     switch (path) {
     case EXACT_AVX512VNNI: return base && bmi2 && zv;
-    case EXACT_AVXVNNI: return base && bmi2 && (__builtin_cpu_supports("avxvnni") || zv);
+    case EXACT_AVXVNNI: return base && bmi2 && __builtin_cpu_supports("avxvnni");
     case EXACT_AVX512: return base && bmi2 && z;
     case EXACT_AVX2: return base;
     }
@@ -81,7 +71,7 @@ bool cpu_has(int path) {
 const ExactKernels *table(int path) {
     switch (path) {
     case EXACT_AVX512VNNI: return &avx512vnni::kernels;
-    case EXACT_AVXVNNI: return __builtin_cpu_supports("avxvnni") ? &avxvnni::kernels : &vnni256::kernels;
+    case EXACT_AVXVNNI: return &avxvnni::kernels;
     case EXACT_AVX512: return &avx512::kernels;
     case EXACT_AVX2: return &avx2::kernels;
     }
@@ -101,7 +91,6 @@ const ExactKernels *exact_kernels = active < 0 ? nullptr : table(active);
 
 const char *exact_path_name(int path) {
     static const char *const names[EXACT_PATHS] = {"AVX-512 VNNI", "AVX-VNNI", "AVX-512", "AVX2"};
-    if (path == EXACT_AVXVNNI && !__builtin_cpu_supports("avxvnni")) return "AVX-VNNI EVEX";
     return path >= 0 && path < EXACT_PATHS ? names[path] : "none";
 }
 bool exact_path_supported(int path) { return path >= 0 && path < EXACT_PATHS && cpu_has(path); }
