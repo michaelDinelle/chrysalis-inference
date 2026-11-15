@@ -143,7 +143,7 @@ inline int sibling(int cpu) {
     return -1;
 }
 inline void pin(std::thread &t, int cpu) { SetThreadAffinityMask((HANDLE)t.native_handle(), (DWORD_PTR)1 << cpu); }
-inline File from_fd(int fd) { return File(_get_osfhandle(fd)); }
+inline File from_fd(int64_t file) { return File((intptr_t)file); }
 inline size_t missing(const void *, size_t bytes) { return (bytes + 4095) / 4096; }
 inline std::string cpu_name() {
     char name[256] = {};
@@ -323,7 +323,7 @@ inline uint64_t vram_grant(unsigned, const char *, int domain, int bus, int dev,
     const uint64_t room = others > VRAM_DESKTOP ? others : VRAM_DESKTOP;
     return most > room ? most - room : 0;
 }
-inline File from_fd(int fd) { return File(fd); }
+inline File from_fd(int64_t file) { return File((intptr_t)file); }
 inline size_t missing(const void *p, size_t bytes) {
     const size_t pages = (bytes + 4095) / 4096;
 #if defined(__linux__)

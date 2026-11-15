@@ -103,7 +103,7 @@ class Engine:
         if self.persistent:
             L.chrysalis_snap_bytes.argtypes, L.chrysalis_snap_bytes.restype = [C.c_int], C.c_int64
             L.chrysalis_snap_export.argtypes, L.chrysalis_snap_export.restype = [C.c_int, C.c_void_p], C.c_int
-            L.chrysalis_snap_import.argtypes, L.chrysalis_snap_import.restype = [C.c_int, C.c_int64, C.c_int64], C.c_int
+            L.chrysalis_snap_import.argtypes, L.chrysalis_snap_import.restype = [C.c_int64, C.c_int64, C.c_int64], C.c_int
         L.chrysalis_generate.argtypes = [C.c_int, C.POINTER(Sampling), C.POINTER(C.c_int), C.c_int, C.c_void_p, C.c_void_p]
         L.chrysalis_draw.argtypes, L.chrysalis_draw.restype = [C.c_int, C.c_void_p, C.c_void_p, C.c_void_p, C.POINTER(Sampling)], C.c_int
         L.chrysalis_masked_top.argtypes = [C.c_void_p, C.c_void_p, C.c_void_p, C.c_void_p]
@@ -325,7 +325,11 @@ class Engine:
 
     def import_snapshot(self, f):
         at = f.tell()
-        snap = self.lib.chrysalis_snap_import(f.fileno(), at, os.fstat(f.fileno()).st_size - at)
+        fd = f.fileno()
+        if os.name == "nt":
+            import msvcrt
+            fd = msvcrt.get_osfhandle(fd)
+        snap = self.lib.chrysalis_snap_import(fd, at, os.fstat(f.fileno()).st_size - at)
         if snap == -2:
             raise KVFull()
         return None if snap < 0 else snap

@@ -168,8 +168,8 @@ void Engine::snap_export(int snap, uint8_t *dst) {
     CK(cudaStreamSynchronize(cst));
 }
 
-int Engine::snap_import(int fd, int64_t off, size_t bytes) {
-    const os::File file = os::from_fd(fd);
+int Engine::snap_import(int64_t from, int64_t off, size_t bytes) {
+    const os::File file = os::from_fd(from);
     auto get = [&](void *dst, size_t n) {
         for (size_t got = 0; got < n;) {
             const int64_t r = os::read_at(file, (uint8_t *)dst + got, n - got, (uint64_t)(off + (int64_t)got));

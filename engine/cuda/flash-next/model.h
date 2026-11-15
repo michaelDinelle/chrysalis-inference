@@ -292,7 +292,7 @@ struct Engine {
     uint32_t *mask_rows();
     size_t snap_bytes(int snap) const;
     void snap_export(int snap, uint8_t *dst);
-    int snap_import(int fd, int64_t off, size_t bytes);
+    int snap_import(int64_t from, int64_t off, size_t bytes);
     void shutdown();
 
     void forward(Seq &s, const int *tokens, int T, bool verify, const int *pos3 = nullptr, bool img = false);

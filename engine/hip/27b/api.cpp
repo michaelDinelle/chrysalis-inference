@@ -71,7 +71,7 @@ int chrysalis_restore(int id, int snap) { try { E->restore(id, snap); return 0; 
 int chrysalis_snap_free(int snap) { try { E->snap_free(snap); return 0; } catch (const std::exception &) { return -1; } }
 int64_t chrysalis_snap_bytes(int snap) { try { return (int64_t)E->snap_bytes(snap); } catch (const std::exception &) { return -1; } }
 int chrysalis_snap_export(int snap, void *dst) { try { E->snap_export(snap, (uint8_t *)dst); return 0; } catch (const std::exception &) { return -1; } }
-int chrysalis_snap_import(int fd, int64_t offset, int64_t bytes) { return E->snap_import(fd, offset, (size_t)bytes); }
+int chrysalis_snap_import(int64_t file, int64_t offset, int64_t bytes) { return E->snap_import(file, offset, (size_t)bytes); }
 void chrysalis_sync() { CK(hipStreamSynchronize(E->st)); }
 int chrysalis_prefill_pos(int id, const int *tokens, const int *pos3, int n) {
     try { E->prefill(id, tokens, pos3, n); return 0; }

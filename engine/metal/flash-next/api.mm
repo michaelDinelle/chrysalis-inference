@@ -139,8 +139,9 @@ int chrysalis_snap_export(int snap, void *dst) {
         } catch (const std::exception &) { return -1; }
     }
 }
-int chrysalis_snap_import(int fd, int64_t offset, int64_t bytes) {
+int chrysalis_snap_import(int64_t file, int64_t offset, int64_t bytes) {
     @autoreleasepool {
+        const int fd = (int)file;
         E->settle();
         auto get = [&](void *dst, size_t n) {
             for (size_t got = 0; got < n;) {

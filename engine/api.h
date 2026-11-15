@@ -46,7 +46,7 @@ CHRYSALIS_API int chrysalis_restore(int id, int snap);
 CHRYSALIS_API int chrysalis_snap_free(int snap);
 CHRYSALIS_API int64_t chrysalis_snap_bytes(int snap);
 CHRYSALIS_API int chrysalis_snap_export(int snap, void *dst);
-CHRYSALIS_API int chrysalis_snap_import(int fd, int64_t offset, int64_t bytes);
+CHRYSALIS_API int chrysalis_snap_import(int64_t file, int64_t offset, int64_t bytes);
 
 CHRYSALIS_API void chrysalis_vision_open(const char *path);
 CHRYSALIS_API void chrysalis_vision_release();
