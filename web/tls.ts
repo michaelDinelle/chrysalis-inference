@@ -22,7 +22,9 @@ function openssl(...args: string[]) {
   return { ok: r.exitCode === 0, err: r.stderr.toString().trim() };
 }
 
-export function tlsDir(dir = process.env.CHRYSALIS_TLS_DIR ?? `${homedir()}/.config/chrysalis/tls`) {
+export const tlsPath = () => process.env.CHRYSALIS_TLS_DIR ?? `${homedir()}/.config/chrysalis/tls`;
+
+export function tlsDir(dir = tlsPath()) {
   mkdirSync(dir, { recursive: true, mode: 0o700 });
   return dir;
 }

@@ -1,14 +1,29 @@
-const PICK = `${import.meta.dir}/../build/gpu`;
+import { join } from "node:path";
+import { exe, here, library, ROOT, serverEnv, type Machine } from "./platform";
 
-export function gpuEnv(env: Record<string, string | undefined> = process.env, pick = PICK): Record<string, string> {
-  if (env.HIP_VISIBLE_DEVICES !== undefined || env.ROCR_VISIBLE_DEVICES !== undefined || env.CUDA_VISIBLE_DEVICES !== undefined) return {};
+const PICK = exe(join(ROOT, "build", "gpu"));
+const CHOSEN = ["HIP_VISIBLE_DEVICES", "ROCR_VISIBLE_DEVICES", "CUDA_VISIBLE_DEVICES"];
+
+export function pick(env: Record<string, string | undefined> = process.env, picker = PICK): Record<string, string> | undefined {
   let out: string;
   try {
-    const p = Bun.spawnSync([pick], { stdin: "ignore", stdout: "pipe", stderr: "inherit", env: env as Record<string, string> });
-    if (p.exitCode !== 0) return {};
+    const p = Bun.spawnSync([picker], { stdin: "ignore", stdout: "pipe", stderr: "inherit", env: env as Record<string, string> });
+    if (p.exitCode !== 0) return undefined;
     out = p.stdout.toString();
-  } catch { return {}; }
-  return Object.fromEntries([...out.matchAll(/^([A-Z_]+)=(.*)$/gm)].map((m) => [m[1], m[2]]));
+  } catch { return undefined; }
+  return Object.fromEntries([...out.matchAll(/^([A-Z_]+)=(.*?)\r?$/gm)].map((m) => [m[1], m[2]]));
+}
+
+export function gpuEnv(env: Record<string, string | undefined> = process.env, picker = PICK): Record<string, string> {
+  if (CHOSEN.some((k) => env[k] !== undefined)) return {};
+  return pick(env, picker) ?? {};
+}
+
+export function gpuHere(m: Machine = here(), root = ROOT, picker = exe(join(root, "build", "gpu"), m)): boolean {
+  if (m.platform === "darwin") return m.arch === "arm64" && m.memory >= 30 * 2 ** 30 && m.exists(library("libchrysalis", m, root));
+  const nvidia = m.platform === "win32" ? join(m.env.SystemRoot ?? m.env.SYSTEMROOT ?? "C:\\Windows", "System32", "nvcuda.dll") : "/dev/nvidiactl";
+  if (m.exists(nvidia) && m.exists(library("libchrysalis", m, root)) && m.exists(library("libchrysalis_fn", m, root))) return true;
+  return pick({ ...m.env, ...serverEnv(m, root) }, picker) !== undefined;
 }
 
 if (import.meta.main) for (const [k, v] of Object.entries(gpuEnv())) console.log(`${k}=${v}`);

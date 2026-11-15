@@ -1,14 +1,17 @@
-import { chmodSync, copyFileSync, existsSync, mkdirSync, mkdtempSync, readdirSync, rmSync } from "node:fs";
+import { chmodSync, copyFileSync, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync } from "node:fs";
 import type { Subprocess } from "bun";
 import { clean, fold, paint, plain } from "./terminal";
+import { letIn } from "./firewall";
 import { gpuEnv } from "./gpu";
+import { getCommand, ourScript, ROOT, serverCommand, serverEnv } from "./platform";
+import { tlsPath } from "./tls";
 import { MODELS, point } from "./veil";
 
 const { bold, dim, green, yellow, red, gray } = paint;
-const ROOT = `${import.meta.dir}/..`, SH = `${ROOT}/chrysalis.sh`;
 const API = process.env.CHRYSALIS_URL ?? "http://127.0.0.1:8080", PORT = process.env.PORT ?? "8081";
 const WEB_FILE = existsSync(`${import.meta.dir}/server.js`) ? "server.js" : "server.ts";
-const ENGINE_CMD: string[] = process.env.CHRYSALIS_ENGINE_CMD ? JSON.parse(process.env.CHRYSALIS_ENGINE_CMD) : [SH, "serve"];
+const chosen = () => { try { return readFileSync(`${tlsPath()}/model`, "utf8").trim() || undefined; } catch { return undefined; } };
+const engineCmd = (): string[] => (process.env.CHRYSALIS_ENGINE_CMD ? JSON.parse(process.env.CHRYSALIS_ENGINE_CMD) : serverCommand(chosen()));
 export const MODES = ["local", "network", "insecure"] as const;
 export type Mode = (typeof MODES)[number];
 export { MODELS };
@@ -72,7 +75,11 @@ class Service {
   constructor(readonly name: string, private spawn: () => Proc, private line: (l: string) => boolean, private began: () => void) {}
 
   start() {
-    const t0 = Date.now(), proc = this.spawn();
+    const t0 = Date.now();
+    let proc: Proc;
+    try { proc = this.spawn(); } catch (e) {
+      return note(red(`the ${this.name} could not start: ${e instanceof Error ? e.message : String(e)} · restart tries again`));
+    }
     this.proc = proc;
     this.asked = false;
     this.tail = [];
@@ -180,12 +187,17 @@ function engineLine(l: string): boolean {
 
 
 let engineSvc: Service, webSvc: Service;
-engineSvc = new Service("model server", () => Bun.spawn(scoped(ENGINE_CMD), { stdin: "ignore", stdout: "pipe", stderr: "pipe",
-  env: { ...process.env, ...gpuEnv(), ...(run ? { CHRYSALIS_SNAPSHOTS: `${run}/snapshots`, TMPDIR: `${run}/tmp` } : {}) } }), (l) => { const took = engineLine(l); sync(); return took; },
+function engineSpawn() {
+  const env = { ...process.env, ...serverEnv() };
+  return Bun.spawn(scoped(engineCmd()), { cwd: ROOT, stdin: "ignore", stdout: "pipe", stderr: "pipe",
+    env: { ...env, ...gpuEnv(env), ...(run ? { CHRYSALIS_SNAPSHOTS: `${run}/snapshots`, TMPDIR: `${run}/tmp` } : {}) } });
+}
+engineSvc = new Service("model server", engineSpawn, (l) => { const took = engineLine(l); sync(); return took; },
   () => Object.assign(engine, { state: "down", since: Date.now(), progress: 0, writing: 0 }));
-webSvc = new Service("web chat", () => Bun.spawn(scoped([process.execPath, WEB_FILE]), {
+const web = ourScript(WEB_FILE);
+webSvc = new Service("web chat", () => Bun.spawn(scoped(web.cmd), {
   cwd: import.meta.dir, stdin: "ignore", stdout: "pipe", stderr: "pipe",
-  env: { ...process.env, NODE_ENV: "production", PORT, CHRYSALIS_HOST: state.mode === "local" ? "127.0.0.1" : "0.0.0.0", CHRYSALIS_INSECURE: state.mode === "insecure" ? "1" : "", CHRYSALIS_MEMORY: run ?? "", CHRYSALIS_KEPT: KEPT },
+  env: { ...process.env, ...web.env, NODE_ENV: "production", PORT, CHRYSALIS_ENGINE_HERE: HAS_MODEL ? "1" : "0", CHRYSALIS_HOST: state.mode === "local" ? "127.0.0.1" : "0.0.0.0", CHRYSALIS_INSECURE: state.mode === "insecure" ? "1" : "", CHRYSALIS_MEMORY: run ?? "", CHRYSALIS_KEPT: KEPT },
   ipc: heard,
 }), () => false, () => { state.web = undefined; state.questions = []; state.veiled = 0; hidden(false); });
 
@@ -279,7 +291,7 @@ const NO_WEB = "the web chat is not running: restart starts it";
 
 export async function setMode(to: Mode) {
   if (to === state.mode) return;
-  if (to !== "local" && ui.live) await ui.suspend(() => Bun.spawn([SH, "firewall", to], { stdio: ["inherit", "inherit", "inherit"] }).exited);
+  if (to !== "local" && ui.live) await ui.suspend(() => letIn(to));
   state.mode = to;
   await webSvc.restart();
 }
@@ -459,8 +471,10 @@ export function start() {
   ui.log("");
   note(bold("Chrysalis Inference"));
   if (flag("--get")) {
-    getting = Bun.spawn([SH, "get", flag("--get")!], { stdin: "ignore", stdout: "ignore", stderr: "ignore" });
-    note(dim(`${flag("--get")} is downloading in the background: model has it once it is here`));
+    try {
+      getting = Bun.spawn(getCommand(flag("--get")!), { cwd: ROOT, stdin: "ignore", stdout: "ignore", stderr: "ignore", env: { ...process.env, ...serverEnv() } });
+      note(dim(`${flag("--get")} is downloading in the background: model has it once it is here`));
+    } catch (e) { note(red(`${flag("--get")} could not be downloaded: ${e instanceof Error ? e.message : String(e)}`)); }
   }
   if (HAS_MODEL) engineSvc.start();
   else note(dim("No GPU Chrysalis runs on here: the web chat uses Chrysalis on another computer on your network."));

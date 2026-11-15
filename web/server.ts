@@ -7,6 +7,7 @@ import { Devices, keyCookie } from "./devices";
 import { advertise, answerName, Link } from "./link";
 import { opencodeLine, opencodeManifest, opencodeScript } from "./opencode";
 import { tunnel } from "./machines";
+import { python } from "./platform";
 import { point } from "./veil";
 import { appleProfile, connectPage, deviceScript, TRUSTED_GIF } from "./setup";
 import * as harness from "./harness";
@@ -493,7 +494,7 @@ const SANDBOX_CSP = "default-src 'none'; script-src 'unsafe-inline' 'unsafe-eval
   "font-src data:; media-src data: blob:; form-action 'none'; base-uri 'none'; frame-ancestors 'self'; sandbox allow-scripts allow-modals allow-pointer-lock allow-orientation-lock";
 
 const ROOT = `${import.meta.dir}/..`;
-const VOICE_CMD: string[] = process.env.CHRYSALIS_VOICE_CMD ? JSON.parse(process.env.CHRYSALIS_VOICE_CMD) : [`${ROOT}/data/venv/bin/python`, "-m", "chrysalis.voice"];
+const VOICE_CMD: string[] = process.env.CHRYSALIS_VOICE_CMD ? JSON.parse(process.env.CHRYSALIS_VOICE_CMD) : [python(), "-m", "chrysalis.voice"];
 const VOICE_IDLE_MS = Number(process.env.CHRYSALIS_VOICE_IDLE_MS ?? 60_000);
 interface VoiceSocket { up?: WebSocket; queue: (string | Buffer<ArrayBuffer>)[]; closed: boolean; machine?: { id: string; name: string; home?: string; kind?: string; line: ReturnType<typeof tunnel> } }
 const attached = new Map<string, { close(): void }>();
@@ -1085,7 +1086,7 @@ if (process.send) {
   }, 1000);
 }
 const declined = new Set<string>();
-if (Bun.spawnSync([`${import.meta.dir}/../chrysalis.sh`, "gpu"]).exitCode !== 0) setInterval(() => {
+if (process.env.CHRYSALIS_ENGINE_HERE === "0") setInterval(() => {
   const s = link.state(), to = s.found.find((f) => !declined.has(f.fp));
   if (!s.linked && !link.pairing && to) void link.pair(to.fp, MACHINE).then(() => {
     if (!link.pairing && !link.state().linked) declined.add(to.fp);
