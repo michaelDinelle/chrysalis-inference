@@ -44,6 +44,7 @@ constexpr float EPS = 1e-6f;
 constexpr int EOS_IM_END = 248046, EOS_TEXT = 248044;
 constexpr int IMG_BASE = 1 << 30, IMG_ROWS = 1 << 14, IMAGE_PAD = 248056;
 inline bool is_attn_layer(int l) { return l % 4 == 3; }
+struct Pos3 { int t, h, w; };
 
 constexpr int T_IQ4_NL = 20, T_IQ4_XS = 23, T_Q3_K = 11, T_Q2_K = 10;
 constexpr size_t XDN = (size_t)D * FE / 32 * 18;

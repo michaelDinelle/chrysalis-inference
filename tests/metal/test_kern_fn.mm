@@ -294,7 +294,7 @@ static void embed_checks(Mtl &m, std::mt19937 &rng) {
         Mat E = make_mat(Q8_0, V, D, rng);
         View ev = upload(m, E.raw.data(), E.raw.size()), tv = upload(m, toks, sizeof toks), res = m.alloc((size_t)T * HCD * 4);
         const uint32_t rb = (uint32_t)E.rb;
-        run(m, [&](Enc &e) { e.k("embed_q8_0").b(0, tv).b(1, ev).c(2, rb).b(3, res).grid(T, 80); });
+        run(m, [&](Enc &e) { e.k("embed_q8_0").b(0, tv).b(1, ev).c(2, rb).b(3, res).b(4, tv).grid(T, 80); });
         std::vector<double> want((size_t)T * HCD), scale(want.size(), 1.0);
         for (int t = 0; t < T; t++) for (int c = 0; c < HC; c++) for (int d = 0; d < D; d++) want[(size_t)t * HCD + c * D + d] = E.w[(size_t)toks[t] * D + d];
         check("embed_q8_0 (exact, every stream)", res.host<float>(), want.data(), scale.data(), want.size(), 1e-7);

@@ -39,8 +39,8 @@ build/test_27b: tests/metal/test_27b.mm $(SRC27) $(H27) build/chrysalis.metallib
 
 KFN   := $(wildcard $(MFN)/kernels/*.metal)
 KHFN  := $(wildcard $(MFN)/kernels/*.h)
-SRCFN := $(MFN)/engine.mm $(MFN)/experts.mm $(MFN)/pass.mm $(MFN)/api.mm
-HFN   := $(wildcard $(MFN)/*.h) engine/api.h engine/sampler.h engine/lookup.h
+SRCFN := $(MFN)/engine.mm $(MFN)/experts.mm $(MFN)/pass.mm $(MFN)/api.mm $(MV)/vision.mm
+HFN   := $(wildcard $(MFN)/*.h) $(MV)/vision.h engine/api.h engine/sampler.h engine/lookup.h engine/os.h
 FFN   := -O3 -std=c++20 -fobjc-arc -fPIC -Wall -Wno-unused-function -Wno-missing-braces -I. -fvisibility=hidden -fvisibility-inlines-hidden
 MFLAGS := -O3 -std=metal3.2 -ffast-math -Wno-unused-variable
 
@@ -52,7 +52,7 @@ build/air/fn/prefill.air: $(MFN)/prefill.metal $(KHFN)
 	@mkdir -p build/air/fn
 	$(METALC) $(MFLAGS) -c $< -o $@
 
-build/chrysalis_fn.metallib: $(patsubst $(MFN)/kernels/%.metal,build/air/fn/%.air,$(KFN)) build/air/fn/prefill.air
+build/chrysalis_fn.metallib: $(patsubst $(MFN)/kernels/%.metal,build/air/fn/%.air,$(KFN)) build/air/fn/prefill.air build/air/vision.air
 	$(METALLIB) $^ -o $@.tmp && mv $@.tmp $@
 
 FN_OBJ := $(SRCFN:%=build/ofn/%.o)
@@ -61,7 +61,7 @@ build/ofn/%.o: % $(HFN)
 	$(OBJCXX) $(FFN) -c -o $@ $<
 
 build/libchrysalis_fn.dylib: $(FN_OBJ) build/chrysalis_fn.metallib
-	$(OBJCXX) $(FFN) -dynamiclib -Wl,-dead_strip -o $@.tmp $(FN_OBJ) $(FW) && mv $@.tmp $@
+	$(OBJCXX) $(FFN) -dynamiclib -Wl,-dead_strip -o $@.tmp $(FN_OBJ) $(FW) -framework MetalPerformanceShaders && mv $@.tmp $@
 
 build/pf/chrysalis_fn.metallib: build/air/fn/prefill.air
 	@mkdir -p build/pf
@@ -97,6 +97,7 @@ define BACKEND_TESTS_FN
 	$(PY) tests/test_snapshot.py --use qwen3.8-flash-next
 	$(PY) tests/test_server.py --use qwen3.8-flash-next
 	$(PY) tests/metal/compare_fn.py
+	$(PY) tests/test_vision.py --use qwen3.8-flash-next
 endef
 
 LLAMA_INC  := -I$(GGML)/include -I$(GGML)/ggml/include

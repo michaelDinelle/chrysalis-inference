@@ -114,8 +114,9 @@ None: no comments or docstrings anywhere in the repo, in any language, including
 - On a Mac with Apple Silicon and 32 GB or more, the same targets build and check the Metal engines: `make kernels`,
   `make kernels_fn`, `make test` and `make test_fn_model`. Their references come from data/llama.cpp at the commit Linux
   pins, built with Metal (`cmake -B build && cmake --build build --target llama ggml ggml-base`), and the PDF checks
-  need poppler and the video checks ffmpeg (`brew install poppler ffmpeg`). The Metal Flash-Next has no vision tower yet, so
-  its tests leave pictures out.
+  need poppler and the video checks ffmpeg (`brew install poppler ffmpeg`). Flash-Next's prompts with a picture are checked
+  against llama.cpp on its Q8_0 source, which a Mac does not hold: tests/test_vision.py leaves llm.tokens.i32, llm.pos.i32 and
+  llm.embd.f32 in build/vision/fn; run build/ref_logits_mm_fn on them where the source is, into the file the test names.
 - On an NVIDIA GPU, the same targets build and check the CUDA engines (nvcc from /usr/local/cuda, the native architecture
   unless ARCH is set): `make kernels`, `make kernels_fn`, `make test` and `make test_fn_model`, with data/llama.cpp built
   for CUDA (`cmake -B build -DGGML_CUDA=ON -DBUILD_SHARED_LIBS=ON && cmake --build build`). On a card too small for a

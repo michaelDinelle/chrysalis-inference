@@ -18,7 +18,6 @@ const char *tname(int t) {
 
 struct GemvArgs { uint32_t rows, cols, rb, T, ldx, ldy, add; float scale; uint32_t ggml; };
 static const uint32_t GGML_ACT = getenv("CHRYSALIS_FN_GGML_ACT") ? 1 : 0;
-struct KVArgs { uint32_t T, pos0, layer, nsplit; };
 struct MoeArgs { uint32_t T, layer, phase, ggml; };
 struct GdnStepArgs { uint32_t T, write_state; };
 
@@ -298,7 +297,7 @@ int Engine::seq_new() {
 void Engine::seq_reset(Seq &s) {
     settle();
     for (int p : s.pages) page_release(p);
-    s.n = 0; s.pending = -1; s.pages.clear(); s.seen.clear(); s.top_v.clear(); s.top_i.clear();
+    s.n = 0; s.pos = 0; s.tail_pos = {0, 0, 0}; s.pending = -1; s.pages.clear(); s.seen.clear(); s.top_v.clear(); s.top_i.clear();
     s.hist[0] = s.hist[1] = -1;
     s.look.clear();
     s.rng.seed(std::random_device{}());
@@ -347,7 +346,7 @@ int Engine::snapshot(int id) {
     if (si == snaps.size()) snaps.emplace_back();
     Snap &sn = snaps[si];
     sn.used = true;
-    sn.n = s.n; sn.hist[0] = s.hist[0]; sn.hist[1] = s.hist[1];
+    sn.n = s.n; sn.pos = s.pos; sn.tail_pos = s.tail_pos; sn.hist[0] = s.hist[0]; sn.hist[1] = s.hist[1];
     if (s.pending < 0) { sn.top_v = s.top_v; sn.top_i = s.top_i; } else { sn.top_v.clear(); sn.top_i.clear(); }
     sn.pages.assign(s.pages.begin(), s.pages.begin() + (s.n + PAGE - 1) / PAGE);
     for (int p : sn.pages) page_ref[p]++;
@@ -365,7 +364,7 @@ void Engine::restore(int id, int snap) {
     s.pages = sn.pages;
     for (int p : s.pages) page_ref[p]++;
     if (!s.pages.empty()) memcpy(s.d_pages.host(), s.pages.data(), s.pages.size() * 4);
-    s.n = sn.n; s.hist[0] = sn.hist[0]; s.hist[1] = sn.hist[1];
+    s.n = sn.n; s.pos = sn.pos; s.tail_pos = sn.tail_pos; s.hist[0] = sn.hist[0]; s.hist[1] = sn.hist[1];
     s.pending = -1;
     s.top_v = sn.top_v; s.top_i = sn.top_i; s.seen.clear();
     memcpy(s.ssm.host(), sn.state.data(), state_bytes());
@@ -453,12 +452,13 @@ void Engine::mixer(Enc &e, const Mix &mx, View res, int T, View inj) {
     e.barrier();
 }
 
-void Engine::forward_small(Seq &s, const int *tokens, int T, bool all_logits, bool verify) {
+void Engine::forward_small(Seq &s, const int *tokens, int T, bool all_logits, bool verify, const Feed &f) {
     if (T > TM) FAIL("forward_small: %d tokens", T);
     settle();
     memcpy(b.tokens.host(), tokens, T * 4);
     experts_tick(T);
-    ple_gather(s, tokens, T, b.ple_rows.host<uint8_t>());
+    ple_gather(s, f.grams ? f.grams : tokens, T, b.ple_rows.host<uint8_t>());
+    const View rp = f.pos3 ? feed_pos(0) : b.tokens;
     const uint32_t pos0 = s.n, tt = T, P = T * TOPK_E;
     id<MTLCommandBuffer> cb = [m.q commandBufferWithUnretainedReferences];
     Enc e;
@@ -477,7 +477,7 @@ void Engine::forward_small(Seq &s, const int *tokens, int T, bool all_logits, bo
     e.args = b.ind_args; e.grids = b.ind_grids;
     e.begin(m, cb);
     const uint32_t erb = (uint32_t)embd.rb;
-    e.k("embed_q8_0").b(0, b.tokens).b(1, embd.v).c(2, erb).b(3, b.res).grid(T, 80);
+    e.k("embed_q8_0").b(0, b.tokens).b(1, embd.v).c(2, erb).b(3, b.res).b(4, f.img ? feed : b.tokens).grid(T, 80);
     e.barrier();
     auto ids_of = [&](int l) { return b.ids.at((size_t)l * TM * TOPK_E * 4); };
     auto wts_of = [&](int l) { return b.wts.at((size_t)l * TM * TOPK_E * 4); };
@@ -516,12 +516,13 @@ void Engine::forward_small(Seq &s, const int *tokens, int T, bool all_logits, bo
             const int nb_end = (pos0 + T) / KPOOL;
             const int nsel_max = std::min(nb_end, SEL_BLOCKS) + 1;
             const uint32_t nsplit = std::max(1, std::min(16, nsel_max / 16));
-            KVArgs ka{tt, pos0, (uint32_t)al, nsplit};
+            const KVArgs ka = kv_args(s, T, pos0, al, nsplit, f.pos3);
             View tail = s.tail.at((size_t)al * KPOOL * IDX_D * 2);
-            e.k("attn_prep").c(0, ka).b(1, b.qg).b(2, b.kb).b(3, b.vb).b(4, w.qn).b(5, w.kn).b(6, kv).b(7, s.d_pages).b(8, b.Q).grid(NH + 2 * NKV, T, 1, 256);
-            e.k("idx_qprep").c(0, ka).b(1, b.qir).b(2, w.iqn).b(3, b.Qi).grid(IDX_H, T, 1, 128);
+            e.k("attn_prep").c(0, ka).b(1, b.qg).b(2, b.kb).b(3, b.vb).b(4, w.qn).b(5, w.kn).b(6, kv).b(7, s.d_pages).b(8, b.Q).b(9, rp)
+                .grid(NH + 2 * NKV, T, 1, 256);
+            e.k("idx_qprep").c(0, ka).b(1, b.qir).b(2, w.iqn).b(3, b.Qi).b(4, rp).grid(IDX_H, T, 1, 128);
             const int first = pos0 / KPOOL, last = (pos0 + T) / KPOOL - 1;
-            if (last >= first) e.k("idx_pool").c(0, ka).b(1, kir).b(2, tail).b(3, w.ikn).b(4, kv).b(5, s.d_pages).grid(last - first + 1, 128);
+            if (last >= first) e.k("idx_pool").c(0, ka).b(1, kir).b(2, tail).b(3, w.ikn).b(4, kv).b(5, s.d_pages).b(6, rp).grid(last - first + 1, 128);
             e.barrier();
             if (!verify) e.k("idx_tail").c(0, ka).b(1, kir).b(2, tail).grid(1, 128);
             const uint32_t ld = std::max(1, nb_end);
@@ -725,32 +726,87 @@ void Engine::topk(Enc &e, int rows) {
     }
 }
 
-void Engine::advance(Seq &s, const int *tokens, int T) {
-    if (T >= 2) { s.hist[0] = tokens[T - 2]; s.hist[1] = tokens[T - 1]; }
-    else { s.hist[0] = s.hist[1]; s.hist[1] = tokens[0]; }
-    s.n += T;
+Pos3 Engine::cell_pos(const Seq &s, const int *pos3, int cell) const {
+    if (cell < s.n) return s.tail_pos;
+    const int i = cell - s.n;
+    if (pos3) return {pos3[3 * i], pos3[3 * i + 1], pos3[3 * i + 2]};
+    return {s.pos + i, s.pos + i, s.pos + i};
 }
 
-void Engine::prefill(int id, const int *tokens, int n) {
+KVArgs Engine::kv_args(const Seq &s, int T, int pos0, int layer, int nsplit, const int *pos3) const {
+    const Pos3 t = cell_pos(s, pos3, pos0 / KPOOL * KPOOL);
+    return {(uint32_t)T, (uint32_t)pos0, (uint32_t)layer, (uint32_t)nsplit, s.pos + pos0 - s.n, pos3 ? 1 : 0, {t.t, t.h, t.w}};
+}
+
+void Engine::advance(Seq &s, const int *tokens, int T, const int *pos3) {
+    if (T >= 2) { s.hist[0] = tokens[T - 2]; s.hist[1] = tokens[T - 1]; }
+    else { s.hist[0] = s.hist[1]; s.hist[1] = tokens[0]; }
+    const int end = s.n + T, blk = end / KPOOL * KPOOL;
+    if (end % KPOOL && blk >= s.n) s.tail_pos = cell_pos(s, pos3, blk);
+    if (pos3)
+        for (int i = 0; i < 3 * T; i++) s.pos = std::max(s.pos, pos3[i] + 1);
+    else
+        s.pos += T;
+    s.n = end;
+}
+
+void Engine::prefill(int id, const int *tokens, const int *pos3, int n) {
     Seq &s = seqs.at(id);
-    for (int i = 0; i < n; i++) if (tokens[i] < 0 || tokens[i] >= VOCAB) throw std::invalid_argument("token id out of range");
+    std::vector<int> grams;
+    for (int i = 0; i < n; i++) {
+        const int t = tokens[i];
+        if (t >= IMG_BASE) {
+            const int pic = (t - IMG_BASE) / IMG_ROWS, row = (t - IMG_BASE) % IMG_ROWS;
+            if (pic >= (int)images.size() || images[pic].rows.empty() || row >= images[pic].n)
+                throw std::invalid_argument("an image token names a picture that is not encoded");
+            if (grams.empty()) grams.assign(tokens, tokens + n);
+            grams[i] = IMAGE_PAD;
+        } else if (t < 0 || t >= VOCAB) {
+            throw std::invalid_argument("token id out of range");
+        }
+    }
+    const int *hashed = grams.empty() ? tokens : grams.data();
     ensure_pages(s, s.n + n, s.n);
+    if ((pos3 || !grams.empty()) && !feed.buf) feed = m.alloc((size_t)PMAX * (D * 2 + 12));
     s.pending = -1;
     for (int done = 0; done < n;) {
         const int T = std::min(n - done <= TM ? TM : PMAX, n - done);
-        if (T <= TM || getenv("CHRYSALIS_FN_DECODE_PREFILL")) {
-            const int t = std::min(TM, T);
-            forward_small(s, tokens + done, t, false);
-            if (has_mtp) mtp_catch_up(s, t, s.n, false);
-            advance(s, tokens + done, t);
-            done += t;
-            continue;
+        const bool small = T <= TM || getenv("CHRYSALIS_FN_DECODE_PREFILL");
+        const int t = small ? std::min(TM, T) : T;
+        Feed f{hashed + done, pos3 ? pos3 + (size_t)done * 3 : nullptr, false};
+        if (f.pos3 || !grams.empty()) {
+            settle();
+            if (f.pos3) memcpy(feed_pos(0).host(), f.pos3, (size_t)t * 12);
+            for (int i = 0; i < t && !grams.empty(); i++) {
+                const int k = tokens[done + i] - IMG_BASE;
+                if (k < 0) continue;
+                memcpy(feed.host<uint8_t>() + (size_t)i * D * 2, images[k / IMG_ROWS].rows.data() + (size_t)(k % IMG_ROWS) * D, (size_t)D * 2);
+                f.img = true;
+            }
         }
-        prompt_pass(s, tokens + done, T);
-        advance(s, tokens + done, T);
-        done += T;
+        if (small) {
+            forward_small(s, tokens + done, t, false, false, f);
+            if (has_mtp) mtp_catch_up(s, t, s.n, false, f);
+        } else {
+            prompt_pass(s, tokens + done, t, f);
+        }
+        advance(s, hashed + done, t, f.pos3);
+        done += t;
     }
     keep_top(s);
+}
+
+int Engine::image_encode(int slot, const float *patches, int gh, int gw, int frames) {
+    const int rows = gh * gw / 4;
+    if (slot < 0 || slot >= (INT32_MAX - IMG_BASE) / IMG_ROWS || rows > IMG_ROWS) return -1;
+    if ((int)images.size() <= slot) images.resize(slot + 1);
+    settle();
+    Image &im = images[slot];
+    im.rows.resize((size_t)rows * D);
+    im.n = rows;
+    if (vision.encode(patches, gh, gw, frames, (uint16_t *)im.rows.data())) return 0;
+    im = {};
+    return -1;
 }
 
 void Engine::keep_top(Seq &s, int row) {
@@ -856,9 +912,10 @@ void Engine::commit(Seq &s, int q, int n) {
     if (cb.status == MTLCommandBufferStatusError) FAIL("GPU error: %s", cb.error.localizedDescription.UTF8String);
 }
 
-void Engine::mtp_layer(Enc &e, Seq &s, int T, uint32_t pos0, View hp, View tok, bool spec) {
+void Engine::mtp_layer(Enc &e, Seq &s, int T, uint32_t pos0, View hp, View tok, bool spec, const Feed &f) {
     const uint32_t tt = T, erb = (uint32_t)embd.rb;
-    e.k("embed_q8_0").b(0, tok).b(1, embd.v).c(2, erb).b(3, b.memb).grid(T, 80);
+    const View rp = f.pos3 ? feed_pos(0) : tok;
+    e.k("embed_q8_0").b(0, tok).b(1, embd.v).c(2, erb).b(3, b.memb).b(4, f.img ? feed : tok).grid(T, 80);
     e.barrier();
     e.k("mtp_norm").b(0, b.memb).b(1, hp).b(2, enorm).b(3, hnorm).b(4, b.emb).b(5, b.key).grid(HC, T, 1, 256);
     e.barrier();
@@ -881,12 +938,13 @@ void Engine::mtp_layer(Enc &e, Seq &s, int T, uint32_t pos0, View hp, View tok, 
     const int nb_end = (pos0 + T) / KPOOL;
     const int nsel_max = std::min(nb_end, SEL_BLOCKS) + 1;
     const uint32_t nsplit = std::max(1, std::min(16, nsel_max / 16));
-    const KVArgs ka{tt, pos0, (uint32_t)NATT, nsplit};
+    const KVArgs ka = kv_args(s, T, pos0, NATT, nsplit, f.pos3);
     const View tail = s.tail.at((size_t)NATT * KPOOL * IDX_D * 2);
-    e.k("attn_prep").c(0, ka).b(1, b.qg).b(2, b.kb).b(3, b.vb).b(4, w.qn).b(5, w.kn).b(6, kv).b(7, s.d_pages).b(8, b.Q).grid(NH + 2 * NKV, T, 1, 256);
-    e.k("idx_qprep").c(0, ka).b(1, b.qir).b(2, w.iqn).b(3, b.Qi).grid(IDX_H, T, 1, 128);
+    e.k("attn_prep").c(0, ka).b(1, b.qg).b(2, b.kb).b(3, b.vb).b(4, w.qn).b(5, w.kn).b(6, kv).b(7, s.d_pages).b(8, b.Q).b(9, rp)
+        .grid(NH + 2 * NKV, T, 1, 256);
+    e.k("idx_qprep").c(0, ka).b(1, b.qir).b(2, w.iqn).b(3, b.Qi).b(4, rp).grid(IDX_H, T, 1, 128);
     const int first = pos0 / KPOOL, last = (pos0 + T) / KPOOL - 1;
-    if (last >= first) e.k("idx_pool").c(0, ka).b(1, kir).b(2, tail).b(3, w.ikn).b(4, kv).b(5, s.d_pages).grid(last - first + 1, 128);
+    if (last >= first) e.k("idx_pool").c(0, ka).b(1, kir).b(2, tail).b(3, w.ikn).b(4, kv).b(5, s.d_pages).b(6, rp).grid(last - first + 1, 128);
     e.barrier();
     if (!spec) e.k("idx_tail").c(0, ka).b(1, kir).b(2, tail).grid(1, 128);
     const uint32_t ld = std::max(1, nb_end);
@@ -921,14 +979,14 @@ void Engine::mtp_layer(Enc &e, Seq &s, int T, uint32_t pos0, View hp, View tok, 
     e.barrier();
 }
 
-void Engine::mtp_catch_up(Seq &s, int T, int pos0, bool spec) {
+void Engine::mtp_catch_up(Seq &s, int T, int pos0, bool spec, const Feed &f) {
     id<MTLCommandBuffer> cb = [m.q commandBufferWithUnretainedReferences];
     Enc e; e.begin(m, cb);
     const uint32_t nh = HCD, nr = (T - 1) * HCD;
     e.k("copy_f32").b(0, s.h_last).b(1, b.mhp).c(2, nh).grid(HCD / 256, 256);
     if (T > 1) e.k("copy_f32").b(0, b.res).b(1, b.mhp.at((size_t)HCD * 4)).c(2, nr).grid((nr + 255) / 256, 256);
     e.barrier();
-    mtp_layer(e, s, T, (uint32_t)pos0, b.mhp, b.tokens, spec);
+    mtp_layer(e, s, T, (uint32_t)pos0, b.mhp, b.tokens, spec, f);
     if (!spec) e.k("copy_f32").b(0, b.res.at((size_t)(T - 1) * HCD * 4)).b(1, s.h_last).c(2, nh).grid(HCD / 256, 256);
     e.end();
     [cb commit];

@@ -2,6 +2,7 @@
 #include "mtl.h"
 #include "engine/sampler.h"
 #include "engine/lookup.h"
+#include "engine/metal/vision.h"
 #include <atomic>
 #include <chrono>
 #include <condition_variable>
@@ -18,6 +19,8 @@ inline bool is_eos(int t) { return t == EOS_IM_END || t == EOS_TEXT; }
 inline double now_s() { return std::chrono::duration<double>(std::chrono::steady_clock::now().time_since_epoch()).count(); }
 
 struct WT { int type = -1; int rows = 0, cols = 0; size_t rb = 0; View v; };
+struct KVArgs { uint32_t T, pos0, layer, nsplit; int32_t rope0, rpos, tail[3]; };
+struct Feed { const int *grams = nullptr, *pos3 = nullptr; bool img = false; };
 struct Mix { View norm; WT down, up, inject; };
 
 struct Layer {
@@ -33,7 +36,8 @@ struct Layer {
 
 struct Seq {
     bool used = false;
-    int n = 0;
+    int n = 0, pos = 0;
+    Pos3 tail_pos{0, 0, 0};
     int pending = -1;
     std::vector<int> pages;
     View d_pages;
@@ -141,8 +145,8 @@ struct Engine {
              part_o, part_ml, att, atth, rlog, ids, wts, sgv, shg, shu, shh, shout, Y, emb, embh, key, value, xconv, ple_rows, moe, tokens, tokens2;
     } pb;
     void alloc_prompt_buffers();
-    void prompt_pass(Seq &s, const int *tokens, int P);
-    struct Snap { bool used = false; int n = 0, hist[2] = {-1, -1}; std::vector<int> pages; std::vector<uint8_t> state;
+    void prompt_pass(Seq &s, const int *tokens, int P, const Feed &f = {});
+    struct Snap { bool used = false; int n = 0, pos = 0, hist[2] = {-1, -1}; Pos3 tail_pos{0, 0, 0}; std::vector<int> pages; std::vector<uint8_t> state;
                   std::vector<float> top_v; std::vector<int> top_i; };
     std::vector<Snap> snaps;
 
@@ -162,20 +166,28 @@ struct Engine {
     void restore(int id, int snap);
     void snap_free(int snap);
 
-    void prefill(int id, const int *tokens, int n);
+    void prefill(int id, const int *tokens, const int *pos3, int n);
+    Vision vision;
+    struct Image { std::vector<__fp16> rows; int n = 0; };
+    std::vector<Image> images;
+    View feed;
+    View feed_pos(int row) const { return feed.at((size_t)PMAX * D * 2 + (size_t)row * 12); }
+    int image_encode(int slot, const float *patches, int gh, int gw, int frames = 1);
+    Pos3 cell_pos(const Seq &s, const int *pos3, int cell) const;
+    KVArgs kv_args(const Seq &s, int T, int pos0, int layer, int nsplit, const int *pos3) const;
     int generate(int id, const Sampling &sp, int *out, int max_out, float *rows_v, int *rows_i);
     int draft(int id, const Sampling &sp, const int *fixed, int nfixed, int max_k, int *out);
     int generate_masked(int id, const Sampling &sp, const int *drafts, int k, const uint32_t *masks, int *out, int max_out);
     int verify(Seq &s, const Sampling &sp, const int *drafts, int k, bool masked, int *out, int nout, float *rows_v, int *rows_i);
     void commit(Seq &s, int q, int n);
-    void mtp_layer(Enc &e, Seq &s, int T, uint32_t pos0, View hp, View tok, bool spec);
-    void mtp_catch_up(Seq &s, int T, int pos0, bool spec);
+    void mtp_layer(Enc &e, Seq &s, int T, uint32_t pos0, View hp, View tok, bool spec, const Feed &f = {});
+    void mtp_catch_up(Seq &s, int T, int pos0, bool spec, const Feed &f = {});
     void mtp_draft(Seq &s, int k, int *out, int nfixed = 0);
     void load_mtp();
-    void forward_small(Seq &s, const int *tokens, int T, bool all_logits, bool verify = false);
+    void forward_small(Seq &s, const int *tokens, int T, bool all_logits, bool verify = false, const Feed &f = {});
     void ple_ids(int h0, int h1, const int *tokens, int T, size_t *rows) const;
     void ple_gather(const Seq &s, const int *tokens, int T, uint8_t *dst) const;
-    void advance(Seq &s, const int *tokens, int T);
+    void advance(Seq &s, const int *tokens, int T, const int *pos3 = nullptr);
 
     void gemv(Enc &e, const WT &w, View x, int ldx, View y, int ldy, int T, int add = 0, float scale = 1.0f, View inj = View{});
     void gemv_combine(Enc &e, const WT &w, View x, int ldx, int T, View inj) { gemv(e, w, x, ldx, b.res, HCD, T, 2, 1.0f, inj); }

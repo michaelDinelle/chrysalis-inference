@@ -3,7 +3,6 @@
 #include <algorithm>
 #include <cmath>
 
-struct KVArgs { uint32_t T, pos0, layer, nsplit; };
 struct HcArgs2 { uint32_t T, inject; };
 
 void Engine::alloc_prompt_buffers() {
@@ -29,10 +28,10 @@ void Engine::alloc_prompt_buffers() {
     for (auto &[v, n] : parts) *v = a.get(n);
 }
 
-void Engine::prompt_pass(Seq &s, const int *tokens, int P) {
+void Engine::prompt_pass(Seq &s, const int *tokens, int P, const Feed &f) {
     const double t0 = now_s();
     memcpy(b.tokens.host(), tokens, std::min(P, TM) * 4);
-    std::thread gather([&] { ple_gather(s, tokens, P, pb.ple_rows.host<uint8_t>()); });
+    std::thread gather([&] { ple_gather(s, f.grams ? f.grams : tokens, P, pb.ple_rows.host<uint8_t>()); });
     uint64_t ple_ready = 0;
     View tok = npass++ & 1 ? pb.tokens2 : pb.tokens;
     memcpy(tok.host(), tokens, (size_t)P * 4);
@@ -41,7 +40,7 @@ void Engine::prompt_pass(Seq &s, const int *tokens, int P) {
     Enc e;
     e.begin(m, cb);
     const uint32_t erb = (uint32_t)embd.rb;
-    e.k("embed_q8_0").b(0, tok).b(1, embd.v).c(2, erb).b(3, pb.res).grid(P, 80);
+    e.k("embed_q8_0").b(0, tok).b(1, embd.v).c(2, erb).b(3, pb.res).b(4, f.img ? feed : tok).grid(P, 80);
     e.barrier();
     std::vector<uint64_t> routed(NL), done(NL), staged(NL);
     int gl = 0, al = 0;
@@ -108,12 +107,14 @@ void Engine::prompt_pass(Seq &s, const int *tokens, int P) {
                 mm(w.ik, pb.mx, D, pb.kir, IDX_D);
                 e.barrier();
                 const int nb_end = (pos0 + n) / KPOOL;
-                KVArgs ka{nn, pos0, (uint32_t)al, 1};
+                const KVArgs ka = kv_args(s, n, pos0, al, 1, f.pos3);
+                const View rp = f.pos3 ? feed_pos(c0) : tok;
                 View tail = s.tail.at((size_t)al * KPOOL * IDX_D * 2);
-                e.k("attn_prep").c(0, ka).b(1, pb.qg).b(2, pb.kb).b(3, pb.vb).b(4, w.qn).b(5, w.kn).b(6, kv).b(7, s.d_pages).b(8, pb.Q).grid(NH + 2 * NKV, n, 1, 256);
-                e.k("idx_qprep").c(0, ka).b(1, pb.qir).b(2, w.iqn).b(3, pb.Qi).grid(IDX_H, n, 1, 128);
+                e.k("attn_prep").c(0, ka).b(1, pb.qg).b(2, pb.kb).b(3, pb.vb).b(4, w.qn).b(5, w.kn).b(6, kv).b(7, s.d_pages).b(8, pb.Q).b(9, rp)
+                    .grid(NH + 2 * NKV, n, 1, 256);
+                e.k("idx_qprep").c(0, ka).b(1, pb.qir).b(2, w.iqn).b(3, pb.Qi).b(4, rp).grid(IDX_H, n, 1, 128);
                 const int first = pos0 / KPOOL, last = (pos0 + n) / KPOOL - 1;
-                if (last >= first) e.k("idx_pool").c(0, ka).b(1, pb.kir).b(2, tail).b(3, w.ikn).b(4, kv).b(5, s.d_pages).grid(last - first + 1, 128);
+                if (last >= first) e.k("idx_pool").c(0, ka).b(1, pb.kir).b(2, tail).b(3, w.ikn).b(4, kv).b(5, s.d_pages).b(6, rp).grid(last - first + 1, 128);
                 e.barrier();
                 e.k("idx_tail").c(0, ka).b(1, pb.kir).b(2, tail).grid(1, 128);
                 const uint32_t ld = std::max(1, nb_end);
@@ -212,7 +213,7 @@ void Engine::prompt_pass(Seq &s, const int *tokens, int P) {
             } else {
                 e.k("copy_f32").b(0, pb.res.at((size_t)(c0 - 1) * HCD * 4)).b(1, pb.gate).c(2, nr).grid((nr + 255) / 256, 256);
             }
-            e.k("embed_q8_0").b(0, tok.at((size_t)c0 * 4)).b(1, embd.v).c(2, erb).b(3, pb.xn).grid(n, 80);
+            e.k("embed_q8_0").b(0, tok.at((size_t)c0 * 4)).b(1, embd.v).c(2, erb).b(3, pb.xn).b(4, f.img ? feed.at((size_t)c0 * D * 2) : tok).grid(n, 80);
             e.barrier();
             e.k("mtp_norm").b(0, pb.xn).b(1, pb.gate).b(2, enorm).b(3, hnorm).b(4, pb.emb).b(5, pb.key).grid(HC, n, 1, 256);
             e.barrier();
@@ -229,12 +230,14 @@ void Engine::prompt_pass(Seq &s, const int *tokens, int P) {
             mm(w.ik, pb.mx, D, pb.kir, IDX_D, n);
             e.barrier();
             const int nb_end = (pos0 + n) / KPOOL;
-            const KVArgs ka{nn, pos0, (uint32_t)NATT, 1};
+            const KVArgs ka = kv_args(s, n, pos0, NATT, 1, f.pos3);
+            const View rp = f.pos3 ? feed_pos(c0) : tok;
             const View tail = s.tail.at((size_t)NATT * KPOOL * IDX_D * 2);
-            e.k("attn_prep").c(0, ka).b(1, pb.qg).b(2, pb.kb).b(3, pb.vb).b(4, w.qn).b(5, w.kn).b(6, kv).b(7, s.d_pages).b(8, pb.Q).grid(NH + 2 * NKV, n, 1, 256);
-            e.k("idx_qprep").c(0, ka).b(1, pb.qir).b(2, w.iqn).b(3, pb.Qi).grid(IDX_H, n, 1, 128);
+            e.k("attn_prep").c(0, ka).b(1, pb.qg).b(2, pb.kb).b(3, pb.vb).b(4, w.qn).b(5, w.kn).b(6, kv).b(7, s.d_pages).b(8, pb.Q).b(9, rp)
+                .grid(NH + 2 * NKV, n, 1, 256);
+            e.k("idx_qprep").c(0, ka).b(1, pb.qir).b(2, w.iqn).b(3, pb.Qi).b(4, rp).grid(IDX_H, n, 1, 128);
             const int first = pos0 / KPOOL, last = (pos0 + n) / KPOOL - 1;
-            if (last >= first) e.k("idx_pool").c(0, ka).b(1, pb.kir).b(2, tail).b(3, w.ikn).b(4, kv).b(5, s.d_pages).grid(last - first + 1, 128);
+            if (last >= first) e.k("idx_pool").c(0, ka).b(1, pb.kir).b(2, tail).b(3, w.ikn).b(4, kv).b(5, s.d_pages).b(6, rp).grid(last - first + 1, 128);
             e.barrier();
             e.k("idx_tail").c(0, ka).b(1, pb.kir).b(2, tail).grid(1, 128);
             const uint32_t ld = std::max(1, nb_end);
