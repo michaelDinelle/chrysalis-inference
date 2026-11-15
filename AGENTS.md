@@ -11,6 +11,16 @@ urgent for it.
 it completes; when something must wait, wait on the condition itself (the GPU reads empty, a file exists, a process has
 exited).
 
+**There are no trade-offs.** Giving up some of one reward (quality, speed, memory, context, library size, lines of code)
+for another is not a move here. Don't weigh one, don't offer one as an option, and don't ask which reward matters more:
+asking is proposing. A loss is a problem to solve, never a price. No second model file, lighter build, mode or variant
+for a hard machine: one file and one path that win everywhere. Don't state ceilings ("it can't do better than X on this
+card"): say what was measured, what the largest remaining cost is and what changes next. When Strata or llama.cpp gets
+a number Chrysalis doesn't on the same hardware, that number is reachable: read how they do it and get it at
+Chrysalis's quality. When one machine wins and another loses with the same file, compare their measured cost per unit
+of work before explaining anything. Delete as you climb: a second copy of a file, or a new file an existing one could
+have covered, is a loss. Don't stop to report or ask mid-climb; report at a verdict.
+
 README.md shows what Chrysalis is. This file is how to change it.
 
 ## Layout
