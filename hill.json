@@ -16,7 +16,6 @@
     "build/bench/ref-27b.bin"
   ],
   "build": "data/venv/bin/python bench/hill_tree.py",
-  "same": "data/venv/bin/python bench/hill_same.py",
   "readme": "README.md",
   "machines": {
     "e20a368548adfcc2": "7900 XTX",
@@ -45,39 +44,41 @@
   "instruments": {
     "build": {
       "run": "data/venv/bin/python bench/hill_build.py",
-      "blocks": 1,
-      "calibration_blocks": 3,
+      "depends": "data/venv/bin/python bench/hill_same.py",
+      "budget_s": 90,
       "memory_gb": 4
     },
     "speed-27b": {
-      "run": "data/venv/bin/python bench/hill_speed.py 27b",
+      "serve": "data/venv/bin/python bench/worker.py 27b",
+      "exclusive": "gpu",
+      "depends": "data/venv/bin/python bench/hill_same.py 27b",
+      "budget_s": 40,
       "blocks": 1,
-      "calibration_blocks": 3,
-      "memory_gb": 12,
-      "ready": "data/venv/bin/python bench/hill_ready.py 27b",
-      "same": "data/venv/bin/python bench/hill_same.py 27b"
+      "memory_gb": 12
     },
     "quality-27b": {
-      "run": "data/venv/bin/python bench/hill_quality.py 27b",
-      "memory_gb": 12,
-      "ready": "data/venv/bin/python bench/hill_ready.py 27b",
+      "serve": "data/venv/bin/python bench/worker.py 27b",
+      "exclusive": "gpu",
+      "depends": "data/venv/bin/python bench/hill_same.py 27b",
+      "budget_s": 90,
       "blocks": 1,
-      "same": "data/venv/bin/python bench/hill_same.py 27b"
+      "memory_gb": 12
     },
     "speed-fn": {
-      "run": "data/venv/bin/python bench/hill_speed.py fn",
+      "serve": "data/venv/bin/python bench/worker.py fn",
+      "exclusive": "gpu",
+      "depends": "data/venv/bin/python bench/hill_same.py fn",
+      "budget_s": 60,
       "blocks": 1,
-      "calibration_blocks": 3,
-      "memory_gb": 12,
-      "ready": "data/venv/bin/python bench/hill_ready.py fn",
-      "same": "data/venv/bin/python bench/hill_same.py fn"
+      "memory_gb": 12
     },
     "quality-fn": {
-      "run": "data/venv/bin/python bench/hill_quality.py fn",
-      "memory_gb": 12,
-      "ready": "data/venv/bin/python bench/hill_ready.py fn",
+      "serve": "data/venv/bin/python bench/worker.py fn",
+      "exclusive": "gpu",
+      "depends": "data/venv/bin/python bench/hill_same.py fn",
+      "budget_s": 120,
       "blocks": 1,
-      "same": "data/venv/bin/python bench/hill_same.py fn"
+      "memory_gb": 12
     }
   },
   "rewards": {

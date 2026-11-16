@@ -11,7 +11,10 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <signal.h>
 #include <sys/file.h>
+#include <sys/socket.h>
+#include <sys/un.h>
 #include <sys/stat.h>
 #include <sys/types.h>
 #include <sys/utsname.h>
@@ -21,7 +24,9 @@
 
 #define ALPHA 0.05
 #define BLOCKS 2
-#define CALIBRATION_BLOCKS 6
+#define BUDGET_S 5
+#define RING 8
+#define REFRESH_S 10
 #define HEADING "Rewards"
 
 extern char **environ;
@@ -974,13 +979,6 @@ static Digests digests(Spec *s, const char *tree) {
     return d;
 }
 
-static Pairs files_of(Spec *s) {
-    Strs all = {0};
-    for (size_t i = 0; i < s->measured.n; i++) spush(&all, s->measured.v[i]);
-    for (size_t i = 0; i < s->harness.n; i++) spush(&all, s->harness.v[i]);
-    return listing("worktree", &all);
-}
-
 typedef struct {
     char *ok[8];
     size_t len[8];
@@ -1068,7 +1066,12 @@ static void default_file(char *path, const char *text) {
 static char *hill_dir(void) {
     char *d = fmtstr("%s/.hill", root_dir);
     mkdir(d, 0777);
-    default_file(fmtstr("%s/.gitignore", d), "trees/\nlogs/\nlock\nbin.path\n");
+    char *ignore = fmtstr("%s/.gitignore", d);
+    default_file(ignore, "trees/\nlogs/\nrun/\nbin.path\n");
+    char *have = read_file(ignore, NULL);
+    FILE *f = have && !strstr(have, "run/") ? fopen(ignore, "a") : NULL;
+    if (f) fputs(have[0] && have[strlen(have) - 1] != '\n' ? "\nrun/\n" : "run/\n", f), fclose(f);
+    mkdir(fmtstr("%s/run", d), 0777);
     default_file(fmtstr("%s/.gitattributes", d), "ledger.jsonl merge=union\n");
     return d;
 }
@@ -1114,36 +1117,26 @@ static void append(J *entry) {
     fclose(f);
 }
 
-static int lock_fd = -1;
-
-static void lock_hill(void) {
-    char *path = fmtstr("%s/lock", hill_dir());
-    lock_fd = open(path, O_WRONLY | O_CREAT | O_TRUNC | O_CLOEXEC, 0666);
-    if (lock_fd < 0 || flock(lock_fd, LOCK_EX | LOCK_NB)) stop("REFUSE", "another hill run holds the lock; nothing was started");
-}
-
-static void unlock_hill(void) {
-    if (lock_fd >= 0) close(lock_fd);
-    lock_fd = -1;
-}
-
-static char *best_tree(Spec *s, const char *commit) {
+static char *tree_at(Spec *s, const char *commit, const char *slot) {
     char *trees = fmtstr("%s/trees", hill_dir());
-    char *path = fmtstr("%s/%.12s", trees, commit);
-    char *dotgit = fmtstr("%s/.git", path);
-    if (access(dotgit, F_OK)) {
+    char *path = fmtstr("%s/%s", trees, slot);
+    if (access(fmtstr("%s/.git", path), F_OK)) {
         mkdir(trees, 0777);
         Strs old = entries_of(trees);
         for (size_t i = 0; i < old.n; i++) {
+            if (!strcmp(old.v[i], "a") || !strcmp(old.v[i], "b")) continue;
             char *gone = fmtstr("%s/%s", trees, old.v[i]);
             char *argv[] = {"git", "worktree", "remove", "--force", gone, NULL};
             spawn(argv, root_dir, NULL, 0, 1, 1, -1, NULL);
             char *rm[] = {"rm", "-rf", gone, NULL};
             if (!access(gone, F_OK)) spawn(rm, root_dir, NULL, 0, 1, 1, -1, NULL);
         }
+        char *rm[] = {"rm", "-rf", path, NULL};
+        spawn(rm, root_dir, NULL, 0, 1, 1, -1, NULL);
         GIT("worktree", "prune");
-        GIT("worktree", "add", "--detach", path, commit);
-    }
+        GIT("worktree", "add", "--detach", "--force", path, commit);
+    } else
+        GIT("-C", path, "checkout", "-q", "--detach", "-f", commit);
     J *share = jget(s->spec, "share");
     for (size_t i = 0; share && share->t == JARR && i < share->len; i++) {
         char *link = fmtstr("%s/%s", path, share->v[i]->s);
@@ -1214,56 +1207,6 @@ static char **env_with(const char *side, const char *tree) {
 
 static int linebreak(unsigned char c) { return c == '\n' || c == '\r' || c == 0x0b || c == 0x0c || c == 0x1c || c == 0x1d || c == 0x1e; }
 
-static J *measure(Spec *s, const char *name, const char *tree, const char *side) {
-    J *inst = jget(jget(s->spec, "instruments"), name);
-    J *need = jget(inst, "memory_gb");
-    if (jnum(need) && jd(need) != 0) {
-        double have = available_gb();
-        if (have < jd(need)) {
-            Buf b = {0};
-            dump(&b, need);
-            stop("REFUSE", "%s needs %s GB of free memory and %.1f GB is free; nothing was started", name, bstr(&b), available_gb());
-        }
-    }
-    const char *ready = jtext(jget(inst, "ready"));
-    if (ready && ready[0]) {
-        Proc r = shell(ready, tree, 1, 1, -1, NULL);
-        if (r.status) {
-            Buf both = {0};
-            bputs(&both, r.out.p);
-            bputs(&both, r.err.p);
-            stop("REFUSE", "%s is not safe to run now: %s", name, strip(bstr(&both)));
-        }
-    }
-    char *log = fmtstr("%s/%s-%s-%s.log", logs_dir(), utc_text(1), name, side);
-    int fd = open(log, O_WRONLY | O_CREAT | O_TRUNC | O_CLOEXEC, 0666);
-    char *argv[] = {"/bin/sh", "-c", (char *)jtext(jget(inst, "run")), NULL};
-    char **env = env_with(side, tree);
-    int saved = dup(2);
-    dup2(fd, 2);
-    Proc r = spawn(argv, tree, NULL, 0, 1, 0, -1, env);
-    dup2(saved, 2);
-    close(saved);
-    close(fd);
-    if (r.status) stop("ERROR", "%s failed on the %s with exit %d (see %s)", name, side, r.status, log);
-    char *text = r.out.p, *last = NULL;
-    size_t lastlen = 0;
-    size_t i = 0, n = r.out.n;
-    while (i < n) {
-        size_t j = i;
-        while (j < n && !linebreak((unsigned char)text[j])) j++;
-        int blank = 1;
-        for (size_t k = i; k < j; k++)
-            if (!isspace((unsigned char)text[k])) blank = 0;
-        if (!blank) last = text + i, lastlen = j - i;
-        if (j < n && text[j] == '\r' && j + 1 < n && text[j + 1] == '\n') j++;
-        i = j + 1;
-    }
-    J *values = last ? parse(last, lastlen) : NULL;
-    if (!values || values->t != JOBJ) stop("ERROR", "%s did not end its output with a JSON object (see %s)", name, log);
-    return values;
-}
-
 static J *field(Spec *s, const char *rid, J *values, const char *name) {
     J *r = jget(jget(s->spec, "rewards"), rid);
     J *v = jget(values, jtext_or(r, "field", rid));
@@ -1289,85 +1232,10 @@ static void vpush(Vals *a, J *v) {
     a->v[a->n++] = v;
 }
 
-typedef struct {
-    Vals *a, *b;
-    size_t blocks;
-} Sample;
-
-static Strs noisy_instruments(Spec *s) {
-    Strs all = instrument_names(s), out = {0};
-    J *rewards = jget(s->spec, "rewards");
-    for (size_t i = 0; i < all.n; i++)
-        for (size_t r = 0; r < rewards->len; r++)
-            if (!strcmp(jget(rewards->v[r], "instrument")->s, all.v[i]) && !jtruthy(jget(rewards->v[r], "exact"))) {
-                spush(&out, all.v[i]);
-                break;
-            }
-    return out;
-}
-
 static int listed(Strs *names, const char *name) {
     for (size_t i = 0; i < names->n; i++)
         if (!strcmp(names->v[i], name)) return 1;
     return 0;
-}
-
-static Sample *paired(Spec *s, const char *tree_a, const char *tree_b, const char *a, const char *b, const char *blocks_key, long long dflt,
-                      Strs *only) {
-    J *rewards = jget(s->spec, "rewards");
-    Sample *samples = calloc(rewards->len, sizeof *samples);
-    Strs names = only ? *only : instrument_names(s);
-    for (size_t ni = 0; ni < names.n; ni++) {
-        const char *name = names.v[ni];
-        long long n = jint_or(jget(jget(s->spec, "instruments"), name), blocks_key, dflt);
-        for (size_t r = 0; r < rewards->len; r++)
-            if (!strcmp(jget(rewards->v[r], "instrument")->s, name)) {
-                samples[r].a = calloc((size_t)n, sizeof(Vals));
-                samples[r].b = calloc((size_t)n, sizeof(Vals));
-                samples[r].blocks = (size_t)n;
-            }
-        for (long long k = 0; k < n; k++) {
-            const char *order[4] = {a, b, b, a};
-            if (k % 2) order[0] = b, order[1] = a, order[2] = a, order[3] = b;
-            printf("hill: %s, block %lld of %lld: %s, %s, %s, %s\n", name, k + 1, n, order[0], order[1], order[2], order[3]);
-            fflush(stdout);
-            J *runs[4];
-            for (int i = 0; i < 4; i++) runs[i] = measure(s, name, order[i] == a ? tree_a : tree_b, order[i]);
-            for (size_t r = 0; r < rewards->len; r++) {
-                if (strcmp(jget(rewards->v[r], "instrument")->s, name)) continue;
-                for (int i = 0; i < 4; i++)
-                    if (order[i] == a) vpush(&samples[r].a[k], field(s, rewards->k[r], runs[i], name));
-                for (int i = 0; i < 4; i++)
-                    if (order[i] == b) vpush(&samples[r].b[k], field(s, rewards->k[r], runs[i], name));
-            }
-        }
-    }
-    return samples;
-}
-
-static Vals *solo(Spec *s, const char *tree, const char *side) {
-    J *rewards = jget(s->spec, "rewards");
-    Vals *samples = calloc(rewards->len, sizeof *samples);
-    Strs names = instrument_names(s);
-    for (size_t ni = 0; ni < names.n; ni++) {
-        const char *name = names.v[ni];
-        long long n = 2 * jint_or(jget(jget(s->spec, "instruments"), name), "blocks", BLOCKS);
-        for (long long k = 0; k < n; k++) {
-            printf("hill: %s, run %lld of %lld\n", name, k + 1, n);
-            fflush(stdout);
-            J *values = measure(s, name, tree, side);
-            for (size_t r = 0; r < rewards->len; r++)
-                if (!strcmp(jget(rewards->v[r], "instrument")->s, name)) vpush(&samples[r], field(s, rewards->k[r], values, name));
-        }
-    }
-    return samples;
-}
-
-static Vals flat(Vals *blocks, size_t n) {
-    Vals out = {0};
-    for (size_t k = 0; k < n; k++)
-        for (size_t i = 0; i < blocks[k].n; i++) vpush(&out, blocks[k].v[i]);
-    return out;
 }
 
 static double fsum(const double *xs, size_t count) {
@@ -1432,8 +1300,6 @@ static double fmean_vals(Vals *v) {
     return m;
 }
 
-static double fmean(const double *xs, size_t n) { return fsum(xs, n) / (double)n; }
-
 static int num_cmp(const void *a, const void *b) {
     double x = jd(*(J *const *)a), y = jd(*(J *const *)b);
     return (x > y) - (x < y);
@@ -1452,14 +1318,6 @@ static J *median(Vals *v) {
     J *x = sorted[v->n / 2 - 1], *y = sorted[v->n / 2];
     if (x->t == JINT && y->t == JINT) return jreal((double)(x->i + y->i) / 2);
     return jreal((jd(x) + jd(y)) / 2);
-}
-
-static double stdev(const double *xs, size_t n) {
-    long double mean = 0, ss = 0;
-    for (size_t i = 0; i < n; i++) mean += xs[i];
-    mean /= (long double)n;
-    for (size_t i = 0; i < n; i++) ss += ((long double)xs[i] - mean) * ((long double)xs[i] - mean);
-    return (double)sqrtl(ss / (long double)(n - 1));
 }
 
 static double inv_cdf(double p) {
@@ -1509,39 +1367,6 @@ typedef struct {
     long long dof;
     int has, na;
 } Noise;
-
-static double floor_of(Spec *s, Noise noise, size_t n) {
-    J *rewards = jget(s->spec, "rewards");
-    long long noisy = 0;
-    for (size_t i = 0; i < rewards->len; i++) noisy += !jtruthy(jget(rewards->v[i], "exact"));
-    double m = (double)(noisy > 1 ? noisy : 1);
-    return quantile(1 - ALPHA / m, noise.dof) * noise.sigma / sqrt((double)n);
-}
-
-static Noise *calibration(Spec *s, Ledger *l, const char *ident, const char *harness) {
-    J *rewards = jget(s->spec, "rewards");
-    Noise *out = calloc(rewards->len, sizeof *out);
-    for (size_t r = 0; r < rewards->len; r++) {
-        size_t count = 0, cap = 16;
-        int absent = 0;
-        double *xs = malloc(cap * sizeof *xs);
-        for (size_t i = 0; i < l->n; i++) {
-            J *e = l->v[i];
-            if (!is(e, "type", "calibration") || !is(e, "machine", ident) || !is(e, "harness", harness)) continue;
-            J *xsj = jget(jget(e, "blocks"), rewards->k[r]);
-            absent |= xsj && xsj->t == JNULL;
-            for (size_t k = 0; xsj && k < xsj->len; k++) {
-                if (count == cap) cap *= 2, xs = realloc(xs, cap * sizeof *xs);
-                double x = jd(xsj->v[k]);
-                xs[count++] = x * x;
-            }
-        }
-        if (count >= 3) out[r] = (Noise){sqrt(fmean(xs, count)), (long long)count, 1, 0};
-        else out[r].na = absent;
-        free(xs);
-    }
-    return out;
-}
 
 static int unit_is(const char *unit, const char *x) { return unit && !strcmp(unit, x); }
 
@@ -1657,158 +1482,21 @@ static int exact_only(Spec *s, const char *name) {
     return 1;
 }
 
-static J *known_best(Spec *s, Ledger *l, const char *machine, const char *harness, const char *product, const char *name) {
-    J *rewards = jget(s->spec, "rewards"), *found = NULL;
-    for (size_t i = 0; i < l->n; i++) {
-        J *e = l->v[i], *vals = jnew(JOBJ);
-        if (!is(e, "machine", machine) || !is(e, "harness", harness)) continue;
-        int all = 1;
-        for (size_t r = 0; r < rewards->len && all; r++) {
-            if (strcmp(jget(rewards->v[r], "instrument")->s, name)) continue;
-            J *v = NULL;
-            if (is(e, "type", "record") && is(e, "product", product)) v = jget(jget(e, "values"), rewards->k[r]);
-            else if (is(e, "type", "verdict") && is(e, "candidate", product)) v = jget(jget(e, "values"), rewards->k[r]);
-            else if (is(e, "type", "verdict") && is(e, "best", product)) v = jget(jget(jget(e, "rows"), rewards->k[r]), "best");
-            if (v) jset(vals, rewards->k[r], v);
-            else all = 0;
-        }
-        if (all) found = vals;
-    }
-    return found;
-}
-
-static Sample *once(Spec *s, const char *tree_a, const char *tree_b, const char *name, J *known) {
-    J *rewards = jget(s->spec, "rewards");
-    Sample *samples = calloc(rewards->len, sizeof *samples);
-    printf(known ? "hill: %s: candidate, against the best's values in the ledger\n" : "hill: %s: best, candidate\n", name);
-    fflush(stdout);
-    J *best = known ? known : measure(s, name, tree_a, "best"), *cand = measure(s, name, tree_b, "candidate");
-    int moved = 0;
-    for (size_t r = 0; r < rewards->len; r++) {
-        if (strcmp(jget(rewards->v[r], "instrument")->s, name)) continue;
-        samples[r].a = calloc(1, sizeof(Vals));
-        samples[r].b = calloc(1, sizeof(Vals));
-        samples[r].blocks = 1;
-        vpush(&samples[r].a[0], known ? jget(known, rewards->k[r]) : field(s, rewards->k[r], best, name));
-        vpush(&samples[r].b[0], field(s, rewards->k[r], cand, name));
-        moved |= !num_eq(samples[r].a[0].v[0], samples[r].b[0].v[0]);
-    }
-    if (moved && known) {
-        printf("hill: %s: best, to confirm the ledger\n", name);
-        fflush(stdout);
-        J *fresh = measure(s, name, tree_a, "best");
-        for (size_t r = 0; r < rewards->len; r++)
-            if (samples[r].blocks) vpush(&samples[r].a[0], field(s, rewards->k[r], fresh, name));
-    }
-    if (moved) {
-        printf("hill: %s: candidate again\n", name);
-        fflush(stdout);
-        J *again = measure(s, name, tree_b, "candidate");
-        for (size_t r = 0; r < rewards->len; r++)
-            if (samples[r].blocks) vpush(&samples[r].b[0], field(s, rewards->k[r], again, name));
-    }
-    return samples;
-}
-
-static Sample *carried(Spec *s, const char *name, J *known, const char *fp) {
-    J *rewards = jget(s->spec, "rewards");
-    Sample *samples = calloc(rewards->len, sizeof *samples);
-    printf("hill: %s: the candidate runs the same code for it as the best (%.16s): its rewards are the best's values in the ledger\n", name, fp);
-    fflush(stdout);
-    for (size_t r = 0; r < rewards->len; r++) {
-        if (strcmp(jget(rewards->v[r], "instrument")->s, name)) continue;
-        samples[r].a = calloc(1, sizeof(Vals));
-        samples[r].b = calloc(1, sizeof(Vals));
-        samples[r].blocks = 1;
-        vpush(&samples[r].a[0], jget(known, rewards->k[r]));
-        vpush(&samples[r].b[0], jget(known, rewards->k[r]));
-    }
-    return samples;
-}
-
-static char *same_here(const char *cmd, const char *tree) {
-    if (!cmd || !cmd[0]) return NULL;
-    Proc a = shell(cmd, tree, 1, 0, -1, NULL), b = shell(cmd, root_dir, 1, 0, -1, NULL);
-    return !a.status && !b.status && bstr(&a.out)[0] && !strcmp(bstr(&a.out), bstr(&b.out)) ? bstr(&a.out) : NULL;
-}
-
 typedef struct {
     J *rows;
     int wins, losses;
 } Judged;
 
-static Judged judge(Spec *s, Sample *samples, Noise *noise) {
-    J *rewards = jget(s->spec, "rewards");
-    Judged out = {jnew(JOBJ), 0, 0};
-    for (size_t r = 0; r < rewards->len; r++) {
-        if (!samples[r].blocks) continue;
-        const char *rid = rewards->k[r];
-        J *spec = rewards->v[r];
-        double sign = is(spec, "better", "higher") ? 1 : -1;
-        J *row = jnew(JOBJ);
-        const char *result;
-        Sample *sm = &samples[r];
-        Vals fa = flat(sm->a, sm->blocks), fc = flat(sm->b, sm->blocks);
-        int exact = jtruthy(jget(spec, "exact")), gone = nulls(rid, &fa), missing = nulls(rid, &fc);
-        if (gone || missing) {
-            jset(row, "best", gone ? jnew(JNULL) : exact ? exact_value(rid, &fa) : median(&fa));
-            jset(row, "candidate", missing ? jnew(JNULL) : exact ? exact_value(rid, &fc) : median(&fc));
-            jset(row, "change", jnew(JNULL));
-            result = gone && missing ? "tie" : gone ? "win" : "loss";
-        } else if (exact) {
-            J *a = exact_value(rid, &fa), *c = exact_value(rid, &fc);
-            jset(row, "best", a);
-            jset(row, "candidate", c);
-            int zero = a->t == JINT ? a->i == 0 : a->d == 0;
-            jset(row, "change", zero ? jnew(JNULL) : jreal(jd(c) / jd(a) - 1));
-            double diff = (a->t == JINT && c->t == JINT) ? (double)(c->i - a->i) : jd(c) - jd(a);
-            result = diff * sign > 0 ? "win" : diff * sign < 0 ? "loss" : "tie";
-        } else {
-            double *xs = malloc((sm->blocks + 1) * sizeof *xs);
-            for (size_t k = 0; k < sm->blocks; k++) {
-                double ma = fmean_vals(&sm->a[k]), mc = fmean_vals(&sm->b[k]);
-                if (ma <= 0 || mc <= 0) stop("ERROR", "%s is noisy but not positive; it has to be exact", rid);
-                xs[k] = log(mc / ma);
-            }
-            double d = fmean(xs, sm->blocks);
-            Noise nz = noise[r];
-            if (nz.na) stop("ERROR", "%s now gives numbers but was calibrated as not applicable here: run hill calibrate", rid);
-            if (!nz.has) {
-                double *reps = malloc(2 * sm->blocks * sizeof *reps);
-                size_t n = 0;
-                for (int side = 0; side < 2; side++)
-                    for (size_t k = 0; k < sm->blocks; k++, n++) {
-                        Vals *v = side ? &sm->b[k] : &sm->a[k];
-                        reps[n] = log(jd(v->v[v->n - 1]) / jd(v->v[0]));
-                        reps[n] *= reps[n];
-                    }
-                nz = (Noise){sqrt(fsum(reps, n) / (double)n / 2), (long long)n, 1, 0};
-                free(reps);
-            }
-            double fl = floor_of(s, nz, sm->blocks);
-            jset(row, "best", median(&fa));
-            jset(row, "candidate", median(&fc));
-            jset(row, "change", jreal(expm1(d)));
-            jset(row, "floor", jreal(expm1(fl)));
-            result = d * sign > fl ? "win" : d * sign < -fl ? "loss" : "tie";
-            free(xs);
-        }
-        jset(row, "result", jstr(result));
-        jset(out.rows, rid, row);
-        out.wins += !strcmp(result, "win");
-        out.losses += !strcmp(result, "loss");
-    }
-    return out;
-}
-
-static char *report(Spec *s, J *rows, const char *verdict) {
-    Buf b = {0}, named = {0};
-    bputs(&b, "| Reward | Best | Candidate | Change | Verdict |\n| --- | ---: | ---: | ---: | --- |");
+static char *report(Spec *s, J *rows, const char *verdict, const char *label) {
+    Buf b = {0}, named = {0}, table = {0};
     const char *pick = !strcmp(verdict, "PROMOTE") ? "win" : !strcmp(verdict, "REJECT") ? "loss" : "";
     int counts[3] = {0};
     for (size_t i = 0; i < rows->len; i++) {
         J *row = rows->v[i];
         J *change = jget(row, "change");
+        const char *result = jget(row, "result")->s;
+        counts[!strcmp(result, "win") ? 0 : !strcmp(result, "tie") ? 1 : 2]++;
+        if (!strcmp(result, "tie") && num_eq(jget(row, "best"), jget(row, "candidate"))) continue;
         Buf c = {0}, d = {0};
         if (!change || change->t == JNULL) {
         } else if (jget(row, "floor")) {
@@ -1820,21 +1508,19 @@ static char *report(Spec *s, J *rows, const char *verdict) {
         }
         char *fa, *fc;
         pair_fmt(s, rows->k[i], jget(row, "best"), jget(row, "candidate"), &fa, &fc);
-        const char *result = jget(row, "result")->s;
-        bprintf(&b, "\n| %s | %s | %s | %s | %s |", name_of(s, rows->k[i]), fa, fc, bstr(&c), result);
+        bprintf(&table, "\n| %s | %s | %s | %s | %s |", name_of(s, rows->k[i]), fa, fc, bstr(&c), result);
         if (!strcmp(result, pick)) bprintf(&named, "\n  %s: %s \xe2\x86\x92 %s%s%s%s", name_of(s, rows->k[i]), fa, fc, d.n ? " (" : "", bstr(&d), d.n ? ")" : "");
-        counts[!strcmp(result, "win") ? 0 : !strcmp(result, "tie") ? 1 : 2]++;
     }
+    bprintf(&b, "%s:", label);
+    if (table.n) bprintf(&b, "\n| Reward | Best | Candidate | Change | Verdict |\n| --- | ---: | ---: | ---: | --- |%s", bstr(&table));
     size_t total = jget(s->spec, "rewards")->len;
-    if (rows->len && rows->len < total) bprintf(&b, "\n\nThe gate stopped at the first loss: %zu of %zu rewards were not measured.", total - rows->len, total);
-    if (!rows->len) bprintf(&b, "\n\nThe candidate builds and runs the same code here as the best, so nothing was measured: every reward is equal.");
+    if (rows->len < total) bprintf(&b, "\nThe step stopped at the first loss: %zu of %zu rewards were not measured.", total - rows->len, total);
     if (!strcmp(verdict, "PROMOTE"))
-        bprintf(&b, "\n\n\xf0\x9f\x91\x91 PROMOTE on %d reward%s, with %d equal and none worse:%s\nCommit it with .hill/ledger.jsonl staged; it's the new best.", counts[0],
-                counts[0] == 1 ? "" : "s", counts[1], bstr(&named));
+        bprintf(&b, "\nPROMOTE on %d reward%s, with %d equal and none worse:%s", counts[0], counts[0] == 1 ? "" : "s", counts[1], bstr(&named));
     else if (!strcmp(verdict, "REJECT"))
-        bprintf(&b, "\n\nREJECT on %d reward%s, with %d better and %d equal:%s\nThe best stays.", counts[2], counts[2] == 1 ? "" : "s", counts[0], counts[1], bstr(&named));
+        bprintf(&b, "\nREJECT on %d reward%s, with %d better and %d equal:%s", counts[2], counts[2] == 1 ? "" : "s", counts[0], counts[1], bstr(&named));
     else
-        bprintf(&b, "\n\nTIE: %d better, %d equal, %d worse. The best stays.", counts[0], counts[1], counts[2]);
+        bprintf(&b, "\nTIE: %d better, %d equal, %d worse.", counts[0], counts[1], counts[2]);
     return bstr(&b);
 }
 
@@ -1978,202 +1664,934 @@ static J *entry_of(const char *type, Machine *m) {
     return e;
 }
 
-static int cmd_calibrate(Spec *s) {
-    char *commit = head_commit();
-    if (!commit) stop("REFUSE", "commit something first: calibration measures HEAD");
-    Digests best = digests(s, commit), work = digests(s, "worktree");
-    if (strcmp(best.product, work.product) || strcmp(best.harness, work.harness))
-        stop("REFUSE", "calibration pairs HEAD's tree with the working tree, so the working tree's measured and harness paths have to match HEAD's");
-    Machine m = machine(s);
-    lock_hill();
-    char *tree = best_tree(s, commit);
-    build(s, tree, "best");
-    build(s, root_dir, "again");
-    Strs names = noisy_instruments(s);
-    Sample *samples = paired(s, tree, root_dir, "best", "again", "calibration_blocks", CALIBRATION_BLOCKS, &names);
-    unlock_hill();
-    J *rewards = jget(s->spec, "rewards");
-    J *blocks = jnew(JOBJ);
-    Buf biased = {0};
-    int nbiased = 0;
-    for (size_t r = 0; r < rewards->len; r++) {
-        const char *rid = rewards->k[r];
-        Sample *sm = &samples[r];
-        if (!listed(&names, jget(rewards->v[r], "instrument")->s)) continue;
-        Vals all = flat(sm->a, sm->blocks), again = flat(sm->b, sm->blocks);
-        for (size_t i = 0; i < again.n; i++) vpush(&all, again.v[i]);
-        if (jtruthy(jget(rewards->v[r], "exact"))) {
-            exact_value(rid, &all);
-            continue;
-        }
-        if (nulls(rid, &all)) {
-            jset(blocks, rid, jnew(JNULL));
-            continue;
-        }
-        double *xs = malloc((sm->blocks + 1) * sizeof *xs);
-        J *list = jnew(JARR);
-        for (size_t k = 0; k < sm->blocks; k++) {
-            xs[k] = log(fmean_vals(&sm->b[k]) / fmean_vals(&sm->a[k]));
-            jpush(list, jreal(xs[k]));
-        }
-        if (sm->blocks < 3) stop("ERROR", "calibrating %s needs at least 3 blocks", rid);
-        double sd = stdev(xs, sm->blocks);
-        if (sd != 0 && fabs(fmean(xs, sm->blocks)) > 3 * sd / sqrt((double)sm->blocks)) {
-            if (nbiased++) bputs(&biased, "\n  ");
-            bprintf(&biased, "%s: %+.2f%%", name_of(s, rid), 100 * expm1(fmean(xs, sm->blocks)));
-        }
-        jset(blocks, rid, list);
-    }
-    if (nbiased)
-        stop("ERROR", "the same code measures differently in HEAD's tree and the working tree, so the gate can't be trusted until "
-                      "that's found and fixed (shared build outputs, paths baked into builds, caches):\n  %s", bstr(&biased));
-    J *entry = entry_of("calibration", &m);
-    jset(entry, "harness", jstr(best.harness));
-    jset(entry, "commit", jstr(commit));
-    jset(entry, "blocks", blocks);
-    append(entry);
-    Ledger l = read_ledger();
-    Noise *noise = calibration(s, &l, m.ident, best.harness);
-    for (size_t r = 0; r < rewards->len; r++) {
-        J *b = jget(blocks, rewards->k[r]);
-        if (!b || b->t == JNULL) continue;
-        long long n = jint_or(jget(jget(s->spec, "instruments"), jget(rewards->v[r], "instrument")->s), "blocks", BLOCKS);
-        printf("%s: a gate of %lld blocks sees a change beyond \xc2\xb1%.2f%% (%lld calibration blocks)\n", name_of(s, rewards->k[r]), n,
-               100 * expm1(floor_of(s, noise[r], (size_t)n)), noise[r].dof);
-    }
-    return 0;
+static double now_s(void) {
+    struct timespec t;
+    clock_gettime(CLOCK_MONOTONIC, &t);
+    return (double)t.tv_sec + (double)t.tv_nsec / 1e9;
 }
 
-static int cmd_record(Spec *s) {
-    char *commit = head_commit();
-    if (!commit) stop("REFUSE", "commit something first: record measures HEAD");
-    Digests best = digests(s, commit);
-    Machine m = machine(s);
-    lock_hill();
-    char *tree = best_tree(s, commit);
-    build(s, tree, "best");
-    Vals *samples = solo(s, tree, "best");
-    unlock_hill();
-    J *rewards = jget(s->spec, "rewards");
-    J *values = jnew(JOBJ);
-    for (size_t r = 0; r < rewards->len; r++)
-        jset(values, rewards->k[r],
-             jtruthy(jget(rewards->v[r], "exact")) || nulls(rewards->k[r], &samples[r]) ? exact_value(rewards->k[r], &samples[r]) : median(&samples[r]));
-    Ledger l = read_ledger();
-    J *before = NULL;
-    for (size_t i = 0; i < l.n; i++) {
-        J *e = l.v[i];
-        if (is(e, "type", "record") && is(e, "machine", m.ident) && is(e, "product", best.product) && !is(e, "harness", best.harness)) before = e;
-    }
-    J *entry = entry_of("record", &m);
-    jset(entry, "commit", jstr(commit));
-    jset(entry, "product", jstr(best.product));
-    jset(entry, "harness", jstr(best.harness));
-    jset(entry, "values", values);
-    append(entry);
-    for (size_t r = 0; r < values->len; r++) printf("%s: %s\n", name_of(s, values->k[r]), fmt_value(s, values->k[r], values->v[r], 0));
-    if (before) {
-        J *old = jget(before, "values");
-        Noise *now_noise = calibration(s, &l, m.ident, best.harness), *old_noise = calibration(s, &l, m.ident, jtext(jget(before, "harness")));
-        Buf lower = {0};
-        int nl = 0;
-        for (size_t r = 0; r < values->len; r++) {
-            J *o = jget(old, values->k[r]);
-            if (!o || o->t == JNULL || values->v[r]->t == JNULL) continue;
-            J *spec_r = rewards->v[r];
-            double sign = is(spec_r, "better", "higher") ? 1 : -1, v = jd(values->v[r]), was = jd(o);
-            Noise noise = now_noise[r].has ? now_noise[r] : old_noise[r];
-            for (size_t i = l.n; !noise.has && i-- > 0;) {
-                J *e = l.v[i];
-                if (is(e, "type", "calibration") && is(e, "machine", m.ident) && jget(jget(e, "blocks"), values->k[r]))
-                    noise = calibration(s, &l, m.ident, jtext(jget(e, "harness")))[r];
-            }
-            int worse;
-            if (jtruthy(jget(spec_r, "exact")) || !noise.has || v <= 0 || was <= 0)
-                worse = (v - was) * sign < 0;
-            else
-                worse = log(v / was) * sign <
-                        -floor_of(s, noise, (size_t)jint_or(jget(jget(s->spec, "instruments"), jget(spec_r, "instrument")->s), "blocks", BLOCKS));
-            if (worse) {
-                nl++;
-                bprintf(&lower, "  %s: %s -> %s\n", name_of(s, values->k[r]), fmt_value(s, values->k[r], o, 0),
-                        fmt_value(s, values->k[r], values->v[r], 0));
-            }
-        }
+static int read_line(int fd, Buf *got, double deadline, char **line) {
+    for (;;) {
+        char *nl = got->n ? memchr(got->p, '\n', got->n) : NULL;
         if (nl) {
-            printf("\nThe harness changed since the last record of this code, and these values moved the wrong way. "
-                   "Whether to keep that harness change is the user's call:\n%s", bstr(&lower));
+            size_t n = (size_t)(nl - got->p);
+            *line = strndup(got->p, n);
+            memmove(got->p, nl + 1, got->n - n - 1);
+            got->n -= n + 1;
+            return 1;
         }
+        int ms = -1;
+        if (deadline > 0) {
+            double left = deadline - now_s();
+            if (left <= 0) return -1;
+            ms = (int)(left * 1000) + 1;
+        }
+        struct pollfd p = {fd, POLLIN, 0};
+        int r = poll(&p, 1, ms);
+        if (r < 0 && errno == EINTR) continue;
+        if (r == 0) return -1;
+        char chunk[65536];
+        ssize_t k = read(fd, chunk, sizeof chunk);
+        if (k < 0 && errno == EINTR) continue;
+        if (k <= 0) return 0;
+        bput(got, chunk, (size_t)k);
     }
-    return 0;
 }
 
-static int cmd_gate(Spec *s) {
-    char *commit = head_commit();
-    if (!commit) stop("REFUSE", "commit something first: the gate judges the working tree against HEAD");
-    Digests best = digests(s, commit);
-    Pairs cand_files = files_of(s);
-    Digests cand = all_plain(s) ? split_digests(s, &cand_files) : digests(s, "worktree");
-    if (strcmp(cand.harness, best.harness)) stop("REFUSE", "the harness differs from HEAD's: land harness changes on their own, then record");
-    if (!strcmp(cand.product, best.product)) stop("REFUSE", "the measured paths are the same as HEAD's: nothing to judge");
+static pid_t launch(const char *cmd, const char *cwd, const char *side, int *in, int *out, const char *log) {
+    int pin[2], pout[2];
+    if (pipe2(pin, O_CLOEXEC) || pipe2(pout, O_CLOEXEC)) stop("ERROR", "pipe: %s", strerror(errno));
+    int fd = open(log, O_WRONLY | O_CREAT | O_APPEND | O_CLOEXEC, 0666);
+    char **env = env_with(side, cwd);
+    fflush(stdout);
+    fflush(stderr);
+    pid_t pid = fork();
+    if (pid < 0) stop("ERROR", "fork: %s", strerror(errno));
+    if (!pid) {
+        setpgid(0, 0);
+        if (chdir(cwd)) _exit(127);
+        dup2(in ? pin[0] : open("/dev/null", O_RDONLY), 0);
+        dup2(pout[1], 1);
+        dup2(fd, 2);
+        environ = env;
+        execl("/bin/sh", "sh", "-c", cmd, (char *)NULL);
+        _exit(127);
+    }
+    setpgid(pid, pid);
+    close(pin[0]);
+    close(pout[1]);
+    close(fd);
+    if (in) *in = pin[1];
+    else close(pin[1]);
+    *out = pout[0];
+    return pid;
+}
+
+static int reap(pid_t pid) {
+    int st = 0;
+    while (waitpid(pid, &st, 0) < 0 && errno == EINTR) {
+    }
+    return WIFEXITED(st) ? WEXITSTATUS(st) : -WTERMSIG(st);
+}
+
+typedef struct {
+    char *serve, *tree, *excl, *log;
+    pid_t pid;
+    int in, out;
+    Buf got;
+} Worker;
+
+static Worker *workers;
+static size_t nworkers;
+
+static void worker_kill(Worker *w) {
+    if (!w->pid) return;
+    kill(-w->pid, SIGKILL);
+    close(w->in);
+    close(w->out);
+    reap(w->pid);
+    w->pid = 0;
+    w->got.n = 0;
+}
+
+static Worker *worker_for(const char *serve, const char *tree, const char *side, const char *excl, const char *name) {
+    for (size_t i = 0; i < nworkers; i++)
+        if (workers[i].pid && !strcmp(workers[i].serve, serve) && !strcmp(workers[i].tree, tree)) return &workers[i];
+    for (size_t i = 0; excl && i < nworkers; i++)
+        if (workers[i].pid && workers[i].excl && !strcmp(workers[i].excl, excl)) worker_kill(&workers[i]);
+    Worker *w = NULL;
+    for (size_t i = 0; i < nworkers && !w; i++)
+        if (!workers[i].pid) w = &workers[i];
+    if (!w) workers = realloc(workers, (nworkers + 1) * sizeof *workers), w = &workers[nworkers++];
+    *w = (Worker){strdup(serve), strdup(tree), excl ? strdup(excl) : NULL, fmtstr("%s/%s-%s.log", logs_dir(), name, side), 0, -1, -1, {0}};
+    printf("hill: %s: starting the %s's worker\n", name, side);
+    w->pid = launch(serve, tree, side, &w->in, &w->out, w->log);
+    for (;;) {
+        char *line;
+        if (read_line(w->out, &w->got, 0, &line) <= 0) {
+            worker_kill(w);
+            stop("ERROR", "%s's worker for the %s exited before it was ready (see %s)", name, side, w->log);
+        }
+        J *j = parse(line, strlen(line));
+        if (j && j->t == JOBJ && jtruthy(jget(j, "ready"))) return w;
+    }
+}
+
+static double budget_of(J *inst) {
+    J *b = jget(inst, "budget_s");
+    return jnum(b) && jd(b) > 0 ? jd(b) : BUDGET_S;
+}
+
+static void over(const char *name, double budget) { stop("ERROR", "%s took more than %g s: make it fast first", name, budget); }
+
+static char *one_shot(const char *cmd, const char *tree, const char *side, const char *name, double budget, const char *log, int *status) {
+    int out;
+    pid_t pid = launch(cmd, tree, side, NULL, &out, log);
+    Buf all = {0};
+    char chunk[65536];
+    double deadline = now_s() + budget;
+    int done = 0;
+    while (!done) {
+        double left = deadline - now_s();
+        struct pollfd p = {out, POLLIN, 0};
+        int q = left > 0 ? poll(&p, 1, (int)(left * 1000) + 1) : 0;
+        if (q < 0 && errno == EINTR) continue;
+        if (q == 0) {
+            kill(-pid, SIGKILL);
+            close(out);
+            reap(pid);
+            over(name, budget);
+        }
+        ssize_t k = read(out, chunk, sizeof chunk);
+        if (k < 0 && errno == EINTR) continue;
+        if (k <= 0) done = 1;
+        else bput(&all, chunk, (size_t)k);
+    }
+    close(out);
+    *status = reap(pid);
+    return bstr(&all);
+}
+
+static char *last_line(char *text, size_t n) {
+    char *last = NULL;
+    size_t lastlen = 0, i = 0;
+    while (i < n) {
+        size_t j = i;
+        while (j < n && !linebreak((unsigned char)text[j])) j++;
+        int blank = 1;
+        for (size_t k = i; k < j; k++)
+            if (!isspace((unsigned char)text[k])) blank = 0;
+        if (!blank) last = text + i, lastlen = j - i;
+        if (j < n && text[j] == '\r' && j + 1 < n && text[j + 1] == '\n') j++;
+        i = j + 1;
+    }
+    return last ? strndup(last, lastlen) : NULL;
+}
+
+static J *last_detail, *cand_detail;
+
+static J *run_inst(Spec *s, const char *name, const char *tree, const char *side) {
+    J *inst = jget(jget(s->spec, "instruments"), name);
+    J *need = jget(inst, "memory_gb");
+    if (jnum(need) && jd(need) != 0 && available_gb() < jd(need)) {
+        Buf b = {0};
+        dump(&b, need);
+        stop("REFUSE", "%s needs %s GB of free memory and %.1f GB is free; nothing was started", name, bstr(&b), available_gb());
+    }
+    const char *ready = jtext(jget(inst, "ready"));
+    if (ready && ready[0]) {
+        Proc r = shell(ready, tree, 1, 1, -1, NULL);
+        if (r.status) {
+            Buf both = {0};
+            bputs(&both, r.out.p);
+            bputs(&both, r.err.p);
+            stop("REFUSE", "%s is not safe to run now: %s", name, strip(bstr(&both)));
+        }
+    }
+    double budget = budget_of(inst);
+    const char *serve = jtext(jget(inst, "serve"));
+    char *line = NULL, *log;
+    if (serve) {
+        Worker *w = worker_for(serve, tree, side, jtext(jget(inst, "exclusive")), name);
+        log = w->log;
+        char *req = fmtstr("run %s\n", name);
+        ssize_t sent = write(w->in, req, strlen(req));
+        (void)sent;
+        int got = read_line(w->out, &w->got, now_s() + budget, &line);
+        if (got <= 0) worker_kill(w);
+        if (got < 0) over(name, budget);
+        if (!got) stop("ERROR", "%s's worker for the %s exited (see %s)", name, side, log);
+    } else {
+        log = fmtstr("%s/%s-%s.log", logs_dir(), name, side);
+        int status;
+        char *text = one_shot(jtext(jget(inst, "run")), tree, side, name, budget, log, &status);
+        if (status) stop("ERROR", "%s failed on the %s with exit %d (see %s)", name, side, status, log);
+        line = last_line(text, strlen(text));
+    }
+    J *values = line ? parse(line, strlen(line)) : NULL;
+    if (!values || values->t != JOBJ) stop("ERROR", "%s did not answer with one JSON object (see %s)", name, log);
+    last_detail = jget(values, "detail");
+    return values;
+}
+
+static char *fingerprint(Spec *s, const char *name, const char *tree, const char *side) {
+    J *inst = jget(jget(s->spec, "instruments"), name);
+    const char *cmd = jtext(jget(inst, "depends"));
+    if (!cmd || !cmd[0]) return NULL;
+    int status;
+    char *text = one_shot(cmd, tree, side, fmtstr("%s's depends", name), budget_of(inst), fmtstr("%s/%s-depends-%s.log", logs_dir(), name, side), &status);
+    text = strip(text);
+    return !status && text[0] ? text : NULL;
+}
+
+typedef struct {
+    J *v;
+    double at;
+} Kept;
+
+typedef struct {
+    Kept k[RING];
+    size_t n;
+} Ring;
+
+static struct {
+    Spec s;
+    char *commit, *tree;
+    Ring *rings;
+    J *fps, *details;
+    double *next;
+} B;
+
+static void ring_push(Ring *r, J *v) {
+    if (r->n == RING) memmove(r->k, r->k + 1, (RING - 1) * sizeof *r->k), r->n--;
+    r->k[r->n++] = (Kept){v, now_s()};
+}
+
+static int of(Spec *s, size_t r, const char *name) { return !strcmp(jget(jget(s->spec, "rewards")->v[r], "instrument")->s, name); }
+
+static size_t held(Spec *s, const char *name) {
+    J *rewards = jget(s->spec, "rewards");
+    size_t least = RING;
+    for (size_t r = 0; r < rewards->len; r++)
+        if (of(s, r, name) && B.rings[r].n < least) least = B.rings[r].n;
+    return least;
+}
+
+static J *best_sample(Spec *s, const char *name, Vals *into) {
+    J *v = run_inst(s, name, B.tree, "best");
+    J *rewards = jget(s->spec, "rewards");
+    for (size_t r = 0; r < rewards->len; r++)
+        if (of(s, r, name)) {
+            J *x = field(s, rewards->k[r], v, name);
+            ring_push(&B.rings[r], x);
+            if (into) vpush(&into[r], x);
+        }
+    jset(B.details, name, last_detail ? last_detail : jnew(JNULL));
+    return v;
+}
+
+static void take(Spec *s, const char *name, const char *tree, Vals *into) {
+    J *v = run_inst(s, name, tree, "candidate");
+    J *rewards = jget(s->spec, "rewards");
+    for (size_t r = 0; r < rewards->len; r++)
+        if (of(s, r, name)) vpush(&into[r], field(s, rewards->k[r], v, name));
+    cand_detail = last_detail;
+}
+
+static Vals ring_vals(Ring *r) {
+    Vals v = {0};
+    for (size_t i = 0; i < r->n; i++) vpush(&v, r->k[i].v);
+    return v;
+}
+
+static Noise ring_noise(const char *rid, Ring *r) {
+    if (r->n < 2) stop("ERROR", "%s needs two samples of the best to know its noise", rid);
+    double sum = 0;
+    for (size_t i = 1; i < r->n; i++) {
+        double a = jd(r->k[i - 1].v), b = jd(r->k[i].v);
+        if (a <= 0 || b <= 0) stop("ERROR", "%s is noisy but not positive; it has to be exact", rid);
+        sum += log(b / a) * log(b / a);
+    }
+    return (Noise){sqrt(sum / (double)(r->n - 1) / 2), (long long)(r->n - 1), 1, 0};
+}
+
+static void judge_rows(Spec *s, const char *name, Vals *a, Vals *b, J *rows, int *wins, int *losses) {
+    J *rewards = jget(s->spec, "rewards");
+    long long noisy = 0;
+    for (size_t i = 0; i < rewards->len; i++) noisy += !jtruthy(jget(rewards->v[i], "exact"));
+    for (size_t r = 0; r < rewards->len; r++) {
+        if (!of(s, r, name)) continue;
+        const char *rid = rewards->k[r];
+        J *spec = rewards->v[r], *row = jnew(JOBJ);
+        double sign = is(spec, "better", "higher") ? 1 : -1;
+        const char *result;
+        int exact = jtruthy(jget(spec, "exact")), gone = nulls(rid, &a[r]), missing = nulls(rid, &b[r]);
+        if (gone || missing) {
+            jset(row, "best", gone ? jnew(JNULL) : exact ? exact_value(rid, &a[r]) : median(&a[r]));
+            jset(row, "candidate", missing ? jnew(JNULL) : exact ? exact_value(rid, &b[r]) : median(&b[r]));
+            jset(row, "change", jnew(JNULL));
+            result = gone && missing ? "tie" : gone ? "win" : "loss";
+        } else if (exact) {
+            J *x = exact_value(rid, &a[r]), *c = exact_value(rid, &b[r]);
+            jset(row, "best", x);
+            jset(row, "candidate", c);
+            int zero = x->t == JINT ? x->i == 0 : x->d == 0;
+            jset(row, "change", zero ? jnew(JNULL) : jreal(jd(c) / jd(x) - 1));
+            double diff = (x->t == JINT && c->t == JINT) ? (double)(c->i - x->i) : jd(c) - jd(x);
+            result = diff * sign > 0 ? "win" : diff * sign < 0 ? "loss" : "tie";
+        } else {
+            double ma = fmean_vals(&a[r]), mc = fmean_vals(&b[r]);
+            if (ma <= 0 || mc <= 0) stop("ERROR", "%s is noisy but not positive; it has to be exact", rid);
+            double d = log(mc / ma);
+            Noise nz = ring_noise(rid, &B.rings[r]);
+            double fl = quantile(1 - ALPHA / (double)(noisy > 1 ? noisy : 1), nz.dof) * nz.sigma * sqrt(1.0 / (double)a[r].n + 1.0 / (double)b[r].n);
+            jset(row, "best", median(&a[r]));
+            jset(row, "candidate", median(&b[r]));
+            jset(row, "change", jreal(expm1(d)));
+            jset(row, "floor", jreal(expm1(fl)));
+            result = d * sign > fl ? "win" : d * sign < -fl ? "loss" : "tie";
+        }
+        jset(row, "result", jstr(result));
+        jset(rows, rid, row);
+        *wins += !strcmp(result, "win");
+        *losses += !strcmp(result, "loss");
+    }
+}
+
+static void end_best(void) {
+    for (size_t i = 0; i < nworkers; i++) worker_kill(&workers[i]);
+    B.commit = NULL;
+}
+
+static Spec spec_at(const char *commit) {
+    const char *names[] = {fmtstr("%s:hill.json", commit)};
+    Blobs b = cat_files(names, 1);
+    if (!b.ok[0]) stop("ERROR", "%.12s has no hill.json", commit);
+    return load_spec(b.ok[0], b.len[0]);
+}
+
+static void set_best(const char *commit) {
+    if (B.commit && !strcmp(B.commit, commit)) return;
+    end_best();
+    Spec s = spec_at(commit);
+    char *tree = tree_at(&s, commit, B.tree && !strcmp(B.tree + strlen(B.tree) - 1, "b") ? "b" : "a");
+    build(&s, tree, "best");
+    size_t n = jget(s.spec, "rewards")->len;
+    B.s = s;
+    B.tree = tree;
+    B.rings = calloc(n + 1, sizeof *B.rings);
+    B.fps = jnew(JOBJ);
+    B.details = jnew(JOBJ);
+    B.next = calloc(jget(s.spec, "instruments")->len + 1, sizeof *B.next);
+    B.commit = strdup(commit);
+}
+
+static char *git_path(const char *what) {
+    char *p = strip(GIT("rev-parse", "--git-path", what));
+    return p[0] == '/' ? p : fmtstr("%s/%s", root_dir, p);
+}
+
+static char *run_path(const char *name) { return fmtstr("%s/run/%s", hill_dir(), name); }
+
+static void copy_file(const char *from, const char *to) {
+    size_t n = 0;
+    char *text = read_file(from, &n);
+    FILE *f = fopen(to, "wb");
+    if (!f) stop("ERROR", "cannot write %s", to);
+    if (text) fwrite(text, 1, n, f);
+    fclose(f);
+}
+
+static char *snapshot(void) {
+    char *idx = run_path("index");
+    struct stat st;
+    copy_file(git_path("index"), idx);
+    if (!stat(git_path("index"), &st)) utimensat(AT_FDCWD, idx, (struct timespec[]){
+#ifdef __APPLE__
+            st.st_atimespec, st.st_mtimespec
+#else
+            st.st_atim, st.st_mtim
+#endif
+        }, 0);
+    setenv("GIT_INDEX_FILE", idx, 1);
+    GIT("add", "-A");
+    GIT("reset", "-q", "HEAD", "--", ".hill/ledger.jsonl");
+    char *tree = strip(GIT("write-tree"));
+    unsetenv("GIT_INDEX_FILE");
+    return tree;
+}
+
+static char *commit_of(const char *tree, const char *parent, const char *message) {
+    return strip(GIT("commit-tree", tree, "-p", parent, "-m", message));
+}
+
+static int cmd_check(void);
+
+static char *land(const char *head, const char *tree, const char *message) {
+    char *idx = run_path("index");
+    setenv("GIT_INDEX_FILE", idx, 1);
+    GIT("read-tree", tree);
+    if (!access(fmtstr("%s/.hill/ledger.jsonl", root_dir), F_OK)) GIT("add", "-f", ".hill/ledger.jsonl");
+    int bad = cmd_check();
+    char *t = strip(GIT("write-tree"));
+    unsetenv("GIT_INDEX_FILE");
+    if (bad) stop("ERROR", "the commit would not pass the hook (above)");
+    char *c = commit_of(t, head, message);
+    GIT("update-ref", "-m", fmtstr("hill step: %s", message), "HEAD", c, head);
+    GIT("reset", "-q");
+    return c;
+}
+
+static char *slug(const char *message) {
+    Buf b = {0};
+    for (const char *p = message; *p && b.n < 60; p++) {
+        if (isalnum((unsigned char)*p)) bputc(&b, (char)tolower((unsigned char)*p));
+        else if (b.n && b.p[b.n - 1] != '-') bputc(&b, '-');
+    }
+    while (b.n && b.p[b.n - 1] == '-') b.n--;
+    if (!b.n) bputs(&b, "candidate");
+    char *base = bstr(&b), *ref = fmtstr("refs/candidates/%s", base);
+    for (int i = 2;; i++) {
+        char *argv[] = {"git", "rev-parse", "-q", "--verify", ref, NULL};
+        if (spawn(argv, root_dir, NULL, 0, 1, 1, -1, NULL).status) return ref;
+        ref = fmtstr("refs/candidates/%s-%d", base, i);
+    }
+}
+
+static char *shelve(const char *head, const char *tree, const char *message, const char *why) {
+    char *ref = slug(message);
+    char *c = commit_of(tree, head, fmtstr("%s\n\n%s", message, why));
+    GIT("update-ref", ref, c);
+    if (!strcmp(snapshot(), tree)) {
+        size_t n = 0;
+        char *ledger = fmtstr("%s/.hill/ledger.jsonl", root_dir);
+        char *kept = read_file(ledger, &n);
+        GIT("reset", "-q", "--hard", "HEAD");
+        GIT("clean", "-fdq");
+        if (kept) {
+            FILE *f = fopen(ledger, "wb");
+            if (f) fwrite(kept, 1, n, f), fclose(f);
+        }
+        printf("hill: the working tree is back at HEAD\n");
+    } else
+        printf("hill: the working tree changed during the step, so it was left as it is\n");
+    return ref;
+}
+
+typedef struct {
+    char *name, *out;
+    pid_t pid;
+} Remote;
+
+static Remote *remotes;
+static size_t nremotes;
+
+static char *quoted(const char *s) {
+    Buf b = {0};
+    bputc(&b, '\'');
+    for (; *s; s++)
+        if (*s == '\'') bputs(&b, "'\\''");
+        else bputc(&b, *s);
+    bputc(&b, '\'');
+    return bstr(&b);
+}
+
+static void start_remotes(const char *sha) {
+    const char *home = getenv("HOME"), *base = strrchr(root_dir, '/') ? strrchr(root_dir, '/') + 1 : root_dir;
+    char *path = fmtstr("%s/.config/hill/%s.json", home ? home : "", base);
+    size_t n;
+    char *text = read_file(path, &n);
+    if (!text) return;
+    J *list = parse(text, n);
+    if (!list || list->t != JARR) stop("ERROR", "%s is not a JSON list of machines", path);
+    remotes = calloc(list->len + 1, sizeof *remotes);
+    for (size_t i = 0; i < list->len; i++) {
+        J *m = list->v[i], *ssh = jget(m, "ssh");
+        const char *name = jtext(jget(m, "name")), *dir = jtext(jget(m, "dir")), *url = jtext(jget(m, "git"));
+        if (!name || !dir || !url || !ssh || ssh->t != JARR) stop("ERROR", "%s: each machine needs name, ssh, dir and git", path);
+        Buf cmd = {0};
+        bprintf(&cmd, "git push -q %s %s && exec", quoted(url), quoted(fmtstr("+%s:refs/hill/candidate", sha)));
+        for (size_t k = 0; k < ssh->len; k++) bprintf(&cmd, " %s", quoted(ssh->v[k]->s));
+        bprintf(&cmd, " %s", quoted(jtext_or(m, "shell", "bash -s")));
+        char *script = run_path(fmtstr("%s.sh", name));
+        FILE *f = fopen(script, "w");
+        if (!f) stop("ERROR", "cannot write %s", script);
+        fprintf(f, "%s\ncd %s%s && .hill/hill step --remote %s\n", jtext_or(m, "pre", ""), strncmp(dir, "~/", 2) ? "" : "~/",
+                quoted(strncmp(dir, "~/", 2) ? dir : dir + 2), sha);
+        fclose(f);
+        bprintf(&cmd, " < %s", quoted(script));
+        Remote *r = &remotes[nremotes++];
+        r->name = strdup(name);
+        r->out = fmtstr("%s/%s.out", logs_dir(), name);
+        int o;
+        unlink(r->out);
+        r->pid = launch(bstr(&cmd), root_dir, "remote", NULL, &o, r->out);
+        close(o);
+        printf("hill: %s: measuring there\n", name);
+    }
+}
+
+static J *gather_remotes(int cut) {
+    J *out = jnew(JARR);
+    for (size_t i = 0; i < nremotes; i++) {
+        Remote *r = &remotes[i];
+        if (!r->pid) continue;
+        if (cut) kill(-r->pid, SIGTERM);
+        reap(r->pid);
+        r->pid = 0;
+        if (cut) continue;
+        size_t n = 0;
+        char *text = read_file(r->out, &n);
+        J *e = NULL;
+        for (char *line = text ? strtok(text, "\n") : NULL; line; line = strtok(NULL, "\n"))
+            if (line[0] == '{') e = parse(line, strlen(line));
+        if (!e || !is(e, "type", "verdict")) stop("ERROR", "%s gave no verdict (see %s)", r->name, r->out);
+        jpush(out, e);
+    }
+    nremotes = 0;
+    return out;
+}
+
+static void print_detail(Spec *s, J *rows, J *bdet, J *cdet) {
+    const char *worst = NULL;
+    double size = -1;
+    for (size_t i = 0; i < rows->len; i++) {
+        if (!is(rows->v[i], "result", "loss")) continue;
+        J *c = jget(rows->v[i], "change");
+        double x = c && c->t != JNULL ? fabs(jd(c)) : INFINITY;
+        if (x > size) size = x, worst = rows->k[i];
+    }
+    if (!worst) return;
+    const char *name = jget(jget(jget(s->spec, "rewards"), worst), "instrument")->s;
+    J *bd = jget(bdet, name), *cd = jget(cdet, name);
+    if ((!bd || bd->t != JOBJ) && (!cd || cd->t != JOBJ)) return;
+    printf("\nWhere %s lost (%s):\n| | Best | Candidate |\n| --- | ---: | ---: |\n", name_of(s, worst), name);
+    J *keys = bd && bd->t == JOBJ ? bd : cd;
+    for (size_t k = 0; k < keys->len; k++) {
+        Buf x = {0}, y = {0};
+        J *a = jget(bd, keys->k[k]), *c = jget(cd, keys->k[k]);
+        if (a) dump(&x, a);
+        if (c) dump(&y, c);
+        printf("| %s | %s | %s |\n", keys->k[k], a ? bstr(&x) : "", c ? bstr(&y) : "");
+    }
+}
+
+static int step(const char *message, const char *remote_sha) {
+    char *head, *cand, *tree = NULL;
+    if (remote_sha) {
+        cand = strip(GIT("rev-parse", "--verify", fmtstr("%s^{commit}", remote_sha)));
+        head = strip(GIT("rev-parse", "--verify", fmtstr("%s^", cand)));
+    } else {
+        head = head_commit();
+        if (!head) stop("REFUSE", "commit something first: a step is judged against HEAD");
+        if (!message || !message[0]) stop("REFUSE", "a step needs a message");
+    }
+    set_best(head);
+    Spec *s = &B.s;
+    if (!remote_sha) {
+        tree = snapshot();
+        if (!strcmp(tree, strip(GIT("rev-parse", fmtstr("%s^{tree}", head))))) stop("REFUSE", "nothing changed since HEAD");
+        cand = commit_of(tree, head, message);
+    }
+    Digests best = digests(s, head), now = digests(s, cand);
+    int product = strcmp(now.product, best.product) != 0;
+    if (product && strcmp(now.harness, best.harness)) stop("REFUSE", "the harness and the measured code both changed: step the harness change on its own first");
+    if (!product) {
+        if (remote_sha) stop("REFUSE", "nothing measured changed");
+        char *c = land(head, tree, message);
+        printf("hill: nothing measured changed, so nothing was measured: landed %.12s\n", c);
+        return 0;
+    }
     Machine m = machine(s);
     Ledger l = read_ledger();
-    for (size_t i = 0; i < l.n; i++) {
+    for (size_t i = 0; !remote_sha && i < l.n; i++) {
         J *e = l.v[i];
-        if (is(e, "type", "verdict") && is(e, "machine", m.ident) && is(e, "best", best.product) && is(e, "candidate", cand.product) &&
+        if (is(e, "type", "verdict") && is(e, "machine", m.ident) && is(e, "best", best.product) && is(e, "candidate", now.product) &&
             is(e, "harness", best.harness))
             stop("REFUSE", "this candidate already has a verdict on this machine (%s); a new verdict needs a new candidate", jtext(jget(e, "verdict")));
     }
-    Noise *noise = calibration(s, &l, m.ident, best.harness);
-    lock_hill();
-    char *tree = best_tree(s, commit);
-    char *same = same_here(jtext(jget(s->spec, "same")), tree);
-    if (same) {
-        printf("hill: the candidate builds and runs the same code here as the best (%.16s): every reward is equal\n", same);
-        fflush(stdout);
-    } else {
-        build(s, tree, "best");
-        build(s, root_dir, "candidate");
-    }
+    if (!remote_sha) start_remotes(cand);
+    J *rewards = jget(s->spec, "rewards");
     Strs names = instrument_names(s);
-    Judged j = {jnew(JOBJ), 0, 0};
-    J *kept = jnew(JOBJ);
-    for (size_t ni = 0; ni < names.n && !j.losses && !same; ni++) {
-        Strs one = {0};
-        spush(&one, names.v[ni]);
-        char *fp = same_here(jtext(jget(jget(jget(s->spec, "instruments"), names.v[ni]), "same")), tree);
-        J *known = known_best(s, &l, m.ident, best.harness, best.product, names.v[ni]);
-        if (fp && known) jset(kept, names.v[ni], jstr(fp));
-        Sample *samples = fp && known ? carried(s, names.v[ni], known, fp)
-                        : exact_only(s, names.v[ni]) ? once(s, tree, root_dir, names.v[ni], known)
-                                                     : paired(s, tree, root_dir, "best", "candidate", "blocks", BLOCKS, &one);
-        Judged part = judge(s, samples, noise);
-        for (size_t r = 0; r < part.rows->len; r++) jset(j.rows, part.rows->k[r], part.rows->v[r]);
-        j.wins += part.wins;
-        j.losses += part.losses;
+    J *rows = jnew(JOBJ), *cdet = jnew(JOBJ), *bdet = jnew(JOBJ), *fps = jnew(JOBJ), *carried = jnew(JOBJ);
+    Vals *cv = calloc(rewards->len + 1, sizeof *cv);
+    int wins = 0, losses = 0, built = 0;
+    char *ctree = NULL;
+    for (size_t ni = 0; ni < names.n && !losses; ni++) {
+        const char *name = names.v[ni];
+        int any = 0;
+        for (size_t r = 0; r < rewards->len; r++) any |= of(s, r, name);
+        if (!any) continue;
+        J *inst = jget(jget(s->spec, "instruments"), name);
+        if (!ctree) ctree = tree_at(s, cand, B.tree[strlen(B.tree) - 1] == 'a' ? "b" : "a");
+        if (jtext(jget(inst, "depends"))) {
+            if (!jget(B.fps, name)) {
+                char *f = fingerprint(s, name, B.tree, "best");
+                jset(B.fps, name, f ? jstr(f) : jnew(JNULL));
+            }
+            char *f = fingerprint(s, name, ctree, "candidate");
+            if (f) jset(fps, name, jstr(f));
+            if (f && is(B.fps, name, f)) {
+                if (!held(s, name)) best_sample(s, name, NULL);
+                printf("hill: %s: depends on the same as the best's (%.16s): its rewards carry over\n", name, f);
+                for (size_t r = 0; r < rewards->len; r++) {
+                    if (!of(s, r, name)) continue;
+                    J *row = jnew(JOBJ), *v = B.rings[r].k[B.rings[r].n - 1].v;
+                    jset(row, "best", v);
+                    jset(row, "candidate", v);
+                    jset(row, "change", jnew(JNULL));
+                    jset(row, "result", jstr("tie"));
+                    jset(rows, rewards->k[r], row);
+                    vpush(&cv[r], v);
+                }
+                jset(carried, name, jstr(f));
+                continue;
+            }
+        }
+        if (!built) build(s, ctree, "candidate"), built = 1;
+        Vals *a = calloc(rewards->len + 1, sizeof *a), *b = calloc(rewards->len + 1, sizeof *b);
+        long long blocks = jint_or(inst, "blocks", BLOCKS);
+        if (exact_only(s, name)) {
+            if (!held(s, name)) best_sample(s, name, NULL);
+            printf("hill: %s: candidate\n", name);
+            take(s, name, ctree, b);
+            int moved = 0;
+            for (size_t r = 0; r < rewards->len; r++)
+                if (of(s, r, name)) moved |= !num_eq(b[r].v[0], B.rings[r].k[B.rings[r].n - 1].v);
+            if (moved) printf("hill: %s: candidate again\n", name), take(s, name, ctree, b);
+        } else if (jtext(jget(inst, "exclusive")) && jtext(jget(inst, "serve"))) {
+            while (held(s, name) < 3) best_sample(s, name, NULL);
+            for (size_t r = 0; r < rewards->len; r++)
+                if (of(s, r, name)) a[r] = ring_vals(&B.rings[r]);
+            printf("hill: %s: the candidate alone, %lld runs against the best's last %zu\n", name, 2 * blocks, held(s, name));
+            for (long long k = 0; k < 2 * blocks; k++) take(s, name, ctree, b);
+        } else {
+            for (long long k = 0; k < blocks; k++) {
+                printf("hill: %s, block %lld of %lld: %s\n", name, k + 1, blocks, k % 2 ? "candidate, best, best, candidate" : "best, candidate, candidate, best");
+                for (int i = 0; i < 4; i++)
+                    if ((i == 0 || i == 3) == !(k % 2)) best_sample(s, name, a);
+                    else take(s, name, ctree, b);
+            }
+        }
+        for (size_t r = 0; r < rewards->len; r++)
+            if (of(s, r, name) && (exact_only(s, name) || jtruthy(jget(rewards->v[r], "exact")))) a[r] = ring_vals(&B.rings[r]);
+        jset(bdet, name, jget(B.details, name) ? jget(B.details, name) : jnew(JNULL));
+        jset(cdet, name, cand_detail ? cand_detail : jnew(JNULL));
+        int was = losses;
+        judge_rows(s, name, a, b, rows, &wins, &losses);
+        for (size_t r = 0; r < rewards->len; r++)
+            if (of(s, r, name)) cv[r] = b[r];
+        if (losses > was) printf("hill: %s: a loss, so the step stops here\n", name);
     }
-    unlock_hill();
-    Pairs now = files_of(s);
-    for (size_t i = 0; i < cand_files.n; i++) {
-        Pair *found = bsearch(&cand_files.v[i], now.v, now.n, sizeof *now.v, pair_cmp);
-        if (!found) stop("ERROR", "the working tree changed while it was being measured; gate it again once it is still");
-    }
-    const char *verdict = j.wins && !j.losses ? "PROMOTE" : j.losses ? "REJECT" : "TIE";
+    const char *verdict = wins && !losses ? "PROMOTE" : losses ? "REJECT" : "TIE";
     J *values = jnew(JOBJ);
-    for (size_t r = 0; r < j.rows->len; r++) jset(values, j.rows->k[r], jget(j.rows->v[r], "candidate"));
+    for (size_t r = 0; r < rows->len; r++) jset(values, rows->k[r], jget(rows->v[r], "candidate"));
     J *entry = entry_of("verdict", &m);
-    jset(entry, "best_commit", jstr(commit));
+    jset(entry, "best_commit", jstr(head));
+    jset(entry, "candidate_commit", jstr(cand));
     jset(entry, "best", jstr(best.product));
-    jset(entry, "candidate", jstr(cand.product));
+    jset(entry, "candidate", jstr(now.product));
     jset(entry, "harness", jstr(best.harness));
     jset(entry, "verdict", jstr(verdict));
-    if (same) jset(entry, "same", jstr(same));
-    if (kept->len) jset(entry, "same_for", kept);
-    jset(entry, "rows", j.rows);
+    jset(entry, "rows", rows);
     jset(entry, "values", values);
+    if (carried->len) jset(entry, "same_for", carried);
+    printf("\n%s\n", report(s, rows, verdict, m.label));
+    print_detail(s, rows, bdet, cdet);
+    if (remote_sha) {
+        Buf b = {0};
+        dump(&b, entry);
+        printf("%s\n", bstr(&b));
+        return 0;
+    }
+    J *all = gather_remotes(losses > 0);
+    int promote = !strcmp(verdict, "PROMOTE"), reject = !strcmp(verdict, "REJECT");
+    Buf why = {0};
+    bprintf(&why, "%s: %s", m.label, verdict);
+    for (size_t i = 0; i < all->len; i++) {
+        J *e = all->v[i];
+        printf("\n%s\n", report(s, jget(e, "rows"), jtext_or(e, "verdict", "TIE"), jtext_or(e, "label", "?")));
+        promote |= is(e, "verdict", "PROMOTE");
+        reject |= is(e, "verdict", "REJECT");
+        bprintf(&why, "\n%s: %s", jtext_or(e, "label", "?"), jtext_or(e, "verdict", "?"));
+    }
     append(entry);
-    puts(report(s, j.rows, verdict));
-    return strcmp(verdict, "PROMOTE") ? 1 : 0;
+    for (size_t i = 0; i < all->len; i++) {
+        J *e = jnew(JOBJ);
+        for (size_t k = 0; k < all->v[i]->len; k++)
+            if (strcmp(all->v[i]->k[k], "at")) jset(e, all->v[i]->k[k], all->v[i]->v[k]);
+        append(e);
+    }
+    for (size_t r = 0; r < rows->len; r++) {
+        J *row = rows->v[r];
+        if (!is(row, "result", "tie")) {
+            char *fa, *fc;
+            pair_fmt(s, rows->k[r], jget(row, "best"), jget(row, "candidate"), &fa, &fc);
+            bprintf(&why, "\n  %s: %s -> %s (%s)", name_of(s, rows->k[r]), fa, fc, jtext(jget(row, "result")));
+        }
+    }
+    if (promote && !reject) {
+        char *c = land(head, tree, message);
+        for (size_t i = 0; i < nworkers; i++)
+            if (workers[i].pid && !strcmp(workers[i].tree, B.tree)) worker_kill(&workers[i]);
+        B.commit = c;
+        B.tree = ctree;
+        for (size_t r = 0; r < rewards->len; r++)
+            if (cv[r].n) {
+                B.rings[r].n = 0;
+                for (size_t i = 0; i < cv[r].n; i++) ring_push(&B.rings[r], cv[r].v[i]);
+            }
+        for (size_t i = 0; i < fps->len; i++) jset(B.fps, fps->k[i], fps->v[i]);
+        for (size_t i = 0; i < cdet->len; i++) jset(B.details, cdet->k[i], cdet->v[i]);
+        printf("\nhill: PROMOTE: landed %.12s, the new best\n", c);
+        return 0;
+    }
+    char *ref = shelve(head, tree, message, bstr(&why));
+    printf("\nhill: %s: kept as %s\n", reject ? "REJECT" : "TIE", ref);
+    return 1;
+}
+
+static int listen_fd = -1;
+static char *version;
+
+static void end_step(void) {
+    unsetenv("GIT_INDEX_FILE");
+    gather_remotes(1);
+    for (size_t i = 0; i < nworkers; i++)
+        if (workers[i].pid && (!B.tree || strcmp(workers[i].tree, B.tree))) worker_kill(&workers[i]);
+}
+
+static void quit_judge(void) {
+    for (size_t i = 0; i < nworkers; i++) worker_kill(&workers[i]);
+    _exit(0);
+}
+
+static void serve_one(int c) {
+    Buf got = {0};
+    char *line;
+    if (read_line(c, &got, now_s() + 5, &line) <= 0) return;
+    J *req = parse(line, strlen(line));
+    if (!req || req->t != JOBJ) return;
+    if (!is(req, "version", version) || is(req, "cmd", "stop")) {
+        close(listen_fd);
+        dprintf(c, "\x1erestart\n");
+        quit_judge();
+    }
+    fflush(stdout);
+    fflush(stderr);
+    int o1 = dup(1), o2 = dup(2);
+    dup2(c, 1);
+    dup2(c, 2);
+    volatile int code = 2;
+    if (setjmp(stop_env)) {
+        fflush(stdout);
+        fprintf(stderr, "%s: %s\n", stop_kind, stop_text);
+    } else
+        code = step(jtext(jget(req, "message")), jtext(jget(req, "sha")));
+    if (!setjmp(stop_env)) end_step();
+    fflush(stdout);
+    fflush(stderr);
+    dprintf(1, "\x1e%d\n", code);
+    dup2(o1, 1);
+    dup2(o2, 2);
+    close(o1);
+    close(o2);
+}
+
+static void idle_work(void) {
+    if (!B.commit) return;
+    Spec *s = &B.s;
+    Strs names = instrument_names(s);
+    double t = now_s();
+    for (size_t i = 0; i < names.n; i++) {
+        size_t any = 0;
+        for (size_t r = 0; r < jget(s->spec, "rewards")->len; r++) any |= (size_t)of(s, r, names.v[i]);
+        if (!any || B.next[i] > t) continue;
+        if (setjmp(stop_env)) {
+            fflush(stdout);
+            fprintf(stderr, "hill: idle %s: %s: %s\n", names.v[i], stop_kind, stop_text);
+            B.next[i] = now_s() + 60;
+            return;
+        }
+        J *inst = jget(jget(s->spec, "instruments"), names.v[i]);
+        int alone = jtext(jget(inst, "exclusive")) != NULL;
+        size_t want = exact_only(s, names.v[i]) ? 1 : alone ? 3 : RING;
+        if (held(s, names.v[i]) < want) best_sample(s, names.v[i], NULL);
+        else if (!alone && !exact_only(s, names.v[i])) best_sample(s, names.v[i], NULL);
+        B.next[i] = now_s() + (held(s, names.v[i]) < want ? 0 : alone || exact_only(s, names.v[i]) ? 1e9 : REFRESH_S);
+        return;
+    }
+}
+
+static int idle_ms(void) {
+    if (!B.commit) return -1;
+    Spec *s = &B.s;
+    Strs names = instrument_names(s);
+    double soonest = -1, t = now_s();
+    for (size_t i = 0; i < names.n; i++) {
+        size_t any = 0;
+        for (size_t r = 0; r < jget(s->spec, "rewards")->len; r++) any |= (size_t)of(s, r, names.v[i]);
+        if (any && (soonest < 0 || B.next[i] < soonest)) soonest = B.next[i];
+    }
+    if (soonest < 0) return -1;
+    return soonest <= t ? 0 : (int)((soonest - t) * 1000) + 1;
+}
+
+static void judge_loop(void) {
+    signal(SIGPIPE, SIG_IGN);
+    setvbuf(stdout, NULL, _IOLBF, 0);
+    for (;;) {
+        struct pollfd p = {listen_fd, POLLIN, 0};
+        int r = poll(&p, 1, idle_ms());
+        if (r < 0 && errno == EINTR) continue;
+        if (r > 0) {
+            int c = accept(listen_fd, NULL, NULL);
+            if (c < 0) continue;
+            fcntl(c, F_SETFD, FD_CLOEXEC);
+            serve_one(c);
+            close(c);
+        } else if (!r)
+            idle_work();
+    }
+}
+
+static struct sockaddr_un judge_addr(void) {
+    struct sockaddr_un a = {0};
+    a.sun_family = AF_UNIX;
+    strcpy(a.sun_path, ".hill/run/judge.sock");
+    return a;
+}
+
+static int connect_judge(void) {
+    int fd = socket(AF_UNIX, SOCK_STREAM, 0);
+    struct sockaddr_un a = judge_addr();
+    if (fd < 0 || connect(fd, (struct sockaddr *)&a, sizeof a)) {
+        if (fd >= 0) close(fd);
+        return -1;
+    }
+    fcntl(fd, F_SETFD, FD_CLOEXEC);
+    return fd;
+}
+
+static int start_judge(int foreground) {
+    hill_dir();
+    int start = open(run_path("judge.start"), O_RDWR | O_CREAT | O_CLOEXEC, 0666);
+    if (start < 0 || flock(start, LOCK_EX)) stop("ERROR", "cannot lock %s", run_path("judge.start"));
+    int fd = connect_judge();
+    if (fd >= 0) {
+        close(start);
+        if (foreground) stop("REFUSE", "a judge already runs here");
+        return fd;
+    }
+    int life = open(run_path("judge.pid"), O_RDWR | O_CREAT | O_CLOEXEC, 0666);
+    if (life < 0 || flock(life, LOCK_EX)) stop("ERROR", "cannot lock %s", run_path("judge.pid"));
+    unlink(".hill/run/judge.sock");
+    listen_fd = socket(AF_UNIX, SOCK_STREAM, 0);
+    struct sockaddr_un a = judge_addr();
+    if (listen_fd < 0 || bind(listen_fd, (struct sockaddr *)&a, sizeof a) || listen(listen_fd, 16)) stop("ERROR", "cannot listen on .hill/run/judge.sock: %s", strerror(errno));
+    fcntl(listen_fd, F_SETFD, FD_CLOEXEC);
+    if (foreground) {
+        close(start);
+        dprintf(life, "%d\n", (int)getpid());
+        judge_loop();
+    }
+    fflush(stdout);
+    fflush(stderr);
+    pid_t pid = fork();
+    if (pid < 0) stop("ERROR", "fork: %s", strerror(errno));
+    if (!pid) {
+        setsid();
+        close(start);
+        int nul = open("/dev/null", O_RDONLY), log = open(fmtstr("%s/judge.log", logs_dir()), O_WRONLY | O_CREAT | O_APPEND, 0666);
+        dup2(nul, 0);
+        dup2(log, 1);
+        dup2(log, 2);
+        close(nul);
+        close(log);
+        if (ftruncate(life, 0) == 0) dprintf(life, "%d\n", (int)getpid());
+        judge_loop();
+    }
+    close(listen_fd);
+    close(life);
+    close(start);
+    fd = connect_judge();
+    if (fd < 0) stop("ERROR", "the judge did not start (see %s/judge.log)", logs_dir());
+    return fd;
+}
+
+static int cmd_step(const char *message, const char *sha) {
+    J *req = jnew(JOBJ);
+    jset(req, "version", jstr(version));
+    jset(req, "cmd", jstr(sha ? "remote" : "step"));
+    if (message) jset(req, "message", jstr(message));
+    if (sha) jset(req, "sha", jstr(sha));
+    Buf line = {0};
+    dump(&line, req);
+    bputc(&line, '\n');
+    signal(SIGPIPE, SIG_IGN);
+    for (int tries = 0; tries < 2; tries++) {
+        int fd = start_judge(0);
+        if (write(fd, line.p, line.n) != (ssize_t)line.n) stop("ERROR", "the judge closed the connection");
+        Buf got = {0};
+        char chunk[65536];
+        size_t shown = 0;
+        ssize_t k;
+        while ((k = read(fd, chunk, sizeof chunk)) > 0 || (k < 0 && errno == EINTR)) {
+            if (k < 0) continue;
+            size_t from = got.n;
+            bput(&got, chunk, (size_t)k);
+            char *mark = memchr(got.p + from, 0x1e, got.n - from);
+            size_t upto = mark ? (size_t)(mark - got.p) : got.n;
+            if (upto > shown) fwrite(got.p + shown, 1, upto - shown, stdout), fflush(stdout), shown = upto;
+        }
+        close(fd);
+        bstr(&got);
+        char *mark = memchr(got.p, 0x1e, got.n);
+        if (!mark) stop("ERROR", "the judge stopped mid-step (see %s/judge.log)", logs_dir());
+        if (strncmp(mark + 1, "restart", 7)) return atoi(mark + 1);
+    }
+    stop("ERROR", "the judge keeps asking for a restart");
+    return 2;
 }
 
 static void loosened(Spec *old, Spec *new, Strs *found, Strs *held) {
@@ -2195,6 +2613,7 @@ static void loosened(Spec *old, Spec *new, Strs *found, Strs *held) {
         int kept = 0;
         for (size_t r = 0; r < orew->len; r++) kept |= is(orew->v[r], "instrument", oi->k[i]) && listed(held, orew->k[r]);
         if (kept && n && jint_or(n, "blocks", BLOCKS) < jint_or(oi->v[i], "blocks", BLOCKS)) spush(found, fmtstr("%s runs fewer blocks", oi->k[i]));
+        if (kept && n && jget(oi->v[i], "budget_s") && budget_of(n) > budget_of(oi->v[i])) spush(found, fmtstr("%s was given a longer budget", oi->k[i]));
     }
 }
 
@@ -2227,46 +2646,15 @@ static int cmd_check(void) {
             spush(&problems, "the harness and the measured code both change: land the harness change on its own");
         else {
             Ledger l = read_ledger_text(staged_ledger, staged_len);
-            Strs idents = {0}, labels = {0};
+            int promoted = 0;
             for (size_t i = 0; i < l.n; i++) {
                 J *e = l.v[i];
-                if (!is(e, "harness", best.harness)) continue;
-                if ((is(e, "type", "record") && is(e, "product", best.product)) ||
-                    (is(e, "type", "verdict") && (is(e, "best", best.product) || (is(e, "verdict", "PROMOTE") && is(e, "candidate", best.product))))) {
-                    size_t k = 0;
-                    while (k < idents.n && strcmp(idents.v[k], jtext(jget(e, "machine")))) k++;
-                    if (k == idents.n) spush(&idents, (char *)jtext(jget(e, "machine"))), spush(&labels, (char *)jtext(jget(e, "label")));
-                    else labels.v[k] = (char *)jtext(jget(e, "label"));
-                }
+                if (!is(e, "type", "verdict") || !is(e, "best", best.product) || !is(e, "candidate", cand.product) || !is(e, "harness", best.harness)) continue;
+                promoted += is(e, "verdict", "PROMOTE");
+                if (is(e, "verdict", "REJECT")) spush(&problems, fmtstr("%s judged this change REJECT", jtext_or(e, "label", "a machine")));
             }
-            J *machines = jget(s.spec, "machines");
-            for (size_t m = 0; machines && machines->t == JOBJ && m < machines->len; m++)
-                if (!listed(&idents, machines->k[m])) spush(&idents, machines->k[m]), spush(&labels, (char *)jtext(machines->v[m]));
-            if (!idents.n) spush(&problems, "nothing has measured HEAD: run hill gate on every machine");
-            size_t judged = 0, promoted = 0, rejected = 0;
-            for (size_t k = 0; k < idents.n; k++) {
-                J *found = NULL;
-                for (size_t i = 0; i < l.n; i++) {
-                    J *e = l.v[i];
-                    if (is(e, "type", "verdict") && is(e, "machine", idents.v[k]) && is(e, "best", best.product) && is(e, "candidate", cand.product) &&
-                        is(e, "harness", best.harness))
-                        found = e;
-                }
-                if (!found) {
-                    spush(&problems, fmtstr("no verdict for this change on %s: run hill gate there and stage .hill/ledger.jsonl", labels.v[k]));
-                    continue;
-                }
-                judged++;
-                promoted += is(found, "verdict", "PROMOTE");
-                if (is(found, "verdict", "REJECT")) {
-                    rejected++;
-                    spush(&problems, fmtstr("%s judged this change REJECT", labels.v[k]));
-                }
-            }
-            if (idents.n && judged == idents.n && !promoted && !rejected) spush(&problems, "no machine judged this change better");
+            if (!promoted) spush(&problems, "no verdict lands this change: run hill step");
         }
-    } else if (strcmp(cand.harness, best.harness)) {
-        fprintf(stderr, "hill: a harness change; after committing it, run hill record on every machine with a record\n");
     }
     if (problems.n) {
         fprintf(stderr, "hill: this commit can't land:\n");
@@ -2567,11 +2955,11 @@ static char *find_root(void) {
 }
 
 int main(int argc, char **argv) {
-    const char *commands[] = {"calibrate", "record", "gate", "table", "check", "hook"};
-    int known = 0;
-    for (int i = 0; argc == 2 && i < 6; i++) known |= !strcmp(argv[1], commands[i]);
-    if (!known) {
-        fprintf(stderr, "usage: hill calibrate | record | gate | table | check | hook\n");
+    int ok = argc == 2 && (!strcmp(argv[1], "table") || !strcmp(argv[1], "check") || !strcmp(argv[1], "hook") || !strcmp(argv[1], "judge") || !strcmp(argv[1], "stop"));
+    ok |= argc == 3 && !strcmp(argv[1], "step");
+    ok |= argc == 4 && !strcmp(argv[1], "step") && !strcmp(argv[2], "--remote");
+    if (!ok) {
+        fprintf(stderr, "usage: hill step \"<message>\" | table | check | hook | judge | stop\n");
         return 2;
     }
     if (setjmp(stop_env)) {
@@ -2580,11 +2968,21 @@ int main(int argc, char **argv) {
         return 2;
     }
     root_dir = find_root();
+    if (chdir(root_dir)) stop("ERROR", "cannot enter %s", root_dir);
+    struct stat self;
+    version = !stat(argv[0], &self) ? fmtstr("%lld.%lld.%lld", (long long)self.st_ino, (long long)self.st_mtime, (long long)self.st_size) : "?";
     if (!strcmp(argv[1], "check")) return cmd_check();
     if (!strcmp(argv[1], "hook")) return cmd_hook();
+    if (!strcmp(argv[1], "judge")) return start_judge(1), 0;
+    if (!strcmp(argv[1], "stop")) {
+        int fd = connect_judge();
+        if (fd >= 0 && write(fd, "{\"cmd\": \"stop\"}\n", 16) == 16) {
+            char c;
+            while (read(fd, &c, 1) > 0) {}
+        }
+        return 0;
+    }
+    if (!strcmp(argv[1], "step")) return argc == 4 ? cmd_step(NULL, argv[3]) : cmd_step(argv[2], NULL);
     Spec s = load_spec_file();
-    if (!strcmp(argv[1], "calibrate")) return cmd_calibrate(&s);
-    if (!strcmp(argv[1], "record")) return cmd_record(&s);
-    if (!strcmp(argv[1], "gate")) return cmd_gate(&s);
     return cmd_table(&s);
 }

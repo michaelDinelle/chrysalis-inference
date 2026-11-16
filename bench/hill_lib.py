@@ -56,10 +56,9 @@ def gpu_power():
     return None
 
 
-def unsupported(instrument):
+def nulls(instrument):
     spec = json.load(open(os.path.join(ROOT, "hill.json")))
-    print(json.dumps({r.get("field", k): None for k, r in spec["rewards"].items() if r["instrument"] == instrument}))
-    sys.exit(0)
+    return {r.get("field", k): None for k, r in spec["rewards"].items() if r["instrument"] == instrument}
 
 
 _mach = []
@@ -161,11 +160,19 @@ class Server:
             except Exception:
                 pass
             time.sleep(0.05)
-        http(self.url + "/v1/chat/completions", {"model": self.use, "messages": [{"role": "user", "content": "Hi"}], "max_tokens": 1, "stream": False,
-                                                  "chat_template_kwargs": {"enable_thinking": False}})
+        self.hello()
         self.load_s = time.monotonic() - t0
         self.B = strata()
         self.target = self.B.Target(self.url, None)
+
+    def hello(self):
+        http(self.url + "/v1/chat/completions", {"model": self.use, "messages": [{"role": "user", "content": "Hi"}], "max_tokens": 1, "stream": False,
+                                                  "chat_template_kwargs": {"enable_thinking": False}})
+
+    def renew(self, kl=None):
+        out = http(self.url + "/bench/renew", {"kl": kl})
+        self.hello()
+        return out
 
     def ask(self, spec):
         raw = self.B.stream_chat(self.target, spec, self.use, timeout_s=self.B.REQUEST_TIMEOUT_S)
@@ -186,6 +193,11 @@ class Server:
         if MAC:
             return peak_footprint(pid) / 1e9
         return next(int(l.split()[1]) for l in open(f"/proc/{pid}/status") if l.startswith("VmHWM:")) * 1024 / 1e9
+
+    def clear_peak(self):
+        if not MAC:
+            with open(f"/proc/{server_pid(self.srv.pid)}/clear_refs", "w") as f:
+                f.write("5")
 
     def stop(self):
         try:

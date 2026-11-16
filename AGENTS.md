@@ -2,19 +2,19 @@
 
 **Using the Hill Climb Anything skill is mandatory, at all times, for every change:
 https://github.com/michaelDinelle/hill-climb-anything** (installed at ~/.claude/skills/hill-climb-anything). Load it
-before touching anything and climb by it: choose a target, profile it, change one thing, gate it with `.hill/hill gate`
-on every machine with a record, and report each verdict's table. It is not optional, and no task is too small or too
-urgent for it.
+before touching anything and climb by it: choose a target, change one thing, run `.hill/hill step "<what changed>"`,
+read what it says moved and where, and report each verdict's table. It is not optional, and no task is too small or too
+urgent for it. Every helper an agent starts is told to load the skill and work by it before anything else.
 
 **Plan, clock, work.** The answer to a task is the plan and then the work; no sentence questions whether it can be
-done. Before starting, measure what is there in one call and write the plan as steps with a due time each, sized from
-how long such steps have taken here; a time budget is a floor to beat. Read the clock before every tool call, and cut or
-re-plan a step the moment it is late. Run independent work side by side, one track per machine or set of files, the
-slowest machine first, and tell every helper its files, its deadline and when it may use the CPU or the GPU. Prove a
-change by the cheapest proof that settles it: the same preprocessed or compiled code first, the same output next, the
-gate's paired timing last. When the same reward is rejected twice, profile that case before changing anything again.
-While a gate runs in a checkout, change and commit nothing there; do side work in a worktree under ~/.cache, never
-under /tmp, which is RAM. A candidate that ties or loses is kept under refs/candidates with its verdict in the message.
+done. Before starting, measure what is there in one call and write the plan as steps; a due time comes from that
+measurement, never from a guess, and a time budget is a floor to beat. Read the clock before every tool call, and cut or
+re-plan a step the moment it is late. Run independent work side by side, one track per machine or set of files, and
+tell every helper to load the skill, its files, and when it may use the CPU or the GPU. Prove a change by the cheapest
+proof that settles it: the same preprocessed or compiled code first, the same output next, the step's timing last. When
+the same reward loses twice, read the breakdown the step printed before changing anything again. The step judges a
+snapshot in trees of its own, so the checkout stays free to work in; scratch work goes in a worktree under ~/.cache,
+never under /tmp, which is RAM. When something is found broken it is fixed then, not listed for later.
 
 **No guessed time limits and no fixed sleeps.** Never wrap a job in an arbitrary `timeout`, and never wait with a fixed
 `sleep`: both either cut real work short or burn wall clock doing nothing. Run a long job in the background and act when
@@ -33,7 +33,7 @@ have covered, is a loss. Don't stop to report or ask mid-climb; report at a verd
 
 **The model files are fixed.** The hill compares one thing with itself: the same model file, measured the same way,
 before and after a change. A file with fewer bits is faster and smaller and worse; a file with more bits is better and
-slower and larger. Either is a different product at another point on the same curve, not a climb, and a gate between
+slower and larger. Either is a different product at another point on the same curve, not a climb, and a verdict between
 two different files has no meaning. So never build, measure, propose or write engine code for a model file with a
 different size, bit allocation or tier layout than the one chrysalis/models.py names, whatever a request for "better
 quality" or "a new model" seems to allow: it means this file, at this size, run better. Before starting any work ask:
@@ -101,27 +101,36 @@ README.md shows what Chrysalis is. This file is how to change it.
 
 ## Rewards
 
-Every reward in hill.json is held by `.hill/hill`. A change is promoted only when no reward is worse on any machine with
-a record and at least one is better: no trade-offs, no net gains, no "within noise" after the fact, no blaming the
-machine. `.hill/hill gate` is the only judge; if it is wrong, fix it and gate again. The ledger is append-only. Rewards
-are never dropped, re-keyed or loosened. Only the user can make an exception, and agents never propose one. Harness
-changes (bench/, hill.json, .hill/) land on their own, never with a product change. A change is the hill's to judge when it
-touches hill.json's measured paths (engine/, chrysalis/, the Makefile) outside its not_measured ones (chrysalis/voice,
-which the server never imports): web/, tests/ (the test targets are tests/tests.mk), the voice service and these notes
-commit with no gate. The README has no Rewards table and
-`hill table` isn't run: report each verdict's table to the user instead, and keep the README's charts and its For agents
-numbers true to what Chrysalis does now. media/charts.json holds those numbers, and `data/venv/bin/python media/charts.py`
-is the only thing that writes the charts and the tables, both from that file: never edit them by hand. `python3
-media/charts.py --check` fails if either differs from it, and the hook and `make test_web` run it.
+Every reward in hill.json is held by `.hill/hill`. One command, `.hill/hill step "<what changed>"`, takes a change from
+idea to commit: it judges the working tree against HEAD on this machine and on every machine in
+~/.config/hill/chrysalis-inference.json at once, says what moved and where, lands the change with that message when no
+reward is worse on any machine and at least one is better, and hands anything else back under refs/candidates with its
+verdict. No trade-offs, no net gains, no "within noise" after the fact, no blaming the machine. It is the only judge and
+the only way to commit; if it is wrong, fix it and step again. No tool call waits on a job, and nothing is sent to a
+helper to wait on either: a check that outgrows its budget in hill.json is a defect to fix first, and a budget is never
+raised. The ledger is append-only. Rewards are never dropped, re-keyed or loosened. Only the user can make an exception,
+and agents never propose one or ask about one. Harness changes (bench/, hill.json, .hill/) are stepped on their own,
+never with a product change. A change is measured when it touches hill.json's measured paths (engine/, chrysalis/, the
+Makefile) outside its not_measured ones (chrysalis/voice, which the server never imports): web/, tests/ (the test
+targets are tests/tests.mk), the voice service and these notes land through the same step with nothing measured. The
+README has no Rewards table and `hill table` isn't run: report each verdict's table to the user instead, and keep the
+README's charts and its For agents numbers true to what Chrysalis does now. media/charts.json holds those numbers, and
+`data/venv/bin/python media/charts.py` is the only thing that writes the charts and the tables, both from that file:
+never edit them by hand. `python3 media/charts.py --check` fails if either differs from it, and the hook and
+`make test_web` run it.
 
-A gate measures the working tree against HEAD in the same session, both models on the GPU with Chrysalis's model server
-stopped; bench/hill_ready.py refuses to start while anything else holds the GPU or free memory is short. Measuring time
-is a reward too: a gate takes minutes, deep context is restored from snapshots primed once per machine, and the bench
-only gets faster. Every machine with a record (the RX 7900 here and the M4 Max on studio) judges each change: run
-`.hill/hill gate` there and append its new .hill/ledger.jsonl lines here before committing. The RTX 5070 rented on
-vast.ai was destroyed on 2026-11-11: its verdicts stay in the ledger, and it judges nothing more. The RTX 3090 rented
-there (with a Xeon W-2133) holds a record from 2026-11-15 and judges every change to engine/cuda/ for as long as it is
-rented. The hook (`git config core.hooksPath .githooks`) holds every commit to that.
+Each machine keeps a judge running (the first step starts it; `.hill/hill stop` ends it and frees the GPU). It holds
+HEAD built in a tree of its own under .hill/trees and keeps bench/worker.py alive per model with the model loaded, so a
+check never pays a load: `run speed-<model>` and `run quality-<model>` answer from the loaded engine, with a breakdown
+(time per step, pool hits, moves and waits per step, prompt time) the step prints beside the best's when a reward
+loses. One model holds the GPU at a time. A check whose `depends` fingerprint (bench/hill_same.py: the sources that
+model's engine is built from on this machine) is the same on both sides is not run, so a Flash-Next change never
+measures the 27B and a Mac never measures code it does not build. Chrysalis's own model server has to be stopped while
+a judge measures: bench/hill_ready.py refuses to start while anything else holds the GPU or free memory is short. Deep
+context is restored from snapshots primed once per machine. The machines are the RX 7900 here, the M4 Max on studio and,
+for as long as it is rented, the RTX 3090 on vast.ai (with a Xeon W-2133), which judges every change under engine/cuda
+and engine/gpu. The RTX 5070 rented there was destroyed on 2026-11-11: its verdicts stay in the ledger. The hook
+(`git config core.hooksPath .githooks`) holds any commit made another way to the same verdicts.
 
 ## Comments
 
