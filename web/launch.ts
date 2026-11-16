@@ -1,7 +1,7 @@
 import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { letIn } from "./firewall";
-import { gpuEnv, gpuFound, gpuHere } from "./gpu";
+import { gpuEnv, gpuFound } from "./gpu";
 import { getCommand, here, HOME, MODELS, ourScript, python, ROOT, serverCommand, serverEnv, utf8Console, type Machine } from "./platform";
 import { tlsPath } from "./tls";
 
@@ -90,7 +90,7 @@ const wait = async (cmd: string[], o: { cwd?: string; env?: Record<string, strin
   }
 };
 
-type Found = () => { here: boolean; env: Record<string, string> };
+type Found = () => { here: boolean; env: Record<string, string>; why?: string };
 async function start(args: string[], m: Machine, gpus: Found) {
   const asked = parse(args);
   if (!asked) return console.log(USAGE), 1;
@@ -111,7 +111,7 @@ async function start(args: string[], m: Machine, gpus: Found) {
     const got = await wait(getCommand(model, m), { env });
     if (got !== 0) return got;
     if (p.background && p.background !== model) run.push("--get", p.background);
-  } else run.push("--no-model");
+  } else run.push("--no-model", ...(found.why ? [found.why] : []));
   const cli = Bun.spawn(run, { cwd: import.meta.dir, env: { ...process.env, ...found.env, BUN_BE_BUN: "1" }, stdio: ["inherit", "inherit", "inherit"] });
   const opener = m.platform === "win32" ? ["cmd", "/c", "start", ""] : HOME !== ROOT ? ["open"] : undefined;
   if (opener && asked.mode !== "insecure") void (async () => {
@@ -155,7 +155,11 @@ export async function main(args: string[], m: Machine = here(), gpus: Found = ()
       return wait([...serverCommand(MODELS.includes(model ?? "") ? model : undefined, m), ...args.slice(1)], { env: { ...env, ...gpuEnv(env) } });
     }
     case "get": return wait(args.length > 1 ? [...getCommand(args[1], m), ...args.slice(2)] : [python(m), "-m", "chrysalis", "get"], { env });
-    case "gpu": return gpuHere(m) ? 0 : 1;
+    case "gpu": {
+      const found = gpus();
+      if (found.why) console.error(`chrysalis: ${found.why}`);
+      return found.here ? 0 : 1;
+    }
     case "opencode": return opencode(args[1]);
     case "stats": return console.log(await fetch(`${process.env.CHRYSALIS_URL ?? "http://127.0.0.1:8080"}/chrysalis/stats`).then((r) => r.text(), () => "")), 0;
     case "help": case "-h": case "--help": return console.log(USAGE), 0;

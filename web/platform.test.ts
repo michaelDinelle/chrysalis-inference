@@ -2,7 +2,7 @@ import { expect, test } from "bun:test";
 import { chmodSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { gpuHere } from "./gpu";
+import { gpuFound, gpuHere } from "./gpu";
 import { python, serverCommand, serverEnv, type Machine } from "./platform";
 
 const root = join(tmpdir(), "chrysalis-root");
@@ -47,5 +47,11 @@ test("a GPU Chrysalis runs on is a Mac with Apple silicon, 30 GB and the Metal e
     expect([gpuHere(machine("win32", cuda, { env: { SystemRoot: "C:\\Windows" } }), root, none), gpuHere(machine("win32", cuda.slice(0, 2), { env: { SystemRoot: "C:\\Windows" } }), root, none)]).toEqual([true, false]);
     expect([gpuHere(machine("linux", ["/dev/nvidiactl", join(root, "build/libchrysalis.so"), join(root, "build/libchrysalis_fn.so")]), root, none),
       gpuHere(machine("linux"), root, found), gpuHere(machine("linux"), root, none), gpuHere(machine("linux"), root, `${dir}/missing`)]).toEqual([true, true, false, false]);
+    const says = `${dir}/says`;
+    writeFileSync(says, "#!/bin/sh\necho 'chrysalis: this computer has no GPU that AMD'\\''s ROCm can use' >&2\nexit 1\n");
+    chmodSync(says, 0o755);
+    expect([gpuFound(machine("linux"), root, found).why, gpuFound(machine("linux"), root, says).why, gpuFound(machine("linux"), root, none).why]).toEqual([undefined, "this computer has no GPU that AMD's ROCm can use", `${none} stopped with code 1`]);
+    expect(gpuFound(machine("linux"), root, `${dir}/missing`).why).toStartWith(`${dir}/missing could not be run: `);
+    expect([gpuFound(machine("darwin", [metal], { arch: "arm64", memory: 36 * 2 ** 30 }), root, none).why, gpuFound(machine("darwin", [metal], { arch: "x64" }), root, found).why?.startsWith("a Mac runs it on Apple silicon")]).toEqual([undefined, true]);
   } finally { rmSync(dir, { recursive: true }); }
 });

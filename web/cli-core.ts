@@ -463,6 +463,9 @@ export function start() {
     } catch (e) { note(red(`${flag("--get")} could not be downloaded: ${e instanceof Error ? e.message : String(e)}`)); }
   }
   if (HAS_MODEL) engineSvc.start();
-  else note(dim("No GPU Chrysalis runs on here: the web chat uses Chrysalis on another computer on your network."));
+  else {
+    if (flag("--no-model")) note(`No GPU was found: ${flag("--no-model")}`);
+    note(dim("No GPU Chrysalis runs on here: the web chat uses Chrysalis on another computer on your network."));
+  }
   webSvc.start();
 }

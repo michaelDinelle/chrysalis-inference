@@ -4539,7 +4539,8 @@ const current = () => !onService() ? otherModel() : switching ?? status.loading 
 const quick = () => (onChrysalis() ? { model: `${current()}-fast` } : { model: current(), reasoning_effort: "none" });
 
 async function start() {
-  await fetch("/api/chrysalis/start", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ model: picked }) });
+  const r = await fetch("/api/chrysalis/start", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ model: picked }) });
+  return r.status === 409 ? ((await r.json().catch(() => ({}))).error?.message as string | undefined) : undefined;
 }
 
 async function pickModel(model: string) {
@@ -4716,7 +4717,8 @@ async function ensureOnline(run: { stopping: boolean }) {
     if (!current()) throw new Error(`${status.backend?.name ?? "The backend"} lists no model to chat with`);
     return;
   }
-  if (status.state === "offline") await start();
+  const none = status.state === "offline" ? await start() : undefined;
+  if (none) throw new Error(none);
   for (const deadline = Date.now() + 180_000; status.state !== "online" || status.loading; await refreshStatus()) {
     if (run.stopping) throw new DOMException("stopped", "AbortError");
     if (Date.now() > deadline) throw new Error("Chrysalis did not start: its terminal says why");

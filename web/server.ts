@@ -886,6 +886,8 @@ img.src = ${JSON.stringify(checkUrl(req))} + "?t=" + Date.now();
       })),
     },
     "/api/chrysalis/start": { POST: guarded(async (req) => {
+      if (process.env.CHRYSALIS_ENGINE_HERE === "0" && !link.state().linked)
+        return Response.json({ error: { message: "No model runs on this computer and none is linked: Chrysalis's terminal says why no GPU was found" } }, { status: 409 });
       const model = (await pickModel(req)) ?? (await engineStats().then((r) => r.json()).catch(() => ({}))).model;
       if (model) void engineCall("/chrysalis/load", { model }).catch(() => {});
       return new Response(null, { status: 202 });

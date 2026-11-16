@@ -10,9 +10,9 @@ const json = { "Content-Type": "application/json" };
 const freePort = () => { const s = Bun.serve({ hostname: "127.0.0.1", port: 0, fetch: () => new Response() }), port = s.port!; s.stop(true); return port; };
 const refused = (url: string, init: object = {}) => fetch(url, init).then((r) => `answered ${r.status}`, () => "refused");
 
-function chrysalis(o: { pty?: boolean; mode?: string; env?: Record<string, string> } = {}) {
+function chrysalis(o: { pty?: boolean; mode?: string; args?: string[]; env?: Record<string, string> } = {}) {
   const dir = mkdtempSync(`${tmpdir()}/chrysalis-cli-`), port = freePort(), engine = freePort();
-  const cmd = [process.execPath, "cli.ts", ...(o.mode ? ["--mode", o.mode] : [])];
+  const cmd = [process.execPath, "cli.ts", ...(o.mode ? ["--mode", o.mode] : []), ...(o.args ?? [])];
   const proc = Bun.spawn(o.pty ? ["python3", "-c", "import pty, sys; pty.spawn(sys.argv[1:])", ...cmd] : cmd, {
     cwd: import.meta.dir, stdin: "pipe", stdout: "pipe", stderr: "inherit",
     env: { ...process.env, PORT: String(port), CHRYSALIS_URL: `http://127.0.0.1:${engine}`, FAKE_ENGINE_PORT: String(engine), HOME: dir, BUN_RUNTIME_TRANSPILER_CACHE_PATH: "0", CHRYSALIS_TLS_DIR: `${dir}/tls`,
@@ -112,6 +112,20 @@ test("the terminal shows each request to the model as it finishes, by its sizes 
     expect(await asked("probe seen")).toBe("written");
     await c.shown("14,982 tokens read", at);
     expect(readdirSync(`${c.dir}/cache/qwen3.8-flash-next`)).toEqual(["seen.snap"]);
+  } finally {
+    await c.stop();
+  }
+}, 60_000);
+
+test("where no GPU was found, the terminal says why in the launcher's own words, starts no model server and still serves the chat, which is refused a start at once instead of waiting for one", async () => {
+  const why = "this computer has no GPU that AMD's ROCm can use", c = chrysalis({ args: ["--no-model", why] });
+  try {
+    await c.shown(`No GPU was found: ${why}`);
+    await c.shown(/chat\s+http:\/\/localhost:\d+/);
+    expect(c.out()).not.toContain("ready in");
+    expect(await refused(`${c.engine}/health`)).toBe("refused");
+    const start = await fetch(`${c.here}/api/chrysalis/start`, { method: "POST", headers: json, body: "{}" });
+    expect([start.status, (await start.json()).error.message]).toEqual([409, "No model runs on this computer and none is linked: Chrysalis's terminal says why no GPU was found"]);
   } finally {
     await c.stop();
   }
