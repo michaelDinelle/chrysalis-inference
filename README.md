@@ -65,13 +65,6 @@ Start Chrysalis with `chrysalis.sh --host 0.0.0.0`. The other computer needs [Op
 
 <sub>It opens on Chrysalis's models alone, with every other provider off.</sub>
 
-## Also
-
-- **Voice mode** you can interrupt by talking
-- **OpenCode threads** in the chat: work in a folder, with OpenCode's tools, on Chrysalis's models unless you allow others
-- **Claude Code** and **OpenCode**, through OpenAI and Anthropic APIs
-- **Qwen3.8-27B** with its full 262K context
-
 ## Run it
 
 Every system ends the same way: the terminal shows the chat's address and the model, and the chat opens at
