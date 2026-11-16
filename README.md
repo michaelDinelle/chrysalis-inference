@@ -15,8 +15,6 @@
 
 ## Qwen3.8-Flash-Next: Chrysalis vs Strata
 
-Chrysalis beats Strata's IQ3_S on every measure on the RX 7900.
-
 <p align="center"><img src="media/flash-next.png" width="860" alt="Qwen3.8-Flash-Next in Chrysalis and Strata on an RX 7900 XTX and an M4 Max: time to first token and writing speed at five prompt lengths, error against Q8_0, load time and memory"></p>
 
 ## Qwen3.8-27B: Chrysalis vs llama.cpp and MLX
@@ -65,9 +63,6 @@ Start Chrysalis with `chrysalis.sh --host 0.0.0.0`. The other computer needs [Op
 
 ## Run it
 
-The first start downloads the model from [Hugging Face](https://huggingface.co/michaelDinelle/Qwen3.8-Chrysalis): 16 GB
-for the 27B, 117 GB for Flash-Next. The chat is then at `http://localhost:8081`.
-
 **Windows 11 with an RX 7900 XTX**
 
 1. Driver: install [AMD Software: Adrenalin Edition](https://www.amd.com/en/support/download/drivers.html) if the card
@@ -81,11 +76,6 @@ for the 27B, 117 GB for Flash-Next. The chat is then at `http://localhost:8081`.
 <p align="center"><img src="media/windows-run.png" width="760" alt="Chrysalis running in a window on Windows 11 with the model ready, and the chat open in the browser"></p>
 
 **Linux with an RX 7900 XTX**
-
-1. Driver: none to install. The card runs on the `amdgpu` driver every current distribution ships (`lspci -k` shows
-   "Kernel driver in use: amdgpu"), and Chrysalis brings its own ROCm.
-2. Get Chrysalis and start it. The first start gets the engines built for the card and the GPU runtime they use,
-   Python and Bun:
 
 ```sh
 git clone https://github.com/michaelDinelle/chrysalis-inference
