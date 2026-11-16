@@ -51,6 +51,20 @@ const painted = (svg: string) => {
   return rows;
 };
 const files = (dir: string): string[] => readdirSync(dir, { withFileTypes: true }).flatMap((f) => (f.isDirectory() ? files(`${dir}/${f.name}`) : f.isFile() ? [`${dir}/${f.name}`] : []));
+function listening(root: number) {
+  const kids = new Map<number, number[]>();
+  for (const l of Bun.spawnSync(["ps", "-A", "-o", "pid=,ppid="], { stdout: "pipe" }).stdout.toString().trim().split("\n")) {
+    const [pid, ppid] = l.trim().split(/\s+/).map(Number);
+    kids.set(ppid, [...(kids.get(ppid) ?? []), pid]);
+  }
+  const tree = [root];
+  for (let i = 0; i < tree.length; i++) tree.push(...(kids.get(tree[i]) ?? []));
+  const out = Bun.spawnSync(["lsof", "-nP", "-a", "-p", tree.join(","), "-i"], { stdout: "pipe", stderr: "pipe" }).stdout.toString();
+  return out.split("\n").flatMap((l) => {
+    const m = /\s(TCP|UDP) (\S+)(?: \((\w+)\))?\s*$/.exec(l);
+    return !m || (m[1] === "TCP" ? m[3] !== "LISTEN" : m[2].includes("->")) ? [] : [`${m[1]} ${m[2]}`];
+  });
+}
 
 test("the terminal shows each request to the model as it finishes, by its sizes and speeds and never its words, and nothing else the servers print until verbose is typed; none of it reaches a file; a request from an incognito chat stays off the terminal and tells the model server to keep it out of its prompt cache on disk, which the next ordinary request writes again", async () => {
   const c = chrysalis();
@@ -103,6 +117,23 @@ test("the terminal shows each request to the model as it finishes, by its sizes 
   }
 }, 60_000);
 
+test("in local mode every port the terminal, the web chat and what they start listen on is on 127.0.0.1 alone, while the model is unloaded and the page asks for the status and for computers to link to as well", async () => {
+  const c = chrysalis({ env: { CHRYSALIS_FIND_MS: "60000" } });
+  try {
+    await c.shown("ready in");
+    await c.shown(/chat\s+http:\/\/localhost:\d+/);
+    c.type("model unload\n");
+    await c.shown("is unloaded and the GPU is free");
+    expect((await (await fetch(`${c.here}/api/status`)).json()).state).toBe("offline");
+    expect((await fetch(`${c.here}/api/link`)).status).toBe(200);
+    const open = listening(c.proc.pid);
+    expect(open).toContain(`TCP 127.0.0.1:${c.port}`);
+    expect(open.filter((s) => !/ (127\.[\d.]+|\[::1\]):\d+$/.test(s))).toEqual([]);
+  } finally {
+    await c.stop();
+  }
+}, 60_000);
+
 test("insecure puts the chat and the API on the network over plain HTTP with no certificate made and nobody to let in, warns that it is unencrypted and without voice, says who asks, and keeps OpenCode and voice on this computer; local takes it off the network again", async () => {
   const ip = lanAddresses()[0];
   expect(ip).toBeTruthy();
@@ -127,7 +158,7 @@ test("insecure puts the chat and the API on the network over plain HTTP with no 
     expect([said.status, (await said.json()).choices[0].message.content]).toEqual([200, "heard over the network"]);
     await c.shown(`from ${new URL(chat).hostname}`, at);
     await c.shown("14,982 tokens read (14,272 cached)", at);
-    expect((await fetch(`${api}/v1/models`)).status).toBe(404);
+    expect((await (await fetch(`${api}/v1/models`)).json()).data.map((m: { id: string }) => m.id)).toContain("qwen3.8-27b");
     expect((await fetch(`${api}/metrics`)).status).toBe(404);
     expect((await fetch(`${chat}/api/chat`, { method: "POST", headers: json, body: JSON.stringify({ messages: [{ role: "user", content: "in the chat" }] }) })).status).toBe(200);
 
@@ -332,5 +363,27 @@ test("OpenCode, the ordinary one and the incognito one, ends with the web server
     proc.kill();
     for (const pid of alive()) process.kill(pid);
     rmSync(dir, { recursive: true, force: true });
+  }
+}, 60_000);
+
+test("OpenCode started from the page before the model server answers waits for it and is given every model it lists, so the first message of a chat has Chrysalis's models", async () => {
+  const engine = freePort(), bin = `${tmpdir()}/chrysalis-cli-opencode-early-${process.pid}`;
+  writeFileSync(bin, `#!/bin/sh\nexec ${process.execPath} ${import.meta.dir}/fake-opencode-bin.ts "$@"\n`);
+  chmodSync(bin, 0o755);
+  let asked!: () => void;
+  const models = new Promise<void>((r) => (asked = r));
+  const before = Bun.listen({ hostname: "127.0.0.1", port: engine, socket: { data(s, d) { if (d.toString().startsWith("GET /v1/models")) asked(); s.end(); } } });
+  const c = chrysalis({ env: { CHRYSALIS_URL: `http://127.0.0.1:${engine}`, FAKE_ENGINE_PORT: String(engine), CHRYSALIS_OPENCODE: bin } });
+  try {
+    await c.shown(/chat\s+http:\/\/localhost:\d+/);
+    const started = fetch(`${c.here}/api/threads`, { method: "POST" });
+    await models;
+    before.stop(true);
+    expect((await started).status).toBe(200);
+    expect((await (await fetch(`${c.here}/api/threads`)).json()).models.map((m: { id: string }) => m.id)).toEqual(["chrysalis/qwen3.8-27b", "chrysalis/qwen3.8-flash-next"]);
+  } finally {
+    before.stop(true);
+    await c.stop();
+    rmSync(bin, { force: true });
   }
 }, 60_000);

@@ -3306,6 +3306,7 @@ function render() {
   const was = [...thread.children];
   thread.append(...(conv.messages.length ? conv.messages.map(messageView) : [emptyState()]));
   for (const el of was) el.remove();
+  if (conv.messages.length) ocean.butterfly(null);
   $("title").textContent = conv.title;
   document.title = conv.messages.length && !conv.incognito ? `${conv.title} · Chrysalis Inference` : "Chrysalis Inference";
   renderComposer();
@@ -5621,6 +5622,7 @@ function paintGhost() {
     g = h("article", "msg user ghost");
     g.append(h("div", "bubble"));
     thread.querySelector(".empty")?.remove();
+    ocean.butterfly(null);
     thread.append(g);
   }
   const b = g.firstElementChild as HTMLElement, known = knownFor(v, text);

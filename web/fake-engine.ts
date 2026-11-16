@@ -1,3 +1,4 @@
+import { MODELS } from "./platform";
 const say = (line: string) => process.stderr.write(`${line}\n`);
 let model = "qwen3.8-flash-next", asleep = false, writing = 0;
 const gap = Number(process.env.FAKE_ENGINE_GAP_MS ?? 0);
@@ -5,11 +6,12 @@ const gap = Number(process.env.FAKE_ENGINE_GAP_MS ?? 0);
 say(`chrysalis: loading ${model}`);
 say("chrysalis-fn: CPU experts on 16 threads");
 say("chrysalis-fn: weights 20.10 GB VRAM (4.1 s), cold experts 42.60 GB RAM (9.0 s), buffers 2.00 GB (passes of 2048 tokens), KV pool 4030 pages = 257920 tokens (2.50 GB), load 13.2 s");
-Bun.serve({
+const serve = () => Bun.serve({
   hostname: "127.0.0.1",
   port: Number(process.env.FAKE_ENGINE_PORT),
   async fetch(req) {
     const path = new URL(req.url).pathname;
+    if (path === "/v1/models") return Response.json({ object: "list", data: MODELS.flatMap((m) => [m, `${m}-fast`]).map((id) => ({ id, object: "model", owned_by: "chrysalis", context_length: 257920 })) });
     if (path === "/chrysalis/stats") return Response.json(asleep ? { model, asleep: true } : { model, context: 257920 });
     if (path === "/chrysalis/env") return Response.json({ pid: process.pid, snapshots: process.env.CHRYSALIS_SNAPSHOTS, tmp: process.env.TMPDIR });
     if (path === "/metrics") return new Response(`chrysalis_replies_writing ${writing}\n`);
@@ -42,5 +44,8 @@ Bun.serve({
     return new Response("not found", { status: 404 });
   },
 });
+for (;;) {
+  try { serve(); break; } catch { await Bun.sleep(20); }
+}
 say(`chrysalis: serving ${model} on http://127.0.0.1:${process.env.FAKE_ENGINE_PORT}/v1 (context 257920 tokens)`);
 say("chrysalis: warmed up in 0.4 s");

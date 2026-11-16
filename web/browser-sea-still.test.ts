@@ -39,6 +39,36 @@ test("the sea drawn by the CPU, in a browser without WebGL, is the sea WebGL2 dr
   }
 }, 90_000);
 
+test("with reduced motion the butterfly is gone from behind every chat with messages, one written in and one opened from the list, and a new chat raises it again", async () => {
+  const gl = await puppeteer.launch({ executablePath: process.env.CHROMIUM ?? "/usr/bin/chromium", headless: true, args: [...CHAT_ARGS, "--enable-unsafe-swiftshader"] });
+  try {
+    const page = await (await chatContext(gl)).newPage();
+    page.on("pageerror", (e) => { throw e; });
+    await page.emulateMediaFeatures([{ name: "prefers-reduced-motion", value: "reduce" }]);
+    await page.setViewport({ width: 1920, height: 900 });
+    await idle(page, page.goto(`${base}/`));
+    await page.waitForSelector(".sea > canvas.ocean");
+    const sea = (await (await page.$(".sea"))!.boundingBox())!, box = (await (await page.$(".composer-box"))!.boundingBox())!;
+    const middle = { x: box.x + box.width / 2 - 150, y: (sea.y + box.y) / 2 - 100, width: 300, height: 200 };
+    const settled = async (ok: (pink: number) => boolean) => {
+      let pink = (await look(page, middle)).pink;
+      for (const end = Date.now() + 5000; !ok(pink) && Date.now() < end; await Bun.sleep(100)) pink = (await look(page, middle)).pink;
+      return pink;
+    };
+    expect(await settled((p) => p > 800)).toBeGreaterThan(800);
+    await send(page, "capital of France");
+    expect(await settled((p) => p < 50)).toBeLessThan(50);
+    await fresh(page);
+    expect(await settled((p) => p > 800)).toBeGreaterThan(800);
+    await page.click(".conv");
+    await page.waitForSelector("#thread .msg.assistant");
+    expect(await settled((p) => p < 50)).toBeLessThan(50);
+    await page.close();
+  } finally {
+    await gl.close();
+  }
+}, 60_000);
+
 test("the sea stays behind a chat, the butterfly sunk into it and every click the chat's, and a new chat raises it again; Settings takes the sea away (remembered), from chats and from a new chat, which is then empty, and brings it back", async () => {
   const gl = await puppeteer.launch({ executablePath: process.env.CHROMIUM ?? "/usr/bin/chromium", headless: true, args: [...CHAT_ARGS, "--enable-unsafe-swiftshader"] });
   try {

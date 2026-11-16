@@ -4,7 +4,7 @@ interface Session { id: string; title: string; dir: string; created: number; upd
 
 const PAGE = '<!doctype html>\n<html><head><title>Counter</title></head>\n<body>\n<h1 id="title">Clicks</h1>\n<button id="inc">Add</button>\n</body></html>\n';
 
-export function fakeOpenCode(secret: string, port = 0, store?: string, model?: string) {
+export function fakeOpenCode(secret: string, port = 0, store?: string, model?: string, ours = [{ id: "qwen3.8-27b", name: "Qwen3.8 27B" }]) {
   let cards = 0;
   const kept = store && store !== ":memory:" ? store : undefined;
   const keep = () => { if (kept) { mkdirSync(dirname(kept), { recursive: true }); writeFileSync(kept, JSON.stringify([...sessions.values()])); } };
@@ -132,7 +132,7 @@ export function fakeOpenCode(secret: string, port = 0, store?: string, model?: s
       const url = new URL(req.url), path = url.pathname, method = req.method;
       if (req.headers.get("authorization") !== `Basic ${Buffer.from(`opencode:${secret}`).toString("base64")}`) return new Response("", { status: 401 });
       if (path === "/api/info") return json({ version: "2.2.7" });
-      if (path === "/api/model") return json({ data: [{ id: "qwen3.8-27b", providerID: "chrysalis", name: "Qwen3.8 27B", variants: [{ id: "none" }, { id: "low" }, { id: "medium" }] }, ...(store ? [] : [{ id: "cloud-1", providerID: "elsewhere", name: "Cloud One", settings: { baseURL: "https://cloud.example/v1" } }])] });
+      if (path === "/api/model") return json({ data: [...ours.map(({ id, name }) => ({ id, providerID: "chrysalis", name, variants: [{ id: "none" }, { id: "low" }, { id: "medium" }] })), ...(store ? [] : [{ id: "cloud-1", providerID: "elsewhere", name: "Cloud One", settings: { baseURL: "https://cloud.example/v1" } }])] });
       if (path === "/api/agent") return json({ data: [{ id: "build", name: "Build", mode: "primary", hidden: false }, { id: "plan", name: "Plan", mode: "primary", hidden: false },
         { id: "explore", name: "Explore", mode: "subagent", hidden: false }, { id: "title", name: "Title", mode: "primary", hidden: true }] });
       if (path === "/api/command") return json({ data: [{ name: "review", description: "review changes" }] });

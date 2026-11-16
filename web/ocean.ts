@@ -442,7 +442,7 @@ export class Ocean {
 
   place() { this.layout(); }
 
-  butterfly(empty: HTMLElement) {
+  butterfly(empty: HTMLElement | null) {
     this.empty = empty;
     this.wake();
   }

@@ -64,7 +64,7 @@ export class Link {
   private lastFind = 0;
   private offNetwork = false;
 
-  constructor(private file: string, private ownFp: string) {
+  constructor(private file: string, private ownFp: string, private onNetwork: boolean) {
     if (existsSync(file)) this.linked = JSON.parse(readFileSync(file, "utf8"));
   }
   get name() { return this.linked?.name; }
@@ -88,7 +88,7 @@ export class Link {
   }
 
   state() {
-    if (!this.linked && !this.finding && Date.now() - this.lastFind > REFIND_MS) {
+    if (this.onNetwork && !this.linked && !this.finding && Date.now() - this.lastFind > REFIND_MS) {
       let off = false;
       this.finding = discover(() => (off = true)).then((f) => {
         this.found = f.filter((x) => x.fp !== this.ownFp);
@@ -151,7 +151,7 @@ export class Link {
       if (req.signal.aborted) throw e;
       this.offNetwork = refused(e);
       if (this.offNetwork) return Response.json({ error: { message: OFF_NETWORK } }, { status: 502 });
-      const now = (await discover()).find((f) => f.fp === l.fp);
+      const now = this.onNetwork ? (await discover()).find((f) => f.fp === l.fp) : undefined;
       if (!now || (now.address === l.address && now.port === l.port)) {
         return Response.json({ error: { message: `Chrysalis on ${l.name} does not answer: is it on, and on this network?` } }, { status: 502 });
       }

@@ -146,8 +146,13 @@ async function freePort() {
 }
 
 async function ourModels(chrysalis: string) {
-  const listed = await fetch(`${chrysalis}/v1/models`, { signal: AbortSignal.timeout(3000) }).then((r) => r.json()).catch(() => ({ data: [] }));
-  return Object.fromEntries((listed.data ?? []).filter((m: any) => typeof m?.id === "string" && !m.id.endsWith("-fast")).map((m: any) => [m.id, { variants: THINKING, capabilities: { input: ["text", "image", "pdf"] },
+  let listed;
+  for (;;) {
+    listed = await fetch(`${chrysalis}/v1/models`).then((r) => r.json().catch(() => ({ data: [] })), () => undefined);
+    if (listed || process.env.CHRYSALIS_ENGINE_HERE !== "1") break;
+    await Bun.sleep(150);
+  }
+  return Object.fromEntries((listed?.data ?? []).filter((m: any) => typeof m?.id === "string" && !m.id.endsWith("-fast")).map((m: any) => [m.id, { variants: THINKING, capabilities: { input: ["text", "image", "pdf"] },
     ...(m.context_length > 0 ? { limit: { context: m.context_length, output: 32768 } } : {}) }]));
 }
 export const awayConfig = async (chrysalis: string) => ({ enabled_providers: ["chrysalis"],

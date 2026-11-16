@@ -547,7 +547,7 @@ const LAN = process.env.CHRYSALIS_HOST === "0.0.0.0" && !OPEN, dir = tlsDir();
 let certs: ReturnType<typeof webTls> | undefined;
 const tls = () => (certs ??= webTls(dir));
 const devices = new Devices(`${dir}/devices.json`), backends = new Backends(`${dir}/backend.json`, `${CHRYSALIS}/v1`), sea = await deviceScript();
-const link = new Link(`${dir}/link.json`, LAN ? tls().link.fingerprint : ""), MACHINE = hostname().replace(/\.local$/, "");
+const link = new Link(`${dir}/link.json`, LAN ? tls().link.fingerprint : "", LAN), MACHINE = hostname().replace(/\.local$/, "");
 const PAGE = { "Content-Type": "text/html; charset=utf-8", "Cache-Control": "no-store" };
 const serve = (hostname: string, port: number) => Bun.serve<VoiceSocket>({
   hostname,
