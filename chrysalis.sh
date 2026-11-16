@@ -70,12 +70,12 @@ build() {
         if [ ! -f "$L/build/bin/libggml-cpu.so" ]; then
             echo "getting llama.cpp's CPU kernels, which Flash-Next's CPU experts run on (once)"
             { [ -d "$L/.git" ] || git clone -q https://github.com/ggml-org/llama.cpp "$L"; } && git -C "$L" checkout -q "$LLAMA_REV" &&
-                cmake -S "$L" -B "$L/build" -DCMAKE_BUILD_TYPE=Release -DBUILD_SHARED_LIBS=ON -DLLAMA_BUILD_TOOLS=OFF -DLLAMA_BUILD_EXAMPLES=OFF \
-                    -DLLAMA_BUILD_TESTS=OFF >/dev/null && cmake --build "$L/build" -j"$(nproc)" --target ggml-cpu ggml-base >/dev/null ||
+                cmake --log-level=WARNING -S "$L" -B "$L/build" -DCMAKE_BUILD_TYPE=Release -DBUILD_SHARED_LIBS=ON -DLLAMA_BUILD_TOOLS=OFF \
+                    -DLLAMA_BUILD_EXAMPLES=OFF -DLLAMA_BUILD_TESTS=OFF -DLLAMA_BUILD_COMMON=OFF >/dev/null && cmake --build "$L/build" -j"$(nproc)" --target ggml-cpu ggml-base >/dev/null ||
                 { echo "  that failed: start Chrysalis again to try again"; return 0; }
         fi
         echo "building Chrysalis's CUDA engines for this GPU (once, a few minutes)"
-        PATH="$PATH:$cuda" make -C "$ROOT" -s engines >/dev/null 2>&1 || echo "  that failed: 'make engines' shows why"
+        PATH="$PATH:$cuda" make -C "$ROOT" -s -j"$(nproc)" engines >/dev/null 2>&1 || echo "  that failed: 'make engines' shows why"
         return 0
     fi
     apple && [ -f "$ROOT/Makefile" ] || return 0
@@ -103,6 +103,7 @@ release() {
     cp data/models/{tokenizer.json,tokenizer_config.json,chat_template.jinja} "$OUT/data/models/"
     cp data/models/qwen3.8-27b/{config.json,generation_config.json,preprocessor_config.json} "$OUT/data/models/qwen3.8-27b/"
     cp data/models/qwen3.8-flash-next/preprocessor_config.json "$OUT/data/models/qwen3.8-flash-next/"
+    [ ! -f data/cache/hipblaslt.txt ] || { mkdir -p "$OUT/data/cache" && cp data/cache/hipblaslt.txt "$OUT/data/cache/"; }
     UV=$(mktemp -d) && trap 'rm -rf "$UV"' EXIT
     curl -fsSL https://github.com/astral-sh/uv/releases/latest/download/uv-x86_64-unknown-linux-gnu.tar.gz | tar -xz -C "$UV" --strip-components=1
     "$UV/uv" python install -q --no-bin 3.12 --install-dir "$UV/python"

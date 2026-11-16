@@ -159,7 +159,7 @@ function ready(model: string, seconds: string | number, context?: string) {
 function engineLine(l: string): boolean {
   let m: RegExpExecArray | null;
   if ((m = REQUEST.exec(l))) {
-    if (!state.veiled) note(`${stamp()}  ${read(m[1], m[2])}${m[3] ? `${SEP}${m[3]} pictures` : ""}${SEP}first token ${m[4]} s${SEP}${count(m[5])} written at ${m[6]} tok/s${m[7] === "stop" ? "" : SEP + (FINISH[m[7]] ?? m[7])}`);
+    if (!state.veiled) note(`${stamp()}  ${read(m[1], m[2])}${m[3] ? `${SEP}${m[3]} picture${m[3] === "1" ? "" : "s"}` : ""}${SEP}first token ${m[4]} s${SEP}${count(m[5])} written at ${m[6]} tok/s${m[7] === "stop" ? "" : SEP + (FINISH[m[7]] ?? m[7])}`);
     return !state.verbose;
   }
   if ((m = STOPPED.exec(l))) {

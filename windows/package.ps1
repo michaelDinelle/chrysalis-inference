@@ -18,6 +18,7 @@ Copy-Item "$root\LICENSE" "$pkg\"
 Copy-Item "$root\data\models\tokenizer.json", "$root\data\models\tokenizer_config.json", "$root\data\models\chat_template.jinja" "$pkg\data\models\"
 Copy-Item "$root\data\models\qwen3.8-27b\config.json", "$root\data\models\qwen3.8-27b\generation_config.json", "$root\data\models\qwen3.8-27b\preprocessor_config.json" "$pkg\data\models\qwen3.8-27b\"
 Copy-Item "$root\data\models\qwen3.8-flash-next\preprocessor_config.json" "$pkg\data\models\qwen3.8-flash-next\"
+if ($Backend -eq "hip" -and (Test-Path "$root\data\cache\hipblaslt.txt")) { New-Item -ItemType Directory -Force "$pkg\data\cache" | Out-Null; Copy-Item "$root\data\cache\hipblaslt.txt" "$pkg\data\cache\" }
 
 $t = Join-Path $Out "tmp"
 Remove-Item $t -Recurse -Force -ErrorAction SilentlyContinue
