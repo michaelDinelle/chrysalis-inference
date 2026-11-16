@@ -4,7 +4,7 @@ ROOT="$(dirname "$(readlink -f "$0")")"
 PY="$ROOT/data/venv/bin/python"
 MAC=; [ "$(uname)" = Darwin ] && MAC=1
 APP="$ROOT/Chrysalis.app"
-BUN="$ROOT/bin/bun"; [ -n "$MAC" ] && BUN="$APP/Contents/MacOS/Chrysalis"; [ -x "$BUN" ] || BUN=bun
+BUN="$ROOT/bin/bun"; [ -n "$MAC" ] && [ -x "$APP/Contents/MacOS/Chrysalis" ] && BUN="$APP/Contents/MacOS/Chrysalis"; [ -x "$BUN" ] || BUN=bun
 export BUN_BE_BUN=1
 launch() { exec "$BUN" "$ROOT/web/launch.ts" "$@"; }
 PKGS=(numpy tokenizers pillow llguidance "huggingface_hub[hf_xet]" onnxruntime==1.31.0 sherpa-onnx==1.13.8 kokoro-onnx==0.4.7 websockets==17.2 pypdfium2==5.15.2 av==19.0.2)

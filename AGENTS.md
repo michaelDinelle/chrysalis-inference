@@ -120,8 +120,10 @@ never edit them by hand. `python3 media/charts.py --check` fails if either diffe
 `make test_web` run it.
 
 Each machine keeps a judge running (the first step starts it; `.hill/hill stop` ends it and frees the GPU). It holds
-HEAD built in a tree of its own under .hill/trees and keeps bench/worker.py alive per model with the model loaded, so a
-check never pays a load: `run speed-<model>` and `run quality-<model>` answer from the loaded engine, with a breakdown
+HEAD built in a tree of its own under .hill/trees and keeps bench/worker.py alive per model: the 27B stays loaded (one
+speed run is thrown away before it is ready, because the first after a load is slower), and Flash-Next starts a fresh
+model server for each check, because its pool and split move with what a server has run and only fresh processes repeat
+each other. `run speed-<model>` and `run quality-<model>` answer with a breakdown
 (time per step, pool hits, moves and waits per step, prompt time) the step prints beside the best's when a reward
 loses. One model holds the GPU at a time. A check whose `depends` fingerprint (bench/hill_same.py: the sources that
 model's engine is built from on this machine) is the same on both sides is not run, so a Flash-Next change never
