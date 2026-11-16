@@ -1,4 +1,4 @@
-import { join } from "node:path";
+import { dirname, join } from "node:path";
 import { exe, here, library, ROOT, serverEnv, type Machine } from "./platform";
 
 const PICK = exe(join(ROOT, "build", "gpu"));
@@ -9,7 +9,7 @@ export function pick(env: Record<string, string | undefined> = process.env, pick
     const p = Bun.spawnSync([picker], { stdin: "ignore", stdout: "pipe", stderr: "pipe", env: env as Record<string, string> });
     if (p.exitCode === 0) return { env: Object.fromEntries([...p.stdout.toString().matchAll(/^([A-Z_]+)=(.*?)\r?$/gm)].map((m) => [m[1], m[2]])) };
     const said = p.stderr.toString().trim().split(/\r?\n/).pop()!.replace(/^chrysalis: /, "");
-    return { why: said || (p.exitCode! >>> 0 === 0xc0000135 ? "AMD's driver is missing or older than Chrysalis needs (it has no amdhip64_7.dll): install the current AMD Software: Adrenalin Edition for a Radeon RX 7900" : `${picker} stopped with code ${p.exitCode}`) };
+    return { why: said || `${picker} stopped with code ${p.exitCode}` };
   } catch (e) { return { why: `${picker} could not be run: ${e instanceof Error ? e.message : String(e)}` }; }
 }
 
@@ -27,6 +27,8 @@ export function gpuFound(m: Machine = here(), root = ROOT, picker = exe(join(roo
   }
   const nvidia = m.platform === "win32" ? join(m.env.SystemRoot ?? m.env.SYSTEMROOT ?? "C:\\Windows", "System32", "nvcuda.dll") : "/dev/nvidiactl";
   if (m.exists(nvidia) && m.exists(library("libchrysalis", m, root)) && m.exists(library("libchrysalis_fn", m, root))) return { here: true, env: {} };
+  if (m.platform === "win32" && !m.exists(join(dirname(nvidia), "amdhip64_7.dll")))
+    return { here: false, env: {}, why: "AMD's driver is missing or older than Chrysalis needs (Windows has no amdhip64_7.dll): install the current AMD Software: Adrenalin Edition for a Radeon RX 7900" };
   const found = pick({ ...m.env, ...serverEnv(m, root) }, picker);
   return { here: !!found.env, env: CHOSEN.some((k) => m.env[k] !== undefined) ? {} : found.env ?? {}, ...(found.why ? { why: found.why } : {}) };
 }

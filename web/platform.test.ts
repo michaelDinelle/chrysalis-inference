@@ -47,6 +47,8 @@ test("a GPU Chrysalis runs on is a Mac with Apple silicon, 30 GB and the Metal e
     expect([gpuHere(machine("win32", cuda, { env: { SystemRoot: "C:\\Windows" } }), root, none), gpuHere(machine("win32", cuda.slice(0, 2), { env: { SystemRoot: "C:\\Windows" } }), root, none)]).toEqual([true, false]);
     expect([gpuHere(machine("linux", ["/dev/nvidiactl", join(root, "build/libchrysalis.so"), join(root, "build/libchrysalis_fn.so")]), root, none),
       gpuHere(machine("linux"), root, found), gpuHere(machine("linux"), root, none), gpuHere(machine("linux"), root, `${dir}/missing`)]).toEqual([true, true, false, false]);
+    const hip7 = join("C:\\Windows", "System32", "amdhip64_7.dll"), windows = { env: { SystemRoot: "C:\\Windows" } };
+    expect([gpuFound(machine("win32", [hip7], windows), root, found).here, gpuFound(machine("win32", [], windows), root, found).here, gpuFound(machine("win32", [], windows), root, found).why?.includes("Windows has no amdhip64_7.dll")]).toEqual([true, false, true]);
     const says = `${dir}/says`;
     writeFileSync(says, "#!/bin/sh\necho 'chrysalis: this computer has no GPU that AMD'\\''s ROCm can use' >&2\nexit 1\n");
     chmodSync(says, 0o755);
