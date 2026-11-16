@@ -2012,8 +2012,16 @@ static Spec spec_at(const char *commit) {
 
 static void set_best(const char *commit) {
     if (B.commit && !strcmp(B.commit, commit)) return;
-    end_best();
     Spec s = spec_at(commit);
+    if (B.commit) {
+        Digests was = digests(&B.s, B.commit), now = digests(&s, commit);
+        if (!strcmp(was.product, now.product) && !strcmp(was.harness, now.harness)) {
+            tree_at(&s, commit, B.tree + strlen(B.tree) - 1);
+            B.commit = strdup(commit);
+            return;
+        }
+    }
+    end_best();
     char *tree = tree_at(&s, commit, B.tree && !strcmp(B.tree + strlen(B.tree) - 1, "b") ? "b" : "a");
     build(&s, tree, "best");
     size_t n = jget(s.spec, "rewards")->len;

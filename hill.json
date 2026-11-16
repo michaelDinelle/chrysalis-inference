@@ -46,7 +46,8 @@
       "run": "data/venv/bin/python bench/hill_build.py",
       "depends": "data/venv/bin/python bench/hill_same.py",
       "budget_s": 90,
-      "memory_gb": 4
+      "memory_gb": 4,
+      "exclusive": "cpu"
     },
     "speed-27b": {
       "serve": "data/venv/bin/python bench/worker.py 27b",
