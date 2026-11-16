@@ -1,23 +1,18 @@
 import { expect, test } from "bun:test";
-import { existsSync, mkdtempSync, rmSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { main, parse, plan } from "./launch";
+import { main, parse, plan, uninstall } from "./launch";
 import { here } from "./platform";
 
 const none = () => false, all = () => true;
 
-test("a first start asks nothing when one model is sensible: the 27B where RAM is short of Flash-Next, the model last chosen or named, and no model where no GPU runs Chrysalis; with room for both it asks once, the 27B first, and gets Flash-Next in the background", () => {
-  expect(plan({ gpu: false, roomy: true, asks: true, missing: all })).toEqual({ ask: false, choices: [], at: 0 });
-  const small = plan({ gpu: true, roomy: false, asks: true, missing: all });
-  expect([small.ask, small.model, small.background, small.choices.length]).toEqual([false, "qwen3.8-27b", undefined, 1]);
-  expect(plan({ gpu: true, roomy: false, asks: true, last: "qwen3.8-flash-next", missing: all }).model).toBe("qwen3.8-27b");
-  const roomy = plan({ gpu: true, roomy: true, asks: true, missing: all });
-  expect([roomy.ask, roomy.at, roomy.model, roomy.background, roomy.choices.map((c) => c.id)]).toEqual([true, 0, "qwen3.8-27b", "qwen3.8-flash-next", ["qwen3.8-27b", "qwen3.8-flash-next"]]);
-  expect([plan({ gpu: true, roomy: true, asks: true, missing: none }).background, plan({ gpu: true, roomy: true, asks: true, last: "qwen3.8-flash-next", missing: none }).at]).toEqual([undefined, 1]);
-  const named = plan({ gpu: true, roomy: true, asks: true, first: "qwen3.8-flash-next", missing: all });
-  expect([named.ask, named.model, named.background]).toEqual([false, "qwen3.8-flash-next", undefined]);
-  const piped = plan({ gpu: true, roomy: true, asks: false, last: "qwen3.8-flash-next", missing: all });
-  expect([piped.ask, piped.model]).toEqual([false, "qwen3.8-flash-next"]);
+test("a start asks nothing and waits for no download: the model named, else the one last used where it fits, else the 27B; no model where no GPU runs Chrysalis; with room for both, Flash-Next follows the 27B in the background when it is not here", () => {
+  expect(plan({ gpu: false, roomy: true, missing: all })).toEqual({});
+  expect(plan({ gpu: true, roomy: false, missing: all })).toEqual({ model: "qwen3.8-27b" });
+  expect(plan({ gpu: true, roomy: false, last: "qwen3.8-flash-next", missing: all })).toEqual({ model: "qwen3.8-27b" });
+  expect(plan({ gpu: true, roomy: true, missing: all })).toEqual({ model: "qwen3.8-27b", background: "qwen3.8-flash-next" });
+  expect([plan({ gpu: true, roomy: true, missing: none }), plan({ gpu: true, roomy: true, last: "qwen3.8-flash-next", missing: all })]).toEqual([{ model: "qwen3.8-27b" }, { model: "qwen3.8-flash-next" }]);
+  expect(plan({ gpu: true, roomy: false, first: "qwen3.8-flash-next", missing: all })).toEqual({ model: "qwen3.8-flash-next" });
   expect([parse([]), parse(["--host", "0.0.0.0", "--model", "qwen3.8-27b"]), parse(["--insecure"]), parse(["--host", "127.0.0.1"]), parse(["--model", "other"]), parse(["--host"])])
     .toEqual([{ mode: "local" }, { mode: "network", model: "qwen3.8-27b" }, { mode: "insecure" }, { mode: "local" }, undefined, undefined]);
 });
@@ -44,3 +39,14 @@ test("the launcher starts the terminal without a model on a computer with no GPU
     rmSync(dir, { recursive: true, force: true });
   }
 }, 60_000);
+
+test("uninstalling removes the models, the caches and the settings Chrysalis wrote, says which were there, and leaves the folders beside them alone", () => {
+  const dir = mkdtempSync(`${tmpdir()}/chrysalis-uninstall-`);
+  try {
+    for (const d of ["home/data/models/qwen3.8-27b", "home/data/cache/huggingface", "home/data/venv", "config/chrysalis/tls", "config/other"]) mkdirSync(`${dir}/${d}`, { recursive: true });
+    writeFileSync(`${dir}/home/data/models/qwen3.8-27b/qwen3.8-27b.gguf`, "weights");
+    expect(uninstall(`${dir}/home`, `${dir}/config/chrysalis`, `${dir}/none.exe`).sort()).toEqual([`${dir}/config/chrysalis`, `${dir}/home/data/cache`, `${dir}/home/data/models`]);
+    expect(["home/data/models", "home/data/cache", "config/chrysalis", "home/data/venv", "config/other"].map((d) => existsSync(`${dir}/${d}`))).toEqual([false, false, false, true, true]);
+    expect(uninstall(`${dir}/home`, `${dir}/config/chrysalis`, `${dir}/none.exe`)).toEqual([]);
+  } finally { rmSync(dir, { recursive: true, force: true }); }
+});

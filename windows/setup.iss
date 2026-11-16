@@ -41,8 +41,5 @@ Name: "{autodesktop}\Chrysalis"; Filename: "{app}\Chrysalis.exe"; WorkingDir: "{
 Filename: "{app}\Chrysalis.exe"; WorkingDir: "{app}"; Description: "{cm:LaunchProgram,Chrysalis}"; Flags: nowait postinstall skipifsilent
 
 [UninstallDelete]
-Type: filesandordirs; Name: "{app}\build"
-Type: filesandordirs; Name: "{app}\chrysalis"
-Type: filesandordirs; Name: "{app}\web"
-Type: filesandordirs; Name: "{app}\data\venv"
-Type: filesandordirs; Name: "{app}\data\cache"
+Type: filesandordirs; Name: "{app}"
+Type: filesandordirs; Name: "{%USERPROFILE}\.config\chrysalis"

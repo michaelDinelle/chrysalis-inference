@@ -1,11 +1,16 @@
-param([string]$Sdk = $env:HIP_PATH, [string]$Llama = "", [string]$CMake = "cmake", [string]$Ninja = "ninja", [string]$Bun = "bun", [string]$Out = "", [string]$Version = "", [ValidateSet("hip", "cuda")][string]$Backend = "hip", [string]$Cuda = $env:CUDA_PATH, [string]$Arch = "sm_86")
+param([string]$Sdk = $env:HIP_PATH, [string]$Llama = "", [string]$CMake = "cmake", [string]$Ninja = "ninja", [string]$Bun = "bun", [string]$Out = "", [string]$Version = "", [ValidateSet("hip", "cuda")][string]$Backend = "hip", [string]$Cuda = $env:CUDA_PATH, [string]$Arch = "sm_86", [string]$Engines = "")
 $ErrorActionPreference = "Stop"
 $ProgressPreference = "SilentlyContinue"
 $root = Split-Path -Parent $PSScriptRoot
 if (-not $Out) { $Out = Join-Path $root "dist" }
 $pkg = Join-Path $Out "Chrysalis"
-& (Join-Path $PSScriptRoot "build.ps1") -Sdk $Sdk -Llama $Llama -CMake $CMake -Ninja $Ninja -Backend $Backend -Cuda $Cuda -Arch $Arch
-if ($LASTEXITCODE) { throw "the engines did not build" }
+if ($Engines) {
+    New-Item -ItemType Directory -Force "$root\build" | Out-Null
+    Copy-Item "$Engines\*" "$root\build\" -Recurse -Force
+} else {
+    & (Join-Path $PSScriptRoot "build.ps1") -Sdk $Sdk -Llama $Llama -CMake $CMake -Ninja $Ninja -Backend $Backend -Cuda $Cuda -Arch $Arch
+    if ($LASTEXITCODE) { throw "the engines did not build" }
+}
 Remove-Item $pkg -Recurse -Force -ErrorAction SilentlyContinue
 New-Item -ItemType Directory -Force "$pkg\build", "$pkg\data\models\qwen3.8-27b", "$pkg\data\models\qwen3.8-flash-next", "$pkg\web" | Out-Null
 Copy-Item "$root\build\*.dll", "$root\build\ramdrive.exe" "$pkg\build\"

@@ -30,7 +30,7 @@ test("on Linux the model server loads the bundled ROCm and the ggml build this C
   expect(serverEnv(vnni, root).LD_LIBRARY_PATH.split(":")).toEqual([join(root, "data/rocm/lib"), join(root, "data/rocm/lib/rocm_sysdeps/lib"), join(root, "ggml/avx512"), "/opt/x"]);
   const plain = serverEnv(machine("linux", [], { read: () => "flags\t: fpu avx2 avx512f avx512vl\n" }), root);
   expect(plain.LD_LIBRARY_PATH.split(":").at(-1)).toBe(join(root, "ggml/avx2"));
-  expect(Object.keys(serverEnv(machine("darwin"), root)).sort()).toEqual(["PYTHONIOENCODING", "PYTHONUTF8"]);
+  expect(serverEnv(machine("darwin"), root)).toEqual({ PYTHONIOENCODING: "utf-8", PYTHONUTF8: "1", HF_HOME: join(root, "data", "cache", "huggingface") });
 });
 
 test("a GPU Chrysalis runs on is a Mac with Apple silicon, 30 GB and the Metal engine built, an NVIDIA driver with both CUDA engines built, or one the engine's own picker finds", () => {

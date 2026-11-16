@@ -36,7 +36,7 @@ const before = (env: Record<string, string | undefined>, name: string, dirs: str
 };
 
 export function serverEnv(m: Machine = here(), root = ROOT): Record<string, string> {
-  const utf8 = { PYTHONUTF8: "1", PYTHONIOENCODING: "utf-8" };
+  const utf8 = { PYTHONUTF8: "1", PYTHONIOENCODING: "utf-8", HF_HOME: join(root === ROOT ? HOME : root, "data", "cache", "huggingface") };
   if (m.platform === "win32")
     return { ...utf8, CHRYSALIS_LT_CACHE: join(root, "data", "cache", "hipblaslt.txt"), ...before(m.env, "PATH", [join(root, "build"), join(root, "build", "runtime")], ";") };
   if (m.platform === "darwin") return utf8;

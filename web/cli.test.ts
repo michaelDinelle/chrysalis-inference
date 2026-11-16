@@ -3,7 +3,7 @@ import { chmodSync, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSyn
 import { tmpdir } from "node:os";
 import { dirname } from "node:path";
 import { memoryRoot } from "./platform";
-import { plain } from "./terminal";
+import { butterfly, plain, progress } from "./terminal";
 import { lanAddresses } from "./tls";
 
 const json = { "Content-Type": "application/json" };
@@ -130,6 +130,23 @@ test("where no GPU was found, the terminal says why in the launcher's own words,
     await c.stop();
   }
 }, 60_000);
+
+test("a download's progress is read from the line the downloader draws: the newest of what it has said, before it starts, as it goes and when it is done", () => {
+  const bar = (tail: string) => `\r\x1b[K  qwen3.8-27b          \x1b[35m━━━━━━━━━\x1b[2m━━━━━━━━━━━━━━━━━━━\x1b[0m  ${tail}`;
+  expect(progress("Warning: You are sending unauthenticated requests to the HF Hub.")).toBeUndefined();
+  expect(progress(bar(" 0.0 / 16.8 GB  starting"))).toEqual({ done: 0, total: 16.8e9, rate: 0 });
+  expect(progress(bar(" 0.0 / 16.8 GB  starting") + bar(" 5.7 / 16.8 GB  110 MB/s, 1:40 left"))).toEqual({ done: 5.7e9, total: 16.8e9, rate: 110e6 });
+  expect(progress(bar(" 5.7 / 16.8 GB  110 MB/s, 1:40 left") + bar("16.8 / 16.8 GB  done\n"))).toEqual({ done: 16.8e9, total: 16.8e9, rate: 0 });
+});
+
+test("the butterfly is the logo in characters: as wide as asked, its two sides alike, more of it there the further it has emerged, and never still between frames", () => {
+  const full = butterfly(40, 14, 0), ink = (lines: string[]) => lines.join("").replace(/ /g, "").length;
+  expect([full.length, Math.max(...full.map((l) => l.length)) <= 40, ink(full) > 150]).toEqual([14, true, true]);
+  const sides = full.map((l) => l.padEnd(40)).reduce((n, l) => [n[0] + l.slice(0, 20).replace(/ /g, "").length, n[1] + l.slice(20).replace(/ /g, "").length], [0, 0]);
+  expect(Math.abs(sides[0] - sides[1]) / (sides[0] + sides[1])).toBeLessThan(0.1);
+  expect([ink(butterfly(40, 14, 0, 0)), ink(butterfly(40, 14, 0, 0.5)) < ink(full) * 0.75, ink(butterfly(40, 14, 0, 0.5)) > ink(full) * 0.25]).toEqual([0, true, true]);
+  expect(butterfly(40, 14, 0.9).join("\n")).not.toBe(full.join("\n"));
+});
 
 test("in local mode every port the terminal, the web chat and what they start listen on is on 127.0.0.1 alone, while the model is unloaded and the page asks for the status and for computers to link to as well", async () => {
   const c = chrysalis({ env: { CHRYSALIS_FIND_MS: "60000" } });

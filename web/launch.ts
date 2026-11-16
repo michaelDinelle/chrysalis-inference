@@ -5,10 +5,6 @@ import { gpuEnv, gpuFound } from "./gpu";
 import { getCommand, here, HOME, MODELS, ourScript, python, ROOT, serverCommand, serverEnv, utf8Console, type Machine } from "./platform";
 import { tlsPath } from "./tls";
 
-const CHOICES = [
-  { id: MODELS[0], name: "Qwen3.8-27B", note: "Quickest replies" },
-  { id: MODELS[1], name: "Qwen3.8-Flash-Next", note: "Fast at any length" },
-];
 const ROOMY_GB = 58, NAME = process.platform === "win32" ? "Chrysalis.exe" : "chrysalis.sh";
 const USAGE = `usage: ${NAME} [--host 0.0.0.0 | --insecure] [--model <model>]
 
@@ -21,9 +17,10 @@ const USAGE = `usage: ${NAME} [--host 0.0.0.0 | --insecure] [--model <model>]
   --insecure: on the local network over plain HTTP, as llama.cpp serves: no certificates and nobody to let in, the
   chat on port 8081 and the API on 8080. Anyone on the network can use it and read what is sent, and other devices
   get no voice mode and no OpenCode
-  --model qwen3.8-27b or qwen3.8-flash-next: start with that model and ask nothing
+  --model qwen3.8-27b or qwen3.8-flash-next: start with that model; without it, the one last used, or the 27B
 
   ${NAME} get <model>   download a model's files now (Chrysalis gets the one it loads by itself)
+  ${NAME} uninstall     remove Chrysalis from this computer: its models, its caches and its settings too
   ${NAME} opencode      say whether OpenCode here is kept to Chrysalis's models (it is, until you change it)
   ${NAME} opencode outside   allow models outside this computer, after a warning; takes effect at once
   ${NAME} opencode only      keep OpenCode here to Chrysalis's models again`;
@@ -42,40 +39,12 @@ export function parse(args: string[]): { mode: Mode; model?: string } | undefine
   return { mode, model };
 }
 
-export interface Facts { gpu: boolean; roomy: boolean; asks: boolean; last?: string; first?: string; missing: (model: string) => boolean }
-export interface Plan { ask: boolean; choices: typeof CHOICES; at: number; model?: string; background?: string }
+export interface Facts { gpu: boolean; roomy: boolean; last?: string; first?: string; missing: (model: string) => boolean }
+export interface Plan { model?: string; background?: string }
 export function plan(f: Facts): Plan {
-  if (!f.gpu) return { ask: false, choices: [], at: 0 };
-  const choices = f.roomy ? CHOICES : CHOICES.slice(0, 1), chosen = f.first ?? (choices.some((c) => c.id === f.last) ? f.last : undefined);
-  const at = Math.max(0, choices.findIndex((c) => c.id === chosen)), ask = !f.first && choices.length > 1 && f.asks;
-  const model = chosen ?? choices[0].id;
-  return { ask, choices, at, model, ...(f.roomy && (ask || model !== MODELS[1]) && f.missing(MODELS[1]) ? { background: MODELS[1] } : {}) };
-}
-
-async function choose(p: Plan, missing: (model: string) => boolean): Promise<string> {
-  const out = process.stdout, n = p.choices.length, notes = p.choices.map((c) => `${c.note}${missing(c.id) ? " · downloads first" : ""}`);
-  let at = p.at;
-  const draw = () => {
-    for (const [i, c] of p.choices.entries())
-      out.write(i === at ? `\r\x1b[K  \x1b[35m●\x1b[0m \x1b[1m${c.name.padEnd(19)}\x1b[0m ${notes[i]}\n` : `\r\x1b[K  \x1b[2m○ ${c.name.padEnd(19)} ${notes[i]}\x1b[0m\n`);
-    out.write("\r\x1b[K  \x1b[2m↑↓ or 1-" + n + " to choose · Enter to start\x1b[0m");
-  };
-  const done = () => { out.write(`\r\x1b[${n + 1}A\x1b[J\x1b[?25h`); process.stdin.setRawMode(false); process.stdin.pause(); };
-  out.write("\x1b[?25l  \x1b[1mWhich model?\x1b[0m\n");
-  draw();
-  process.stdin.setRawMode(true);
-  for await (const chunk of process.stdin) {
-    const keys = String(chunk);
-    if (keys === "\x03") { done(); process.exit(130); }
-    if (keys === "\r" || keys === "\n") break;
-    if (/^[1-9]$/.test(keys) && Number(keys) <= n) { at = Number(keys) - 1; break; }
-    if (keys === "\x1b[A" || keys === "\x1bOA" || keys === "k") at = (at + n - 1) % n;
-    if (keys === "\x1b[B" || keys === "\x1bOB" || keys === "j") at = (at + 1) % n;
-    out.write(`\r\x1b[${n}A`);
-    draw();
-  }
-  done();
-  return p.choices[at].id;
+  if (!f.gpu) return {};
+  const fits = f.roomy ? MODELS : MODELS.slice(0, 1), model = f.first ?? (f.last && fits.includes(f.last) ? f.last : fits[0]);
+  return { model, ...(f.roomy && model !== MODELS[1] && f.missing(MODELS[1]) ? { background: MODELS[1] } : {}) };
 }
 
 const read = (path: string) => { try { return readFileSync(path, "utf8").trim(); } catch { return ""; } };
@@ -100,17 +69,14 @@ async function start(args: string[], m: Machine, gpus: Found) {
   const tls = tlsPath(), last = read(`${tls}/model`) || undefined, env = { ...process.env, ...serverEnv(m) };
   const missing = (model: string) => { try { return Bun.spawnSync([...getCommand(model, m), "--check"], { cwd: ROOT, env, stdout: "ignore", stderr: "ignore" }).exitCode !== 0; } catch { return true; } };
   const found = gpus(), gpu = found.here;
-  const p = plan({ gpu, roomy: Math.floor(m.memory / 2 ** 30) >= ROOMY_GB, asks: !!process.stdin.isTTY && !!process.stdout.isTTY, last, first: asked.model, missing });
+  const p = plan({ gpu, roomy: Math.floor(m.memory / 2 ** 30) >= ROOMY_GB, last, first: asked.model, missing });
   const run = [...ourScript(existsSync(join(import.meta.dir, "cli.js")) ? join(import.meta.dir, "cli.js") : join(import.meta.dir, "cli.ts")).cmd, "--mode", asked.mode];
   if (!existsSync(join(import.meta.dir, "cli.js")))
     await wait([process.execPath, "install", "--frozen-lockfile"], { cwd: import.meta.dir, env: { ...process.env, BUN_BE_BUN: "1" }, quiet: true });
   if (p.model) {
-    const model = p.ask ? await choose(p, missing) : p.model;
     mkdirSync(tls, { recursive: true });
-    writeFileSync(`${tls}/model`, model);
-    const got = await wait(getCommand(model, m), { env });
-    if (got !== 0) return got;
-    if (p.background && p.background !== model) run.push("--get", p.background);
+    writeFileSync(`${tls}/model`, p.model);
+    if (p.background) run.push("--get", p.background);
   } else run.push("--no-model", ...(found.why ? [found.why] : []));
   const cli = Bun.spawn(run, { cwd: import.meta.dir, env: { ...process.env, ...found.env, BUN_BE_BUN: "1" }, stdio: ["inherit", "inherit", "inherit"] });
   const opener = m.platform === "win32" ? ["cmd", "/c", "start", ""] : HOME !== ROOT ? ["open"] : undefined;
@@ -145,6 +111,24 @@ async function opencode(to: string | undefined) {
   return 0;
 }
 
+export function uninstall(root = HOME, settings = dirname(tlsPath()), setup = join(dirname(process.execPath), "unins000.exe")): string[] {
+  const gone = [join(root, "data", "models"), join(root, "data", "cache"), settings].filter((dir) => existsSync(dir));
+  for (const dir of gone) rmSync(dir, { recursive: true, force: true });
+  if (existsSync(setup)) Bun.spawn([setup, "/SILENT", "/SUPPRESSMSGBOXES", "/NORESTART"], { stdin: "ignore", stdout: "ignore", stderr: "ignore", detached: true } as never).unref();
+  return gone;
+}
+
+async function remove() {
+  if (await running(process.env.PORT ?? "8081")) return console.error("Chrysalis is running: stop it first (Ctrl+C in its terminal, or quit there)"), 1;
+  if (!process.stdin.isTTY) return console.error("run this in a terminal: it asks before it removes anything"), 1;
+  console.log("Uninstall Chrysalis\nThis removes the models it downloaded, its caches and its settings from this computer. Nothing of it is kept.");
+  if (!/^(y|yes)$/i.test(prompt("Remove them? [y/N]")?.trim() ?? "")) return console.log("Nothing was removed."), 0;
+  const setup = existsSync(join(dirname(process.execPath), "unins000.exe"));
+  for (const dir of uninstall()) console.log(`  removed ${dir}`);
+  console.log(setup ? "Windows is removing Chrysalis itself now." : `What is left is the program's own folder, ${ROOT}: delete it and Chrysalis is gone.`);
+  return 0;
+}
+
 export async function main(args: string[], m: Machine = here(), gpus: Found = () => gpuFound(m)): Promise<number> {
   await utf8Console(m);
   const env = { ...process.env, ...serverEnv(m) };
@@ -161,6 +145,7 @@ export async function main(args: string[], m: Machine = here(), gpus: Found = ()
       return found.here ? 0 : 1;
     }
     case "opencode": return opencode(args[1]);
+    case "uninstall": return remove();
     case "stats": return console.log(await fetch(`${process.env.CHRYSALIS_URL ?? "http://127.0.0.1:8080"}/chrysalis/stats`).then((r) => r.text(), () => "")), 0;
     case "help": case "-h": case "--help": return console.log(USAGE), 0;
   }

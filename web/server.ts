@@ -869,10 +869,10 @@ img.src = ${JSON.stringify(checkUrl(req))} + "?t=" + Date.now();
           const stats = await r.json();
           return { state: stats.asleep ? "offline" : "online", build: BUILD(), ...stats };
         } catch {
-          return { state: "offline", build: BUILD() };
+          return download ? { state: "loading", build: BUILD(), loading: download.model, progress: download.total ? Math.min(1, download.done / download.total) : undefined } : { state: "offline", build: BUILD() };
         }
       })(), net = fromNetwork(req, srv), found = devices.find(req);
-      const res = Response.json({ ...state, backend, here: !net, ...(net ? { machine: MACHINE } : {}), ...(found && devices!.stale(found.device) ? { check: true } : {}),
+      const res = Response.json({ ...state, ...(download ? { download } : {}), backend, here: !net, ...(net ? { machine: MACHINE } : {}), ...(found && devices!.stale(found.device) ? { check: true } : {}),
         ...(LAN && !net ? { waiting: devices.waiting().length } : {}),
         ...(!net && (state.state === "offline" || link.name || link.pairing) ? { link: link.state() } : {}) });
       if (found) res.headers.append("Set-Cookie", keyCookie(found.key));
@@ -1062,6 +1062,7 @@ let told = "[]";
 if (process.send) {
   process.on("message", (m: any) => {
     if (m?.forget) return void harness.forget();
+    if (m && "download" in m) return void (download = m.download ?? undefined);
     const key = String(m?.answer?.key ?? ""), answer = answers.get(key);
     if (!answer) return;
     answered.add(key);
@@ -1086,6 +1087,7 @@ if (process.send) {
     told = now;
   }, 1000);
 }
+let download: { model: string; done: number; total: number; rate: number } | undefined;
 const declined = new Set<string>();
 if (process.env.CHRYSALIS_ENGINE_HERE === "0") setInterval(() => {
   const s = link.state(), to = s.found.find((f) => !declined.has(f.fp));

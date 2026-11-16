@@ -1,9 +1,10 @@
 import { useEffect, useReducer, useRef, useSyncExternalStore } from "react";
 import { Box, render, Text, useAnimation, useApp, useInput, usePaste, useStdout } from "ink";
 import * as core from "./cli-core";
-import { paint } from "./terminal";
+import { butterfly, paint } from "./terminal";
 
 const { state, ui } = core;
+const pink = (s: string) => `\x1b[38;2;226;77;133m${s}\x1b[39m`;
 const SPIN = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
 const MODEL_NAMES = ["Qwen3.8-27B", "Qwen3.8-Flash-Next"];
 
@@ -24,16 +25,27 @@ function rows(): Row[] {
   ];
 }
 
+const WINGS = [38, 14] as const, PINK = "#e24d85";
+function Butterfly() {
+  const e = state.engine, d = state.download, { frame } = useAnimation({ interval: 110 });
+  const shown = d ? 0.12 + 0.6 * (d.total ? Math.min(1, d.done / d.total) : 0) : e.state === "loading" ? 0.72 + 0.28 * Math.min(1, e.progress) : 0.72;
+  return <Box flexDirection="column" marginBottom={1}>{butterfly(WINGS[0], WINGS[1], frame * 0.11, shown).map((line, i) => <Text key={i} color={PINK}>{"    "}{line || " "}</Text>)}</Box>;
+}
+
 function Status() {
-  const e = state.engine, starting = e.state === "down" && core.HAS_MODEL && state.serving;
-  const { frame } = useAnimation({ interval: 100, isActive: e.state === "loading" || starting || (e.state === "ready" && e.writing > 0) });
+  const e = state.engine, d = state.download, starting = e.state === "down" && core.HAS_MODEL && state.serving;
+  const { frame } = useAnimation({ interval: 100, isActive: !!d || e.state === "loading" || starting || (e.state === "ready" && e.writing > 0) });
+  const got = d?.total ? Math.min(1, d.done / d.total) : 0, bar = Math.round(got * 20), left = d?.rate ? Math.round((d.total - d.done) / d.rate) : 0;
   const spin = <Text color="magenta">{SPIN[frame % SPIN.length]}</Text>, filled = Math.round(Math.min(1, Math.max(0, e.progress)) * 20);
   return (
     <Text wrap="truncate-end">
       {"  "}
-      {e.state === "loading" ? <>{spin} <Text bold>{e.model || "model"}</Text>{"  "}<Text color="magenta">{"━".repeat(filled)}</Text><Text color="gray">{"━".repeat(20 - filled)}</Text>
+      {d && e.state !== "ready" ? <>{spin} <Text bold>{d.model}</Text>{"  "}<Text color="magenta">{"━".repeat(bar)}</Text><Text color="gray">{"━".repeat(20 - bar)}</Text>
+        {` ${String(Math.round(got * 100)).padStart(3)}%  `}<Text dimColor>downloading · {(d.done / 1e9).toFixed(1)} of {(d.total / 1e9).toFixed(1)} GB{d.rate > 0 ? ` · ${Math.round(d.rate / 1e6)} MB/s · ${Math.floor(left / 60)}:${String(left % 60).padStart(2, "0")} left` : ""}</Text></>
+        : e.state === "loading" ? <>{spin} <Text bold>{e.model || "model"}</Text>{"  "}<Text color="magenta">{"━".repeat(filled)}</Text><Text color="gray">{"━".repeat(20 - filled)}</Text>
         {` ${String(Math.round(e.progress * 100)).padStart(3)}%  `}<Text dimColor>{e.step} · {Math.round((Date.now() - e.since) / 1000)} s</Text></>
-        : e.state === "ready" ? <><Text color="green">●</Text> <Text bold>{e.model}</Text>{e.writing ? <><Text dimColor> · </Text>{spin} {e.writing} writing</> : null}</>
+        : e.state === "ready" ? <><Text color="green">●</Text> <Text bold>{e.model}</Text>{e.writing ? <><Text dimColor> · </Text>{spin} {e.writing} writing</> : null}
+          {d ? <><Text dimColor> · </Text>{d.model} <Text color="magenta">{Math.round(got * 100)}%</Text><Text dimColor> downloaded</Text></> : null}</>
         : e.state === "stopped" ? <><Text color="gray">○</Text> {e.model} <Text dimColor>is unloaded</Text></>
         : !core.HAS_MODEL ? <><Text color="gray">○</Text> <Text dimColor>no model on this computer</Text></>
         : starting ? <>{spin} <Text dimColor>the model server is starting</Text></>
@@ -137,6 +149,10 @@ function App() {
   });
 
   const asking = [...state.asks, ...state.questions], row = Math.min(ed.row, all.length - 1);
+  const waking = core.HAS_MODEL && !state.woke && !ed.panel, roomy = (process.stdout.rows ?? 0) >= WINGS[1] + 12 && (process.stdout.columns ?? 0) >= WINGS[0] + 8;
+  useEffect(() => {
+    if (state.woke && roomy) ui.log(`\n${butterfly(WINGS[0], WINGS[1], 0).map((line) => `    ${pink(line)}`).join("\n")}\n`);
+  }, [state.woke]);
   return (
     <Box flexDirection="column" marginTop={1}>
       {asking.map((q, i) => <Text key={q.key}>{"  "}<Text color="yellow">?</Text> {q.text}{i ? null : <Text dimColor>{"  y or n"}</Text>}</Text>)}
@@ -154,6 +170,7 @@ function App() {
           <Text dimColor>{"  ↑↓ row · ←→ choice · Enter sets it · Esc closes"}</Text>
         </Box>
       ) : null}
+      {waking && roomy ? <Butterfly /> : null}
       <Status />
       <Text>
         {"  "}<Text color="magenta">›</Text>{" "}

@@ -330,6 +330,9 @@ main:has(.thread > .empty) .composer-box { pointer-events: auto; }
 .model-btn .i { flex: none; width: 13px; height: 13px; transition: transform 0.15s; }
 .model-btn .dot { width: 7px; height: 7px; margin-right: 2px; }
 .model-pct { color: var(--faint); font: 11.5px var(--mono); font-variant-numeric: tabular-nums; }
+.model-pct .i { width: 11px; height: 11px; margin-right: 3px; vertical-align: -1.5px; }
+.model-btn.getting { background: linear-gradient(90deg, color-mix(in srgb, var(--accent) 24%, transparent) var(--got), color-mix(in srgb, var(--accent) 7%, transparent) var(--got)); color: var(--text);
+  transition: background 0.5s; }
 .attach { flex: none; width: 30px; height: 30px; margin-right: -4px; }
 .attach .i { width: 17px; height: 17px; }
 .model-btn.open .i { transform: rotate(180deg); }

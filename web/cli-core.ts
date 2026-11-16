@@ -1,10 +1,11 @@
-import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import type { Subprocess } from "bun";
-import { clean, fold, paint, plain } from "./terminal";
+import { clean, fold, paint, plain, progress } from "./terminal";
 import { utcOffset } from "./clock";
 import { letIn } from "./firewall";
 import { gpuEnv } from "./gpu";
+import { uninstall } from "./launch";
 import { getCommand, memoryRoot, MODELS, ourScript, ROOT, serverCommand, serverEnv, stopTree } from "./platform";
 import { qrText } from "./qr";
 import { tlsPath } from "./tls";
@@ -33,6 +34,8 @@ export const state = {
   questions: [] as Ask[],
   asks: [] as Ask[],
   opencode: undefined as { state: string; outside: boolean } | undefined,
+  download: undefined as { model: string; done: number; total: number; rate: number } | undefined,
+  woke: false,
   engine: { state: "down" as "down" | "loading" | "ready" | "stopped", model: "", progress: 0, step: "loading the weights", since: Date.now(), writing: 0, vram: "", ram: "" },
 };
 const engine = state.engine;
@@ -153,6 +156,7 @@ function ready(model: string, seconds: string | number, context?: string) {
   const sizes = [context ? `${count(context)} tokens of context` : "", engine.vram ? `${engine.vram} GB VRAM` : "", engine.ram ? `${engine.ram} GB RAM` : ""].filter(Boolean).join(" · ");
   note(`${green("✓")} ${bold(model)} ready in ${seconds} s  ${dim(sizes)}`);
   Object.assign(engine, { state: "ready", model, vram: "", ram: "", step: "loading the weights" });
+  state.woke = true;
   engineSvc.tail = [];
   readyAt = Date.now();
 }
@@ -282,9 +286,10 @@ const HELP: [string, string][] = [
   ["opencode", "the line that connects OpenCode on another computer"],
   ["links", "the addresses again"],
   ["clear", "clear the screen"],
+  ["uninstall", "remove Chrysalis from this computer: its models, its caches and its settings too"],
   ["quit", "stop Chrysalis (Ctrl+C)"],
 ];
-export const WORDS = ["local", "network", "insecure", "model", "restart", "verbose", "incognito", "qr", "opencode", "links", "clear", "quit", "help"];
+export const WORDS = ["local", "network", "insecure", "model", "restart", "verbose", "incognito", "qr", "opencode", "links", "clear", "uninstall", "quit", "help"];
 
 const here = () => state.web?.local.replace("localhost", "127.0.0.1");
 const failure = async (r: Response) => (await r.json().catch(() => null))?.error?.message ?? `it answered ${r.status}`;
@@ -303,8 +308,39 @@ async function restartWeb() {
   await webSvc.restart();
 }
 
+const WATCHED = "import sys\nclass Shown:\n    def __init__(self, out):\n        self.out = out\n    def isatty(self):\n        return True\n    def write(self, text):\n        return self.out.write(text)\n    def flush(self):\n        self.out.flush()\nsys.stderr = Shown(sys.stderr)\nfrom chrysalis import get\nget.fetch(sys.argv[1])";
+const getEnv = () => ({ ...process.env, ...serverEnv() });
+const absent = (model: string) => {
+  if (process.env.CHRYSALIS_ENGINE_CMD) return false;
+  try { return Bun.spawnSync([...getCommand(model), "--check"], { cwd: ROOT, env: getEnv(), stdout: "ignore", stderr: "ignore" }).exitCode !== 0; } catch { return true; }
+};
+async function download(model: string): Promise<boolean> {
+  if (state.download) return note(`${state.download.model} is downloading: ${model} is next once it is here`), false;
+  const dl = state.download = { model, done: 0, total: 0, rate: 0 };
+  note(`${bold(model)} is downloading`);
+  let proc: Subprocess<"ignore", "ignore", "pipe">, said = "";
+  try { proc = getting = Bun.spawn([getCommand(model)[0], "-c", WATCHED, model], { cwd: ROOT, stdin: "ignore", stdout: "ignore", stderr: "pipe", env: getEnv() }); }
+  catch (e) { state.download = undefined; return note(red(`${model} could not be downloaded: ${e instanceof Error ? e.message : String(e)}`)), false; }
+  const words = new TextDecoder();
+  for await (const chunk of proc.stderr) {
+    said = (said + words.decode(chunk, { stream: true })).slice(-2000);
+    Object.assign(dl, progress(plain(said)));
+    webSvc.proc?.send({ download: dl });
+    sync();
+  }
+  const code = await proc.exited, total = dl.total;
+  getting = state.download = undefined;
+  webSvc.proc?.send({ download: null });
+  sync();
+  if (quitting) return false;
+  if (code) return note(red(`${model} did not finish downloading: ${clean(plain(said).trim().split(/[\r\n]+/).pop() ?? "").trim() || `exit ${code}`}`)), false;
+  return note(`${green("✓")} ${bold(model)} downloaded${total ? `  ${dim(`${(total / 1e9).toFixed(1)} GB`)}` : ""}`), true;
+}
+
 export async function setModel(to: string) {
   if (to === engine.model && engine.state === "ready") return note(`${to} is loaded already`);
+  if (absent(to)) return void download(to).then((got) => (got ? act(() => setModel(to)) : undefined));
+  if (!engineSvc.proc) return void (mkdirSync(tlsPath(), { recursive: true }), writeFileSync(`${tlsPath()}/model`, to), engineSvc.restart());
   const r = await fetch(`${here()}/api/chrysalis/load`, { method: "POST", body: JSON.stringify({ model: to }), headers: JSON_BODY }).catch(() => null);
   if (!r?.ok) note(red(r ? await failure(r) : NO_WEB));
 }
@@ -430,6 +466,12 @@ async function command(line: string) {
     case "restart": return arg && arg !== "model" && arg !== "web" ? note("restart, restart model or restart web") : restart(arg);
     case "qr": return qr();
     case "opencode": return opencodeLine();
+    case "uninstall":
+      if (!state.asks.some((a) => a.key === "uninstall")) state.asks.push({ key: "uninstall", text: "Remove Chrysalis from this computer, with its models, its caches and its settings?", answer: (yes) => {
+        if (!yes) return note(dim("nothing was removed"));
+        void Promise.all([engineSvc.stop(), webSvc.stop()]).then(() => { for (const dir of uninstall()) note(`removed ${dir}`); quit(); });
+      } });
+      return;
   }
   note(`no command ${clean(cmd)}${SEP}${dim("help lists them")}`);
 }
@@ -456,13 +498,11 @@ export function start() {
   memory();
   ui.log("");
   note(bold("Chrysalis Inference"));
-  if (flag("--get")) {
-    try {
-      getting = Bun.spawn(getCommand(flag("--get")!), { cwd: ROOT, stdin: "ignore", stdout: "ignore", stderr: "ignore", env: { ...process.env, ...serverEnv() } });
-      note(dim(`${flag("--get")} is downloading in the background: model has it once it is here`));
-    } catch (e) { note(red(`${flag("--get")} could not be downloaded: ${e instanceof Error ? e.message : String(e)}`)); }
-  }
-  if (HAS_MODEL) engineSvc.start();
+  if (HAS_MODEL) void (async () => {
+    const model = chosen() ?? MODELS[0], next = flag("--get");
+    if (!absent(model) || await download(model)) engineSvc.start();
+    if (next && absent(next)) await download(next);
+  })();
   else {
     if (flag("--no-model")) note(`No GPU was found: ${flag("--no-model")}`);
     note(dim("No GPU Chrysalis runs on here: the web chat uses Chrysalis on another computer on your network."));

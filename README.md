@@ -70,7 +70,8 @@ Start Chrysalis with `chrysalis.sh --host 0.0.0.0`. The other computer needs [Op
 2. Download [Chrysalis-Setup.exe](https://github.com/michaelDinelle/chrysalis-inference/releases/latest/download/Chrysalis-Setup.exe)
    and double-click it. Windows asks once whether to run a program whose publisher it does not know: Run.
 3. Go through the setup. It installs for you alone, with no administrator prompt, adds Chrysalis to the Start menu and
-   starts it when it finishes. Its uninstaller leaves the models you downloaded.
+   starts it when it finishes. Uninstalling it, from Windows' apps list or with `uninstall` in its terminal, removes
+   everything: the models, its caches and its settings.
 
 <p align="center"><img src="media/windows-setup.png" width="760" alt="Chrysalis's setup on Windows 11, showing the MIT licence, with no administrator prompt"></p>
 <p align="center"><img src="media/windows-run.png" width="760" alt="Chrysalis running in a window on Windows 11 with the model ready, and the chat open in the browser"></p>
@@ -140,8 +141,9 @@ docker run -d --device /dev/kfd --device /dev/dri -p 127.0.0.1:8080:8080 -v chry
 
 **Running Chrysalis**
 
-- Everything stays in Chrysalis's folder. With 64 GB of RAM, each start asks which model to run. With less, it runs the
-  27B. Ctrl+C in its terminal stops it.
+- Everything stays in Chrysalis's folder. It starts with the model last used, the 27B the first time, and `model` in its
+  terminal or the chat's model button changes it, downloading one that is not here yet. Ctrl+C in its terminal stops it;
+  `uninstall` there removes its models, its caches and its settings.
 - The terminal shows each request as it finishes, by its sizes and speeds and never its words. Tab opens the switches,
   rows set with the arrows and Enter: where Chrysalis is reachable, the model (or none, which frees the GPU), what the terminal shows,
   OpenCode's models, restarts. Each is a command too (`help` lists them): `local`, `network` and `insecure` move

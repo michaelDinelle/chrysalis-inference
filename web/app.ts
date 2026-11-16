@@ -68,7 +68,7 @@ interface Settings {
   global?: string;
 }
 interface VoiceSettings { tts?: string; name?: string; stt?: string; speed?: number }
-interface Status { state: "online" | "loading" | "offline"; machine?: string; build?: string; model?: string; loading?: string; progress?: number; context?: number; kv_tokens?: number; cache?: { free_kv_tokens: number };
+interface Status { state: "online" | "loading" | "offline"; download?: { model: string; done: number; total: number; rate: number }; machine?: string; build?: string; model?: string; loading?: string; progress?: number; context?: number; kv_tokens?: number; cache?: { free_kv_tokens: number };
   check?: boolean; here?: boolean; waiting?: number;
   backend?: Backend; link?: Linking }
 interface Linking { linked?: { name: string }; found: { name: string; fp: string }[]; refused?: string;
@@ -4721,7 +4721,7 @@ async function ensureOnline(run: { stopping: boolean }) {
   if (none) throw new Error(none);
   for (const deadline = Date.now() + 180_000; status.state !== "online" || status.loading; await refreshStatus()) {
     if (run.stopping) throw new DOMException("stopped", "AbortError");
-    if (Date.now() > deadline) throw new Error("Chrysalis did not start: its terminal says why");
+    if (Date.now() > deadline && !status.download) throw new Error("Chrysalis did not start: its terminal says why");
     await sleep(100);
   }
 }
@@ -6751,9 +6751,13 @@ function renderControls() {
   const state = status.loading || status.state === "loading" ? "loading" : status.state;
   const pct = status.progress == null ? "" : `${Math.round(status.progress * 100)}%`, name = modelName(current());
   const btn = $("model-btn");
-  btn.innerHTML = `<span class="dot ${state}"></span><span class="model-name">${shortName(current())}</span>${state === "loading" && pct ? `<span class="model-pct">${pct}</span>` : ""}${icon("chevron")}`;
+  const dl = status.download, got = dl?.total ? Math.min(1, dl.done / dl.total) : 0, left = dl?.rate ? Math.round((dl.total - dl.done) / dl.rate) : 0;
+  const getting = dl ? `Downloading ${modelName(dl.model)}: ${(dl.done / 1e9).toFixed(1)} of ${(dl.total / 1e9).toFixed(1)} GB${dl.rate ? `, ${Math.round(dl.rate / 1e6)} MB/s, ${Math.floor(left / 60)}:${String(left % 60).padStart(2, "0")} left` : ""}` : "";
+  btn.innerHTML = `<span class="dot ${state}"></span><span class="model-name">${shortName(current())}</span>${dl ? `<span class="model-pct">${icon("download")}${Math.round(got * 100)}%</span>` : state === "loading" && pct ? `<span class="model-pct">${pct}</span>` : ""}${icon("chevron")}`;
+  btn.style.setProperty("--got", dl ? `${got * 100}%` : "0%");
+  btn.classList.toggle("getting", !!dl);
   const b = status.backend, down = b?.listed && !b.listed.ok ? b.listed.error : "";
-  btn.title = !onService() ? (down ? `${b!.name}: ${down}` : `${name || "No model"} on ${b!.name}`)
+  btn.title = getting ? getting : !onService() ? (down ? `${b!.name}: ${down}` : `${name || "No model"} on ${b!.name}`)
     : state === "online" ? `${name}: ready` : state === "loading" ? `Loading ${name}` : `${name}: stopped`;
   btn.setAttribute("aria-expanded", String(modelsOpen));
   btn.classList.toggle("open", modelsOpen);

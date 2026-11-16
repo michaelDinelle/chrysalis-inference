@@ -79,7 +79,10 @@ README.md shows what Chrysalis is. This file is how to change it.
 - chrysalis.sh sets a machine up (Python, Bun, the CUDA and Metal builds) and hands everything else to web/launch.ts, the
   launcher written once for every system (Chrysalis.exe on Windows is that file compiled; windows/build.ps1 and
   windows/package.ps1 build the engines and the folder there), which hands its terminal to web/cli.ts, which runs the model server and web/server.ts,
-  shows each request as it finishes and takes commands: web/cli-core.ts is the servers, the state and the commands,
+  shows each request as it finishes and takes commands. Nothing is asked or downloaded before the terminal is up: it
+  downloads a model that is not here (chrysalis get, with the progress counted from the files on disk and sent to the
+  web server for the page's model button), draws the logo as an animated butterfly that emerges as it arrives
+  (`butterfly` in web/terminal.ts), and `uninstall` removes the models, caches and settings (Windows' uninstaller too): web/cli-core.ts is the servers, the state and the commands,
   web/cli-ui.tsx draws it with Ink (the switches, the status line, the prompt), and without a terminal it is plain
   lines. The web server tells it who asks and what to ask over Bun's IPC. It shows the servers' own output only after `verbose`, and keeps
   nothing: no log, no history file.
