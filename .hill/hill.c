@@ -1849,6 +1849,10 @@ static J *run_inst(Spec *s, const char *name, const char *tree, const char *side
     caller_here();
     J *inst = jget(jget(s->spec, "instruments"), name);
     J *need = jget(inst, "memory_gb");
+    const char *mine = jtext(jget(inst, "serve")), *alone = jtext(jget(inst, "exclusive"));
+    for (size_t i = 0; mine && alone && i < nworkers; i++)
+        if (workers[i].pid && workers[i].excl && !strcmp(workers[i].excl, alone) && (strcmp(workers[i].serve, mine) || strcmp(workers[i].tree, tree)))
+            worker_kill(&workers[i]);
     if (jnum(need) && jd(need) != 0 && available_gb() < jd(need)) {
         Buf b = {0};
         dump(&b, need);
@@ -2504,8 +2508,16 @@ static int idle_ms(void) {
     return soonest <= t ? 0 : (int)((soonest - t) * 1000) + 1;
 }
 
+static void on_term(int sig) {
+    (void)sig;
+    for (size_t i = 0; i < nworkers; i++)
+        if (workers[i].pid) kill(-workers[i].pid, SIGTERM);
+    _exit(0);
+}
+
 static void judge_loop(void) {
     signal(SIGPIPE, SIG_IGN);
+    signal(SIGTERM, on_term);
     setvbuf(stdout, NULL, _IOLBF, 0);
     for (;;) {
         struct pollfd p = {listen_fd, POLLIN, 0};
@@ -3002,11 +3014,9 @@ int main(int argc, char **argv) {
     if (!strcmp(argv[1], "hook")) return cmd_hook();
     if (!strcmp(argv[1], "judge")) return start_judge(1), 0;
     if (!strcmp(argv[1], "stop")) {
-        int fd = connect_judge();
-        if (fd >= 0 && write(fd, "{\"cmd\": \"stop\"}\n", 16) == 16) {
-            char c;
-            while (read(fd, &c, 1) > 0) {}
-        }
+        size_t n = 0;
+        char *pid = read_file(".hill/run/judge.pid", &n);
+        if (pid && atoi(pid) > 1) kill(atoi(pid), SIGTERM);
         return 0;
     }
     if (!strcmp(argv[1], "step")) return argc == 4 ? cmd_step(NULL, argv[3]) : cmd_step(argv[2], NULL);
