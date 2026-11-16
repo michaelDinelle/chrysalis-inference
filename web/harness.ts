@@ -151,11 +151,11 @@ export const whenEngineComing = (coming: () => boolean) => { engineComing = comi
 async function ourModels(chrysalis: string) {
   let listed;
   for (;;) {
-    listed = await fetch(`${chrysalis}/v1/models`).then((r) => r.json().catch(() => undefined), () => undefined);
-    if (listed?.data?.length || !engineComing()) break;
+    listed = await fetch(`${chrysalis}/v1/models`).then((r) => r.json().catch(() => ({ data: [] })), () => undefined);
+    if (listed || !engineComing()) break;
     await Bun.sleep(150);
   }
-  return Object.fromEntries((listed?.data?.length ? listed.data : MODELS.map((id) => ({ id }))).filter((m: any) => typeof m?.id === "string" && !m.id.endsWith("-fast")).map((m: any) => [m.id, { variants: THINKING, capabilities: { input: ["text", "image", "pdf"] },
+  return Object.fromEntries((listed ? listed.data ?? [] : MODELS.map((id) => ({ id }))).filter((m: any) => typeof m?.id === "string" && !m.id.endsWith("-fast")).map((m: any) => [m.id, { variants: THINKING, capabilities: { input: ["text", "image", "pdf"] },
     ...(m.context_length > 0 ? { limit: { context: m.context_length, output: 32768 } } : {}) }]));
 }
 export const awayConfig = async (chrysalis: string) => ({ enabled_providers: ["chrysalis"],

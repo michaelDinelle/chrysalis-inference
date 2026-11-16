@@ -6,7 +6,7 @@ import { utcOffset } from "./clock";
 import { letIn } from "./firewall";
 import { gpuEnv } from "./gpu";
 import { uninstall } from "./launch";
-import { dropDownload, getCommand, memoryRoot, MODELS, ourScript, ROOT, serverCommand, serverEnv, stopTree, WATCHED } from "./platform";
+import { dropDownload, getCommand, HOME, memoryRoot, MODELS, ourScript, serverCommand, serverEnv, stopTree, WATCHED } from "./platform";
 import { qrText } from "./qr";
 import { tlsPath } from "./tls";
 
@@ -194,9 +194,9 @@ function engineLine(l: string): boolean {
 
 let engineSvc: Service, webSvc: Service, opencodeOn = false;
 function engineSpawn() {
-  mkdirSync(join(ROOT, "data", "cache"), { recursive: true });
+  mkdirSync(join(HOME, "data", "cache"), { recursive: true });
   const env = { ...process.env, ...serverEnv() };
-  return Bun.spawn(scoped(engineCmd()), { cwd: ROOT, stdin: "ignore", stdout: "pipe", stderr: "pipe",
+  return Bun.spawn(scoped(engineCmd()), { cwd: HOME, stdin: "ignore", stdout: "pipe", stderr: "pipe",
     env: { ...env, ...gpuEnv(env), ...(run ? { TMPDIR: run } : {}) } });
 }
 engineSvc = new Service("model server", engineSpawn, (l) => { const took = engineLine(l); sync(); return took; },
@@ -324,7 +324,7 @@ async function restartWeb() {
 const getEnv = () => ({ ...process.env, ...serverEnv() });
 const absent = (model: string) => {
   if (process.env.CHRYSALIS_ENGINE_CMD) return false;
-  try { return Bun.spawnSync([...getCommand(model), "--check"], { cwd: ROOT, env: getEnv(), stdout: "ignore", stderr: "ignore" }).exitCode !== 0; } catch { return true; }
+  try { return Bun.spawnSync([...getCommand(model), "--check"], { cwd: HOME, env: getEnv(), stdout: "ignore", stderr: "ignore" }).exitCode !== 0; } catch { return true; }
 };
 function tell() {
   state.here = MODELS.filter((m) => !absent(m));
@@ -366,7 +366,7 @@ async function download(model: string): Promise<boolean> {
   tell();
   note(`${bold(model)} is downloading`);
   let proc: Subprocess<"ignore", "ignore", "pipe">, said = "";
-  try { proc = getting = Bun.spawn(process.env.CHRYSALIS_GET_CMD ? [...JSON.parse(process.env.CHRYSALIS_GET_CMD), model] : [getCommand(model)[0], "-c", WATCHED, model], { cwd: ROOT, stdin: "ignore", stdout: "ignore", stderr: "pipe", env: getEnv() }); }
+  try { proc = getting = Bun.spawn(process.env.CHRYSALIS_GET_CMD ? [...JSON.parse(process.env.CHRYSALIS_GET_CMD), model] : [getCommand(model)[0], "-c", WATCHED, model], { cwd: HOME, stdin: "ignore", stdout: "ignore", stderr: "pipe", env: getEnv() }); }
   catch (e) { state.download = undefined; return note(red(`${model} could not be downloaded: ${e instanceof Error ? e.message : String(e)}`)), false; }
   const words = new TextDecoder();
   for await (const chunk of proc.stderr) {

@@ -2,7 +2,7 @@ import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node
 import { dirname, join } from "node:path";
 import { letIn } from "./firewall";
 import { gpuEnv, gpuFound } from "./gpu";
-import { getCommand, here, HOME, MODELS, ourScript, python, ROOT, serverCommand, serverEnv, utf8Console, type Machine } from "./platform";
+import { getCommand, here, HOME, MODELS, ourScript, python, ROOT, serverCommand, serverEnv, settle, utf8Console, type Machine } from "./platform";
 import { tlsPath } from "./tls";
 
 const NAME = process.platform === "win32" ? "Chrysalis.exe" : "chrysalis.sh";
@@ -53,7 +53,7 @@ const read = (path: string) => { try { return readFileSync(path, "utf8").trim();
 const running = (port: string) => fetch(`http://127.0.0.1:${port}/`, { signal: AbortSignal.timeout(1000) }).then((r) => r.ok, () => false);
 const wait = async (cmd: string[], o: { cwd?: string; env?: Record<string, string | undefined>; quiet?: boolean } = {}) => {
   try {
-    const p = Bun.spawn(cmd, { cwd: o.cwd ?? ROOT, env: o.env as Record<string, string>, stdin: "inherit", stdout: o.quiet ? "ignore" : "inherit", stderr: o.quiet ? "ignore" : "inherit" });
+    const p = Bun.spawn(cmd, { cwd: o.cwd ?? HOME, env: o.env as Record<string, string>, stdin: "inherit", stdout: o.quiet ? "ignore" : "inherit", stderr: o.quiet ? "ignore" : "inherit" });
     return await p.exited;
   } catch (e) {
     if (!o.quiet) console.error(`chrysalis: ${cmd[0]} could not be started: ${e instanceof Error ? e.message : String(e)}`);
@@ -69,7 +69,7 @@ async function start(args: string[], m: Machine, gpus: Found) {
   if (await running(port)) return console.log("Chrysalis is running already, in another terminal (Ctrl+C there stops it)"), 1;
   if (asked.mode !== "local") await letIn(asked.mode);
   const tls = tlsPath(), last = read(`${tls}/model`) || undefined, env = { ...process.env, ...serverEnv(m) };
-  const missing = (model: string) => { try { return Bun.spawnSync([...getCommand(model, m), "--check"], { cwd: ROOT, env, stdout: "ignore", stderr: "ignore" }).exitCode !== 0; } catch { return true; } };
+  const missing = (model: string) => { try { return Bun.spawnSync([...getCommand(model, m), "--check"], { cwd: HOME, env, stdout: "ignore", stderr: "ignore" }).exitCode !== 0; } catch { return true; } };
   const found = gpus(), gpu = found.here;
   const p = plan({ gpu, last, first: asked.model, missing });
   const run = [...ourScript(existsSync(join(import.meta.dir, "cli.js")) ? join(import.meta.dir, "cli.js") : join(import.meta.dir, "cli.ts")).cmd, "--mode", asked.mode];
@@ -115,8 +115,8 @@ async function opencode(to: string | undefined) {
   return 0;
 }
 
-export function uninstall(root = HOME, settings = dirname(tlsPath()), setup = join(dirname(process.execPath), "unins000.exe")): string[] {
-  const gone = [join(root, "data", "models"), join(root, "data", "cache"), settings].filter((dir) => existsSync(dir));
+export function uninstall(root = HOME, settings = dirname(tlsPath()), setup = join(dirname(process.execPath), "unins000.exe"), app = ROOT): string[] {
+  const own = root !== app, gone = [...(own ? [root] : [join(root, "data", "models"), join(root, "data", "cache")]), settings, ...(own ? [join(app, "..", "..")] : [])].filter((dir) => existsSync(dir));
   for (const dir of gone) rmSync(dir, { recursive: true, force: true });
   if (existsSync(setup)) Bun.spawn([setup, "/SILENT", "/SUPPRESSMSGBOXES", "/NORESTART"], { stdin: "ignore", stdout: "ignore", stderr: "ignore", detached: true } as never).unref();
   return gone;
@@ -129,12 +129,13 @@ async function remove() {
   if (!/^(y|yes)$/i.test(prompt("Remove them? [y/N]")?.trim() ?? "")) return console.log("Nothing was removed."), 0;
   const setup = existsSync(join(dirname(process.execPath), "unins000.exe"));
   for (const dir of uninstall()) console.log(`  removed ${dir}`);
-  console.log(setup ? "Windows is removing Chrysalis itself now." : `What is left is the program's own folder, ${ROOT}: delete it and Chrysalis is gone.`);
+  console.log(setup ? "Windows is removing Chrysalis itself now." : HOME !== ROOT ? "Chrysalis is gone." : `What is left is the program's own folder, ${ROOT}: delete it and Chrysalis is gone.`);
   return 0;
 }
 
 export async function main(args: string[], m: Machine = here(), gpus: Found = () => gpuFound(m)): Promise<number> {
   await utf8Console(m);
+  settle();
   const env = { ...process.env, ...serverEnv(m) };
   switch (args[0]) {
     case "serve": {
@@ -157,9 +158,15 @@ export async function main(args: string[], m: Machine = here(), gpus: Found = ()
 }
 
 if (import.meta.main) {
-  const beside = dirname(process.execPath);
-  if (!existsSync(join(ROOT, "web", "launch.ts")) && existsSync(join(beside, "web", "launch.ts"))) {
-    const p = Bun.spawn([process.execPath, join(beside, "web", "launch.ts"), ...process.argv.slice(2)], { stdio: ["inherit", "inherit", "inherit"], env: { ...process.env, BUN_BE_BUN: "1" } });
+  const beside = dirname(process.execPath), dir = [beside, join(beside, "..", "Resources")].find((d) => existsSync(join(d, "web", "launch.ts")));
+  if (!existsSync(join(ROOT, "web", "launch.ts")) && dir) {
+    if (process.platform === "darwin" && !process.stdout.isTTY && !process.argv[2]) {
+      const home = join(process.env.HOME ?? "", "Library", "Application Support", "Chrysalis"), command = join(home, "Chrysalis.command");
+      mkdirSync(home, { recursive: true });
+      writeFileSync(command, `#!/bin/sh\nexec "${process.execPath.replace(/["$`\\]/g, "\\$&")}"\n`, { mode: 0o755 });
+      process.exit(Bun.spawnSync(["open", "-a", "Terminal", command]).exitCode ?? 0);
+    }
+    const p = Bun.spawn([process.execPath, join(dir, "web", "launch.ts"), ...process.argv.slice(2)], { stdio: ["inherit", "inherit", "inherit"], env: { ...process.env, BUN_BE_BUN: "1" } });
     for (const sig of ["SIGINT", "SIGTERM", "SIGHUP"] as const) process.on(sig, () => p.kill(sig));
     process.exit(await p.exited);
   }

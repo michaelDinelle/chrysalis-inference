@@ -487,6 +487,35 @@ test("with no model here yet, OpenCode still connects at once and is given Chrys
   }
 }, 60_000);
 
+test("once OpenCode has been connected, the next start of Chrysalis starts it at once, so its threads are there when the page opens; disconnecting it stops that", async () => {
+  const empty = mkdtempSync(`${tmpdir()}/chrysalis-oc-early-`), bin = `${empty}/opencode`, tls = `${empty}/tls`, pids = `${empty}/pids`;
+  writeFileSync(bin, `#!/bin/sh\nexec ${process.execPath} ${import.meta.dir}/fake-opencode-bin.ts "$@"\n`);
+  chmodSync(bin, 0o755);
+  const env = { CHRYSALIS_ENGINE_CMD: "", CHRYSALIS_HOME: empty, CHRYSALIS_OPENCODE: bin, CHRYSALIS_TLS_DIR: tls, FAKE_OPENCODE_PIDS: pids };
+  const state = async (c: ReturnType<typeof chrysalis>) => (await (await fetch(`${c.here}/api/threads`)).json()).state;
+  const until = async (c: ReturnType<typeof chrysalis>, want: string) => { for (const end = Date.now() + 15_000; Date.now() < end; await Bun.sleep(100)) if ((await state(c)) === want) return want; return state(c); };
+  try {
+    const first = chrysalis({ env });
+    await first.shown(/chat\s+http:\/\/localhost:\d+/);
+    await Bun.sleep(1500);
+    expect(await state(first)).toBe("off");
+    expect((await fetch(`${first.here}/api/threads`, { method: "POST" })).status).toBe(200);
+    await first.stop();
+    const second = chrysalis({ env });
+    await second.shown(/chat\s+http:\/\/localhost:\d+/);
+    expect(await until(second, "on")).toBe("on");
+    expect((await fetch(`${second.here}/api/threads`, { method: "DELETE" })).status).toBe(204);
+    await second.stop();
+    const third = chrysalis({ env });
+    await third.shown(/chat\s+http:\/\/localhost:\d+/);
+    await Bun.sleep(1500);
+    expect(await state(third)).toBe("off");
+    await third.stop();
+  } finally {
+    rmSync(empty, { recursive: true, force: true });
+  }
+}, 90_000);
+
 test("OpenCode started from the page before the model server answers waits for it and is given every model it lists, so the first message of a chat has Chrysalis's models", async () => {
   const engine = freePort(), bin = `${tmpdir()}/chrysalis-cli-opencode-early-${process.pid}`;
   writeFileSync(bin, `#!/bin/sh\nexec ${process.execPath} ${import.meta.dir}/fake-opencode-bin.ts "$@"\n`);

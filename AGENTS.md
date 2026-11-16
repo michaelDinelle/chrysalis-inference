@@ -76,9 +76,16 @@ README.md shows what Chrysalis is. This file is how to change it.
   takes ("Selected queue", with its refCount); a fifth queue costs the KV cache VRAM and decode about 2%.
 - chrysalis/models.py picks the backend from the platform (CHRYSALIS_BACKEND overrides it), with each backend's own
   settings in ON; bench/measure.py does the same for the bench.
-- chrysalis.sh sets a machine up (Python, Bun, the CUDA and Metal builds) and hands everything else to web/launch.ts, the
-  launcher written once for every system (Chrysalis.exe on Windows is that file compiled; windows/build.ps1 and
-  windows/package.ps1 build the engines and the folder there), which hands its terminal to web/cli.ts, which runs the model server and web/server.ts,
+- package.ts is the one release build, run with Bun on each system: it builds that system's engines (windows/build.ps1,
+  `make engines` on a Mac, chrysalis.sh native in a manylinux container on Linux), puts the same folder together every
+  time (the engines, the Python code, a Python of its own with its packages, the model files' configs, the web chat
+  bundled) with web/launch.ts compiled as the program, and wraps only the last step per system: windows/setup.iss's
+  Chrysalis-Setup.exe, a Chrysalis.app in Chrysalis.dmg (the folder is its Resources, the program its MacOS/Chrysalis,
+  every Mach-O in it signed), or Chrysalis-linux-x86_64.tar.gz. A Mac app keeps what it writes in
+  ~/Library/Application Support/Chrysalis (`settle` in web/platform.ts copies the engines and links Python there), and
+  opens Terminal on itself when it is double-clicked. chrysalis.sh is the developer's way in from a clone (it gets
+  Python and Bun and builds the engines) and hands everything else to web/launch.ts, the launcher written once for every
+  system, which hands its terminal to web/cli.ts, which runs the model server and web/server.ts,
   shows each request as it finishes and takes commands. Nothing is asked and nothing is downloaded by itself: the
   first start has no model, and one is downloaded only when it is picked, on the Model row of the switches or in the page's
   model menu (which reaches the terminal over IPC), or named with --model. The terminal runs chrysalis get, reads the

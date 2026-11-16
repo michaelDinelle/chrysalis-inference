@@ -66,7 +66,7 @@ const arrived = (req: Request, srv: Srv) => {
 const json = (handler: (req: Request, srv: Srv) => Response | Promise<Response>) => (req: Request, srv: Srv) =>
   (req.headers.get("content-type") ?? "").startsWith("application/json") ? handler(req, srv) : new Response("JSON only", { status: 415 });
 
-const MODEL_FILE = `${tlsDir()}/model`, OPENCODE_OFF = `${tlsDir()}/opencode-off`, OPENCODE_OUTSIDE = `${tlsDir()}/opencode-outside`;
+const MODEL_FILE = `${tlsDir()}/model`, OPENCODE_OFF = `${tlsDir()}/opencode-off`, OPENCODE_USED = `${tlsDir()}/opencode-used`, OPENCODE_OUTSIDE = `${tlsDir()}/opencode-outside`;
 harness.allowOutside(existsSync(OPENCODE_OUTSIDE));
 async function pickModel(req: Request): Promise<string | undefined> {
   const model = (await req.json().catch(() => ({})))?.model;
@@ -725,12 +725,14 @@ img.src = ${JSON.stringify(checkUrl(req))} + "?t=" + Date.now();
       }),
       DELETE: trusted(() => {
         writeFileSync(OPENCODE_OFF, "");
+        rmSync(OPENCODE_USED, { force: true });
         harness.stop();
         return new Response(null, { status: 204 });
       }),
       POST: trusted(async () => {
         rmSync(OPENCODE_OFF, { force: true });
         try { await harness.ensure(CHRYSALIS); } catch (e) { return Response.json({ error: { message: (e as Error).message } }, { status: 502 }); }
+        writeFileSync(OPENCODE_USED, "");
         return Response.json(harness.state());
       }),
     },
@@ -1011,7 +1013,7 @@ harness.routeModel(`http://127.0.0.1:${server.port}/opencode/${MODEL_KEY}`, (u) 
   } catch { return false; }
 });
 const secure = LAN || OPEN ? lanAddresses().map((ip) => serve(ip, server.port!)) : [];
-if (process.env.CHRYSALIS_OPENCODE_ON) void harness.ensure(CHRYSALIS).catch((e) => tell({ note: `OpenCode did not start again: ${(e as Error).message}` }));
+if (process.env.CHRYSALIS_OPENCODE_ON || (existsSync(OPENCODE_USED) && !existsSync(OPENCODE_OFF) && harness.state().state !== "absent")) void harness.ensure(CHRYSALIS).catch((e) => tell({ note: `OpenCode did not start again: ${(e as Error).message}` }));
 let checkPort = Number(process.env.CHRYSALIS_CHECK_PORT ?? 8083);
 const checks = (LAN ? lanAddresses() : []).map((ip) => {
   const s = Bun.serve({ hostname: ip, port: checkPort, tls: tls().check, fetch: checkFetch });

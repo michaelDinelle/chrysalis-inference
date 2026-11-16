@@ -1,9 +1,34 @@
-import { existsSync, mkdirSync, readdirSync, readFileSync, realpathSync, rmdirSync, rmSync } from "node:fs";
-import { tmpdir, totalmem } from "node:os";
+import { copyFileSync, existsSync, lstatSync, mkdirSync, readdirSync, readFileSync, readlinkSync, realpathSync, rmdirSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
+import { homedir, tmpdir, totalmem } from "node:os";
 import { join } from "node:path";
 
 export const ROOT = join(import.meta.dir, "..");
-export const HOME = process.env.CHRYSALIS_HOME || ROOT;
+export const BUNDLE = /\.app\/Contents\/Resources\/?$/;
+export const HOME = process.env.CHRYSALIS_HOME || (BUNDLE.test(ROOT) ? join(homedir(), "Library", "Application Support", "Chrysalis") : ROOT);
+
+const read = (path: string) => { try { return readFileSync(path, "utf8").trim(); } catch { return ""; } };
+export function settle(root = ROOT, home = HOME) {
+  if (home === root) return;
+  const link = (to: string, at: string) => {
+    try { if (lstatSync(at).isSymbolicLink() && readlinkSync(at) === to) return; rmSync(at, { recursive: true, force: true }); } catch {}
+    symlinkSync(to, at);
+  };
+  const copy = (from: string, to: string, keep: (name: string) => boolean) => {
+    mkdirSync(to, { recursive: true });
+    for (const e of existsSync(from) ? readdirSync(from, { withFileTypes: true }) : []) {
+      if (e.isDirectory()) copy(join(from, e.name), join(to, e.name), keep);
+      else if (keep(e.name)) copyFileSync(join(from, e.name), join(to, e.name));
+    }
+  };
+  mkdirSync(join(home, "data"), { recursive: true });
+  link(join(root, "chrysalis"), join(home, "chrysalis"));
+  link(join(root, "data", "venv"), join(home, "data", "venv"));
+  if (read(join(root, "VERSION")) !== read(join(home, "VERSION")) || !existsSync(join(home, "build"))) {
+    copy(join(root, "build"), join(home, "build"), (name) => !name.endsWith(".archive"));
+    copy(join(root, "data", "models"), join(home, "data", "models"), (name) => !name.endsWith(".gguf"));
+    writeFileSync(join(home, "VERSION"), read(join(root, "VERSION")));
+  }
+}
 export const MODELS = ["qwen3.8-27b", "qwen3.8-flash-next"];
 
 export interface Machine {
@@ -36,7 +61,8 @@ const before = (env: Record<string, string | undefined>, name: string, dirs: str
 };
 
 export function serverEnv(m: Machine = here(), root = ROOT): Record<string, string> {
-  const utf8 = { PYTHONUTF8: "1", PYTHONIOENCODING: "utf-8", HF_HOME: join(root === ROOT ? HOME : root, "data", "cache", "huggingface") };
+  const data = join(root === ROOT ? HOME : root, "data", "cache");
+  const utf8 = { PYTHONUTF8: "1", PYTHONIOENCODING: "utf-8", HF_HOME: join(data, "huggingface"), PYTHONPYCACHEPREFIX: join(data, "pycache") };
   if (m.platform === "win32")
     return { ...utf8, CHRYSALIS_LT_CACHE: join(root, "data", "cache", "hipblaslt.txt"), ...before(m.env, "PATH", [join(root, "build"), join(root, "build", "runtime")], ";") };
   if (m.platform === "darwin") return utf8;

@@ -1,8 +1,8 @@
 import { expect, test } from "bun:test";
-import { existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, readlinkSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { main, parse, plan, uninstall } from "./launch";
-import { here } from "./platform";
+import { here, settle } from "./platform";
 
 const none = () => false, all = () => true;
 
@@ -43,8 +43,32 @@ test("uninstalling removes the models, the caches and the settings Chrysalis wro
   try {
     for (const d of ["home/data/models/qwen3.8-27b", "home/data/cache/huggingface", "home/data/venv", "config/chrysalis/tls", "config/other"]) mkdirSync(`${dir}/${d}`, { recursive: true });
     writeFileSync(`${dir}/home/data/models/qwen3.8-27b/qwen3.8-27b.gguf`, "weights");
-    expect(uninstall(`${dir}/home`, `${dir}/config/chrysalis`, `${dir}/none.exe`).sort()).toEqual([`${dir}/config/chrysalis`, `${dir}/home/data/cache`, `${dir}/home/data/models`]);
+    expect(uninstall(`${dir}/home`, `${dir}/config/chrysalis`, `${dir}/none.exe`, `${dir}/home`).sort()).toEqual([`${dir}/config/chrysalis`, `${dir}/home/data/cache`, `${dir}/home/data/models`]);
     expect(["home/data/models", "home/data/cache", "config/chrysalis", "home/data/venv", "config/other"].map((d) => existsSync(`${dir}/${d}`))).toEqual([false, false, false, true, true]);
-    expect(uninstall(`${dir}/home`, `${dir}/config/chrysalis`, `${dir}/none.exe`)).toEqual([]);
+    expect(uninstall(`${dir}/home`, `${dir}/config/chrysalis`, `${dir}/none.exe`, `${dir}/home`)).toEqual([]);
+  } finally { rmSync(dir, { recursive: true, force: true }); }
+});
+
+test("in a Mac app the program is read where it was installed and kept where its data is: the engines, the model files and the version are copied out, Python and the Python code are linked, weights are never copied, and uninstalling removes the data folder and the app", () => {
+  const dir = mkdtempSync(`${tmpdir()}/chrysalis-app-`), app = `${dir}/Applications/Chrysalis.app/Contents/Resources`, home = `${dir}/Support/Chrysalis`;
+  try {
+    for (const d of ["build", "chrysalis", "data/venv/bin", "data/models/qwen3.8-27b"]) mkdirSync(`${app}/${d}`, { recursive: true });
+    writeFileSync(`${app}/build/libchrysalis.dylib`, "engine");
+    writeFileSync(`${app}/build/chrysalis.metallib.archive`, "cache");
+    writeFileSync(`${app}/data/models/qwen3.8-27b/config.json`, "{}");
+    writeFileSync(`${app}/data/models/qwen3.8-27b/qwen3.8-27b.gguf`, "weights");
+    writeFileSync(`${app}/VERSION`, "v2");
+    settle(app, home);
+    settle(app, home);
+    expect([readFileSync(`${home}/build/libchrysalis.dylib`, "utf8"), existsSync(`${home}/build/chrysalis.metallib.archive`), readFileSync(`${home}/data/models/qwen3.8-27b/config.json`, "utf8"),
+      existsSync(`${home}/data/models/qwen3.8-27b/qwen3.8-27b.gguf`), readlinkSync(`${home}/chrysalis`), readlinkSync(`${home}/data/venv`), readFileSync(`${home}/VERSION`, "utf8")])
+      .toEqual(["engine", false, "{}", false, `${app}/chrysalis`, `${app}/data/venv`, "v2"]);
+    writeFileSync(`${app}/build/libchrysalis.dylib`, "engine 3");
+    writeFileSync(`${app}/VERSION`, "v3");
+    settle(app, home);
+    expect(readFileSync(`${home}/build/libchrysalis.dylib`, "utf8")).toBe("engine 3");
+    mkdirSync(`${dir}/config/chrysalis`, { recursive: true });
+    expect(uninstall(home, `${dir}/config/chrysalis`, `${dir}/none.exe`, app).sort()).toEqual([`${dir}/Applications/Chrysalis.app`, `${dir}/Support/Chrysalis`, `${dir}/config/chrysalis`].sort());
+    expect([existsSync(home), existsSync(`${dir}/Applications/Chrysalis.app`), existsSync(`${dir}/config/chrysalis`)]).toEqual([false, false, false]);
   } finally { rmSync(dir, { recursive: true, force: true }); }
 });

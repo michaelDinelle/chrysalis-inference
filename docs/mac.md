@@ -1,17 +1,8 @@
 # Chrysalis on a Mac with Apple Silicon and 32 GB or more
 
-```sh
-xcode-select --install
-git clone https://github.com/michaelDinelle/chrysalis-inference
-cd chrysalis-inference
-./chrysalis.sh
-```
+1. Download [Chrysalis.dmg](https://github.com/michaelDinelle/chrysalis-inference/releases/latest/download/Chrysalis.dmg)
+   and open it.
+2. Drag **Chrysalis** to **Applications**, then open it from Applications. It opens in Terminal.
+3. Pick a model on the Model row and it downloads.
 
-If the first start says Metal's compiler is missing:
-
-```sh
-xcodebuild -downloadComponent MetalToolchain
-```
-
-The release, [Chrysalis.dmg](https://github.com/michaelDinelle/chrysalis-inference/releases/latest/download/Chrysalis.dmg),
-is a laptop's chat alone, for Chrysalis on another computer: open it, drag Chrysalis to Applications and open it there.
+Uninstall is a row in its terminal: it removes the app, its models and its settings.

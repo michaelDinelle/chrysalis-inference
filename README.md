@@ -95,10 +95,9 @@ Start Chrysalis with `chrysalis.sh --host 0.0.0.0`. The other computer needs [Op
 - With no supported GPU, Chrysalis is the chat alone, for Chrysalis on another computer. The page has no box for another
   backend's address now: `curl -X POST localhost:8081/api/backend -H 'Content-Type: application/json' -d '{"url": "localhost:11434"}'`
   on the computer it runs on points the chat at llama.cpp, Ollama, LM Studio, KoboldCpp or vLLM.
-- Mac: the first `./chrysalis.sh` in a clone gets Python and Bun and builds the Metal engines with Xcode's Metal compiler.
-  The release, [Chrysalis.dmg](https://github.com/michaelDinelle/chrysalis-inference/releases/latest/download/Chrysalis.dmg),
-  is a laptop's chat alone, for Chrysalis on another computer: open it, drag Chrysalis to Applications and open it there.
-  It keeps what it downloads in `~/Library/Application Support/Chrysalis`.
+- Every system's release is built by `bun package.ts` on that system, the same folder each time with the launcher compiled
+  as the program: Chrysalis-Setup.exe on Windows, Chrysalis.dmg on a Mac, Chrysalis-linux-x86_64.tar.gz on Linux. A Mac
+  app keeps what it downloads in `~/Library/Application Support/Chrysalis`.
 - NVIDIA: needs Linux with NVIDIA's driver and CUDA toolkit. The first `./chrysalis.sh` in a clone builds the CUDA engines.
 - Windows: Chrysalis runs natively, with no WSL: the folder holds the engines, a Python of its own and the web chat,
   and needs only AMD's driver. Closing its window stops it. `Chrysalis.exe --host 0.0.0.0` in a terminal puts it on the
