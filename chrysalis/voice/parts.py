@@ -1,4 +1,4 @@
-import collections, ctypes, gc, os, re, shutil, tarfile, tempfile, threading, urllib.request
+import collections, ctypes, gc, os, re, shutil, sys, tarfile, tempfile, threading, urllib.request
 
 import numpy as np
 import onnxruntime as ort
@@ -79,6 +79,19 @@ def trim():
         _malloc_trim(0)
 
 
+def rss_mb():
+    if sys.platform == "darwin":
+        libc, info, n = ctypes.CDLL(None), (ctypes.c_uint64 * 6)(), ctypes.c_uint(12)
+        libc.task_info(ctypes.c_uint.in_dll(libc, "mach_task_self_"), 20, info, ctypes.byref(n))
+        return info[1] >> 20
+    if sys.platform == "win32":
+        k, info = ctypes.WinDLL("kernel32"), (ctypes.c_size_t * 9)(72)
+        k.GetCurrentProcess.restype = ctypes.c_void_p
+        k.K32GetProcessMemoryInfo(ctypes.c_void_p(k.GetCurrentProcess()), info, 72)
+        return info[2] >> 20
+    return int(next(l for l in open("/proc/self/status") if l.startswith("VmRSS")).split()[1]) // 1024
+
+
 DICTS = ("/usr/share/dict/words", "/usr/share/dict/cracklib-small")
 _words = None
 
@@ -94,7 +107,8 @@ def words():
 
 def terms(text):
     known, out = words(), []
-    for tok in re.findall(r"[A-Za-z0-9][A-Za-z0-9.'+\-]*[A-Za-z0-9]|[A-Za-z]", text):
+    for i, (gap, tok) in enumerate(re.findall(r"([^A-Za-z0-9]*)([A-Za-z0-9][A-Za-z0-9.'+\-]*[A-Za-z0-9]|[A-Za-z])", text)):
+        opens = i == 0 or bool(re.search(r"[.!?:\n]", gap))
         parts = [p for p in tok.strip(".'").split("-") if p]
         for p in parts:
             a = re.match(r"[A-Za-z]*", p).group(0)
@@ -109,7 +123,7 @@ def terms(text):
             if re.fullmatch(r"[A-Z][a-z]+", p):
                 run.append(p)
                 continue
-            if len(run) >= 2 and " ".join(run) not in out:
+            if (len(run) >= 2 or run and not opens) and " ".join(run) not in out:
                 out.append(" ".join(run))
             run = []
     return out

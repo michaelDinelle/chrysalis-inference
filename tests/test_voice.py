@@ -124,7 +124,7 @@ def kind(m):
     return "audio" if isinstance(m, tuple) else m["type"]
 
 
-rss = lambda: int(next(l for l in open(f"/proc/{svc.pid}/status") if l.startswith("VmRSS")).split()[1]) // 1024
+rss = lambda: int(subprocess.check_output(["ps", "-o", "rss=", "-p", str(svc.pid)])) // 1024
 voice_mode, ws = ws, connect(url, compression=None, max_size=None)
 ws.send(json.dumps({"type": "catalog"}))
 listed = events(lambda m: kind(m) in ("catalog", "error"), 30)[-1]
@@ -251,8 +251,7 @@ check("and speaks with it", wer("This one comes from another voice.", heard) <= 
 
 sending.join()
 ws.close()
-with open(f"/proc/{svc.pid}/status") as f:
-    mem = {l.split(":")[0]: int(l.split()[1]) // 1024 for l in f if l.startswith(("VmRSS", "VmHWM"))}
+held = rss()
 ws = connect(url, compression=None, max_size=None)
 early = "Tell me a joke about penguins."
 stream(say(early), tail=1.5)
@@ -325,7 +324,7 @@ try:
 except subprocess.TimeoutExpired:
     svc.kill()
 check("the service exits when its stdin ends", svc.returncode == 0, f"exit {svc.returncode}")
-print(f"service: loaded in {ready.get('load_ms')} ms, RSS {mem.get('VmRSS')} MB (peak {mem.get('VmHWM')} MB); "
+print(f"service: loaded in {ready.get('load_ms')} ms, RSS {held} MB; "
       f"first audio {first and round(first * 1000)} ms after the reply's first text")
 print("all ok" if not fails else f"{fails} FAILURES")
 sys.exit(fails != 0)

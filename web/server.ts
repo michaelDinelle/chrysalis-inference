@@ -504,8 +504,7 @@ let voiceSockets = 0, voiceIdle: Timer | undefined;
 
 function speechService(): Promise<string> {
   if (speech) return speech.url;
-  const missing = (why: string) => new Error(process.platform === "darwin" && !process.env.CHRYSALIS_VOICE_CMD ? "Voice mode is not on the Mac yet"
-    : `The voice service did not start (${why})`);
+  const missing = (why: string) => new Error(`The voice service did not start (${why})`);
   let proc: Subprocess<"pipe", "pipe", "inherit">;
   try {
     proc = Bun.spawn(VOICE_CMD, { cwd: ROOT, stdin: "pipe", stdout: "pipe", stderr: "inherit" });

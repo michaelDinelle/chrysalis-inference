@@ -2,7 +2,7 @@ import asyncio, collections, json, re, struct, sys, time, unicodedata
 
 import numpy as np
 
-from .parts import DEFAULTS, PARTS, RATE, Missing, fetch, terms, trim
+from .parts import DEFAULTS, PARTS, RATE, Missing, fetch, rss_mb, terms, trim
 
 PRE_ROLL = int(0.4 * RATE)
 START_FRAMES = 3
@@ -276,10 +276,6 @@ PREVIEW = {"en": "Hi, I'm {}. This is how I sound.", "es": "Hola, soy {}. Así s
            "fr": "Bonjour, je suis {}. Voici ma voix.", "it": "Ciao, sono {}. Questa è la mia voce.",
            "pt": "Olá, eu sou {}. Esta é a minha voz.", "hi": "नमस्ते, यह मेरी आवाज़ है।", "ja": "こんにちは、これが私の声です。",
            "zh": "你好，这是我的声音。"}
-
-
-def rss_mb():
-    return int(next(l for l in open("/proc/self/status") if l.startswith("VmRSS")).split()[1]) // 1024
 
 
 class Talk:

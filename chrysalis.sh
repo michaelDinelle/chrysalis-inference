@@ -36,7 +36,14 @@ setup() {
         fi
         rm -rf "$T"
     fi
-    if [ -x "$PY" ] && ! "$PY" -c "import pypdfium2, av" 2>/dev/null; then
+    if [ -x "$PY" ] && ! "$PY" -c 'import sys, importlib.metadata as m
+def held(p):
+    n, _, v = p.split("[")[0].partition("==")
+    try:
+        return v in ("", m.version(n))
+    except m.PackageNotFoundError:
+        return False
+sys.exit(not all(map(held, sys.argv[1:])))' "${PKGS[@]}" 2>/dev/null; then
         echo "getting the packages this version of Chrysalis added (once)"
         "$PY" -m pip install -q --break-system-packages "${PKGS[@]}" 2>/dev/null || echo "  that failed: start Chrysalis again to try again"
     fi
