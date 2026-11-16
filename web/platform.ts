@@ -36,7 +36,8 @@ const before = (env: Record<string, string | undefined>, name: string, dirs: str
 
 export function serverEnv(m: Machine = here(), root = ROOT): Record<string, string> {
   const utf8 = { PYTHONUTF8: "1", PYTHONIOENCODING: "utf-8" };
-  if (m.platform === "win32") return { ...utf8, ...before(m.env, "PATH", [join(root, "build"), join(root, "build", "runtime")], ";") };
+  if (m.platform === "win32")
+    return { ...utf8, CHRYSALIS_LT_CACHE: join(root, "data", "cache", "hipblaslt.txt"), ...before(m.env, "PATH", [join(root, "build"), join(root, "build", "runtime")], ";") };
   if (m.platform === "darwin") return utf8;
   const ggml = join(root, "ggml", /\bavx512_vnni\b/.test(m.read("/proc/cpuinfo")) ? "avx512" : "avx2");
   return { ...utf8, ...before(m.env, "LD_LIBRARY_PATH", [join(root, "data/rocm/lib"), join(root, "data/rocm/lib/rocm_sysdeps/lib"), ggml], ":") };

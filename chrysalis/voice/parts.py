@@ -167,7 +167,7 @@ class Parakeet:
         enc, dec, join, tokens = files(type(self))
         vocab = os.path.join(os.path.dirname(tokens), "terms.vocab")
         if not os.path.exists(vocab):
-            with open(tokens) as f, open(vocab + ".tmp", "w") as out:
+            with open(tokens, encoding="utf-8") as f, open(vocab + ".tmp", "w", encoding="utf-8") as out:
                 for line in f:
                     tok = line.rsplit(" ", 1)[0]
                     out.write(f"{tok}\t{0.0 if tok == '<unk>' else -1.0}\n")

@@ -18,11 +18,11 @@ test("the model server runs on the bundled Python wherever its packager put it: 
   expect(serverCommand(undefined, machine("win32"), root)).toEqual([join(root, "data/venv/Scripts/python.exe"), "-m", "chrysalis", "serve", "--host", "127.0.0.1"]);
 });
 
-test("on Windows the model server finds the engine's DLLs and the GPU runtime beside them first, through the one Path entry Windows keeps, whatever its case", () => {
+test("on Windows the model server finds the engine's DLLs and the GPU runtime beside them first, through the one Path entry Windows keeps, whatever its case, and is told where its tuned matmul choices are kept before the engine loads", () => {
   const env = serverEnv(machine("win32", [], { env: { Path: "C:\\Windows\\System32", HOME: "x" } }), root);
   expect(Object.keys(env).filter((k) => k.toUpperCase() === "PATH")).toEqual(["Path"]);
   expect(env.Path.split(";")).toEqual([join(root, "build"), join(root, "build", "runtime"), "C:\\Windows\\System32"]);
-  expect([env.PYTHONUTF8, "LD_LIBRARY_PATH" in env]).toEqual(["1", false]);
+  expect([env.PYTHONUTF8, "LD_LIBRARY_PATH" in env, env.CHRYSALIS_LT_CACHE]).toEqual(["1", false, join(root, "data", "cache", "hipblaslt.txt")]);
 });
 
 test("on Linux the model server loads the bundled ROCm and the ggml build this CPU runs fastest, ahead of what the system had", () => {

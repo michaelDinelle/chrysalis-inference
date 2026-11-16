@@ -150,6 +150,7 @@ export async function main(args: string[], m: Machine = here(), gpus: Found = ()
   switch (args[0]) {
     case "serve": {
       const model = read(`${tlsPath()}/model`) || undefined;
+      mkdirSync(join(ROOT, "data", "cache"), { recursive: true });
       return wait([...serverCommand(MODELS.includes(model ?? "") ? model : undefined, m), ...args.slice(1)], { env: { ...env, ...gpuEnv(env) } });
     }
     case "get": return wait(args.length > 1 ? [...getCommand(args[1], m), ...args.slice(2)] : [python(m), "-m", "chrysalis", "get"], { env });

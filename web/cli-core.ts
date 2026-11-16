@@ -1,4 +1,5 @@
-import { existsSync, mkdtempSync, readdirSync, readFileSync, rmSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync } from "node:fs";
+import { join } from "node:path";
 import type { Subprocess } from "bun";
 import { clean, fold, paint, plain } from "./terminal";
 import { utcOffset } from "./clock";
@@ -187,6 +188,7 @@ function engineLine(l: string): boolean {
 
 let engineSvc: Service, webSvc: Service, opencodeOn = false;
 function engineSpawn() {
+  mkdirSync(join(ROOT, "data", "cache"), { recursive: true });
   const env = { ...process.env, ...serverEnv() };
   return Bun.spawn(scoped(engineCmd()), { cwd: ROOT, stdin: "ignore", stdout: "pipe", stderr: "pipe",
     env: { ...env, ...gpuEnv(env), ...(run ? { TMPDIR: run } : {}) } });
