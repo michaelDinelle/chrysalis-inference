@@ -1,6 +1,5 @@
 #pragma once
-#include <cuda_runtime.h>
-#include <cuda_fp16.h>
+#include "gpu_api.h"
 #include <cstdarg>
 #include <cstdint>
 #include <cstdio>
@@ -16,7 +15,7 @@
     fputc('\n', stderr);
     abort();
 }
-#define CK(x) do { cudaError_t e_ = (x); if (e_ != cudaSuccess) fail("CUDA error '%s' at %s:%d", cudaGetErrorString(e_), __FILE__, __LINE__); } while (0)
+#define CK(x) do { gpuError_t e_ = (x); if (e_ != gpuSuccess) fail(GPU_ERROR_FORMAT, gpuGetErrorString(e_), __FILE__, __LINE__); } while (0)
 #define FAIL(...) fail(__VA_ARGS__)
 
 constexpr int D = 2560;
@@ -112,17 +111,21 @@ __host__ __device__ inline QTensor down_view(const QTensor &pool, int s, int &ro
     return t;
 }
 
+#if defined(__HIP_PLATFORM_AMD__)
+struct QAct { int8_t *q; float *d; };
+#else
 struct QAct { int8_t *q; float *d; int8_t *r = nullptr; };
 
 template <typename T> void zalloc(T **p, size_t bytes) {
     CK(cudaMalloc((void **)p, bytes));
     CK(cudaMemset(*p, 0, bytes));
 }
+#endif
 
 struct Arena {
     uint8_t *base = nullptr;
     size_t used = 0, cap = 0;
-    void init(size_t bytes) { zalloc(&base, bytes); cap = bytes; used = 0; }
+    void init(size_t bytes) { gpuAlloc(&base, bytes); cap = bytes; used = 0; }
     template <typename T = uint8_t> T *get(size_t n) {
         size_t bytes = (n * sizeof(T) + 255) & ~size_t(255);
         if (used + bytes > cap) FAIL("arena out of memory (%zu + %zu > %zu)", used, bytes, cap);
@@ -130,8 +133,20 @@ struct Arena {
     }
 };
 
+#if defined(__HIP_PLATFORM_AMD__)
+template <int M> __device__ __forceinline__ int lane_xor(int v) {
+    static_assert(M == 1 || M == 2 || M == 4 || M == 8 || M == 16, "lane_xor: M");
+    if constexpr (M == 1) return __builtin_amdgcn_update_dpp(0, v, 0xb1, 0xf, 0xf, true);
+    else if constexpr (M == 2) return __builtin_amdgcn_update_dpp(0, v, 0x4e, 0xf, 0xf, true);
+    else if constexpr (M == 4) return __builtin_amdgcn_update_dpp(0, v, 0x164, 0xf, 0xf, true);
+    else if constexpr (M == 8) return __builtin_amdgcn_update_dpp(0, v, 0x168, 0xf, 0xf, true);
+    else return __builtin_amdgcn_permlanex16(v, v, 0x76543210, 0xfedcba98, true, false);
+}
+template <int M> __device__ __forceinline__ float lane_xor(float v) { return __int_as_float(lane_xor<M>(__float_as_int(v))); }
+#else
 template <int M> __device__ __forceinline__ int lane_xor(int v) { return __shfl_xor_sync(0xffffffffu, v, M); }
 template <int M> __device__ __forceinline__ float lane_xor(float v) { return __shfl_xor_sync(0xffffffffu, v, M); }
+#endif
 
 __device__ __forceinline__ float warp_sum(float v) {
     v += lane_xor<16>(v); v += lane_xor<8>(v); v += lane_xor<4>(v); v += lane_xor<2>(v); v += lane_xor<1>(v);
@@ -150,6 +165,11 @@ __device__ __forceinline__ void wave_argmax(float &b, int &bi) {
 }
 __device__ __forceinline__ float silu(float x) { return x / (1.0f + __expf(-x)); }
 __device__ __forceinline__ float sigmoid(float x) { return 1.0f / (1.0f + __expf(-x)); }
+#if defined(__HIP_PLATFORM_AMD__)
+__device__ __forceinline__ int dot4(int a, int b, int c) { return __builtin_amdgcn_sudot4(true, a, true, b, c, false); }
+typedef _Float16 h16 __attribute__((ext_vector_type(16)));
+typedef float f8 __attribute__((ext_vector_type(8)));
+#else
 __device__ __forceinline__ int dot4(int a, int b, int c) { return __dp4a(a, b, c); }
 __device__ __forceinline__ void quant_put(QAct o, size_t i, float v) {
     const float d = warp_max(fabsf(v)) / 127.0f;
@@ -186,3 +206,4 @@ __device__ __forceinline__ unsigned load_relaxed_gpu(const unsigned *p) {
 __device__ __forceinline__ void store_sys(unsigned *p, unsigned v) { asm volatile("st.release.sys.global.u32 [%0], %1;" :: "l"(p), "r"(v) : "memory"); }
 __device__ __forceinline__ void store_gpu(unsigned *p, unsigned v) { asm volatile("st.release.gpu.global.u32 [%0], %1;" :: "l"(p), "r"(v) : "memory"); }
 __device__ __forceinline__ void store_relaxed_gpu(unsigned *p, unsigned v) { asm volatile("st.relaxed.gpu.global.u32 [%0], %1;" :: "l"(p), "r"(v) : "memory"); }
+#endif

@@ -2,11 +2,10 @@
 #include "kernels.h"
 #include "../../sampler.h"
 #include "../../lookup.h"
-#include "../vision.h"
+#include "vision.h"
 static_assert(TOPK == SAMPLE_N, "the sampler takes the engine's rows as they are");
 static_assert(LOGIT_STATS == NSTAT, "the sampler reads the statistics the engine writes");
 #include <random>
-#include <hipblaslt/hipblaslt.h>
 #include <map>
 #include <tuple>
 #include <string>
@@ -35,7 +34,7 @@ struct Seq {
     int *d_pages = nullptr;
     float *ssm = nullptr, *conv = nullptr;
     float *h_last = nullptr;
-    hipEvent_t ev[12] = {};
+    gpuEvent_t ev[12] = {};
     bool restoring = false;
     std::vector<float> top_v;
     std::vector<int> top_i;
@@ -56,10 +55,10 @@ struct Engine {
     float *enorm = nullptr, *hnorm = nullptr, *head_norm = nullptr;
     float *gdn_A = nullptr, *gdn_dt = nullptr;
 
-    hipStream_t st, cst;
-    hipEvent_t staged, copied;
+    gpuStream_t st, cst;
+    gpuEvent_t staged, copied;
     uint8_t *stage_state = nullptr;
-    hipblasLtHandle_t lt = nullptr;
+    gpuLtHandle_t lt = nullptr;
     void *lt_ws = nullptr;
     size_t lt_ws_size = 32 << 20;
     using LtPlan = lt_tune::Plan;
@@ -90,12 +89,37 @@ struct Engine {
     uint32_t *d_mask = nullptr;
     float *ssm_pool = nullptr, *conv_pool = nullptr;
     Vision vision;
+#if !defined(__HIP_PLATFORM_AMD__)
+    struct Spill { uint8_t *host = nullptr; size_t bytes = 0; };
+    Spill spill[NL];
+    int first_spill = NL;
+    size_t stage_bytes = 0;
+    uint8_t *stage_slot[2] = {};
+    gpuEvent_t stage_copied[2] = {}, stage_used[2] = {};
+    Layer stage_L[2][NL];
+    Layer spill_L[NL];
+    struct Lent { int page = -1, pages = 0; };
+    Lent lent[NL];
+    int n_lent = 0, kv_segs = 0;
+    bool lend_on = true;
+    std::vector<int> kv_seg;
+    int spill_from() const { return first_spill + n_lent; }
+    int lent_pages() const;
+    void lend();
+    void reclaim(int pages);
+    void stage_layer(int l);
+    const Layer &layer_for(int l, bool stage);
+    void layer_done(int l, bool stage);
+#endif
     struct Image { half *rows = nullptr; int n = 0; };
     std::vector<Image> images;
 
     void load(const std::string &path, int max_seqs, size_t reserve_bytes);
     void warmup();
     void alloc_buffers(int max_seqs);
+#if !defined(__HIP_PLATFORM_AMD__)
+    size_t buffer_need(int max_seqs) const;
+#endif
     void add_kv_memory(uint8_t *p, size_t bytes);
     int seq_new();
     void seq_reset(Seq &s);
@@ -117,8 +141,12 @@ struct Engine {
     uint32_t *mask_rows();
 
     void forward(Seq &s, int T, bool verify, int rope0, bool rpos = false, bool img = false);
+#if defined(__HIP_PLATFORM_AMD__)
     float *mtp_in(int T, const float *h_prev, const int *tokens, bool img);
     void mtp_draft(Seq &s, int i, int *draft, bool pick = true);
+#else
+    void mtp_forward(Seq &s, int T, int pos0, const float *h_prev, const int *tokens, int rope0, bool rpos = false, bool img = false);
+#endif
     void mtp_catch_up(Seq &s, int T, int pos0, int rope0, bool rpos = false, bool img = false, int off = 0);
     void lm_head(const QAct &in, int T, int rows);
     void ensure_pages(Seq &s, int n_tokens, int from);

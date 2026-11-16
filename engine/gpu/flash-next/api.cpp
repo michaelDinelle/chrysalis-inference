@@ -44,14 +44,14 @@ void chrysalis_seq_push(int id, const int *tokens, int n) {
 int chrysalis_free_tokens() { return E->free_tokens(); }
 void chrysalis_seq_lookup(int id, const int *tokens, int n) { E->seqs.at(id).look.set(tokens, n); }
 void chrysalis_masked_top(const uint32_t *mask, float *v, int *ids, float *stats) {
-    CK(cudaMemcpyAsync(E->mask_rows(), mask, VOCAB / 32 * 4, cudaMemcpyHostToDevice, E->st));
+    CK(gpuMemcpyAsync(E->mask_rows(), mask, VOCAB / 32 * 4, gpuMemcpyHostToDevice, E->st));
     mask_logits(E->b.logits, E->d_mask, VOCAB, 1, E->st);
     topk(E->b.logits, 1, VOCAB, VOCAB, E->b.tsv, E->b.tsi, E->b.topv, E->b.topi, E->st);
     logit_stats(E->b.logits, 1, VOCAB, VOCAB, E->b.tops, E->st);
-    CK(cudaMemcpyAsync(v, E->b.topv, SAMPLE_N * 4, cudaMemcpyDeviceToHost, E->st));
-    CK(cudaMemcpyAsync(ids, E->b.topi, SAMPLE_N * 4, cudaMemcpyDeviceToHost, E->st));
-    CK(cudaMemcpyAsync(stats, E->b.tops, NSTAT * 4, cudaMemcpyDeviceToHost, E->st));
-    CK(cudaStreamSynchronize(E->st));
+    CK(gpuMemcpyAsync(v, E->b.topv, SAMPLE_N * 4, gpuMemcpyDeviceToHost, E->st));
+    CK(gpuMemcpyAsync(ids, E->b.topi, SAMPLE_N * 4, gpuMemcpyDeviceToHost, E->st));
+    CK(gpuMemcpyAsync(stats, E->b.tops, NSTAT * 4, gpuMemcpyDeviceToHost, E->st));
+    CK(gpuStreamSynchronize(E->st));
 }
 int chrysalis_draw(int id, const float *v, const int *ids, const float *stats, const Sampling *sp) {
     Seq &s = E->seqs.at(id);
@@ -75,7 +75,7 @@ int chrysalis_snap_free(int snap) { try { E->snap_free(snap); return 0; } catch 
 int64_t chrysalis_snap_bytes(int snap) { try { return (int64_t)E->snap_bytes(snap); } catch (const std::exception &) { return -1; } }
 int chrysalis_snap_export(int snap, void *dst) { try { E->snap_export(snap, (uint8_t *)dst); return 0; } catch (const std::exception &) { return -1; } }
 int chrysalis_snap_import(int64_t file, int64_t offset, int64_t bytes) { return E->snap_import(file, offset, (size_t)bytes); }
-void chrysalis_sync() { CK(cudaStreamSynchronize(E->st)); }
+void chrysalis_sync() { CK(gpuStreamSynchronize(E->st)); }
 int chrysalis_prefill_pos(int id, const int *tokens, const int *pos3, int n) {
     try { E->prefill(id, tokens, pos3, n); return 0; }
     catch (const std::invalid_argument &) { return -2; }
@@ -88,7 +88,7 @@ int chrysalis_image_encode(int slot, const float *patches, int gh, int gw) { ret
 int chrysalis_video_encode(int slot, const float *patches, int gh, int gw) { return E->image_encode(slot, patches, gh, gw, 2); }
 void chrysalis_image_free(int slot) {
     if (slot < 0 || slot >= (int)E->images.size() || !E->images[slot].rows) return;
-    CK(cudaFreeHost(E->images[slot].rows));
+    CK(gpuFreeHost(E->images[slot].rows));
     E->images[slot] = {};
 }
 int chrysalis_image_read(int slot, float *out) {
@@ -113,7 +113,11 @@ double chrysalis_tune(const char *key, double value) {
     if (k == "experts") { old = E->xc.on; E->xc.on = value != 0; }
     if (k == "experts_half_life") { old = E->xc.half_life; if (value > 0) E->xc.half_life = value; }
     if (k == "spill") { old = E->xc.spill_cap; if (value >= 0) E->xc.spill_cap = (int)value; }
+#if defined(__HIP_PLATFORM_AMD__)
+    if (k == "spill_spare") { old = E->xc.spare / 1e9; if (value >= 0) { E->xc.spare = value * 1e9; E->xc.avail_at = {}; } }
+#else
     if (k == "spill_spare") { old = E->xc.spare / 1e9; if (value >= 0) { E->xc.spare = value * 1e9; E->experts_budget(E->mirror_room()); } }
+#endif
     return old;
 }
 int chrysalis_pool_save(const char *path) { return E && E->pool_save(path); }
@@ -128,5 +132,5 @@ void chrysalis_route_counts(int64_t *out) {
     if (!out) E->route_counts.assign((size_t)NL * NE, 0);
     else std::copy(E->route_counts.begin(), E->route_counts.end(), out);
 }
-void chrysalis_last_logits(float *out) { CK(cudaMemcpy(out, E->b.logits, (size_t)VOCAB * 4, cudaMemcpyDeviceToHost)); }
+void chrysalis_last_logits(float *out) { CK(gpuMemcpy(out, E->b.logits, (size_t)VOCAB * 4, gpuMemcpyDeviceToHost)); }
 }

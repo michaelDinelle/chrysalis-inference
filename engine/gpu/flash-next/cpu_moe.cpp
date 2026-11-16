@@ -46,10 +46,25 @@ void CpuMoe::start(MoeShared *shared, MoeShared *pred, const std::vector<ColdLay
     for (const ColdLayer &c : L) if (c.n && !exact_formats(c)) exact = false;
     exact_ok = exact;
     dxq.resize((size_t)MOE_MAX_T * D_); dxs.resize(MOE_MAX_T * (D_ / 32)); dxsum.resize(MOE_MAX_T * (D_ / 16));
+#if !MOE_SHARED_ROWS
     ds16.resize(MOE_MAX_T * (D_ / 16)); df16.resize(MOE_MAX_T * (D_ / 16));
+#else
+    ds16.resize(MOE_MAX_T * (D_ / 16)); df16.resize(MOE_MAX_T * (D_ / 16)); dxf.resize(MOE_MAX_T * (D_ / 32));
+#endif
     dhq.resize((size_t)MOE_MAX_T * MOE_MAX_E * FE_); dhs.resize(MOE_MAX_T * MOE_MAX_E * (FE_ / 32)); dhc.resize(MOE_MAX_T * MOE_MAX_E * (FE_ / 32)); dhb.resize(MOE_MAX_T * MOE_MAX_E * (FE_ / 4));
+#if !MOE_SMT_SIBLINGS
     std::vector<int> core;
     for (int c : os::cores()) if (c > 0 && (int)core.size() < n) core.push_back(c);
+#else
+    std::vector<int> core, sib;
+    for (int c : os::cores()) {
+        if (c < 1 || (int)core.size() >= n) continue;
+        core.push_back(c);
+        const int second = os::sibling(c);
+        if (second > c) sib.push_back(second);
+    }
+    if (sib.size() == core.size()) { core.insert(core.end(), sib.begin(), sib.end()); n = (int)core.size(); scr = std::vector<Scratch>(n); }
+#endif
     for (int i = 0; i < n; i++) {
         th.emplace_back(&CpuMoe::worker, this, i);
         if (i < (int)core.size()) os::pin(th.back(), core[i]);
@@ -198,10 +213,27 @@ void CpuMoe::worker(int id) {
         const int layer = sh->layer, T = sh->T;
         const ColdLayer &c = L[layer];
         int pick[MOE_MAX_T * MOE_MAX_E], np = 0, emu[MOE_MAX_T * MOE_MAX_E], ne = 0;
+#if MOE_SHARED_ROWS
+        int uslot[MOE_MAX_T * MOE_MAX_E], ufirst[MOE_MAX_T * MOE_MAX_E + 1], umem[MOE_MAX_T * MOE_MAX_E], nu = 0;
+#endif
         for (int j = 0; j < T * MOE_MAX_E; j++) {
             if (sh->slot[j] >= 0) pick[np++] = j;
             else if (sh->slot[j] <= -2) emu[ne++] = j;
         }
+#if MOE_SHARED_ROWS
+        for (int p = 0; p < np; p++) {
+            const int s = sh->slot[pick[p]];
+            int u = 0;
+            while (u < nu && uslot[u] != s) u++;
+            if (u == nu) uslot[nu++] = s;
+        }
+        ufirst[0] = 0;
+        for (int u = 0, m = 0; u < nu; u++) {
+            for (int p = 0; p < np; p++)
+                if (sh->slot[pick[p]] == uslot[u]) umem[m++] = p;
+            ufirst[u + 1] = m;
+        }
+#endif
         const ggml_type_traits_cpu *tr_gu[3] = {ggml_get_type_traits_cpu((ggml_type)c.type_gu[0]),
                                                 ggml_get_type_traits_cpu((ggml_type)(c.gate[1] ? c.type_gu[1] : c.type_gu[0])),
                                                 ggml_get_type_traits_cpu((ggml_type)(c.gate[2] ? c.type_gu[2] : c.type_gu[0]))};
@@ -214,27 +246,68 @@ void CpuMoe::worker(int id) {
                     int32_t *xsum = dxsum.data() + t * (D_ / 16);
                     exact_quant_x(sh->x + (size_t)t * D_, dxq.data() + (size_t)t * D_, dxs.data() + t * (D_ / 32), xsum);
                     exact_act1(dxs.data() + t * (D_ / 32), xsum, ds16.data() + t * (D_ / 16), df16.data() + t * (D_ / 16));
+#if MOE_SHARED_ROWS
+                    exact_act_x(xsum, dxf.data() + t * (D_ / 32));
+#endif
                 } else {
                     for (int g = 0; g < (dot_same ? 1 : 3); g++)
                         ggml_get_type_traits_cpu((ggml_type)dot_gu[g])->from_float(sh->x + (size_t)t * D_, xq[g].data() + xq_row[g] * t, D_);
                 }
             }
             barrier();
+#if !MOE_SHARED_ROWS
             const int R1 = (np + ne) * 2 * FE_;
+#else
+            const int R1 = (nu + ne) * 2 * FE_;
+#endif
             for (int r = id * R1 / n; r < (id + 1) * R1 / n; r++) {
+#if !MOE_SHARED_ROWS
                 if (r / (2 * FE_) >= np) {
                     const int j = emu[r / (2 * FE_) - np], k = r % (2 * FE_), slot = -2 - sh->slot[j];
+#else
+                if (vx && r + 1 < (id + 1) * R1 / n && r / (2 * FE_) < nu && (r + 1) / (2 * FE_) == r / (2 * FE_) &&
+                    c.type_gu[c.grp(uslot[r / (2 * FE_)])] == 23) {
+                    const int u = r / (2 * FE_), k = r % (2 * FE_), slot = uslot[u];
+                    const uint8_t *r0 = c.gu_row(k >= FE_, slot, k % FE_), *r1 = c.gu_row(k + 1 >= FE_, slot, (k + 1) % FE_);
+                    for (int m = ufirst[u]; m < ufirst[u + 1]; m++) {
+                        const int p = umem[m], t = pick[p] / MOE_MAX_E;
+                        float o[2];
+                        exact_dot_gu2(r0, r1, dxq.data() + (size_t)t * D_, dxs.data() + t * (D_ / 32), dxf.data() + t * (D_ / 32), o);
+                        gu[(size_t)p * 2 * FE_ + k] = o[0];
+                        gu[(size_t)p * 2 * FE_ + k + 1] = o[1];
+                    }
+                    r++;
+                    continue;
+                }
+                if (r / (2 * FE_) >= nu) {
+                    const int j = emu[r / (2 * FE_) - nu], k = r % (2 * FE_), slot = -2 - sh->slot[j];
+#endif
                     me->gu[j][k] = emu_gu_row(c.gu_row(k >= FE_, slot, k % FE_), c.type_gu[c.grp(slot)], ea[j / MOE_MAX_E], scr[id].v);
                     continue;
                 }
+#if !MOE_SHARED_ROWS
                 const int p = r / (2 * FE_), k = r % (2 * FE_), j = pick[p], slot = sh->slot[j], g = c.grp(slot), gx = dot_same ? 0 : g;
+#else
+                const int u = r / (2 * FE_), k = r % (2 * FE_), slot = uslot[u], g = c.grp(slot), gx = dot_same ? 0 : g;
+#endif
                 const uint8_t *row = c.gu_row(k >= FE_, slot, k % FE_);
+#if !MOE_SHARED_ROWS
                 const int t = j / MOE_MAX_E;
                 if (vx)
                     gu[(size_t)p * 2 * FE_ + k] = exact_dot_gu1(row, c.type_gu[g], dxq.data() + (size_t)t * D_, dxs.data() + t * (D_ / 32),
                                                                dxsum.data() + t * (D_ / 16), ds16.data() + t * (D_ / 16),
                                                                df16.data() + t * (D_ / 16), scr[id].v);
                 else tr_gu[g]->vec_dot(D_, &gu[(size_t)p * 2 * FE_ + k], 0, row, 0, xq[gx].data() + xq_row[gx] * t, 0, 1);
+#else
+                for (int m = ufirst[u]; m < ufirst[u + 1]; m++) {
+                    const int p = umem[m], t = pick[p] / MOE_MAX_E;
+                    if (vx)
+                        gu[(size_t)p * 2 * FE_ + k] = exact_dot_gu1(row, c.type_gu[g], dxq.data() + (size_t)t * D_, dxs.data() + t * (D_ / 32),
+                                                                   dxsum.data() + t * (D_ / 16), ds16.data() + t * (D_ / 16),
+                                                                   df16.data() + t * (D_ / 16), scr[id].v);
+                    else tr_gu[g]->vec_dot(D_, &gu[(size_t)p * 2 * FE_ + k], 0, row, 0, xq[gx].data() + xq_row[gx] * t, 0, 1);
+                }
+#endif
             }
             barrier();
             if (ne && id == 0) store_rel(&me->ready, g);

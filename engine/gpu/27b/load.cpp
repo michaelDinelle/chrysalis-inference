@@ -1,5 +1,6 @@
 #include "model.h"
-#include "../gpu.h"
+#include "gpu.h"
+#include "gpu_api.h"
 #include "../../gguf.h"
 #include <algorithm>
 #include <atomic>
@@ -43,6 +44,9 @@ struct Job {
     int slab = -1;
     size_t off = 0, bytes = 0;
     int unit = 4;
+#if !defined(__HIP_PLATFORM_AMD__)
+    int layer = -1;
+#endif
 };
 struct Piece { int job; size_t src, len, ring; int dep; };
 
@@ -62,6 +66,12 @@ void Engine::add_kv_memory(uint8_t *p, size_t bytes) {
     const size_t top = std::max(last, free_pages.empty() ? 0 : *std::max_element(free_pages.begin(), free_pages.end()) + 1 + shift);
     if (top > (1u << 24)) { fprintf(stderr, "chrysalis: KV segment too far from the pool, not used\n"); return; }
     kv_pool = base;
+#if !defined(__HIP_PLATFORM_AMD__)
+    if (shift) kv_seg.insert(kv_seg.begin(), shift, -1);
+    if (kv_seg.size() < last) kv_seg.resize(last, -1);
+    for (size_t i = first; i < last; i++) kv_seg[i] = kv_segs;
+    kv_segs++;
+#endif
     for (int &id : free_pages) id += (int)shift;
     for (size_t i = first; i < last; i++) free_pages.push_back((int)i);
     std::sort(free_pages.begin(), free_pages.end(), std::greater<int>());
@@ -98,11 +108,20 @@ void Engine::load(const std::string &path, int max_seqs, size_t reserve_bytes) {
         if (!t) FAIL("missing tensor %s", name.c_str());
         return t;
     };
+#if defined(__HIP_PLATFORM_AMD__)
     auto quant = [&](const std::string &name, QTensor &q) { Job j{Job::QUANT, get(name)}; j.q = &q; jobs.push_back(j); };
     auto vec = [&](const std::string &name, float *&v) { Job j{Job::VEC, get(name)}; j.vec = &v; jobs.push_back(j); };
+#else
+    int at = -1;
+    auto quant = [&](const std::string &name, QTensor &q) { Job j{Job::QUANT, get(name)}; j.q = &q; j.layer = at; jobs.push_back(j); };
+    auto vec = [&](const std::string &name, float *&v) { Job j{Job::VEC, get(name)}; j.vec = &v; j.layer = at; jobs.push_back(j); };
+#endif
     quant("output.weight", out);
     vec("output_norm.weight", out_norm);
     for (int l = 0, gl = 0; l <= NL; l++) {
+#if !defined(__HIP_PLATFORM_AMD__)
+        at = l;
+#endif
         Layer &w = l < NL ? L[l] : M;
         const std::string p = "blk." + std::to_string(l) + ".";
         vec(p + "attn_norm.weight", w.attn_norm);
@@ -119,6 +138,9 @@ void Engine::load(const std::string &path, int max_seqs, size_t reserve_bytes) {
                 Job j{kind, get(p + name)};
                 if (j.t->type != F32 || j.t->ne[0] * j.t->ne[1] != (int64_t)GV * D) FAIL("unexpected %s", (p + name).c_str());
                 j.q = &w.ab;
+#if !defined(__HIP_PLATFORM_AMD__)
+                j.layer = l;
+#endif
                 jobs.push_back(j);
             }
             for (auto [name, kind] : {std::pair{"ssm_a", Job::GDN_A}, {"ssm_dt.bias", Job::GDN_DT}}) {
@@ -129,14 +151,54 @@ void Engine::load(const std::string &path, int max_seqs, size_t reserve_bytes) {
             gl++;
         }
     }
+#if !defined(__HIP_PLATFORM_AMD__)
+    at = -1;
+#endif
     const std::string p = "blk." + std::to_string(NL) + ".";
     quant(p + "nextn.eh_proj.weight", eh_proj);
     vec(p + "nextn.enorm.weight", enorm); vec(p + "nextn.hnorm.weight", hnorm);
     vec(p + "nextn.shared_head_norm.weight", head_norm);
     std::sort(jobs.begin(), jobs.end(), [](const Job &a, const Job &b) { return a.t->data < b.t->data; });
 
+#if !defined(__HIP_PLATFORM_AMD__)
+    CK(gpuSetDevice(0));
+    CK(gpuFree(nullptr));
+    const double t_gpu = now();
+    const size_t vram_free = gpu_free();
+#endif
     std::vector<size_t> slab_bytes;
     std::vector<const QTensor *> abs_made;
+#if !defined(__HIP_PLATFORM_AMD__)
+    std::vector<size_t> layer_bytes(NL + 1, 0);
+    size_t fixed_bytes = 0;
+    for (Job &j : jobs) {
+        if (!(j.kind == Job::QUANT || j.kind == Job::VEC || j.kind == Job::ALPHA || j.kind == Job::BETA)) continue;
+        const bool ab = j.kind == Job::ALPHA || j.kind == Job::BETA;
+        if (ab && std::find(abs_made.begin(), abs_made.end(), j.q) != abs_made.end()) continue;
+        if (ab) abs_made.push_back(j.q);
+        Arena dry;
+        dry.cap = SIZE_MAX;
+        make_qtensor(dry, ab ? F16 : j.t->type, ab ? 2 * GV : (int)j.t->ne[1], ab ? D : (int)j.t->ne[0]);
+        if (j.layer >= 0 && j.layer < NL) layer_bytes[j.layer] += dry.used;
+        else fixed_bytes += dry.used;
+    }
+    abs_made.clear();
+    const char *ctx_env = getenv("CHRYSALIS_CTX");
+    const size_t ctx = ctx_env ? (size_t)atoll(ctx_env) : 32768;
+    const size_t kv_need = (ctx + PAGE - 1) / PAGE * KV_PAGE, slack = 512ull << 20;
+    const size_t need = fixed_bytes + buffer_need(max_seqs) + kv_need + reserve_bytes + slack;
+    size_t all_layers = 0, max_layer = 0;
+    for (int l = 0; l < NL; l++) { all_layers += layer_bytes[l]; max_layer = std::max(max_layer, (layer_bytes[l] + 4095) & ~size_t(4095)); }
+    first_spill = NL;
+    if (need + all_layers > vram_free) {
+        size_t used = need + 2 * max_layer;
+        int n = 0;
+        while (n < NL && used + layer_bytes[n] <= vram_free) used += layer_bytes[n++];
+        first_spill = n;
+        stage_bytes = max_layer;
+    }
+    std::vector<size_t> spill_off(NL, 0);
+#endif
     for (Job &j : jobs) {
         int type = j.t->type, rows = (int)j.t->ne[1], cols = (int)j.t->ne[0];
         if (j.kind == Job::ALPHA || j.kind == Job::BETA) {
@@ -153,6 +215,14 @@ void Engine::load(const std::string &path, int max_seqs, size_t reserve_bytes) {
         dry.cap = SIZE_MAX;
         make_qtensor(dry, type, rows, cols);
         j.bytes = dry.used;
+#if !defined(__HIP_PLATFORM_AMD__)
+        if (j.layer >= first_spill && j.layer < NL) {
+            j.slab = -1;
+            j.off = spill_off[j.layer];
+            spill_off[j.layer] += j.bytes;
+            continue;
+        }
+#endif
         if (slab_bytes.empty() || (slab_bytes.back() + j.bytes > SLAB && slab_bytes.back() > 0)) slab_bytes.push_back(0);
         j.slab = (int)slab_bytes.size() - 1;
         j.off = slab_bytes.back();
@@ -200,17 +270,28 @@ void Engine::load(const std::string &path, int max_seqs, size_t reserve_bytes) {
         os::close(fd);
     });
 
+#if defined(__HIP_PLATFORM_AMD__)
     CK(hipInit(0));
-    CK(hipSetDevice(0));
-    CK(hipFree(nullptr));
+    CK(gpuSetDevice(0));
+    CK(gpuFree(nullptr));
     const double t_gpu = now();
     hipDeviceProp_t prop;
     CK(hipGetDeviceProperties(&prop, 0));
+#else
+    for (int l = first_spill; l < NL; l++) {
+        spill[l].bytes = (spill_off[l] + 4095) & ~size_t(4095);
+        CK(gpuHostMalloc(&spill[l].host, spill[l].bytes));
+    }
+#endif
     uint8_t *ring;
+#if defined(__HIP_PLATFORM_AMD__)
     if (prop.isLargeBar) CK(hipExtMallocWithFlags((void **)&ring, RING, hipDeviceMallocFinegrained));
-    else CK(hipHostMalloc(&ring, RING));
-    std::vector<hipEvent_t> done(n);
-    for (hipEvent_t &e : done) CK(hipEventCreateWithFlags(&e, hipEventDisableTiming));
+    else CK(gpuHostMalloc(&ring, RING));
+#else
+    CK(gpuHostMalloc(&ring, RING));
+#endif
+    std::vector<gpuEvent_t> done(n);
+    for (gpuEvent_t &e : done) CK(gpuEventCreateWithFlags(&e, gpuEventDisableTiming));
 
     std::atomic<int> next{0}, submitted{0};
     std::vector<std::atomic<uint8_t>> filled(n);
@@ -222,40 +303,48 @@ void Engine::load(const std::string &path, int max_seqs, size_t reserve_bytes) {
             wait_for(prefetched, (size_t)(src - g.base) + pc.len);
             if (pc.dep >= 0) {
                 wait_for(submitted, pc.dep + 1);
-                CK(hipEventSynchronize(done[pc.dep]));
+                CK(gpuEventSynchronize(done[pc.dep]));
             }
             stream_copy(ring + pc.ring, src, pc.len);
             publish(filled[i], (uint8_t)1);
         }
     });
-    CK(hipStreamCreateWithFlags(&st, hipStreamNonBlocking));
-    CK(hipStreamCreateWithFlags(&cst, hipStreamNonBlocking));
-    CK(hipEventCreateWithFlags(&staged, hipEventDisableTiming));
-    CK(hipEventCreateWithFlags(&copied, hipEventDisableTiming));
-    CK(hipEventRecord(copied, cst));
+    CK(gpuStreamCreateWithFlags(&st, gpuStreamNonBlocking));
+    CK(gpuStreamCreateWithFlags(&cst, gpuStreamNonBlocking));
+    CK(gpuEventCreateWithFlags(&staged, gpuEventDisableTiming));
+    CK(gpuEventCreateWithFlags(&copied, gpuEventDisableTiming));
+    CK(gpuEventRecord(copied, cst));
     f32_to_f16(nullptr, nullptr, 0, st);
-    CK(hipStreamSynchronize(st));
+    CK(gpuStreamSynchronize(st));
     std::atomic<int> slabs_ready{0}, gdn_ready{0};
     std::vector<uint8_t *> slab_base(slab_bytes.size());
     std::thread vram([&] {
-        CK(hipMalloc(&slab_base[0], slab_bytes[0]));
+        CK(gpuMalloc(&slab_base[0], slab_bytes[0]));
         publish(slabs_ready, 1);
-        CK(hipMalloc(&gdn_A, 48 * GV * 4));
-        CK(hipMalloc(&gdn_dt, 48 * GV * 4));
+        CK(gpuMalloc(&gdn_A, 48 * GV * 4));
+        CK(gpuMalloc(&gdn_dt, 48 * GV * 4));
         publish(gdn_ready, 1);
         for (size_t k = 1; k < slab_bytes.size(); k++) {
-            CK(hipMalloc(&slab_base[k], slab_bytes[k]));
+            CK(gpuMalloc(&slab_base[k], slab_bytes[k]));
             publish(slabs_ready, (int)k + 1);
         }
         weight_bytes = 0;
         for (size_t b : slab_bytes) weight_bytes += b;
         alloc_buffers(max_seqs);
-        CK(hipMalloc(&lt_ws, lt_ws_size));
+#if !defined(__HIP_PLATFORM_AMD__)
+        if (first_spill < NL)
+            for (int k = 0; k < 2; k++) {
+                CK(gpuMalloc(&stage_slot[k], stage_bytes));
+                CK(gpuEventCreateWithFlags(&stage_copied[k], gpuEventDisableTiming));
+                CK(gpuEventCreateWithFlags(&stage_used[k], gpuEventDisableTiming));
+            }
+#endif
+        CK(gpuMalloc(&lt_ws, lt_ws_size));
         const size_t free_b = gpu_free();
         for (size_t left = (free_b - std::min(free_b, reserve_bytes)) / KV_PAGE; left;) {
             const size_t pages = std::min(left, (size_t)(SLAB / KV_PAGE));
             uint8_t *kv;
-            CK(hipMalloc(&kv, pages * KV_PAGE));
+            CK(gpuMalloc(&kv, pages * KV_PAGE));
             add_kv_memory(kv, pages * KV_PAGE);
             left -= pages;
         }
@@ -266,9 +355,17 @@ void Engine::load(const std::string &path, int max_seqs, size_t reserve_bytes) {
         Job &j = jobs[pc.job];
         if (pc.src == 0) {
             if (j.carve) {
+#if defined(__HIP_PLATFORM_AMD__)
                 wait_for(slabs_ready, j.slab + 1);
+#else
+                if (j.slab >= 0) wait_for(slabs_ready, j.slab + 1);
+#endif
                 Arena a;
+#if defined(__HIP_PLATFORM_AMD__)
                 a.base = slab_base[j.slab] + j.off;
+#else
+                a.base = (j.slab >= 0 ? slab_base[j.slab] : spill[j.layer].host) + j.off;
+#endif
                 a.cap = j.bytes;
                 const bool ab = j.kind == Job::ALPHA || j.kind == Job::BETA;
                 j.made = make_qtensor(a, ab ? F16 : j.t->type, ab ? 2 * GV : (int)j.t->ne[1], ab ? D : (int)j.t->ne[0]);
@@ -281,45 +378,65 @@ void Engine::load(const std::string &path, int max_seqs, size_t reserve_bytes) {
         const uint8_t *src = ring + pc.ring;
         switch (j.kind) {
             case Job::QUANT:
-                if (j.t->type == F32) CK(hipMemcpyAsync((uint8_t *)j.q->f + pc.src, src, pc.len, hipMemcpyDefault, st));
+                if (j.t->type == F32) CK(gpuMemcpyAsync((uint8_t *)j.q->f + pc.src, src, pc.len, gpuMemcpyDefault, st));
                 else relayout(*j.q, src, st, pc.src / j.unit, pc.len / j.unit);
                 break;
             case Job::VEC:
-                CK(hipMemcpyAsync((uint8_t *)j.made.f + pc.src, src, pc.len, hipMemcpyDefault, st));
+                CK(gpuMemcpyAsync((uint8_t *)j.made.f + pc.src, src, pc.len, gpuMemcpyDefault, st));
                 break;
             case Job::ALPHA: case Job::BETA:
                 f32_to_f16((const float *)src, (half *)j.q->f + (j.kind == Job::BETA ? (size_t)GV * D : 0) + pc.src / 4, pc.len / 4, st);
                 break;
             case Job::GDN_A: case Job::GDN_DT:
-                CK(hipMemcpyAsync((j.kind == Job::GDN_A ? gdn_A : gdn_dt) + (size_t)j.gl * GV + pc.src / 4, src, pc.len, hipMemcpyDefault, st));
+                CK(gpuMemcpyAsync((j.kind == Job::GDN_A ? gdn_A : gdn_dt) + (size_t)j.gl * GV + pc.src / 4, src, pc.len, gpuMemcpyDefault, st));
                 break;
         }
-        CK(hipEventRecord(done[i], st));
+        CK(gpuEventRecord(done[i], st));
         publish(submitted, i + 1);
         load_done += pc.len;
         const uintptr_t a = (uintptr_t)(j.t->data + pc.src) & ~uintptr_t(4095);
         const uintptr_t e = ((uintptr_t)(j.t->data + pc.src + pc.len) + 4095) & ~uintptr_t(4095);
         os::drop_mapped((void *)a, e - a);
     }
-    CK(hipStreamSynchronize(st));
+    CK(gpuStreamSynchronize(st));
     const double t_weights = now();
     for (std::thread &w : writers) w.join();
     prefetch.join();
-    for (hipEvent_t e : done) CK(hipEventDestroy(e));
-    if (prop.isLargeBar) CK(hipFree(ring));
+    for (gpuEvent_t e : done) CK(gpuEventDestroy(e));
+#if defined(__HIP_PLATFORM_AMD__)
+    if (prop.isLargeBar) CK(gpuFree(ring));
     else CK(hipHostFree(ring));
+#else
+    CK(cudaFreeHost(ring));
+#endif
 
     vram.join();
+#if defined(__HIP_PLATFORM_AMD__)
     if (prop.isLargeBar) {
         const size_t free_b = gpu_free();
         const size_t bytes = (free_b - std::min(free_b, reserve_bytes)) / KV_PAGE * KV_PAGE;
         uint8_t *kv;
-        if (bytes && hipMalloc(&kv, bytes) == hipSuccess) add_kv_memory(kv, bytes);
+        if (bytes && gpuMalloc(&kv, bytes) == gpuSuccess) add_kv_memory(kv, bytes);
     }
     if (!gpu_runs(st)) FAIL("%s cannot run this engine", prop.name);
+#else
+    for (int l = first_spill; l < NL; l++) spill_L[l] = L[l];
+    lend();
+    CK(gpuStreamSynchronize(st));
+#endif
     const double t1 = now();
+#if defined(__HIP_PLATFORM_AMD__)
     fprintf(stderr, "chrysalis: weights %.2f GB, buffers %.2f GB, KV pool %d pages = %d tokens (%.2f GB)\n",
             weight_bytes / 1e9, barena.used / 1e9, n_pages, n_pages * PAGE, (double)n_pages * KV_PAGE / 1e9);
+#else
+    size_t spilled = 0;
+    for (int l = first_spill; l < NL; l++) spilled += spill[l].bytes;
+    fprintf(stderr, "chrysalis: weights %.2f GB in VRAM and %.2f GB in RAM from layer %d, buffers %.2f GB, KV pool %d pages = %d tokens (%.2f GB)\n",
+            weight_bytes / 1e9, spilled / 1e9, first_spill, barena.used / 1e9, n_pages, n_pages * PAGE, (double)n_pages * KV_PAGE / 1e9);
+    if (n_lent)
+        fprintf(stderr, "chrysalis: layers %d to %d also in VRAM the KV cache isn't using (%.2f GB), until a context needs it\n", first_spill,
+                spill_from() - 1, (double)lent_pages() * KV_PAGE / 1e9);
+#endif
     fprintf(stderr, "chrysalis: loaded in %.2f s: GPU ready after %.2f s, %.1f GB of weights at %.1f GB/s, %.1f GB read from disk\n",
             t1 - t0, t_gpu - t0, total_bytes / 1e9, total_bytes / 1e9 / (t_weights - t_gpu), disk_bytes / 1e9);
 }
@@ -330,8 +447,8 @@ void Engine::warmup() {
     struct Done { ~Done() { load_phase = 3; } } done_;
     const double t0 = now();
     const size_t ne = (size_t)embd.rows * embd.cols, nb = ne / 256;
-    CK(hipHostMalloc(&embd.q, ne / 2)); CK(hipHostMalloc(&embd.sc, ne / 64));
-    CK(hipHostMalloc(&embd.sh, nb * 2)); CK(hipHostMalloc(&embd.d, nb * 2));
+    CK(gpuHostMalloc(&embd.q, ne / 2)); CK(gpuHostMalloc(&embd.sc, ne / 64));
+    CK(gpuHostMalloc(&embd.sh, nb * 2)); CK(gpuHostMalloc(&embd.d, nb * 2));
     std::vector<std::thread> th;
     const int nt = 4;
     for (int w = 0; w < nt; w++) th.emplace_back([&, w] {
@@ -354,9 +471,9 @@ void Engine::warmup() {
     });
     snaps.resize(std::max<size_t>(snaps.size(), 8));
     for (Snap &sn : snaps)
-        if (!sn.host) CK(hipHostMalloc(&sn.host, state_bytes()));
+        if (!sn.host) CK(gpuHostMalloc(&sn.host, state_bytes()));
     for (std::thread &t : th) t.join();
-    if (!lt) hipblasLtCreate(&lt);
+    if (!lt) gpublasLtCreate(&lt);
     int id = seq_new();
     const bool borrowed = id < 0;
     if (borrowed) id = 0;
@@ -365,13 +482,42 @@ void Engine::warmup() {
     prefill(id, toks.data(), nullptr, 9);
     if (borrowed) seq_truncate(id, 0);
     else seq_free(id);
-    CK(hipStreamSynchronize(st));
+    CK(gpuStreamSynchronize(st));
     fprintf(stderr, "chrysalis: warmed up in %.2f s\n", now() - t0);
 }
+
+#if !defined(__HIP_PLATFORM_AMD__)
+static size_t arena_need(size_t U) {
+    size_t need = 0;
+    auto add = [&](size_t bytes) { need += (bytes + 255) & ~size_t(255); };
+    add(U * 4); add(U * D * 4 * 3);
+    add(U * 16384 * 4); add(U * NKV * HD * 4 * 2);
+    add(U * GK * GD * 4 * 2); add(U * GV * GD * 4 * 2);
+    add(U * 2 * D * 2);
+    add(U * NH * HD * 2 * 2);
+    add(U * 2 * NH * HD * 2);
+    add(8 * FF * 4); add(8 * VOCAB * 4);
+    add((size_t)MAX_SPLITS * 8 * NH * HD * 4); add((size_t)MAX_SPLITS * 8 * NH * 2 * 4);
+    add(U * 2 * D * 9 / 4); add(U * 2 * D * 9 / 4); add(U * FF * 9 / 4);
+    add(8 * 64 * TOPK * 8 * 2);
+    add(8 * LOGIT_STATS * 4);
+    add(48 * 8 * (QKV + GK * GD + GV * GD + 2 * GV) * 4);
+    add(8 * D * 4 * 2); add(64);
+    add(U * sizeof(half *)); add(U * 3 * 4);
+    return need + (1 << 20);
+}
+
+size_t Engine::buffer_need(int max_seqs) const {
+    const size_t U = (umax + 63) / 64 * 64;
+    return arena_need(U) + state_bytes() + 2 * 48 * GV * 4 +
+           ((size_t)48 * GV * GD * GD * 4 + (size_t)48 * QKV * 3 * 4 + D * 4 + 262144 / PAGE * 4 * 2) * max_seqs + lt_ws_size;
+}
+#endif
 
 void Engine::alloc_buffers(int max_seqs) {
     umax = (umax + 63) / 64 * 64;
     const size_t U = umax;
+#if defined(__HIP_PLATFORM_AMD__)
     {
         size_t need = 0;
         auto add = [&](size_t bytes) { need += (bytes + 255) & ~size_t(255); };
@@ -391,20 +537,35 @@ void Engine::alloc_buffers(int max_seqs) {
         add(U * sizeof(half *)); add(U * 3 * 4);
         barena.init(need + (1 << 20));
     }
+#else
+    barena.init(arena_need(U));
+#endif
     b.tokens = barena.get<int>(U);
     b.x = barena.get<float>(U * D); b.hfin = barena.get<float>(U * D); b.mtp_h = barena.get<float>(U * D);
     b.proj = barena.get<float>(U * 16384); b.k = barena.get<float>(U * NKV * HD); b.v = barena.get<float>(U * NKV * HD);
     b.qn = barena.get<float>(U * GK * GD); b.kn = barena.get<float>(U * GK * GD);
     b.vc = barena.get<float>(U * GV * GD); b.o = barena.get<float>(U * GV * GD);
+#if defined(__HIP_PLATFORM_AMD__)
     b.hh = barena.get<half>(U * 2 * D); b.deq = barena.get<half>((size_t)FF * D);
+#else
+    b.hh = barena.get<half>(U * 2 * D);
+#endif
     b.Q16 = barena.get<half>(U * NH * HD); b.mix = barena.get<half>(U * NH * HD);
+#if defined(__HIP_PLATFORM_AMD__)
     b.ffn_g = barena.get<half>(U * FF); b.ffn_u = barena.get<half>(U * FF);
+#endif
     b.gemm16 = barena.get<half>(U * 2 * NH * HD);
     b.act = barena.get<float>(8 * FF); b.logits = barena.get<float>(8 * (size_t)VOCAB);
     b.part_o = barena.get<float>((size_t)MAX_SPLITS * 8 * NH * HD); b.part_ml = barena.get<float>((size_t)MAX_SPLITS * 8 * NH * 2);
+#if defined(__HIP_PLATFORM_AMD__)
     b.hq = {barena.get<int8_t>(8 * 2 * D), barena.get<float>(8 * 2 * D / 32)};
     b.mq = {barena.get<int8_t>(8 * 2 * D), barena.get<float>(8 * 2 * D / 32)};
     b.aq = {barena.get<int8_t>(8 * FF), barena.get<float>(8 * FF / 32)};
+#else
+    b.hq = {barena.get<int8_t>(U * 2 * D), barena.get<float>(U * 2 * D / 32), barena.get<int8_t>(U * 2 * D)};
+    b.mq = {barena.get<int8_t>(U * 2 * D), barena.get<float>(U * 2 * D / 32), barena.get<int8_t>(U * 2 * D)};
+    b.aq = {barena.get<int8_t>(U * FF), barena.get<float>(U * FF / 32), barena.get<int8_t>(U * FF)};
+#endif
     b.topv = barena.get<float>(8 * TOPK); b.topi = barena.get<int>(8 * TOPK);
     b.tops = barena.get<float>(8 * LOGIT_STATS);
     b.tsv = barena.get<float>(8 * 64 * TOPK); b.tsi = barena.get<int>(8 * 64 * TOPK);
@@ -413,15 +574,15 @@ void Engine::alloc_buffers(int max_seqs) {
     b.mtp_x = barena.get<float>(8 * D); b.draft = barena.get<int>(16);
     b.img = barena.get<const half *>(U); b.rpos = barena.get<int>(U * 3);
 
-    CK(hipMalloc(&stage_state, state_bytes()));
+    CK(gpuMalloc(&stage_state, state_bytes()));
     seqs.resize(max_seqs);
     const size_t ssm_bytes = (size_t)48 * GV * GD * GD * 4, conv_bytes = (size_t)48 * QKV * 3 * 4;
-    CK(hipMalloc(&ssm_pool, ssm_bytes * max_seqs));
-    CK(hipMalloc(&conv_pool, conv_bytes * max_seqs));
+    CK(gpuMalloc(&ssm_pool, ssm_bytes * max_seqs));
+    CK(gpuMalloc(&conv_pool, conv_bytes * max_seqs));
     for (int i = 0; i < max_seqs; i++) {
         seqs[i].ssm = ssm_pool + ssm_bytes / 4 * i;
         seqs[i].conv = conv_pool + conv_bytes / 4 * i;
-        CK(hipMalloc(&seqs[i].h_last, D * 4));
-        CK(hipMalloc(&seqs[i].d_pages, 262144 / PAGE * 4 * 2));
+        CK(gpuMalloc(&seqs[i].h_last, D * 4));
+        CK(gpuMalloc(&seqs[i].d_pages, 262144 / PAGE * 4 * 2));
     }
 }

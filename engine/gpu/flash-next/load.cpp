@@ -8,6 +8,7 @@
 #include <chrono>
 #include <cstring>
 #include <thread>
+#include "gpu_api.h"
 
 namespace {
 double now() { return std::chrono::duration<double>(std::chrono::steady_clock::now().time_since_epoch()).count(); }
@@ -41,17 +42,17 @@ int physical_cores() {
 
 double Engine::measure_dma() {
     const size_t piece = std::min<size_t>(stage_gu ? stage_gu / STAGE_G : (size_t)1 << 20, cold_bytes / 64);
-    cudaEvent_t e0, e1;
-    CK(cudaEventCreate(&e0)); CK(cudaEventCreate(&e1));
+    gpuEvent_t e0, e1;
+    CK(gpuEventCreate(&e0)); CK(gpuEventCreate(&e1));
     float best_ms = 1e30f;
     for (int rep = 0; rep < 3; rep++) {
-        CK(cudaEventRecord(e0, cst));
-        for (int i = 0; i < 48; i++) CK(cudaMemcpyAsync(b.raw[i % NSLOT], cold_mem + (size_t)i * 7 * piece % (cold_bytes - piece), piece, cudaMemcpyHostToDevice, cst));
-        CK(cudaEventRecord(e1, cst)); CK(cudaEventSynchronize(e1));
-        float ms; CK(cudaEventElapsedTime(&ms, e0, e1));
+        CK(gpuEventRecord(e0, cst));
+        for (int i = 0; i < 48; i++) CK(gpuMemcpyAsync(b.raw[i % NSLOT], cold_mem + (size_t)i * 7 * piece % (cold_bytes - piece), piece, gpuMemcpyHostToDevice, cst));
+        CK(gpuEventRecord(e1, cst)); CK(gpuEventSynchronize(e1));
+        float ms; CK(gpuEventElapsedTime(&ms, e0, e1));
         best_ms = std::min(best_ms, ms);
     }
-    CK(cudaEventDestroy(e0)); CK(cudaEventDestroy(e1));
+    CK(gpuEventDestroy(e0)); CK(gpuEventDestroy(e1));
     return 48.0 * piece / (best_ms * 1e-3);
 }
 
@@ -135,7 +136,11 @@ std::string Engine::cal_key() const {
     std::string cpu = os::cpu_name();
     cpu.erase(cpu.find_last_not_of(" \n") + 1);
     const long long ram = (long long)(os::ram_total() >> 30);
+#if defined(__HIP_PLATFORM_AMD__)
+    return lt_tune::device(lt) + " | " + cpu + " | " + std::to_string(n_workers) + " workers | " + std::to_string(ram) + " GiB | " +
+#else
     return lt_tune::device() + " | " + cpu + " | " + std::to_string(n_workers) + " workers | " + std::to_string(ram) + " GiB | " +
+#endif
            std::to_string(cold_bytes);
 }
 
@@ -143,24 +148,42 @@ bool Engine::cal_load() {
     FILE *f = cal_path.empty() ? nullptr : fopen(cal_path.c_str(), "r");
     if (!f) return false;
     const std::string key = cal_key();
+#if defined(__HIP_PLATFORM_AMD__)
+    double v[7], got[7];
+#else
     double v[9], got[9];
+#endif
     bool found = false;
     char line[1024];
     while (fgets(line, sizeof line, f)) {
         const char *tab = strchr(line, '\t');
+#if !defined(__HIP_PLATFORM_AMD__)
         int n = 0;
+#endif
         if (tab && std::string(line, (size_t)(tab - line)) == key &&
+#if defined(__HIP_PLATFORM_AMD__)
+            sscanf(tab + 1, "%lf %lf %lf %lf %lf %lf %lf", &got[0], &got[1], &got[2], &got[3], &got[4], &got[5], &got[6]) == 7 &&
+#else
             (n = sscanf(tab + 1, "%lf %lf %lf %lf %lf %lf %lf %lf %lf", &got[0], &got[1], &got[2], &got[3], &got[4], &got[5], &got[6], &got[7],
                         &got[8])) >= 7 &&
+#endif
             std::all_of(got, got + 7, [](double g) { return g > 0; })) {
+#if defined(__HIP_PLATFORM_AMD__)
+            std::copy(got, got + 7, v);
+#else
             if (n < 9) got[7] = got[8] = -1;
             std::copy(got, got + 9, v);
+#endif
             found = true;
         }
     }
     fclose(f);
     if (!found) return false;
+#if defined(__HIP_PLATFORM_AMD__)
+    cal_cpu_bw = v[0]; cal_cpu_mac = v[1]; cal_dma_bw = v[2]; std::copy(v + 3, v + 6, cpu_bias); restore_s = v[6];
+#else
     cal_cpu_bw = v[0]; cal_cpu_mac = v[1]; cal_dma_bw = v[2]; std::copy(v + 3, v + 6, cpu_bias); restore_s = v[6]; cal_ram = v[7]; cal_extra = v[8];
+#endif
     gfrac = (float)(cal_dma_bw / (cal_dma_bw + cal_cpu_bw));
     calibrated = true;
     return true;
@@ -184,7 +207,7 @@ void Engine::cal_split(int id) {
                 seq_truncate(id, 0);
                 const double t0 = now();
                 prefill(id, toks.data(), nullptr, n);
-                CK(cudaStreamSynchronize(st));
+                CK(gpuStreamSynchronize(st));
                 t = std::min(t, now() - t0);
             }
             if (i >= 0 && t < best) best = t, pick = cpu_bias[0];
@@ -203,10 +226,16 @@ void Engine::cal_split(int id) {
 void Engine::cal_save() {
     calibrated = true;
     if (FILE *f = cal_path.empty() ? nullptr : fopen(cal_path.c_str(), "a")) {
+#if defined(__HIP_PLATFORM_AMD__)
+        fprintf(f, "%s\t%.17g %.17g %.17g %.17g %.17g %.17g %.17g\n", cal_key().c_str(), cal_cpu_bw, cal_cpu_mac, cal_dma_bw, cpu_bias[0], cpu_bias[1],
+#else
         fprintf(f, "%s\t%.17g %.17g %.17g %.17g %.17g %.17g %.17g", cal_key().c_str(), cal_cpu_bw, cal_cpu_mac, cal_dma_bw, cpu_bias[0], cpu_bias[1],
+#endif
                 cpu_bias[2], restore_s);
+#if !defined(__HIP_PLATFORM_AMD__)
         if (cal_ram >= 0 && cal_extra >= 0) fprintf(f, " %.17g %.17g", cal_ram, cal_extra);
         fputc('\n', f);
+#endif
         fclose(f);
     }
 }
@@ -214,8 +243,10 @@ void Engine::cal_save() {
 void Engine::load(const std::string &path, int max_seqs, size_t reserve_bytes) {
     const double t0 = now();
     load_read = 0; load_total = 0; load_phase = 0;
+#if !defined(__HIP_PLATFORM_AMD__)
     load_anon = own_anon();
     load_avail = ram_free();
+#endif
     static GGUF g;
     if (!g.base && !g.open(path.c_str())) FAIL("cannot open %s", path.c_str());
     for (Layer *w = L; w <= &M; w++) *w = Layer{};
@@ -227,16 +258,23 @@ void Engine::load(const std::string &path, int max_seqs, size_t reserve_bytes) {
         return t;
     };
 
-    CK(cudaSetDevice(0));
-    CK(cudaStreamCreateWithFlags(&st, cudaStreamNonBlocking));
-    CK(cudaStreamCreateWithFlags(&cst, cudaStreamNonBlocking));
-    CK(cudaStreamCreateWithFlags(&lst, cudaStreamNonBlocking));
-    CK(cudaEventCreateWithFlags(&staged, cudaEventDisableTiming));
-    CK(cudaEventCreateWithFlags(&copied, cudaEventDisableTiming));
-    CK(cudaEventCreateWithFlags(&topk_ready, cudaEventDisableTiming));
-    CK(cudaEventCreateWithFlags(&front_ready, cudaEventDisableTiming));
-    CK(cudaEventCreateWithFlags(&front_copied, cudaEventDisableTiming));
-    CK(cudaEventRecord(copied, cst));
+#if defined(__HIP_PLATFORM_AMD__)
+    CK(hipInit(0));
+#endif
+    CK(gpuSetDevice(0));
+#if defined(__HIP_PLATFORM_AMD__)
+    hipDeviceProp_t gpu{};
+    CK(hipGetDeviceProperties(&gpu, 0));
+#endif
+    CK(gpuStreamCreateWithFlags(&st, gpuStreamNonBlocking));
+    CK(gpuStreamCreateWithFlags(&cst, gpuStreamNonBlocking));
+    CK(gpuStreamCreateWithFlags(&lst, gpuStreamNonBlocking));
+    CK(gpuEventCreateWithFlags(&staged, gpuEventDisableTiming));
+    CK(gpuEventCreateWithFlags(&copied, gpuEventDisableTiming));
+    CK(gpuEventCreateWithFlags(&topk_ready, gpuEventDisableTiming));
+    CK(gpuEventCreateWithFlags(&front_ready, gpuEventDisableTiming));
+    CK(gpuEventCreateWithFlags(&front_copied, gpuEventDisableTiming));
+    CK(gpuEventRecord(copied, cst));
 
     struct Up { const GGUFTensor *t; QTensor *q = nullptr; float **f = nullptr; half **h = nullptr; int layer = -1;
                 int64_t b0 = -1; };
@@ -247,7 +285,9 @@ void Engine::load(const std::string &path, int max_seqs, size_t reserve_bytes) {
     auto f16 = [&](const std::string &name, half *&h) { ups.push_back({get(name), nullptr, nullptr, &h, cur}); };
     n_slots = 0;
     std::vector<int> first_slot(NL, 0);
+#if !defined(__HIP_PLATFORM_AMD__)
     std::vector<std::array<const GGUFTensor *, 3>> hot_t(NL, std::array<const GGUFTensor *, 3>{nullptr, nullptr, nullptr});
+#endif
     auto hcmix = [&](const std::string &p, HcMix &m, bool inject) {
         vec(p + "norm.weight", m.norm); quant(p + "down.weight", m.down); quant(p + "up.weight", m.up);
         if (inject) quant(p + "inject.weight", m.inject);
@@ -292,7 +332,14 @@ void Engine::load(const std::string &path, int max_seqs, size_t reserve_bytes) {
             if (hg) {
                 if (hg->type != IQ4_XS || get(p + "ffn_up_hot.weight")->type != IQ4_XS || get(p + "ffn_down_hot.weight")->type != IQ4_NL)
                     FAIL("layer %d: VRAM experts must be IQ4_XS gate / up, IQ4_NL down", l);
+#if defined(__HIP_PLATFORM_AMD__)
+                const int64_t b0 = (int64_t)n_slots * FE * D / 256, d0 = (int64_t)n_slots * D * FE / 32;
+                ups.push_back({hg, &pool_gate, nullptr, nullptr, cur, b0});
+                ups.push_back({get(p + "ffn_up_hot.weight"), &pool_up, nullptr, nullptr, cur, b0});
+                ups.push_back({get(p + "ffn_down_hot.weight"), &pool_down, nullptr, nullptr, cur, d0});
+#else
                 hot_t[l] = {hg, get(p + "ffn_up_hot.weight"), get(p + "ffn_down_hot.weight")};
+#endif
             }
             first_slot[l] = n_slots;
             n_slots += w.n_hot;
@@ -316,15 +363,27 @@ void Engine::load(const std::string &path, int max_seqs, size_t reserve_bytes) {
     }
     {
         Arena dry; dry.cap = SIZE_MAX;
+#if defined(__HIP_PLATFORM_AMD__)
+        make_qtensor(dry, IQ4_XS, n_slots * FE, D); make_qtensor(dry, IQ4_XS, n_slots * FE, D); make_qtensor(dry, IQ4_NL, n_slots * D, FE);
+#endif
         dry.get<int>((size_t)NL * NE); dry.get<uint8_t>(n_slots + MAX_EXTRA);
         wbytes += dry.used;
     }
     wbytes += (size_t)NE * 4 + 2 * (size_t)NGDN * GV * 4 + (1 << 20);
     warena.init(wbytes);
+#if defined(__HIP_PLATFORM_AMD__)
+    pool_gate = make_qtensor(warena, IQ4_XS, n_slots * FE, D);
+    pool_up = make_qtensor(warena, IQ4_XS, n_slots * FE, D);
+    pool_down = make_qtensor(warena, IQ4_NL, n_slots * D, FE);
+#endif
     d_slot_of = warena.get<int>((size_t)NL * NE);
     d_fmt = warena.get<uint8_t>(n_slots + MAX_EXTRA);
+#if defined(__HIP_PLATFORM_AMD__)
+    for (int l = 0; l < NL; l++) { L[l].hot_gate = pool_gate; L[l].hot_up = pool_up; L[l].hot_down = pool_down; L[l].slot_of = d_slot_of + (size_t)l * NE; }
+#else
     for (int l = 0; l < NL; l++) L[l].slot_of = d_slot_of + (size_t)l * NE;
     const int n_hot_all = n_slots;
+#endif
 
     enum { G0, U0, G1, U1, DN };
     std::vector<std::array<const GGUFTensor *, 5>> ct(NL);
@@ -375,12 +434,12 @@ void Engine::load(const std::string &path, int max_seqs, size_t reserve_bytes) {
 
     constexpr size_t STAGE = 64 << 20;
     uint8_t *pin[2], *dev[2];
-    cudaEvent_t ev[2];
+    gpuEvent_t ev[2];
     for (int i = 0; i < 2; i++) {
-        CK(cudaMallocHost(&pin[i], STAGE));
-        zalloc(&dev[i], STAGE);
-        CK(cudaEventCreateWithFlags(&ev[i], cudaEventDisableTiming));
-        CK(cudaEventRecord(ev[i], st));
+        CK(gpuMallocPinned(&pin[i], STAGE));
+        gpuAllocDev(&dev[i], STAGE);
+        CK(gpuEventCreateWithFlags(&ev[i], gpuEventDisableTiming));
+        CK(gpuEventRecord(ev[i], st));
     }
     int slot = 0;
     size_t total = 0;
@@ -388,11 +447,11 @@ void Engine::load(const std::string &path, int max_seqs, size_t reserve_bytes) {
     auto put = [&](const uint8_t *src, size_t n, auto &&consume) {
         for (size_t off = 0; off < n; off += STAGE) {
             const size_t len = std::min(STAGE, n - off);
-            CK(cudaEventSynchronize(ev[slot]));
+            CK(gpuEventSynchronize(ev[slot]));
             fetch(pin[slot], src + off, len);
-            CK(cudaMemcpyAsync(dev[slot], pin[slot], len, cudaMemcpyHostToDevice, st));
+            CK(gpuMemcpyAsync(dev[slot], pin[slot], len, gpuMemcpyHostToDevice, st));
             consume(dev[slot], off, len);
-            CK(cudaEventRecord(ev[slot], st));
+            CK(gpuEventRecord(ev[slot], st));
             slot ^= 1;
         }
         total += n;
@@ -406,11 +465,11 @@ void Engine::load(const std::string &path, int max_seqs, size_t reserve_bytes) {
             const size_t piece = STAGE / bb * bb;
             for (size_t off = 0; off < u.t->nbytes; off += piece) {
                 const size_t len = std::min(piece, u.t->nbytes - off);
-                CK(cudaEventSynchronize(ev[slot]));
+                CK(gpuEventSynchronize(ev[slot]));
                 fetch(pin[slot], u.t->data + off, len);
-                CK(cudaMemcpyAsync(dev[slot], pin[slot], len, cudaMemcpyHostToDevice, st));
+                CK(gpuMemcpyAsync(dev[slot], pin[slot], len, gpuMemcpyHostToDevice, st));
                 relayout(*u.q, dev[slot], st, std::max<int64_t>(u.b0, 0) + off / bb, len / bb);
-                CK(cudaEventRecord(ev[slot], st));
+                CK(gpuEventRecord(ev[slot], st));
                 slot ^= 1;
             }
             g.drop(u.t->data, u.t->nbytes);
@@ -418,7 +477,7 @@ void Engine::load(const std::string &path, int max_seqs, size_t reserve_bytes) {
         } else {
             uint8_t *d = warena.get(u.t->nbytes);
             put(u.t->data, u.t->nbytes, [&](uint8_t *src, size_t off, size_t len) {
-                CK(cudaMemcpyAsync(d + off, src, len, cudaMemcpyDeviceToDevice, st));
+                CK(gpuMemcpyAsync(d + off, src, len, gpuMemcpyDeviceToDevice, st));
             });
             g.drop(u.t->data, u.t->nbytes);
             if (u.f) *u.f = (float *)d;
@@ -428,27 +487,41 @@ void Engine::load(const std::string &path, int max_seqs, size_t reserve_bytes) {
     gdn_A = warena.get<float>((size_t)NGDN * GV);
     gdn_dt = warena.get<float>((size_t)NGDN * GV);
     for (int gl = 0; gl < NGDN; gl++) {
-        CK(cudaMemcpyAsync(gdn_A + gl * GV, ssm_a[gl], GV * 4, cudaMemcpyDeviceToDevice, st));
-        CK(cudaMemcpyAsync(gdn_dt + gl * GV, ssm_dt[gl], GV * 4, cudaMemcpyDeviceToDevice, st));
+        CK(gpuMemcpyAsync(gdn_A + gl * GV, ssm_a[gl], GV * 4, gpuMemcpyDeviceToDevice, st));
+        CK(gpuMemcpyAsync(gdn_dt + gl * GV, ssm_dt[gl], GV * 4, gpuMemcpyDeviceToDevice, st));
     }
     {
         std::vector<int> id(NE);
         for (int e = 0; e < NE; e++) id[e] = e;
         M.slot_of = warena.get<int>(NE);
-        CK(cudaMemcpyAsync(M.slot_of, id.data(), NE * 4, cudaMemcpyHostToDevice, st));
+        CK(gpuMemcpyAsync(M.slot_of, id.data(), NE * 4, gpuMemcpyHostToDevice, st));
         M.slot_h = id;
-        CK(cudaStreamSynchronize(st));
+#if defined(__HIP_PLATFORM_AMD__)
+        std::vector<int> all((size_t)NL * NE);
+        for (int l = 0; l < NL; l++) {
+            const int *s = (const int *)get("blk." + std::to_string(l) + ".ffn_exp_slot")->data;
+            L[l].slot_h.resize(NE);
+            for (int e = 0; e < NE; e++) {
+                if (s[e] >= L[l].n_hot || -1 - s[e] >= L[l].n_cold) FAIL("layer %d: expert %d has slot %d", l, e, s[e]);
+                L[l].slot_h[e] = all[(size_t)l * NE + e] = s[e] >= 0 ? first_slot[l] + s[e] : s[e];
+            }
+        }
+        CK(gpuMemcpyAsync(d_slot_of, all.data(), all.size() * 4, gpuMemcpyHostToDevice, st));
+        std::vector<uint8_t> f(n_slots, IQ4_XS);
+        CK(gpuMemcpyAsync(d_fmt, f.data(), f.size(), gpuMemcpyHostToDevice, st));
+#endif
+        CK(gpuStreamSynchronize(st));
         file_fd = g.fd; file_base = g.base;
     }
-    for (int i = 0; i < 2; i++) { CK(cudaFreeHost(pin[i])); CK(cudaFree(dev[i])); CK(cudaEventDestroy(ev[i])); }
+    for (int i = 0; i < 2; i++) { CK(gpuFreePinned(pin[i])); CK(gpuFree(dev[i])); CK(gpuEventDestroy(ev[i])); }
     const double t_vram = now();
 
     if (cold_th.joinable()) cold_th.join();
     cold_dev.assign(NL, ColdDec{});
     if (cold_bytes) {
         void *dp = nullptr;
-        cold_gpu = cudaHostRegister(cold_mem, cold_bytes, cudaHostRegisterMapped) == cudaSuccess && cudaHostGetDevicePointer(&dp, cold_mem, 0) == cudaSuccess;
-        (void)cudaGetLastError();
+        cold_gpu = gpuHostRegister(cold_mem, cold_bytes, gpuHostRegisterMapped) == gpuSuccess && gpuHostGetDevicePointer(&dp, cold_mem, 0) == gpuSuccess;
+        (void)gpuGetLastError();
         d_cold = cold_gpu ? (uint8_t *)dp : nullptr;
     }
     const char *hot_names[3] = {"ffn_gate_hot.weight", "ffn_up_hot.weight", "ffn_down_hot.weight"};
@@ -494,12 +567,12 @@ void Engine::load(const std::string &path, int max_seqs, size_t reserve_bytes) {
         const GGUFTensor *t = get("token_embd.weight");
         if (t->type != Q8_0) FAIL("token embeddings must be Q8_0");
         void *host;
-        CK(cudaHostAlloc((void **)&host, t->nbytes, cudaHostAllocMapped));
+        CK(gpuMallocMapped(&host, t->nbytes));
         read_file(g, (uint8_t *)host, t->data, t->nbytes);
         g.drop(t->data, t->nbytes);
         embd_host = host;
         void *devp;
-        CK(cudaHostGetDevicePointer(&devp, host, 0));
+        CK(gpuHostGetDevicePointer(&devp, host, 0));
         embd.type = Q8_0; embd.rows = (int)t->ne[1]; embd.cols = (int)t->ne[0]; embd.q = (uint8_t *)devp;
     }
     if (!ngram_map) {
@@ -522,31 +595,32 @@ void Engine::load(const std::string &path, int max_seqs, size_t reserve_bytes) {
     {
         auto shared = [](MoeShared *&h, MoeShared *&d) {
             void *p, *dp;
-            CK(cudaHostAlloc((void **)&p, sizeof(MoeShared), cudaHostAllocMapped));
+            CK(gpuMallocCoherent(&p, sizeof(MoeShared)));
             memset(p, 0, sizeof(MoeShared));
-            CK(cudaHostGetDevicePointer(&dp, p, 0));
+            CK(gpuHostGetDevicePointer(&dp, p, 0));
             h = (MoeShared *)p; d = (MoeShared *)dp;
         };
         shared(sh, d_sh);
         shared(sh_pred, d_sh_pred);
         void *p;
-        CK(cudaHostAlloc((void **)&p, sizeof(MoeEmu), cudaHostAllocMapped));
+        CK(gpuMallocCoherent(&p, sizeof(MoeEmu)));
         memset(p, 0, sizeof(MoeEmu));
         me = (MoeEmu *)p;
-        CK(cudaHostGetDevicePointer((void **)&d_me, p, 0));
+        CK(gpuHostGetDevicePointer((void **)&d_me, p, 0));
         n_workers = std::max(1, physical_cores() - 1);
         cpu.start(sh, sh_pred, cold, n_workers, me);
     }
-    cublasLtCreate(&lt);
-    zalloc(&lt_ws, lt_ws_size);
+    gpuBlasLtCreate(&lt);
+    gpuAllocDev(&lt_ws, lt_ws_size);
     {
         void *p, *dp;
-        CK(cudaHostAlloc(&p, 64, cudaHostAllocMapped));
+        CK(gpuMallocMappedRaw(&p, 64));
         memset(p, 0, 64);
-        CK(cudaHostGetDevicePointer(&dp, p, 0));
+        CK(gpuHostGetDevicePointer(&dp, p, 0));
         la_lost = (unsigned *)p; d_la_lost = (unsigned *)dp;
     }
     alloc_buffers(max_seqs);
+#if !defined(__HIP_PLATFORM_AMD__)
     int spilled_at_load = 0;
     {
         const size_t free_b = gpu_free();
@@ -589,12 +663,12 @@ void Engine::load(const std::string &path, int max_seqs, size_t reserve_bytes) {
         for (int l = 0; l < NL; l++) { L[l].hot_gate = pool_gate; L[l].hot_up = pool_up; L[l].hot_down = pool_down; }
         const size_t gu_bytes = (size_t)FE * qrow_bytes(IQ4_XS, D), dn_bytes = (size_t)D * qrow_bytes(IQ4_NL, FE);
         uint8_t *pinb[2], *devb[2];
-        cudaEvent_t evb[2];
+        gpuEvent_t evb[2];
         for (int i = 0; i < 2; i++) {
-            CK(cudaMallocHost(&pinb[i], STAGE));
-            zalloc(&devb[i], STAGE);
-            CK(cudaEventCreateWithFlags(&evb[i], cudaEventDisableTiming));
-            CK(cudaEventRecord(evb[i], st));
+            CK(gpuMallocPinned(&pinb[i], STAGE));
+            gpuAllocDev(&devb[i], STAGE);
+            CK(gpuEventCreateWithFlags(&evb[i], gpuEventDisableTiming));
+            CK(gpuEventRecord(evb[i], st));
         }
         int sb = 0;
         for (int l = 0; l < NL; l++) {
@@ -609,11 +683,11 @@ void Engine::load(const std::string &path, int max_seqs, size_t reserve_bytes) {
                 const size_t piece = STAGE / bb * bb, n = (size_t)keep_l[l] * eb[m];
                 for (size_t off = 0; off < n; off += piece) {
                     const size_t len = std::min(piece, n - off);
-                    CK(cudaEventSynchronize(evb[sb]));
+                    CK(gpuEventSynchronize(evb[sb]));
                     read_file(g, pinb[sb], t->data + off, len);
-                    CK(cudaMemcpyAsync(devb[sb], pinb[sb], len, cudaMemcpyHostToDevice, st));
+                    CK(gpuMemcpyAsync(devb[sb], pinb[sb], len, gpuMemcpyHostToDevice, st));
                     relayout(*pools[m], devb[sb], st, b0[m] + (int64_t)(off / bb), (int64_t)(len / bb));
-                    CK(cudaEventRecord(evb[sb], st));
+                    CK(gpuEventRecord(evb[sb], st));
                     sb ^= 1;
                 }
                 if (keep_l[l] < L[l].n_hot) {
@@ -625,8 +699,8 @@ void Engine::load(const std::string &path, int max_seqs, size_t reserve_bytes) {
             }
             spilled_at_load += L[l].n_hot - keep_l[l];
         }
-        CK(cudaStreamSynchronize(st));
-        for (int i = 0; i < 2; i++) { CK(cudaFreeHost(pinb[i])); CK(cudaFree(devb[i])); CK(cudaEventDestroy(evb[i])); }
+        CK(gpuStreamSynchronize(st));
+        for (int i = 0; i < 2; i++) { CK(gpuFreePinned(pinb[i])); CK(gpuFree(devb[i])); CK(gpuEventDestroy(evb[i])); }
         std::vector<int> all((size_t)NL * NE);
         for (int l = 0; l < NL; l++) {
             const int *sl = (const int *)get("blk." + std::to_string(l) + ".ffn_exp_slot")->data;
@@ -637,22 +711,28 @@ void Engine::load(const std::string &path, int max_seqs, size_t reserve_bytes) {
                     sl[e] < 0 ? sl[e] : sl[e] < keep_l[l] ? first_slot[l] + sl[e] : -1 - (L[l].n_cold + sl[e]);
             }
         }
-        CK(cudaMemcpyAsync(d_slot_of, all.data(), all.size() * 4, cudaMemcpyHostToDevice, st));
+        CK(gpuMemcpyAsync(d_slot_of, all.data(), all.size() * 4, gpuMemcpyHostToDevice, st));
         std::vector<uint8_t> f(n_slots + MAX_EXTRA, IQ4_XS);
-        CK(cudaMemcpyAsync(d_fmt, f.data(), f.size(), cudaMemcpyHostToDevice, st));
-        CK(cudaStreamSynchronize(st));
+        CK(gpuMemcpyAsync(d_fmt, f.data(), f.size(), gpuMemcpyHostToDevice, st));
+        CK(gpuStreamSynchronize(st));
         if (spilled_at_load)
             fprintf(stderr, "chrysalis-fn: %d of %d VRAM experts fit beside a %d-token KV cache; %d start in RAM\n", n_slots, n_hot_all,
                     max_ctx * 3 / 2, spilled_at_load);
     }
+#endif
     experts_init();
+#if !defined(__HIP_PLATFORM_AMD__)
     xc.spilled = spilled_at_load;
+#endif
     const size_t free_b = gpu_free();
     const size_t want = free_b > reserve_bytes ? free_b - reserve_bytes : 0;
     const size_t max_pages = ((size_t)max_ctx * 3 / 2 + PAGE - 1) / PAGE;
     n_pages = (int)std::min(max_pages, want / KV_PAGE);
     if (n_pages < 64) FAIL("not enough VRAM left for the KV cache");
-    zalloc(&kv_pool, (size_t)n_pages * KV_PAGE);
+    gpuAllocDev(&kv_pool, (size_t)n_pages * KV_PAGE);
+#if defined(__HIP_PLATFORM_AMD__)
+    if (!gpu_runs(st)) FAIL("%s cannot run this engine", gpu.name);
+#endif
     load_phase = 1;
     if (cold_bytes && !cal_load()) calibrate();
     if (cold_bytes && !cold_gpu) {
@@ -788,31 +868,31 @@ void Engine::alloc_buffers(int max_seqs) {
     carve(dry);
     barena.init(dry.used + (1 << 20));
     carve(barena);
-    CK(cudaMemsetAsync(b.rr_counter, 0, 4, st));
-    CK(cudaMemsetAsync(la.counter, 0, 64 * 4, st));
-    CK(cudaMallocHost(&b.ple_rows, (size_t)S * PLE_HEADS * 170));
-    CK(cudaMallocHost(&b.h_ids, N * 4)); CK(cudaMallocHost(&b.h_wts, N * 4)); CK(cudaMallocHost(&b.h_tok, N * 4));
-    CK(cudaMallocHost(&b.h_entw, N * 4)); CK(cudaMallocHost(&b.h_pos, N * 4)); CK(cudaMallocHost(&b.h_btok, N * 4));
-    CK(cudaMallocHost(&b.h_work, (N / 64 + 2 * NE) * sizeof(MoeWork)));
-    CK(cudaMallocHost(&b.h_x16, (size_t)S * D * 2)); CK(cudaMallocHost(&b.h_cout, P * D * 2));
-    CK(cudaMallocHost(&b.h_topv, (size_t)8 * TOPK * 4)); CK(cudaMallocHost(&b.h_topi, (size_t)8 * TOPK * 4)); CK(cudaMallocHost(&b.h_draft, 64));
-    CK(cudaMallocHost(&b.h_tops, (size_t)8 * LOGIT_STATS * 4));
+    CK(gpuMemsetAsync(b.rr_counter, 0, 4, st));
+    CK(gpuMemsetAsync(la.counter, 0, 64 * 4, st));
+    CK(gpuMallocPinned(&b.ple_rows, (size_t)S * PLE_HEADS * 170));
+    CK(gpuMallocPinned(&b.h_ids, N * 4)); CK(gpuMallocPinned(&b.h_wts, N * 4)); CK(gpuMallocPinned(&b.h_tok, N * 4));
+    CK(gpuMallocPinned(&b.h_entw, N * 4)); CK(gpuMallocPinned(&b.h_pos, N * 4)); CK(gpuMallocPinned(&b.h_btok, N * 4));
+    CK(gpuMallocPinned(&b.h_work, (N / 64 + 2 * NE) * sizeof(MoeWork)));
+    CK(gpuMallocPinned(&b.h_x16, (size_t)S * D * 2)); CK(gpuMallocPinned(&b.h_cout, P * D * 2));
+    CK(gpuMallocPinned(&b.h_topv, (size_t)8 * TOPK * 4)); CK(gpuMallocPinned(&b.h_topi, (size_t)8 * TOPK * 4)); CK(gpuMallocPinned(&b.h_draft, 64));
+    CK(gpuMallocPinned(&b.h_tops, (size_t)8 * LOGIT_STATS * 4));
     for (int k = 0; k < NSLOT; k++) {
-        CK(cudaMallocHost(&b.bounce[k], raw_bytes));
-        CK(cudaEventCreateWithFlags(&raw_free[k], cudaEventDisableTiming));
-        CK(cudaEventCreateWithFlags(&raw_ready[k], cudaEventDisableTiming));
-        CK(cudaEventRecord(raw_free[k], st));
+        CK(gpuMallocPinned(&b.bounce[k], raw_bytes));
+        CK(gpuEventCreateWithFlags(&raw_free[k], gpuEventDisableTiming));
+        CK(gpuEventCreateWithFlags(&raw_ready[k], gpuEventDisableTiming));
+        CK(gpuEventRecord(raw_free[k], st));
     }
     seqs.assign(max_seqs, Seq{});
     for (Seq &s : seqs) {
-        zalloc(&s.d_pages, ((size_t)max_ctx * 2 / PAGE + 8) * 4);
-        zalloc(&s.ssm, ssm_bytes());
-        zalloc(&s.conv, conv_bytes());
-        zalloc(&s.ple, ple_bytes());
-        zalloc(&s.h_last, (size_t)HCD * 4);
-        zalloc(&s.idx_tail, tail_bytes());
+        gpuAllocDev(&s.d_pages, ((size_t)max_ctx * 2 / PAGE + 8) * 4);
+        gpuAllocDev(&s.ssm, ssm_bytes());
+        gpuAllocDev(&s.conv, conv_bytes());
+        gpuAllocDev(&s.ple, ple_bytes());
+        gpuAllocDev(&s.h_last, (size_t)HCD * 4);
+        gpuAllocDev(&s.idx_tail, tail_bytes());
     }
-    zalloc(&stage_state, state_bytes());
+    gpuAllocDev(&stage_state, state_bytes());
 }
 
 void Engine::warmup() {
@@ -830,13 +910,13 @@ void Engine::warmup() {
     sp.temperature = 0.0f; sp.n_draft = 1;
     int out[4];
     generate(id, sp, out, 4);
-    CK(cudaStreamSynchronize(st));
+    CK(gpuStreamSynchronize(st));
     if (!calibrated && cold_bytes) cal_split(id);
     xc.on = on;
     std::fill(xc.fresh.begin(), xc.fresh.end(), 0u);
     std::fill(xc.total.begin(), xc.total.end(), 0ull);
     xc.tokens = 0; xc.counts_pending = false;
-    CK(cudaMemsetAsync(xc.d_counts, 0, (size_t)NL * NE * 4, st));
+    CK(gpuMemsetAsync(xc.d_counts, 0, (size_t)NL * NE * 4, st));
     if (borrowed) seq_reset(seqs[0]); else seq_free(id);
     snap_warm = true;
     snap_reserve_finish();
@@ -845,9 +925,9 @@ void Engine::warmup() {
 void Engine::shutdown() {
     cpu.stop();
     experts_stop();
-    CK(cudaDeviceSynchronize());
-    if (kv_pool) (void)cudaFree(kv_pool);
-    for (Seq &s : seqs) { (void)cudaFree(s.d_pages); (void)cudaFree(s.ssm); (void)cudaFree(s.conv); (void)cudaFree(s.ple); (void)cudaFree(s.h_last); (void)cudaFree(s.idx_tail); }
+    CK(gpuDeviceSynchronize());
+    if (kv_pool) (void)gpuFree(kv_pool);
+    for (Seq &s : seqs) { (void)gpuFree(s.d_pages); (void)gpuFree(s.ssm); (void)gpuFree(s.conv); (void)gpuFree(s.ple); (void)gpuFree(s.h_last); (void)gpuFree(s.idx_tail); }
     seqs.clear();
     snap_reserve_finish();
     auto in_region = [&](const void *p) {
@@ -857,34 +937,38 @@ void Engine::shutdown() {
     std::vector<void *> own;
     for (Snap &sn : snaps) if (sn.host && !in_region(sn.host)) own.push_back(sn.host);
     for (void *p : snap_spare) if (!in_region(p)) own.push_back(p);
-    for (void *p : own) { (void)cudaHostUnregister(p); os::release(p, (state_bytes() + (2 << 20) - 1) & ~size_t((2 << 20) - 1)); }
-    for (auto &r : snap_regions) { (void)cudaHostUnregister(r.first); os::release(r.first, r.second); }
+    for (void *p : own) { (void)gpuHostUnregister(p); os::release(p, (state_bytes() + (2 << 20) - 1) & ~size_t((2 << 20) - 1)); }
+    for (auto &r : snap_regions) { (void)gpuHostUnregister(r.first); os::release(r.first, r.second); }
     snaps.clear(); snap_spare.clear(); snap_regions.clear();
-    if (warena.base) (void)cudaFree(warena.base);
-    if (barena.base) (void)cudaFree(barena.base);
-    if (parena.base) (void)cudaFree(parena.base);
+    if (warena.base) (void)gpuFree(warena.base);
+    if (barena.base) (void)gpuFree(barena.base);
+#if defined(__HIP_PLATFORM_AMD__)
+    warena = Arena{}; barena = Arena{};
+#else
+    if (parena.base) (void)gpuFree(parena.base);
     warena = Arena{}; barena = Arena{}; parena = Arena{};
+#endif
     for (void *p : {(void *)b.ple_rows, (void *)b.h_ids, (void *)b.h_wts, (void *)b.h_tok, (void *)b.h_entw, (void *)b.h_pos, (void *)b.h_btok,
                     (void *)b.h_work, (void *)b.h_x16, (void *)b.h_cout, (void *)b.h_topv, (void *)b.h_tops, (void *)b.h_topi, (void *)b.h_draft, (void *)sh,
                     (void *)sh_pred, (void *)me})
-        if (p) (void)cudaFreeHost(p);
-    if (embd.q) { void *h = nullptr; (void)cudaHostGetDevicePointer(&h, embd.q, 0); }
-    if (embd_host) (void)cudaFreeHost(embd_host);
-    if (la_lost) (void)cudaFreeHost(la_lost);
+        if (p) (void)gpuFreePinned(p);
+    if (embd.q) { void *h = nullptr; (void)gpuHostGetDevicePointer(&h, embd.q, 0); }
+    if (embd_host) (void)gpuFreePinned(embd_host);
+    if (la_lost) (void)gpuFreePinned(la_lost);
     la_lost = d_la_lost = nullptr;
     embd_host = nullptr; embd.q = nullptr; sh = d_sh = nullptr; sh_pred = d_sh_pred = nullptr; me = d_me = nullptr;
-    if (stage_state) (void)cudaFree(stage_state);
-    if (d_mask) (void)cudaFree(d_mask);
+    if (stage_state) (void)gpuFree(stage_state);
+    if (d_mask) (void)gpuFree(d_mask);
     d_mask = nullptr;
-    for (uint8_t *&p : b.bounce) { if (p) (void)cudaFreeHost(p); p = nullptr; }
-    if (lt_ws) (void)cudaFree(lt_ws);
-    if (lt) cublasLtDestroy(lt);
+    for (uint8_t *&p : b.bounce) { if (p) (void)gpuFreePinned(p); p = nullptr; }
+    if (lt_ws) (void)gpuFree(lt_ws);
+    if (lt) gpuBlasLtDestroy(lt);
     lt = nullptr; lt_ws = nullptr; stage_state = nullptr; kv_pool = nullptr;
     lt_plans.clear();
     free_pages.clear(); page_ref.clear();
-    if (cold_mem && cold_gpu) (void)cudaHostUnregister(cold_mem);
-    (void)cudaGetLastError();
-    (void)cudaStreamDestroy(st); (void)cudaStreamDestroy(cst); (void)cudaStreamDestroy(lst);
+    if (cold_mem && cold_gpu) (void)gpuHostUnregister(cold_mem);
+    (void)gpuGetLastError();
+    (void)gpuStreamDestroy(st); (void)gpuStreamDestroy(cst); (void)gpuStreamDestroy(lst);
     os::release(cold_mem, cold_bytes);
     os::release(spill_mem, spill_bytes);
     os::unmap(ngram_map, ngram_map_bytes);

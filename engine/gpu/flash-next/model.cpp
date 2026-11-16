@@ -1,5 +1,7 @@
 #include "model.h"
+#if defined(__HIP_PLATFORM_AMD__)
 #include "../gpu.h"
+#endif
 #include <chrono>
 #include <thread>
 #include <algorithm>
@@ -27,10 +29,10 @@ void Engine::seq_reset(Seq &s) {
     s.hist[0] = s.hist[1] = -1;
     s.look.clear();
     s.rng.seed(std::random_device{}());
-    CK(hipMemsetAsync(s.ssm, 0, ssm_bytes(), st));
-    CK(hipMemsetAsync(s.conv, 0, conv_bytes(), st));
-    CK(hipMemsetAsync(s.ple, 0, ple_bytes(), st));
-    CK(hipMemsetAsync(s.h_last, 0, (size_t)HCD * 4, st));
+    CK(gpuMemsetAsync(s.ssm, 0, ssm_bytes(), st));
+    CK(gpuMemsetAsync(s.conv, 0, conv_bytes(), st));
+    CK(gpuMemsetAsync(s.ple, 0, ple_bytes(), st));
+    CK(gpuMemsetAsync(s.h_last, 0, (size_t)HCD * 4, st));
 }
 
 void Engine::seq_free(int id) {
@@ -68,19 +70,19 @@ void Engine::ensure_pages(Seq &s, int n_tokens, int from) {
     if ((int)free_pages.size() < need - dirty + shared) throw std::runtime_error("out of KV pages");
     while ((int)s.pages.size() < need) {
         const int p = page_alloc();
-        CK(hipMemsetAsync(kv_pool + (size_t)p * KV_PAGE, 0, KV_PAGE, st));
+        CK(gpuMemsetAsync(kv_pool + (size_t)p * KV_PAGE, 0, KV_PAGE, st));
         s.pages.push_back(p);
     }
     for (int i = from / PAGE; i < dirty && i < need; i++) {
         if (page_ref[s.pages[i]] == 1) continue;
         const int np = page_alloc();
-        CK(hipMemcpyAsync(kv_pool + (size_t)np * KV_PAGE, kv_pool + (size_t)s.pages[i] * KV_PAGE, KV_PAGE, hipMemcpyDeviceToDevice, st));
+        CK(gpuMemcpyAsync(kv_pool + (size_t)np * KV_PAGE, kv_pool + (size_t)s.pages[i] * KV_PAGE, KV_PAGE, gpuMemcpyDeviceToDevice, st));
         page_release(s.pages[i]);
         s.pages[i] = np;
         dirty = std::min(dirty, i);
     }
     if (dirty < need)
-        CK(hipMemcpyAsync(s.d_pages + dirty, s.pages.data() + dirty, (need - dirty) * 4, hipMemcpyHostToDevice, st));
+        CK(gpuMemcpyAsync(s.d_pages + dirty, s.pages.data() + dirty, (need - dirty) * 4, gpuMemcpyHostToDevice, st));
 }
 
 
@@ -92,8 +94,8 @@ void *Engine::snap_buffer() {
     os::huge(p, n, true);
     memset(p, 0, n);
     const auto t1 = std::chrono::steady_clock::now();
-    (void)hipHostRegister(p, n, hipHostRegisterDefault);
-    (void)hipGetLastError();
+    (void)gpuHostRegister(p, n, gpuHostRegisterDefault);
+    (void)gpuGetLastError();
     const auto t2 = std::chrono::steady_clock::now();
     if (getenv("CHRYSALIS_TRACE"))
         fprintf(stderr, "chrysalis-fn: snapshot buffer %zu MB: fault-in %.0f ms, register %.0f ms\n", n >> 20,
@@ -135,8 +137,8 @@ void Engine::snap_reserve_finish() {
     if (!snap_pending) return;
     const size_t one = (state_bytes() + (2 << 20) - 1) & ~size_t((2 << 20) - 1), all = one * snap_pending_n;
     const auto t1 = std::chrono::steady_clock::now();
-    (void)hipHostRegister(snap_pending, all, hipHostRegisterDefault);
-    (void)hipGetLastError();
+    (void)gpuHostRegister(snap_pending, all, gpuHostRegisterDefault);
+    (void)gpuGetLastError();
     const auto t2 = std::chrono::steady_clock::now();
     for (int i = 0; i < snap_pending_n; i++) snap_spare.push_back((char *)snap_pending + (size_t)i * one);
     snap_regions.push_back({snap_pending, all});
@@ -160,17 +162,17 @@ int Engine::snapshot(int id) {
     if (s.pending < 0) { sn.top_v = s.top_v; sn.top_i = s.top_i; } else { sn.top_v.clear(); sn.top_i.clear(); }
     sn.pages.assign(s.pages.begin(), s.pages.begin() + (s.n + PAGE - 1) / PAGE);
     for (int p : sn.pages) page_ref[p]++;
-    CK(hipStreamWaitEvent(st, copied, 0));
+    CK(gpuStreamWaitEvent(st, copied, 0));
     size_t o = 0;
-    CK(hipMemcpyAsync(stage_state + o, s.ssm, ssm_bytes(), hipMemcpyDeviceToDevice, st)); o += ssm_bytes();
-    CK(hipMemcpyAsync(stage_state + o, s.conv, conv_bytes(), hipMemcpyDeviceToDevice, st)); o += conv_bytes();
-    CK(hipMemcpyAsync(stage_state + o, s.ple, ple_bytes(), hipMemcpyDeviceToDevice, st)); o += ple_bytes();
-    CK(hipMemcpyAsync(stage_state + o, s.h_last, (size_t)HCD * 4, hipMemcpyDeviceToDevice, st)); o += (size_t)HCD * 4;
-    CK(hipMemcpyAsync(stage_state + o, s.idx_tail, tail_bytes(), hipMemcpyDeviceToDevice, st));
-    CK(hipEventRecord(staged, st));
-    CK(hipStreamWaitEvent(cst, staged, 0));
-    CK(hipMemcpyAsync(sn.host, stage_state, state_bytes(), hipMemcpyDeviceToHost, cst));
-    CK(hipEventRecord(copied, cst));
+    CK(gpuMemcpyAsync(stage_state + o, s.ssm, ssm_bytes(), gpuMemcpyDeviceToDevice, st)); o += ssm_bytes();
+    CK(gpuMemcpyAsync(stage_state + o, s.conv, conv_bytes(), gpuMemcpyDeviceToDevice, st)); o += conv_bytes();
+    CK(gpuMemcpyAsync(stage_state + o, s.ple, ple_bytes(), gpuMemcpyDeviceToDevice, st)); o += ple_bytes();
+    CK(gpuMemcpyAsync(stage_state + o, s.h_last, (size_t)HCD * 4, gpuMemcpyDeviceToDevice, st)); o += (size_t)HCD * 4;
+    CK(gpuMemcpyAsync(stage_state + o, s.idx_tail, tail_bytes(), gpuMemcpyDeviceToDevice, st));
+    CK(gpuEventRecord(staged, st));
+    CK(gpuStreamWaitEvent(cst, staged, 0));
+    CK(gpuMemcpyAsync(sn.host, stage_state, state_bytes(), gpuMemcpyDeviceToHost, cst));
+    CK(gpuEventRecord(copied, cst));
     return (int)si;
 }
 
@@ -178,11 +180,11 @@ void Engine::restore(int id, int snap) {
     Seq &s = seqs.at(id);
     Snap &sn = snaps.at(snap);
     if (!sn.used) throw std::runtime_error("restore of a freed snapshot");
-    CK(hipStreamWaitEvent(st, copied, 0));
+    CK(gpuStreamWaitEvent(st, copied, 0));
     for (int p : s.pages) page_release(p);
     s.pages = sn.pages;
     for (int p : s.pages) page_ref[p]++;
-    if (!s.pages.empty()) CK(hipMemcpyAsync(s.d_pages, s.pages.data(), s.pages.size() * 4, hipMemcpyHostToDevice, st));
+    if (!s.pages.empty()) CK(gpuMemcpyAsync(s.d_pages, s.pages.data(), s.pages.size() * 4, gpuMemcpyHostToDevice, st));
     s.n = sn.n;
     s.pos = sn.pos; s.tail_pos = sn.tail_pos;
     s.hist[0] = sn.hist[0]; s.hist[1] = sn.hist[1];
@@ -190,11 +192,11 @@ void Engine::restore(int id, int snap) {
     s.top_v = sn.top_v; s.top_i = sn.top_i; s.seen.clear();
     const uint8_t *h = (const uint8_t *)sn.host;
     size_t o = 0;
-    CK(hipMemcpyAsync(s.ssm, h + o, ssm_bytes(), hipMemcpyHostToDevice, st)); o += ssm_bytes();
-    CK(hipMemcpyAsync(s.conv, h + o, conv_bytes(), hipMemcpyHostToDevice, st)); o += conv_bytes();
-    CK(hipMemcpyAsync(s.ple, h + o, ple_bytes(), hipMemcpyHostToDevice, st)); o += ple_bytes();
-    CK(hipMemcpyAsync(s.h_last, h + o, (size_t)HCD * 4, hipMemcpyHostToDevice, st)); o += (size_t)HCD * 4;
-    CK(hipMemcpyAsync(s.idx_tail, h + o, tail_bytes(), hipMemcpyHostToDevice, st));
+    CK(gpuMemcpyAsync(s.ssm, h + o, ssm_bytes(), gpuMemcpyHostToDevice, st)); o += ssm_bytes();
+    CK(gpuMemcpyAsync(s.conv, h + o, conv_bytes(), gpuMemcpyHostToDevice, st)); o += conv_bytes();
+    CK(gpuMemcpyAsync(s.ple, h + o, ple_bytes(), gpuMemcpyHostToDevice, st)); o += ple_bytes();
+    CK(gpuMemcpyAsync(s.h_last, h + o, (size_t)HCD * 4, gpuMemcpyHostToDevice, st)); o += (size_t)HCD * 4;
+    CK(gpuMemcpyAsync(s.idx_tail, h + o, tail_bytes(), gpuMemcpyHostToDevice, st));
 }
 
 struct SnapHeader { char magic[8]; uint64_t kv_page, state; int32_t n, pos, tail[3], hist[2], n_top, n_pages; };
@@ -208,8 +210,8 @@ size_t Engine::snap_bytes(int snap) const {
 void Engine::snap_export(int snap, uint8_t *dst) {
     const Snap &sn = snaps.at(snap);
     if (!sn.used) throw std::runtime_error("export of a freed snapshot");
-    CK(hipStreamSynchronize(st));
-    CK(hipStreamSynchronize(cst));
+    CK(gpuStreamSynchronize(st));
+    CK(gpuStreamSynchronize(cst));
     SnapHeader h;
     memcpy(h.magic, SNAP_MAGIC, 8);
     h.kv_page = KV_PAGE; h.state = state_bytes(); h.n = sn.n; h.pos = sn.pos;
@@ -222,10 +224,10 @@ void Engine::snap_export(int snap, uint8_t *dst) {
     memcpy(p, sn.top_i.data(), (size_t)h.n_top * 4); p += (size_t)h.n_top * 4;
     memcpy(p, sn.host, h.state); p += h.state;
     for (int pg : sn.pages) {
-        CK(hipMemcpyAsync(p, kv_pool + (size_t)pg * KV_PAGE, KV_PAGE, hipMemcpyDeviceToHost, cst));
+        CK(gpuMemcpyAsync(p, kv_pool + (size_t)pg * KV_PAGE, KV_PAGE, gpuMemcpyDeviceToHost, cst));
         p += KV_PAGE;
     }
-    CK(hipStreamSynchronize(cst));
+    CK(gpuStreamSynchronize(cst));
 }
 
 int Engine::snap_import(int64_t from, int64_t off, size_t bytes) {
@@ -257,22 +259,22 @@ int Engine::snap_import(int64_t from, int64_t off, size_t bytes) {
     const int64_t state_at = off;
     off += (int64_t)h.state;
     const int per = (int)(h.state / 2 / KV_PAGE);
-    hipEvent_t ev[2];
-    for (hipEvent_t &e : ev) CK(hipEventCreateWithFlags(&e, hipEventDisableTiming));
+    gpuEvent_t ev[2];
+    for (gpuEvent_t &e : ev) CK(gpuEventCreateWithFlags(&e, gpuEventDisableTiming));
     sn.pages.clear();
     for (int i = 0; ok && i < h.n_pages; i += per) {
         const int half = i / per % 2, n = std::min(per, h.n_pages - i);
         uint8_t *buf = (uint8_t *)sn.host + (size_t)half * per * KV_PAGE;
-        if (i >= 2 * per) CK(hipEventSynchronize(ev[half]));
+        if (i >= 2 * per) CK(gpuEventSynchronize(ev[half]));
         ok = get(buf, (size_t)n * KV_PAGE);
         for (int k = 0; ok && k < n; k++) {
             sn.pages.push_back(page_alloc());
-            CK(hipMemcpyAsync(kv_pool + (size_t)sn.pages.back() * KV_PAGE, buf + (size_t)k * KV_PAGE, KV_PAGE, hipMemcpyHostToDevice, st));
+            CK(gpuMemcpyAsync(kv_pool + (size_t)sn.pages.back() * KV_PAGE, buf + (size_t)k * KV_PAGE, KV_PAGE, gpuMemcpyHostToDevice, st));
         }
-        CK(hipEventRecord(ev[half], st));
+        CK(gpuEventRecord(ev[half], st));
     }
-    CK(hipStreamSynchronize(st));
-    for (hipEvent_t e : ev) CK(hipEventDestroy(e));
+    CK(gpuStreamSynchronize(st));
+    for (gpuEvent_t e : ev) CK(gpuEventDestroy(e));
     off = state_at;
     if (!ok || !get(sn.host, h.state)) {
         for (int p : sn.pages) page_release(p);
@@ -290,8 +292,8 @@ int Engine::snap_import(int64_t from, int64_t off, size_t bytes) {
 void Engine::snap_free(int snap) {
     Snap &sn = snaps.at(snap);
     if (!sn.used) throw std::runtime_error("double free of a snapshot");
-    CK(hipStreamSynchronize(st));
-    CK(hipStreamSynchronize(cst));
+    CK(gpuStreamSynchronize(st));
+    CK(gpuStreamSynchronize(cst));
     for (int p : sn.pages) page_release(p);
     sn.pages.clear();
     sn.used = false;
@@ -310,8 +312,8 @@ void Engine::gemm(const half *W, int N, int K, const half *x, int ldx, int T, vo
     const int ldd = dst == y ? ldy : N;
     const int Tp = std::min(umax * HC, (T + 63) / 64 * 64);
     LtPlan &p = lt_plan(N, K, Tp, ldx, ldd, false, W, x, dst);
-    if (hipblasLtMatmul(lt, p.desc, &alpha, W, p.a, x, p.b, &beta, dst, p.c, dst, p.c, &p.algo, lt_ws, lt_ws_size, st) != HIPBLAS_STATUS_SUCCESS)
-        FAIL("hipblasLtMatmul failed (%dx%dx%d)", N, K, T);
+    if (gpublasLtMatmul(lt, p.desc, &alpha, W, p.a, x, p.b, &beta, dst, p.c, dst, p.c, &p.algo, lt_ws, lt_ws_size, st) != GPUBLAS_STATUS_SUCCESS)
+        FAIL(GPU_LT_MATMUL_FAILED, N, K, T);
     if (dst != y) store_f16(b.gemm16, N, T, (float *)y, ldy, accumulate, st);
 }
 
@@ -319,15 +321,17 @@ void Engine::gemm32(const half *W, int N, int K, const half *x, int ldx, int T, 
     const float alpha = 1.0f, beta = 0.0f;
     const int Tp = std::min(umax * HC, (T + 63) / 64 * 64);
     LtPlan &p = lt_plan(N, K, Tp, ldx, ldy, true, W, x, y);
-    if (hipblasLtMatmul(lt, p.desc, &alpha, W, p.a, x, p.b, &beta, y, p.c, y, p.c, &p.algo, lt_ws, lt_ws_size, st) != HIPBLAS_STATUS_SUCCESS)
-        FAIL("hipblasLtMatmul failed (%dx%dx%d)", N, K, T);
+    if (gpublasLtMatmul(lt, p.desc, &alpha, W, p.a, x, p.b, &beta, y, p.c, y, p.c, &p.algo, lt_ws, lt_ws_size, st) != GPUBLAS_STATUS_SUCCESS)
+        FAIL(GPU_LT_MATMUL_FAILED, N, K, T);
 }
 
 void Engine::linear(const QTensor &W, int T, const QAct &qin, const half *hin, int ldin, void *out, int ldo, int mode, bool out_f16) {
     if (T <= 8) {
         gemv(W, qin, T, (float *)out, ldo, mode, st);
+#if defined(__HIP_PLATFORM_AMD__)
     } else if (T <= GEMM_Q_MAX && W.type != F16 && W.rows % 32 == 0 && W.cols % 256 == 0) {
         gemm_q(W, hin, ldin, T, out, ldo, mode, out_f16, st);
+#endif
     } else if (W.type == F16) {
         gemm((const half *)W.f, W.rows, W.cols, hin, ldin, T, out, ldo, out_f16, mode == GEMV_ADD);
     } else {
@@ -510,7 +514,7 @@ constexpr double EXPERT_MAC = 3.0 * FE * D;
 static double wall() { return std::chrono::duration<double>(std::chrono::steady_clock::now().time_since_epoch()).count(); }
 void Engine::pmark(int phase) {
     if (!prof) return;
-    CK(hipStreamSynchronize(st));
+    CK(gpuStreamSynchronize(st));
     const double t = wall();
     if (phase >= 0) prof_t[phase] += t - prof_last;
     prof_last = t;
@@ -520,14 +524,14 @@ static const char *PROF_NAMES[12] = {"embed+ple rows", "token mixers", "moe fron
 
 void Engine::moe_front(const Layer &w, int n, int c0) {
     half *x = b.hmoe + (size_t)c0 * D;
-    CK(hipMemcpyAsync(x, b.hh, (size_t)n * D * 2, hipMemcpyDeviceToDevice, st));
+    CK(gpuMemcpyAsync(x, b.hh, (size_t)n * D * 2, gpuMemcpyDeviceToDevice, st));
     gemm(w.router, NE, D, x, D, n, b.rlog, NE, false, false);
     route_many(b.rlog, w.sg_w, b.mx, n, b.idsT + (size_t)c0 * TOPK_E, b.wtsT + (size_t)c0 * TOPK_E, b.sgT + c0, st);
-    CK(hipEventRecord(front_ready, st));
-    CK(hipStreamWaitEvent(cst, front_ready, 0));
-    CK(hipMemcpyAsync(b.h_ids + (size_t)c0 * TOPK_E, b.idsT + (size_t)c0 * TOPK_E, (size_t)n * TOPK_E * 4, hipMemcpyDeviceToHost, cst));
-    CK(hipMemcpyAsync(b.h_wts + (size_t)c0 * TOPK_E, b.wtsT + (size_t)c0 * TOPK_E, (size_t)n * TOPK_E * 4, hipMemcpyDeviceToHost, cst));
-    if (&w != &M) CK(hipMemcpyAsync(b.h_x16 + (size_t)c0 * D, x, (size_t)n * D * 2, hipMemcpyDeviceToHost, cst));
+    CK(gpuEventRecord(front_ready, st));
+    CK(gpuStreamWaitEvent(cst, front_ready, 0));
+    CK(gpuMemcpyAsync(b.h_ids + (size_t)c0 * TOPK_E, b.idsT + (size_t)c0 * TOPK_E, (size_t)n * TOPK_E * 4, gpuMemcpyDeviceToHost, cst));
+    CK(gpuMemcpyAsync(b.h_wts + (size_t)c0 * TOPK_E, b.wtsT + (size_t)c0 * TOPK_E, (size_t)n * TOPK_E * 4, gpuMemcpyDeviceToHost, cst));
+    if (&w != &M) CK(gpuMemcpyAsync(b.h_x16 + (size_t)c0 * D, x, (size_t)n * D * 2, gpuMemcpyDeviceToHost, cst));
     half *g = b.att_h, *u = b.att_h + (size_t)n * FS;
     linear(w.sh_gate, n, NO_Q, x, D, g, FS, GEMV_STORE, true);
     linear(w.sh_up, n, NO_Q, x, D, u, FS, GEMV_STORE, true);
@@ -538,8 +542,8 @@ void Engine::moe_front(const Layer &w, int n, int c0) {
 
 void Engine::moe_back(const Layer &w, int layer, int T) {
     const int N = T * TOPK_E, P = smax;
-    CK(hipEventRecord(front_copied, cst));
-    CK(hipEventSynchronize(front_copied));
+    CK(gpuEventRecord(front_copied, cst));
+    CK(gpuEventSynchronize(front_copied));
     const std::vector<int> &slot_of = w.slot_h;
     std::vector<int> cnt(NE, 0);
     for (int j = 0; j < N; j++) cnt[b.h_ids[j]]++;
@@ -635,11 +639,11 @@ void Engine::moe_back(const Layer &w, int layer, int T) {
         cpu.submit(job);
     }
     pmark(3);
-    CK(hipMemcpyAsync(b.ent_tok, b.h_tok, (size_t)pc0 * 4, hipMemcpyHostToDevice, st));
-    CK(hipMemcpyAsync(b.ent_w, b.h_entw, (size_t)pc0 * 4, hipMemcpyHostToDevice, st));
-    CK(hipMemcpyAsync(b.pos, b.h_pos, (size_t)N * 4, hipMemcpyHostToDevice, st));
-    CK(hipMemcpyAsync(b.work, b.h_work, (size_t)nw * sizeof(MoeWork), hipMemcpyHostToDevice, st));
-    CK(hipMemcpyAsync(b.btok, b.h_btok, (size_t)nt * 4, hipMemcpyHostToDevice, st));
+    CK(gpuMemcpyAsync(b.ent_tok, b.h_tok, (size_t)pc0 * 4, gpuMemcpyHostToDevice, st));
+    CK(gpuMemcpyAsync(b.ent_w, b.h_entw, (size_t)pc0 * 4, gpuMemcpyHostToDevice, st));
+    CK(gpuMemcpyAsync(b.pos, b.h_pos, (size_t)N * 4, gpuMemcpyHostToDevice, st));
+    CK(gpuMemcpyAsync(b.work, b.h_work, (size_t)nw * sizeof(MoeWork), gpuMemcpyHostToDevice, st));
+    CK(gpuMemcpyAsync(b.btok, b.h_btok, (size_t)nt * 4, gpuMemcpyHostToDevice, st));
     QTensor none{};
     auto gemms = [&](const Group &g, int w0, int w1, const QTensor &G, const QTensor &U, const QTensor &Dn, half *X, half *H, half *Y) {
         moe_gemm_gateup(G, U, none, none, b.work + w0, w1 - w0, X, H, st);
@@ -660,9 +664,9 @@ void Engine::moe_back(const Layer &w, int layer, int T) {
         const Group &G = gpu_g[gi];
         const int k = gi % NSLOT, fg = cl->grp(cslot(gpu_cold[G.i0])), ng = G.i1 - G.i0;
         const size_t gsz = (size_t)FE * cl->row_gu[fg], dsz = (size_t)D * cl->row_dn;
-        CK(hipStreamWaitEvent(cst, raw_free[k], 0));
+        CK(gpuStreamWaitEvent(cst, raw_free[k], 0));
         uint8_t *r = b.raw[k];
-        if (fg == 2 || !cold_gpu) CK(hipEventSynchronize(raw_ready[k]));
+        if (fg == 2 || !cold_gpu) CK(gpuEventSynchronize(raw_ready[k]));
         for (int c = 0; c < ng;) {
             const int s0 = cslot(gpu_cold[G.i0 + c]);
             int run_n = 1;
@@ -671,16 +675,16 @@ void Engine::moe_back(const Layer &w, int layer, int T) {
             const size_t at[3] = {c * gsz, stage_gu + c * gsz, 2 * stage_gu + c * dsz}, len[3] = {run_n * gsz, run_n * gsz, run_n * dsz};
             for (int m = 0; m < 3; m++) {
                 if (fg == 2 || !cold_gpu) memcpy(b.bounce[k] + at[m], src[m], len[m]);
-                else CK(hipMemcpyAsync(r + at[m], src[m], len[m], hipMemcpyHostToDevice, cst));
+                else CK(gpuMemcpyAsync(r + at[m], src[m], len[m], gpuMemcpyHostToDevice, cst));
             }
             c += run_n;
         }
         if (fg == 2 || !cold_gpu) {
-            CK(hipMemcpyAsync(r, b.bounce[k], ng * gsz, hipMemcpyHostToDevice, cst));
-            CK(hipMemcpyAsync(r + stage_gu, b.bounce[k] + stage_gu, ng * gsz, hipMemcpyHostToDevice, cst));
-            CK(hipMemcpyAsync(r + 2 * stage_gu, b.bounce[k] + 2 * stage_gu, ng * dsz, hipMemcpyHostToDevice, cst));
+            CK(gpuMemcpyAsync(r, b.bounce[k], ng * gsz, gpuMemcpyHostToDevice, cst));
+            CK(gpuMemcpyAsync(r + stage_gu, b.bounce[k] + stage_gu, ng * gsz, gpuMemcpyHostToDevice, cst));
+            CK(gpuMemcpyAsync(r + 2 * stage_gu, b.bounce[k] + 2 * stage_gu, ng * dsz, gpuMemcpyHostToDevice, cst));
         }
-        CK(hipEventRecord(raw_ready[k], cst));
+        CK(gpuEventRecord(raw_ready[k], cst));
     };
     int nwh = 0;
     for (const Group &g : hot_g) nwh += g.w1 - g.w0;
@@ -705,7 +709,7 @@ void Engine::moe_back(const Layer &w, int layer, int T) {
         if (gi == 0) pmark(4);
         if (gi == 0 || gpu_g[gi - 1].range != g.range) gather(g.range, X1);
         const int k = gi % NSLOT, ns = g.i1 - g.i0, fmt = cl->type_gu[cl->grp(cslot(gpu_cold[g.i0]))];
-        CK(hipStreamWaitEvent(st, raw_ready[k], 0));
+        CK(gpuStreamWaitEvent(st, raw_ready[k], 0));
         Arena ag, au;
         ag.base = b.sgu[k]; au.base = b.sgu[k] + stage_soa; ag.cap = au.cap = stage_soa;
         const QTensor G = make_qtensor(ag, fmt, ns * FE, D), U = make_qtensor(au, fmt, ns * FE, D);
@@ -714,7 +718,7 @@ void Engine::moe_back(const Layer &w, int layer, int T) {
         relayout(G, b.raw[k], st, 0, (int64_t)ns * FE * D / 256);
         relayout(U, b.raw[k] + stage_gu, st, 0, (int64_t)ns * FE * D / 256);
         relayout(Dn, b.raw[k] + 2 * stage_gu, st, 0, (int64_t)ns * D * FE / 32);
-        CK(hipEventRecord(raw_free[k], st));
+        CK(gpuEventRecord(raw_free[k], st));
         gemms(g, g.w0, g.w1, G, U, Dn, X1, H1, Y1);
         if (gi + 1 == gpu_g.size() || gpu_g[gi + 1].range != g.range) accum(g.range, Y1);
     }
@@ -722,7 +726,7 @@ void Engine::moe_back(const Layer &w, int layer, int T) {
     if (!cpu_cold.empty()) {
         cpu.wait();
         pmark(6);
-        CK(hipMemcpyAsync(b.Ys, b.h_cout, (size_t)(N - pc0) * D * 2, hipMemcpyHostToDevice, st));
+        CK(gpuMemcpyAsync(b.Ys, b.h_cout, (size_t)(N - pc0) * D * 2, gpuMemcpyHostToDevice, st));
         accum((int)ranges.size() - 1, b.Ys);
     }
 }
@@ -769,7 +773,7 @@ void Engine::ple_rows(const Seq &s, const int *tokens, int T, int off) {
 void Engine::ple_block_run(Seq &s, int c0, int n, bool verify, float *res) {
     const Layer &w = L[PLE_LAYER];
     constexpr size_t RB = PLE_DIM / 32 * 34;
-    CK(hipMemcpyAsync(b.d_ple_rows, b.ple_rows + (size_t)c0 * PLE_HEADS * RB, (size_t)n * PLE_HEADS * RB, hipMemcpyHostToDevice, st));
+    CK(gpuMemcpyAsync(b.d_ple_rows, b.ple_rows + (size_t)c0 * PLE_HEADS * RB, (size_t)n * PLE_HEADS * RB, gpuMemcpyHostToDevice, st));
     if (n <= 8) {
         ple_embed(b.d_ple_rows, n, nullptr, nullptr, b.emb_q, st);
         gemv(w.ple_key, b.emb_q, n, b.key, HCD, GEMV_STORE, st);
@@ -800,7 +804,9 @@ void Engine::lookahead_flags(const Layer &w, int layer, int T, const float *res,
                      qoff(b.xn_q, (size_t)4 * HCD), 1, lst, la.counter + 16, g, t0 + 4 >= T ? 2 : 0);
     router_route_dec(w.router, w.sg_w, la.mx, T, la.logits, la.sg, w.slot_of, cold[layer].n, la.ids, la.wts, la.hot, d_sh_pred, gfrac,
                      layer, gen + 1, la.counter, lst, nullptr, starts, xfrac, false);
+#if defined(__HIP_PLATFORM_AMD__)
     submit(lst);
+#endif
     la_pend = g;
 }
 void Engine::forward(Seq &s, const int *tokens, int T, bool verify, const int *pos3, bool img) {
@@ -817,8 +823,8 @@ void Engine::forward(Seq &s, const int *tokens, int T, bool verify, const int *p
     std::thread ple_th;
     if (T > 8) ple_th = std::thread([this, &s, hashed, T] { ple_rows(s, hashed, T); });
     else ple_rows(s, hashed, T);
-    CK(hipMemcpyAsync(b.tokens, tokens, T * 4, hipMemcpyHostToDevice, st));
-    if (pos3) CK(hipMemcpyAsync(b.rpos, pos3, (size_t)T * 12, hipMemcpyHostToDevice, st));
+    CK(gpuMemcpyAsync(b.tokens, tokens, T * 4, gpuMemcpyHostToDevice, st));
+    if (pos3) CK(gpuMemcpyAsync(b.rpos, pos3, (size_t)T * 12, gpuMemcpyHostToDevice, st));
     const int nc = (T + umax - 1) / umax;
     auto cb = [&](int c) { return (int)((int64_t)T * c / nc); };
     for (int c = 0; c < nc; c++) {
@@ -860,7 +866,7 @@ void Engine::forward(Seq &s, const int *tokens, int T, bool verify, const int *p
 void Engine::ple_parts(const Part *p, int np, int T, float *res) {
     const Layer &w = L[PLE_LAYER];
     constexpr size_t RB = PLE_DIM / 32 * 34;
-    CK(hipMemcpyAsync(b.d_ple_rows, b.ple_rows, (size_t)T * PLE_HEADS * RB, hipMemcpyHostToDevice, st));
+    CK(gpuMemcpyAsync(b.d_ple_rows, b.ple_rows, (size_t)T * PLE_HEADS * RB, gpuMemcpyHostToDevice, st));
     ple_embed(b.d_ple_rows, T, nullptr, nullptr, b.emb_q, st);
     gemv(w.ple_key, b.emb_q, T, b.key, HCD, GEMV_STORE, st);
     gemv(w.ple_value, b.emb_q, T, b.value, D, GEMV_STORE, st);
@@ -881,7 +887,7 @@ void Engine::forward_parts(const Part *p, int np, const int *tokens, int T) {
     }
     experts_place(T);
     for (int i = 0; i < np; i++) ple_rows(*p[i].s, tokens + p[i].off, p[i].T, p[i].off);
-    CK(hipMemcpyAsync(b.tokens, tokens, T * 4, hipMemcpyHostToDevice, st));
+    CK(gpuMemcpyAsync(b.tokens, tokens, T * 4, gpuMemcpyHostToDevice, st));
     embed(embd, b.tokens, nullptr, T, b.x, st);
     hc_init(b.x, b.res, T, st);
     for (int l = 0, gl = 0; l < NL; l++) {
@@ -941,10 +947,10 @@ void Engine::mtp_catch_up(Seq &s, int T, int pos0, bool spec, const int *pos3, b
         const int n = std::min(MTP_CHUNK, T - t0);
         float *h = b.key;
         if (t0 == 0) {
-            CK(hipMemcpyAsync(h, s.h_last, (size_t)HCD * 4, hipMemcpyDeviceToDevice, st));
-            if (n > 1) CK(hipMemcpyAsync(h + HCD, res, (size_t)(n - 1) * HCD * 4, hipMemcpyDeviceToDevice, st));
+            CK(gpuMemcpyAsync(h, s.h_last, (size_t)HCD * 4, gpuMemcpyDeviceToDevice, st));
+            if (n > 1) CK(gpuMemcpyAsync(h + HCD, res, (size_t)(n - 1) * HCD * 4, gpuMemcpyDeviceToDevice, st));
         } else {
-            CK(hipMemcpyAsync(h, res + (size_t)(t0 - 1) * HCD, (size_t)n * HCD * 4, hipMemcpyDeviceToDevice, st));
+            CK(gpuMemcpyAsync(h, res + (size_t)(t0 - 1) * HCD, (size_t)n * HCD * 4, gpuMemcpyDeviceToDevice, st));
         }
         mtp_forward(s, n, pos0 + t0, h, b.tokens + off + t0, spec, s.pos + t0, pos3 ? b.rpos + 3 * t0 : nullptr,
                     cell_pos(s, pos0, pos3, (pos0 + t0) / KPOOL * KPOOL), img ? b.img + t0 : nullptr, off);
@@ -974,7 +980,7 @@ void Engine::prefill(int id, const int *tokens, const int *pos3, int n) {
         if (T <= 8) cpu.arm();
         const int *p3 = pos3 ? pos3 + (size_t)done * 3 : nullptr;
         const bool img = any_img && std::any_of(rows.begin() + done, rows.begin() + done + T, [](const half *r) { return r; });
-        if (img) CK(hipMemcpyAsync(b.img, rows.data() + done, T * sizeof(half *), hipMemcpyHostToDevice, st));
+        if (img) CK(gpuMemcpyAsync(b.img, rows.data() + done, T * sizeof(half *), gpuMemcpyHostToDevice, st));
         forward(s, tokens + done, T, false, p3, img);
         mtp_catch_up(s, T, s.n, false, p3, img);
         if (T > 8) pmark(8);
@@ -983,11 +989,11 @@ void Engine::prefill(int id, const int *tokens, const int *pos3, int n) {
             topk(b.logits, 1, VOCAB, VOCAB, b.tsv, b.tsi, b.topv, b.topi, st);
             logit_stats(b.logits, 1, VOCAB, VOCAB, b.tops, st);
             s.top_v.resize(TOPK + NSTAT); s.top_i.assign(TOPK + NSTAT, 0);
-            CK(hipMemcpyAsync(s.top_v.data(), b.topv, TOPK * 4, hipMemcpyDeviceToHost, st));
-            CK(hipMemcpyAsync(s.top_v.data() + TOPK, b.tops, NSTAT * 4, hipMemcpyDeviceToHost, st));
-            CK(hipMemcpyAsync(s.top_i.data(), b.topi, TOPK * 4, hipMemcpyDeviceToHost, st));
+            CK(gpuMemcpyAsync(s.top_v.data(), b.topv, TOPK * 4, gpuMemcpyDeviceToHost, st));
+            CK(gpuMemcpyAsync(s.top_v.data() + TOPK, b.tops, NSTAT * 4, gpuMemcpyDeviceToHost, st));
+            CK(gpuMemcpyAsync(s.top_i.data(), b.topi, TOPK * 4, gpuMemcpyDeviceToHost, st));
         }
-        CK(hipMemcpyAsync(s.h_last, b.res + (size_t)(T - 1) * HCD, (size_t)HCD * 4, hipMemcpyDeviceToDevice, st));
+        CK(gpuMemcpyAsync(s.h_last, b.res + (size_t)(T - 1) * HCD, (size_t)HCD * 4, gpuMemcpyDeviceToDevice, st));
         auto gram = [](int t) { return t >= IMG_BASE ? IMAGE_PAD : t; };
         s.hist[0] = T >= 2 ? gram(tokens[done + T - 2]) : s.hist[1];
         s.hist[1] = gram(tokens[done + T - 1]);
@@ -1000,7 +1006,7 @@ void Engine::prefill(int id, const int *tokens, const int *pos3, int n) {
         s.n = end;
         done += T;
     }
-    CK(hipStreamSynchronize(st));
+    CK(gpuStreamSynchronize(st));
     if (prof && n > 8) {
         pmark(9);
         double tot = 0;
@@ -1029,14 +1035,14 @@ int Engine::image_encode(int slot, const float *patches, int gh, int gw, int fra
     if (slot < 0 || slot >= (INT32_MAX - IMG_BASE) / IMG_ROWS || rows > IMG_ROWS || vision.scratch_need(gh * gw) > barena.cap) return -1;
     if ((int)images.size() <= slot) images.resize(slot + 1);
     Image &im = images[slot];
-    if (im.rows && im.n != rows) { CK(hipHostFree(im.rows)); im.rows = nullptr; }
-    if (!im.rows) CK(hipHostMalloc(&im.rows, (size_t)rows * D * 2));
+    if (im.rows && im.n != rows) { CK(gpuFreeHost(im.rows)); im.rows = nullptr; }
+    if (!im.rows) CK(gpuMallocHost(&im.rows, (size_t)rows * D * 2));
     im.n = rows;
-    for (hipStream_t s : {st, cst}) if (s) CK(hipStreamSynchronize(s));
+    for (gpuStream_t s : {st, cst}) if (s) CK(gpuStreamSynchronize(s));
     const bool ok = vision.encode(patches, gh, gw, im.rows, barena.base, barena.cap, st, frames);
-    CK(hipMemsetAsync(b.rr_counter, 0, 4, st));
-    CK(hipMemsetAsync(la.counter, 0, 4, st));
-    CK(hipStreamSynchronize(st));
+    CK(gpuMemsetAsync(b.rr_counter, 0, 4, st));
+    CK(gpuMemsetAsync(la.counter, 0, 4, st));
+    CK(gpuStreamSynchronize(st));
     return ok ? 0 : -1;
 }
 
@@ -1067,12 +1073,12 @@ int Engine::generate(int id, const Sampling &sp, int *out, int max_out, float *r
     const int q = s.n;
     ensure_pages(s, q + k + 1, q);
 
-    CK(hipMemcpyAsync(b.draft, copied, (nl + 1) * 4, hipMemcpyHostToDevice, st));
+    CK(gpuMemcpyAsync(b.draft, copied, (nl + 1) * 4, gpuMemcpyHostToDevice, st));
     for (int i = 0; i < k && nl == 0; i++) {
         const Pos3 tail = cell_pos(s, q, nullptr, (q + i) / KPOOL * KPOOL);
         if (i == 0) mtp_forward(s, 1, q, s.h_last, b.draft, true, s.pos, nullptr, tail, nullptr);
         else {
-            CK(hipMemcpyAsync(b.value, b.mtp_res, (size_t)HCD * 4, hipMemcpyDeviceToDevice, st));
+            CK(gpuMemcpyAsync(b.value, b.mtp_res, (size_t)HCD * 4, gpuMemcpyDeviceToDevice, st));
             mtp_forward(s, 1, q + i, b.value, b.draft + i, true, s.pos + i, nullptr, tail, nullptr);
         }
         hc_mix_run(*this, mtp_head, b.mtp_res, 1, nullptr);
@@ -1080,8 +1086,8 @@ int Engine::generate(int id, const Sampling &sp, int *out, int max_out, float *r
         argmax(b.logits, 1, DRAFT_VOCAB, VOCAB, b.draft + i + 1, st);
     }
     if (k > 0) {
-        CK(hipMemcpyAsync(b.h_draft, b.draft, (k + 1) * 4, hipMemcpyDeviceToHost, st));
-        CK(hipStreamSynchronize(st));
+        CK(gpuMemcpyAsync(b.h_draft, b.draft, (k + 1) * 4, gpuMemcpyDeviceToHost, st));
+        CK(gpuStreamSynchronize(st));
     } else b.h_draft[0] = s.pending;
     return verify(s, sp, std::vector<int>(b.h_draft, b.h_draft + k + 1), false, out, nout, rows_v, rows_i);
 }
@@ -1094,13 +1100,13 @@ int Engine::verify(Seq &s, const Sampling &sp, const std::vector<int> &drafts, b
     if (masked) mask_logits(b.logits, d_mask, VOCAB, T, st);
     topk(b.logits, T, VOCAB, VOCAB, b.tsv, b.tsi, b.topv, b.topi, st);
     logit_stats(b.logits, T, VOCAB, VOCAB, b.tops, st);
-    CK(hipMemcpyAsync(b.h_topv, b.topv, T * TOPK * 4, hipMemcpyDeviceToHost, st));
-    CK(hipMemcpyAsync(b.h_topi, b.topi, T * TOPK * 4, hipMemcpyDeviceToHost, st));
-    CK(hipMemcpyAsync(b.h_tops, b.tops, T * NSTAT * 4, hipMemcpyDeviceToHost, st));
-    CK(hipEventRecord(topk_ready, st));
-    CK(hipMemcpyAsync(b.tokens, b.draft, T * 4, hipMemcpyDeviceToDevice, st));
+    CK(gpuMemcpyAsync(b.h_topv, b.topv, T * TOPK * 4, gpuMemcpyDeviceToHost, st));
+    CK(gpuMemcpyAsync(b.h_topi, b.topi, T * TOPK * 4, gpuMemcpyDeviceToHost, st));
+    CK(gpuMemcpyAsync(b.h_tops, b.tops, T * NSTAT * 4, gpuMemcpyDeviceToHost, st));
+    CK(gpuEventRecord(topk_ready, st));
+    CK(gpuMemcpyAsync(b.tokens, b.draft, T * 4, gpuMemcpyDeviceToDevice, st));
     mtp_catch_up(s, T, q, k > 0);
-    CK(hipEventSynchronize(topk_ready));
+    CK(gpuEventSynchronize(topk_ready));
     cpu.disarm();
     la_check();
     const float *tv = b.h_topv;
@@ -1127,7 +1133,7 @@ int Engine::verify(Seq &s, const Sampling &sp, const std::vector<int> &drafts, b
         ple_commit(s.ple, b.xconv, a + 1, st);
         idx_tail_commit(s.idx_tail, b.idx_raw, (size_t)umax * IDX_D, NKVL, q, q + a + 1, st);
     }
-    CK(hipMemcpyAsync(s.h_last, b.res + (size_t)a * HCD, (size_t)HCD * 4, hipMemcpyDeviceToDevice, st));
+    CK(gpuMemcpyAsync(s.h_last, b.res + (size_t)a * HCD, (size_t)HCD * 4, gpuMemcpyDeviceToDevice, st));
     if (a >= 1) { s.hist[0] = drafts[a - 1]; s.hist[1] = drafts[a]; }
     else { s.hist[0] = s.hist[1]; s.hist[1] = drafts[0]; }
     const int end = q + a + 1, blk = end / KPOOL * KPOOL;
@@ -1144,7 +1150,7 @@ int Engine::verify(Seq &s, const Sampling &sp, const std::vector<int> &drafts, b
 }
 
 uint32_t *Engine::mask_rows() {
-    if (!d_mask) CK(hipMalloc(&d_mask, (size_t)4 * (VOCAB / 32) * 4));
+    if (!d_mask) gpuAlloc(&d_mask, (size_t)4 * (VOCAB / 32) * 4);
     return d_mask;
 }
 
@@ -1161,12 +1167,12 @@ int Engine::draft(int id, const Sampling &sp, const int *fixed, int nfixed, int 
     if (k > nf + nl) {
         const int q = s.n;
         ensure_pages(s, q + k + 1, q);
-        CK(hipMemcpyAsync(b.draft, copied, (nf + 1) * 4, hipMemcpyHostToDevice, st));
+        CK(gpuMemcpyAsync(b.draft, copied, (nf + 1) * 4, gpuMemcpyHostToDevice, st));
         for (int i = 0; i < k; i++) {
             const Pos3 tail = cell_pos(s, q, nullptr, (q + i) / KPOOL * KPOOL);
             if (i == 0) mtp_forward(s, 1, q, s.h_last, b.draft, true, s.pos, nullptr, tail, nullptr);
             else {
-                CK(hipMemcpyAsync(b.value, b.mtp_res, (size_t)HCD * 4, hipMemcpyDeviceToDevice, st));
+                CK(gpuMemcpyAsync(b.value, b.mtp_res, (size_t)HCD * 4, gpuMemcpyDeviceToDevice, st));
                 mtp_forward(s, 1, q + i, b.value, b.draft + i, true, s.pos + i, nullptr, tail, nullptr);
             }
             if (i < nf) continue;
@@ -1174,8 +1180,8 @@ int Engine::draft(int id, const Sampling &sp, const int *fixed, int nfixed, int 
             lm_head(b.hq, 1, DRAFT_VOCAB);
             argmax(b.logits, 1, DRAFT_VOCAB, VOCAB, b.draft + i + 1, st);
         }
-        CK(hipMemcpyAsync(copied + 1 + nf, b.draft + 1 + nf, (k - nf) * 4, hipMemcpyDeviceToHost, st));
-        CK(hipStreamSynchronize(st));
+        CK(gpuMemcpyAsync(copied + 1 + nf, b.draft + 1 + nf, (k - nf) * 4, gpuMemcpyDeviceToHost, st));
+        CK(gpuStreamSynchronize(st));
     }
     std::copy(copied + 1, copied + 1 + k, out);
     return k;
@@ -1189,8 +1195,8 @@ int Engine::generate_masked(int id, const Sampling &sp, const int *drafts, int k
     ensure_pages(s, s.n + k + 1, s.n);
     std::vector<int> toks(k + 1, s.pending);
     std::copy(drafts, drafts + k, toks.begin() + 1);
-    CK(hipMemcpyAsync(b.draft, toks.data(), (k + 1) * 4, hipMemcpyHostToDevice, st));
-    CK(hipMemcpyAsync(mask_rows(), masks, (size_t)(k + 1) * (VOCAB / 32) * 4, hipMemcpyHostToDevice, st));
+    CK(gpuMemcpyAsync(b.draft, toks.data(), (k + 1) * 4, gpuMemcpyHostToDevice, st));
+    CK(gpuMemcpyAsync(mask_rows(), masks, (size_t)(k + 1) * (VOCAB / 32) * 4, gpuMemcpyHostToDevice, st));
     cpu.arm();
     return verify(s, sp, toks, true, out, 0, nullptr, nullptr);
 }
@@ -1235,12 +1241,12 @@ void Engine::generate_batch(int n, const int *ids, const Sampling *sps, int *out
         k[i] = std::max(0, std::min({sps[i].n_draft, per - 1, max_out - counts[i] - 1}));
         q[i] = s.n;
         ensure_pages(s, q[i] + k[i] + 1, q[i]);
-        CK(hipMemcpyAsync(b.draft + T, &s.pending, 4, hipMemcpyHostToDevice, st));
+        CK(gpuMemcpyAsync(b.draft + T, &s.pending, 4, gpuMemcpyHostToDevice, st));
         for (int d = 0; d < k[i]; d++) {
             const Pos3 tail = cell_pos(s, q[i], nullptr, (q[i] + d) / KPOOL * KPOOL);
             if (d == 0) mtp_forward(s, 1, q[i], s.h_last, b.draft + T, true, s.pos, nullptr, tail, nullptr);
             else {
-                CK(hipMemcpyAsync(b.value, b.mtp_res, (size_t)HCD * 4, hipMemcpyDeviceToDevice, st));
+                CK(gpuMemcpyAsync(b.value, b.mtp_res, (size_t)HCD * 4, gpuMemcpyDeviceToDevice, st));
                 mtp_forward(s, 1, q[i] + d, b.value, b.draft + T + d, true, s.pos + d, nullptr, tail, nullptr);
             }
             hc_mix_run(*this, mtp_head, b.mtp_res, 1, nullptr);
@@ -1251,18 +1257,18 @@ void Engine::generate_batch(int n, const int *ids, const Sampling *sps, int *out
         T += k[i] + 1;
     }
     std::vector<int> drafts(T);
-    CK(hipMemcpyAsync(drafts.data(), b.draft, T * 4, hipMemcpyDeviceToHost, st));
-    CK(hipStreamSynchronize(st));
+    CK(gpuMemcpyAsync(drafts.data(), b.draft, T * 4, gpuMemcpyDeviceToHost, st));
+    CK(gpuStreamSynchronize(st));
     forward_parts(parts.data(), (int)parts.size(), drafts.data(), T);
     head(*this, hc_head, b.res, T, VOCAB, true);
     topk(b.logits, T, VOCAB, VOCAB, b.tsv, b.tsi, b.topv, b.topi, st);
     logit_stats(b.logits, T, VOCAB, VOCAB, b.tops, st);
-    CK(hipMemcpyAsync(b.h_topv, b.topv, T * TOPK * 4, hipMemcpyDeviceToHost, st));
-    CK(hipMemcpyAsync(b.h_topi, b.topi, T * TOPK * 4, hipMemcpyDeviceToHost, st));
-    CK(hipMemcpyAsync(b.h_tops, b.tops, T * NSTAT * 4, hipMemcpyDeviceToHost, st));
-    CK(hipEventRecord(topk_ready, st));
+    CK(gpuMemcpyAsync(b.h_topv, b.topv, T * TOPK * 4, gpuMemcpyDeviceToHost, st));
+    CK(gpuMemcpyAsync(b.h_topi, b.topi, T * TOPK * 4, gpuMemcpyDeviceToHost, st));
+    CK(gpuMemcpyAsync(b.h_tops, b.tops, T * NSTAT * 4, gpuMemcpyDeviceToHost, st));
+    CK(gpuEventRecord(topk_ready, st));
     for (const Part &p : parts) mtp_catch_up(*p.s, p.T, p.s->n, p.verify, nullptr, false, p.off);
-    CK(hipEventSynchronize(topk_ready));
+    CK(gpuEventSynchronize(topk_ready));
     cpu.disarm();
     la_check();
     const float *tv = b.h_topv;
@@ -1295,7 +1301,7 @@ void Engine::generate_batch(int n, const int *ids, const Sampling *sps, int *out
             ple_commit(s.ple, b.xconv + (size_t)p.off * HCD, a + 1, st);
             idx_tail_commit(s.idx_tail, b.idx_raw + (size_t)p.off * IDX_D, (size_t)umax * IDX_D, NKVL, q[i], q[i] + a + 1, st);
         }
-        CK(hipMemcpyAsync(s.h_last, b.res + (size_t)(p.off + a) * HCD, (size_t)HCD * 4, hipMemcpyDeviceToDevice, st));
+        CK(gpuMemcpyAsync(s.h_last, b.res + (size_t)(p.off + a) * HCD, (size_t)HCD * 4, gpuMemcpyDeviceToDevice, st));
         if (a >= 1) { s.hist[0] = dr[a - 1]; s.hist[1] = dr[a]; }
         else { s.hist[0] = s.hist[1]; s.hist[1] = dr[0]; }
         const int end = q[i] + a + 1, blk = end / KPOOL * KPOOL;
@@ -1307,5 +1313,5 @@ void Engine::generate_batch(int n, const int *ids, const Sampling *sps, int *out
         ple_ids(s.hist[0], s.hist[1], &next, 1, rows);
         ple_prefetch(rows, PLE_HEADS);
     }
-    CK(hipStreamSynchronize(st));
+    CK(gpuStreamSynchronize(st));
 }

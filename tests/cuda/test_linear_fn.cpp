@@ -1,4 +1,4 @@
-#include "../../engine/cuda/flash-next/model.h"
+#include "../../engine/gpu/flash-next/model.h"
 #include "ggml.h"
 #include <cmath>
 #include <random>

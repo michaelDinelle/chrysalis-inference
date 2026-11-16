@@ -1,17 +1,17 @@
-param([string]$Sdk = $env:HIP_PATH, [string]$Llama = "", [string]$CMake = "cmake", [string]$Ninja = "ninja", [string]$Bun = "bun", [string]$Out = "", [string]$Version = "")
+param([string]$Sdk = $env:HIP_PATH, [string]$Llama = "", [string]$CMake = "cmake", [string]$Ninja = "ninja", [string]$Bun = "bun", [string]$Out = "", [string]$Version = "", [ValidateSet("hip", "cuda")][string]$Backend = "hip", [string]$Cuda = $env:CUDA_PATH, [string]$Arch = "sm_86")
 $ErrorActionPreference = "Stop"
 $ProgressPreference = "SilentlyContinue"
 $root = Split-Path -Parent $PSScriptRoot
 if (-not $Out) { $Out = Join-Path $root "dist" }
 $pkg = Join-Path $Out "Chrysalis"
-& (Join-Path $PSScriptRoot "build.ps1") -Sdk $Sdk -Llama $Llama -CMake $CMake -Ninja $Ninja
+& (Join-Path $PSScriptRoot "build.ps1") -Sdk $Sdk -Llama $Llama -CMake $CMake -Ninja $Ninja -Backend $Backend -Cuda $Cuda -Arch $Arch
 if ($LASTEXITCODE) { throw "the engines did not build" }
 Remove-Item $pkg -Recurse -Force -ErrorAction SilentlyContinue
 New-Item -ItemType Directory -Force "$pkg\build", "$pkg\data\models\qwen3.8-27b", "$pkg\data\models\qwen3.8-flash-next", "$pkg\web" | Out-Null
-Copy-Item "$root\build\*.dll", "$root\build\gpu.exe", "$root\build\ramdrive.exe" "$pkg\build\"
+Copy-Item "$root\build\*.dll", "$root\build\ramdrive.exe" "$pkg\build\"
 Invoke-WebRequest -UseBasicParsing "https://github.com/winfsp/winfsp/releases/download/v2.1/winfsp-2.1.25156.msi" -OutFile "$pkg\build\winfsp.msi"
 if ((Get-FileHash "$pkg\build\winfsp.msi" -Algorithm SHA256).Hash.ToLower() -ne "073a70e00f77423e34bed98b86e600def93393ba5822204fac57a29324db9f7a") { throw "WinFsp's download does not match its checksum" }
-Copy-Item "$root\build\hipblaslt" "$pkg\build\" -Recurse
+if ($Backend -eq "hip") { Copy-Item "$root\build\gpu.exe" "$pkg\build\"; Copy-Item "$root\build\hipblaslt" "$pkg\build\" -Recurse }
 Copy-Item "$root\chrysalis" "$pkg\" -Recurse
 Get-ChildItem "$pkg\chrysalis" -Recurse -Directory -Filter "__pycache__" | Remove-Item -Recurse -Force
 Copy-Item "$root\LICENSE" "$pkg\"

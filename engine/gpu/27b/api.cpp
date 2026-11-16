@@ -1,5 +1,7 @@
 #include "../../api.h"
 #include "model.h"
+#include <climits>
+#include <cstring>
 #include <stdexcept>
 
 static Engine *E = nullptr;
@@ -16,8 +18,8 @@ int chrysalis_init(const char *path, int max_seqs, int umax, long long reserve_m
 }
 void chrysalis_shutdown(int) {
     if (!E) return;
-    (void)hipDeviceSynchronize();
-    (void)hipDeviceReset();
+    (void)gpuDeviceSynchronize();
+    (void)gpuDeviceReset();
     E = nullptr;
 }
 void chrysalis_warmup() { E->warmup(); }
@@ -39,19 +41,23 @@ void chrysalis_seq_push(int id, const int *tokens, int n) {
     Seq &s = E->seqs.at(id);
     for (int i = 0; i < n; i++) s.seen.push(tokens[i], 0);
 }
+#if defined(__HIP_PLATFORM_AMD__)
 int chrysalis_free_tokens() { return (int)E->free_pages.size() * PAGE; }
+#else
+int chrysalis_free_tokens() { return ((int)E->free_pages.size() + E->lent_pages()) * PAGE; }
+#endif
 int chrysalis_generate_batch(int n, const int *ids, const Sampling *sps, int *out, int max_out, int *counts, float *rows_v, int *rows_i) {
     try { E->generate_batch(n, ids, sps, out, max_out, counts, rows_v, rows_i); return 0; } catch (const std::exception &) { return -1; }
 }
 void chrysalis_masked_top(const uint32_t *mask, float *v, int *ids, float *stats) {
-    CK(hipMemcpyAsync(E->mask_rows(), mask, VOCAB / 32 * 4, hipMemcpyHostToDevice, E->st));
+    CK(gpuMemcpyAsync(E->mask_rows(), mask, VOCAB / 32 * 4, gpuMemcpyHostToDevice, E->st));
     mask_logits(E->b.logits, E->d_mask, VOCAB, 1, E->st);
     topk(E->b.logits, 1, VOCAB, VOCAB, E->b.tsv, E->b.tsi, E->b.topv, E->b.topi, E->st);
     logit_stats(E->b.logits, 1, VOCAB, VOCAB, E->b.tops, E->st);
-    CK(hipMemcpyAsync(v, E->b.topv, SAMPLE_N * 4, hipMemcpyDeviceToHost, E->st));
-    CK(hipMemcpyAsync(ids, E->b.topi, SAMPLE_N * 4, hipMemcpyDeviceToHost, E->st));
-    CK(hipMemcpyAsync(stats, E->b.tops, NSTAT * 4, hipMemcpyDeviceToHost, E->st));
-    CK(hipStreamSynchronize(E->st));
+    CK(gpuMemcpyAsync(v, E->b.topv, SAMPLE_N * 4, gpuMemcpyDeviceToHost, E->st));
+    CK(gpuMemcpyAsync(ids, E->b.topi, SAMPLE_N * 4, gpuMemcpyDeviceToHost, E->st));
+    CK(gpuMemcpyAsync(stats, E->b.tops, NSTAT * 4, gpuMemcpyDeviceToHost, E->st));
+    CK(gpuStreamSynchronize(E->st));
 }
 int chrysalis_draw(int id, const float *v, const int *ids, const float *stats, const Sampling *sp) {
     Seq &s = E->seqs.at(id);
@@ -72,7 +78,17 @@ int chrysalis_snap_free(int snap) { try { E->snap_free(snap); return 0; } catch 
 int64_t chrysalis_snap_bytes(int snap) { try { return (int64_t)E->snap_bytes(snap); } catch (const std::exception &) { return -1; } }
 int chrysalis_snap_export(int snap, void *dst) { try { E->snap_export(snap, (uint8_t *)dst); return 0; } catch (const std::exception &) { return -1; } }
 int chrysalis_snap_import(int64_t file, int64_t offset, int64_t bytes) { return E->snap_import(file, offset, (size_t)bytes); }
-void chrysalis_sync() { CK(hipStreamSynchronize(E->st)); }
+void chrysalis_sync() { CK(gpuStreamSynchronize(E->st)); }
+#if !defined(__HIP_PLATFORM_AMD__)
+double chrysalis_tune(const char *key, double value) {
+    if (strcmp(key, "lend") || E->first_spill >= NL) return -1;
+    const double old = E->n_lent;
+    E->lend_on = value != 0;
+    if (E->lend_on) E->lend();
+    else E->reclaim(INT32_MAX);
+    return old;
+}
+#endif
 int chrysalis_prefill_pos(int id, const int *tokens, const int *pos3, int n) {
     try { E->prefill(id, tokens, pos3, n); return 0; }
     catch (const std::invalid_argument &) { return -2; }
@@ -85,7 +101,7 @@ int chrysalis_image_encode(int slot, const float *patches, int gh, int gw) { ret
 int chrysalis_video_encode(int slot, const float *patches, int gh, int gw) { return E->image_encode(slot, patches, gh, gw, 2); }
 void chrysalis_image_free(int slot) {
     if (slot < 0 || slot >= (int)E->images.size() || !E->images[slot].rows) return;
-    CK(hipHostFree(E->images[slot].rows));
+    CK(gpuHostFree(E->images[slot].rows));
     E->images[slot] = {};
 }
 int chrysalis_image_read(int slot, float *out) {
@@ -97,5 +113,5 @@ int chrysalis_image_read(int slot, float *out) {
 int chrysalis_generate(int id, const Sampling *sp, int *out, int max_out, float *rows_v, int *rows_i) {
     try { return E->generate(id, *sp, out, max_out, rows_v, rows_i); } catch (const std::exception &) { return -1; }
 }
-void chrysalis_last_logits(float *out) { CK(hipMemcpy(out, E->b.logits, (size_t)VOCAB * 4, hipMemcpyDeviceToHost)); }
+void chrysalis_last_logits(float *out) { CK(gpuMemcpy(out, E->b.logits, (size_t)VOCAB * 4, gpuMemcpyDeviceToHost)); }
 }

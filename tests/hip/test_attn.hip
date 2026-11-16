@@ -1,4 +1,4 @@
-#include "../../engine/hip/27b/kernels.h"
+#include "../../engine/gpu/27b/kernels.h"
 #include <cmath>
 #include <random>
 #include <vector>

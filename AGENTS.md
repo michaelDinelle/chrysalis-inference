@@ -49,6 +49,11 @@ README.md shows what Chrysalis is. This file is how to change it.
   `submit` after its work is queued, and nothing passes a C file descriptor into an engine: Windows takes handles.
 - engine/<backend>/ (hip for the RX 7900, cuda for NVIDIA, metal for Apple Silicon) has a build.mk and one engine per
   model, 27b/ and flash-next/, each a shared library that includes engine/api.h. Every backend reads the same model files.
+- engine/gpu/<model>/ is the host code of the AMD and NVIDIA engines, written once: loading, the forward pass, sequences
+  and snapshots, the C API, and Flash-Next's CPU workers. It names the GPU runtime through engine/<backend>/gpu_api.h
+  (gpuStream_t, gpuMemcpyAsync and the like, each backend's own spelling) and keeps what the two really do differently
+  behind `#if defined(__HIP_PLATFORM_AMD__)`. engine/hip and engine/cuda hold the kernels, the seam headers and what one
+  backend alone has. A change under engine/gpu is judged by the RX 7900 and the RTX 3090 both.
 - A HIP engine has at most three streams of its own. ROCm gives a process four hardware queues and hipBLASLt's setup
   keeps one on the default stream for good, and streams take queues as they get work: with a fourth, two of them share
   a queue in some processes and run one after the other (Flash-Next's 4K prompt took 2.19 s instead of 1.72 s in about

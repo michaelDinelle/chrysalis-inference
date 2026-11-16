@@ -1,5 +1,5 @@
 #ifndef CHRYSALIS_GDN_KERNELS
-#include "../../engine/cuda/27b/kernels.h"
+#include "../../engine/gpu/27b/kernels.h"
 #endif
 #include <cmath>
 #include <random>

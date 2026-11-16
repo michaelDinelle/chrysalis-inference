@@ -1,4 +1,4 @@
-#include "../../engine/cuda/flash-next/cpu_moe.h"
+#include "../../engine/gpu/flash-next/cpu_moe.h"
 #include "ggml.h"
 #include "ggml-cpu.h"
 #include <algorithm>

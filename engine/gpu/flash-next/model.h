@@ -5,8 +5,8 @@
 static_assert(TOPK == SAMPLE_N, "the sampler takes the engine's rows as they are");
 static_assert(LOGIT_STATS == NSTAT, "the sampler reads the statistics the engine writes");
 #include "cpu_moe.h"
-#include "../vision.h"
-#include <hipblaslt/hipblaslt.h>
+#include "vision.h"
+#include GPU_BLASLT_H
 #include <atomic>
 #include <chrono>
 #include <condition_variable>
@@ -98,14 +98,18 @@ struct Engine {
         std::vector<uint64_t> total;
         std::vector<uint8_t> busy;
         std::vector<uint8_t> coming;
+#if defined(__HIP_PLATFORM_AMD__)
         int spilled = 0, spill_cap = 0;
+#else
+        int spilled = 0, spill_cap = 0, mem_cap = -1;
+#endif
         double spare = 4e9;
         double avail = 0;
         std::chrono::steady_clock::time_point avail_at{};
         double tokens = 0;
         unsigned *d_counts = nullptr;
         uint32_t *h_counts = nullptr;
-        hipEvent_t counted = nullptr;
+        gpuEvent_t counted = nullptr;
         bool counts_pending = false;
         int placed = 0, loaded_file = 0;
         double copied_bytes = 0, copied_ms = 0;
@@ -121,9 +125,12 @@ struct Engine {
             uint64_t due = 0;
             uint8_t *stage = nullptr;
             uint8_t *bounce = nullptr;
-            hipEvent_t start = nullptr, copied = nullptr, done = nullptr;
+            gpuEvent_t start = nullptr, copied = nullptr, done = nullptr;
         };
         Load loads[PLACE_MAX];
+#if !defined(__HIP_PLATFORM_AMD__)
+        cudaStream_t xst = nullptr;
+#endif
         std::thread loader;
         std::mutex mu;
         std::condition_variable cv;
@@ -132,6 +139,13 @@ struct Engine {
         bool quit = false;
     } xc;
     void experts_init();
+#if !defined(__HIP_PLATFORM_AMD__)
+    void experts_budget(double room);
+    double mirror_room();
+    double ram_free();
+    double own_anon() const;
+    double experts_ram() const;
+#endif
     void extra_init();
     void extra_grow();
     void kv_need(int need);
@@ -156,7 +170,11 @@ struct Engine {
     double measure_dma();
     double cal_cpu_bw = 50e9, cal_cpu_mac = 150e9, cal_dma_bw = 25e9;
     static constexpr int SPLIT_AT[3] = {32, 256, 4096};
+#if defined(__HIP_PLATFORM_AMD__)
     double cpu_bias[3] = {1.0, 1.0, 1.0}, restore_s = 4e-3;
+#else
+    double cpu_bias[3] = {1.0, 1.0, 1.0}, restore_s = 4e-3, cal_ram = -1, cal_extra = -1, load_anon = 0, load_avail = 0;
+#endif
     double split_bias(int T) const;
     std::string cal_path;
     bool calibrated = false;
@@ -174,7 +192,7 @@ struct Engine {
     void pmark(int phase);
     uint32_t gen = 0;
 
-    hipStream_t st, cst, lst;
+    gpuStream_t st, cst, lst;
     unsigned la_gen = 0, la_pend = 0;
     MoeShared *sh_pred = nullptr, *d_sh_pred = nullptr;
     struct { float *lo, *inv, *mx, *logits, *sg, *wts; half *hh; QAct hq; int *ids, *hot; unsigned *counter; } la{};
@@ -189,10 +207,10 @@ struct Engine {
         la_on = false;
         fprintf(stderr, "chrysalis-fn: the expert lookahead and the main pass did not meet on this GPU: the lookahead is off\n");
     }
-    hipEvent_t staged, copied, topk_ready;
-    hipEvent_t front_ready, front_copied;
+    gpuEvent_t staged, copied, topk_ready;
+    gpuEvent_t front_ready, front_copied;
     uint8_t *stage_state = nullptr;
-    hipblasLtHandle_t lt = nullptr;
+    gpublasLtHandle_t lt = nullptr;
     void *lt_ws = nullptr;
     size_t lt_ws_size = 32 << 20;
     using LtPlan = lt_tune::Plan;
@@ -206,7 +224,11 @@ struct Engine {
     static constexpr size_t DEQ_ELEMS = (size_t)6144 * 2560;
     static constexpr int SEL_G = 64;
     static constexpr int MTP_CHUNK = 256;
+#if defined(__HIP_PLATFORM_AMD__)
     Arena warena, barena;
+#else
+    Arena warena, barena, parena;
+#endif
     struct {
         int *tokens; float *x, *res, *xn, *lo, *gate, *inj_a, *inj_f, *mx, *proj, *zb, *kb, *vb, *qidx, *kidx, *blk;
         half *xn_h, *lo_h, *hh, *Q16, *qidx16, *att_h, *deq, *gemm16;
@@ -240,7 +262,7 @@ struct Engine {
     std::vector<float> j_w;
     uint8_t *d_cold = nullptr;
     bool cold_gpu = false;
-    hipEvent_t raw_free[NSLOT], raw_ready[NSLOT];
+    gpuEvent_t raw_free[NSLOT], raw_ready[NSLOT];
     uint8_t *kv_pool = nullptr;
     int n_pages = 0;
     std::vector<int> free_pages;

@@ -1,4 +1,4 @@
-#include "../../engine/hip/flash-next/kernels.h"
+#include "../../engine/gpu/flash-next/kernels.h"
 #include "ggml.h"
 #include <cmath>
 #include <cstring>

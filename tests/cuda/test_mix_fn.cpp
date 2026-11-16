@@ -1,4 +1,4 @@
-#include "../../engine/cuda/flash-next/kernels.h"
+#include "../../engine/gpu/flash-next/kernels.h"
 #include <cmath>
 #include <random>
 #include <vector>

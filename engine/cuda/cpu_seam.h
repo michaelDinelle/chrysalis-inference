@@ -1,0 +1,2 @@
+#define MOE_SMT_SIBLINGS 1
+#define MOE_SHARED_ROWS 1

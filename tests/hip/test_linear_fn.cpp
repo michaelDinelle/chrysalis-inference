@@ -1,4 +1,4 @@
-#include "../../engine/hip/flash-next/model.h"
+#include "../../engine/gpu/flash-next/model.h"
 #include "ggml.h"
 #include <cmath>
 #include <random>
