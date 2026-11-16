@@ -145,3 +145,5 @@ export function dropDownload(model: string, root = HOME): string[] {
   if (existsSync(join(models, ".cache", "huggingface", "download", model))) drop(join(models, ".cache", "huggingface", "download", model));
   return gone;
 }
+
+export const WATCHED = "import sys\nimport huggingface_hub\nclass Shown:\n    def __init__(self, out):\n        self.out = out\n    def isatty(self):\n        return True\n    def write(self, text):\n        return self.out.write(text)\n    def flush(self):\n        self.out.flush()\nfetch = huggingface_hub.hf_hub_download\ndef files_only(*a, tqdm_class=None, **k):\n    if tqdm_class is None:\n        return fetch(*a, **k)\n    class File(tqdm_class):\n        def update(self, n=1):\n            return None if str(self.desc).endswith('downloading bytes') else tqdm_class.update(self, n)\n    return fetch(*a, tqdm_class=File, **k)\nhuggingface_hub.hf_hub_download = files_only\nsys.stderr = Shown(sys.stderr)\nfrom chrysalis import get\nget.fetch(sys.argv[1])";

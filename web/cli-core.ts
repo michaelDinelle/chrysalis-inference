@@ -6,7 +6,7 @@ import { utcOffset } from "./clock";
 import { letIn } from "./firewall";
 import { gpuEnv } from "./gpu";
 import { uninstall } from "./launch";
-import { dropDownload, getCommand, memoryRoot, MODELS, ourScript, ROOT, serverCommand, serverEnv, stopTree } from "./platform";
+import { dropDownload, getCommand, memoryRoot, MODELS, ourScript, ROOT, serverCommand, serverEnv, stopTree, WATCHED } from "./platform";
 import { qrText } from "./qr";
 import { tlsPath } from "./tls";
 
@@ -321,7 +321,6 @@ async function restartWeb() {
   await webSvc.restart();
 }
 
-const WATCHED = "import sys\nclass Shown:\n    def __init__(self, out):\n        self.out = out\n    def isatty(self):\n        return True\n    def write(self, text):\n        return self.out.write(text)\n    def flush(self):\n        self.out.flush()\nsys.stderr = Shown(sys.stderr)\nfrom chrysalis import get\nget.fetch(sys.argv[1])";
 const getEnv = () => ({ ...process.env, ...serverEnv() });
 const absent = (model: string) => {
   if (process.env.CHRYSALIS_ENGINE_CMD) return false;

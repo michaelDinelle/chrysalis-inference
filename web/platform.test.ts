@@ -1,9 +1,9 @@
 import { expect, test } from "bun:test";
-import { chmodSync, existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { gpuFound, gpuHere } from "./gpu";
-import { dropDownload, python, serverCommand, serverEnv, type Machine } from "./platform";
+import { dropDownload, python, ROOT, serverCommand, serverEnv, WATCHED, type Machine } from "./platform";
 
 const root = join(tmpdir(), "chrysalis-root");
 const machine = (platform: NodeJS.Platform, files: string[] = [], o: Partial<Machine> = {}): Machine => ({
@@ -70,3 +70,36 @@ test("cancelling a download removes what had arrived of that model, weights and 
     expect(dropDownload("qwen3.8-flash-next", dir)).toEqual([]);
   } finally { rmSync(dir, { recursive: true, force: true }); }
 });
+
+test("the download the terminal watches counts each file once: the library reports a file being rebuilt and its bytes arriving as two bars of the same size, and the line read from the downloader never claims more than the files hold", () => {
+  const dir = mkdtempSync(`${tmpdir()}/chrysalis-watched-`), py = python();
+  try {
+    mkdirSync(`${dir}/chrysalis`);
+    for (const f of ["__init__.py", "get.py", "models.py"]) writeFileSync(`${dir}/chrysalis/${f}`, readFileSync(join(ROOT, "chrysalis", f)));
+    writeFileSync(`${dir}/huggingface_hub.py`, [
+      "import time",
+      "class Info:",
+      "    size = 1500000000",
+      "class HfApi:",
+      "    def get_paths_info(self, repo, paths, revision=None):",
+      "        return [Info() for _ in paths]",
+      "def hf_hub_download(repo, name, revision=None, local_dir=None, tqdm_class=None):",
+      "    rebuilt = tqdm_class(total=Info.size, desc=name + ': reconstructing file', unit='B')",
+      "    arrived = tqdm_class(total=Info.size, desc=name + ': downloading bytes', unit='B')",
+      "    for _ in range(5):",
+      "        arrived.update(Info.size // 5)",
+      "        time.sleep(0.3)",
+      "        rebuilt.update(Info.size // 5)",
+      "",
+    ].join("\n"));
+    const said = (script: string) => {
+      const p = Bun.spawnSync([py, "-c", script, "qwen3.8-27b"], { cwd: dir, stdout: "pipe", stderr: "pipe", env: { ...process.env, PYTHONPATH: dir, PYTHONUTF8: "1" } });
+      return { code: p.exitCode, shown: [...p.stderr.toString().matchAll(/([\d.]+) \/ ([\d.]+) GB/g)].map((m) => [Number(m[1]), Number(m[2])]) };
+    };
+    const watched = said(WATCHED), counted = watched.shown.map(([done]) => done);
+    expect([watched.code, watched.shown.length > 2, Math.max(...counted), new Set(watched.shown.map(([, total]) => total)).size]).toEqual([0, true, 3, 1]);
+    expect(counted.some((done) => done > 0 && done < 3)).toBe(true);
+    const twice = said("import sys\nclass Shown:\n    def __init__(self, out):\n        self.out = out\n    def isatty(self):\n        return True\n    def write(self, text):\n        return self.out.write(text)\n    def flush(self):\n        self.out.flush()\nsys.stderr = Shown(sys.stderr)\nfrom chrysalis import get\nget.fetch(sys.argv[1])");
+    expect(Math.max(...twice.shown.map(([done]) => done))).toBeGreaterThan(3);
+  } finally { rmSync(dir, { recursive: true, force: true }); }
+}, 30_000);
