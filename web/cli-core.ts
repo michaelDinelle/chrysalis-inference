@@ -36,6 +36,8 @@ export const state = {
   opencode: undefined as { state: string; outside: boolean } | undefined,
   download: undefined as { model: string; done: number; total: number; rate: number } | undefined,
   woke: false,
+  here: [] as string[],
+  none: false,
   engine: { state: "down" as "down" | "loading" | "ready" | "stopped", model: "", progress: 0, step: "loading the weights", since: Date.now(), writing: 0, vram: "", ram: "" },
 };
 const engine = state.engine;
@@ -214,7 +216,8 @@ function scoped(cmd: string[]) {
 }
 
 function heard(m: any) {
-  if (m?.up) { state.web = m.up; links(); }
+  if (m?.up) { state.web = m.up; links(); tell(); if (state.download) webSvc.proc?.send({ download: state.download }); }
+  if (typeof m?.model === "string" && MODELS.includes(m.model)) act(() => setModel(m.model));
   if (Array.isArray(m?.questions)) {
     const now: Ask[] = m.questions.map((q: Ask) => ({ key: String(q.key), text: clean(String(q.text)) }));
     for (const q of state.questions) if (!now.some((x) => x.key === q.key)) note(dim(`${q.text} · answered elsewhere`));
@@ -314,9 +317,16 @@ const absent = (model: string) => {
   if (process.env.CHRYSALIS_ENGINE_CMD) return false;
   try { return Bun.spawnSync([...getCommand(model), "--check"], { cwd: ROOT, env: getEnv(), stdout: "ignore", stderr: "ignore" }).exitCode !== 0; } catch { return true; }
 };
+function tell() {
+  state.here = MODELS.filter((m) => !absent(m));
+  state.none = HAS_MODEL && !engineSvc.proc && !state.download;
+  webSvc.proc?.send({ models: { here: state.here, none: state.none } });
+  sync();
+}
 async function download(model: string): Promise<boolean> {
   if (state.download) return note(`${state.download.model} is downloading: ${model} is next once it is here`), false;
   const dl = state.download = { model, done: 0, total: 0, rate: 0 };
+  tell();
   note(`${bold(model)} is downloading`);
   let proc: Subprocess<"ignore", "ignore", "pipe">, said = "";
   try { proc = getting = Bun.spawn([getCommand(model)[0], "-c", WATCHED, model], { cwd: ROOT, stdin: "ignore", stdout: "ignore", stderr: "pipe", env: getEnv() }); }
@@ -331,7 +341,7 @@ async function download(model: string): Promise<boolean> {
   const code = await proc.exited, total = dl.total;
   getting = state.download = undefined;
   webSvc.proc?.send({ download: null });
-  sync();
+  tell();
   if (quitting) return false;
   if (code) return note(red(`${model} did not finish downloading: ${clean(plain(said).trim().split(/[\r\n]+/).pop() ?? "").trim() || `exit ${code}`}`)), false;
   return note(`${green("✓")} ${bold(model)} downloaded${total ? `  ${dim(`${(total / 1e9).toFixed(1)} GB`)}` : ""}`), true;
@@ -340,7 +350,7 @@ async function download(model: string): Promise<boolean> {
 export async function setModel(to: string) {
   if (to === engine.model && engine.state === "ready") return note(`${to} is loaded already`);
   if (absent(to)) return void download(to).then((got) => (got ? act(() => setModel(to)) : undefined));
-  if (!engineSvc.proc) return void (mkdirSync(tlsPath(), { recursive: true }), writeFileSync(`${tlsPath()}/model`, to), engineSvc.restart());
+  if (!engineSvc.proc) return void (mkdirSync(tlsPath(), { recursive: true }), writeFileSync(`${tlsPath()}/model`, to), engineSvc.restart().then(tell));
   const r = await fetch(`${here()}/api/chrysalis/load`, { method: "POST", body: JSON.stringify({ model: to }), headers: JSON_BODY }).catch(() => null);
   if (!r?.ok) note(red(r ? await failure(r) : NO_WEB));
 }
@@ -498,11 +508,13 @@ export function start() {
   memory();
   ui.log("");
   note(bold("Chrysalis Inference"));
-  if (HAS_MODEL) void (async () => {
-    const model = chosen() ?? MODELS[0], next = flag("--get");
-    if (!absent(model) || await download(model)) engineSvc.start();
-    if (next && absent(next)) await download(next);
-  })();
+  if (HAS_MODEL) {
+    const model = chosen(), named = flag("--get");
+    if (named) act(() => setModel(named));
+    else if (process.env.CHRYSALIS_ENGINE_CMD || (model && !absent(model))) engineSvc.start();
+    else note(dim("No model is here yet: Tab opens the switches, and Model downloads one and loads it."));
+    tell();
+  }
   else {
     if (flag("--no-model")) note(`No GPU was found: ${flag("--no-model")}`);
     note(dim("No GPU Chrysalis runs on here: the web chat uses Chrysalis on another computer on your network."));

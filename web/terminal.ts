@@ -41,7 +41,7 @@ function drawing(cols: number, rows: number) {
   return (wings = { w, h, ink });
 }
 
-export function butterfly(cols: number, rows: number, time: number, shown = 1): string[] {
+export function butterfly(cols: number, rows: number, time: number): string[] {
   const { w, ink } = drawing(cols, rows), beat = 0.84 + 0.16 * Math.cos(time * 1.7), mid = w / 2;
   return Array.from({ length: rows }, (_, row) => {
     let line = "";
@@ -51,8 +51,8 @@ export function butterfly(cols: number, rows: number, time: number, shown = 1): 
         const from = Math.round(mid + (col * FINE + x + 0.5 - mid) / beat);
         if (from >= 0 && from < w) sum += ink[(row * FINE + y) * w + from];
       }
-      const grain = Math.abs(Math.sin(col * 12.9898 + row * 78.233) * 43758.5453) % 1, glow = 0.8 + 0.2 * Math.sin(time * 2.3 - col * 0.35 - row * 0.5);
-      line += grain < shown ? RAMP[Math.min(RAMP.length - 1, Math.round(Math.sqrt(sum / (FINE * FINE)) * glow * (RAMP.length - 1) * 1.25))] : " ";
+      const glow = 0.8 + 0.2 * Math.sin(time * 2.3 - col * 0.35 - row * 0.5);
+      line += RAMP[Math.min(RAMP.length - 1, Math.round(Math.sqrt(sum / (FINE * FINE)) * glow * (RAMP.length - 1) * 1.25))];
     }
     return line.trimEnd();
   });

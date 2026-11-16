@@ -5,7 +5,7 @@ import { gpuEnv, gpuFound } from "./gpu";
 import { getCommand, here, HOME, MODELS, ourScript, python, ROOT, serverCommand, serverEnv, utf8Console, type Machine } from "./platform";
 import { tlsPath } from "./tls";
 
-const ROOMY_GB = 58, NAME = process.platform === "win32" ? "Chrysalis.exe" : "chrysalis.sh";
+const NAME = process.platform === "win32" ? "Chrysalis.exe" : "chrysalis.sh";
 const USAGE = `usage: ${NAME} [--host 0.0.0.0 | --insecure] [--model <model>]
 
   Runs Chrysalis in this terminal: the model and the web chat, each request as it finishes, and the questions when a
@@ -17,7 +17,9 @@ const USAGE = `usage: ${NAME} [--host 0.0.0.0 | --insecure] [--model <model>]
   --insecure: on the local network over plain HTTP, as llama.cpp serves: no certificates and nobody to let in, the
   chat on port 8081 and the API on 8080. Anyone on the network can use it and read what is sent, and other devices
   get no voice mode and no OpenCode
-  --model qwen3.8-27b or qwen3.8-flash-next: start with that model; without it, the one last used, or the 27B
+  --model qwen3.8-27b or qwen3.8-flash-next: start with that model, downloading it first if it is not here; without
+  it, the model last used, and none the first time: Model in the terminal's switches, or the chat's model menu,
+  downloads one and loads it
 
   ${NAME} get <model>   download a model's files now (Chrysalis gets the one it loads by itself)
   ${NAME} uninstall     remove Chrysalis from this computer: its models, its caches and its settings too
@@ -39,12 +41,12 @@ export function parse(args: string[]): { mode: Mode; model?: string } | undefine
   return { mode, model };
 }
 
-export interface Facts { gpu: boolean; roomy: boolean; last?: string; first?: string; missing: (model: string) => boolean }
-export interface Plan { model?: string; background?: string }
-export function plan(f: Facts): Plan {
-  if (!f.gpu) return {};
-  const fits = f.roomy ? MODELS : MODELS.slice(0, 1), model = f.first ?? (f.last && fits.includes(f.last) ? f.last : fits[0]);
-  return { model, ...(f.roomy && model !== MODELS[1] && f.missing(MODELS[1]) ? { background: MODELS[1] } : {}) };
+export interface Facts { gpu: boolean; last?: string; first?: string; missing: (model: string) => boolean }
+export interface Plan { model?: string; get?: string }
+export function plan(f: Facts): Plan | undefined {
+  if (!f.gpu) return undefined;
+  if (f.first) return f.missing(f.first) ? { get: f.first } : { model: f.first };
+  return f.last && MODELS.includes(f.last) && !f.missing(f.last) ? { model: f.last } : {};
 }
 
 const read = (path: string) => { try { return readFileSync(path, "utf8").trim(); } catch { return ""; } };
@@ -69,15 +71,17 @@ async function start(args: string[], m: Machine, gpus: Found) {
   const tls = tlsPath(), last = read(`${tls}/model`) || undefined, env = { ...process.env, ...serverEnv(m) };
   const missing = (model: string) => { try { return Bun.spawnSync([...getCommand(model, m), "--check"], { cwd: ROOT, env, stdout: "ignore", stderr: "ignore" }).exitCode !== 0; } catch { return true; } };
   const found = gpus(), gpu = found.here;
-  const p = plan({ gpu, roomy: Math.floor(m.memory / 2 ** 30) >= ROOMY_GB, last, first: asked.model, missing });
+  const p = plan({ gpu, last, first: asked.model, missing });
   const run = [...ourScript(existsSync(join(import.meta.dir, "cli.js")) ? join(import.meta.dir, "cli.js") : join(import.meta.dir, "cli.ts")).cmd, "--mode", asked.mode];
   if (!existsSync(join(import.meta.dir, "cli.js")))
     await wait([process.execPath, "install", "--frozen-lockfile"], { cwd: import.meta.dir, env: { ...process.env, BUN_BE_BUN: "1" }, quiet: true });
-  if (p.model) {
+  if (!p) run.push("--no-model", ...(found.why ? [found.why] : []));
+  else {
     mkdirSync(tls, { recursive: true });
-    writeFileSync(`${tls}/model`, p.model);
-    if (p.background) run.push("--get", p.background);
-  } else run.push("--no-model", ...(found.why ? [found.why] : []));
+    if (p.model) writeFileSync(`${tls}/model`, p.model);
+    else rmSync(`${tls}/model`, { force: true });
+    if (p.get) run.push("--get", p.get);
+  }
   const cli = Bun.spawn(run, { cwd: import.meta.dir, env: { ...process.env, ...found.env, BUN_BE_BUN: "1" }, stdio: ["inherit", "inherit", "inherit"] });
   const opener = m.platform === "win32" ? ["cmd", "/c", "start", ""] : HOME !== ROOT ? ["open"] : undefined;
   if (opener && asked.mode !== "insecure") void (async () => {

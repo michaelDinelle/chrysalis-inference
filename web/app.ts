@@ -68,7 +68,7 @@ interface Settings {
   global?: string;
 }
 interface VoiceSettings { tts?: string; name?: string; stt?: string; speed?: number }
-interface Status { state: "online" | "loading" | "offline"; download?: { model: string; done: number; total: number; rate: number }; machine?: string; build?: string; model?: string; loading?: string; progress?: number; context?: number; kv_tokens?: number; cache?: { free_kv_tokens: number };
+interface Status { state: "online" | "loading" | "offline"; got?: string[]; download?: { model: string; done: number; total: number; rate: number }; machine?: string; build?: string; model?: string; loading?: string; progress?: number; context?: number; kv_tokens?: number; cache?: { free_kv_tokens: number };
   check?: boolean; here?: boolean; waiting?: number;
   backend?: Backend; link?: Linking }
 interface Linking { linked?: { name: string }; found: { name: string; fp: string }[]; refused?: string;
@@ -4538,8 +4538,8 @@ let switching: string | undefined;
 const current = () => !onService() ? otherModel() : switching ?? status.loading ?? (status.state === "online" ? status.model : undefined) ?? picked;
 const quick = () => (onChrysalis() ? { model: `${current()}-fast` } : { model: current(), reasoning_effort: "none" });
 
-async function start() {
-  const r = await fetch("/api/chrysalis/start", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ model: picked }) });
+async function start(get = false) {
+  const r = await fetch("/api/chrysalis/start", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ model: picked, ...(get ? { get: true } : {}) }) });
   return r.status === 409 ? ((await r.json().catch(() => ({}))).error?.message as string | undefined) : undefined;
 }
 
@@ -6766,7 +6766,7 @@ function renderControls() {
   if (!modelsOpen) return;
   const pop = $("model-pop");
   const tools = harness.state === "on" && !!harness.home && !conv.messages.some((m) => m.role === "user");
-  const key = JSON.stringify([current(), state, pct, listed(), tools, speechKey()]);
+  const key = JSON.stringify([current(), state, pct, listed(), tools, speechKey(), status.got, status.download && [status.download.model, Math.round(100 * (status.download.total ? status.download.done / status.download.total : 0))]]);
   if (pop.dataset.key === key) return;
   pop.dataset.key = key;
   const withTools = () => {
@@ -6784,12 +6784,18 @@ function renderControls() {
     item.type = "button";
     item.setAttribute("role", "option");
     item.setAttribute("aria-selected", String(on));
-    const mark = h("span", "model-check");
-    if (on && state === "loading") mark.textContent = pct || "…";
+    const absent = !!status.got && !status.got.includes(id), coming = status.download?.model === id;
+    const mark = h("span", absent && !coming ? "model-check model-get" : "model-check");
+    if (coming) mark.textContent = `Downloading ${Math.round(100 * (status.download!.total ? status.download!.done / status.download!.total : 0))}%`;
+    else if (absent) mark.textContent = "Download";
+    else if (on && state === "loading") mark.textContent = pct || "…";
     else if (on) mark.innerHTML = icon("check");
+    item.title = absent ? `Download ${label}, then use it` : label;
     item.append(h("span", "model-label", label), mark);
     item.onclick = () => {
-      if (!on || state === "offline") { picked = id; setPref("model", id); void (state === "offline" ? start().then(() => refreshStatus()) : pickModel(id)); }
+      if (coming) return setModelsOpen(false, true);
+      if (absent) { picked = id; setPref("model", id); void start(true).then(() => refreshStatus()); }
+      else if (!on || state === "offline") { picked = id; setPref("model", id); void (state === "offline" ? start(true).then(() => refreshStatus()) : pickModel(id)); }
       setModelsOpen(false, true);
     };
     return item;

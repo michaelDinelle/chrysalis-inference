@@ -14,7 +14,8 @@ function rows(): Row[] {
   return [
     { label: "Reach", options: ["this computer", "network", "network, unencrypted"], current: core.MODES.indexOf(state.mode), set: (i) => core.setMode(core.MODES[i]) },
     ...(core.HAS_MODEL ? [
-      { label: "Model", options: [...MODEL_NAMES, e.state === "stopped" ? "unloaded" : "unload"], current: e.state === "stopped" ? 2 : core.MODELS.indexOf(e.model),
+      { label: "Model", options: [...MODEL_NAMES.map((name, i) => (state.here.includes(core.MODELS[i]) ? name : state.download?.model === core.MODELS[i] ? `${name} · downloading` : `${name} · download`)), ...(state.none ? [] : [e.state === "stopped" ? "unloaded" : "unload"])],
+        current: e.state === "stopped" ? 2 : state.none ? MODEL_NAMES.length + 1 : core.MODELS.indexOf(e.model),
         set: (i: number) => (i === 2 ? core.unload() : core.setModel(core.MODELS[i])) },
     ] : []),
     { label: "Shows", options: ["requests only", "everything"], current: state.verbose ? 1 : 0, set: (i) => core.setVerbose(i === 1) },
@@ -27,9 +28,8 @@ function rows(): Row[] {
 
 const WINGS = [38, 14] as const, PINK = "#e24d85";
 function Butterfly() {
-  const e = state.engine, d = state.download, { frame } = useAnimation({ interval: 110 });
-  const shown = d ? 0.12 + 0.6 * (d.total ? Math.min(1, d.done / d.total) : 0) : e.state === "loading" ? 0.72 + 0.28 * Math.min(1, e.progress) : 0.72;
-  return <Box flexDirection="column" marginBottom={1}>{butterfly(WINGS[0], WINGS[1], frame * 0.11, shown).map((line, i) => <Text key={i} color={PINK}>{"    "}{line || " "}</Text>)}</Box>;
+  const { frame } = useAnimation({ interval: 110 });
+  return <Box flexDirection="column" marginBottom={1}>{butterfly(WINGS[0], WINGS[1], frame * 0.11).map((line, i) => <Text key={i} color={PINK}>{"    "}{line || " "}</Text>)}</Box>;
 }
 
 function Status() {
@@ -48,6 +48,7 @@ function Status() {
           {d ? <><Text dimColor> · </Text>{d.model} <Text color="magenta">{Math.round(got * 100)}%</Text><Text dimColor> downloaded</Text></> : null}</>
         : e.state === "stopped" ? <><Text color="gray">○</Text> {e.model} <Text dimColor>is unloaded</Text></>
         : !core.HAS_MODEL ? <><Text color="gray">○</Text> <Text dimColor>no model on this computer</Text></>
+        : state.none ? <><Text color="gray">○</Text> <Text dimColor>no model yet · Tab, then Model, downloads one</Text></>
         : starting ? <>{spin} <Text dimColor>the model server is starting</Text></>
         : <><Text color="red">○</Text> <Text dimColor>the model server is not running · restart starts it</Text></>}
       <Text dimColor> · </Text>

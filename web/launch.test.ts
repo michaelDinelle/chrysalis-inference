@@ -6,13 +6,11 @@ import { here } from "./platform";
 
 const none = () => false, all = () => true;
 
-test("a start asks nothing and waits for no download: the model named, else the one last used where it fits, else the 27B; no model where no GPU runs Chrysalis; with room for both, Flash-Next follows the 27B in the background when it is not here", () => {
-  expect(plan({ gpu: false, roomy: true, missing: all })).toEqual({});
-  expect(plan({ gpu: true, roomy: false, missing: all })).toEqual({ model: "qwen3.8-27b" });
-  expect(plan({ gpu: true, roomy: false, last: "qwen3.8-flash-next", missing: all })).toEqual({ model: "qwen3.8-27b" });
-  expect(plan({ gpu: true, roomy: true, missing: all })).toEqual({ model: "qwen3.8-27b", background: "qwen3.8-flash-next" });
-  expect([plan({ gpu: true, roomy: true, missing: none }), plan({ gpu: true, roomy: true, last: "qwen3.8-flash-next", missing: all })]).toEqual([{ model: "qwen3.8-27b" }, { model: "qwen3.8-flash-next" }]);
-  expect(plan({ gpu: true, roomy: false, first: "qwen3.8-flash-next", missing: all })).toEqual({ model: "qwen3.8-flash-next" });
+test("a start asks nothing and downloads nothing by itself: it runs the model last used when that one is here, and none the first time or when it is gone; a model named on the command line is run, and fetched first when it is not here; no GPU, no plan", () => {
+  expect(plan({ gpu: false, last: "qwen3.8-27b", missing: none })).toBeUndefined();
+  expect([plan({ gpu: true, missing: all }), plan({ gpu: true, missing: none })]).toEqual([{}, {}]);
+  expect([plan({ gpu: true, last: "qwen3.8-flash-next", missing: none }), plan({ gpu: true, last: "qwen3.8-flash-next", missing: all }), plan({ gpu: true, last: "other", missing: none })]).toEqual([{ model: "qwen3.8-flash-next" }, {}, {}]);
+  expect([plan({ gpu: true, last: "qwen3.8-27b", first: "qwen3.8-flash-next", missing: none }), plan({ gpu: true, first: "qwen3.8-flash-next", missing: all })]).toEqual([{ model: "qwen3.8-flash-next" }, { get: "qwen3.8-flash-next" }]);
   expect([parse([]), parse(["--host", "0.0.0.0", "--model", "qwen3.8-27b"]), parse(["--insecure"]), parse(["--host", "127.0.0.1"]), parse(["--model", "other"]), parse(["--host"])])
     .toEqual([{ mode: "local" }, { mode: "network", model: "qwen3.8-27b" }, { mode: "insecure" }, { mode: "local" }, undefined, undefined]);
 });

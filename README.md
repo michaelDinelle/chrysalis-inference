@@ -141,8 +141,9 @@ docker run -d --device /dev/kfd --device /dev/dri -p 127.0.0.1:8080:8080 -v chry
 
 **Running Chrysalis**
 
-- Everything stays in Chrysalis's folder. It starts with the model last used, the 27B the first time, and `model` in its
-  terminal or the chat's model button changes it, downloading one that is not here yet. Ctrl+C in its terminal stops it;
+- Everything stays in Chrysalis's folder. It starts with the model last used, and with none the first time: nothing is
+  downloaded until you pick a model, under Model in the terminal's switches (Tab) or in the chat's model menu, and its
+  progress shows in both. Ctrl+C in its terminal stops it;
   `uninstall` there removes its models, its caches and its settings.
 - The terminal shows each request as it finishes, by its sizes and speeds and never its words. Tab opens the switches,
   rows set with the arrows and Enter: where Chrysalis is reachable, the model (or none, which frees the GPU), what the terminal shows,

@@ -872,7 +872,7 @@ img.src = ${JSON.stringify(checkUrl(req))} + "?t=" + Date.now();
           return download ? { state: "loading", build: BUILD(), loading: download.model, progress: download.total ? Math.min(1, download.done / download.total) : undefined } : { state: "offline", build: BUILD() };
         }
       })(), net = fromNetwork(req, srv), found = devices.find(req);
-      const res = Response.json({ ...state, ...(download ? { download } : {}), backend, here: !net, ...(net ? { machine: MACHINE } : {}), ...(found && devices!.stale(found.device) ? { check: true } : {}),
+      const res = Response.json({ ...state, ...(download ? { download } : {}), ...(models ? { got: models.here } : {}), backend, here: !net, ...(net ? { machine: MACHINE } : {}), ...(found && devices!.stale(found.device) ? { check: true } : {}),
         ...(LAN && !net ? { waiting: devices.waiting().length } : {}),
         ...(!net && (state.state === "offline" || link.name || link.pairing) ? { link: link.state() } : {}) });
       if (found) res.headers.append("Set-Cookie", keyCookie(found.key));
@@ -888,6 +888,13 @@ img.src = ${JSON.stringify(checkUrl(req))} + "?t=" + Date.now();
     "/api/chrysalis/start": { POST: guarded(async (req) => {
       if (process.env.CHRYSALIS_ENGINE_HERE === "0" && !link.state().linked)
         return Response.json({ error: { message: "No model runs on this computer and none is linked: Chrysalis's terminal says why no GPU was found" } }, { status: 409 });
+      const asked = await req.clone().json().catch(() => ({}));
+      if (models?.none && !download) {
+        const pick = typeof asked.model === "string" && asked.get === true ? asked.model : "";
+        if (!pick || !process.send) return Response.json({ error: { message: "No model is here yet: choose one from the model menu, or under Model in the terminal's switches, and it downloads" } }, { status: 409 });
+        process.send({ model: pick });
+        return new Response(null, { status: 202 });
+      }
       const model = (await pickModel(req)) ?? (await engineStats().then((r) => r.json()).catch(() => ({}))).model;
       if (model) void engineCall("/chrysalis/load", { model }).catch(() => {});
       return new Response(null, { status: 202 });
@@ -1063,6 +1070,7 @@ if (process.send) {
   process.on("message", (m: any) => {
     if (m?.forget) return void harness.forget();
     if (m && "download" in m) return void (download = m.download ?? undefined);
+    if (m?.models) return void (models = m.models);
     const key = String(m?.answer?.key ?? ""), answer = answers.get(key);
     if (!answer) return;
     answered.add(key);
@@ -1088,6 +1096,7 @@ if (process.send) {
   }, 1000);
 }
 let download: { model: string; done: number; total: number; rate: number } | undefined;
+let models: { here: string[]; none: boolean } | undefined;
 const declined = new Set<string>();
 if (process.env.CHRYSALIS_ENGINE_HERE === "0") setInterval(() => {
   const s = link.state(), to = s.found.find((f) => !declined.has(f.fp));
