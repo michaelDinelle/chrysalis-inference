@@ -1746,10 +1746,16 @@ static size_t nworkers;
 
 static void worker_kill(Worker *w) {
     if (!w->pid) return;
-    kill(-w->pid, SIGKILL);
     close(w->in);
+    kill(-w->pid, SIGTERM);
+    int st, gone = 0;
+    for (double until = now_s() + 30; !gone && now_s() < until;) {
+        gone = waitpid(w->pid, &st, WNOHANG) != 0;
+        if (!gone) poll(NULL, 0, 20);
+    }
+    kill(-w->pid, SIGKILL);
     close(w->out);
-    reap(w->pid);
+    if (!gone) reap(w->pid);
     w->pid = 0;
     w->got.n = 0;
 }
