@@ -22,6 +22,9 @@ test: test_web build/libchrysalis.$(LIB) kernels build/test_sampler $(TEST_BUILD
 	$(PY) tests/test_documents.py
 	$(PY) tests/test_video.py
 	$(BACKEND_TESTS)
+	$(if $(LADDER),$(PY) tests/test_ladder.py qwen3.8-27b $(LADDER))
+
+LADDER := $(if $(filter cuda,$(BACKEND)),8 12 16,$(if $(filter hip,$(BACKEND)),2 3))
 
 test_fn: kernels_fn
 

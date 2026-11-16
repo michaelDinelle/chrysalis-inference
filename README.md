@@ -78,7 +78,7 @@ Every system ends the same way: the terminal shows the chat's address and the mo
 `http://localhost:8081`. The first start downloads 16 GB for the 27B or 117 GB for Flash-Next from
 [Hugging Face](https://huggingface.co/michaelDinelle/chrysalis).
 
-**Windows 11 with an RX 7900 XTX, XT or GRE**
+**Windows 11 with an RX 7900 XTX**
 
 1. Driver: install [AMD Software: Adrenalin Edition](https://www.amd.com/en/support/download/drivers.html) if the card
    has none (Device Manager, Display adapters, shows "AMD Radeon RX 7900" when it does).
@@ -90,7 +90,7 @@ Every system ends the same way: the terminal shows the chat's address and the mo
 <p align="center"><img src="media/windows-setup.png" width="760" alt="Chrysalis's setup on Windows 11, showing the MIT licence, with no administrator prompt"></p>
 <p align="center"><img src="media/windows-run.png" width="760" alt="Chrysalis running in a window on Windows 11 with the model ready, and the chat open in the browser"></p>
 
-**Linux with an RX 7900 XTX, XT or GRE**
+**Linux with an RX 7900 XTX**
 
 1. Driver: none to install. The card runs on the `amdgpu` driver every current distribution ships (`lspci -k` shows
    "Kernel driver in use: amdgpu"), and Chrysalis brings its own ROCm.
@@ -274,7 +274,12 @@ docker run -d --device /dev/kfd --device /dev/dri -p 127.0.0.1:8080:8080 -v chry
   speculative decoding and a prompt cache for agent turns.
 - Flash-Next keeps its most used experts in VRAM. The CPU runs the rest from RAM. On a Mac it keeps them in memory and reads
   the others from the SSD.
-- A small card holds what it can of the 27B and reads the other layers from pinned RAM as it writes.
+- A small NVIDIA card holds what it can of the 27B and reads the other layers from pinned RAM as it writes: with a
+  card's worth of 16, 12 or 8 GB it writes the same tokens as with 24 GB, with about 50K tokens of context. The AMD
+  engine does not do this yet. With 20 GB of an RX 7900's memory free (an RX 7900 XT's worth) it runs the 27B with a
+  112K-token context and the same answers; with 16 GB (a GRE's worth) the 27B does not load, and Flash-Next needs all
+  24 GB. `tests/test_ladder.py` checks this by holding part of the card's memory with another program.
+- Chrysalis uses one GPU, the largest it can run on. A second card is not used.
 - Runs repeat to the bit, and each engine change is checked against the last on every machine.
 
 **How Qwen3.8-Flash-Next was measured**
