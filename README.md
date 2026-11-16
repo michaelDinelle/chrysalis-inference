@@ -74,6 +74,8 @@ downloads.
 
 <p align="center"><img src="media/windows/10-downloading.png" width="620" alt="The switches, always on screen: Reach, Model, a Download row while a model downloads, Shows, Restart, Print and Uninstall, with the download's progress below"></p>
 
+<sub>Chrysalis's terminal, here on Windows, downloading its first model.</sub>
+
 <details><summary>For agents</summary>
 
 **Running Chrysalis**
