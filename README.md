@@ -2,9 +2,6 @@
 
 <h1 align="center">Chrysalis</h1>
 
-<p align="center">Runs Qwen3.8-27B and Qwen3.8-Flash-Next on your own computer, with a web chat and an API.<br>
-For an RX 7900 XTX on Windows or Linux, an NVIDIA RTX card on Linux, or an Apple Silicon Mac.</p>
-
 <p align="center">
   <a href="LICENSE"><img alt="MIT license" src="https://img.shields.io/badge/license-MIT-e24d85"></a>
   <a href="https://x.com/michaeldinelle"><img alt="Follow on X" src="https://img.shields.io/badge/follow-%40michaeldinelle-000?logo=x"></a>
