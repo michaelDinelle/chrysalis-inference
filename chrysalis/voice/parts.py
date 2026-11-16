@@ -1,5 +1,7 @@
 import collections, ctypes, gc, os, re, shutil, sys, tarfile, tempfile, threading, urllib.request
 
+os.environ["ORT_DISABLE_TELEMETRY"] = "1"
+
 import numpy as np
 import onnxruntime as ort
 
