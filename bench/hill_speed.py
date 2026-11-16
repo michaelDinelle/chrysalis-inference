@@ -17,8 +17,20 @@ out = {"load_s": s.load_s}
 specs = {x["id"]: x for x in s.B.load_corpus().specs}
 
 
+profile = {}
+
+
 def record(case, spec, deep_from=None):
+    x0 = s.stats().get("experts") or {}
     raw, stat = s.ask(spec)
+    x1 = s.stats().get("experts") or {}
+    d = {k: x1[k] - x0.get(k, 0) for k in x1 if isinstance(x1[k], (int, float))}
+    steps = max(d.get("decode_steps", 0), 1)
+    profile[case] = {"ms_per_step": 1000 * stat["tokens_per_step"] / stat["decode_tps"], "tokens_per_step": stat["tokens_per_step"],
+                     "pool_hits": d.get("decode_picks_in_pool", 0) / max(d.get("decode_picks", 0), 1),
+                     "cold_picks_per_step": (d.get("decode_picks", 0) - d.get("decode_picks_in_pool", 0)) / steps,
+                     "moves_per_step": d.get("placed", 0) / steps, "from_file_per_step": d.get("placed_file_tier", 0) / steps,
+                     "waited_ms_per_step": 1000 * d.get("waited_s", 0) / steps, "prefill_s": stat["prefill_s"]}
     if deep_from and stat["cached_tokens"] < 0.9 * stat["prompt_tokens"]:
         s.stop()
         sys.exit(f"{name} {case}: the {deep_from} prefix was not restored from the bench snapshots ({stat['cached_tokens']} of {stat['prompt_tokens']} cached)")
@@ -48,4 +60,5 @@ for rival, r in RIVALS["rivals"].items():
         for i, case in enumerate(("short", "4k")):
             out[f"{rival}.ttft.{case}"] = r["ttft"][i] / out[f"ttft.{case}"] if here else None
             out[f"{rival}.decode.{case}"] = out[f"decode_tps.{case}"] / r["tps"][i] if here else None
+json.dump(profile, open(os.path.join(ROOT, "build", "bench", f"profile-{name}.json"), "w"))
 print(json.dumps(out))

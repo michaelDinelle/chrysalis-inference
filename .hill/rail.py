@@ -15,6 +15,19 @@ LEDGER = ".hill/ledger.jsonl"
 VERDICT = re.compile(r"^(?:👑 )?(PROMOTE|REJECT|TIE|REFUSE|ERROR)\b", re.M)
 
 
+PROFILE = """python3 - <<'RAIL_PROFILE'
+import glob, json, os
+for new in sorted(glob.glob("build/bench/profile-*.json")):
+    old = [p for p in glob.glob(".hill/trees/*/" + new) if os.path.getmtime(p) > os.path.getmtime(new) - 3600]
+    if not old:
+        continue
+    a, b = json.load(open(max(old, key=os.path.getmtime))), json.load(open(new))
+    for case in b:
+        if case in a:
+            print("  profile", os.path.basename(new)[8:-5], case, "| " + " | ".join(f"{k} {a[case][k]:.3g} -> {b[case][k]:.3g}" for k in b[case]))
+RAIL_PROFILE"""
+
+
 def git(*args, cwd=ROOT, data=None, env=None, check=True):
     r = subprocess.run(["git", *args], cwd=cwd, input=data, capture_output=True, env={**os.environ, **(env or {})})
     if check and r.returncode:
@@ -63,7 +76,8 @@ def local(patch, ledger, out):
     wrap = ["systemd-run", "--user", "--scope", "-q"] if shutil.which("systemd-run") else []
     wrap += sum((["-E", f"{k}={env[k]}"] for k in ("HIP_VISIBLE_DEVICES", "CUDA_VISIBLE_DEVICES") if k in env and wrap), [])
     r = subprocess.run([*wrap, "sh", ".hill/hill", "gate"], cwd=wt, capture_output=True, text=True, env=env)
-    out["local"] = (r.stdout + r.stderr, [x for x in lines(os.path.join(wt, LEDGER)) if x not in set(ledger)])
+    prof = subprocess.run(["sh", "-c", PROFILE], cwd=wt, capture_output=True, text=True).stdout
+    out["local"] = (r.stdout + r.stderr + prof, [x for x in lines(os.path.join(wt, LEDGER)) if x not in set(ledger)])
 
 
 def remote(m, head, patch, ledger, out):
@@ -86,6 +100,7 @@ cp .hill/ledger.jsonl .hill/rail.before
 git apply --binary --index .hill/rail.patch || exit 8
 rm -f .hill/rail.patch
 sh .hill/hill gate 2>&1
+{PROFILE}
 echo {mark}
 grep -vxFf .hill/rail.before .hill/ledger.jsonl
 rm -f .hill/rail.before
