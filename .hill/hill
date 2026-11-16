@@ -1,5 +1,6 @@
 #!/bin/sh
 d=${0%/*}
+case "$1" in next|step) exec python3 "$d/rail.py" "$@";; esac
 if [ "$d/bin.path" -nt "$d/hill.c" ] && read -r b < "$d/bin.path" && [ -x "$b" ]; then exec "$b" "$@"; fi
 v=$(sha256sum "$d/hill.c" 2>/dev/null || shasum -a 256 "$d/hill.c") || exit 2
 v=${v%% *}

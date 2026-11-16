@@ -55,14 +55,14 @@
       "calibration_blocks": 3,
       "memory_gb": 12,
       "ready": "data/venv/bin/python bench/hill_ready.py 27b",
-      "same": "data/venv/bin/python -c \"import hashlib,os,sys;sys.path.insert(0,'bench');from measure import BACKENDS,MACHINE_BACKEND as M;sk={os.path.join('engine',x) for x in BACKENDS if x!=M}|{os.path.join('chrysalis','voice')}|{os.path.join('engine',M,'flash-next')};fs=sorted(os.path.join(d,n) for t in ('engine','chrysalis') for d,ds,ns in os.walk(t) if not any(d==k or d.startswith(k+os.sep) for k in sk) and '__pycache__' not in d for n in ns)+['Makefile'];h=hashlib.sha256((M+' 27b').encode());[h.update(f.encode()+bytes(1)+open(f,'rb').read()+bytes(1)) for f in fs];print(h.hexdigest())\""
+      "same": "data/venv/bin/python bench/hill_same.py 27b"
     },
     "quality-27b": {
       "run": "data/venv/bin/python bench/hill_quality.py 27b",
       "memory_gb": 12,
       "ready": "data/venv/bin/python bench/hill_ready.py 27b",
       "blocks": 1,
-      "same": "data/venv/bin/python -c \"import hashlib,os,sys;sys.path.insert(0,'bench');from measure import BACKENDS,MACHINE_BACKEND as M;sk={os.path.join('engine',x) for x in BACKENDS if x!=M}|{os.path.join('chrysalis','voice')}|{os.path.join('engine',M,'flash-next')};fs=sorted(os.path.join(d,n) for t in ('engine','chrysalis') for d,ds,ns in os.walk(t) if not any(d==k or d.startswith(k+os.sep) for k in sk) and '__pycache__' not in d for n in ns)+['Makefile'];h=hashlib.sha256((M+' 27b').encode());[h.update(f.encode()+bytes(1)+open(f,'rb').read()+bytes(1)) for f in fs];print(h.hexdigest())\""
+      "same": "data/venv/bin/python bench/hill_same.py 27b"
     },
     "speed-fn": {
       "run": "data/venv/bin/python bench/hill_speed.py fn",
@@ -70,14 +70,14 @@
       "calibration_blocks": 3,
       "memory_gb": 12,
       "ready": "data/venv/bin/python bench/hill_ready.py fn",
-      "same": "data/venv/bin/python -c \"import hashlib,os,sys;sys.path.insert(0,'bench');from measure import BACKENDS,MACHINE_BACKEND as M;sk={os.path.join('engine',x) for x in BACKENDS if x!=M}|{os.path.join('chrysalis','voice')}|{os.path.join('engine',M,'27b')};fs=sorted(os.path.join(d,n) for t in ('engine','chrysalis') for d,ds,ns in os.walk(t) if not any(d==k or d.startswith(k+os.sep) for k in sk) and '__pycache__' not in d for n in ns)+['Makefile'];h=hashlib.sha256((M+' flash-next').encode());[h.update(f.encode()+bytes(1)+open(f,'rb').read()+bytes(1)) for f in fs];print(h.hexdigest())\""
+      "same": "data/venv/bin/python bench/hill_same.py fn"
     },
     "quality-fn": {
       "run": "data/venv/bin/python bench/hill_quality.py fn",
       "memory_gb": 12,
       "ready": "data/venv/bin/python bench/hill_ready.py fn",
       "blocks": 1,
-      "same": "data/venv/bin/python -c \"import hashlib,os,sys;sys.path.insert(0,'bench');from measure import BACKENDS,MACHINE_BACKEND as M;sk={os.path.join('engine',x) for x in BACKENDS if x!=M}|{os.path.join('chrysalis','voice')}|{os.path.join('engine',M,'27b')};fs=sorted(os.path.join(d,n) for t in ('engine','chrysalis') for d,ds,ns in os.walk(t) if not any(d==k or d.startswith(k+os.sep) for k in sk) and '__pycache__' not in d for n in ns)+['Makefile'];h=hashlib.sha256((M+' flash-next').encode());[h.update(f.encode()+bytes(1)+open(f,'rb').read()+bytes(1)) for f in fs];print(h.hexdigest())\""
+      "same": "data/venv/bin/python bench/hill_same.py fn"
     }
   },
   "rewards": {
