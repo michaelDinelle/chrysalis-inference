@@ -30,12 +30,23 @@ Move-Item (Get-ChildItem "$t\python" -Directory -Filter "cpython-3.12.*" | Selec
 $pkgs = (Select-String -Path "$root\chrysalis.sh" -Pattern '^PKGS=\((.*)\)$').Matches[0].Groups[1].Value -split " " | ForEach-Object { $_.Trim('"') }
 & "$t\uv.exe" pip install -q --python "$pkg\data\venv\python.exe" --break-system-packages @pkgs
 if ($LASTEXITCODE) { throw "the Python packages did not install" }
+foreach ($d in "tcl", "include", "libs", "Scripts", "Lib\idlelib", "Lib\tkinter", "Lib\turtledemo", "Lib\lib2to3", "Lib\ensurepip", "Lib\site-packages\pip") { Remove-Item "$pkg\data\venv\$d" -Recurse -Force -ErrorAction SilentlyContinue }
 
 Get-ChildItem "$root\web" -File | Where-Object { $_.Extension -in ".ts", ".tsx", ".html", ".css", ".js", ".svg", ".json", ".lock", ".md" -and $_.Name -notmatch "\.test\.ts$|\.check\.ts$|^fake-|^bench-|-harness\.ts$|^tests\.ts$" } | Copy-Item -Destination "$pkg\web\"
-Push-Location "$pkg\web"
-& $Bun install --frozen-lockfile --production 2>&1 | Out-Null
+Push-Location "$root\web"
+& $Bun install --frozen-lockfile 2>&1 | Out-Null
 if ($LASTEXITCODE) { Pop-Location; throw "the web chat's packages did not install" }
 Pop-Location
+Start-Process $Bun -ArgumentList "build", "server.ts", "cli.ts", "--target=bun", "--production", "--external", "react-devtools-core", "--outdir", "`"$pkg\web`"" -WorkingDirectory "$root\web" -NoNewWindow -Wait -RedirectStandardError "$t\bundle.err" -RedirectStandardOutput "$t\bundle.out"
+if (-not (Test-Path "$pkg\web\cli.js") -or -not (Test-Path "$pkg\web\server.js")) { throw "the web chat did not bundle" }
+foreach ($p in "mermaid\dist\mermaid.esm.min.mjs", "mermaid\dist\chunks\mermaid.esm.min", "aframe\dist\aframe-v1.8.0.min.js", "three\package.json", "three\build", "three\examples\jsm") {
+    New-Item -ItemType Directory -Force (Split-Path "$pkg\web\node_modules\$p") | Out-Null
+    Copy-Item "$root\web\node_modules\$p" "$pkg\web\node_modules\$p" -Recurse
+}
+Get-ChildItem "$pkg\web\node_modules" -Recurse -Filter "*.map" | Remove-Item
+New-Item -ItemType Directory -Force "$pkg\web\node_modules\react-devtools-core" | Out-Null
+'{ "name": "react-devtools-core", "type": "module", "main": "index.js" }' | Out-File -Encoding ascii "$pkg\web\node_modules\react-devtools-core\package.json"
+'export default { initialize() {}, connectToDevTools() {} };' | Out-File -Encoding ascii "$pkg\web\node_modules\react-devtools-core\index.js"
 Add-Type -AssemblyName PresentationCore
 $svg = [xml](Get-Content -Raw "$root\web\logo.svg")
 $box = $svg.svg.viewBox -split " " | ForEach-Object { [double]$_ }
@@ -69,6 +80,22 @@ foreach ($p in $pngs) { $ico.Write($p) }
 $ico.Close()
 & $Bun build --compile --windows-icon="$t\chrysalis.ico" --windows-title=Chrysalis --windows-description=Chrysalis --windows-publisher="Chrysalis Inference" "$root\web\launch.ts" --outfile "$pkg\Chrysalis.exe" 2>&1 | Out-Null
 if (-not (Test-Path "$pkg\Chrysalis.exe")) { throw "Chrysalis.exe did not build" }
+$res = Add-Type -PassThru -Name Res -Namespace Chrysalis -MemberDefinition @'
+[DllImport("kernel32", CharSet = CharSet.Unicode, SetLastError = true)] public static extern IntPtr BeginUpdateResource(string file, bool wipe);
+[DllImport("kernel32", CharSet = CharSet.Unicode, SetLastError = true)] public static extern bool UpdateResource(IntPtr update, IntPtr type, string name, ushort language, byte[] data, uint size);
+[DllImport("kernel32", SetLastError = true)] public static extern bool EndUpdateResource(IntPtr update, bool discard);
+'@
+$group = [IO.MemoryStream]::new()
+$g = [IO.BinaryWriter]::new($group)
+$g.Write([uint16]0); $g.Write([uint16]1); $g.Write([uint16]$sizes.Count)
+for ($i = 0; $i -lt $sizes.Count; $i++) {
+    $g.Write([byte]($sizes[$i] % 256)); $g.Write([byte]($sizes[$i] % 256)); $g.Write([uint16]0); $g.Write([uint16]1); $g.Write([uint16]32)
+    $g.Write([uint32]$pngs[$i].Length); $g.Write([uint16]($i + 1))
+}
+$update = $res::BeginUpdateResource("$pkg\Chrysalis.exe", $false)
+if (-not ($res::UpdateResource($update, [IntPtr]14, "IDI_MYICON", 1033, $group.ToArray(), $group.Length) -and $res::EndUpdateResource($update, $false))) { throw "Chrysalis.exe's icon was not set" }
+& "$pkg\Chrysalis.exe" help | Out-Null
+if ($LASTEXITCODE) { throw "Chrysalis.exe does not run" }
 if (-not $Version -and (Get-Command git -ErrorAction SilentlyContinue)) { $Version = git -C $root describe --tags --always 2>$null }
 if ($Version) { $Version | Out-File -Encoding ascii "$pkg\VERSION" }
 $iscc = "$env:LOCALAPPDATA\Programs\Inno Setup 6\ISCC.exe"
