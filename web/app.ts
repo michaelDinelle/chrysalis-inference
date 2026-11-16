@@ -739,6 +739,7 @@ async function loadThreads() {
   if (harness.home && !conv.thread && !conv.messages.some((m) => m.role === "user") && !runs.get(conv.id) && pref("tools", "on") === "on") { conv.thread = conv.incognito ? hiddenThread() : freshThread(); renderControls(); }
   const t = runs.get(conv.id) ? undefined : now(conv);
   if (t && !voice && (t.job ? !conv.messages.some((m) => m.job === t.job) : t.idle !== (conv.thread!.at ?? t.idle))) showThread(t.id);
+  if (harness.state === "off" && harness.wanted) void ensureHarness().catch(() => { harness.wanted = false; if (!$("oc-pop").hidden && !ocAt) void paintOcPop(); });
 }
 async function sentFile(key: string, f: { name: string; type: string; data: string }, keep: boolean): Promise<Attachment> {
   const bytes = Uint8Array.from(atob(f.data), (ch) => ch.charCodeAt(0)), kind = f.type.startsWith("image/") ? "image" : f.type === "application/pdf" ? "pdf" : "text";
@@ -1076,13 +1077,16 @@ async function setOutside(on: boolean) {
   await loadThreads();
   if (!$("oc-pop").hidden && !ocAt) void paintOcPop();
 }
-async function ensureHarness() {
-  if (harness.state === "on" && harness.models?.length) return;
-  if (harness.state !== "on") {
-    const started = await fetch("/api/threads", { method: "POST" }).catch(() => null);
-    if (!started?.ok) throw new Error((await started?.json().catch(() => null))?.error?.message ?? "OpenCode did not start");
-  }
-  await loadThreads();
+let ensuring: Promise<void> | undefined;
+function ensureHarness(): Promise<void> {
+  if (harness.state === "on" && harness.models?.length) return Promise.resolve();
+  return (ensuring ??= (async () => {
+    if (harness.state !== "on") {
+      const started = await fetch("/api/threads", { method: "POST" }).catch(() => null);
+      if (!started?.ok) throw new Error((await started?.json().catch(() => null))?.error?.message ?? "OpenCode did not start");
+    }
+    await loadThreads();
+  })().finally(() => { ensuring = undefined; }));
 }
 async function openHarness() {
   const pop = $("oc-pop"), r = $("opencode").getBoundingClientRect();
@@ -7425,7 +7429,7 @@ $("outside-keep").onclick = () => $<HTMLDialogElement>("outside-view").close();
 $("outside-allow").onclick = () => { $<HTMLDialogElement>("outside-view").close(); void setOutside(true); };
 $("opencode").onclick = () => void openHarness();
 paintHarness();
-void loadThreads().then(() => { if (harness.state === "off" && harness.wanted) void ensureHarness().catch(() => {}); });
+void loadThreads();
 addEventListener("focus", () => { if (harness.state === "on") void loadThreads(); });
 setInterval(() => { if (harness.state === "on" && !document.hidden) void loadThreads(); }, 3000);
 $("connect-close").innerHTML = icon("x");

@@ -998,6 +998,7 @@ harness.routeModel(`http://127.0.0.1:${server.port}/opencode/${MODEL_KEY}`, (u) 
   } catch { return false; }
 });
 const secure = LAN || OPEN ? lanAddresses().map((ip) => serve(ip, server.port!)) : [];
+if (process.env.CHRYSALIS_OPENCODE_ON) void harness.ensure(CHRYSALIS).catch((e) => tell({ note: `OpenCode did not start again: ${(e as Error).message}` }));
 let checkPort = Number(process.env.CHRYSALIS_CHECK_PORT ?? 8083);
 const checks = (LAN ? lanAddresses() : []).map((ip) => {
   const s = Bun.serve({ hostname: ip, port: checkPort, tls: tls().check, fetch: checkFetch });

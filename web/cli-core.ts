@@ -185,7 +185,7 @@ function engineLine(l: string): boolean {
 }
 
 
-let engineSvc: Service, webSvc: Service;
+let engineSvc: Service, webSvc: Service, opencodeOn = false;
 function engineSpawn() {
   const env = { ...process.env, ...serverEnv() };
   return Bun.spawn(scoped(engineCmd()), { cwd: ROOT, stdin: "ignore", stdout: "pipe", stderr: "pipe",
@@ -196,7 +196,7 @@ engineSvc = new Service("model server", engineSpawn, (l) => { const took = engin
 const web = ourScript(WEB_FILE);
 webSvc = new Service("web chat", () => Bun.spawn(scoped(web.cmd), {
   cwd: import.meta.dir, stdin: "ignore", stdout: "pipe", stderr: "pipe",
-  env: { ...process.env, ...web.env, NODE_ENV: "production", PORT, CHRYSALIS_ENGINE_HERE: HAS_MODEL ? "1" : "0", CHRYSALIS_HOST: state.mode === "local" ? "127.0.0.1" : "0.0.0.0", CHRYSALIS_INSECURE: state.mode === "insecure" ? "1" : "" },
+  env: { ...process.env, ...web.env, NODE_ENV: "production", PORT, CHRYSALIS_ENGINE_HERE: HAS_MODEL ? "1" : "0", CHRYSALIS_HOST: state.mode === "local" ? "127.0.0.1" : "0.0.0.0", CHRYSALIS_INSECURE: state.mode === "insecure" ? "1" : "", CHRYSALIS_OPENCODE_ON: opencodeOn ? "1" : "" },
   ipc: heard,
 }), () => false, () => { state.web = undefined; state.questions = []; state.veiled = 0; hidden(false); });
 
@@ -292,6 +292,12 @@ export async function setMode(to: Mode) {
   if (to === state.mode) return;
   if (to !== "local" && ui.live) await ui.suspend(() => letIn(to));
   state.mode = to;
+  await restartWeb();
+}
+
+async function restartWeb() {
+  const got = await fetch(`${here()}/api/threads`).then((r) => r.json()).catch(() => null);
+  opencodeOn = got?.state === "on" || (opencodeOn && !!got?.wanted);
   await webSvc.restart();
 }
 
@@ -351,7 +357,7 @@ export function forget() {
 
 export async function restart(part: string) {
   if (part !== "web" && HAS_MODEL) await engineSvc.restart();
-  if (part !== "model") await webSvc.restart();
+  if (part !== "model") await restartWeb();
 }
 
 const scan = (url: string) => qrText(url).split("\n").map((l) => `  ${l}`).join("\n");

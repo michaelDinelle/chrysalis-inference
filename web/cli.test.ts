@@ -266,6 +266,42 @@ test("an incognito thread runs on a second OpenCode that keeps its database in m
   }
 }, 90_000);
 
+test("OpenCode connected before network and then local, or before restart web, runs again in the web chat that starts after, and a new thread reaches the model there", async () => {
+  const bin = `${tmpdir()}/chrysalis-cli-again-${process.pid}`, pids = `${tmpdir()}/chrysalis-cli-again-${process.pid}.pids`;
+  writeFileSync(bin, `#!/bin/sh\nexec ${process.execPath} ${import.meta.dir}/fake-opencode-bin.ts "$@"\n`);
+  chmodSync(bin, 0o755);
+  const c = chrysalis({ env: { CHRYSALIS_OPENCODE: bin, FAKE_OPENCODE_PIDS: pids } }), work = `${c.dir}/work`;
+  mkdirSync(work);
+  const opencode = async () => (await (await fetch(`${c.here}/api/threads`)).json()).state;
+  const say = async (text: string) => {
+    const t0 = Date.now(), r = await fetch(`${c.here}/api/chat`, { method: "POST", headers: json, body: JSON.stringify({ stream: true, chrysalis_thread: { dir: work, text, title: text, model: "chrysalis/qwen3.8-27b" } }) }), sent = await r.text();
+    return [r.status, sent.includes('"error"'), sent.trimEnd().endsWith("[DONE]"), Date.now() - t0 < 10_000] as const;
+  };
+  const back = async (cmd: string) => {
+    const at = c.mark();
+    c.type(`${cmd}\n`);
+    await c.shown(/chat\s+http:\/\/localhost:\d+/, at);
+    for (const end = Date.now() + 15_000; Date.now() < end; await Bun.sleep(50)) if ((await opencode().catch(() => "")) === "on") return "on";
+    return opencode();
+  };
+  try {
+    await c.shown(/chat\s+http:\/\/localhost:\d+/);
+    expect((await fetch(`${c.here}/api/threads`, { method: "POST" })).status).toBe(200);
+    expect(await say("before the switch")).toEqual([200, false, true, true]);
+    const at = c.mark();
+    c.type("network\n");
+    await c.shown(/phone\s+https:/, at);
+    expect(await back("local")).toBe("on");
+    expect(await say("after the switch")).toEqual([200, false, true, true]);
+    expect(await back("restart web")).toBe("on");
+    expect(await say("after the restart")).toEqual([200, false, true, true]);
+  } finally {
+    await c.stop();
+    rmSync(bin, { force: true });
+    rmSync(pids, { force: true });
+  }
+}, 90_000);
+
 test("OpenCode, the ordinary one and the incognito one, ends with the web server that started it, even when the web server is killed outright", async () => {
   const dir = mkdtempSync(`${tmpdir()}/chrysalis-kept-`), bin = `${dir}/opencode`, pids = `${dir}/pids`, work = `${dir}/work`;
   writeFileSync(bin, `#!/bin/sh\nexec ${process.execPath} ${import.meta.dir}/fake-opencode-bin.ts "$@"\n`);
