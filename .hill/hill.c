@@ -2183,7 +2183,7 @@ static void start_remotes(const char *sha) {
         fprintf(f, "%s\ncd %s%s && .hill/hill step --remote %s\n", jtext_or(m, "pre", ""), strncmp(dir, "~/", 2) ? "" : "~/",
                 quoted(strncmp(dir, "~/", 2) ? dir : dir + 2), sha);
         fclose(f);
-        bprintf(&cmd, " < %s", quoted(script));
+        bprintf(&cmd, " < %s >&2", quoted(script));
         Remote *r = &remotes[nremotes++];
         r->name = strdup(name);
         r->out = fmtstr("%s/%s.out", logs_dir(), name);
