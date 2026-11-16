@@ -469,6 +469,24 @@ test("OpenCode, the ordinary one and the incognito one, ends with the web server
   }
 }, 60_000);
 
+test("with no model here yet, OpenCode still connects at once and is given Chrysalis's models, so its threads list and open; a model is needed only to send", async () => {
+  const empty = mkdtempSync(`${tmpdir()}/chrysalis-oc-none-`), bin = `${empty}/opencode`;
+  writeFileSync(bin, `#!/bin/sh\nexec ${process.execPath} ${import.meta.dir}/fake-opencode-bin.ts "$@"\n`);
+  chmodSync(bin, 0o755);
+  const c = chrysalis({ env: { CHRYSALIS_ENGINE_CMD: "", CHRYSALIS_HOME: empty, CHRYSALIS_OPENCODE: bin } });
+  try {
+    await c.shown("No model is here yet");
+    await c.shown(/chat\s+http:\/\/localhost:\d+/);
+    const started = await Promise.race([fetch(`${c.here}/api/threads`, { method: "POST" }).then((r) => r.status), Bun.sleep(15_000).then(() => "never")]);
+    expect(started).toBe(200);
+    const on = await (await fetch(`${c.here}/api/threads`)).json();
+    expect([on.state, on.models.map((m: { id: string }) => m.id)]).toEqual(["on", ["chrysalis/qwen3.8-27b", "chrysalis/qwen3.8-flash-next"]]);
+  } finally {
+    await c.stop();
+    rmSync(empty, { recursive: true, force: true });
+  }
+}, 60_000);
+
 test("OpenCode started from the page before the model server answers waits for it and is given every model it lists, so the first message of a chat has Chrysalis's models", async () => {
   const engine = freePort(), bin = `${tmpdir()}/chrysalis-cli-opencode-early-${process.pid}`;
   writeFileSync(bin, `#!/bin/sh\nexec ${process.execPath} ${import.meta.dir}/fake-opencode-bin.ts "$@"\n`);

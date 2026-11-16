@@ -1103,6 +1103,7 @@ if (process.send) {
 }
 let download: { model: string; done: number; total: number; rate: number; paused?: boolean } | undefined;
 let models: { here: string[]; none: boolean } | undefined;
+harness.whenEngineComing(() => process.env.CHRYSALIS_ENGINE_HERE === "1" && (models === undefined || (!models.none && !download)));
 const declined = new Set<string>();
 if (process.env.CHRYSALIS_ENGINE_HERE === "0") setInterval(() => {
   const s = link.state(), to = s.found.find((f) => !declined.has(f.fp));

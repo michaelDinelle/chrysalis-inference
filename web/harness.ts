@@ -2,7 +2,7 @@ import { existsSync, mkdirSync, mkdtempSync, readdirSync, rmSync } from "node:fs
 import { homedir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { sessionContextBreakdown, type SessionContextBreakdownSegment } from "./breakdown";
-import { keep, noCores, ramDrop, ramRoot, release, type Kept } from "./platform";
+import { keep, MODELS, noCores, ramDrop, ramRoot, release, type Kept } from "./platform";
 
 export type Decision = "once" | "always" | "deny";
 export interface Scene { cast: string[]; cards?: object[]; group?: string; scenario?: string; name?: string; greeting?: string; greeter?: string }
@@ -146,14 +146,16 @@ async function freePort() {
   return port;
 }
 
+let engineComing = () => process.env.CHRYSALIS_ENGINE_HERE === "1";
+export const whenEngineComing = (coming: () => boolean) => { engineComing = coming; };
 async function ourModels(chrysalis: string) {
   let listed;
   for (;;) {
-    listed = await fetch(`${chrysalis}/v1/models`).then((r) => r.json().catch(() => ({ data: [] })), () => undefined);
-    if (listed || process.env.CHRYSALIS_ENGINE_HERE !== "1") break;
+    listed = await fetch(`${chrysalis}/v1/models`).then((r) => r.json().catch(() => undefined), () => undefined);
+    if (listed?.data?.length || !engineComing()) break;
     await Bun.sleep(150);
   }
-  return Object.fromEntries((listed?.data ?? []).filter((m: any) => typeof m?.id === "string" && !m.id.endsWith("-fast")).map((m: any) => [m.id, { variants: THINKING, capabilities: { input: ["text", "image", "pdf"] },
+  return Object.fromEntries((listed?.data?.length ? listed.data : MODELS.map((id) => ({ id }))).filter((m: any) => typeof m?.id === "string" && !m.id.endsWith("-fast")).map((m: any) => [m.id, { variants: THINKING, capabilities: { input: ["text", "image", "pdf"] },
     ...(m.context_length > 0 ? { limit: { context: m.context_length, output: 32768 } } : {}) }]));
 }
 export const awayConfig = async (chrysalis: string) => ({ enabled_providers: ["chrysalis"],
