@@ -70,8 +70,9 @@ Start Chrysalis with `chrysalis.sh --host 0.0.0.0`. The other computer needs [Op
 2. Download [Chrysalis-Setup.exe](https://github.com/michaelDinelle/chrysalis-inference/releases/latest/download/Chrysalis-Setup.exe)
    and double-click it. Windows asks once whether to run a program whose publisher it does not know: Run.
 3. Go through the setup. It installs for you alone, with no administrator prompt, adds Chrysalis to the Start menu and
-   starts it when it finishes. Uninstalling it, from Windows' apps list or with `uninstall` in its terminal, removes
-   everything: the models, its caches and its settings.
+   starts it when it finishes. Run again, the setup offers to update or uninstall. Uninstalling, from there, from
+   Windows' apps list, the Start menu or the Uninstall row in its terminal, removes everything: the models, its caches
+   and its settings.
 
 <p align="center"><img src="media/windows-setup.png" width="760" alt="Chrysalis's setup on Windows 11, showing the MIT licence, with no administrator prompt"></p>
 <p align="center"><img src="media/windows-run.png" width="760" alt="Chrysalis running in a window on Windows 11 with the model ready, and the chat open in the browser"></p>

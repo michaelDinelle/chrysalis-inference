@@ -36,6 +36,7 @@ Source: "{#Root}\data\models\*"; DestDir: "{app}\data\models"; Flags: ignorevers
 [Icons]
 Name: "{autoprograms}\Chrysalis"; Filename: "{app}\Chrysalis.exe"; WorkingDir: "{app}"
 Name: "{autodesktop}\Chrysalis"; Filename: "{app}\Chrysalis.exe"; WorkingDir: "{app}"; Tasks: desktopicon
+Name: "{autoprograms}\Uninstall Chrysalis"; Filename: "{uninstallexe}"
 
 [Run]
 Filename: "{app}\Chrysalis.exe"; WorkingDir: "{app}"; Description: "{cm:LaunchProgram,Chrysalis}"; Flags: nowait postinstall skipifsilent
@@ -43,3 +44,26 @@ Filename: "{app}\Chrysalis.exe"; WorkingDir: "{app}"; Description: "{cm:LaunchPr
 [UninstallDelete]
 Type: filesandordirs; Name: "{app}"
 Type: filesandordirs; Name: "{%USERPROFILE}\.config\chrysalis"
+
+[Code]
+const
+  Entry = 'Software\Microsoft\Windows\CurrentVersion\Uninstall\{B788DC7D-373F-4C2B-820D-9525017A82D2}_is1';
+
+function InitializeSetup(): Boolean;
+var
+  Uninstaller: String;
+  Code: Integer;
+begin
+  Result := True;
+  if WizardSilent or not (RegQueryStringValue(HKCU, Entry, 'UninstallString', Uninstaller) or RegQueryStringValue(HKLM, Entry, 'UninstallString', Uninstaller)) then
+    Exit;
+  case TaskDialogMsgBox('Chrysalis is already on this computer', 'Update it to this version and keep its models, or uninstall it: that removes Chrysalis with its models, its caches and its settings.', mbConfirmation, MB_YESNOCANCEL, ['Update', 'Uninstall', 'Cancel'], 0) of
+    IDNO:
+      begin
+        Exec(RemoveQuotes(Uninstaller), '', '', SW_SHOW, ewNoWait, Code);
+        Result := False;
+      end;
+    IDCANCEL:
+      Result := False;
+  end;
+end;

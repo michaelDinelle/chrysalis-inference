@@ -170,7 +170,7 @@ test("with no model here the terminal starts none and downloads none: it says wh
   }
 }, 60_000);
 
-test("the switches are on screen from the start with the arrows live and Model highlighted: with no model here, Enter downloads the 27B, and right then Enter the other one, with no key pressed to open anything", async () => {
+test("the switches are on screen from the start with the arrows live and Model highlighted: with no model here, Enter downloads the 27B, and right then Enter the other one, with no key pressed to open anything; Uninstall is a row there too, and asks before it removes anything", async () => {
   for (const [keys, model] of [[["\r"], "qwen3.8-27b"], [[RIGHT, "\r"], "qwen3.8-flash-next"]] as const) {
     const empty = mkdtempSync(`${tmpdir()}/chrysalis-pick-`), c = chrysalis({ pty: true, env: { CHRYSALIS_ENGINE_CMD: "", CHRYSALIS_HOME: empty, LINES: "50", COLUMNS: "120" } });
     try {
@@ -178,7 +178,13 @@ test("the switches are on screen from the start with the arrows live and Model h
       await c.shown("Enter sets it");
       await c.shown("no model yet");
       expect(c.out()).not.toContain("is downloading");
-      await c.press(...keys);
+      await c.shown(/Uninstall\s+remove Chrysalis, its models and its settings/);
+      await c.press(UP, UP, "\r");
+      await c.shown("Remove Chrysalis from this computer, with its models, its caches and its settings?");
+      c.type("n\r");
+      await c.shown("nothing was removed");
+      expect(c.out()).not.toContain("is downloading");
+      await c.press(DOWN, DOWN, ...keys);
       await c.shown(`${model} is downloading`);
     } finally {
       await c.stop();

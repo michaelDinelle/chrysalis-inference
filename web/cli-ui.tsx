@@ -23,11 +23,12 @@ function rows(): Row[] {
     ...(state.opencode ? [{ label: "OpenCode", options: ["Chrysalis's models only", "outside models too"], current: state.opencode.outside ? 1 : 0, set: (i: number) => core.setOutside(i === 1) }] : []),
     { label: "Restart", options: ["model server", "web chat", "both"], current: -1, set: (i) => core.restart(["model", "web", ""][i]) },
     { label: "Print", options: ["addresses", "QR code", "OpenCode line"], current: -1, set: (i) => [core.links, core.qr, core.opencodeLine][i]() },
+    { label: "Uninstall", options: ["remove Chrysalis, its models and its settings"], current: -1, set: () => core.submit("uninstall") },
   ];
 }
 
-const PINK = "#ff6fa5", ROSE = "#b04a72", SIZES = [[64, 23], [46, 17], [33, 12]] as const, BELOW = 12;
-const wings = (rows = process.stdout.rows ?? 0, cols = process.stdout.columns ?? 0) => SIZES.find(([w, h]) => rows > h + BELOW && cols >= w + 8);
+const PINK = "#ff6fa5", ROSE = "#b04a72", SIZES = [[64, 23], [46, 17], [33, 12]] as const;
+const wings = (below: number, rows = process.stdout.rows ?? 0, cols = process.stdout.columns ?? 0) => SIZES.find(([w, h]) => rows > h + below && cols >= w + 8);
 function Butterfly({ size }: { size: readonly [number, number] }) {
   const { frame } = useAnimation({ interval: 110 });
   return (
@@ -152,7 +153,7 @@ function App() {
   });
 
   const asking = [...state.asks, ...state.questions], row = Math.min(ed.row, all.length - 1);
-  const waking = core.HAS_MODEL && !state.woke, size = wings();
+  const waking = core.HAS_MODEL && !state.woke, size = wings(all.length + asking.length + 5);
   useEffect(() => {
     if (state.woke && size) ui.log(`\n${butterfly(size[0], size[1], -9).map((line) => `    ${pink(line)}`).join("\n")}\n`);
   }, [state.woke]);
