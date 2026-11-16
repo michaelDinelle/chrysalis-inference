@@ -25,18 +25,19 @@ for name in ("fn", "27b"):
         sys.exit(f"priming the {name} bench snapshots: {(ready.stdout + ready.stderr).strip()}")
     shutil.rmtree(folder, ignore_errors=True)
     s = Server(name, env=["CHRYSALIS_BENCH_PRIME=1"])
-    for case, (doc, _) in DOCS.items():
-        s.ask({"id": f"prime-{case}", "messages": primed(doc), "max_output_tokens": 1, "seed": 1})
-    seen, still, deadline = None, 0, time.monotonic() + 1800
-    while still < 15:
-        now = sorted(glob.glob(os.path.join(folder, "*")))
-        settled = now == seen and not any(p.endswith(".tmp") for p in now) and sum(p.endswith(".snap") for p in now) >= 2 * len(DOCS)
-        still, seen = still + 1 if settled else 0, now
-        if time.monotonic() > deadline:
-            s.stop()
-            sys.exit(f"the {name} bench snapshots were not written")
-        time.sleep(0.2)
-    s.stop()
+    try:
+        for case, (doc, _) in DOCS.items():
+            s.ask({"id": f"prime-{case}", "messages": primed(doc), "max_output_tokens": 1, "seed": 1})
+        seen, still, deadline = None, 0, time.monotonic() + 1800
+        while still < 15:
+            now = sorted(glob.glob(os.path.join(folder, "*")))
+            settled = now == seen and not any(p.endswith(".tmp") for p in now) and sum(p.endswith(".snap") for p in now) >= 2 * len(DOCS)
+            still, seen = still + 1 if settled else 0, now
+            if time.monotonic() > deadline:
+                sys.exit(f"the {name} bench snapshots were not written")
+            time.sleep(0.2)
+    finally:
+        s.stop()
     open(mark, "w").close()
 lib = "dylib" if MAC else "so"
 for kept, sources, warm in ((os.path.basename(LT_CACHE), (f"build/libchrysalis.{lib}", f"build/libchrysalis_fn.{lib}", "chrysalis/engine.py"), "27b"),

@@ -129,9 +129,10 @@ loses. One model holds the GPU at a time. A check whose `depends` fingerprint (b
 model's engine is built from on this machine) is the same on both sides is not run, so a Flash-Next change never
 measures the 27B and a Mac never measures code it does not build. Chrysalis's own model server has to be stopped while
 a judge measures: bench/hill_ready.py refuses to start while anything else holds the GPU or free memory is short. Deep
-context is restored from snapshots primed once per machine. The machines are the RX 7900 here, the M4 Max on studio and,
-for as long as it is rented, the RTX 3090 on vast.ai (with a Xeon W-2133), which judges every change under engine/cuda
-and engine/gpu. The RTX 5070 rented there was destroyed on 2026-11-11: its verdicts stay in the ledger. The hook
+context is restored from snapshots primed once per machine. The machines are the RX 7900 here and the M4 Max on studio. No
+NVIDIA machine is rented now: the RTX 3090 on vast.ai (with a Xeon W-2133) was given back on 2026-11-16 and the RTX
+5070 on 2026-11-11, and their verdicts stay in the ledger. A change under engine/cuda, or one that changes what the
+NVIDIA build of engine/gpu compiles to, waits until one is rented again. The hook
 (`git config core.hooksPath .githooks`) holds any commit made another way to the same verdicts.
 
 ## Comments
