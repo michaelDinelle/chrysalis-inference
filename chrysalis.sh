@@ -184,7 +184,7 @@ native() {
 case "${1:-}" in
   ""|--host|--insecure|--model)
             if [ -n "$MAC" ]; then
-                codesign -v "$APP" 2>/dev/null || codesign --force -s - "$APP" 2>/dev/null
+                [ ! -e "$APP" ] || codesign -v "$APP" 2>/dev/null || codesign --force -s - "$APP" 2>/dev/null
             fi
             setup
             build
