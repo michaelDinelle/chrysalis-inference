@@ -1830,7 +1830,17 @@ static char *last_line(char *text, size_t n) {
 
 static J *last_detail, *cand_detail;
 
+static int caller_fd = -1;
+
+static void caller_here(void) {
+    if (caller_fd < 0) return;
+    struct pollfd p = {caller_fd, POLLIN, 0};
+    char c;
+    if (poll(&p, 1, 0) > 0 && recv(caller_fd, &c, 1, MSG_PEEK | MSG_DONTWAIT) == 0) stop("ERROR", "the step's caller left, so the step ends");
+}
+
 static J *run_inst(Spec *s, const char *name, const char *tree, const char *side) {
+    caller_here();
     J *inst = jget(jget(s->spec, "instruments"), name);
     J *need = jget(inst, "memory_gb");
     if (jnum(need) && jd(need) != 0 && available_gb() < jd(need)) {
@@ -2435,7 +2445,8 @@ static void serve_one(int c) {
         fflush(stdout);
         fprintf(stderr, "%s: %s\n", stop_kind, stop_text);
     } else
-        code = step(jtext(jget(req, "message")), jtext(jget(req, "sha")));
+        caller_fd = c, code = step(jtext(jget(req, "message")), jtext(jget(req, "sha")));
+    caller_fd = -1;
     if (!setjmp(stop_env)) end_step();
     fflush(stdout);
     fflush(stderr);
