@@ -70,7 +70,8 @@ def speed(s, load):
             for i, case in enumerate(("short", "4k")):
                 out[f"{rival}.ttft.{case}"] = r["ttft"][i] / out[f"ttft.{case}"] if here else None
                 out[f"{rival}.decode.{case}"] = out[f"decode_tps.{case}"] / r["tps"][i] if here else None
-    s.renew()
+    if name == "27b":
+        s.renew()
     return out, profile
 
 
@@ -103,15 +104,23 @@ def serve():
     ready = subprocess.run([PY, os.path.join(ROOT, "bench/hill_ready.py"), name], capture_output=True, text=True)
     if ready.returncode:
         sys.exit((ready.stdout + ready.stderr).strip())
-    start = time.monotonic()
-    sampler = Sampler()
-    s = Server(name)
-    try:
+    runs = {f"speed-{name}": speed, f"quality-{name}": quality}
+    held = []
+
+    def loaded():
+        start = time.monotonic()
+        sampler = Sampler()
+        s = Server(name)
+        held.append(s)
         load = {"load_s": s.load_s, "ram_gb": s.peak_ram_gb(), "mem_limited": (s.stats().get("experts") or {}).get("memory_limited")}
         load.update(sampler.stop())
         load["run_s"] = time.monotonic() - start
-        runs = {f"speed-{name}": speed, f"quality-{name}": quality}
-        speed(s, load)
+        return s, load
+
+    try:
+        if name == "27b":
+            s, load = loaded()
+            speed(s, load)
         send({"ready": True})
         for line in sys.stdin:
             words = line.split()
@@ -120,11 +129,16 @@ def serve():
             if words[0] != "run" or len(words) != 2 or words[1] not in runs:
                 sys.exit(f"worker {name}: unknown command {line.strip()!r}")
             t = time.monotonic()
+            if name != "27b":
+                s, load = loaded()
             out, detail = runs[words[1]](s, load)
+            if name != "27b":
+                held.pop().stop()
             out["detail"] = {**detail, "seconds": time.monotonic() - t}
             send(out)
     finally:
-        s.stop()
+        for s in held:
+            s.stop()
 
 
 signal.signal(signal.SIGTERM, lambda *_: sys.exit(1))
