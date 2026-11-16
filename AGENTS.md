@@ -6,6 +6,16 @@ before touching anything and climb by it: choose a target, profile it, change on
 on every machine with a record, and report each verdict's table. It is not optional, and no task is too small or too
 urgent for it.
 
+**Plan, clock, work.** The answer to a task is the plan and then the work; no sentence questions whether it can be
+done. Before starting, measure what is there in one call and write the plan as steps with a due time each, sized from
+how long such steps have taken here; a time budget is a floor to beat. Read the clock before every tool call, and cut or
+re-plan a step the moment it is late. Run independent work side by side, one track per machine or set of files, the
+slowest machine first, and tell every helper its files, its deadline and when it may use the CPU or the GPU. Prove a
+change by the cheapest proof that settles it: the same preprocessed or compiled code first, the same output next, the
+gate's paired timing last. When the same reward is rejected twice, profile that case before changing anything again.
+While a gate runs in a checkout, change and commit nothing there; do side work in a worktree under ~/.cache, never
+under /tmp, which is RAM. A candidate that ties or loses is kept under refs/candidates with its verdict in the message.
+
 **No guessed time limits and no fixed sleeps.** Never wrap a job in an arbitrary `timeout`, and never wait with a fixed
 `sleep`: both either cut real work short or burn wall clock doing nothing. Run a long job in the background and act when
 it completes; when something must wait, wait on the condition itself (the GPU reads empty, a file exists, a process has
