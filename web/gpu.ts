@@ -9,7 +9,7 @@ export function pick(env: Record<string, string | undefined> = process.env, pick
     const p = Bun.spawnSync([picker], { stdin: "ignore", stdout: "pipe", stderr: "pipe", env: env as Record<string, string> });
     if (p.exitCode === 0) return { env: Object.fromEntries([...p.stdout.toString().matchAll(/^([A-Z_]+)=(.*?)\r?$/gm)].map((m) => [m[1], m[2]])) };
     const said = p.stderr.toString().trim().split(/\r?\n/).pop()!.replace(/^chrysalis: /, "");
-    return { why: said || (p.exitCode! >>> 0 === 0xc0000135 ? "AMD's driver is not installed, and Chrysalis for Windows runs on a Radeon RX 7900: install AMD Software: Adrenalin Edition" : `${picker} stopped with code ${p.exitCode}`) };
+    return { why: said || (p.exitCode! >>> 0 === 0xc0000135 ? "AMD's driver is missing or older than Chrysalis needs (it has no amdhip64_7.dll): install the current AMD Software: Adrenalin Edition for a Radeon RX 7900" : `${picker} stopped with code ${p.exitCode}`) };
   } catch (e) { return { why: `${picker} could not be run: ${e instanceof Error ? e.message : String(e)}` }; }
 }
 
