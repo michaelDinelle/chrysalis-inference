@@ -135,7 +135,7 @@ async function remove() {
 
 export async function main(args: string[], m: Machine = here(), gpus: Found = () => gpuFound(m)): Promise<number> {
   await utf8Console(m);
-  settle();
+  if (!args[0] || args[0].startsWith("-") || args[0] === "serve" || args[0] === "get") settle();
   const env = { ...process.env, ...serverEnv(m) };
   switch (args[0]) {
     case "serve": {
