@@ -63,7 +63,7 @@ Start Chrysalis with `chrysalis.sh --host 0.0.0.0`. The other computer needs [Op
 
 ## Run it
 
-- **Windows 11** with an RX 7900 XTX, XT or GRE: [step by step, with pictures →](docs/windows.md)
+- **Windows 11** with an RX 7900 XTX: [step by step, with pictures →](docs/windows.md)
 - **Linux** with an RX 7900 XTX: [guide →](docs/linux.md)
 - **Linux** with an NVIDIA RTX 30 series or newer: [guide →](docs/nvidia.md)
 - **Mac** with Apple Silicon and 32 GB or more: [guide →](docs/mac.md)

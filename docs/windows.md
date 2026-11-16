@@ -1,6 +1,6 @@
 # Chrysalis on Windows, step by step
 
-Windows 11 and a Radeon RX 7900 XTX, XT or GRE with [AMD's driver](https://www.amd.com/en/support/download/drivers.html).
+Windows 11 and a Radeon RX 7900 XTX with [AMD's driver](https://www.amd.com/en/support/download/drivers.html).
 Every picture below is from a real run of these steps on that PC.
 
 ## 1. Get Chrysalis
