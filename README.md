@@ -10,7 +10,7 @@
   <a href="https://ko-fi.com/michaeldinelle"><img alt="Support on Ko-fi" src="https://img.shields.io/badge/Ko--fi-support-ff5e5b?logo=ko-fi&logoColor=white"></a>
 </p>
 
-<p align="center"><a href="https://huggingface.co/michaelDinelle/chrysalis"><img alt="Download the models on Hugging Face" height="44" src="https://img.shields.io/badge/Hugging%20Face-Download%20the%20models-ffd21e?style=for-the-badge&logo=huggingface&logoColor=ffd21e"></a></p>
+<p align="center"><a href="https://huggingface.co/michaelDinelle/Qwen3.8-Chrysalis"><img alt="Download the models on Hugging Face" height="44" src="https://img.shields.io/badge/Hugging%20Face-Download%20the%20models-ffd21e?style=for-the-badge&logo=huggingface&logoColor=ffd21e"></a></p>
 
 <p align="center"><img src="media/pagoda.webp" width="900" alt="A voxel pagoda garden that Qwen3.8-Flash-Next wrote in Chrysalis, running in the browser"><br>
 <sub>A voxel pagoda garden written by Qwen3.8-Flash-Next in Chrysalis.</sub></p>
@@ -69,7 +69,7 @@ Start Chrysalis with `chrysalis.sh --host 0.0.0.0`. The other computer needs [Op
 
 Every system ends the same way: the terminal shows the chat's address and the model, and the chat opens at
 `http://localhost:8081`. The first start downloads 16 GB for the 27B or 117 GB for Flash-Next from
-[Hugging Face](https://huggingface.co/michaelDinelle/chrysalis).
+[Hugging Face](https://huggingface.co/michaelDinelle/Qwen3.8-Chrysalis).
 
 **Windows 11 with an RX 7900 XTX**
 
@@ -415,7 +415,7 @@ docker run -d --device /dev/kfd --device /dev/dri -p 127.0.0.1:8080:8080 -v chry
 
 ## Links
 
-[Hugging Face](https://huggingface.co/michaelDinelle/chrysalis) · [X @michaeldinelle](https://x.com/michaeldinelle) ·
+[Hugging Face](https://huggingface.co/michaelDinelle/Qwen3.8-Chrysalis) · [X @michaeldinelle](https://x.com/michaeldinelle) ·
 [Ko-fi](https://ko-fi.com/michaeldinelle) · [GitHub](https://github.com/michaelDinelle)
 
 MIT licensed.
