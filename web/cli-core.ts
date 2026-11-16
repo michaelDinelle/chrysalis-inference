@@ -277,7 +277,7 @@ async function poll() {
 }
 
 const HELP: [string, string][] = [
-  ["Tab", "the switches: every setting below as a row to move through and set"],
+  ["↑↓ ←→ Enter", "the switches on screen: move to a row, choose, and set it; each is a command below too"],
   ["local", "only this computer reaches Chrysalis, the way it starts"],
   ["network", "your network too, encrypted; each phone or computer asks here to be let in"],
   ["insecure", "the network over plain HTTP, like llama.cpp: no certificates, no voice mode, open to anyone on it"],
@@ -512,7 +512,7 @@ export function start() {
     const model = chosen(), named = flag("--get");
     if (named) act(() => setModel(named));
     else if (process.env.CHRYSALIS_ENGINE_CMD || (model && !absent(model))) engineSvc.start();
-    else note(dim("No model is here yet: Tab opens the switches, and Model downloads one and loads it."));
+    else note(dim("No model is here yet: choose one on the Model row below (←→, then Enter) and it downloads and loads."));
     tell();
   }
   else {

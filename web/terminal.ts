@@ -20,7 +20,7 @@ export function fold(s: string, room: number, indent = ""): string[] {
   return [...lines, line];
 }
 
-const RAMP = " .:-=+*#%@", FINE = 8;
+const RAMP = "  .:%@@", FINE = 8;
 let wings: { w: number; h: number; ink: Uint8Array } | undefined;
 function drawing(cols: number, rows: number) {
   const w = cols * FINE, h = rows * FINE;
@@ -42,17 +42,14 @@ function drawing(cols: number, rows: number) {
 }
 
 export function butterfly(cols: number, rows: number, time: number): string[] {
-  const { w, ink } = drawing(cols, rows), beat = 0.84 + 0.16 * Math.cos(time * 1.7), mid = w / 2;
+  const { w, ink } = drawing(cols, rows), glint = ((time * 9) % (cols + rows + 24)) - 12;
   return Array.from({ length: rows }, (_, row) => {
     let line = "";
     for (let col = 0; col < cols; col++) {
       let sum = 0;
-      for (let y = 0; y < FINE; y++) for (let x = 0; x < FINE; x++) {
-        const from = Math.round(mid + (col * FINE + x + 0.5 - mid) / beat);
-        if (from >= 0 && from < w) sum += ink[(row * FINE + y) * w + from];
-      }
-      const glow = 0.8 + 0.2 * Math.sin(time * 2.3 - col * 0.35 - row * 0.5);
-      line += RAMP[Math.min(RAMP.length - 1, Math.round(Math.sqrt(sum / (FINE * FINE)) * glow * (RAMP.length - 1) * 1.25))];
+      for (let y = 0; y < FINE; y++) for (let x = 0; x < FINE; x++) sum += ink[(row * FINE + y) * w + col * FINE + x];
+      const glyph = RAMP[Math.min(RAMP.length - 1, Math.round((sum / (FINE * FINE)) ** 0.75 * (RAMP.length - 1) * 1.15))];
+      line += glyph === "@" && Math.abs(col + row - glint) < 1.5 ? "%" : glyph;
     }
     return line.trimEnd();
   });

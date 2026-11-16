@@ -7,6 +7,7 @@ import { butterfly, plain, progress } from "./terminal";
 import { lanAddresses } from "./tls";
 
 const json = { "Content-Type": "application/json" };
+const UP = "\x1b[A", DOWN = "\x1b[B", RIGHT = "\x1b[C";
 const freePort = () => { const s = Bun.serve({ hostname: "127.0.0.1", port: 0, fetch: () => new Response() }), port = s.port!; s.stop(true); return port; };
 const refused = (url: string, init: object = {}) => fetch(url, init).then((r) => `answered ${r.status}`, () => "refused");
 
@@ -139,13 +140,14 @@ test("a download's progress is read from the line the downloader draws: the newe
   expect(progress(bar(" 5.7 / 16.8 GB  110 MB/s, 1:40 left") + bar("16.8 / 16.8 GB  done\n"))).toEqual({ done: 16.8e9, total: 16.8e9, rate: 0 });
 });
 
-test("the butterfly is the logo in characters: as wide as asked, its two sides alike, whole in every frame and never still between them", () => {
+test("the butterfly is the logo in characters: as wide as asked, its two sides alike, and the same drawing in every frame: only a glint crosses it", () => {
   const full = butterfly(40, 14, 0), ink = (lines: string[]) => lines.join("").replace(/ /g, "").length;
-  expect([full.length, Math.max(...full.map((l) => l.length)) <= 40, ink(full) > 150]).toEqual([14, true, true]);
+  expect([full.length, Math.max(...full.map((l) => l.length)) <= 40, ink(full) > 120]).toEqual([14, true, true]);
   const sides = full.map((l) => l.padEnd(40)).reduce((n, l) => [n[0] + l.slice(0, 20).replace(/ /g, "").length, n[1] + l.slice(20).replace(/ /g, "").length], [0, 0]);
   expect(Math.abs(sides[0] - sides[1]) / (sides[0] + sides[1])).toBeLessThan(0.1);
-  expect(butterfly(40, 14, 0.9).join("\n")).not.toBe(full.join("\n"));
-  expect(Array.from({ length: 20 }, (_, i) => ink(butterfly(40, 14, i * 0.11)) > ink(full) * 0.7).every(Boolean)).toBe(true);
+  expect(butterfly(40, 14, 3).join("\n")).not.toBe(full.join("\n"));
+  expect(Array.from({ length: 80 }, (_, i) => ink(butterfly(40, 14, i * 0.11)) === ink(full)).every(Boolean)).toBe(true);
+  expect(Array.from({ length: 80 }, (_, i) => butterfly(40, 14, i * 0.11).join("\n").replace(/%/g, "@")).every((frame) => frame === full.join("\n").replace(/%/g, "@"))).toBe(true);
 });
 
 test("with no model here the terminal starts none and downloads none: it says where to pick one, a chat is refused with the same words, and only a model picked in the page's menu reaches the terminal, which then begins its download", async () => {
@@ -167,6 +169,23 @@ test("with no model here the terminal starts none and downloads none: it says wh
     rmSync(empty, { recursive: true, force: true });
   }
 }, 60_000);
+
+test("the switches are on screen from the start with the arrows live and Model highlighted: with no model here, Enter downloads the 27B, and right then Enter the other one, with no key pressed to open anything", async () => {
+  for (const [keys, model] of [[["\r"], "qwen3.8-27b"], [[RIGHT, "\r"], "qwen3.8-flash-next"]] as const) {
+    const empty = mkdtempSync(`${tmpdir()}/chrysalis-pick-`), c = chrysalis({ pty: true, env: { CHRYSALIS_ENGINE_CMD: "", CHRYSALIS_HOME: empty, LINES: "50", COLUMNS: "120" } });
+    try {
+      await c.shown(/Model\s+○ Qwen3.8-27B · download\s+○ Qwen3.8-Flash-Next · download/);
+      await c.shown("Enter sets it");
+      await c.shown("no model yet");
+      expect(c.out()).not.toContain("is downloading");
+      await c.press(...keys);
+      await c.shown(`${model} is downloading`);
+    } finally {
+      await c.stop();
+      rmSync(empty, { recursive: true, force: true });
+    }
+  }
+}, 90_000);
 
 test("in local mode every port the terminal, the web chat and what they start listen on is on 127.0.0.1 alone, while the model is unloaded and the page asks for the status and for computers to link to as well", async () => {
   const c = chrysalis({ env: { CHRYSALIS_FIND_MS: "60000" } });
@@ -229,7 +248,6 @@ test("insecure puts the chat and the API on the network over plain HTTP with no 
   }
 }, 60_000);
 
-const UP = "\x1b[A", DOWN = "\x1b[B", RIGHT = "\x1b[C";
 test("in a terminal on the network, the code a phone scans shows first, above the addresses, and a reader takes that address from it, as from the page's; every device asking shows above the prompt; one answered on the page leaves, so y lets in the one still asking; Tab opens the switches, where arrows and Enter turn verbose on and unload the model; Tab completes a command, and Ctrl+C stops the model server and the web chat", async () => {
   const c = chrysalis({ pty: true, mode: "network" });
   try {
@@ -251,10 +269,9 @@ test("in a terminal on the network, the code a phone scans shows first, above th
     await c.shown("let in");
     expect([await collect(secondSecret), await collect(firstSecret)]).toEqual([200, 404]);
 
-    await c.press("\t");
     await c.shown("Enter sets it");
     await c.shown(/Shows\s+● requests only\s+○ everything/);
-    await c.press(DOWN, DOWN, RIGHT, "\r");
+    await c.press(DOWN, RIGHT, "\r");
     await c.shown("verbose is on");
     await c.shown(/Shows\s+○ requests only\s+● everything/);
     expect((await (await fetch(`${c.engine}/chrysalis/stats`)).json()).asleep).toBeUndefined();
@@ -263,7 +280,6 @@ test("in a terminal on the network, the code a phone scans shows first, above th
     await c.shown("qwen3.8-flash-next is unloaded and the GPU is free");
     await c.shown(/Model\s+○ Qwen3.8-27B\s+○ Qwen3.8-Flash-Next\s+● unloaded/);
     expect((await (await fetch(`${c.engine}/chrysalis/stats`)).json()).asleep).toBe(true);
-    await c.press("\t");
 
     const at = c.mark();
     c.type("lin\t\r");

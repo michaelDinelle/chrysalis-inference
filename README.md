@@ -87,7 +87,7 @@ cd chrysalis-inference
 <p align="center"><img src="media/run.png" width="760" alt="Chrysalis in a terminal: the chat's and API's addresses, the model ready, two requests with their sizes and speeds, and a prompt"></p>
 <p align="center"><img src="media/switches.png" width="760" alt="The switches, opened with Tab: Reach, Model, Shows, OpenCode, Restart and Print, each a row of choices"></p>
 
-<sub>Tab opens the switches: who reaches Chrysalis, the model, and what the terminal shows.</sub>
+<sub>The switches are always on screen: who reaches Chrysalis, the model, and what the terminal shows.</sub>
 
 <p align="center"><img src="media/linux-run.png" width="760" alt="The chat on Linux answering why the sky is blue, with Qwen3.8-27B, its time to first token and its speed under the reply"></p>
 <p align="center"><img src="media/linux-picture.png" width="760" alt="A picture of Chrysalis's terminal dropped into the chat on Linux, and Qwen3.8-Flash-Next describing it"></p>
@@ -142,11 +142,11 @@ docker run -d --device /dev/kfd --device /dev/dri -p 127.0.0.1:8080:8080 -v chry
 **Running Chrysalis**
 
 - Everything stays in Chrysalis's folder. It starts with the model last used, and with none the first time: nothing is
-  downloaded until you pick a model, under Model in the terminal's switches (Tab) or in the chat's model menu, and its
+  downloaded until you pick a model, on the Model row of the terminal's switches or in the chat's model menu, and its
   progress shows in both. Ctrl+C in its terminal stops it;
   `uninstall` there removes its models, its caches and its settings.
-- The terminal shows each request as it finishes, by its sizes and speeds and never its words. Tab opens the switches,
-  rows set with the arrows and Enter: where Chrysalis is reachable, the model (or none, which frees the GPU), what the terminal shows,
+- The terminal shows each request as it finishes, by its sizes and speeds and never its words. The switches are always on
+  screen, rows set with the arrows and Enter: where Chrysalis is reachable, the model (or none, which frees the GPU), what the terminal shows,
   OpenCode's models, restarts. Each is a command too (`help` lists them): `local`, `network` and `insecure` move
   Chrysalis without stopping it, `model` switches the model, `restart` starts the servers again, and `verbose` also
   shows what the servers print, for that run. Nothing it shows is written to disk.
