@@ -75,7 +75,9 @@ Start Chrysalis with `chrysalis.sh --host 0.0.0.0`. The other computer needs [Op
    and its settings.
 
 <p align="center"><img src="media/windows-setup.png" width="760" alt="Chrysalis's setup on Windows 11, showing the MIT licence, with no administrator prompt"></p>
-<p align="center"><img src="media/windows-run.png" width="760" alt="Chrysalis running in a window on Windows 11 with the model ready, and the chat open in the browser"></p>
+<p align="center"><img src="media/windows/11-ready.png" width="620" alt="Chrysalis's terminal on Windows 11 with the 27B downloaded and ready, the butterfly and the switches"></p>
+
+<sub>Every step on Windows, with a picture of each, OpenCode included: [docs/windows.md](docs/windows.md).</sub>
 
 **Linux with an RX 7900 XTX**
 
@@ -86,7 +88,7 @@ cd chrysalis-inference
 ```
 
 <p align="center"><img src="media/run.png" width="760" alt="Chrysalis in a terminal: the chat's and API's addresses, the model ready, two requests with their sizes and speeds, and a prompt"></p>
-<p align="center"><img src="media/switches.png" width="760" alt="The switches, opened with Tab: Reach, Model, Shows, OpenCode, Restart and Print, each a row of choices"></p>
+<p align="center"><img src="media/windows/10-downloading.png" width="620" alt="The switches, always on screen: Reach, Model, a Download row while a model downloads, Shows, Restart, Print and Uninstall, with the download's progress below"></p>
 
 <sub>The switches are always on screen: who reaches Chrysalis, the model, and what the terminal shows.</sub>
 
