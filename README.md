@@ -67,9 +67,8 @@ Start Chrysalis with `chrysalis.sh --host 0.0.0.0`. The other computer needs [Op
 
 ## Run it
 
-Every system ends the same way: the terminal shows the chat's address and the model, and the chat opens at
-`http://localhost:8081`. The first start downloads 16 GB for the 27B or 117 GB for Flash-Next from
-[Hugging Face](https://huggingface.co/michaelDinelle/Qwen3.8-Chrysalis).
+The first start downloads the model from [Hugging Face](https://huggingface.co/michaelDinelle/Qwen3.8-Chrysalis): 16 GB
+for the 27B, 117 GB for Flash-Next. The chat is then at `http://localhost:8081`.
 
 **Windows 11 with an RX 7900 XTX**
 
