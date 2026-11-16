@@ -63,21 +63,14 @@ Start Chrysalis with `chrysalis.sh --host 0.0.0.0`. The other computer needs [Op
 
 ## Run it
 
-**Windows 11 with an RX 7900 XTX**
+**Windows 11 with an RX 7900 XTX** · [**Step-by-step guide with pictures →**](docs/windows.md)
 
-1. Driver: install [AMD Software: Adrenalin Edition](https://www.amd.com/en/support/download/drivers.html) if the card
-   has none (Device Manager, Display adapters, shows "AMD Radeon RX 7900" when it does).
+1. Driver: [AMD Software: Adrenalin Edition](https://www.amd.com/en/support/download/drivers.html), if the card has none.
 2. Download [Chrysalis-Setup.exe](https://github.com/michaelDinelle/chrysalis-inference/releases/latest/download/Chrysalis-Setup.exe)
-   and double-click it. Windows asks once whether to run a program whose publisher it does not know: Run.
-3. Go through the setup. It installs for you alone, with no administrator prompt, adds Chrysalis to the Start menu and
-   starts it when it finishes. Run again, the setup offers to update or uninstall. Uninstalling, from there, from
-   Windows' apps list, the Start menu or the Uninstall row in its terminal, removes everything: the models, its caches
-   and its settings.
+   and run it.
+3. Chrysalis starts when the setup finishes: pick a model on the Model row and it downloads.
 
-<p align="center"><img src="media/windows-setup.png" width="760" alt="Chrysalis's setup on Windows 11, showing the MIT licence, with no administrator prompt"></p>
 <p align="center"><img src="media/windows/11-ready.png" width="620" alt="Chrysalis's terminal on Windows 11 with the 27B downloaded and ready, the butterfly and the switches"></p>
-
-<sub>Every step on Windows, with a picture of each, OpenCode included: [docs/windows.md](docs/windows.md).</sub>
 
 **Linux with an RX 7900 XTX**
 
@@ -408,6 +401,11 @@ docker run -d --device /dev/kfd --device /dev/dri -p 127.0.0.1:8080:8080 -v chry
 | Peak memory | 7.6 GB | 13.3 GB |
 
 </details>
+
+## Guides
+
+- [Windows, step by step](docs/windows.md): the setup, a first model, a chat, and OpenCode with Node.js, every step
+  pictured.
 
 ## Links
 
