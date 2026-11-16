@@ -114,14 +114,17 @@ cd chrysalis-inference
 
 **Mac with Apple Silicon and 32 GB or more**
 
-1. Driver: none. Apple's command line tools build the engines: `xcode-select --install`, and if the first start says
-   Metal's compiler is missing, `xcodebuild -downloadComponent MetalToolchain`.
-2. Get Chrysalis and start it:
-
 ```sh
+xcode-select --install
 git clone https://github.com/michaelDinelle/chrysalis-inference
 cd chrysalis-inference
 ./chrysalis.sh
+```
+
+If the first start says Metal's compiler is missing:
+
+```sh
+xcodebuild -downloadComponent MetalToolchain
 ```
 
 <p align="center"><img src="media/mac-run.png" width="760" alt="The chat on a Mac answering what a chrysalis is, with Qwen3.8-27B, its time to first token and its speed under the reply"></p>
