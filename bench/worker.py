@@ -97,6 +97,9 @@ def serve():
         for line in sys.stdin:
             send(nulls(line.split()[1]))
         return
+    prime = subprocess.run([PY, os.path.join(ROOT, "bench/hill_prime.py")], cwd=ROOT, capture_output=True, text=True)
+    if prime.returncode:
+        sys.exit((prime.stdout + prime.stderr).strip())
     ready = subprocess.run([PY, os.path.join(ROOT, "bench/hill_ready.py"), name], capture_output=True, text=True)
     if ready.returncode:
         sys.exit((ready.stdout + ready.stderr).strip())
