@@ -117,7 +117,7 @@ chrysalis/chrysalis.sh
 ```sh
 wget https://developer.download.nvidia.com/compute/cuda/repos/ubuntu2204/x86_64/cuda-keyring_1.1-1_all.deb
 sudo dpkg -i cuda-keyring_1.1-1_all.deb && sudo apt update
-sudo apt install cuda-toolkit-13-0 build-essential cmake git unzip
+sudo apt install cuda-toolkit-13-0 build-essential cmake git curl unzip
 ```
 
 3. Get Chrysalis and start it. The first start builds the engines for the card, a few minutes:

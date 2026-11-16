@@ -63,8 +63,8 @@ test("a table the numbers do not generate is caught", () => {
 
 test("a table left out of the README is caught", () => {
   const root = copy();
-  edit(`${root}/README.md`, "**Qwen3.8-27B, M4 Max**", "**Qwen3.8-27B on a Mac**");
+  edit(`${root}/README.md`, "**Qwen3.8-27B, RTX 3090**", "**Qwen3.8-27B on a 3090**");
   const { code, said } = check(root);
   expect(code).toBe(1);
-  expect(said).toContain("Qwen3.8-27B, M4 Max");
+  expect(said).toContain("Qwen3.8-27B, RTX 3090");
 });

@@ -100,7 +100,7 @@ const MODELS: [string, string, string][] = [
   ["qwen3.8-27b", "Qwen3.8-27B", "Quickest replies · 4 s to load"],
   ["qwen3.8-flash-next", "Qwen3.8-Flash-Next", "Fast at any length · 20 s to load"],
 ];
-const modelName = (id?: string) => MODELS.find(([m]) => m === id)?.[1] ?? id?.split("/").pop()?.replace(/\.gguf$/i, "") ?? "";
+const modelName = (id?: string) => MODELS.find(([m]) => m === id?.replace(/^chrysalis\//, ""))?.[1] ?? id?.split("/").pop()?.replace(/\.gguf$/i, "") ?? "";
 const NEUTRAL = { dynatemp_range: 0, dynatemp_exponent: 1, typical_p: 1, xtc_probability: 0, xtc_threshold: 0.1, top_n_sigma: -1, min_keep: 0,
   repeat_last_n: 64, repeat_penalty: 1, frequency_penalty: 0, dry_multiplier: 0, dry_base: 1.75, dry_allowed_length: 2, dry_penalty_last_n: -1,
   mirostat: 0, mirostat_tau: 5, mirostat_eta: 0.1 };

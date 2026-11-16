@@ -5,7 +5,7 @@ import { card, cards, castRows, connect, dir, harness, home, inRow, menu, open, 
 
 harness();
 
-test("OpenCode connects from its button, a folder opened there is a row, and a thread is a chat OpenCode answers: it gets the message and Chrysalis's own model (never one elsewhere unasked), its steps are cards, what it asks waits for an answer that goes back to it, and the thread comes back from OpenCode after a reload, and another tab shows its folder and thread in the sidebar without being asked", async () => {
+test("OpenCode connects from its button, a folder opened there is a row, and a thread is a chat OpenCode answers: it gets the message and Chrysalis's own model (never one elsewhere unasked), named under its reply as a chat names it, its steps are cards, what it asks waits for an answer that goes back to it, and the thread comes back from OpenCode after a reload, and another tab shows its folder and thread in the sidebar without being asked", async () => {
   const page = await open(), prompts = opencode.log.prompts.length, chats = streams.length;
   await connect(page);
   expect(await page.$eval("#opencode .dot", (d) => d.classList.contains("online"))).toBe(true);
@@ -16,7 +16,8 @@ test("OpenCode connects from its button, a folder opened there is a row, and a t
   const sent = opencode.log.prompts.at(-1)!;
   expect([opencode.log.prompts.length - prompts, sent.text, sent.model, sent.persona, streams.length - chats])
     .toEqual([1, "what is in the note", { providerID: "chrysalis", id: "qwen3.8-27b" }, undefined, 0]);
-  expect([await cards(page), await page.$eval("#title", (e) => e.textContent)]).toEqual([[["Read", "OpenCode", "done"]], "what is in the note"]);
+  expect([await cards(page), await page.$eval("#title", (e) => e.textContent), await page.$eval("#thread > article.assistant:last-child .stats", (e) => e.textContent!.split(" · ")[0])])
+    .toEqual([[["Read", "OpenCode", "done"]], "what is in the note", "Qwen3.8-27B"]);
   expect(await page.$eval("#thread > article.assistant:last-child", (e) => (e as HTMLElement).innerText)).toContain("The file says hello and honey. You asked: what is in the note");
 
   await page.type("#input", "ask first, then read it");
