@@ -57,6 +57,11 @@ README.md shows what Chrysalis is. This file is how to change it.
   used by every lane, or it can be moved into a branch only some lanes run (the 27B wrote NaN after 130 tokens from
   this; tests/hip/test_attn.hip checks each row's maximum). A stream that only the GPU waits on is submitted with
   `submit` after its work is queued, and nothing passes a C file descriptor into an engine: Windows takes handles.
+- The Windows engines are built with AMD's HIP SDK 6.4, not 7: they load the driver's amdhip64_6.dll, which drivers old
+  and new carry, where the HIP 7 runtime (amdhip64_7.dll) reports no device on a driver older than itself even when it
+  is placed beside the engines. That runtime fails every GPU in a process once a kernel was launched on one it has no
+  code for (a Ryzen's integrated Radeon, listed first), so when build/gpu finds GPUs and none runs, web/gpu.ts asks it
+  again about each GPU alone (HIP_VISIBLE_DEVICES) and takes the first that does.
 - engine/<backend>/ (hip for the RX 7900, cuda for NVIDIA, metal for Apple Silicon) has a build.mk and one engine per
   model, 27b/ and flash-next/, each a shared library that includes engine/api.h. Every backend reads the same model files.
 - engine/gpu/<model>/ is the host code of the AMD and NVIDIA engines, written once: loading, the forward pass, sequences
