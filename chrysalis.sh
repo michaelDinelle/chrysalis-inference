@@ -173,15 +173,15 @@ native() {
                  -fvisibility-inlines-hidden --gcc-toolchain=$GCC)
     local LIBS=(-L$ROCM/lib -lhipblaslt -pthread -ldl -Wl,--no-undefined -Wl,--gc-sections)
     cd "$W"
-    local H=engine/hip
-    local SRC=($H/27b/relayout.hip $H/27b/quant.hip $H/27b/ops.hip $H/gdn.hip $H/27b/attn.hip $H/vision.hip $H/gpu.hip $H/27b/model.cpp $H/27b/load.cpp $H/27b/api.cpp)
+    local H=engine/hip G=engine/gpu
+    local SRC=($H/27b/relayout.hip $H/27b/quant.hip $H/27b/ops.hip $H/gdn.hip $H/27b/attn.hip $H/vision.hip $H/gpu.hip $G/27b/model.cpp $G/27b/load.cpp $G/27b/api.cpp)
     local FN_SRC=($H/flash-next/relayout.hip $H/flash-next/quant.hip $H/flash-next/ops.hip $H/gdn.hip $H/flash-next/attn.hip $H/flash-next/moe.hip $H/flash-next/ple.hip
-                  $H/vision.hip $H/gpu.hip $H/flash-next/model.cpp $H/flash-next/load.cpp $H/flash-next/experts.cpp $H/flash-next/api.cpp $H/flash-next/cpu_moe.cpp)
+                  $H/vision.hip $H/gpu.hip $G/flash-next/model.cpp $G/flash-next/load.cpp $H/flash-next/experts.cpp $G/flash-next/api.cpp $G/flash-next/cpu_moe.cpp)
     mkdir -p /out/build
     $ROCM/lib/llvm/bin/clang++ -O3 -std=c++20 -fPIC -ffunction-sections -fdata-sections -fvisibility=hidden -fvisibility-inlines-hidden --gcc-toolchain=$GCC \
         -c -o "$W/cpu_exact.o" engine/cpu_exact.cpp || return 1
-    $ROCM/bin/hipcc "${FLAGS[@]}" -I$H/27b -x hip -shared -s -o /out/build/libchrysalis.so "${SRC[@]}" "${LIBS[@]}" & a=$!
-    $ROCM/bin/hipcc "${FLAGS[@]}" -I$H/flash-next -I$W/llama.cpp/ggml/include -shared -s -o /out/build/libchrysalis_fn.so -x hip "${FN_SRC[@]}" -x none "$W/cpu_exact.o" \
+    $ROCM/bin/hipcc "${FLAGS[@]}" -I$H/27b -I$H -I$G/27b -x hip -shared -s -o /out/build/libchrysalis.so "${SRC[@]}" "${LIBS[@]}" & a=$!
+    $ROCM/bin/hipcc "${FLAGS[@]}" -I$H/flash-next -I$H -I$G/flash-next -I$W/llama.cpp/ggml/include -shared -s -o /out/build/libchrysalis_fn.so -x hip "${FN_SRC[@]}" -x none "$W/cpu_exact.o" \
         "${LIBS[@]}" -L$W/ggml-avx2/bin -lggml-cpu -lggml-base & b=$!
     $ROCM/bin/hipcc "${FLAGS[@]}" -s -o /out/build/gpu $H/gpu_pick.hip $H/gpu.hip "${LIBS[@]}" & l=$!
     wait $a && wait $b && wait $l
