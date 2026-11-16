@@ -74,7 +74,7 @@ async function commandsOn(h: Host | undefined, dir: string): Promise<{ name: str
   }
 }
 export const commands = (dir: string, machine?: string) => commandsOn(of(machine), dir);
-export const INSTALL = process.platform === "win32" ? "npm install -g @opencode/cli" : "curl -fsSL https://opencode.ai/v2/install | bash";
+export const INSTALL = process.platform === "win32" ? "npm.cmd install -g @opencode/cli" : "curl -fsSL https://opencode.ai/v2/install | bash";
 const SOURCE = name, PERSONA = "character", OURS = "chrysalis";
 const sceneOf = (s: any): Scene | undefined => (Array.isArray(s?.metadata?.[OURS]?.cast) ? s.metadata[OURS] : undefined);
 const SKIPPED = "The user chose not to answer.", OLDEST = [2, 2, 4];

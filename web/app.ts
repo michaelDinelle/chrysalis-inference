@@ -961,7 +961,7 @@ async function paintOcPop() {
   const head = (version = "") => h("div", "invite-head", `OpenCode ${version}${host ? ` on ${host}` : ""}`.replace(/  +/g, " "));
   if (harness.state === "absent") {
     const line = h("code", "oc-line", harness.install ?? "");
-    return void pop.replaceChildren(head(), h("p", "oc-note", "OpenCode is not installed on the computer Chrysalis runs on. Install it there, then press the button again:"), line,
+    return void pop.replaceChildren(head(), h("p", "oc-note", `OpenCode is not installed on the computer Chrysalis runs on. Install it there${harness.install?.startsWith("npm") ? ", in a terminal (npm comes with Node.js, from nodejs.org)" : ""}, then press the button again:`), line,
       row("invite-card", `${icon("copy")}Copy the line`, () => void navigator.clipboard.writeText(harness.install ?? "").then(() => toast("Copied"))), ...rest());
   }
   const connect = () => { harness.wanted = true; void paintOcPop(); void ensureHarness().catch((e) => { harness.wanted = false; toast(e instanceof Error ? e.message : String(e)); void paintOcPop(); }); };
