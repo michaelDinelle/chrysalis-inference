@@ -69,9 +69,6 @@ Start Chrysalis with `chrysalis.sh --host 0.0.0.0`. The other computer needs [Op
 - **Mac** with Apple Silicon and 32 GB or more: [guide →](docs/mac.md)
 - **Docker**, the API alone: [guide →](docs/docker.md)
 
-Every system ends the same way: Chrysalis's terminal and the chat in your browser. Pick a model on the Model row and it
-downloads.
-
 <p align="center"><img src="media/windows/10-downloading.png" width="620" alt="The switches, always on screen: Reach, Model, a Download row while a model downloads, Shows, Restart, Print and Uninstall, with the download's progress below"></p>
 
 <sub>Chrysalis's terminal, here on Windows, downloading its first model.</sub>
