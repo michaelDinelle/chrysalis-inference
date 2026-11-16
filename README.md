@@ -106,6 +106,9 @@ chrysalis/chrysalis.sh
 
 <sub>Tab opens the switches: who reaches Chrysalis, the model, and what the terminal shows.</sub>
 
+<p align="center"><img src="media/linux-run.png" width="760" alt="The chat on Linux answering why the sky is blue, with Qwen3.8-27B, its time to first token and its speed under the reply"></p>
+<p align="center"><img src="media/linux-picture.png" width="760" alt="A picture of Chrysalis's terminal dropped into the chat on Linux, and Qwen3.8-Flash-Next describing it"></p>
+
 **Linux with an RTX 30 series or newer** (as run on Ubuntu 22.04)
 
 1. Driver: `sudo apt install nvidia-driver-580`, then restart. `nvidia-smi` lists the card when it is in.
@@ -136,6 +139,9 @@ git clone https://github.com/michaelDinelle/chrysalis-inference
 cd chrysalis-inference
 ./chrysalis.sh
 ```
+
+<p align="center"><img src="media/mac-run.png" width="760" alt="The chat on a Mac answering what a chrysalis is, with Qwen3.8-27B, its time to first token and its speed under the reply"></p>
+<p align="center"><img src="media/mac-picture.png" width="760" alt="A chart dropped into the chat on a Mac, and Qwen3.8-27B saying what it shows"></p>
 
 **Docker**
 
@@ -315,6 +321,24 @@ docker run -d --device /dev/kfd --device /dev/dri -p 127.0.0.1:8080:8080 -v chry
 | Load time, to a first answer | 6.9 s |
 | Peak memory | 32.1 GB |
 
+**Qwen3.8-Flash-Next, RTX 3090**
+
+| | Chrysalis RTX 3090 (CUDA) | Strata IQ3_S RTX 3090 (CUDA) | Strata Q2_0 RTX 3090 (CUDA) |
+| --- | ---: | ---: | ---: |
+| First token, short prompt | 0.59 s | 0.87 s | 0.72 s |
+| First token, 4K prompt | 3.3 s | 4.1 s | 2.9 s |
+| First token, 16K prompt | 9.4 s | 8.6 s | 6.2 s |
+| First token, 100K prompt | 60.5 s | 53.3 s | 32.6 s |
+| First token, follow-up in the 100K chat | 2.5 s | 2.1 s | 3.3 s |
+| Writing, short prompt | 38.9 tok/s | 93.5 tok/s | 132.9 tok/s |
+| Writing, 4K prompt | 36.8 tok/s | 93.0 tok/s | 129.9 tok/s |
+| Writing, 16K prompt | 34.7 tok/s | 87.7 tok/s | 133.5 tok/s |
+| Writing, 100K prompt | 34.4 tok/s | 93.0 tok/s | 114.7 tok/s |
+| Writing, follow-up in the 100K chat | 35.9 tok/s | 93.1 tok/s | 133.0 tok/s |
+| Error vs Q8_0, mean KL over 1,082 tokens | 0.0324 | 0.0550 | 0.187 |
+| Load time, to a first answer | 48.4 s | 39.6 s | 36.9 s |
+| Peak memory | 53.7 GB | 54.6 GB | 43.4 GB |
+
 **How Qwen3.8-27B was measured**
 
 - **Machines and prompts**: the same as above. The benchmark's thinking budget of 0 is left out, because Strata and
@@ -364,6 +388,24 @@ docker run -d --device /dev/kfd --device /dev/dri -p 127.0.0.1:8080:8080 -v chry
 | Error vs Q8_0, mean KL over 1,082 tokens | 0.0113 | 0.0351 | 0.0112 |
 | Load time, to a first answer | 8.3 s | 6.0 s | 8.7 s |
 | Peak memory | 25.2 GB | 30.6 GB | 20.9 GB |
+
+**Qwen3.8-27B, RTX 3090**
+
+| | Chrysalis RTX 3090 (CUDA) | llama.cpp RTX 3090 (CUDA) |
+| --- | ---: | ---: |
+| First token, short prompt | 0.44 s | 1.2 s |
+| First token, 4K prompt | 5.7 s | 3.8 s |
+| First token, 16K prompt | 23.2 s | 13.9 s |
+| First token, 100K prompt | 203 s | 107 s |
+| First token, follow-up in the 100K chat | 5.0 s | 3.4 s |
+| Writing, short prompt | 73.5 tok/s | 69.7 tok/s |
+| Writing, 4K prompt | 68.4 tok/s | 62.9 tok/s |
+| Writing, 16K prompt | 57.8 tok/s | 61.0 tok/s |
+| Writing, 100K prompt | 41.2 tok/s | 39.2 tok/s |
+| Writing, follow-up in the 100K chat | 43.6 tok/s | 45.3 tok/s |
+| Error vs Q8_0, mean KL over 1,082 tokens | 0.0117 | 0.0141 |
+| Load time, to a first answer | 9.0 s | 8.2 s |
+| Peak memory | 7.6 GB | 13.3 GB |
 
 </details>
 

@@ -15,7 +15,7 @@ INK = ("#1d181a", "#6e6164", "#e5d6da")
 FILL = {"Chrysalis": "#e24d85", "Strata IQ3_S": "#4d4d4d", "Strata Q2_0": "#bdbdbd", "llama.cpp": "#4d4d4d", "MLX": "#bdbdbd"}
 CASES = ["Short", "4K", "16K", "100K", "Follow-up"]
 PROMPTS = ["short prompt", "4K prompt", "16K prompt", "100K prompt", "follow-up in the 100K chat"]
-MACHINES = {"7900 XTX": "RX 7900 XTX", "RTX 5070": "RTX 5070", "M4 Max": "M4 Max"}
+MACHINES = {"7900 XTX": "RX 7900 XTX", "RTX 3090": "RTX 3090", "M4 Max": "M4 Max"}
 MODELS = {"fn": ("flash-next", "Qwen3.8-Flash-Next", [("Chrysalis", "3.8-bit"), ("Strata IQ3_S", "3.3-bit"), ("Strata Q2_0", "2.3-bit")]),
           "27b": ("27b", "Qwen3.8-27B", [("Chrysalis", "4.65-bit file"), ("llama.cpp", "the same file"), ("MLX", "4-bit")])}
 
@@ -142,13 +142,12 @@ def table(data):
 def tables(numbers, text):
     written = 0
     for key, (_, title, _) in MODELS.items():
-        for machine in dict.fromkeys(d["machine"] for d in numbers[key]):
-            heading = f"**{title}, {MACHINES[machine]}**\n\n"
-            body = table([d for d in numbers[key] if d["machine"] == machine])
-            text, found = re.subn(re.escape(heading) + r"(?:\|.*\n)*", lambda _: heading + body, text)
-            if found != 1:
-                sys.exit(f"README.md needs the heading {heading.strip()} once, and has it {found} times")
-            written += body.count("\n")
+        body = "".join(f"**{title}, {MACHINES[machine]}**\n\n" + table([d for d in numbers[key] if d["machine"] == machine]) + "\n"
+                       for machine in dict.fromkeys(d["machine"] for d in numbers[key]))
+        text, found = re.subn(r"(?:\*\*" + re.escape(title) + r", [^*\n]+\*\*\n\n(?:\|.*\n)*\n)+", lambda _: body, text)
+        if found != 1:
+            sys.exit(f"README.md needs the tables of {title} together once, and has them in {found} places")
+        written += sum(line.startswith("|") for line in body.splitlines())
     return text, written
 
 
