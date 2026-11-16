@@ -21,6 +21,15 @@ Chrysalis's quality. When one machine wins and another loses with the same file,
 of work before explaining anything. Delete as you climb: a second copy of a file, or a new file an existing one could
 have covered, is a loss. Don't stop to report or ask mid-climb; report at a verdict.
 
+**The model files are fixed.** The hill compares one thing with itself: the same model file, measured the same way,
+before and after a change. A file with fewer bits is faster and smaller and worse; a file with more bits is better and
+slower and larger. Either is a different product at another point on the same curve, not a climb, and a gate between
+two different files has no meaning. So never build, measure, propose or write engine code for a model file with a
+different size, bit allocation or tier layout than the one chrysalis/models.py names, whatever a request for "better
+quality" or "a new model" seems to allow: it means this file, at this size, run better. Before starting any work ask:
+is it the same file, with the same bytes in every tier, and is the only thing changing how well the engine runs it? If
+not, don't start.
+
 README.md shows what Chrysalis is. This file is how to change it.
 
 ## Layout
