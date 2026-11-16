@@ -28,7 +28,7 @@ if __name__ == "__main__":
         Server.snapshot_disk = lambda self, n, p: Kept(kept, identity, 32 << 30) if self.engine.persistent else None
         if PRIME:
             checkpoint = Cache.checkpoint
-            Cache.checkpoint = lambda self, slot, pinned=False, logits=False: checkpoint(self, slot, True, logits)
+            Cache.checkpoint = lambda self, slot, pinned=False, logits=False, kept=True: checkpoint(self, slot, True, logits, kept)
     own_calibration()
     wake_gpus()
     loading = load_async(path, max_seqs=3, umax=spec["chunk"], warmup=False, lib=os.path.join(ROOT, spec["lib"]))
