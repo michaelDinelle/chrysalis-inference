@@ -6753,11 +6753,12 @@ function renderControls() {
   const btn = $("model-btn");
   const dl = status.download, got = dl?.total ? Math.min(1, dl.done / dl.total) : 0, left = dl?.rate ? Math.round((dl.total - dl.done) / dl.rate) : 0;
   const getting = dl ? `Downloading ${modelName(dl.model)}: ${(dl.done / 1e9).toFixed(1)} of ${(dl.total / 1e9).toFixed(1)} GB${dl.rate ? `, ${Math.round(dl.rate / 1e6)} MB/s, ${Math.floor(left / 60)}:${String(left % 60).padStart(2, "0")} left` : ""}` : "";
-  btn.innerHTML = `<span class="dot ${state}"></span><span class="model-name">${shortName(current())}</span>${dl ? `<span class="model-pct">${icon("download")}${Math.round(got * 100)}%</span>` : state === "loading" && pct ? `<span class="model-pct">${pct}</span>` : ""}${icon("chevron")}`;
+  const empty = onService() && !dl && status.got?.length === 0 && state === "offline";
+  btn.innerHTML = `<span class="dot ${state}"></span><span class="model-name">${empty ? "Download a model" : shortName(current())}</span>${dl ? `<span class="model-pct">${icon("download")}${Math.round(got * 100)}%</span>` : state === "loading" && pct ? `<span class="model-pct">${pct}</span>` : ""}${icon("chevron")}`;
   btn.style.setProperty("--got", dl ? `${got * 100}%` : "0%");
   btn.classList.toggle("getting", !!dl);
   const b = status.backend, down = b?.listed && !b.listed.ok ? b.listed.error : "";
-  btn.title = getting ? getting : !onService() ? (down ? `${b!.name}: ${down}` : `${name || "No model"} on ${b!.name}`)
+  btn.title = getting ? getting : empty ? "No model is on this computer yet: choose one here and it downloads" : !onService() ? (down ? `${b!.name}: ${down}` : `${name || "No model"} on ${b!.name}`)
     : state === "online" ? `${name}: ready` : state === "loading" ? `Loading ${name}` : `${name}: stopped`;
   btn.setAttribute("aria-expanded", String(modelsOpen));
   btn.classList.toggle("open", modelsOpen);

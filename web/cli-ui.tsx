@@ -26,12 +26,9 @@ function rows(): Row[] {
   ];
 }
 
-const PINK = "#ff6fa5", ROSE = "#b04a72", ABOVE = 18;
-const wings = (): [number, number] | undefined => {
-  const rows = Math.min(23, (process.stdout.rows ?? 0) - ABOVE), cols = Math.round(rows * 2.78);
-  return rows >= 11 && (process.stdout.columns ?? 0) >= cols + 8 ? [cols, rows] : undefined;
-};
-function Butterfly({ size }: { size: [number, number] }) {
+const PINK = "#ff6fa5", ROSE = "#b04a72", SIZES = [[64, 23], [46, 17], [33, 12]] as const, BELOW = 12;
+const wings = (rows = process.stdout.rows ?? 0, cols = process.stdout.columns ?? 0) => SIZES.find(([w, h]) => rows > h + BELOW && cols >= w + 8);
+function Butterfly({ size }: { size: readonly [number, number] }) {
   const { frame } = useAnimation({ interval: 110 });
   return (
     <Box flexDirection="column" marginBottom={1}>
@@ -160,7 +157,7 @@ function App() {
     if (state.woke && size) ui.log(`\n${butterfly(size[0], size[1], -9).map((line) => `    ${pink(line)}`).join("\n")}\n`);
   }, [state.woke]);
   return (
-    <Box flexDirection="column" marginTop={1}>
+    <Box flexDirection="column">
       {asking.map((q, i) => <Text key={q.key}>{"  "}<Text color="yellow">?</Text> {q.text}{i ? null : <Text dimColor>{"  y or n"}</Text>}</Text>)}
       {waking && size ? <Butterfly size={size} /> : null}
       <Box flexDirection="column" marginBottom={1}>
@@ -173,7 +170,7 @@ function App() {
             })}
           </Text>
         ))}
-        <Text dimColor>{"  ↑↓ row · ←→ choice · Enter sets it"}</Text>
+        <Text dimColor wrap="truncate-end">{"  ↑↓ row · ←→ choice · Enter sets it"}{state.web ? `  ·  chat ${state.web.local}` : ""}</Text>
       </Box>
       <Status />
       <Text>
@@ -189,7 +186,17 @@ const waiting: string[] = [];
 export async function mount() {
   ui.live = true;
   ui.log = (text) => void waiting.push(text);
-  const app = render(<App />, { exitOnCtrlC: false });
-  ui.close = () => { app.clear(); app.unmount(); };
+  let app = render(<App />, { exitOnCtrlC: false }), settle: Timer | undefined;
+  process.stdout.on("resize", () => {
+    clearTimeout(settle);
+    settle = setTimeout(() => {
+      app.unmount();
+      process.stdout.write("\x1b[2J\x1b[3J\x1b[H");
+      ui.log = (text) => void waiting.push(text);
+      core.header();
+      app = render(<App />, { exitOnCtrlC: false });
+    }, 150);
+  });
+  ui.close = () => { clearTimeout(settle); app.clear(); app.unmount(); };
   await app.waitUntilRenderFlush?.();
 }

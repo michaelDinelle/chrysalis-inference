@@ -83,7 +83,8 @@ README.md shows what Chrysalis is. This file is how to change it.
   first start has no model, and one is downloaded only when it is picked, on the Model row of the switches or in the page's
   model menu (which reaches the terminal over IPC), or named with --model. The terminal runs chrysalis get, reads the
   progress from the line it draws and sends it to the web server for the page's model button. While no model is ready
-  it draws the logo as a butterfly sized to the window, the same strokes in every frame with a glint crossing them
+  it draws the logo above the switches as a butterfly in one of three sizes, the largest the window has room for
+  (a resize draws the whole screen again), the same strokes in every frame with a glint crossing them
   (`butterfly` in web/terminal.ts). The switches are always on screen, so the arrows and Enter always drive them and
   typing always goes to the prompt (Ctrl+P and Ctrl+N recall earlier commands),
   and `uninstall` removes the models, caches and settings (Windows' uninstaller too): web/cli-core.ts is the servers, the state and the commands,

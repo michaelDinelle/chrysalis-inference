@@ -230,6 +230,12 @@ function heard(m: any) {
   sync();
 }
 
+export function header() {
+  ui.log("");
+  note(bold("Chrysalis Inference"));
+  links();
+}
+
 export function links() {
   const web = state.web;
   if (!web) return;
