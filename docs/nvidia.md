@@ -18,5 +18,3 @@ git clone https://github.com/michaelDinelle/chrysalis-inference
 cd chrysalis-inference
 ./chrysalis.sh
 ```
-
-<p align="center"><img src="../media/nvidia-run.png" width="760" alt="The chat on Ubuntu with an RTX 3090 answering why butterflies have colorful wings, with Qwen3.8-27B, its time to first token and its speed under the reply"></p>
