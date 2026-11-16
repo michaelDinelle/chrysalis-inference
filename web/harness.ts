@@ -80,7 +80,8 @@ const sceneOf = (s: any): Scene | undefined => (Array.isArray(s?.metadata?.[OURS
 const SKIPPED = "The user chose not to answer.", OLDEST = [2, 2, 4];
 const THINKING = ["none", "low", "medium"].map((id) => ({ id, body: { reasoning_effort: id } }));
 
-const binary = () => process.env.CHRYSALIS_OPENCODE ?? Bun.which("opencode") ?? [`${homedir()}/.opencode/bin/opencode`, `${homedir()}/.opencode/bin/opencode.exe`].find((p) => existsSync(p));
+const binary = () => process.env.CHRYSALIS_OPENCODE ?? Bun.which("opencode", { PATH: process.env.PATH ?? "" }) ?? [`${homedir()}/.opencode/bin/opencode`, `${homedir()}/.opencode/bin/opencode.exe`,
+  ...(process.env.APPDATA ? [`${process.env.APPDATA}/npm/node_modules/@opencode/cli/bin/opencode.exe`] : [])].find((p) => existsSync(p));
 export type Send = (path: string, init: { method: string; headers: Record<string, string>; body?: string; signal?: AbortSignal }) => Promise<Response>;
 export interface Machine { id: string; name: string; home: string; kind: string }
 interface Host { id: string; url: string; auth: string; version: string; proc?: Kept; send?: Send; machine?: Machine; store?: string }
