@@ -4,7 +4,6 @@
 
 struct ColdLayer {
     const uint8_t *gate[3] = {}, *up[3] = {}, *down = nullptr, *down2 = nullptr;
-    const uint8_t *file_gate = nullptr, *file_up = nullptr, *file_down2 = nullptr;
     int type_gu[3] = {-1, -1, -1}, type_dn = -1;
     size_t row_gu[3] = {}, row_dn = 0;
     int n0 = 0, n = 0, n2 = 0;

@@ -13,18 +13,6 @@ constexpr float MIN_GAIN = 2.0f;
 constexpr double READ_BUDGET_S = 0.012;
 constexpr size_t STAGE_BYTES = 2 * (size_t)FE * D / 256 * 136 + (size_t)D * FE / 32 * 18;
 
-struct HotCopy { uint8_t *mirror[3]; const uint8_t *file[3]; size_t n[3]; };
-HotCopy hot_copy(const ColdLayer &c, int h) {
-    const uint8_t *m[3] = {c.gu_row(false, h, 0), c.gu_row(true, h, 0), c.dn_row(h, 0)};
-    const uint8_t *mb[3] = {c.gate[2], c.up[2], c.down2}, *fb[3] = {c.file_gate, c.file_up, c.file_down2};
-    HotCopy hc;
-    for (int i = 0; i < 3; i++) {
-        hc.mirror[i] = const_cast<uint8_t *>(m[i]);
-        hc.file[i] = fb[i] + (m[i] - mb[i]);
-        hc.n[i] = i < 2 ? (size_t)FE * c.row_gu[2] : (size_t)D * c.row_dn;
-    }
-    return hc;
-}
 }
 
 static double mem_available(Engine::Experts &x) {
@@ -42,14 +30,6 @@ void Engine::file_read(uint8_t *dst, const uint8_t *src, size_t n) const {
         if (r <= 0) FAIL("reading experts from the model file failed");
         got += (size_t)r;
     }
-    os::forget(file_fd, off, n);
-}
-
-void Engine::file_read3(uint8_t *const dst[3], const uint8_t *const src[3], const size_t n[3]) const {
-    std::thread a([&] { file_read(dst[1], src[1], n[1]); }), b([&] { file_read(dst[2], src[2], n[2]); });
-    file_read(dst[0], src[0], n[0]);
-    a.join();
-    b.join();
 }
 
 void Engine::experts_init() {
@@ -240,20 +220,30 @@ void Engine::experts_loader() {
             x.jobs.pop_front();
         }
         if (job.what < 0) {
-            const int key = -1 - job.what;
+            const int key = -1 - job.what, h = x.home[key];
+            const ColdLayer &c = cold[key / NE];
             CK(hipEventSynchronize(x.loads[job.after].done));
-            const HotCopy hc = hot_copy(cold[key / NE], x.home[key]);
+            const uint8_t *at[3] = {c.gu_row(false, h, 0), c.gu_row(true, h, 0), c.dn_row(h, 0)};
+            const size_t n[3] = {(size_t)FE * c.row_gu[2], (size_t)FE * c.row_gu[2], (size_t)D * c.row_dn};
             for (int m = 0; m < 3; m++) {
-                const uintptr_t a = ((uintptr_t)hc.mirror[m] + 4095) & ~uintptr_t(4095), b = ((uintptr_t)hc.mirror[m] + hc.n[m]) & ~uintptr_t(4095);
-                if (b > a) os::drop((void *)a, b - a);
+                const uintptr_t a = ((uintptr_t)at[m] + 4095) & ~uintptr_t(4095), b = ((uintptr_t)at[m] + n[m]) & ~uintptr_t(4095);
+                if (b > a) os::drop_mapped((void *)a, b - a);
             }
             continue;
         }
         Experts::Load &ld = x.loads[job.what];
         if (ld.out >= 0) {
-            const HotCopy hc = hot_copy(cold[ld.out / NE], x.home[ld.out]);
-            for (int m = 0; m < 3; m++) if (!os::commit(hc.mirror[m], hc.n[m])) FAIL("no memory to read an expert back from the model file");
-            file_read3(hc.mirror, hc.file, hc.n);
+            const ColdLayer &o = cold[ld.out / NE];
+            const int oh = x.home[ld.out];
+            const uint8_t *at[3] = {o.gu_row(false, oh, 0), o.gu_row(true, oh, 0), o.dn_row(oh, 0)};
+            const size_t n[3] = {(size_t)FE * o.row_gu[2], (size_t)FE * o.row_gu[2], (size_t)D * o.row_dn};
+            unsigned seen = 0;
+            for (int m = 0; m < 3; m++) {
+                os::want((void *)((uintptr_t)at[m] & ~uintptr_t(4095)), n[m] + ((uintptr_t)at[m] & 4095));
+                for (size_t i = 0; i < n[m]; i += 4096) seen += at[m][i];
+                seen += at[m][n[m] - 1];
+            }
+            x.touched += seen;
         }
         const int l = ld.key / NE, h = x.home[ld.key];
         const ColdLayer &c = cold[l];

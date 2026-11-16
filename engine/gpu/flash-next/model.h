@@ -86,7 +86,6 @@ struct Engine {
     int *d_slot_of = nullptr;
     uint8_t *d_fmt = nullptr;
     os::File file_fd = os::NO_FILE; const uint8_t *file_base = nullptr;
-    uint8_t *spill_mem = nullptr; size_t spill_bytes = 0;
     struct Experts {
         bool on = true;
         double half_life = 256;
@@ -112,6 +111,7 @@ struct Engine {
         gpuEvent_t counted = nullptr;
         bool counts_pending = false;
         int placed = 0, loaded_file = 0;
+        std::atomic<unsigned> touched{0};
         double copied_bytes = 0, copied_ms = 0;
         uint64_t picks = 0, hits = 0, mem_limited = 0, step = 0, waited_steps = 0;
         double waited_s = 0;
@@ -158,7 +158,6 @@ struct Engine {
     int pool_warm(const char *path);
     uint64_t model_bytes() const;
     void file_read(uint8_t *dst, const uint8_t *src, size_t n) const;
-    void file_read3(uint8_t *const dst[3], const uint8_t *const src[3], const size_t n[3]) const;
     std::vector<ColdLayer> cold;
     std::vector<ColdDec> cold_dev;
     uint8_t *cold_mem = nullptr; size_t cold_bytes = 0;

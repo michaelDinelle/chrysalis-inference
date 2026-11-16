@@ -109,16 +109,15 @@ void Engine::calibrate() {
         for (int i = 0; i < reps; i++) {
             const ColdLayer &c = *tier[(size_t)i * 7 % tier.size()];
             const int h = c.n + (int)((size_t)i * 131 % (size_t)c.n2);
-            const uint8_t *const mb[3] = {c.gate[2], c.up[2], c.down2}, *const fb[3] = {c.file_gate, c.file_up, c.file_down2};
-            const uint8_t *m[3] = {c.gu_row(false, h, 0), c.gu_row(true, h, 0), c.dn_row(h, 0)}, *src[3];
+            const uint8_t *src[3] = {c.gu_row(false, h, 0), c.gu_row(true, h, 0), c.dn_row(h, 0)};
             const size_t n[3] = {(size_t)FE * c.row_gu[2], (size_t)FE * c.row_gu[2], (size_t)D * c.row_dn};
             uint8_t *dst[3] = {scratch.data(), scratch.data() + n[0], scratch.data() + n[0] + n[1]};
-            for (int k = 0; k < 3; k++) {
-                src[k] = fb[k] + (m[k] - mb[k]);
-                os::forget(file_fd, (uint64_t)(src[k] - file_base), n[k]);
-            }
+            for (int k = 0; k < 3; k++) os::forget(file_fd, (uint64_t)(src[k] - file_base), n[k]);
             const double t0 = now();
-            file_read3(dst, src, n);
+            std::thread ra([&] { file_read(dst[1], src[1], n[1]); }), rb([&] { file_read(dst[2], src[2], n[2]); });
+            file_read(dst[0], src[0], n[0]);
+            ra.join();
+            rb.join();
             spent += now() - t0;
         }
         restore_s = spent / reps;
@@ -472,7 +471,7 @@ void Engine::load(const std::string &path, int max_seqs, size_t reserve_bytes) {
                 CK(gpuEventRecord(ev[slot], st));
                 slot ^= 1;
             }
-            g.drop(u.t->data, u.t->nbytes);
+            if (u.q != &pool_gate && u.q != &pool_up && u.q != &pool_down) g.drop(u.t->data, u.t->nbytes);
             total += u.t->nbytes;
         } else {
             uint8_t *d = warena.get(u.t->nbytes);
@@ -525,23 +524,12 @@ void Engine::load(const std::string &path, int max_seqs, size_t reserve_bytes) {
         d_cold = cold_gpu ? (uint8_t *)dp : nullptr;
     }
     const char *hot_names[3] = {"ffn_gate_hot.weight", "ffn_up_hot.weight", "ffn_down_hot.weight"};
-    auto page_up = [](size_t n) { return (n + 4095) & ~size_t(4095); };
-    spill_bytes = 0;
-    for (int l = 0; l < NL; l++)
-        if (L[l].n_hot) for (const char *t : hot_names) spill_bytes += page_up(get("blk." + std::to_string(l) + "." + t)->nbytes);
-    if (spill_bytes) {
-        spill_mem = (uint8_t *)os::reserve(spill_bytes);
-        if (!spill_mem) FAIL("cannot reserve %.1f GB of address space for the spill mirror", spill_bytes / 1e9);
-        os::huge(spill_mem, spill_bytes, false);
-    }
-    size_t spill_at = 0;
     for (int l = 0; l < NL; l++) {
         ColdLayer &c = cold[l];
         if (L[l].n_hot) {
             const std::string p = "blk." + std::to_string(l) + ".";
             const GGUFTensor *t[3] = {get(p + hot_names[0]), get(p + hot_names[1]), get(p + hot_names[2])};
-            const uint8_t **mirror[3] = {&c.gate[2], &c.up[2], &c.down2}, **file[3] = {&c.file_gate, &c.file_up, &c.file_down2};
-            for (int m = 0; m < 3; m++) { *file[m] = t[m]->data; *mirror[m] = spill_mem + spill_at; spill_at += page_up(t[m]->nbytes); }
+            c.gate[2] = t[0]->data; c.up[2] = t[1]->data; c.down2 = t[2]->data;
             c.type_gu[2] = IQ4_XS; c.row_gu[2] = qrow_bytes(IQ4_XS, D); c.n2 = L[l].n_hot;
             c.type_dn = IQ4_NL; c.row_dn = qrow_bytes(IQ4_NL, FE);
         }
@@ -676,7 +664,6 @@ void Engine::load(const std::string &path, int max_seqs, size_t reserve_bytes) {
             const QTensor *pools[3] = {&pool_gate, &pool_up, &pool_down};
             const size_t eb[3] = {gu_bytes, gu_bytes, dn_bytes};
             const int64_t b0[3] = {(int64_t)first_slot[l] * FE * D / 256, (int64_t)first_slot[l] * FE * D / 256, (int64_t)first_slot[l] * D * FE / 32};
-            const uint8_t *mirror[3] = {cold[l].gate[2], cold[l].up[2], cold[l].down2};
             for (int m = 0; m < 3; m++) {
                 const GGUFTensor *t = hot_t[l][m];
                 const int bb = qbytes_of(t->type);
@@ -690,12 +677,6 @@ void Engine::load(const std::string &path, int max_seqs, size_t reserve_bytes) {
                     CK(gpuEventRecord(evb[sb], st));
                     sb ^= 1;
                 }
-                if (keep_l[l] < L[l].n_hot) {
-                    uint8_t *at = const_cast<uint8_t *>(mirror[m]) + n;
-                    const size_t len = (size_t)(L[l].n_hot - keep_l[l]) * eb[m];
-                    read_file(g, at, t->data + n, len);
-                }
-                g.drop(t->data, t->nbytes);
             }
             spilled_at_load += L[l].n_hot - keep_l[l];
         }
@@ -716,7 +697,7 @@ void Engine::load(const std::string &path, int max_seqs, size_t reserve_bytes) {
         CK(gpuMemcpyAsync(d_fmt, f.data(), f.size(), gpuMemcpyHostToDevice, st));
         CK(gpuStreamSynchronize(st));
         if (spilled_at_load)
-            fprintf(stderr, "chrysalis-fn: %d of %d VRAM experts fit beside a %d-token KV cache; %d start in RAM\n", n_slots, n_hot_all,
+            fprintf(stderr, "chrysalis-fn: %d of %d VRAM experts fit beside a %d-token KV cache; %d stay in file\n", n_slots, n_hot_all,
                     max_ctx * 3 / 2, spilled_at_load);
     }
 #endif
@@ -970,8 +951,7 @@ void Engine::shutdown() {
     (void)gpuGetLastError();
     (void)gpuStreamDestroy(st); (void)gpuStreamDestroy(cst); (void)gpuStreamDestroy(lst);
     os::release(cold_mem, cold_bytes);
-    os::release(spill_mem, spill_bytes);
     os::unmap(ngram_map, ngram_map_bytes);
-    cold_mem = nullptr; spill_mem = nullptr; ngram_map = nullptr; cold_bytes = spill_bytes = 0; d_cold = nullptr; cold_gpu = false;
+    cold_mem = nullptr; ngram_map = nullptr; cold_bytes = 0; d_cold = nullptr; cold_gpu = false;
     cold.clear(); cold_dev.clear();
 }
