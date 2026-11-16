@@ -46,35 +46,40 @@
       "depends": "data/venv/bin/python bench/hill_same.py",
       "memory_gb": 4,
       "exclusive": "cpu",
-      "serve": "data/venv/bin/python bench/hill_build.py"
+      "serve": "data/venv/bin/python bench/hill_build.py",
+      "budget_s": 90
     },
     "speed-27b": {
       "serve": "data/venv/bin/python bench/worker.py 27b",
       "exclusive": "gpu",
       "depends": "data/venv/bin/python bench/hill_same.py 27b",
       "blocks": 1,
-      "memory_gb": 12
+      "memory_gb": 12,
+      "budget_s": 90
     },
     "quality-27b": {
       "serve": "data/venv/bin/python bench/worker.py 27b",
       "exclusive": "gpu",
       "depends": "data/venv/bin/python bench/hill_same.py 27b",
       "blocks": 1,
-      "memory_gb": 12
+      "memory_gb": 12,
+      "budget_s": 400
     },
     "speed-fn": {
       "serve": "data/venv/bin/python bench/worker.py fn",
       "exclusive": "gpu",
       "depends": "data/venv/bin/python bench/hill_same.py fn",
       "blocks": 1,
-      "memory_gb": 12
+      "memory_gb": 12,
+      "budget_s": 150
     },
     "quality-fn": {
       "serve": "data/venv/bin/python bench/worker.py fn",
       "exclusive": "gpu",
       "depends": "data/venv/bin/python bench/hill_same.py fn",
       "blocks": 1,
-      "memory_gb": 12
+      "memory_gb": 12,
+      "budget_s": 800
     }
   },
   "rewards": {
