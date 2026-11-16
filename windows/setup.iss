@@ -60,7 +60,7 @@ begin
   case TaskDialogMsgBox('Chrysalis is already on this computer', 'Update it to this version and keep its models, or uninstall it: that removes Chrysalis with its models, its caches and its settings.', mbConfirmation, MB_YESNOCANCEL, ['Update', 'Uninstall', 'Cancel'], 0) of
     IDNO:
       begin
-        Exec(RemoveQuotes(Uninstaller), '', '', SW_SHOW, ewNoWait, Code);
+        Exec(RemoveQuotes(Uninstaller), '/SILENT', '', SW_SHOW, ewNoWait, Code);
         Result := False;
       end;
     IDCANCEL:
