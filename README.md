@@ -94,11 +94,13 @@ Every system ends the same way: the terminal shows the chat's address and the mo
 
 1. Driver: none to install. The card runs on the `amdgpu` driver every current distribution ships (`lspci -k` shows
    "Kernel driver in use: amdgpu"), and Chrysalis brings its own ROCm.
-2. Download and unpack, then start it:
+2. Download [Chrysalis-linux-x86_64.sh](https://github.com/michaelDinelle/chrysalis-inference/releases/latest/download/Chrysalis-linux-x86_64.sh)
+   and run it. It unpacks Chrysalis into a `chrysalis` folder where you run it and starts it; `chrysalis/chrysalis.sh`
+   starts it again.
 
 ```sh
-curl -fsSL https://github.com/michaelDinelle/chrysalis-inference/releases/latest/download/chrysalis-linux-x86_64.tar.gz | tar -xz
-chrysalis/chrysalis.sh
+curl -fsSLO https://github.com/michaelDinelle/chrysalis-inference/releases/latest/download/Chrysalis-linux-x86_64.sh
+sh Chrysalis-linux-x86_64.sh
 ```
 
 <p align="center"><img src="media/run.png" width="760" alt="Chrysalis in a terminal: the chat's and API's addresses, the model ready, two requests with their sizes and speeds, and a prompt"></p>

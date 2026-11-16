@@ -122,7 +122,9 @@ release() {
         printf '%s\n' 'export default { initialize() {}, connectToDevTools() {} };' > "$OUT/web/node_modules/react-devtools-core/index.js"
     cp "$(readlink -f "$(command -v bun)")" "$OUT/bin/bun"
     echo "$VER" > "$OUT/VERSION"
-    tar -C dist -czf dist/chrysalis-linux-x86_64.tar.gz chrysalis
+    local HEAD=('#!/bin/sh' 'set -e' 'dir="${CHRYSALIS_DIR:-$PWD/chrysalis}"' 'mkdir -p "$dir"' 'echo "unpacking Chrysalis into $dir"'
+                'tail -n +8 "$0" | tar -xz -C "$dir" --strip-components=1' 'exec "$dir/chrysalis.sh" "$@"')
+    { printf '%s\n' "${HEAD[@]}"; tar -C dist -cz chrysalis; } > dist/Chrysalis-linux-x86_64.sh
     local M=dist/macos/chrysalis A=dist/macos/chrysalis/Chrysalis.app/Contents
     rm -rf dist/macos && mkdir -p "$A/MacOS" "$A/Resources" && cp -r chrysalis.sh LICENSE "$OUT/VERSION" "$OUT/web" "$M/"
     curl -fsSL -o "$UV/bun.zip" "https://github.com/oven-sh/bun/releases/download/bun-v$(bun --version)/bun-darwin-aarch64.zip"
@@ -154,7 +156,7 @@ await Bun.write(out, Buffer.concat([h, p]));' "$UV/icon.png" "$A/Resources/chrys
         "VOLUME /models" "EXPOSE 8080" \
         'CMD ["sh", "-c", "cp -r /opt/chrysalis/configs/. /models/ && exec /opt/chrysalis/chrysalis.sh serve --host 0.0.0.0"]' |
         docker build -q -t ghcr.io/michaeldinelle/chrysalis:latest -f - dist >/dev/null
-    du -sh "$OUT" dist/chrysalis-linux-x86_64.tar.gz dist/chrysalis-macos-arm64.tar.gz
+    du -sh "$OUT" dist/Chrysalis-linux-x86_64.sh dist/chrysalis-macos-arm64.tar.gz
 }
 
 native() {
