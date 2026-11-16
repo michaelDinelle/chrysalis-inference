@@ -206,7 +206,7 @@ const server = Bun.serve<Session>({
     close(ws) { log({ s: ws.data.n, ev: "close" }); },
   },
 });
-log({ ev: "start" });
+log({ ev: "start", cwd: process.cwd() });
 console.log(`voice: ws://127.0.0.1:${server.port}`);
 for await (const _ of Bun.stdin.stream()) {  }
 log({ ev: "exit" });

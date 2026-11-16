@@ -7,7 +7,7 @@ import { Devices, keyCookie } from "./devices";
 import { advertise, answerName, Link } from "./link";
 import { opencodeLine, opencodeManifest, opencodeScript } from "./opencode";
 import { tunnel } from "./machines";
-import { MODELS, python } from "./platform";
+import { HOME, MODELS, python } from "./platform";
 import { qrSvg as qrCode } from "./qr";
 import { appleProfile, connectPage, deviceScript, TRUSTED_GIF } from "./setup";
 import * as harness from "./harness";
@@ -494,7 +494,6 @@ const SANDBOX = await sandboxPage();
 const SANDBOX_CSP = "default-src 'none'; script-src 'unsafe-inline' 'unsafe-eval' blob:; style-src 'unsafe-inline'; img-src data: blob:; " +
   "font-src data:; media-src data: blob:; form-action 'none'; base-uri 'none'; frame-ancestors 'self'; sandbox allow-scripts allow-modals allow-pointer-lock allow-orientation-lock";
 
-const ROOT = `${import.meta.dir}/..`;
 const VOICE_CMD: string[] = process.env.CHRYSALIS_VOICE_CMD ? JSON.parse(process.env.CHRYSALIS_VOICE_CMD) : [python(), "-m", "chrysalis.voice"];
 const VOICE_IDLE_MS = Number(process.env.CHRYSALIS_VOICE_IDLE_MS ?? 60_000);
 interface VoiceSocket { up?: WebSocket; queue: (string | Buffer<ArrayBuffer>)[]; closed: boolean; machine?: { id: string; name: string; home?: string; kind?: string; line: ReturnType<typeof tunnel> } }
@@ -507,7 +506,7 @@ function speechService(): Promise<string> {
   const missing = (why: string) => new Error(`The voice service did not start (${why})`);
   let proc: Subprocess<"pipe", "pipe", "inherit">;
   try {
-    proc = Bun.spawn(VOICE_CMD, { cwd: ROOT, stdin: "pipe", stdout: "pipe", stderr: "inherit" });
+    proc = Bun.spawn(VOICE_CMD, { cwd: HOME, stdin: "pipe", stdout: "pipe", stderr: "inherit" });
   } catch (e) {
     return Promise.reject(missing(e instanceof Error ? e.message : String(e)));
   }

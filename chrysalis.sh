@@ -1,10 +1,16 @@
 #!/usr/bin/env bash
 set -e
 ROOT="$(dirname "$(readlink -f "$0")")"
-PY="$ROOT/data/venv/bin/python"
 MAC=; [ "$(uname)" = Darwin ] && MAC=1
-APP="$ROOT/Chrysalis.app"
-BUN="$ROOT/bin/bun"; [ -n "$MAC" ] && [ -x "$APP/Contents/MacOS/Chrysalis" ] && BUN="$APP/Contents/MacOS/Chrysalis"; [ -x "$BUN" ] || BUN=bun
+export CHRYSALIS_HOME="$ROOT"
+BUN="$ROOT/bin/bun"
+case "$ROOT" in *.app/Contents/Resources)
+    CHRYSALIS_HOME="$HOME/Library/Application Support/Chrysalis" BUN="$ROOT/../MacOS/Chrysalis"
+    export PYTHONPYCACHEPREFIX="$CHRYSALIS_HOME/data/pycache"
+    mkdir -p "$CHRYSALIS_HOME" && ln -sfn "$ROOT/chrysalis" "$CHRYSALIS_HOME/chrysalis" ;;
+esac
+PY="$CHRYSALIS_HOME/data/venv/bin/python"
+[ -x "$BUN" ] || BUN=bun
 export BUN_BE_BUN=1
 launch() { exec "$BUN" "$ROOT/web/launch.ts" "$@"; }
 PKGS=(numpy tokenizers pillow llguidance "huggingface_hub[hf_xet]" onnxruntime==1.31.0 sherpa-onnx==1.13.8 kokoro-onnx==0.4.7 websockets==17.2 pypdfium2==5.15.2 av==19.0.2)
@@ -26,13 +32,13 @@ setup() {
     if [ ! -x "$PY" ]; then
         echo "getting Python and the packages Chrysalis uses (once)"
         T=$(mktemp -d)
-        if uv_get "$T" && "$T/uv" python install -q --no-bin 3.12 --install-dir "$T/python" && mkdir -p "$ROOT/data" &&
-            mv "$(find "$T/python" -mindepth 1 -maxdepth 1 -type d -name 'cpython-3.12.*')" "$ROOT/data/venv" &&
-            "$T/uv" pip install -q --python "$ROOT/data/venv/bin/python3" --break-system-packages "${PKGS[@]}"; then
-            ln -sf python3 "$ROOT/data/venv/bin/python"
+        if uv_get "$T" && "$T/uv" python install -q --no-bin 3.12 --install-dir "$T/python" && mkdir -p "$CHRYSALIS_HOME/data" &&
+            mv "$(find "$T/python" -mindepth 1 -maxdepth 1 -type d -name 'cpython-3.12.*')" "$CHRYSALIS_HOME/data/venv" &&
+            "$T/uv" pip install -q --python "$CHRYSALIS_HOME/data/venv/bin/python3" --break-system-packages "${PKGS[@]}"; then
+            ln -sf python3 "$CHRYSALIS_HOME/data/venv/bin/python"
         else
             echo "  that failed: start Chrysalis again to try again"
-            rm -rf "$ROOT/data/venv"
+            rm -rf "$CHRYSALIS_HOME/data/venv"
         fi
         rm -rf "$T"
     fi
@@ -76,6 +82,13 @@ build() {
         fi
         echo "building Chrysalis's CUDA engines for this GPU (once, a few minutes)"
         PATH="$PATH:$cuda" make -C "$ROOT" -s -j"$(nproc)" engines >/dev/null 2>&1 || echo "  that failed: 'make engines' shows why"
+        return 0
+    fi
+    if [ -z "$MAC" ]; then
+        [ -f "$ROOT/build/libchrysalis.so" ] && [ -f "$ROOT/build/libchrysalis_fn.so" ] && return 0
+        echo "getting Chrysalis's engines for the RX 7900 and the GPU runtime they use (once, 127 MB)"
+        curl -fsSL "${CHRYSALIS_RELEASE:-https://github.com/michaelDinelle/chrysalis-inference/releases/latest/download}/chrysalis-engines-linux-amd.tar.gz" |
+            tar -xz -C "$ROOT" || echo "  that failed: start Chrysalis again to try again"
         return 0
     fi
     apple && [ -f "$ROOT/Makefile" ] || return 0
@@ -122,25 +135,26 @@ release() {
         printf '%s\n' 'export default { initialize() {}, connectToDevTools() {} };' > "$OUT/web/node_modules/react-devtools-core/index.js"
     cp "$(readlink -f "$(command -v bun)")" "$OUT/bin/bun"
     echo "$VER" > "$OUT/VERSION"
-    local HEAD=('#!/bin/sh' 'set -e' 'dir="${CHRYSALIS_DIR:-$PWD/chrysalis}"' 'mkdir -p "$dir"' 'echo "unpacking Chrysalis into $dir"'
-                'tail -n +8 "$0" | tar -xz -C "$dir" --strip-components=1' 'exec "$dir/chrysalis.sh" "$@"')
-    { printf '%s\n' "${HEAD[@]}"; tar -C dist -cz chrysalis; } > dist/Chrysalis-linux-x86_64.sh
-    local M=dist/macos/chrysalis A=dist/macos/chrysalis/Chrysalis.app/Contents
-    rm -rf dist/macos && mkdir -p "$A/MacOS" "$A/Resources" && cp -r chrysalis.sh LICENSE "$OUT/VERSION" "$OUT/web" "$M/"
+    tar -C "$OUT" -czf dist/chrysalis-engines-linux-amd.tar.gz build ggml data/rocm data/cache
+    local A=dist/macos/Chrysalis.app/Contents M=dist/macos/Chrysalis.app/Contents/Resources N="${VER#v}" && N="${N%%-*}"
+    rm -rf dist/macos && mkdir -p "$A/MacOS" "$M/chrysalis" && cp -r chrysalis.sh LICENSE "$OUT/VERSION" "$OUT/web" "$M/" &&
+        cp -r chrysalis/__init__.py chrysalis/voice "$M/chrysalis/" && rm -rf "$M/chrysalis/voice/__pycache__"
     curl -fsSL -o "$UV/bun.zip" "https://github.com/oven-sh/bun/releases/download/bun-v$(bun --version)/bun-darwin-aarch64.zip"
     unzip -q -j "$UV/bun.zip" -d "$UV/darwin"
     bun -e 'const file = process.argv.at(-1), b = Buffer.from(await Bun.file(file).arrayBuffer());
 for (let i = 0, at = 32; i < b.readUInt32LE(16); i++, at += b.readUInt32LE(at + 4))
   if (b.readUInt32LE(at) === 0x1b) crypto.getRandomValues(b.subarray(at + 8, at + 24));
 await Bun.write(file, b);' "$UV/darwin/bun"
-    printf '%s\n' 'import { resolve } from "node:path";' 'const root = resolve(process.execPath, "../../../..");' \
-        'Bun.spawnSync(["open", "-a", "Terminal", `${root}/chrysalis.sh`]);' \
-        'for (let i = 0; i < 300 && !(await fetch("http://127.0.0.1:8081/").then(() => true, () => false)); i++) await Bun.sleep(200);' \
-        'Bun.spawnSync(["open", "http://localhost:8081"]);' > "$UV/open.ts"
+    printf '%s\n' 'import { mkdirSync, writeFileSync } from "node:fs";' 'import { homedir } from "node:os";' 'import { join, resolve } from "node:path";' \
+        'const dir = join(homedir(), "Library", "Application Support", "Chrysalis"), sh = resolve(process.execPath, "../../Resources/chrysalis.sh");' \
+        'mkdirSync(dir, { recursive: true });' \
+        'writeFileSync(join(dir, "Chrysalis.command"), "#!/bin/sh\nexec /usr/bin/env bash \"" + sh.replace(/["$`\\]/g, "\\$&") + "\"\n", { mode: 0o755 });' \
+        'Bun.spawnSync(["open", "-a", "Terminal", join(dir, "Chrysalis.command")]);' > "$UV/open.ts"
     bun build --compile --target=bun-darwin-arm64 --compile-executable-path="$UV/darwin/bun" "$UV/open.ts" --outfile "$A/MacOS/Chrysalis" >/dev/null
     printf '%s\n' '<?xml version="1.0" encoding="UTF-8"?>' '<plist version="1.0"><dict>' \
         '<key>CFBundleIdentifier</key><string>io.github.michaeldinelle.chrysalis</string>' '<key>CFBundleName</key><string>Chrysalis</string>' \
         '<key>CFBundleExecutable</key><string>Chrysalis</string>' '<key>CFBundlePackageType</key><string>APPL</string>' \
+        "<key>CFBundleShortVersionString</key><string>$N</string>" "<key>CFBundleVersion</key><string>$N</string>" '<key>LSMinimumSystemVersion</key><string>13.0</string>' \
         '<key>CFBundleIconFile</key><string>chrysalis</string>' '<key>LSBackgroundOnly</key><true/>' \
         '<key>NSLocalNetworkUsageDescription</key><string>Chrysalis finds the computer on your network that runs it, and answers from its GPU.</string>' \
         '</dict></plist>' > "$A/Info.plist"
@@ -148,7 +162,6 @@ await Bun.write(file, b);' "$UV/darwin/bun"
     bun -e 'const [png, out] = process.argv.slice(-2), p = await Bun.file(png).bytes(), h = Buffer.alloc(16);
 h.write("icns"); h.writeUInt32BE(16 + p.length, 4); h.write("ic10", 8); h.writeUInt32BE(8 + p.length, 12);
 await Bun.write(out, Buffer.concat([h, p]));' "$UV/icon.png" "$A/Resources/chrysalis.icns"
-    tar -C dist/macos -czf dist/chrysalis-macos-arm64.tar.gz chrysalis
     printf '%s\n' "FROM ubuntu:24.04" \
         "RUN apt-get update && apt-get install -y --no-install-recommends ca-certificates && rm -rf /var/lib/apt/lists/*" \
         "COPY chrysalis /opt/chrysalis" \
@@ -156,7 +169,60 @@ await Bun.write(out, Buffer.concat([h, p]));' "$UV/icon.png" "$A/Resources/chrys
         "VOLUME /models" "EXPOSE 8080" \
         'CMD ["sh", "-c", "cp -r /opt/chrysalis/configs/. /models/ && exec /opt/chrysalis/chrysalis.sh serve --host 0.0.0.0"]' |
         docker build -q -t ghcr.io/michaeldinelle/chrysalis:latest -f - dist >/dev/null
-    du -sh "$OUT" dist/Chrysalis-linux-x86_64.sh dist/chrysalis-macos-arm64.tar.gz
+    du -sh "$OUT" dist/chrysalis-engines-linux-amd.tar.gz dist/macos
+}
+
+dmg() {
+    set -euo pipefail
+    local from out X app dev team plist
+    from="$(cd "${1:-$ROOT/dist/macos}" && pwd)" && out="$(dirname "$from")/Chrysalis.dmg"
+    T=$(mktemp -d) && trap 'rm -rf "$T"' EXIT
+    X="$T/Chrysalis.xcarchive" app="$T/Chrysalis.xcarchive/Products/Applications/Chrysalis.app" plist='<?xml version="1.0" encoding="UTF-8"?><plist version="1.0"><dict>'
+    mkdir -p "$X/Products/Applications" "$T/Chrysalis" && ditto "$from/Chrysalis.app" "$app" && xattr -cr "$app" && ln -s /Applications "$T/Chrysalis/Applications"
+    printf '%s\n' "$plist" '<key>com.apple.security.cs.allow-jit</key><true/>' '<key>com.apple.security.cs.allow-unsigned-executable-memory</key><true/>' \
+        '<key>com.apple.security.cs.disable-executable-page-protection</key><true/>' '<key>com.apple.security.cs.allow-dyld-environment-variables</key><true/>' \
+        '<key>com.apple.security.cs.disable-library-validation</key><true/>' '</dict></plist>' > "$T/bun.entitlements"
+    dev=$(security find-identity -v -p codesigning | awk '/"Apple Development: / { print $2; exit }')
+    codesign --force --options runtime --entitlements "$T/bun.entitlements" -s "${dev:--}" "$app"
+    team=$(codesign -dv "$app" 2>&1 | sed -n 's/^TeamIdentifier=//p' | grep -vx 'not set' || true)
+    if [ -z "$team" ]; then
+        echo "no Apple Development certificate in the keychain, so no team to sign for: the app is signed ad hoc, and macOS opens it only after Open Anyway in Privacy & Security"
+        mv "$app" "$T/Chrysalis/"
+    else
+        printf '%s\n' "$plist" '<key>ApplicationProperties</key><dict><key>ApplicationPath</key><string>Applications/Chrysalis.app</string>' \
+            '<key>Architectures</key><array><string>arm64</string></array>' \
+            "<key>CFBundleIdentifier</key><string>$(plutil -extract CFBundleIdentifier raw "$app/Contents/Info.plist")</string>" \
+            "<key>CFBundleShortVersionString</key><string>$(plutil -extract CFBundleShortVersionString raw "$app/Contents/Info.plist")</string>" \
+            "<key>CFBundleVersion</key><string>$(plutil -extract CFBundleVersion raw "$app/Contents/Info.plist")</string>" \
+            "<key>SigningIdentity</key><string>Apple Development</string><key>Team</key><string>$team</string></dict>" \
+            "<key>ArchiveVersion</key><integer>2</integer><key>CreationDate</key><date>$(date -u +%Y-%m-%dT%H:%M:%SZ)</date>" \
+            '<key>Name</key><string>Chrysalis</string><key>SchemeName</key><string>Chrysalis</string></dict></plist>' > "$X/Info.plist"
+        for to in export upload; do
+            printf '%s\n' "$plist" '<key>method</key><string>developer-id</string><key>signingStyle</key><string>automatic</string>' \
+                "<key>teamID</key><string>$team</string><key>destination</key><string>$to</string></dict></plist>" > "$T/$to.plist"
+        done
+        xcodebuild -exportArchive -archivePath "$X" -exportOptionsPlist "$T/export.plist" -exportPath "$T/signed" -allowProvisioningUpdates > "$T/signed.log" 2>&1 ||
+            { grep -E "error:|FAILED" "$T/signed.log"; return 1; }
+        echo "signed with Developer ID for team $team; sending it to Apple to notarize"
+        if ! xcodebuild -exportArchive -archivePath "$X" -exportOptionsPlist "$T/upload.plist" -exportPath "$T/upload" -allowProvisioningUpdates > "$T/upload.log" 2>&1; then
+            grep "error:" "$T/upload.log" || tail -3 "$T/upload.log"
+            echo "Apple did not take it: the dmg holds the app signed with Developer ID, not notarized"
+        else
+            until xcodebuild -exportNotarizedApp -archivePath "$X" -exportPath "$T/notarized" > "$T/notarized.log" 2>&1 && [ -d "$T/notarized/Chrysalis.app" ]; do
+                grep -q "is processing" "$T/notarized.log" ||
+                    { grep "error:" "$T/notarized.log" || tail -3 "$T/notarized.log"; echo "Apple did not notarize it: the dmg holds the app signed with Developer ID, not notarized"; break; }
+                sleep 30
+            done
+            if [ -d "$T/notarized/Chrysalis.app" ]; then
+                xcrun stapler validate -q "$T/notarized/Chrysalis.app" || xcrun stapler staple -q "$T/notarized/Chrysalis.app"
+                rm -rf "$T/signed/Chrysalis.app" && mv "$T/notarized/Chrysalis.app" "$T/signed/" && echo "notarized by Apple, its ticket stapled to the app"
+            fi
+        fi
+        mv "$T/signed/Chrysalis.app" "$T/Chrysalis/"
+    fi
+    codesign -v --deep --strict "$T/Chrysalis/Chrysalis.app"
+    hdiutil create -quiet -volname Chrysalis -srcfolder "$T/Chrysalis" -format ULMO -ov "$out"
+    ls -l "$out" && shasum -a 256 "$out"
 }
 
 native() {
@@ -193,14 +259,12 @@ native() {
 
 case "${1:-}" in
   ""|--host|--insecure|--model)
-            if [ -n "$MAC" ]; then
-                [ ! -e "$APP" ] || codesign -v "$APP" 2>/dev/null || codesign --force -s - "$APP" 2>/dev/null
-            fi
             setup
             build
             launch "$@" ;;
   get)      setup; launch "$@" ;;
   release)  release "${@:2}" ;;
+  dmg)      dmg "${@:2}" ;;
   native)   native ;;
   *)        launch "$@" ;;
 esac

@@ -1,5 +1,5 @@
 import { expect, test } from "bun:test";
-import { mkdtempSync, readFileSync } from "node:fs";
+import { mkdtempSync, readFileSync, realpathSync } from "node:fs";
 import { harness, CHUNKS, Ev, GAP_MS, NOTE, RUN, Round, all, ask, base, chrysalisAborted, collect, contents, decide, deltas, events, fake, json, outcome, parsed, port, post, seen, until, voiceServer, unique, web } from "./server-harness";
 
 harness();
@@ -122,11 +122,11 @@ test("a reply, and the answer to a thread's question, must come as JSON: another
   expect((await fetch(`${base}/api/chat/x/tool/y`, { method: "POST", body: '{"decision":"once"}', headers: form })).status).toBe(415);
 });
 
-test("voice: only this server's own pages get a socket; it starts the service, passes both sides' frames through as they are, and stops the service once idle", async () => {
-  const log = `${mkdtempSync(`${RUN}/voice-`)}/voice.log`, events = () => {
+test("voice: only this server's own pages get a socket; it starts the service in the folder Chrysalis keeps its files in, passes both sides' frames through as they are, and stops the service once idle", async () => {
+  const home = realpathSync(mkdtempSync(`${RUN}/voice-home-`)), log = `${mkdtempSync(`${RUN}/voice-`)}/voice.log`, events = () => {
     try { return readFileSync(log, "utf8").trim().split("\n").filter(Boolean).map((l) => JSON.parse(l)); } catch { return []; }
   };
-  const v = await voiceServer({ CHRYSALIS_VOICE_CMD: JSON.stringify([process.execPath, `${import.meta.dir}/fake-voice.ts`]), FAKE_VOICE_LOG: log, CHRYSALIS_VOICE_IDLE_MS: "300" });
+  const v = await voiceServer({ CHRYSALIS_VOICE_CMD: JSON.stringify([process.execPath, `${import.meta.dir}/fake-voice.ts`]), FAKE_VOICE_LOG: log, CHRYSALIS_VOICE_IDLE_MS: "300", CHRYSALIS_HOME: home });
   try {
     expect(await outcome(v.socket("http://evil.example"))).toBe("closed");
     expect(await outcome(v.socket())).toBe("closed");
@@ -150,7 +150,7 @@ test("voice: only this server's own pages get a socket; it starts the service, p
     expect(chunks.map((c) => [c.head.text, c.samples])).toEqual([["one two three ", 3600], ["four", 2400]]);
     s.close();
     expect(await until(() => events().some((e) => e.ev === "exit"))).toBe(true);
-    expect(events().filter((e) => e.ev === "start").length).toBe(1);
+    expect(events().filter((e) => e.ev === "start").map((e) => e.cwd)).toEqual([home]);
   } finally {
     v.proc.kill();
   }

@@ -82,25 +82,25 @@ Every system ends the same way: the terminal shows the chat's address and the mo
 
 1. Driver: install [AMD Software: Adrenalin Edition](https://www.amd.com/en/support/download/drivers.html) if the card
    has none (Device Manager, Display adapters, shows "AMD Radeon RX 7900" when it does).
-2. Download [Chrysalis-windows-x64.zip](https://github.com/michaelDinelle/chrysalis-inference/releases/latest/download/Chrysalis-windows-x64.zip),
-   right-click it and choose Extract All.
-3. Double-click `Chrysalis.exe` in the folder. Windows asks once whether to run a program it does not know: More info,
-   then Run anyway.
+2. Download [Chrysalis-Setup.exe](https://github.com/michaelDinelle/chrysalis-inference/releases/latest/download/Chrysalis-Setup.exe)
+   and double-click it. Windows asks once whether to run a program whose publisher it does not know: Run.
+3. Go through the setup. It installs for you alone, with no administrator prompt, adds Chrysalis to the Start menu and
+   starts it when it finishes. Its uninstaller leaves the models you downloaded.
 
-<p align="center"><img src="media/windows-folder.png" width="760" alt="The unzipped Chrysalis folder in Windows Explorer, with Chrysalis.exe"></p>
+<p align="center"><img src="media/windows-setup.png" width="760" alt="Chrysalis's setup on Windows 11, showing the MIT licence, with no administrator prompt"></p>
 <p align="center"><img src="media/windows-run.png" width="760" alt="Chrysalis running in a window on Windows 11 with the model ready, and the chat open in the browser"></p>
 
 **Linux with an RX 7900 XTX, XT or GRE**
 
 1. Driver: none to install. The card runs on the `amdgpu` driver every current distribution ships (`lspci -k` shows
    "Kernel driver in use: amdgpu"), and Chrysalis brings its own ROCm.
-2. Download [Chrysalis-linux-x86_64.sh](https://github.com/michaelDinelle/chrysalis-inference/releases/latest/download/Chrysalis-linux-x86_64.sh)
-   and run it. It unpacks Chrysalis into a `chrysalis` folder where you run it and starts it; `chrysalis/chrysalis.sh`
-   starts it again.
+2. Get Chrysalis and start it. The first start gets the engines built for the card and the GPU runtime they use,
+   Python and Bun:
 
 ```sh
-curl -fsSLO https://github.com/michaelDinelle/chrysalis-inference/releases/latest/download/Chrysalis-linux-x86_64.sh
-sh Chrysalis-linux-x86_64.sh
+git clone https://github.com/michaelDinelle/chrysalis-inference
+cd chrysalis-inference
+./chrysalis.sh
 ```
 
 <p align="center"><img src="media/run.png" width="760" alt="Chrysalis in a terminal: the chat's and API's addresses, the model ready, two requests with their sizes and speeds, and a prompt"></p>
@@ -157,7 +157,7 @@ docker run -d --device /dev/kfd --device /dev/dri -p 127.0.0.1:8080:8080 -v chry
 
 **Running Chrysalis**
 
-- Everything stays in the release's folder. With 64 GB of RAM, each start asks which model to run. With less, it runs the
+- Everything stays in Chrysalis's folder. With 64 GB of RAM, each start asks which model to run. With less, it runs the
   27B. Ctrl+C in its terminal stops it.
 - The terminal shows each request as it finishes, by its sizes and speeds and never its words. Tab opens the switches,
   rows set with the arrows and Enter: where Chrysalis is reachable, the model (or none, which frees the GPU), what the terminal shows,
@@ -174,7 +174,9 @@ docker run -d --device /dev/kfd --device /dev/dri -p 127.0.0.1:8080:8080 -v chry
   backend's address now: `curl -X POST localhost:8081/api/backend -H 'Content-Type: application/json' -d '{"url": "localhost:11434"}'`
   on the computer it runs on points the chat at llama.cpp, Ollama, LM Studio, KoboldCpp or vLLM.
 - Mac: the first `./chrysalis.sh` in a clone gets Python and Bun and builds the Metal engines with Xcode's Metal compiler.
-  The release, `chrysalis-macos-arm64.tar.gz`, is a laptop's chat alone, and `chrysalis/Chrysalis.app` opens it in Terminal.
+  The release, [Chrysalis.dmg](https://github.com/michaelDinelle/chrysalis-inference/releases/latest/download/Chrysalis.dmg),
+  is a laptop's chat alone, for Chrysalis on another computer: open it, drag Chrysalis to Applications and open it there.
+  It keeps what it downloads in `~/Library/Application Support/Chrysalis`.
 - NVIDIA: needs Linux with NVIDIA's driver and CUDA toolkit. The first `./chrysalis.sh` in a clone builds the CUDA engines.
 - Windows: Chrysalis runs natively, with no WSL: the folder holds the engines, a Python of its own and the web chat,
   and needs only AMD's driver. Closing its window stops it. `Chrysalis.exe --host 0.0.0.0` in a terminal puts it on the

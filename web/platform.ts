@@ -3,6 +3,7 @@ import { tmpdir, totalmem } from "node:os";
 import { join } from "node:path";
 
 export const ROOT = join(import.meta.dir, "..");
+export const HOME = process.env.CHRYSALIS_HOME || ROOT;
 export const MODELS = ["qwen3.8-27b", "qwen3.8-flash-next"];
 
 export interface Machine {
@@ -23,7 +24,7 @@ export const exe = (path: string, m: Machine = here()) => (m.platform === "win32
 export const library = (name: string, m: Machine = here(), root = ROOT) =>
   join(root, "build", `${name}${m.platform === "darwin" ? ".dylib" : m.platform === "win32" ? ".dll" : ".so"}`);
 
-export function python(m: Machine = here(), root = ROOT) {
+export function python(m: Machine = here(), root = HOME) {
   const tries = m.platform === "win32" ? ["data/venv/Scripts/python.exe", "data/venv/python.exe"] : ["data/venv/bin/python"];
   return join(root, tries.find((p) => m.exists(join(root, p))) ?? tries[0]);
 }
@@ -43,9 +44,9 @@ export function serverEnv(m: Machine = here(), root = ROOT): Record<string, stri
   return { ...utf8, ...before(m.env, "LD_LIBRARY_PATH", [join(root, "data/rocm/lib"), join(root, "data/rocm/lib/rocm_sysdeps/lib"), ggml], ":") };
 }
 
-export const serverCommand = (model?: string, m: Machine = here(), root = ROOT) =>
+export const serverCommand = (model?: string, m: Machine = here(), root = HOME) =>
   [python(m, root), "-m", "chrysalis", "serve", "--host", "127.0.0.1", ...(model ? ["--use", model] : [])];
-export const getCommand = (model: string, m: Machine = here(), root = ROOT) => [python(m, root), "-m", "chrysalis", "get", model];
+export const getCommand = (model: string, m: Machine = here(), root = HOME) => [python(m, root), "-m", "chrysalis", "get", model];
 
 export const ourScript = (file: string) => ({ cmd: [process.execPath, file], env: { BUN_BE_BUN: "1" } });
 

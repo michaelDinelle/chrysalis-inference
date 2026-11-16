@@ -2,7 +2,7 @@ import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node
 import { dirname, join } from "node:path";
 import { letIn } from "./firewall";
 import { gpuEnv, gpuFound, gpuHere } from "./gpu";
-import { getCommand, here, MODELS, ourScript, python, ROOT, serverCommand, serverEnv, utf8Console, type Machine } from "./platform";
+import { getCommand, here, HOME, MODELS, ourScript, python, ROOT, serverCommand, serverEnv, utf8Console, type Machine } from "./platform";
 import { tlsPath } from "./tls";
 
 const CHOICES = [
@@ -113,9 +113,10 @@ async function start(args: string[], m: Machine, gpus: Found) {
     if (p.background && p.background !== model) run.push("--get", p.background);
   } else run.push("--no-model");
   const cli = Bun.spawn(run, { cwd: import.meta.dir, env: { ...process.env, ...found.env, BUN_BE_BUN: "1" }, stdio: ["inherit", "inherit", "inherit"] });
-  if (m.platform === "win32" && asked.mode !== "insecure") void (async () => {
+  const opener = m.platform === "win32" ? ["cmd", "/c", "start", ""] : HOME !== ROOT ? ["open"] : undefined;
+  if (opener && asked.mode !== "insecure") void (async () => {
     while (cli.exitCode === null && !(await running(port))) await Bun.sleep(250);
-    if (cli.exitCode === null) Bun.spawn(["cmd", "/c", "start", "", `http://localhost:${port}`], { stdin: "ignore", stdout: "ignore", stderr: "ignore" });
+    if (cli.exitCode === null) Bun.spawn([...opener, `http://localhost:${port}`], { stdin: "ignore", stdout: "ignore", stderr: "ignore" });
   })();
   for (const sig of ["SIGINT", "SIGTERM", "SIGHUP"] as const) process.on(sig, () => cli.kill(sig));
   return cli.exited;

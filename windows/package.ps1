@@ -36,12 +36,49 @@ Push-Location "$pkg\web"
 & $Bun install --frozen-lockfile --production 2>&1 | Out-Null
 if ($LASTEXITCODE) { Pop-Location; throw "the web chat's packages did not install" }
 Pop-Location
-& $Bun build --compile "$root\web\launch.ts" --outfile "$pkg\Chrysalis.exe" 2>&1 | Out-Null
+Add-Type -AssemblyName PresentationCore
+$svg = [xml](Get-Content -Raw "$root\web\logo.svg")
+$box = $svg.svg.viewBox -split " " | ForEach-Object { [double]$_ }
+$shape = [Windows.Media.Geometry]::Parse("F0 " + $svg.svg.path.d)
+$fill = [Windows.Media.SolidColorBrush]::new([Windows.Media.ColorConverter]::ConvertFromString($svg.svg.fill))
+$sizes = 16, 20, 24, 32, 40, 48, 64, 256
+$pngs = foreach ($s in $sizes) {
+    $k = $s * 880 / 1024 / [Math]::Max($box[2], $box[3])
+    $v = [Windows.Media.DrawingVisual]::new()
+    $dc = $v.RenderOpen()
+    $dc.PushTransform([Windows.Media.MatrixTransform]::new($k, 0, 0, $k, ($s - $k * $box[2]) / 2 - $k * $box[0], ($s - $k * $box[3]) / 2 - $k * $box[1]))
+    $dc.DrawGeometry($fill, $null, $shape)
+    $dc.Close()
+    $bmp = [Windows.Media.Imaging.RenderTargetBitmap]::new($s, $s, 96, 96, [Windows.Media.PixelFormats]::Pbgra32)
+    $bmp.Render($v)
+    $enc = [Windows.Media.Imaging.PngBitmapEncoder]::new()
+    $enc.Frames.Add([Windows.Media.Imaging.BitmapFrame]::Create($bmp))
+    $ms = [IO.MemoryStream]::new()
+    $enc.Save($ms)
+    , $ms.ToArray()
+}
+$ico = [IO.BinaryWriter]::new([IO.File]::Create("$t\chrysalis.ico"))
+$ico.Write([uint16]0); $ico.Write([uint16]1); $ico.Write([uint16]$sizes.Count)
+$at = 6 + 16 * $sizes.Count
+for ($i = 0; $i -lt $sizes.Count; $i++) {
+    $ico.Write([byte]($sizes[$i] % 256)); $ico.Write([byte]($sizes[$i] % 256)); $ico.Write([uint16]0); $ico.Write([uint16]1); $ico.Write([uint16]32)
+    $ico.Write([uint32]$pngs[$i].Length); $ico.Write([uint32]$at)
+    $at += $pngs[$i].Length
+}
+foreach ($p in $pngs) { $ico.Write($p) }
+$ico.Close()
+& $Bun build --compile --windows-icon="$t\chrysalis.ico" --windows-title=Chrysalis --windows-description=Chrysalis --windows-publisher="Chrysalis Inference" "$root\web\launch.ts" --outfile "$pkg\Chrysalis.exe" 2>&1 | Out-Null
 if (-not (Test-Path "$pkg\Chrysalis.exe")) { throw "Chrysalis.exe did not build" }
 if (-not $Version -and (Get-Command git -ErrorAction SilentlyContinue)) { $Version = git -C $root describe --tags --always 2>$null }
 if ($Version) { $Version | Out-File -Encoding ascii "$pkg\VERSION" }
+$iscc = "$env:LOCALAPPDATA\Programs\Inno Setup 6\ISCC.exe"
+if (-not (Test-Path $iscc)) {
+    Invoke-WebRequest -UseBasicParsing "https://github.com/jrsoftware/issrc/releases/download/is-6_7_4/innosetup-6.7.4.exe" -OutFile "$t\innosetup.exe"
+    if ((Get-FileHash "$t\innosetup.exe" -Algorithm SHA256).Hash.ToLower() -ne "a549929319f9120716677c685535ca4671e4b937b5fdc87e2585f32d8eb30e8c") { throw "Inno Setup's download does not match its checksum" }
+    Start-Process "$t\innosetup.exe" -ArgumentList "/VERYSILENT", "/SUPPRESSMSGBOXES", "/NORESTART", "/CURRENTUSER" -Wait
+}
+$setup = Join-Path $Out "Chrysalis-Setup.exe"
+& $iscc /Q "/DRoot=$pkg" "/DVersion=$Version" "/DIcon=$t\chrysalis.ico" "/O$Out" "$PSScriptRoot\setup.iss"
+if ($LASTEXITCODE -or -not (Test-Path $setup)) { throw "Chrysalis-Setup.exe did not build" }
 Remove-Item $t -Recurse -Force
-$zip = Join-Path $Out "Chrysalis-windows-x64.zip"
-Remove-Item $zip -ErrorAction SilentlyContinue
-Compress-Archive -Path $pkg -DestinationPath $zip -CompressionLevel Optimal
-"{0}: {1:N0} MB unpacked, {2:N0} MB zipped" -f $pkg, ((Get-ChildItem $pkg -Recurse -File | Measure-Object Length -Sum).Sum / 1MB), ((Get-Item $zip).Length / 1MB)
+"{0}: {1:N0} MB unpacked, {2:N0} MB installer" -f $pkg, ((Get-ChildItem $pkg -Recurse -File | Measure-Object Length -Sum).Sum / 1MB), ((Get-Item $setup).Length / 1MB)
