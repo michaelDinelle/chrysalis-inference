@@ -63,75 +63,16 @@ Start Chrysalis with `chrysalis.sh --host 0.0.0.0`. The other computer needs [Op
 
 ## Run it
 
-**Windows 11 with an RX 7900 XTX** · [**Step-by-step guide with pictures →**](docs/windows.md)
+- **Windows 11** with an RX 7900 XTX, XT or GRE: [step by step, with pictures →](docs/windows.md)
+- **Linux** with an RX 7900 XTX: [guide →](docs/linux.md)
+- **Linux** with an NVIDIA RTX 30 series or newer: [guide →](docs/nvidia.md)
+- **Mac** with Apple Silicon and 32 GB or more: [guide →](docs/mac.md)
+- **Docker**, the API alone: [guide →](docs/docker.md)
 
-1. Driver: [AMD Software: Adrenalin Edition](https://www.amd.com/en/support/download/drivers.html), if the card has none.
-2. Download [Chrysalis-Setup.exe](https://github.com/michaelDinelle/chrysalis-inference/releases/latest/download/Chrysalis-Setup.exe)
-   and run it.
-3. Chrysalis starts when the setup finishes: pick a model on the Model row and it downloads.
+Every system ends the same way: Chrysalis's terminal and the chat in your browser. Pick a model on the Model row and it
+downloads.
 
-<p align="center"><img src="media/windows/11-ready.png" width="620" alt="Chrysalis's terminal on Windows 11 with the 27B downloaded and ready, the butterfly and the switches"></p>
-
-**Linux with an RX 7900 XTX**
-
-```sh
-git clone https://github.com/michaelDinelle/chrysalis-inference
-cd chrysalis-inference
-./chrysalis.sh
-```
-
-<p align="center"><img src="media/run.png" width="760" alt="Chrysalis in a terminal: the chat's and API's addresses, the model ready, two requests with their sizes and speeds, and a prompt"></p>
 <p align="center"><img src="media/windows/10-downloading.png" width="620" alt="The switches, always on screen: Reach, Model, a Download row while a model downloads, Shows, Restart, Print and Uninstall, with the download's progress below"></p>
-
-<sub>The switches are always on screen: who reaches Chrysalis, the model, and what the terminal shows.</sub>
-
-<p align="center"><img src="media/linux-run.png" width="760" alt="The chat on Linux answering why the sky is blue, with Qwen3.8-27B, its time to first token and its speed under the reply"></p>
-<p align="center"><img src="media/linux-picture.png" width="760" alt="A picture of Chrysalis's terminal dropped into the chat on Linux, and Qwen3.8-Flash-Next describing it"></p>
-
-**Linux with an RTX 30 series or newer** (as run on Ubuntu 22.04)
-
-1. Driver: `sudo apt install nvidia-driver-580`, then restart. `nvidia-smi` lists the card when it is in.
-2. CUDA toolkit and build tools:
-
-```sh
-wget https://developer.download.nvidia.com/compute/cuda/repos/ubuntu2204/x86_64/cuda-keyring_1.1-1_all.deb
-sudo dpkg -i cuda-keyring_1.1-1_all.deb && sudo apt update
-sudo apt install cuda-toolkit-13-0 build-essential cmake git curl unzip
-```
-
-3. Get Chrysalis and start it. The first start builds the engines for the card, a few minutes:
-
-```sh
-git clone https://github.com/michaelDinelle/chrysalis-inference
-cd chrysalis-inference
-./chrysalis.sh
-```
-
-<p align="center"><img src="media/nvidia-run.png" width="760" alt="The chat on Ubuntu with an RTX 3090 answering why butterflies have colorful wings, with Qwen3.8-27B, its time to first token and its speed under the reply"></p>
-
-**Mac with Apple Silicon and 32 GB or more**
-
-```sh
-xcode-select --install
-git clone https://github.com/michaelDinelle/chrysalis-inference
-cd chrysalis-inference
-./chrysalis.sh
-```
-
-If the first start says Metal's compiler is missing:
-
-```sh
-xcodebuild -downloadComponent MetalToolchain
-```
-
-<p align="center"><img src="media/mac-run.png" width="760" alt="The chat on a Mac answering what a chrysalis is, with Qwen3.8-27B, its time to first token and its speed under the reply"></p>
-<p align="center"><img src="media/mac-picture.png" width="760" alt="A chart dropped into the chat on a Mac, and Qwen3.8-27B saying what it shows"></p>
-
-**Docker**
-
-```sh
-docker run -d --device /dev/kfd --device /dev/dri -p 127.0.0.1:8080:8080 -v chrysalis:/models ghcr.io/michaeldinelle/chrysalis
-```
 
 <details><summary>For agents</summary>
 
@@ -401,11 +342,6 @@ docker run -d --device /dev/kfd --device /dev/dri -p 127.0.0.1:8080:8080 -v chry
 | Peak memory | 7.6 GB | 13.3 GB |
 
 </details>
-
-## Guides
-
-- [Windows, step by step](docs/windows.md): the setup, a first model, a chat, and OpenCode with Node.js, every step
-  pictured.
 
 ## Links
 
