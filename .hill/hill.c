@@ -1790,9 +1790,12 @@ static double budget_of(J *inst) {
 
 static void over(const char *name, double budget) { stop("ERROR", "%s took more than %g s: make it fast first", name, budget); }
 
+static volatile pid_t one_shot_pid;
+
 static char *one_shot(const char *cmd, const char *tree, const char *side, const char *name, double budget, const char *log, int *status) {
     int out;
     pid_t pid = launch(cmd, tree, side, NULL, &out, log);
+    one_shot_pid = pid;
     Buf all = {0};
     char chunk[65536];
     double deadline = now_s() + budget;
@@ -1806,6 +1809,7 @@ static char *one_shot(const char *cmd, const char *tree, const char *side, const
             kill(-pid, SIGKILL);
             close(out);
             reap(pid);
+            one_shot_pid = 0;
             over(name, budget);
         }
         ssize_t k = read(out, chunk, sizeof chunk);
@@ -1815,6 +1819,7 @@ static char *one_shot(const char *cmd, const char *tree, const char *side, const
     }
     close(out);
     *status = reap(pid);
+    one_shot_pid = 0;
     return bstr(&all);
 }
 
@@ -2135,7 +2140,7 @@ static char *shelve(const char *head, const char *tree, const char *message, con
         char *ledger = fmtstr("%s/.hill/ledger.jsonl", root_dir);
         char *kept = read_file(ledger, &n);
         GIT("reset", "-q", "--hard", "HEAD");
-        GIT("clean", "-fdq");
+        GIT("clean", "-fdq", "-e", ".hill/run", "-e", ".hill/logs", "-e", ".hill/trees", "-e", ".hill/bin.path");
         if (kept) {
             FILE *f = fopen(ledger, "wb");
             if (f) fwrite(kept, 1, n, f), fclose(f);
@@ -2512,6 +2517,7 @@ static void on_term(int sig) {
     (void)sig;
     for (size_t i = 0; i < nworkers; i++)
         if (workers[i].pid) kill(-workers[i].pid, SIGTERM);
+    if (one_shot_pid > 1) kill(-one_shot_pid, SIGTERM);
     _exit(0);
 }
 
@@ -2783,8 +2789,8 @@ static char *render(Spec *s, Column *cols, size_t ncols) {
     const char *heading = jtext_or(s->spec, "readme_heading", HEADING);
     bprintf(&b, "## %s\n\n%s\n\n", heading,
             jtext_or(s->spec, "readme_intro",
-                     "Every number here is held by the gate: a change is promoted only when at least one of them gets "
-                     "better and none gets worse, on every machine with a record. \xe2\x86\x91 higher is better, \xe2\x86\x93 lower is better."));
+                     "Every number here is held by hill step: a change lands only when at least one of them gets "
+                     "better and none gets worse, on every machine that judges it. \xe2\x86\x91 higher is better, \xe2\x86\x93 lower is better."));
     Strs groups = {0};
     ordered(s, "group", &rids, &groups);
     for (size_t gi = 0; gi < groups.n; gi++) {

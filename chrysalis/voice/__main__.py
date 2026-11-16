@@ -1,4 +1,4 @@
-import argparse, asyncio, json, os, signal, sys, threading
+import argparse, asyncio, atexit, json, os, signal, sys, threading
 from concurrent.futures import ThreadPoolExecutor
 
 from websockets.asyncio.server import serve
@@ -8,11 +8,16 @@ from .parts import Library
 from .talk import Talk
 
 
+def leave():
+    atexit._run_exitfuncs()
+    os._exit(0)
+
+
 async def main(port, threads):
     loop = asyncio.get_running_loop()
     if sys.platform != "win32":
-        loop.add_signal_handler(signal.SIGTERM, os._exit, 0)
-    threading.Thread(target=lambda: (sys.stdin.buffer.read(), os._exit(0)), daemon=True).start()
+        loop.add_signal_handler(signal.SIGTERM, leave)
+    threading.Thread(target=lambda: (sys.stdin.buffer.read(), leave()), daemon=True).start()
     lib, listen_pool, speak_pool = Library(threads), ThreadPoolExecutor(1), ThreadPoolExecutor(1)
 
     async def session(ws):

@@ -6,8 +6,8 @@ import { getCommand, here, MODELS, ourScript, python, ROOT, serverCommand, serve
 import { tlsPath } from "./tls";
 
 const CHOICES = [
-  { id: MODELS[0], name: "Qwen3.8-27B", note: "Quickest replies · 4 s to load" },
-  { id: MODELS[1], name: "Qwen3.8-Flash-Next", note: "Fast at any length · 20 s to load" },
+  { id: MODELS[0], name: "Qwen3.8-27B", note: "Quickest replies" },
+  { id: MODELS[1], name: "Qwen3.8-Flash-Next", note: "Fast at any length" },
 ];
 const ROOMY_GB = 58, NAME = process.platform === "win32" ? "Chrysalis.exe" : "chrysalis.sh";
 const USAGE = `usage: ${NAME} [--host 0.0.0.0 | --insecure] [--model <model>]
