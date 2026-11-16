@@ -2296,11 +2296,13 @@ static int step(const char *message, const char *remote_sha) {
             char *f = fingerprint(s, name, ctree, "candidate");
             if (f) jset(fps, name, jstr(f));
             if (f && is(B.fps, name, f)) {
-                if (!held(s, name)) best_sample(s, name, NULL);
                 printf("hill: %s: depends on the same as the best's (%.16s): its rewards carry over\n", name, f);
                 for (size_t r = 0; r < rewards->len; r++) {
                     if (!of(s, r, name)) continue;
-                    J *row = jnew(JOBJ), *v = B.rings[r].k[B.rings[r].n - 1].v;
+                    J *row = jnew(JOBJ), *v = B.rings[r].n ? B.rings[r].k[B.rings[r].n - 1].v : NULL;
+                    for (size_t i = l.n; !v && i-- > 0;)
+                        if (is(l.v[i], "machine", m.ident)) v = jget(jget(l.v[i], "values"), rewards->k[r]);
+                    if (!v) v = jnew(JNULL);
                     jset(row, "best", v);
                     jset(row, "candidate", v);
                     jset(row, "change", jnew(JNULL));
