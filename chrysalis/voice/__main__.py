@@ -10,7 +10,8 @@ from .talk import Talk
 
 async def main(port, threads):
     loop = asyncio.get_running_loop()
-    loop.add_signal_handler(signal.SIGTERM, os._exit, 0)
+    if sys.platform != "win32":
+        loop.add_signal_handler(signal.SIGTERM, os._exit, 0)
     threading.Thread(target=lambda: (sys.stdin.buffer.read(), os._exit(0)), daemon=True).start()
     lib, listen_pool, speak_pool = Library(threads), ThreadPoolExecutor(1), ThreadPoolExecutor(1)
 
