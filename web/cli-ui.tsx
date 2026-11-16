@@ -4,6 +4,7 @@ import * as core from "./cli-core";
 import { butterfly, paint } from "./terminal";
 
 const { state, ui } = core;
+const gb = (bytes: number) => (bytes / 1e9).toFixed(1);
 const pink = (s: string) => `\x1b[38;2;255;111;165m${s}\x1b[39m`;
 const SPIN = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
 const MODEL_NAMES = ["Qwen3.8-27B", "Qwen3.8-Flash-Next"];
@@ -14,10 +15,12 @@ function rows(): Row[] {
   return [
     { label: "Reach", options: ["this computer", "network", "network, unencrypted"], current: core.MODES.indexOf(state.mode), set: (i) => core.setMode(core.MODES[i]) },
     ...(core.HAS_MODEL ? [
-      { label: "Model", options: [...MODEL_NAMES.map((name, i) => (state.here.includes(core.MODELS[i]) ? name : state.download?.model === core.MODELS[i] ? `${name} · downloading` : `${name} · download`)), ...(state.none ? [] : [e.state === "stopped" ? "unloaded" : "unload"])],
+      { label: "Model", options: [...MODEL_NAMES.map((name, i) => (state.here.includes(core.MODELS[i]) ? name : state.download?.model === core.MODELS[i] ? `${name} · ${state.download.paused ? "paused" : "downloading"}` : `${name} · download`)), ...(state.none ? [] : [e.state === "stopped" ? "unloaded" : "unload"])],
         current: e.state === "stopped" ? 2 : state.none ? MODEL_NAMES.length + 1 : core.MODELS.indexOf(e.model),
         set: (i: number) => (i === 2 ? core.unload() : core.setModel(core.MODELS[i])) },
     ] : []),
+    ...(state.download ? [{ label: "Download", options: [state.download.paused ? "resume" : "pause", "cancel"], current: -1,
+      set: (i: number) => (i ? core.cancelDownload() : state.download?.paused ? core.resumeDownload() : core.pauseDownload()) }] : []),
     { label: "Shows", options: ["requests only", "everything"], current: state.verbose ? 1 : 0, set: (i) => core.setVerbose(i === 1) },
     ...(state.incognito ? [{ label: "Incognito", options: ["forget its chats"], current: -1, set: () => core.forget() }] : []),
     ...(state.opencode ? [{ label: "OpenCode", options: ["Chrysalis's models only", "outside models too"], current: state.opencode.outside ? 1 : 0, set: (i: number) => core.setOutside(i === 1) }] : []),
@@ -42,18 +45,19 @@ function Butterfly({ size }: { size: readonly [number, number] }) {
 
 function Status() {
   const e = state.engine, d = state.download, starting = e.state === "down" && core.HAS_MODEL && state.serving;
-  const { frame } = useAnimation({ interval: 100, isActive: !!d || e.state === "loading" || starting || (e.state === "ready" && e.writing > 0) });
+  const { frame } = useAnimation({ interval: 100, isActive: (!!d && !d.paused) || e.state === "loading" || starting || (e.state === "ready" && e.writing > 0) });
   const got = d?.total ? Math.min(1, d.done / d.total) : 0, bar = Math.round(got * 20), left = d?.rate ? Math.round((d.total - d.done) / d.rate) : 0;
   const spin = <Text color="magenta">{SPIN[frame % SPIN.length]}</Text>, filled = Math.round(Math.min(1, Math.max(0, e.progress)) * 20);
   return (
     <Text wrap="truncate-end">
       {"  "}
-      {d && e.state !== "ready" ? <>{spin} <Text bold>{d.model}</Text>{"  "}<Text color="magenta">{"━".repeat(bar)}</Text><Text color="gray">{"━".repeat(20 - bar)}</Text>
-        {` ${String(Math.round(got * 100)).padStart(3)}%  `}<Text dimColor>downloading · {(d.done / 1e9).toFixed(1)} of {(d.total / 1e9).toFixed(1)} GB{d.rate > 0 ? ` · ${Math.round(d.rate / 1e6)} MB/s · ${Math.floor(left / 60)}:${String(left % 60).padStart(2, "0")} left` : ""}</Text></>
+      {d && e.state !== "ready" ? <>{d.paused ? <Text color="yellow">Ⅱ</Text> : spin} <Text bold>{d.model}</Text>{"  "}<Text color="magenta">{"━".repeat(bar)}</Text><Text color="gray">{"━".repeat(20 - bar)}</Text>
+        {` ${String(Math.round(got * 100)).padStart(3)}%  `}<Text dimColor>{d.paused ? "paused" : "downloading"} · {gb(d.done).padStart(gb(d.total).length)} of {gb(d.total)} GB
+          {d.paused ? "" : ` · ${String(Math.round(d.rate / 1e6)).padStart(3)} MB/s · ${`${Math.floor(left / 60)}:${String(left % 60).padStart(2, "0")}`.padStart(5)} left`}</Text></>
         : e.state === "loading" ? <>{spin} <Text bold>{e.model || "model"}</Text>{"  "}<Text color="magenta">{"━".repeat(filled)}</Text><Text color="gray">{"━".repeat(20 - filled)}</Text>
         {` ${String(Math.round(e.progress * 100)).padStart(3)}%  `}<Text dimColor>{e.step} · {Math.round((Date.now() - e.since) / 1000)} s</Text></>
         : e.state === "ready" ? <><Text color="green">●</Text> <Text bold>{e.model}</Text>{e.writing ? <><Text dimColor> · </Text>{spin} {e.writing} writing</> : null}
-          {d ? <><Text dimColor> · </Text>{d.model} <Text color="magenta">{Math.round(got * 100)}%</Text><Text dimColor> downloaded</Text></> : null}</>
+          {d ? <><Text dimColor> · </Text>{d.model} <Text color="magenta">{String(Math.round(got * 100)).padStart(3)}%</Text><Text dimColor> {d.paused ? "paused" : "downloaded"}</Text></> : null}</>
         : e.state === "stopped" ? <><Text color="gray">○</Text> {e.model} <Text dimColor>is unloaded</Text></>
         : !core.HAS_MODEL ? <><Text color="gray">○</Text> <Text dimColor>no model on this computer</Text></>
         : state.none ? <><Text color="gray">○</Text> <Text dimColor>no model yet · the Model row downloads one</Text></>

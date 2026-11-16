@@ -1,9 +1,9 @@
 import { expect, test } from "bun:test";
-import { chmodSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { gpuFound, gpuHere } from "./gpu";
-import { python, serverCommand, serverEnv, type Machine } from "./platform";
+import { dropDownload, python, serverCommand, serverEnv, type Machine } from "./platform";
 
 const root = join(tmpdir(), "chrysalis-root");
 const machine = (platform: NodeJS.Platform, files: string[] = [], o: Partial<Machine> = {}): Machine => ({
@@ -56,4 +56,17 @@ test("a GPU Chrysalis runs on is a Mac with Apple silicon, 30 GB and the Metal e
     expect(gpuFound(machine("linux"), root, `${dir}/missing`).why).toStartWith(`${dir}/missing could not be run: `);
     expect([gpuFound(machine("darwin", [metal], { arch: "arm64", memory: 36 * 2 ** 30 }), root, none).why, gpuFound(machine("darwin", [metal], { arch: "x64" }), root, found).why?.startsWith("a Mac runs it on Apple silicon")]).toEqual([undefined, true]);
   } finally { rmSync(dir, { recursive: true }); }
+});
+
+test("cancelling a download removes what had arrived of that model, weights and partial files wherever its files go, and nothing else: the files the setup put there and the other model stay", () => {
+  const dir = mkdtempSync(`${tmpdir()}/chrysalis-drop-`), m = `${dir}/data/models`;
+  try {
+    for (const d of ["qwen3.8-flash-next/src/Q8_0", "qwen3.8-flash-next/src/.cache/huggingface/download/Q8_0", ".cache/huggingface/download/qwen3.8-flash-next", ".cache/huggingface/download/qwen3.8-27b", "qwen3.8-27b"]) mkdirSync(`${m}/${d}`, { recursive: true });
+    const made = ["qwen3.8-flash-next/mmproj.gguf", "qwen3.8-flash-next/preprocessor_config.json", "qwen3.8-flash-next/src/Q8_0/part.gguf", "qwen3.8-flash-next/src/.cache/huggingface/download/Q8_0/a.incomplete",
+      ".cache/huggingface/download/qwen3.8-flash-next/b.incomplete", ".cache/huggingface/download/qwen3.8-27b/c.incomplete", "qwen3.8-27b/qwen3.8-27b.gguf", "tokenizer.json"];
+    for (const f of made) writeFileSync(`${m}/${f}`, "x");
+    expect(dropDownload("qwen3.8-flash-next", dir).length).toBe(4);
+    expect(made.filter((f) => existsSync(`${m}/${f}`))).toEqual(["qwen3.8-flash-next/preprocessor_config.json", ".cache/huggingface/download/qwen3.8-27b/c.incomplete", "qwen3.8-27b/qwen3.8-27b.gguf", "tokenizer.json"]);
+    expect(dropDownload("qwen3.8-flash-next", dir)).toEqual([]);
+  } finally { rmSync(dir, { recursive: true, force: true }); }
 });

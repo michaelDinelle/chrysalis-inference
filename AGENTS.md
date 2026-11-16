@@ -82,7 +82,9 @@ README.md shows what Chrysalis is. This file is how to change it.
   shows each request as it finishes and takes commands. Nothing is asked and nothing is downloaded by itself: the
   first start has no model, and one is downloaded only when it is picked, on the Model row of the switches or in the page's
   model menu (which reaches the terminal over IPC), or named with --model. The terminal runs chrysalis get, reads the
-  progress from the line it draws and sends it to the web server for the page's model button. While no model is ready
+  progress from the line it draws and sends it to the web server for the page's model button. A download is paused,
+  resumed or cancelled from the Download row of the switches or the page's model menu: pausing stops chrysalis get and
+  keeps what arrived, cancelling removes it (`dropDownload` in web/platform.ts). While no model is ready
   it draws the logo above the switches as a butterfly in one of three sizes, the largest the window has room for
   (a resize draws the whole screen again), the same strokes in every frame with a glint crossing them
   (`butterfly` in web/terminal.ts). The switches are always on screen, so the arrows and Enter always drive them and

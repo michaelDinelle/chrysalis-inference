@@ -6,7 +6,7 @@ import { utcOffset } from "./clock";
 import { letIn } from "./firewall";
 import { gpuEnv } from "./gpu";
 import { uninstall } from "./launch";
-import { getCommand, memoryRoot, MODELS, ourScript, ROOT, serverCommand, serverEnv, stopTree } from "./platform";
+import { dropDownload, getCommand, memoryRoot, MODELS, ourScript, ROOT, serverCommand, serverEnv, stopTree } from "./platform";
 import { qrText } from "./qr";
 import { tlsPath } from "./tls";
 
@@ -34,7 +34,7 @@ export const state = {
   questions: [] as Ask[],
   asks: [] as Ask[],
   opencode: undefined as { state: string; outside: boolean } | undefined,
-  download: undefined as { model: string; done: number; total: number; rate: number } | undefined,
+  download: undefined as { model: string; done: number; total: number; rate: number; paused?: boolean } | undefined,
   woke: false,
   here: [] as string[],
   none: false,
@@ -218,6 +218,9 @@ function scoped(cmd: string[]) {
 function heard(m: any) {
   if (m?.up) { state.web = m.up; links(); tell(); if (state.download) webSvc.proc?.send({ download: state.download }); }
   if (typeof m?.model === "string" && MODELS.includes(m.model)) act(() => setModel(m.model));
+  if (m?.downloading === "pause") act(pauseDownload);
+  if (m?.downloading === "resume") act(resumeDownload);
+  if (m?.downloading === "cancel") act(cancelDownload);
   if (Array.isArray(m?.questions)) {
     const now: Ask[] = m.questions.map((q: Ask) => ({ key: String(q.key), text: clean(String(q.text)) }));
     for (const q of state.questions) if (!now.some((x) => x.key === q.key)) note(dim(`${q.text} · answered elsewhere`));
@@ -295,10 +298,11 @@ const HELP: [string, string][] = [
   ["opencode", "the line that connects OpenCode on another computer"],
   ["links", "the addresses again"],
   ["clear", "clear the screen"],
+  ["download [how]", "the download under way; pause stops it and keeps what has arrived, resume carries on, cancel removes it"],
   ["uninstall", "remove Chrysalis from this computer: its models, its caches and its settings too"],
   ["quit", "stop Chrysalis (Ctrl+C)"],
 ];
-export const WORDS = ["local", "network", "insecure", "model", "restart", "verbose", "incognito", "qr", "opencode", "links", "clear", "uninstall", "quit", "help"];
+export const WORDS = ["local", "network", "insecure", "model", "restart", "verbose", "incognito", "qr", "opencode", "links", "clear", "download", "uninstall", "quit", "help"];
 
 const here = () => state.web?.local.replace("localhost", "127.0.0.1");
 const failure = async (r: Response) => (await r.json().catch(() => null))?.error?.message ?? `it answered ${r.status}`;
@@ -329,13 +333,41 @@ function tell() {
   webSvc.proc?.send({ models: { here: state.here, none: state.none } });
   sync();
 }
+type Download = NonNullable<(typeof state)["download"]>;
+let halt: "pause" | "cancel" | undefined;
+const dropped = (model: string) => {
+  dropDownload(model);
+  state.download = undefined;
+  webSvc.proc?.send({ download: null });
+  tell();
+  note(`${model}'s download is cancelled and what had arrived is removed`);
+};
+export function pauseDownload() {
+  const d = state.download;
+  if (!d || d.paused || !getting) return note(d?.paused ? `${d.model}'s download is paused already` : "nothing is downloading");
+  halt = "pause";
+  stopTree(getting);
+}
+export function resumeDownload() {
+  const d = state.download;
+  if (!d?.paused) return note(d ? `${d.model} is downloading` : "no download is paused");
+  state.download = undefined;
+  act(() => setModel(d.model));
+}
+export function cancelDownload() {
+  const d = state.download;
+  if (!d) return note("nothing is downloading");
+  if (d.paused || !getting) return dropped(d.model);
+  halt = "cancel";
+  stopTree(getting);
+}
 async function download(model: string): Promise<boolean> {
-  if (state.download) return note(`${state.download.model} is downloading: ${model} is next once it is here`), false;
-  const dl = state.download = { model, done: 0, total: 0, rate: 0 };
+  if (state.download) return note(state.download.paused ? `${state.download.model}'s download is paused: resume or cancel it first` : `${state.download.model} is downloading: ${model} is next once it is here`), false;
+  const dl: Download = state.download = { model, done: 0, total: 0, rate: 0 };
   tell();
   note(`${bold(model)} is downloading`);
   let proc: Subprocess<"ignore", "ignore", "pipe">, said = "";
-  try { proc = getting = Bun.spawn([getCommand(model)[0], "-c", WATCHED, model], { cwd: ROOT, stdin: "ignore", stdout: "ignore", stderr: "pipe", env: getEnv() }); }
+  try { proc = getting = Bun.spawn(process.env.CHRYSALIS_GET_CMD ? [...JSON.parse(process.env.CHRYSALIS_GET_CMD), model] : [getCommand(model)[0], "-c", WATCHED, model], { cwd: ROOT, stdin: "ignore", stdout: "ignore", stderr: "pipe", env: getEnv() }); }
   catch (e) { state.download = undefined; return note(red(`${model} could not be downloaded: ${e instanceof Error ? e.message : String(e)}`)), false; }
   const words = new TextDecoder();
   for await (const chunk of proc.stderr) {
@@ -344,8 +376,16 @@ async function download(model: string): Promise<boolean> {
     webSvc.proc?.send({ download: dl });
     sync();
   }
-  const code = await proc.exited, total = dl.total;
-  getting = state.download = undefined;
+  const code = await proc.exited, total = dl.total, how = halt;
+  halt = getting = undefined;
+  if (how === "pause" && !quitting) {
+    Object.assign(dl, { paused: true, rate: 0 });
+    webSvc.proc?.send({ download: dl });
+    tell();
+    return note(`${bold(model)}'s download is paused${total ? ` at ${Math.round((100 * dl.done) / total)}%` : ""}${SEP}${dim("the Download row resumes or cancels it")}`), false;
+  }
+  if (how === "cancel" && !quitting) return dropped(model), false;
+  state.download = undefined;
   webSvc.proc?.send({ download: null });
   tell();
   if (quitting) return false;
@@ -482,6 +522,7 @@ async function command(line: string) {
     case "restart": return arg && arg !== "model" && arg !== "web" ? note("restart, restart model or restart web") : restart(arg);
     case "qr": return qr();
     case "opencode": return opencodeLine();
+    case "download": return arg === "pause" ? pauseDownload() : arg === "resume" ? resumeDownload() : arg === "cancel" ? cancelDownload() : note(`${state.download ? `${state.download.model} is ${state.download.paused ? "paused" : "downloading"}` : "nothing is downloading"}${SEP}${dim("download pause, download resume or download cancel")}`);
     case "uninstall":
       if (!state.asks.some((a) => a.key === "uninstall")) state.asks.push({ key: "uninstall", text: "Remove Chrysalis from this computer, with its models, its caches and its settings?", answer: (yes) => {
         if (!yes) return note(dim("nothing was removed"));

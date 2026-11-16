@@ -86,7 +86,10 @@ button { font: inherit; color: inherit; cursor: pointer; }
 
 .dot { width: 8px; height: 8px; flex: none; border-radius: 50%; background: var(--faint); }
 .dot.online { background: var(--ok); box-shadow: 0 0 0 3px rgb(108 207 142 / 0.16); }
-.dot.loading { background: var(--warn); animation: pulse 1s ease-in-out infinite; }
+.dot.loading { background: var(--warn); animation: breathe 2.4s ease-in-out infinite; }
+@keyframes breathe { 50% { opacity: 0.6; } }
+.model-btn.getting .dot { background: var(--accent); animation: none; }
+.model-btn.paused .dot { background: var(--faint); }
 .model-item { display: flex; align-items: center; gap: 10px; padding: 8px 10px; border: 0; border-radius: 8px; background: none; color: var(--text); text-align: left; cursor: pointer; }
 .model-item:hover, .model-item:focus-visible { background: var(--hover); outline: none; }
 .model-text { display: grid; gap: 1px; min-width: 0; flex: 1; }
@@ -330,7 +333,12 @@ main:has(.thread > .empty) .composer-box { pointer-events: auto; }
 .model-btn:hover, .model-btn.open { background: var(--hover); color: var(--text); }
 .model-btn .i { flex: none; width: 13px; height: 13px; transition: transform 0.15s; }
 .model-btn .dot { width: 7px; height: 7px; margin-right: 2px; }
-.model-pct { color: var(--faint); font: 11.5px var(--mono); font-variant-numeric: tabular-nums; }
+.model-pct { display: inline-block; min-width: 4ch; color: var(--faint); font: 11.5px var(--mono); font-variant-numeric: tabular-nums; text-align: right; }
+.model-btn .model-pct { min-width: 6.5ch; }
+.model-check.model-doing { display: inline-flex; align-items: center; gap: 6px; height: auto; }
+.model-item .model-label { white-space: nowrap; }
+.model-do { padding: 1px 9px; border: 1px dashed var(--line); border-radius: 999px; color: var(--muted); font: 12px var(--sans); cursor: pointer; }
+.model-do:hover { border-color: var(--accent); color: var(--text); }
 .model-pct .i { width: 11px; height: 11px; margin-right: 3px; vertical-align: -1.5px; }
 .model-btn.getting { background: linear-gradient(90deg, color-mix(in srgb, var(--accent) 24%, transparent) var(--got), color-mix(in srgb, var(--accent) 7%, transparent) var(--got)); color: var(--text);
   transition: background 0.5s; }

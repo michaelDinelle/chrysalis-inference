@@ -899,6 +899,12 @@ img.src = ${JSON.stringify(checkUrl(req))} + "?t=" + Date.now();
       if (model) void engineCall("/chrysalis/load", { model }).catch(() => {});
       return new Response(null, { status: 202 });
     }) },
+    "/api/chrysalis/download": { POST: guarded(async (req) => {
+      const how = (await req.json().catch(() => ({}))).how;
+      if (!download || !process.send || !["pause", "resume", "cancel"].includes(how)) return Response.json({ error: { message: "No download is under way" } }, { status: 409 });
+      process.send({ downloading: how });
+      return new Response(null, { status: 202 });
+    }) },
     "/api/chrysalis/load": {
       POST: guarded(async (req, srv) => {
         srv.timeout(req, 0);
@@ -1095,7 +1101,7 @@ if (process.send) {
     told = now;
   }, 1000);
 }
-let download: { model: string; done: number; total: number; rate: number } | undefined;
+let download: { model: string; done: number; total: number; rate: number; paused?: boolean } | undefined;
 let models: { here: string[]; none: boolean } | undefined;
 const declined = new Set<string>();
 if (process.env.CHRYSALIS_ENGINE_HERE === "0") setInterval(() => {

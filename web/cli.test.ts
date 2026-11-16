@@ -193,6 +193,36 @@ test("the switches are on screen from the start with the arrows live and Model h
   }
 }, 90_000);
 
+test("a download can be paused, resumed and cancelled from the page: pausing stops it and keeps its place, resuming carries on, and cancelling removes what had arrived and leaves no download behind", async () => {
+  const home = mkdtempSync(`${tmpdir()}/chrysalis-pause-`), part = `${home}/data/models/qwen3.8-27b/qwen3.8-27b.gguf`;
+  const c = chrysalis({ env: { CHRYSALIS_ENGINE_CMD: "", CHRYSALIS_HOME: home, CHRYSALIS_GET_CMD: JSON.stringify([process.execPath, `${import.meta.dir}/fake-get.ts`]) } });
+  const say = (path: string, body: object) => fetch(`${c.here}${path}`, { method: "POST", headers: json, body: JSON.stringify(body) }).then((r) => r.status);
+  const download = async () => (await (await fetch(`${c.here}/api/status`)).json()).download;
+  const until = async (ok: (d: any) => boolean) => { for (const end = Date.now() + 10_000; Date.now() < end; await Bun.sleep(50)) { const d = await download(); if (ok(d)) return d; } throw new Error(`the download never got there: ${JSON.stringify(await download())}`); };
+  try {
+    await c.shown("No model is here yet");
+    expect(await say("/api/chrysalis/download", { how: "pause" })).toBe(409);
+    for (const end = Date.now() + 10_000; !(await (await fetch(`${c.here}/api/status`)).json()).got && Date.now() < end; ) await Bun.sleep(100);
+    expect(await say("/api/chrysalis/start", { model: "qwen3.8-27b", get: true })).toBe(202);
+    const going = await until((d) => d?.done > 1e9 && !d.paused);
+    expect([going.model, going.total, going.rate]).toEqual(["qwen3.8-27b", 16.8e9, 100e6]);
+    expect(await say("/api/chrysalis/download", { how: "pause" })).toBe(202);
+    const paused = await until((d) => d?.paused === true);
+    await c.shown("qwen3.8-27b's download is paused");
+    await Bun.sleep(500);
+    expect([(await download()).done, paused.done >= going.done, existsSync(part)]).toEqual([paused.done, true, true]);
+    expect(await say("/api/chrysalis/download", { how: "resume" })).toBe(202);
+    await until((d) => d && !d.paused && d.done > 0);
+    expect(await say("/api/chrysalis/download", { how: "cancel" })).toBe(202);
+    await until((d) => d === undefined);
+    await c.shown("download is cancelled and what had arrived is removed");
+    expect(existsSync(part)).toBe(false);
+  } finally {
+    await c.stop();
+    rmSync(home, { recursive: true, force: true });
+  }
+}, 60_000);
+
 test("in local mode every port the terminal, the web chat and what they start listen on is on 127.0.0.1 alone, while the model is unloaded and the page asks for the status and for computers to link to as well", async () => {
   const c = chrysalis({ env: { CHRYSALIS_FIND_MS: "60000" } });
   try {

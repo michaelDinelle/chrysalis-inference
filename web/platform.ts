@@ -1,4 +1,4 @@
-import { existsSync, mkdirSync, readFileSync, realpathSync, rmdirSync } from "node:fs";
+import { existsSync, mkdirSync, readdirSync, readFileSync, realpathSync, rmdirSync, rmSync } from "node:fs";
 import { tmpdir, totalmem } from "node:os";
 import { join } from "node:path";
 
@@ -130,4 +130,18 @@ export async function utf8Console(m: Machine = here()) {
     k.symbols.SetConsoleOutputCP(65001);
     k.symbols.SetConsoleCP(65001);
   } catch {  }
+}
+
+export function dropDownload(model: string, root = HOME): string[] {
+  const models = join(root, "data", "models"), gone: string[] = [];
+  const drop = (path: string) => { rmSync(path, { recursive: true, force: true }); gone.push(path); };
+  const walk = (dir: string) => {
+    for (const e of existsSync(dir) ? readdirSync(dir, { withFileTypes: true }) : []) {
+      if (e.isDirectory()) e.name === ".cache" ? drop(join(dir, e.name)) : walk(join(dir, e.name));
+      else if (e.name.endsWith(".gguf")) drop(join(dir, e.name));
+    }
+  };
+  walk(join(models, model));
+  if (existsSync(join(models, ".cache", "huggingface", "download", model))) drop(join(models, ".cache", "huggingface", "download", model));
+  return gone;
 }

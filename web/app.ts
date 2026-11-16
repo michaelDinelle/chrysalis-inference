@@ -68,7 +68,7 @@ interface Settings {
   global?: string;
 }
 interface VoiceSettings { tts?: string; name?: string; stt?: string; speed?: number }
-interface Status { state: "online" | "loading" | "offline"; got?: string[]; download?: { model: string; done: number; total: number; rate: number }; machine?: string; build?: string; model?: string; loading?: string; progress?: number; context?: number; kv_tokens?: number; cache?: { free_kv_tokens: number };
+interface Status { state: "online" | "loading" | "offline"; got?: string[]; download?: { model: string; done: number; total: number; rate: number; paused?: boolean }; machine?: string; build?: string; model?: string; loading?: string; progress?: number; context?: number; kv_tokens?: number; cache?: { free_kv_tokens: number };
   check?: boolean; here?: boolean; waiting?: number;
   backend?: Backend; link?: Linking }
 interface Linking { linked?: { name: string }; found: { name: string; fp: string }[]; refused?: string;
@@ -6752,11 +6752,12 @@ function renderControls() {
   const pct = status.progress == null ? "" : `${Math.round(status.progress * 100)}%`, name = modelName(current());
   const btn = $("model-btn");
   const dl = status.download, got = dl?.total ? Math.min(1, dl.done / dl.total) : 0, left = dl?.rate ? Math.round((dl.total - dl.done) / dl.rate) : 0;
-  const getting = dl ? `Downloading ${modelName(dl.model)}: ${(dl.done / 1e9).toFixed(1)} of ${(dl.total / 1e9).toFixed(1)} GB${dl.rate ? `, ${Math.round(dl.rate / 1e6)} MB/s, ${Math.floor(left / 60)}:${String(left % 60).padStart(2, "0")} left` : ""}` : "";
+  const getting = dl ? `${dl.paused ? "Paused" : "Downloading"} ${modelName(dl.model)}: ${(dl.done / 1e9).toFixed(1)} of ${(dl.total / 1e9).toFixed(1)} GB${dl.rate ? `, ${Math.round(dl.rate / 1e6)} MB/s, ${Math.floor(left / 60)}:${String(left % 60).padStart(2, "0")} left` : ""}` : "";
   const empty = onService() && !dl && status.got?.length === 0 && state === "offline";
   btn.innerHTML = `<span class="dot ${state}"></span><span class="model-name">${empty ? "Download a model" : shortName(current())}</span>${dl ? `<span class="model-pct">${icon("download")}${Math.round(got * 100)}%</span>` : state === "loading" && pct ? `<span class="model-pct">${pct}</span>` : ""}${icon("chevron")}`;
   btn.style.setProperty("--got", dl ? `${got * 100}%` : "0%");
   btn.classList.toggle("getting", !!dl);
+  btn.classList.toggle("paused", !!dl?.paused);
   const b = status.backend, down = b?.listed && !b.listed.ok ? b.listed.error : "";
   btn.title = getting ? getting : empty ? "No model is on this computer yet: choose one here and it downloads" : !onService() ? (down ? `${b!.name}: ${down}` : `${name || "No model"} on ${b!.name}`)
     : state === "online" ? `${name}: ready` : state === "loading" ? `Loading ${name}` : `${name}: stopped`;
@@ -6767,7 +6768,7 @@ function renderControls() {
   if (!modelsOpen) return;
   const pop = $("model-pop");
   const tools = harness.state === "on" && !!harness.home && !conv.messages.some((m) => m.role === "user");
-  const key = JSON.stringify([current(), state, pct, listed(), tools, speechKey(), status.got, status.download && [status.download.model, Math.round(100 * (status.download.total ? status.download.done / status.download.total : 0))]]);
+  const key = JSON.stringify([current(), state, pct, listed(), tools, speechKey(), status.got, status.download && [status.download.model, !!status.download.paused, Math.round(100 * (status.download.total ? status.download.done / status.download.total : 0))]]);
   if (pop.dataset.key === key) return;
   pop.dataset.key = key;
   const withTools = () => {
@@ -6787,8 +6788,12 @@ function renderControls() {
     item.setAttribute("aria-selected", String(on));
     const absent = !!status.got && !status.got.includes(id), coming = status.download?.model === id;
     const mark = h("span", absent && !coming ? "model-check model-get" : "model-check");
-    if (coming) mark.textContent = `Downloading ${Math.round(100 * (status.download!.total ? status.download!.done / status.download!.total : 0))}%`;
-    else if (absent) mark.textContent = "Download";
+    if (coming) {
+      const d = status.download!, tell = (how: string) => (ev: Event) => { ev.stopPropagation(); void fetch("/api/chrysalis/download", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ how }) }).then(() => refreshStatus()); };
+      const chip = (label: string, how: string) => { const b = h("span", "model-get model-do", label); b.setAttribute("role", "button"); b.tabIndex = 0; b.onclick = tell(how); return b; };
+      mark.className = "model-check model-doing";
+      mark.append(h("span", "model-pct", `${Math.round(100 * (d.total ? Math.min(1, d.done / d.total) : 0))}%`), chip(d.paused ? "Resume" : "Pause", d.paused ? "resume" : "pause"), chip("Cancel", "cancel"));
+    } else if (absent) mark.textContent = "Download";
     else if (on && state === "loading") mark.textContent = pct || "…";
     else if (on) mark.innerHTML = icon("check");
     item.title = absent ? `Download ${label}, then use it` : label;
