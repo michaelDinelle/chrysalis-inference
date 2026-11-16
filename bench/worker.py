@@ -111,6 +111,7 @@ def serve():
         load.update(sampler.stop())
         load["run_s"] = time.monotonic() - start
         runs = {f"speed-{name}": speed, f"quality-{name}": quality}
+        speed(s, load)
         send({"ready": True})
         for line in sys.stdin:
             words = line.split()
