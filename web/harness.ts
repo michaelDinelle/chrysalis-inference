@@ -175,7 +175,7 @@ async function launch(chrysalis: string, store?: string): Promise<Host> {
     }
     const cmd = [bin, "serve", "--hostname", "127.0.0.1", "--port", String(port)];
     const proc = keep(store ? unswapped(noCores(cmd)) : cmd, {
-      ...env, ...(store ? { OPENCODE_DB: ":memory:", XDG_DATA_HOME: `${store}/data`, XDG_STATE_HOME: `${store}/state`, TMPDIR: `${store}/tmp`, TEMP: `${store}/tmp`, TMP: `${store}/tmp` } : {}), OPENCODE_PASSWORD: password,
+      ...env, ...(store ? { CHRYSALIS_GUARD_STORE: store, OPENCODE_DB: ":memory:", XDG_DATA_HOME: `${store}/data`, XDG_STATE_HOME: `${store}/state`, TMPDIR: `${store}/tmp`, TEMP: `${store}/tmp`, TMP: `${store}/tmp` } : {}), OPENCODE_PASSWORD: password,
         OPENCODE_CONFIG_CONTENT: JSON.stringify({ ...(outside && !store ? {} : { enabled_providers: ["chrysalis"] }), providers: { ...others, chrysalis: { name: "Chrysalis",
           package: "@opencode/ai/providers/openai-compatible", settings: { baseURL: `${modelUrl}${store ? "/hidden" : ""}/v1`, apiKey: "chrysalis" }, models } } }) });
     const at = await reach(`http://127.0.0.1:${port}`, password, proc, Object.keys(models).length > 0);

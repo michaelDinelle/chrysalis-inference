@@ -1,5 +1,5 @@
 import { expect, test } from "bun:test";
-import { chmodSync, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, realpathSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname } from "node:path";
 import { memoryRoot } from "./platform";
@@ -53,7 +53,7 @@ const painted = (svg: string) => {
   return rows;
 };
 const files = (dir: string): string[] => readdirSync(dir, { withFileTypes: true }).flatMap((f) => (f.isDirectory() ? files(`${dir}/${f.name}`) : f.isFile() ? [`${dir}/${f.name}`] : []));
-function listening(root: number) {
+function family(root: number) {
   const kids = new Map<number, number[]>();
   for (const l of Bun.spawnSync(["ps", "-A", "-o", "pid=,ppid="], { stdout: "pipe" }).stdout.toString().trim().split("\n")) {
     const [pid, ppid] = l.trim().split(/\s+/).map(Number);
@@ -61,6 +61,10 @@ function listening(root: number) {
   }
   const tree = [root];
   for (let i = 0; i < tree.length; i++) tree.push(...(kids.get(tree[i]) ?? []));
+  return tree;
+}
+function listening(root: number) {
+  const tree = family(root);
   const out = Bun.spawnSync(["lsof", "-nP", "-a", "-p", tree.join(","), "-i"], { stdout: "pipe", stderr: "pipe" }).stdout.toString();
   return out.split("\n").flatMap((l) => {
     const m = /\s(TCP|UDP) (\S+)(?: \((\w+)\))?\s*$/.exec(l);
@@ -331,7 +335,7 @@ test("in a terminal on the network, the code a phone scans shows first, above th
 }, 60_000);
 
 const holding = (dir: string, text: string) => (existsSync(dir) ? files(dir) : []).filter((f) => statSync(f).size < 1 << 20 && readFileSync(f, "latin1").includes(text));
-test("an incognito thread runs on a second OpenCode that keeps its database in memory, with its tools, beside the first, which is never stopped: it is in no list and in no file, the model server is told to keep its requests out of the prompt cache on disk, and the ordinary store and cache are untouched; deleting it, incognito end in the terminal, or stopping Chrysalis ends that OpenCode and deletes its folder", async () => {
+test("an incognito thread runs on a second OpenCode that keeps its database in memory, with its tools, beside the first, which is never stopped: it is in no list and in no file, the model server is told to keep its requests out of the prompt cache on disk, and the ordinary store and cache are untouched; deleting it, incognito end in the terminal, stopping Chrysalis or closing its terminal window ends that OpenCode and deletes its folder", async () => {
   const bin = `${tmpdir()}/chrysalis-cli-opencode-${process.pid}`, pids = `${tmpdir()}/chrysalis-cli-opencode-${process.pid}.pids`;
   writeFileSync(bin, `#!/bin/sh\nexec ${process.execPath} ${import.meta.dir}/fake-opencode-bin.ts "$@"\n`);
   chmodSync(bin, 0o755);
@@ -391,7 +395,7 @@ test("an incognito thread runs on a second OpenCode that keeps its database in m
     expect((await say("a third secret", true)).slice(0, 3)).toEqual([200, false, true]);
     const third = stores()[0];
     expect(third).toBeTruthy();
-    c.proc.kill();
+    for (const pid of family(c.proc.pid)) try { process.kill(pid, "SIGHUP"); } catch {  }
     await c.proc.exited;
     expect(await until(() => !existsSync(third) && !started().some((o) => up(o.pid)))).toBe(true);
     expect([held(), anywhere("a third secret")]).toEqual([[], []]);
@@ -438,7 +442,7 @@ test("OpenCode connected before network and then local, or before restart web, r
   }
 }, 90_000);
 
-test("OpenCode, the ordinary one and the incognito one, ends with the web server that started it, even when the web server is killed outright", async () => {
+test("OpenCode, the ordinary one and the incognito one, ends with the web server that started it, even when the web server is killed outright, and nothing of the incognito one is left in memory", async () => {
   const dir = mkdtempSync(`${tmpdir()}/chrysalis-kept-`), bin = `${dir}/opencode`, pids = `${dir}/pids`, work = `${dir}/work`;
   writeFileSync(bin, `#!/bin/sh\nexec ${process.execPath} ${import.meta.dir}/fake-opencode-bin.ts "$@"\n`);
   chmodSync(bin, 0o755);
@@ -460,10 +464,12 @@ test("OpenCode, the ordinary one and the incognito one, ends with the web server
     const hidden = await fetch(`${here}/api/chat`, { method: "POST", headers: json, body: JSON.stringify({ stream: true, chrysalis_thread: { dir: work, text: "a secret", title: "a secret", model: "chrysalis/qwen3.8-27b", hidden: true } }) });
     expect([hidden.status, (await hidden.text()).trimEnd().endsWith("[DONE]")]).toEqual([200, true]);
     expect(alive().length).toBe(2);
+    const left = () => [...new Set([memoryRoot(), tmpdir()].map((d) => realpathSync(d)))].flatMap((d) => readdirSync(d).filter((n) => n.startsWith(`chrysalis-run-${proc.pid}-`) || n === `chrysalis-ram-${proc.pid}`));
+    expect(left().length).toBe(1);
     proc.kill("SIGKILL");
     await proc.exited;
-    for (const end = Date.now() + 15_000; alive().length && Date.now() < end; ) await Bun.sleep(50);
-    expect(alive()).toEqual([]);
+    for (const end = Date.now() + 15_000; (alive().length || left().length) && Date.now() < end; ) await Bun.sleep(50);
+    expect([alive(), left()]).toEqual([[], []]);
   } finally {
     proc.kill();
     for (const pid of alive()) process.kill(pid);

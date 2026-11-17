@@ -99,11 +99,16 @@ const quiet = (cmd: string[]) => { const r = Bun.spawnSync(cmd, { stdin: "ignore
 const RAM = "chrysalis-ram-", RAM_MB = 1024;
 let ram: { root: string; drop: () => void } | undefined;
 
-function macRam() {
-  const eject = (dev: string, at: string) => { quiet(["umount", "-f", at]); quiet(["hdiutil", "detach", "-force", dev]); try { rmdirSync(at); } catch {  } };
+const eject = (dev: string, at: string) => { quiet(["umount", "-f", at]); quiet(["hdiutil", "detach", "-force", dev]); try { rmdirSync(at); } catch {  } };
+export function sweepRam() {
+  if (process.platform !== "darwin") return;
   for (const [, dev, at, pid] of (quiet(["mount"]) ?? "").matchAll(new RegExp(`^(/dev/disk\\d+) on (.*/${RAM}(\\d+)) \\(`, "gm"))) {
     try { process.kill(Number(pid), 0); } catch (e) { if ((e as { code?: string }).code !== "EPERM") eject(dev, at); }
   }
+}
+
+function macRam() {
+  sweepRam();
   const dev = quiet(["hdiutil", "attach", "-nomount", `ram://${RAM_MB * 2048}`])?.trim().split(/\s/)[0], at = join(realpathSync(tmpdir()), `${RAM}${process.pid}`);
   if (!dev) throw new Error("Incognito keeps its files in memory only, and macOS made no RAM disk for them");
   mkdirSync(at, { recursive: true });

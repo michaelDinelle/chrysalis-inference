@@ -23,7 +23,7 @@ const PAGE_FILES = ["index.html", "app.ts", "sampler.ts", "files.ts", "wire.ts",
   .map((f) => `${import.meta.dir}/${f}`);
 const BUILT = Bun.hash((await Promise.all(PAGE_FILES.map((f) => Bun.file(f).text()))).join("\0")).toString(36);
 const BUILD = () => LIVE ? Bun.hash(PAGE_FILES.map((f) => { const at = statSync(f); return `${at.mtimeMs}:${at.size}`; }).join("\0")).toString(36) : BUILT;
-for (const sig of ["SIGINT", "SIGTERM"] as const) process.on(sig, () => process.exit(0));
+for (const sig of ["SIGINT", "SIGTERM", "SIGHUP"] as const) process.on(sig, () => process.exit(0));
 process.on("disconnect", () => process.exit(0));
 const tell = (m: object) => void process.send?.(m);
 
