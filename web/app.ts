@@ -6687,6 +6687,9 @@ function threadControls() {
   const missing = !!id && absent(id) && !coming(id);
   btn.innerHTML = `${away ? icon("warn") : `<span class="dot ${!on || missing ? "offline" : id && coming(id) ? "loading" : "online"}"></span>`}<span class="model-name">${escapeHtml(missing ? "Download a model" : label)}</span>${id && coming(id) ? `<span class="model-pct">${icon("download")}${got(dl!)}%</span>` : ""}${icon("chevron")}`;
   btn.classList.toggle("outside", away);
+  btn.classList.toggle("getting", !!id && coming(id));
+  btn.classList.toggle("paused", !!id && coming(id) && !!dl?.paused);
+  btn.style.setProperty("--got", id && coming(id) ? `${got(dl!)}%` : "0%");
   btn.title = missing ? `${label} is not on this computer yet: choose it here and it downloads` : id ? `${id}, through OpenCode${away ? ": this thread leaves this computer" : ""}` : "OpenCode lists no model";
   btn.setAttribute("aria-expanded", String(modelsOpen));
   btn.classList.toggle("open", modelsOpen);
