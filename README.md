@@ -208,8 +208,7 @@ Start Chrysalis with `chrysalis.sh --host 0.0.0.0`. The other computer needs [Op
 - **Machines**: an RX 7900 XTX (24 GB) with a Ryzen 7 7800X3D and 64 GB of DDR5 on Linux, and an M4 Max Mac Studio with
   36 GB on macOS 27.2. One engine ran at a time, and one client timed every request.
 - **Chrysalis**: its own file, 3.8 bits per expert weight, 63 GB plus a 54 GB lookup table read from disk.
-- **Strata**: IQ3_S (3.3 bits) and Q2_0 (2.3 bits). 0.2.13 on the RX 7900 with its RX 7900 switches on. Strata doesn't run
-  on a Mac.
+- **Strata**: IQ3_S (3.3 bits) and Q2_0 (2.3 bits). 0.2.13 on the RX 7900 with its RX 7900 switches on.
 - **Prompts**: short, 4K and 16K are Strata's standard benchmark, run through its own client code with 512-token answers.
   100K is the same kind of records at 98,878 tokens. The follow-up adds about 1,100 tokens to that chat.
 - **Rounds**: medians over two rounds on the RX 7900 and one on the Mac, run from October 30 to November 1, 2026.
