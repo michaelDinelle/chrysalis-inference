@@ -1,4 +1,4 @@
-> This is my best shot at beating [Strata](https://github.com/Niko1221/Strata) right now. Honestly, anyone can make these with Opus these days. It doesn't work with multiple GPUs, and really, this is very AMD-focused. But if it's buggy on your GPU or you're having problems, feel free to make a PR 🤗 I think you'll like the UI if you wanted [T3 Code](https://github.com/pingdotgg/t3code) + [SillyTavern](https://github.com/SillyTavern/SillyTavern) together.
+> This is my best shot at beating [Strata](https://github.com/Niko1221/Strata) right now. Honestly, anyone can make these with Opus these days. But if it's buggy on your GPU or you're having problems, feel free to make a PR 🤗 I think you'll like the UI if you wanted [T3 Code](https://github.com/pingdotgg/t3code) + [SillyTavern](https://github.com/SillyTavern/SillyTavern) together.
 
 <p align="center"><img src="media/butterfly.webp" width="300" alt="Chrysalis's butterfly in its sea of characters"></p>
 
