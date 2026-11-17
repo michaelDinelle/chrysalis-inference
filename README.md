@@ -25,7 +25,7 @@
 
 ## Editing artifacts by pointing at them
 
-<p align="center"><img src="media/paint.webp" width="900" alt="An SVG cabin drawn live; pointing at the roof and asking to make it red changes only the roof; the paint bucket fills the door by hand"></p>
+<p align="center"><img src="media/paint.webp" width="900" alt="An SVG cabin; pointing at the roof and asking to make it red changes only the roof; the paint bucket fills the door by hand"></p>
 
 <sub>Click a part, then ask for a change.</sub>
 
