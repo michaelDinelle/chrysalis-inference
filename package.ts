@@ -237,7 +237,7 @@ async function notarize(app: string, team: string, n: string) {
     return file;
   };
   const xcode = async (args: string[], log: string) => {
-    const r = await $`xcodebuild ${args} -allowProvisioningUpdates`.nothrow().quiet();
+    const r = await $`xcodebuild ${args} -allowProvisioningUpdates`.env({ ...process.env, TMPDIR: T }).nothrow().quiet();
     writeFileSync(join(T, log), r.stdout.toString() + r.stderr.toString());
     return r.exitCode === 0;
   };
