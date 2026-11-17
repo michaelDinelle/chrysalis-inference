@@ -88,7 +88,7 @@ async function placePython() {
   if (!WIN && !existsSync(join(venv, "bin", "python"))) symlinkSync("python3", join(venv, "bin", "python"));
   const lib = WIN ? join(venv, "Lib") : join(venv, "lib", "python3.12");
   for (const d of [...(WIN ? ["tcl", "include", "libs", "Scripts"].map((d) => join(venv, d)) : [join(venv, "include")]),
-    ...["idlelib", "tkinter", "turtledemo", "lib2to3", "ensurepip", join("site-packages", "pip")].map((d) => join(lib, d)),
+    ...["idlelib", "tkinter", "turtledemo", "lib2to3", "ensurepip", join("site-packages", "pip"), ...readdirSync(join(lib, WIN ? "" : "lib-dynload")).filter((f) => f.startsWith("_tkinter")).map((f) => join(WIN ? "" : "lib-dynload", f))].map((d) => join(lib, d)),
     ...(WIN ? [] : readdirSync(join(venv, "lib")).filter((d) => /^(tcl|tk|itcl|thread)\d/.test(d)).map((d) => join(venv, "lib", d)))]) rmSync(d, { recursive: true, force: true });
 }
 
@@ -209,6 +209,9 @@ async function wrapMac(exe: string) {
   await sign(join(contents, "MacOS", "Chrysalis"));
   await sign(app);
   await $`codesign -v --deep --strict ${app}`;
+  const team = /^TeamIdentifier=(\S+)$/m.exec(await $`codesign -dv ${app} 2>&1`.nothrow().text())?.[1];
+  if (team && team !== "not") await notarize(app, team, n);
+  else say("no Apple developer team in the keychain: the app is signed for this Mac alone, and others open it only after Open Anyway");
   const stage = join(T, "dmg");
   mkdirSync(stage);
   cpSync(app, join(stage, "Chrysalis.app"), { recursive: true, verbatimSymlinks: true });
@@ -216,6 +219,47 @@ async function wrapMac(exe: string) {
   const dmg = join(OUT, "Chrysalis.dmg");
   await $`hdiutil create -quiet -volname Chrysalis -srcfolder ${stage} -format ULMO -ov ${dmg}`;
   return dmg;
+}
+
+async function notarize(app: string, team: string, n: string) {
+  const plist = (body: string) => `<?xml version="1.0" encoding="UTF-8"?><plist version="1.0"><dict>${body}</dict></plist>`;
+  const archive = join(T, "Chrysalis.xcarchive");
+  mkdirSync(join(archive, "Products", "Applications"), { recursive: true });
+  await $`ditto ${app} ${join(archive, "Products", "Applications", "Chrysalis.app")}`;
+  writeFileSync(join(archive, "Info.plist"), plist(`<key>ApplicationProperties</key><dict><key>ApplicationPath</key><string>Applications/Chrysalis.app</string>
+<key>Architectures</key><array><string>arm64</string></array><key>CFBundleIdentifier</key><string>io.github.michaeldinelle.chrysalis</string>
+<key>CFBundleShortVersionString</key><string>${n}</string><key>CFBundleVersion</key><string>${n}</string><key>SigningIdentity</key><string>Apple Development</string>
+<key>Team</key><string>${team}</string></dict><key>ArchiveVersion</key><integer>2</integer><key>CreationDate</key><date>${new Date().toISOString().slice(0, 19)}Z</date>
+<key>Name</key><string>Chrysalis</string><key>SchemeName</key><string>Chrysalis</string>`));
+  const options = (to: string) => {
+    const file = join(T, `${to}.plist`);
+    writeFileSync(file, plist(`<key>method</key><string>developer-id</string><key>signingStyle</key><string>automatic</string><key>teamID</key><string>${team}</string><key>destination</key><string>${to}</string>`));
+    return file;
+  };
+  const xcode = async (args: string[], log: string) => {
+    const r = await $`xcodebuild ${args} -allowProvisioningUpdates`.nothrow().quiet();
+    writeFileSync(join(T, log), r.stdout.toString() + r.stderr.toString());
+    return r.exitCode === 0;
+  };
+  say(`signing with Developer ID for team ${team}`);
+  if (!(await xcode(["-exportArchive", "-archivePath", archive, "-exportOptionsPlist", options("export"), "-exportPath", join(T, "signed")], "signed.log")))
+    throw new Error(`Developer ID signing failed: ${readFileSync(join(T, "signed.log"), "utf8").split("\n").filter((l) => /error/i.test(l)).slice(0, 3).join(" ")}`);
+  say("sending it to Apple to notarize");
+  if (!(await xcode(["-exportArchive", "-archivePath", archive, "-exportOptionsPlist", options("upload"), "-exportPath", join(T, "upload")], "upload.log")))
+    throw new Error(`Apple did not take it for notarizing: ${readFileSync(join(T, "upload.log"), "utf8").split("\n").filter((l) => /error/i.test(l)).slice(0, 3).join(" ")}`);
+  const done = join(T, "notarized", "Chrysalis.app");
+  for (;;) {
+    const ok = await xcode(["-exportNotarizedApp", "-archivePath", archive, "-exportPath", join(T, "notarized")], "notarized.log");
+    if (ok && existsSync(done)) break;
+    const log = readFileSync(join(T, "notarized.log"), "utf8");
+    if (!/is processing|in progress/i.test(log)) throw new Error(`Apple did not notarize it: ${log.split("\n").filter((l) => /error/i.test(l)).slice(0, 3).join(" ")}`);
+    await Bun.sleep(20_000);
+  }
+  if ((await $`xcrun stapler validate -q ${done}`.nothrow().quiet()).exitCode) await $`xcrun stapler staple -q ${done}`;
+  rmSync(app, { recursive: true, force: true });
+  await $`ditto ${done} ${app}`;
+  await $`spctl --assess --type execute ${app}`;
+  say("notarized by Apple, its ticket stapled to the app");
 }
 
 async function wrapLinux(exe: string) {
