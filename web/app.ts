@@ -6681,29 +6681,36 @@ function renderMeter() {
 function threadControls() {
   const id = threadModel(conv), btn = $("model-btn"), on = harness.state === "on";
   const label = id ? shortName(id.startsWith("chrysalis/") ? id.slice(10) : harness.models?.find((m) => m.id === id)?.name ?? id) : "OpenCode";
-  const away = !!id && !id.startsWith("chrysalis/");
-  btn.innerHTML = `${away ? icon("warn") : `<span class="dot ${on ? "online" : "offline"}"></span>`}<span class="model-name">${escapeHtml(label)}</span>${icon("chevron")}`;
+  const away = !!id && !id.startsWith("chrysalis/"), local = !conv.thread?.machine, dl = status.download;
+  const absent = (model: string) => local && model.startsWith("chrysalis/") && !!status.got && !status.got.includes(model.slice(10));
+  const coming = (model: string) => local && dl?.model === model.slice(10), got = (d: NonNullable<Status["download"]>) => Math.round(100 * (d.total ? Math.min(1, d.done / d.total) : 0));
+  const missing = !!id && absent(id) && !coming(id);
+  btn.innerHTML = `${away ? icon("warn") : `<span class="dot ${!on || missing ? "offline" : id && coming(id) ? "loading" : "online"}"></span>`}<span class="model-name">${escapeHtml(missing ? "Download a model" : label)}</span>${id && coming(id) ? `<span class="model-pct">${icon("download")}${got(dl!)}%</span>` : ""}${icon("chevron")}`;
   btn.classList.toggle("outside", away);
-  btn.title = id ? `${id}, through OpenCode${away ? ": this thread leaves this computer" : ""}` : "OpenCode lists no model";
+  btn.title = missing ? `${label} is not on this computer yet: choose it here and it downloads` : id ? `${id}, through OpenCode${away ? ": this thread leaves this computer" : ""}` : "OpenCode lists no model";
   btn.setAttribute("aria-expanded", String(modelsOpen));
   btn.classList.toggle("open", modelsOpen);
   renderMeter();
   if (!modelsOpen) return;
-  const pop = $("model-pop"), agent = conv.thread!.agent ?? harness.agents?.[0]?.id, key = JSON.stringify(["thread", id, agent, harness.models, harness.agents, speechKey()]);
+  const pop = $("model-pop"), agent = conv.thread!.agent ?? harness.agents?.[0]?.id, key = JSON.stringify(["thread", id, agent, harness.models, harness.agents, speechKey(), status.got, dl && [dl.model, got(dl)]]);
   if (pop.dataset.key === key) return;
   pop.dataset.key = key;
   const groups = Object.entries(Object.groupBy(harness.models ?? [], (m) => m.provider)).sort(([, a], [, b]) => Number(b![0].id.startsWith("chrysalis/")) - Number(a![0].id.startsWith("chrysalis/")));
   if (!groups.length) return void pop.replaceChildren(h("div", "model-empty", "OpenCode lists no model: sign in to a provider with opencode on that computer"), ...speechRows());
-  const option = (name: string, title: string, cur: boolean, pick: () => void) => {
-    const item = h("button", cur ? "model-item current" : "model-item"), mark = h("span", "model-check");
+  const option = (name: string, title: string, cur: boolean, pick: () => void, model = "") => {
+    const item = h("button", cur ? "model-item current" : "model-item"), gone = !!model && absent(model) && !coming(model);
+    const mark = h("span", gone ? "model-check model-get" : "model-check");
     item.type = "button";
-    item.title = title;
+    item.title = gone ? `Download ${name}, then use it` : title;
     item.setAttribute("role", "option");
     item.setAttribute("aria-selected", String(cur));
-    if (cur) mark.innerHTML = icon("check");
+    if (model && coming(model)) mark.textContent = `Downloading ${got(dl!)}%`;
+    else if (gone) mark.textContent = "Download";
+    else if (cur) mark.innerHTML = icon("check");
     item.append(h("span", "model-label", name), mark);
     item.onclick = () => {
       pick();
+      if (gone) { picked = model.slice(10); setPref("model", picked); void start(true).then(() => refreshStatus()); }
       if (conv.messages.length) save(conv);
       setModelsOpen(false, true);
     };
@@ -6713,7 +6720,7 @@ function threadControls() {
   const plain = fresh ? [option("Chat only", `No tools: a plain chat with the model, without ${harness.name ?? "OpenCode"}`, false, () => { delete conv.thread; setPref("tools", "off"); })] : [];
   pop.replaceChildren(...((harness.agents?.length ?? 0) > 1 || plain.length ? [h("div", "model-group", harness.name ?? "OpenCode"),
     ...(harness.agents ?? []).map((a) => option(a.name, `${harness.name ?? "OpenCode"}'s ${a.name} agent`, a.id === agent, () => { conv.thread!.agent = a.id; })), ...plain] : []),
-    ...groups.flatMap(([provider, list]) => [list![0].id.startsWith("chrysalis/") ? h("div", "model-group", provider) : h("div", "model-group outside", `${provider}: leaves this computer`), ...list!.map((m) => option(m.name, m.id, m.id === id, () => { conv.thread!.model = m.id; setPref("thread-model", m.id); }))]),
+    ...groups.flatMap(([provider, list]) => [list![0].id.startsWith("chrysalis/") ? h("div", "model-group", provider) : h("div", "model-group outside", `${provider}: leaves this computer`), ...list!.map((m) => option(m.name, m.id, m.id === id, () => { conv.thread!.model = m.id; setPref("thread-model", m.id); }, m.id))]),
     ...speechRows());
 }
 function renderControls() {
