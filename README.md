@@ -1,3 +1,5 @@
+This is my best shot at beating strata right now, honestly anyone can make these with opus these days, it doesn't work with multiple GPUs and really this is very AMD focused, but, if its buggy on your GPU or your having problems feel free to make a PR 🤗 i think you'll like the UI if you wanted T3 code + Sillytavern together
+
 <p align="center"><img src="media/butterfly.webp" width="300" alt="Chrysalis's butterfly in its sea of characters"></p>
 
 <h1 align="center">Chrysalis</h1>
