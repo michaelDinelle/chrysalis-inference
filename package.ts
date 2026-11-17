@@ -237,7 +237,9 @@ async function notarize(app: string, team: string, n: string) {
     return file;
   };
   const xcode = async (args: string[], log: string) => {
-    const r = await $`xcodebuild ${args} -allowProvisioningUpdates`.env({ ...process.env, TMPDIR: T }).nothrow().quiet();
+    const scratch = (await $`getconf DARWIN_USER_TEMP_DIR`.text()).trim(), before = new Set(readdirSync(scratch));
+    const r = await $`xcodebuild ${args} -allowProvisioningUpdates`.nothrow().quiet();
+    for (const f of readdirSync(scratch)) if (!before.has(f) && f.startsWith("XcodeDistPipeline.")) rmSync(join(scratch, f), { recursive: true, force: true });
     writeFileSync(join(T, log), r.stdout.toString() + r.stderr.toString());
     return r.exitCode === 0;
   };
