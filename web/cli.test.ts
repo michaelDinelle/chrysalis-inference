@@ -5,6 +5,7 @@ import { dirname } from "node:path";
 import { memoryRoot } from "./platform";
 import { butterfly, plain, progress } from "./terminal";
 import { lanAddresses } from "./tls";
+import puppeteer, { type Page } from "puppeteer-core";
 
 const json = { "Content-Type": "application/json" };
 const UP = "\x1b[A", DOWN = "\x1b[B", RIGHT = "\x1b[C";
@@ -153,13 +154,13 @@ test("the butterfly is the logo in characters: as wide as asked, its two sides a
 test("with no model here the terminal starts none and downloads none: it says where to pick one, a chat is refused with the same words, and only a model picked in the page's menu reaches the terminal, which then begins its download", async () => {
   const empty = mkdtempSync(`${tmpdir()}/chrysalis-none-`), c = chrysalis({ env: { CHRYSALIS_ENGINE_CMD: "", CHRYSALIS_HOME: empty } });
   try {
-    await c.shown("No model is here yet");
+    await c.shown("No model is downloaded yet");
     await c.shown(/chat\s+http:\/\/localhost:\d+/);
     const status = async () => (await fetch(`${c.here}/api/status`)).json();
     for (const end = Date.now() + 10_000; !(await status()).got && Date.now() < end; ) await Bun.sleep(100);
     expect([(await status()).got, (await status()).state]).toEqual([[], "offline"]);
     const chat = await fetch(`${c.here}/api/chrysalis/start`, { method: "POST", headers: json, body: JSON.stringify({ model: "qwen3.8-27b" }) });
-    expect([chat.status, (await chat.json()).error.message.startsWith("No model is here yet")]).toEqual([409, true]);
+    expect([chat.status, (await chat.json()).error.message.startsWith("No model is downloaded yet")]).toEqual([409, true]);
     expect(c.out()).not.toContain("is downloading");
     const pick = await fetch(`${c.here}/api/chrysalis/start`, { method: "POST", headers: json, body: JSON.stringify({ model: "qwen3.8-27b", get: true }) });
     expect(pick.status).toBe(202);
@@ -194,13 +195,14 @@ test("the switches are on screen from the start with the arrows live and Model h
 }, 90_000);
 
 test("a download can be paused, resumed and cancelled from the page: pausing stops it and keeps its place, resuming carries on, and cancelling removes what had arrived and leaves no download behind", async () => {
-  const home = mkdtempSync(`${tmpdir()}/chrysalis-pause-`), part = `${home}/data/models/qwen3.8-27b/qwen3.8-27b.gguf`;
+  const home = mkdtempSync(`${tmpdir()}/chrysalis-pause-`), part = `${home}/data/models/.cache/huggingface/download/qwen3.8-27b/weights.incomplete`;
   const c = chrysalis({ env: { CHRYSALIS_ENGINE_CMD: "", CHRYSALIS_HOME: home, CHRYSALIS_GET_CMD: JSON.stringify([process.execPath, `${import.meta.dir}/fake-get.ts`]) } });
   const say = (path: string, body: object) => fetch(`${c.here}${path}`, { method: "POST", headers: json, body: JSON.stringify(body) }).then((r) => r.status);
   const download = async () => (await (await fetch(`${c.here}/api/status`)).json()).download;
   const until = async (ok: (d: any) => boolean) => { for (const end = Date.now() + 10_000; Date.now() < end; await Bun.sleep(50)) { const d = await download(); if (ok(d)) return d; } throw new Error(`the download never got there: ${JSON.stringify(await download())}`); };
   try {
-    await c.shown("No model is here yet");
+    await c.shown("No model is downloaded yet");
+    await c.shown(/chat\s+http:\/\/localhost:\d+/);
     expect(await say("/api/chrysalis/download", { how: "pause" })).toBe(409);
     for (const end = Date.now() + 10_000; !(await (await fetch(`${c.here}/api/status`)).json()).got && Date.now() < end; ) await Bun.sleep(100);
     expect(await say("/api/chrysalis/start", { model: "qwen3.8-27b", get: true })).toBe(202);
@@ -475,7 +477,7 @@ test("with no model here yet, OpenCode still connects at once and is given Chrys
   chmodSync(bin, 0o755);
   const c = chrysalis({ env: { CHRYSALIS_ENGINE_CMD: "", CHRYSALIS_HOME: empty, CHRYSALIS_OPENCODE: bin } });
   try {
-    await c.shown("No model is here yet");
+    await c.shown("No model is downloaded yet");
     await c.shown(/chat\s+http:\/\/localhost:\d+/);
     const started = await Promise.race([fetch(`${c.here}/api/threads`, { method: "POST" }).then((r) => r.status), Bun.sleep(15_000).then(() => "never")]);
     expect(started).toBe(200);
@@ -537,3 +539,105 @@ test("OpenCode started from the page before the model server answers waits for i
     rmSync(bin, { force: true });
   }
 }, 60_000);
+
+test("every model state reads the same in the terminal, the server, a chat and a thread, and sending from each does what it says: nothing downloaded refuses with where to get one, a download under way shows in both buttons and is waited for, a model downloaded but not running loads on the first message from a chat or a thread, and a thread on another model than the one loaded switches to it", async () => {
+  const home = mkdtempSync(`${tmpdir()}/chrysalis-states-`), work = `${home}/work`, bin = `${home}/opencode`, finish = `${home}/finish`;
+  mkdirSync(work);
+  writeFileSync(bin, `#!/bin/sh\nexec ${process.execPath} ${import.meta.dir}/fake-opencode-bin.ts "$@"\n`);
+  chmodSync(bin, 0o755);
+  const env = { CHRYSALIS_HOME: home, CHRYSALIS_OPENCODE: bin, CHRYSALIS_GET_CMD: JSON.stringify([process.execPath, `${import.meta.dir}/fake-get.ts`]), FAKE_GET_FINISH: finish };
+  const browser = await puppeteer.launch({ executablePath: process.env.CHROMIUM ?? "/usr/bin/chromium", headless: true, args: ["--no-sandbox"] });
+  let c = chrysalis({ env });
+  const status = async () => (await fetch(`${c.here}/api/status`)).json();
+  const start = async (body: object) => { const r = await fetch(`${c.here}/api/chrysalis/start`, { method: "POST", headers: json, body: JSON.stringify(body) }); return [r.status, r.status === 409 ? (await r.json()).error.message.split(":")[0] : ""]; };
+  const reach = async (what: string, ok: (s: any) => boolean) => { for (const end = Date.now() + 15_000; ; await Bun.sleep(50)) { const s = await status(); if (ok(s)) return s; if (Date.now() > end) throw new Error(`the server never reached ${what}: ${JSON.stringify(s)}`); } };
+  const button = (page: Page) => page.$eval("#model-btn", (b) => [b.querySelector(".model-name")!.textContent, b.querySelector(".dot")?.className.replace("dot ", ""), b.classList.contains("getting") ? (b.classList.contains("paused") ? "paused" : "getting") : "", (b as HTMLElement).title.split(/[:,]/)[0]]);
+  const shows = async (page: Page, want: (string | undefined)[]) => {
+    await page.bringToFront();
+    for (const end = Date.now() + 15_000; ; await Bun.sleep(50)) { const got = await button(page); if (JSON.stringify(got) === JSON.stringify(want)) return; if (Date.now() > end) expect(got).toEqual(want); }
+  };
+  const said = (page: Page) => page.$$eval("#thread > article", (a) => (a.at(-1) as HTMLElement | undefined)?.innerText ?? "");
+  const open = async () => { const page = await browser.newPage(); await page.setViewport({ width: 1200, height: 900 }); await page.goto(`${c.here}/`, { waitUntil: "load" }); return page; };
+  const thread = async (page: Page) => {
+    await page.click("#opencode");
+    await page.waitForSelector("#oc-pop .invite-head");
+    await page.evaluate(() => [...document.querySelectorAll<HTMLElement>("#oc-pop .invite-card")].find((b) => b.textContent === "Connect")?.click());
+    await page.waitForFunction(() => /OpenCode 2/.test(document.querySelector("#oc-pop .invite-head")?.textContent ?? ""));
+    await page.keyboard.press("Escape");
+    await page.waitForSelector("#folder-btn:not([hidden])");
+    await page.click("#folder-btn");
+    await page.waitForSelector("#oc-pop .oc-path");
+    await page.$eval("#oc-pop .oc-path", (e, v) => { (e as HTMLInputElement).value = v; (e as HTMLInputElement).focus(); }, work);
+    await page.keyboard.press("Enter");
+    await page.waitForFunction((want) => document.querySelector("#oc-pop .oc-use")?.getAttribute("title") === want, {}, work);
+    await page.click("#oc-pop .oc-use");
+    await page.waitForFunction((want) => document.querySelector("#folder-btn")?.getAttribute("title") === `Working in ${want}`, {}, work);
+  };
+  const choose = async (page: Page, name: string) => {
+    await page.bringToFront();
+    await page.click("#model-btn");
+    await page.waitForSelector("#model-pop:not([hidden]) .model-item");
+    await page.evaluate((name) => [...document.querySelectorAll<HTMLElement>("#model-pop .model-item")].find((i) => i.querySelector(".model-label")!.textContent!.toLowerCase().endsWith(name))!.click(), name);
+  };
+  const type = async (page: Page, words: string) => { await page.bringToFront(); await page.type("#input", words); await page.keyboard.press("Enter"); };
+  try {
+    await c.shown("No model is downloaded yet");
+    await c.shown(/chat\s+http:\/\/localhost:\d+/);
+    await reach("nothing here", (s) => JSON.stringify(s.got) === "[]" && s.state === "offline");
+    expect([await start({}), await start({ model: "qwen3.8-27b" }), await start({ model: "qwen3.8-flash-next" })]).toEqual(Array(3).fill([409, "No model is downloaded yet"]));
+    const chat = await open();
+    await shows(chat, ["Download a model", "offline", "", "No model is on this computer yet"]);
+    await type(chat, "hello");
+    await chat.waitForFunction(() => /No model is downloaded yet/.test((document.querySelector("#thread > article:last-child") as HTMLElement | null)?.innerText ?? ""));
+    const page = await open();
+    await thread(page);
+    await shows(page, ["Download a model", "offline", "", "Qwen3.8-27B is not on this computer yet"]);
+    await type(page, "hello");
+    await page.waitForFunction(() => /No model is downloaded yet/.test((document.querySelector("#thread > article:last-child") as HTMLElement | null)?.innerText ?? ""));
+    expect(c.out()).not.toContain("is downloading");
+
+    await choose(page, "27b");
+    await c.shown("qwen3.8-27b is downloading");
+    await reach("the 27B downloading", (s) => s.download?.model === "qwen3.8-27b" && !s.download.paused);
+    await shows(page, ["27B", "loading", "getting", "chrysalis/qwen3.8-27b"]);
+    await shows(chat, ["27B", "loading", "getting", "Downloading Qwen3.8-27B"]);
+    expect([await start({ model: "qwen3.8-flash-next" }), await start({ model: "qwen3.8-27b" })]).toEqual([[409, "No model is downloaded yet"], [202, ""]]);
+    expect((await fetch(`${c.here}/api/chrysalis/download`, { method: "POST", headers: json, body: JSON.stringify({ how: "pause" }) })).status).toBe(202);
+    await reach("the download paused", (s) => s.download?.paused === true);
+    await shows(page, ["27B", "loading", "paused", "chrysalis/qwen3.8-27b"]);
+    await shows(chat, ["27B", "loading", "paused", "Paused Qwen3.8-27B"]);
+    expect((await fetch(`${c.here}/api/chrysalis/download`, { method: "POST", headers: json, body: JSON.stringify({ how: "resume" }) })).status).toBe(202);
+    await reach("the download resumed", (s) => s.download && !s.download.paused);
+    writeFileSync(finish, "");
+    await reach("the 27B loaded once it arrived", (s) => s.state === "online" && !s.loading && s.model === "qwen3.8-27b" && !s.download && JSON.stringify(s.got) === '["qwen3.8-27b"]');
+    await shows(page, ["27B", "online", "", "chrysalis/qwen3.8-27b"]);
+    await shows(chat, ["27B", "online", "", "Qwen3.8-27B"]);
+
+    await choose(page, "flash-next");
+    await reach("Flash-Next downloaded and loaded once picked", (s) => s.state === "online" && !s.loading && s.model === "qwen3.8-flash-next" && !s.download && JSON.stringify(s.got) === '["qwen3.8-27b","qwen3.8-flash-next"]');
+    await shows(page, ["Flash-Next", "online", "", "chrysalis/qwen3.8-flash-next"]);
+    await choose(page, "27b");
+    await shows(page, ["27B", "offline", "", "Qwen3.8-27B is not loaded"]);
+    await type(page, "which model");
+    await reach("the 27B loaded again for the thread's message", (s) => s.state === "online" && !s.loading && s.model === "qwen3.8-27b");
+    await shows(page, ["27B", "online", "", "chrysalis/qwen3.8-27b"]);
+    await page.waitForFunction(() => document.querySelector("#send")?.getAttribute("aria-label") === "Send");
+    expect(await said(page)).not.toMatch(/not downloaded|No model/);
+
+    await c.stop();
+    c = chrysalis({ env });
+    await c.shown(/chat\s+http:\/\/localhost:\d+/);
+    await reach("both here and none running", (s) => JSON.stringify(s.got) === '["qwen3.8-27b","qwen3.8-flash-next"]' && s.state === "offline");
+    const again = await open();
+    await thread(again);
+    await shows(again, ["27B", "offline", "", "Qwen3.8-27B is not loaded"]);
+    await type(again, "hello again");
+    await reach("the 27B loaded for the thread's first message", (s) => s.state === "online" && !s.loading && s.model === "qwen3.8-27b");
+    await shows(again, ["27B", "online", "", "chrysalis/qwen3.8-27b"]);
+    expect(await said(again)).not.toMatch(/not downloaded|No model/);
+  } finally {
+    await browser.close();
+    await c.stop();
+    rmSync(home, { recursive: true, force: true });
+  }
+}, 180_000);

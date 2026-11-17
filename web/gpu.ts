@@ -1,3 +1,4 @@
+import { existsSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { exe, here, library, ROOT, serverEnv, type Machine } from "./platform";
 
@@ -24,7 +25,7 @@ export function pick(env: Record<string, string | undefined> = process.env, pick
 }
 
 export function gpuEnv(env: Record<string, string | undefined> = process.env, picker = PICK): Record<string, string> {
-  if (CHOSEN.some((k) => env[k] !== undefined)) return {};
+  if (CHOSEN.some((k) => env[k] !== undefined) || !existsSync(picker)) return {};
   const p = pick(env, picker);
   if (p.why) console.error(`chrysalis: ${p.why}`);
   return p.env ?? {};

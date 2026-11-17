@@ -891,10 +891,14 @@ img.src = ${JSON.stringify(checkUrl(req))} + "?t=" + Date.now();
       if (process.env.CHRYSALIS_ENGINE_HERE === "0" && !link.state().linked)
         return Response.json({ error: { message: "No model runs on this computer and none is linked: Chrysalis's terminal says why no GPU was found" } }, { status: 409 });
       const asked = await req.clone().json().catch(() => ({}));
-      if (models?.none && !download) {
-        const pick = typeof asked.model === "string" && asked.get === true ? asked.model : "";
-        if (!pick || !process.send) return Response.json({ error: { message: "No model is here yet: choose one from the model menu, or under Model in the terminal's switches, and it downloads" } }, { status: 409 });
-        process.send({ model: pick });
+      if (process.send && models) {
+        const stats = await engineStats().then((r) => (r.ok ? r.json() : undefined), () => undefined);
+        const want: string | undefined = (MODELS.includes(asked.model) ? asked.model : undefined) ?? (stats?.asleep ? undefined : stats?.model) ?? models.here[0];
+        const where = "choose it from the model menu, or on the Model row in Chrysalis's terminal, and it downloads";
+        if (!want || (!models.here.length && download?.model !== want && asked.get !== true)) return Response.json({ error: { message: `No model is downloaded yet: ${where.replace("choose it", "choose one")}` } }, { status: 409 });
+        if (!models.here.includes(want) && download?.model !== want && asked.get !== true) return Response.json({ error: { message: `${want} is not downloaded yet: ${where}` } }, { status: 409 });
+        if (stats && !stats.asleep && stats.model === want) return new Response(null, { status: 202 });
+        process.send({ model: want });
         return new Response(null, { status: 202 });
       }
       const model = (await pickModel(req)) ?? (await engineStats().then((r) => r.json()).catch(() => ({}))).model;

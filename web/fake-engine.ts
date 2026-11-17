@@ -1,6 +1,6 @@
 import { MODELS } from "./platform";
 const say = (line: string) => process.stderr.write(`${line}\n`);
-let model = "qwen3.8-flash-next", asleep = false, writing = 0;
+let model = (() => { try { return require("node:fs").readFileSync(`${process.env.CHRYSALIS_TLS_DIR}/model`, "utf8").trim() || "qwen3.8-flash-next"; } catch { return "qwen3.8-flash-next"; } })(), asleep = false, writing = 0;
 const gap = Number(process.env.FAKE_ENGINE_GAP_MS ?? 0);
 
 say(`chrysalis: loading ${model}`);

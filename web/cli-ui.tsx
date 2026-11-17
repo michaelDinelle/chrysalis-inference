@@ -60,7 +60,7 @@ function Status() {
           {d ? <><Text dimColor> · </Text>{d.model} <Text color="magenta">{String(Math.round(got * 100)).padStart(3)}%</Text><Text dimColor> {d.paused ? "paused" : "downloaded"}</Text></> : null}</>
         : e.state === "stopped" ? <><Text color="gray">○</Text> {e.model} <Text dimColor>is unloaded</Text></>
         : !core.HAS_MODEL ? <><Text color="gray">○</Text> <Text dimColor>no model on this computer</Text></>
-        : state.none ? <><Text color="gray">○</Text> <Text dimColor>no model yet · the Model row downloads one</Text></>
+        : state.none ? <><Text color="gray">○</Text> <Text dimColor>{state.here.length ? "no model loaded · choose one on the Model row" : "no model yet · the Model row downloads one"}</Text></>
         : starting ? <>{spin} <Text dimColor>the model server is starting</Text></>
         : <><Text color="red">○</Text> <Text dimColor>the model server is not running · restart starts it</Text></>}
       <Text dimColor> · </Text>

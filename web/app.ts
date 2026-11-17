@@ -4538,8 +4538,8 @@ let switching: string | undefined;
 const current = () => !onService() ? otherModel() : switching ?? status.loading ?? (status.state === "online" ? status.model : undefined) ?? picked;
 const quick = () => (onChrysalis() ? { model: `${current()}-fast` } : { model: current(), reasoning_effort: "none" });
 
-async function start(get = false) {
-  const r = await fetch("/api/chrysalis/start", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ model: picked, ...(get ? { get: true } : {}) }) });
+async function start(get = false, model = picked) {
+  const r = await fetch("/api/chrysalis/start", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ model, ...(get ? { get: true } : {}) }) });
   return r.status === 409 ? ((await r.json().catch(() => ({}))).error?.message as string | undefined) : undefined;
 }
 
@@ -4709,7 +4709,7 @@ async function* events(body: ReadableStream<Uint8Array>, seen?: (id: number) => 
   }
 }
 
-async function ensureOnline(run: { stopping: boolean }) {
+async function ensureOnline(run: { stopping: boolean }, model = picked) {
   if (!onService()) {
     if (status.state !== "online") await refreshStatus();
     const l = status.backend?.listed;
@@ -4717,9 +4717,9 @@ async function ensureOnline(run: { stopping: boolean }) {
     if (!current()) throw new Error(`${status.backend?.name ?? "The backend"} lists no model to chat with`);
     return;
   }
-  const none = status.state === "offline" ? await start() : undefined;
+  const none = status.state !== "online" || status.loading || status.model !== model ? await start(false, model) : undefined;
   if (none) throw new Error(none);
-  for (const deadline = Date.now() + 180_000; status.state !== "online" || status.loading; await refreshStatus()) {
+  for (const deadline = Date.now() + 180_000; status.state !== "online" || status.loading || status.model !== model; await refreshStatus()) {
     if (run.stopping) throw new DOMException("stopped", "AbortError");
     if (Date.now() > deadline && !status.download) throw new Error("Chrysalis did not start: its terminal says why");
     await sleep(100);
@@ -4780,9 +4780,10 @@ async function startRun(c: Conversation, m: Message, body: () => object, pick?: 
       await ensureHarness();
       if (!threadModel(c)) throw new Error("Choose a model for this thread: OpenCode lists none of Chrysalis's own");
     }
-    if ((!c.thread || threadModel(c)?.startsWith("chrysalis/")) && (status.state !== "online" || status.loading)) {
+    const want = c.thread ? threadModel(c)?.slice(10) : current();
+    if ((!c.thread || threadModel(c)?.startsWith("chrysalis/")) && (status.state !== "online" || status.loading || (onService() && status.model !== want))) {
       run.live.loading = true;
-      await ensureOnline(run);
+      await ensureOnline(run, want);
       run.live.note = "Reading the prompt";
       run.live.loading = false;
       run.live.since = performance.now();
@@ -6685,12 +6686,14 @@ function threadControls() {
   const absent = (model: string) => local && model.startsWith("chrysalis/") && !!status.got && !status.got.includes(model.slice(10));
   const coming = (model: string) => local && dl?.model === model.slice(10), got = (d: NonNullable<Status["download"]>) => Math.round(100 * (d.total ? Math.min(1, d.done / d.total) : 0));
   const missing = !!id && absent(id) && !coming(id);
-  btn.innerHTML = `${away ? icon("warn") : `<span class="dot ${!on || missing ? "offline" : id && coming(id) ? "loading" : "online"}"></span>`}<span class="model-name">${escapeHtml(missing ? "Download a model" : label)}</span>${id && coming(id) ? `<span class="model-pct">${icon("download")}${got(dl!)}%</span>` : ""}${icon("chevron")}`;
+  const which = id?.startsWith("chrysalis/") ? id.slice(10) : undefined, loaded = !which || !local || (status.state === "online" && !status.loading && status.model === which);
+  const busy = !!which && local && (status.loading === which || coming(id!));
+  btn.innerHTML = `${away ? icon("warn") : `<span class="dot ${!on || missing ? "offline" : busy ? "loading" : loaded ? "online" : "offline"}"></span>`}<span class="model-name">${escapeHtml(missing ? "Download a model" : label)}</span>${id && coming(id) ? `<span class="model-pct">${icon("download")}${got(dl!)}%</span>` : ""}${icon("chevron")}`;
   btn.classList.toggle("outside", away);
   btn.classList.toggle("getting", !!id && coming(id));
   btn.classList.toggle("paused", !!id && coming(id) && !!dl?.paused);
   btn.style.setProperty("--got", id && coming(id) ? `${got(dl!)}%` : "0%");
-  btn.title = missing ? `${label} is not on this computer yet: choose it here and it downloads` : id ? `${id}, through OpenCode${away ? ": this thread leaves this computer" : ""}` : "OpenCode lists no model";
+  btn.title = missing ? `${modelName(which!)} is not on this computer yet: choose it here and it downloads` : !loaded && !busy ? `${modelName(which!)} is not loaded: the first message loads it` : id ? `${id}, through OpenCode${away ? ": this thread leaves this computer" : ""}` : "OpenCode lists no model";
   btn.setAttribute("aria-expanded", String(modelsOpen));
   btn.classList.toggle("open", modelsOpen);
   renderMeter();

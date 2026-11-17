@@ -323,8 +323,9 @@ async function restartWeb() {
 
 const getEnv = () => ({ ...process.env, ...serverEnv() });
 const absent = (model: string) => {
-  if (process.env.CHRYSALIS_ENGINE_CMD) return false;
-  try { return Bun.spawnSync([...getCommand(model), "--check"], { cwd: HOME, env: getEnv(), stdout: "ignore", stderr: "ignore" }).exitCode !== 0; } catch { return true; }
+  if (process.env.CHRYSALIS_ENGINE_CMD && !process.env.CHRYSALIS_GET_CMD) return false;
+  const check = process.env.CHRYSALIS_GET_CMD ? [...JSON.parse(process.env.CHRYSALIS_GET_CMD), "--check", model] : [...getCommand(model), "--check"];
+  try { return Bun.spawnSync(check, { cwd: HOME, env: getEnv(), stdout: "ignore", stderr: "ignore" }).exitCode !== 0; } catch { return true; }
 };
 function tell() {
   state.here = MODELS.filter((m) => !absent(m));
@@ -557,8 +558,8 @@ export function start() {
   if (HAS_MODEL) {
     const model = chosen(), named = flag("--get");
     if (named) act(() => setModel(named));
-    else if (process.env.CHRYSALIS_ENGINE_CMD || (model && !absent(model))) engineSvc.start();
-    else note(dim("No model is here yet: choose one on the Model row below (←→, then Enter) and it downloads and loads."));
+    else if ((process.env.CHRYSALIS_ENGINE_CMD && !process.env.CHRYSALIS_GET_CMD) || (model && !absent(model))) engineSvc.start();
+    else note(dim("No model is downloaded yet: choose one on the Model row below (←→, then Enter) and it downloads and loads."));
     tell();
   }
   else {
